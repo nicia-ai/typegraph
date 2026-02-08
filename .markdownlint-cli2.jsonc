@@ -1,0 +1,13 @@
+{
+  // Glob patterns to ignore
+  "ignores": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "MARKETING.md",
+    "monorepo.md",
+    "typegraph-spec.md",
+    ".changeset/**",
+    ".pnpm-store/**",
+    "**/node_modules/**",
+  ],
+}

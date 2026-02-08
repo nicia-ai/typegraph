@@ -1,0 +1,201 @@
+{
+  "name": "@nicia-ai/typegraph",
+  "version": "0.0.0",
+  "description": "TypeScript-first embedded knowledge graph library with ontological reasoning",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./interchange": {
+      "import": {
+        "types": "./dist/interchange/index.d.ts",
+        "default": "./dist/interchange/index.js"
+      },
+      "require": {
+        "types": "./dist/interchange/index.d.cts",
+        "default": "./dist/interchange/index.cjs"
+      }
+    },
+    "./profiler": {
+      "import": {
+        "types": "./dist/profiler/index.d.ts",
+        "default": "./dist/profiler/index.js"
+      },
+      "require": {
+        "types": "./dist/profiler/index.d.cts",
+        "default": "./dist/profiler/index.cjs"
+      }
+    },
+    "./indexes": {
+      "import": {
+        "types": "./dist/indexes/index.d.ts",
+        "default": "./dist/indexes/index.js"
+      },
+      "require": {
+        "types": "./dist/indexes/index.d.cts",
+        "default": "./dist/indexes/index.cjs"
+      }
+    },
+    "./sqlite": {
+      "import": {
+        "types": "./dist/backend/sqlite/index.d.ts",
+        "default": "./dist/backend/sqlite/index.js"
+      },
+      "require": {
+        "types": "./dist/backend/sqlite/index.d.cts",
+        "default": "./dist/backend/sqlite/index.cjs"
+      }
+    },
+    "./postgres": {
+      "import": {
+        "types": "./dist/backend/postgres/index.d.ts",
+        "default": "./dist/backend/postgres/index.js"
+      },
+      "require": {
+        "types": "./dist/backend/postgres/index.d.cts",
+        "default": "./dist/backend/postgres/index.cjs"
+      }
+    },
+    "./drizzle": {
+      "import": {
+        "types": "./dist/backend/drizzle/index.d.ts",
+        "default": "./dist/backend/drizzle/index.js"
+      },
+      "require": {
+        "types": "./dist/backend/drizzle/index.d.cts",
+        "default": "./dist/backend/drizzle/index.cjs"
+      }
+    },
+    "./drizzle/sqlite": {
+      "import": {
+        "types": "./dist/backend/drizzle/sqlite.d.ts",
+        "default": "./dist/backend/drizzle/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/backend/drizzle/sqlite.d.cts",
+        "default": "./dist/backend/drizzle/sqlite.cjs"
+      }
+    },
+    "./drizzle/postgres": {
+      "import": {
+        "types": "./dist/backend/drizzle/postgres.d.ts",
+        "default": "./dist/backend/drizzle/postgres.js"
+      },
+      "require": {
+        "types": "./dist/backend/drizzle/postgres.d.cts",
+        "default": "./dist/backend/drizzle/postgres.cjs"
+      }
+    },
+    "./drizzle/schema/sqlite": {
+      "import": {
+        "types": "./dist/backend/drizzle/schema/sqlite.d.ts",
+        "default": "./dist/backend/drizzle/schema/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/backend/drizzle/schema/sqlite.d.cts",
+        "default": "./dist/backend/drizzle/schema/sqlite.cjs"
+      }
+    },
+    "./drizzle/schema/postgres": {
+      "import": {
+        "types": "./dist/backend/drizzle/schema/postgres.d.ts",
+        "default": "./dist/backend/drizzle/schema/postgres.js"
+      },
+      "require": {
+        "types": "./dist/backend/drizzle/schema/postgres.d.cts",
+        "default": "./dist/backend/drizzle/schema/postgres.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "dev": "tsup --watch",
+    "build": "tsup",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "pretest": "node --import tsx scripts/ensure-native-sqlite.ts",
+    "test": "vitest run",
+    "pretest:unit": "node --import tsx scripts/ensure-native-sqlite.ts",
+    "test:unit": "vitest run",
+    "pretest:property": "node --import tsx scripts/ensure-native-sqlite.ts",
+    "test:property": "vitest run tests/property",
+    "test:postgres": "./scripts/test-postgres.sh",
+    "test:coverage": "vitest run --coverage",
+    "test:mutation": "stryker run"
+  },
+  "keywords": [
+    "graph",
+    "knowledge-graph",
+    "typescript",
+    "sqlite",
+    "drizzle",
+    "zod",
+    "ontology",
+    "semantic"
+  ],
+  "author": "Nicia AI, Inc.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicia-ai/typegraph.git",
+    "directory": "packages/typegraph"
+  },
+  "bugs": {
+    "url": "https://github.com/nicia-ai/typegraph/issues"
+  },
+  "homepage": "https://typegraph.dev",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=9.0.0",
+    "drizzle-orm": ">=0.35.0",
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "nanoid": "^5.1.6"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^9.5.1",
+    "@stryker-mutator/vitest-runner": "^9.5.1",
+    "@typegraph/eslint-config": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.11",
+    "@types/pg": "^8.16.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "better-sqlite3": "^12.6.2",
+    "drizzle-orm": "^0.45.1",
+    "eslint": "^9.39.2",
+    "fast-check": "^4.5.3",
+    "pg": "^8.18.0",
+    "sqlite-vec": "0.1.7-alpha.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18",
+    "zod": "^4.3.6"
+  }
+}

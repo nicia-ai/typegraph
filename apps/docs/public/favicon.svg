@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Hexagon + TS with asymmetric single-layer nodes -->
+
+  <!-- Edges connecting hexagon to nodes -->
+  <g stroke="#3178c6" stroke-width="3" stroke-linecap="round">
+    <line x1="50" y1="35" x2="50" y2="10"/>
+    <line x1="65" y1="58" x2="88" y2="70"/>
+    <line x1="35" y1="58" x2="12" y2="82"/>
+  </g>
+
+  <!-- Central hexagon -->
+  <polygon
+    points="50,30 68,42 68,62 50,74 32,62 32,42"
+    fill="#3178c6"
+  />
+
+  <!-- TS Text -->
+  <text x="50" y="58"
+        font-family="Arial, sans-serif"
+        font-size="18"
+        font-weight="bold"
+        fill="white"
+        text-anchor="middle">TS</text>
+
+  <!-- Asymmetric nodes - 3 nodes, varying sizes -->
+  <circle cx="50" cy="10" r="10" fill="#6aaccc"/>
+  <circle cx="88" cy="70" r="9" fill="#4080a8"/>
+  <circle cx="12" cy="82" r="11" fill="#1a3a6c"/>
+</svg>

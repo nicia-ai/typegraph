@@ -1,0 +1,54 @@
+name: Deploy Docs
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs
+        run: pnpm --filter @nicia-ai/typegraph-docs build
+
+      - name: Deploy to Cloudflare Workers
+        run: |
+          # Pass PUBLIC_* vars from .env.production to wrangler
+          VAR_FLAGS=()
+          while IFS= read -r line; do
+            VAR_FLAGS+=(--var "${line/=/:}")
+          done < <(grep -E '^PUBLIC_' apps/docs/.env.production)
+          pnpm --filter @nicia-ai/typegraph-docs exec wrangler deploy "${VAR_FLAGS[@]}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

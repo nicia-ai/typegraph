@@ -1,0 +1,22 @@
+{
+  "name": "@nicia-ai/typegraph-benchmarks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit --skipLibCheck"
+  },
+  "dependencies": {
+    "@nicia-ai/typegraph": "workspace:*",
+    "better-sqlite3": "^12.6.2",
+    "drizzle-orm": "^0.45.1",
+    "tinybench": "^6.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.11",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

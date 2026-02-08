@@ -1,0 +1,70 @@
+<svg
+  viewBox="0 0 600 400"
+  fill="none"
+  xmlns="http://www.w3.org/2000/svg"
+  class="w-full h-auto max-w-[600px]"
+>
+  <!-- Background glow -->
+  <circle cx="300" cy="200" r="150" fill="url(#glow)" opacity="0.2" />
+
+  <!-- Connecting Lines -->
+  <path d="M300 200 L150 100" stroke="currentColor" stroke-width="2" class="opacity-30" />
+  <path d="M300 200 L450 100" stroke="currentColor" stroke-width="2" class="opacity-30" />
+  <path d="M300 200 L150 300" stroke="currentColor" stroke-width="2" class="opacity-30" />
+  <path d="M300 200 L450 300" stroke="currentColor" stroke-width="2" class="opacity-30" />
+  <path d="M150 100 L450 100" stroke="currentColor" stroke-width="2" stroke-dasharray="4 4" class="opacity-20" />
+
+  <!-- Nodes -->
+  <!-- Central Node -->
+  <g class="node-group">
+    <circle cx="300" cy="200" r="40" fill="var(--bg-card)" stroke="var(--primary)" stroke-width="3" />
+    <text x="300" y="205" text-anchor="middle" fill="currentColor" font-weight="bold" font-size="14">Graph</text>
+  </g>
+
+  <!-- Top Left Node -->
+  <g class="node-group floating" style="animation-delay: 0s;">
+    <circle cx="150" cy="100" r="30" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" />
+    <text x="150" y="105" text-anchor="middle" fill="currentColor" font-size="12">User</text>
+  </g>
+
+  <!-- Top Right Node -->
+  <g class="node-group floating" style="animation-delay: 1s;">
+    <circle cx="450" cy="100" r="30" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" />
+    <text x="450" y="105" text-anchor="middle" fill="currentColor" font-size="12">Post</text>
+  </g>
+
+  <!-- Bottom Left Node -->
+  <g class="node-group floating" style="animation-delay: 2s;">
+    <circle cx="150" cy="300" r="30" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" />
+    <text x="150" y="305" text-anchor="middle" fill="currentColor" font-size="12">Group</text>
+  </g>
+
+  <!-- Bottom Right Node -->
+  <g class="node-group floating" style="animation-delay: 3s;">
+    <circle cx="450" cy="300" r="30" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" />
+    <text x="450" y="305" text-anchor="middle" fill="currentColor" font-size="12">Role</text>
+  </g>
+
+  <!-- Floating Type Badges -->
+  <rect x="240" y="140" width="40" height="20" rx="4" fill="var(--primary)" opacity="0.8" />
+  <text x="260" y="154" text-anchor="middle" fill="white" font-size="10" font-family="monospace">Zod</text>
+
+  <rect x="340" y="240" width="50" height="20" rx="4" fill="var(--accent)" opacity="0.8" />
+  <text x="365" y="254" text-anchor="middle" fill="white" font-size="10" font-family="monospace">Types</text>
+
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(300 200) rotate(90) scale(150)">
+      <stop stop-color="var(--primary)" />
+      <stop offset="1" stop-color="var(--primary)" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <style>
+    .floating { animation: float 6s ease-in-out infinite; }
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-10px); }
+      100% { transform: translateY(0px); }
+    }
+  </style>
+</svg>

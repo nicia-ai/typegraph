@@ -1,0 +1,279 @@
+---
+import FeatureIcon from "../components/landing/FeatureIcon.astro";
+import HeroIllustration from "../components/landing/HeroIllustration.astro";
+import Layout from "../layouts/Landing.astro";
+---
+
+<Layout title="TypeGraph - The Knowledge Graph for TypeScript">
+  <main class="max-w-[1200px] mx-auto px-8">
+    <section
+      class="grid grid-cols-1 md:grid-cols-[1.2fr_1fr] gap-16 items-center py-24 md:py-32"
+    >
+      <div class="text-left">
+        <h1 class="text-5xl font-extrabold leading-[1.1] mb-6 tracking-tight">
+          The Knowledge Graph for <span
+            class="bg-linear-to-br from-primary to-accent bg-clip-text text-transparent"
+            >TypeScript</span
+          >
+        </h1>
+        <p class="text-xl text-text-muted mb-10 max-w-[500px]">
+          Define your ontology with Zod. Query with a fluent builder. Embedded,
+          type-safe, and built for intelligent applications.
+        </p>
+        <div class="flex flex-wrap gap-4">
+          <a
+            href="/getting-started"
+            class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-white bg-primary font-semibold hover:bg-primary-dark hover:-translate-y-px transition-all duration-200"
+            >Get Started</a
+          >
+          <a
+            href="https://github.com/nicia-ai/typegraph"
+            class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-text-main border border-border bg-transparent font-semibold hover:border-primary hover:text-primary transition-all duration-200"
+            >View on GitHub</a
+          >
+        </div>
+      </div>
+      <div class="flex justify-center items-center relative">
+        <HeroIllustration />
+      </div>
+    </section>
+
+    <section class="py-16 text-center">
+      <h2 class="text-4xl font-extrabold mb-4">Define. Connect. Query.</h2>
+      <p class="text-xl text-text-muted mb-12">
+        Your schema is your database. Your types are your queries.
+      </p>
+
+      <div
+        class="bg-[#1e1e1e] rounded-xl shadow-2xl overflow-hidden text-left max-w-[900px] mx-auto border border-[#333]"
+      >
+        <div class="bg-[#252526] px-4 py-3 flex gap-2 border-b border-[#333]">
+          <div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div>
+          <div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div>
+          <div class="w-3 h-3 rounded-full bg-[#27c93f]"></div>
+          <span class="ml-4 text-[#888] text-sm font-mono">schema.ts</span>
+        </div>
+        <div class="p-6 overflow-x-auto">
+          <pre
+              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code><span class="keyword">import</span> &#123; defineNode, defineEdge, defineGraph, createStore &#125; <span class="keyword">from</span> <span class="string">"@nicia-ai/typegraph"</span>;
+<span class="keyword">import</span> &#123; z &#125; <span class="keyword">from</span> <span class="string">"zod"</span>;
+
+<span class="comment">// 1. Define your ontology</span>
+<span class="keyword">const</span> <span class="type">Person</span> = defineNode(<span class="string">"Person"</span>, &#123;
+  schema: z.object(&#123; name: z.string(), role: z.string() &#125;)
+&#125;);
+<span class="keyword">const</span> <span class="type">Project</span> = defineNode(<span class="string">"Project"</span>, &#123;
+  schema: z.object(&#123; name: z.string(), status: z.string() &#125;)
+&#125;);
+<span class="keyword">const</span> <span class="type">worksOn</span> = defineEdge(<span class="string">"worksOn"</span>);
+
+<span class="keyword">const</span> <span class="type">graph</span> = defineGraph(&#123;
+  id: <span class="string">"my_app"</span>,
+  nodes: &#123; Person: &#123; type: Person &#125;, Project: &#123; type: Project &#125; &#125;,
+  edges: &#123; worksOn: &#123; type: worksOn, from: [Person], to: [Project] &#125; &#125;
+&#125;);
+
+<span class="comment">// 2. Query with full type safety</span>
+<span class="keyword">const</span> <span class="type">results</span> = <span class="keyword">await</span> store.query()
+  .from(<span class="string">"Person"</span>, <span class="string">"p"</span>)
+  .whereNode(<span class="string">"p"</span>, p =&gt; p.role.eq(<span class="string">"Engineer"</span>))
+  .traverse(<span class="string">"worksOn"</span>, <span class="string">"e"</span>)
+  .to(<span class="string">"Project"</span>, <span class="string">"proj"</span>)
+  .select(ctx =&gt; (&#123; person: ctx.p.name, project: ctx.proj.name &#125;))
+  .execute();</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="py-24">
+      <div class="text-center mb-16">
+        <h2 class="text-4xl font-extrabold mb-4">Why TypeGraph?</h2>
+        <p class="text-xl text-text-muted max-w-[600px] mx-auto">
+          Build smarter applications with a database that understands your
+          domain.
+        </p>
+      </div>
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-8">
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="code" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Universal Schema
+          </h3>
+          <p class="text-text-muted">
+            Define your data model once with Zod. TypeGraph orchestrates your
+            database, API validation, and TypeScript types automatically. No
+            more syncing separate layers.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="sparkles" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            AI-Native Structure
+          </h3>
+          <p class="text-text-muted">
+            Give LLMs what they crave: structured, semantic context. Feed your
+            ontology directly to agents for higher-accuracy RAG and reasoning.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="tree" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Smart Relationships
+          </h3>
+          <p class="text-text-muted">
+            Go beyond foreign keys. Model real-world logic with <code
+              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
+              >implies</code
+            >, <code
+              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
+              >inverseOf</code
+            >, and transitive rules that the database understands and enforces.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="box" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Zero-Infrastructure Start
+          </h3>
+          <p class="text-text-muted">
+            Prototyping? Start with an in-memory or SQLite graph. Scaling? Swap
+            the adapter to PostgreSQL without changing a line of your
+            application logic.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="search" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Type-Safe Query Builder
+          </h3>
+          <p class="text-text-muted">
+            Forget strict SQL strings. Build complex, multi-hop graph traversals
+            with a fluent TypeScript API that catches errors before you run
+            code.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="lock" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Enforced Integrity
+          </h3>
+          <p class="text-text-muted">
+            Declaratively enforce constraints like disjoint sets ("a User cannot
+            be an Admin and a Guest") and cardinality limits directly at the
+            schema level.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="py-24 bg-bg-card -mx-8 px-8">
+      <div class="max-w-[1200px] mx-auto">
+        <div class="text-center mb-16">
+          <h2 class="text-4xl font-extrabold mb-4">What can you build?</h2>
+          <p class="text-xl text-text-muted max-w-[600px] mx-auto">
+            TypeGraph excels where relationships matter most.
+          </p>
+        </div>
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-8">
+          <div
+            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
+          >
+            <h3 class="text-2xl font-bold mb-4 text-text-main">
+              Knowledge Graphs for RAG
+            </h3>
+            <p class="text-text-muted mb-6 grow">
+              Feed your LLMs high-fidelity, structured context. Map documents to
+              concepts, authors, and entities to reduce hallucinations and
+              improve retrieval accuracy.
+            </p>
+            <a
+              href="/examples/knowledge-graph-rag/"
+              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
+              >Build this &rarr;</a
+            >
+          </div>
+          <div
+            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
+          >
+            <h3 class="text-2xl font-bold mb-4 text-text-main">
+              Complex Identity & Access
+            </h3>
+            <p class="text-text-muted mb-6 grow">
+              Model fine-grained permissions (ReBAC) with ease. Traverse
+              organizational hierarchies and group memberships in a single,
+              type-safe query.
+            </p>
+            <a
+              href="/recipes/#role-based-access-control-rbac"
+              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
+              >Build this &rarr;</a
+            >
+          </div>
+          <div
+            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
+          >
+            <h3 class="text-2xl font-bold mb-4 text-text-main">
+              Recommendation Engines
+            </h3>
+            <p class="text-text-muted mb-6 grow">
+              Discover hidden connections. "Users who bought X also bought Y"
+              becomes a trivial graph traversal rather than a complex series of
+              SQL JOINs.
+            </p>
+            <a
+              href="/examples/product-catalog"
+              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
+              >Build this &rarr;</a
+            >
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer
+      class="text-center py-16 mt-16 border-t border-border text-text-muted"
+    >
+      <p>
+        &copy; {new Date().getFullYear()}
+        <a
+          href="https://nicia.ai"
+          class="text-primary hover:text-primary-dark transition-colors"
+          >Nicia AI, Inc.</a
+        > Open source software.
+      </p>
+    </footer>
+  </main>
+</Layout>
+
+<style>
+  @reference "tailwindcss";
+
+  /* Syntax Highlighting */
+  .keyword {
+    @apply text-blue-400;
+  }
+  .string {
+    @apply text-amber-300;
+  }
+  .function {
+    @apply text-yellow-300;
+  }
+  .comment {
+    @apply text-green-500;
+  }
+  .type {
+    @apply text-cyan-400;
+  }
+</style>

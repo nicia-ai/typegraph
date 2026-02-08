@@ -1,0 +1,7 @@
+{
+  // Extend root config
+  "extends": "../../../../../.markdownlint.jsonc",
+  // Starlight uses frontmatter title as the page title,
+  // so content h1 is not a duplicate
+  "MD025": false,
+}

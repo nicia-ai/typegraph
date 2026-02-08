@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Changesets
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Smoke test npm tarball
+        run: |
+          pnpm --filter @nicia-ai/typegraph build
+          mkdir -p .tmp-release
+          PACK_OUTPUT="$(pnpm --filter @nicia-ai/typegraph pack --json --pack-destination .tmp-release)"
+          TARBALL_PATH="$(echo "$PACK_OUTPUT" | node -e 'const fs = require("node:fs"); const input = fs.readFileSync(0, "utf8"); const data = JSON.parse(input); const filename = Array.isArray(data) ? data[0]?.filename : data?.filename; if (!filename) process.exit(1); process.stdout.write(filename);')"
+          mkdir -p .tmp-release/smoke
+          cd .tmp-release/smoke
+          npm init -y >/dev/null
+          npm install "$TARBALL_PATH" >/dev/null
+          node --input-type=module -e 'const pkg = await import("@nicia-ai/typegraph"); if (typeof pkg.createStore !== "function") throw new Error("Missing createStore export");'
+
+      - name: Create release PR or publish
+        uses: changesets/action@v1
+        with:
+          publish: pnpm release
+          createGithubReleases: true
+        env:
+          # Requires npm trusted publishing for @nicia-ai/typegraph.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true

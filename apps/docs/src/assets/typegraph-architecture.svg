@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600">
+  <defs>
+    <!-- Gradients and filters -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.1"/>
+    </filter>
+    <linearGradient id="appGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f8fafc;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f1f5f9;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="libGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#eff6ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#dbeafe;stop-opacity:1" />
+    </linearGradient>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <!-- "Your Application" Container -->
+  <rect x="50" y="50" width="700" height="420" rx="16" fill="url(#appGradient)" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5,5" />
+  <text x="70" y="90" font-family="system-ui, sans-serif" font-size="20" font-weight="600" fill="#64748b">Your Application</text>
+
+  <!-- "TypeGraph Library" Container -->
+  <rect x="100" y="120" width="600" height="260" rx="12" fill="url(#libGradient)" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)" />
+  <text x="120" y="160" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#2563eb">TypeGraph Library</text>
+
+  <!-- Top Components (Schema DSL & Query Builder) -->
+  <!-- Schema DSL: Centered at x=250 approx -->
+  <rect x="180" y="190" width="140" height="60" rx="8" fill="white" stroke="#bfdbfe" stroke-width="1" />
+  <text x="250" y="225" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#1e293b" font-weight="600">Schema DSL</text>
+    
+  <!-- Query Builder: Centered at x=550 approx -->
+  <rect x="480" y="190" width="140" height="60" rx="8" fill="white" stroke="#bfdbfe" stroke-width="1" />
+  <text x="550" y="225" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#1e293b" font-weight="600">Query Builder</text>
+
+  <!-- Arrows from Top to Middle -->
+  <!-- Schema DSL (250, 250) -> Ontology Layer (320, 290) -->
+  <path d="M250 250 L250 270 L320 270 L320 290" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <!-- Query Builder (550, 250) -> Ontology Layer (480, 290) -->
+  <path d="M550 250 L550 270 L480 270 L480 290" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <!-- Ontology Layer (Middle) - Formerly Type Registry -->
+  <g transform="translate(280, 290)">
+    <rect x="0" y="0" width="240" height="60" rx="8" fill="white" stroke="#bfdbfe" stroke-width="1" />
+    <text x="120" y="35" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#1e293b" font-weight="600">Ontology Layer</text>
+  </g>
+
+  <!-- Drizzle ORM -->
+  <g transform="translate(300, 400)">
+    <rect x="0" y="0" width="200" height="50" rx="8" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1" />
+    <text x="100" y="30" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#334155" font-weight="600">Drizzle ORM</text>
+  </g>
+  
+  <!-- Arrow from Ontology Layer to Drizzle -->
+  <line x1="400" y1="350" x2="400" y2="400" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)" />
+
+  <!-- Database (Bottom) -->
+  <g transform="translate(300, 500)">
+    <path d="M0,15 C0,6.7 44.8,0 100,0 C155.2,0 200,6.7 200,15 L200,65 C200,73.3 155.2,80 100,80 C44.8,80 0,73.3 0,65 Z" fill="#cbd5e1" stroke="#64748b" stroke-width="2"/>
+    <ellipse cx="100" cy="15" rx="100" ry="15" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+    <text x="100" y="55" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#334155" font-weight="600">Your Database</text>
+  </g>
+
+  <!-- Arrow from Drizzle to DB -->
+  <line x1="400" y1="450" x2="400" y2="500" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)" />
+</svg>

@@ -1,0 +1,16 @@
+export { registerAggregateIntegrationTests } from "./aggregates";
+export { registerCrossBackendConsistencyTests } from "./cross-backend";
+export { registerEdgeCaseIntegrationTests } from "./edge-cases";
+export { registerEdgeOperationIntegrationTests } from "./edge-operations";
+export { registerEdgePropertyIntegrationTests } from "./edge-properties";
+export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-advanced";
+export type { IntegrationStore } from "./fixtures";
+export { integrationTestGraph } from "./fixtures";
+export { registerOrderingIntegrationTests } from "./ordering";
+export { registerPaginationIntegrationTests } from "./pagination";
+export { registerPredicateIntegrationTests } from "./predicates";
+export { registerRecursiveIntegrationTests } from "./recursive";
+export { registerSetOperationIntegrationTests } from "./set-operations";
+export { registerTemporalIntegrationTests } from "./temporal";
+export type { IntegrationTestContext } from "./test-context";
+export { registerTraversalIntegrationTests } from "./traversals";

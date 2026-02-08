@@ -1,0 +1,37 @@
+---
+import "../styles/tailwind.css";
+
+import Analytics from "../components/Analytics.astro";
+
+interface Props {
+  title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="TypeGraph - TypeScript-first embedded knowledge graph library with reasoning" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+    <Analytics />
+  </head>
+  <body>
+    <nav class="flex justify-between items-center py-6 px-8 max-w-[1200px] mx-auto">
+      <a href="/" class="text-2xl font-extrabold text-text-main no-underline flex items-center gap-3">
+        <img src="/favicon.svg" alt="" class="w-14 h-14" />
+        TypeGraph
+      </a>
+      <div class="flex gap-8">
+        <a href="/overview" class="text-text-muted font-semibold hover:text-primary transition-colors">Docs</a>
+        <a href="/getting-started" class="text-text-muted font-semibold hover:text-primary transition-colors">Get Started</a>
+        <a href="https://github.com/nicia-ai/typegraph" class="text-text-muted font-semibold hover:text-primary transition-colors">GitHub</a>
+      </div>
+    </nav>
+    <slot />
+  </body>
+</html>

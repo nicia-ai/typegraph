@@ -1,0 +1,3 @@
+export const DEFAULT_MIN_FREQUENCY_FOR_RECOMMENDATION = 3 as const;
+export const DEFAULT_HIGH_FREQUENCY_THRESHOLD = 10 as const;
+export const DEFAULT_MEDIUM_FREQUENCY_THRESHOLD = 5 as const;

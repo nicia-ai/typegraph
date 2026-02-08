@@ -1,0 +1,34 @@
+{
+  "name": "@nicia-ai/typegraph-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "preview:cf": "wrangler dev",
+    "deploy": "astro build && wrangler deploy",
+    "typecheck": "astro check",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.6",
+    "@astrojs/cloudflare": "^12.6.12",
+    "@astrojs/starlight": "^0.37.6",
+    "@astrojs/starlight-tailwind": "^4.0.2",
+    "astro": "^5.17.1",
+    "starlight-llms-txt": "^0.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@typegraph/eslint-config": "workspace:*",
+    "@types/node": "^24.10.11",
+    "astro-eslint-parser": "^1.2.2",
+    "eslint": "^9.39.2",
+    "eslint-plugin-astro": "^1.5.0",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.63.0"
+  }
+}
