@@ -14,9 +14,60 @@ permissions:
   contents: read
 
 jobs:
+  detect-release-metadata-push:
+    name: Detect release metadata push
+    runs-on: ubuntu-24.04
+    outputs:
+      skip_push_ci: ${{ steps.detect.outputs.skip_push_ci }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect release metadata-only push
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base_sha="${{ github.event.before }}"
+          head_sha="${{ github.sha }}"
+
+          if [[ "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
+            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t changed_files < <(git diff --name-only "$base_sha" "$head_sha")
+
+          if [[ "${#changed_files[@]}" -eq 0 ]]; then
+            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          skip_push_ci=true
+          for changed_file in "${changed_files[@]}"; do
+            case "$changed_file" in
+              .changeset/*.md | CHANGELOG.md | */CHANGELOG.md | packages/typegraph/package.json) ;;
+              *)
+                skip_push_ci=false
+                break
+                ;;
+            esac
+          done
+
+          echo "skip_push_ci=$skip_push_ci" >> "$GITHUB_OUTPUT"
+
   lint-and-check:
     name: Lint & Type Check
     runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -49,6 +100,8 @@ jobs:
   test-sqlite:
     name: Test (SQLite, Node ${{ matrix.node-version }})
     runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -79,6 +132,8 @@ jobs:
   test-coverage:
     name: Test (Coverage)
     runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -99,6 +154,8 @@ jobs:
   test-postgres:
     name: Test (PostgreSQL)
     runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     timeout-minutes: 20
     services:
       postgres:
@@ -138,7 +195,13 @@ jobs:
     name: Build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: [lint-and-check, test-sqlite, test-coverage, test-postgres]
+    needs:
+      - detect-release-metadata-push
+      - lint-and-check
+      - test-sqlite
+      - test-coverage
+      - test-postgres
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -154,3 +217,12 @@ jobs:
 
       - name: Build
         run: pnpm turbo run build
+
+  release-metadata-push:
+    name: Release metadata push check
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci == 'true' }}
+    steps:
+      - name: Skip heavy CI on release metadata-only push
+        run: echo "Skipping heavy CI for release metadata-only push to main."
