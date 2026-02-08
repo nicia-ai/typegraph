@@ -2,6 +2,7 @@
   // Glob patterns to ignore
   "ignores": [
     "AGENTS.md",
+    "CHANGELOG.md",
     "CLAUDE.md",
     "MARKETING.md",
     "monorepo.md",
