@@ -1,0 +1,62 @@
+@import "tailwindcss";
+@import "@astrojs/starlight-tailwind";
+
+@layer base {
+  /* Restore list styling removed by Tailwind Preflight */
+  .sl-markdown-content ul:not(:where(.not-content *)) {
+    list-style-type: disc;
+    padding-inline-start: 1.5rem;
+  }
+  .sl-markdown-content ol:not(:where(.not-content *)) {
+    list-style-type: decimal;
+    padding-inline-start: 1.5rem;
+  }
+  .sl-markdown-content ul ul:not(:where(.not-content *)) {
+    list-style-type: circle;
+  }
+  .sl-markdown-content ul ul ul:not(:where(.not-content *)) {
+    list-style-type: square;
+  }
+
+  :root {
+    /* Starlight design tokens are managed via @astrojs/starlight-tailwind */
+    /* We can still define our landing-page specific variables if they differ */
+    --primary: #3b82f6;
+    --primary-dark: #2563eb;
+    --accent: #8b5cf6;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --bg-main: #ffffff;
+    --bg-card: #f8fafc;
+    --border: #e2e8f0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --primary: #60a5fa;
+      --primary-dark: #3b82f6;
+      --accent: #a78bfa;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --bg-main: #0f172a;
+      --bg-card: #1e293b;
+      --border: #334155;
+    }
+  }
+
+  body {
+    @apply font-sans antialiased text-text-main bg-bg-main leading-relaxed;
+  }
+}
+
+@theme {
+  /* Landing page theme variables */
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-accent: var(--accent);
+  --color-text-main: var(--text-main);
+  --color-text-muted: var(--text-muted);
+  --color-bg-main: var(--bg-main);
+  --color-bg-card: var(--bg-card);
+  --color-border: var(--border);
+}

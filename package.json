@@ -1,0 +1,38 @@
+{
+  "name": "typegraph-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.1",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:unit": "turbo run test:unit",
+    "test:property": "turbo run test:property",
+    "test:postgres": "pnpm --filter @nicia-ai/typegraph test:postgres",
+    "bench": "turbo run bench",
+    "fix": "run-s fix:*",
+    "fix:prettier": "prettier --write .",
+    "fix:lint": "turbo run lint -- --fix",
+    "fix:docs": "markdownlint-cli2 --fix \"**/*.md\" \"#node_modules\"",
+    "prettier": "prettier --check .",
+    "test:docs": "markdownlint-cli2 \"**/*.md\" \"#node_modules\"",
+    "test:unused": "knip",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "turbo run build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
+    "knip": "^5.83.1",
+    "markdownlint-cli2": "^0.20.0",
+    "npm-run-all2": "^8.0.4",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "turbo": "^2.8.3",
+    "typescript": "^5.9.3"
+  }
+}

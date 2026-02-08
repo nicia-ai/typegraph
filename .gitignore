@@ -1,0 +1,61 @@
+# compiled output
+.astro/
+.output
+.vinxi
+.wrangler
+dist/
+.turbo
+tmp
+/out-tsc
+.pnpm-store
+/.tmp-release/
+
+# dependencies
+node_modules
+.npmrc
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# misc
+/.nyc_output
+/.sass-cache
+/connect.lock
+/coverage
+/libpeerconnection.log
+npm-debug.log
+yarn-error.log
+testem.log
+/typings
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# local env files
+.env
+.env*.local
+.envrc
+.dev.vars
+
+# Logs
+npm-debug.log
+yarn-error.log
+.aider*
+
+# Stryker mutation testing
+.stryker-cache/
+reports/

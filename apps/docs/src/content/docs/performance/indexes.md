@@ -1,0 +1,246 @@
+---
+title: Indexes
+description: Define and create indexes for TypeGraph queries
+---
+
+TypeGraph stores node and edge properties in a JSON `props` column. When you filter or order by
+JSON properties at scale, you typically need **expression indexes** on those JSON paths.
+
+TypeGraph includes built-in indexes for common access patterns (lookups by ID, edge traversals,
+temporal filtering), but application-specific indexes are up to you.
+
+The `@nicia-ai/typegraph/indexes` entrypoint provides:
+
+- **Type-safe index definitions** for node and edge schemas
+- **Dialect-specific DDL generation** for PostgreSQL and SQLite
+- **Drizzle schema integration** so drizzle-kit can generate migrations
+- **Profiler integration** so recommendations account for indexes you already have
+
+## Quick Start (Drizzle / drizzle-kit)
+
+Define your indexes once and pass them into the Drizzle schema factories:
+
+```ts
+import { defineEdge, defineNode } from "@nicia-ai/typegraph";
+import { createPostgresTables } from "@nicia-ai/typegraph/drizzle/schema/postgres";
+import { andWhere, defineEdgeIndex, defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+import { z } from "zod";
+
+const Person = defineNode("Person", {
+  schema: z.object({
+    email: z.string().email(),
+    name: z.string(),
+    isActive: z.boolean().optional(),
+  }),
+});
+
+const worksAt = defineEdge("worksAt", {
+  schema: z.object({
+    role: z.string(),
+  }),
+});
+
+export const personEmail = defineNodeIndex(Person, {
+  fields: ["email"],
+  unique: true,
+  coveringFields: ["name"],
+  where: (w) => andWhere(w.deletedAt.isNull(), w.isActive.eq(true)),
+});
+
+export const worksAtRoleOut = defineEdgeIndex(worksAt, {
+  fields: ["role"],
+  direction: "out",
+  where: (w) => w.deletedAt.isNull(),
+});
+
+// drizzle-kit will include these indexes in generated migrations
+export const typegraphTables = createPostgresTables({}, {
+  indexes: [personEmail, worksAtRoleOut],
+});
+```
+
+For SQLite, use `createSqliteTables`:
+
+```ts
+import { createSqliteTables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+
+export const typegraphTables = createSqliteTables({}, {
+  indexes: [personEmail, worksAtRoleOut],
+});
+```
+
+## Node Indexes
+
+`defineNodeIndex(nodeType, config)` creates an index definition for node properties.
+
+**Key options:**
+
+- `fields`: JSON property paths used for filtering/ordering (B-tree expression keys).
+- `coveringFields`: additional properties frequently selected with the same filters. These become
+  additional index keys to enable index-only reads when combined with smart select.
+- `unique`: create a unique index.
+- `scope`: prefixes index keys with TypeGraph system columns (default is `"graphAndKind"`).
+- `where`: partial index predicate (portable DSL, compiled per dialect).
+
+:::note[Covering fields vs PostgreSQL INCLUDE]
+TypeGraph properties live inside `props`, so indexes are built on expressions. PostgreSQL `INCLUDE`
+does not support expressions, so `coveringFields` are implemented as additional index keys rather
+than an `INCLUDE (...)` clause.
+
+Because `coveringFields` become index keys, they:
+
+- Increase index size (more key data)
+- Affect index ordering (can help `ORDER BY`, but changes sort/range behavior)
+- Must be maintained on writes like any other key
+
+:::
+
+### Nested JSON Paths
+
+For top-level properties, use the field name:
+
+```ts
+defineNodeIndex(Person, { fields: ["email"] });
+```
+
+For nested properties inside `props`, use a JSON pointer:
+
+```ts
+defineNodeIndex(Person, { fields: ["/metadata/priority"] });
+```
+
+You can also pass pointer segments:
+
+```ts
+defineNodeIndex(Person, { fields: [["metadata", "priority"] as const] });
+```
+
+### Index Scope
+
+Index `scope` controls which TypeGraph system columns are prefixed ahead of your JSON keys:
+
+- `"graphAndKind"` (default): prefixes with `(graph_id, kind)` to match most TypeGraph queries.
+- `"graph"`: prefixes with `graph_id` only (rare; useful for cross-kind queries within a graph).
+- `"none"`: no system prefix (rare; usually only correct for global queries).
+
+## Edge Indexes
+
+`defineEdgeIndex(edgeType, config)` works the same way as node indexes, with one extra option:
+
+- `direction`: `"out" | "in" | "none"` (default `"none"`). When set, the index keys are prefixed
+  with the join key used by traversal queries (`from_id` for `"out"`, `to_id` for `"in"`).
+
+This makes it easy to create indexes that match `.traverse()` patterns.
+
+**When to use `direction`:**
+
+- `"out"`: optimize outbound traversals that join on `from_id` (start node → edges).
+- `"in"`: optimize inbound traversals that join on `to_id` (end node → edges).
+- `"none"`: for edge queries not anchored by a traversal join key (less common).
+
+## Partial Indexes (WHERE)
+
+Use `where` to create partial indexes with a small, typed predicate DSL.
+
+System columns are available (e.g. `deletedAt`, `createdAt`, `fromId`), as well as your schema
+properties (e.g. `email`, `role`).
+
+```ts
+import { andWhere, defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+
+const activeEmail = defineNodeIndex(Person, {
+  fields: ["email"],
+  where: (w) => andWhere(w.deletedAt.isNull(), w.isActive.eq(true)),
+});
+```
+
+## Covering Indexes
+
+To maximize the benefit of [smart select optimization](/performance/overview#3-smart-select-optimization),
+create indexes that include both the filter columns and selected columns. This enables index-only
+scans where the database satisfies the entire query from the index.
+
+```ts
+// Index covers email filter AND name selection
+const personEmailWithName = defineNodeIndex(Person, {
+  fields: ["email"],
+  coveringFields: ["name"],
+  where: (w) => w.deletedAt.isNull(),
+});
+```
+
+**Generated PostgreSQL:**
+
+```sql
+CREATE INDEX idx_person_email_name ON typegraph_nodes
+  (graph_id, kind, ((props #>> ARRAY['email'])), ((props #>> ARRAY['name'])))
+  WHERE deleted_at IS NULL;
+```
+
+**Generated SQLite:**
+
+```sql
+CREATE INDEX idx_person_email_name ON typegraph_nodes
+  (graph_id, kind, json_extract(props, '$.email'), json_extract(props, '$.name'))
+  WHERE deleted_at IS NULL;
+```
+
+## Generating SQL (No drizzle-kit)
+
+If you manage migrations yourself, generate DDL snippets:
+
+```ts
+import { generateIndexDDL } from "@nicia-ai/typegraph/indexes";
+
+const sql = generateIndexDDL(personEmail, "postgres");
+// → CREATE INDEX ...;
+```
+
+## Verifying Index Usage
+
+Use `EXPLAIN ANALYZE` to verify your indexes are being used:
+
+```sql
+-- PostgreSQL
+EXPLAIN ANALYZE SELECT props #>> ARRAY['email'], props #>> ARRAY['name']
+FROM typegraph_nodes
+WHERE graph_id = 'my_graph'
+  AND kind = 'Person'
+  AND deleted_at IS NULL
+  AND (props #>> ARRAY['email']) = 'alice@example.com';
+
+-- SQLite
+EXPLAIN QUERY PLAN SELECT json_extract(props, '$.email'), json_extract(props, '$.name')
+FROM typegraph_nodes
+WHERE graph_id = 'my_graph'
+  AND kind = 'Person'
+  AND deleted_at IS NULL
+  AND json_extract(props, '$.email') = 'alice@example.com';
+```
+
+Look for "Index Scan" or "Index Only Scan" (PostgreSQL) or "USING INDEX" (SQLite) in the output.
+
+## Profiler Integration
+
+Pass your existing indexes to the [Query Profiler](/performance/profiler) so recommendations
+focus on what you *don't* have:
+
+```ts
+import { QueryProfiler } from "@nicia-ai/typegraph/profiler";
+import { toDeclaredIndexes } from "@nicia-ai/typegraph/indexes";
+
+const profiler = new QueryProfiler({
+  declaredIndexes: toDeclaredIndexes([personEmail, worksAtRoleOut]),
+});
+```
+
+## Limitations
+
+- Index utilities generate B-tree expression indexes for **scalar** properties (`string`, `number`,
+  `boolean`, `Date`). Array/object properties require a JSON/GIN strategy (use raw SQL).
+- Embedding fields are indexed via the embeddings table; see [Semantic Search](/semantic-search).
+
+## Next Steps
+
+- [Performance Overview](/performance/overview) - Best practices and smart select
+- [Query Profiler](/performance/profiler) - Automatic index recommendations

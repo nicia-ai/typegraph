@@ -1,0 +1,16 @@
+*.md
+.claude/
+.nitro/
+.output/
+.stryker-tmp/
+.tanstack/
+.wrangler/
+coverage/
+drizzle/
+examples/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+src/routeTree.gen.ts
+worker-configuration.d.ts
+dist/
+node_modules

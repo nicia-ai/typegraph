@@ -1,0 +1,56 @@
+{
+  // Default state for all rules
+  "default": true,
+
+  // MD013 - Line length
+  // Disable for code blocks and tables, allow longer lines in docs
+  "MD013": {
+    "line_length": 120,
+    "code_blocks": false,
+    "tables": false,
+  },
+
+  // MD024 - Multiple headings with same content
+  // Allow siblings with same text (common in API docs)
+  "MD024": {
+    "siblings_only": true,
+  },
+
+  // MD033 - Inline HTML
+  // Allow HTML elements that are commonly needed
+  "MD033": {
+    "allowed_elements": ["br", "sup", "sub", "details", "summary"],
+  },
+
+  // MD041 - First line should be top-level heading
+  // Already following this in all docs
+  "MD041": true,
+
+  // MD046 - Code block style
+  // Use fenced code blocks consistently
+  "MD046": {
+    "style": "fenced",
+  },
+
+  // MD048 - Code fence style
+  // Use backticks consistently
+  "MD048": {
+    "style": "backtick",
+  },
+
+  // MD049 - Emphasis style
+  // Use asterisks for emphasis
+  "MD049": {
+    "style": "asterisk",
+  },
+
+  // MD050 - Strong style
+  // Use asterisks for strong
+  "MD050": {
+    "style": "asterisk",
+  },
+
+  // MD060 - Table column style
+  // Disable - table alignment is a style preference
+  "MD060": false,
+}
