@@ -59,11 +59,7 @@ jobs:
           publish: pnpm release
           createGithubReleases: true
         env:
-          # One-time bootstrap for the first publish. Remove NODE_AUTH_TOKEN/NPM_TOKEN
-          # after npm trusted publishing is configured for this workflow.
-          # Provenance requires a public source repository on npm; keep this false
-          # while the repository is private, then switch back to true once public.
+          # npm trusted publishing (OIDC) via GitHub Actions.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: false
+          # Provenance currently requires a public source repository.
+          NPM_CONFIG_PROVENANCE: ${{ github.event.repository.private != true }}
