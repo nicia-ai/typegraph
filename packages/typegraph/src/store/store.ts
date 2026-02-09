@@ -11,6 +11,7 @@
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { createQueryBuilder, type QueryBuilder } from "../query/builder";
+import { createSqlSchema } from "../query/compiler/schema";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -98,7 +99,9 @@ export class Store<G extends GraphDef> {
     this.#backend = backend;
     this.#registry = buildKindRegistry(graph);
     this.#hooks = options?.hooks ?? {};
-    this.#schema = options?.schema;
+    this.#schema =
+      options?.schema ??
+      (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
   }
 
   // === Accessors ===

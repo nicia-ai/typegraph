@@ -459,14 +459,14 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("hash properties", () => {
-    it("hash is deterministic (same input produces same hash)", () => {
-      fc.assert(
-        fc.property(graphDefArb, versionArb, (graph, version) => {
+    it("hash is deterministic (same input produces same hash)", async () => {
+      await fc.assert(
+        fc.asyncProperty(graphDefArb, versionArb, async (graph, version) => {
           const serialized1 = serializeSchema(graph, version);
           const serialized2 = serializeSchema(graph, version);
 
-          const hash1 = computeSchemaHash(serialized1);
-          const hash2 = computeSchemaHash(serialized2);
+          const hash1 = await computeSchemaHash(serialized1);
+          const hash2 = await computeSchemaHash(serialized2);
 
           expect(hash1).toBe(hash2);
         }),
@@ -474,20 +474,20 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("hash ignores version (only structure matters)", () => {
-      fc.assert(
-        fc.property(
+    it("hash ignores version (only structure matters)", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           graphDefArb,
           versionArb,
           versionArb,
-          (graph, version1, version2) => {
+          async (graph, version1, version2) => {
             fc.pre(version1 !== version2);
 
             const serialized1 = serializeSchema(graph, version1);
             const serialized2 = serializeSchema(graph, version2);
 
-            const hash1 = computeSchemaHash(serialized1);
-            const hash2 = computeSchemaHash(serialized2);
+            const hash1 = await computeSchemaHash(serialized1);
+            const hash2 = await computeSchemaHash(serialized2);
 
             expect(hash1).toBe(hash2);
           },
@@ -496,13 +496,13 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("hash changes when nodes are added", () => {
-      fc.assert(
-        fc.property(
+    it("hash changes when nodes are added", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           graphDefArb,
           identifierArb,
           versionArb,
-          (graph, newNodeName, version) => {
+          async (graph, newNodeName, version) => {
             // Ensure new node name doesn't exist
             fc.pre(!Object.keys(graph.nodes).includes(newNodeName));
 
@@ -525,8 +525,8 @@ describe("Schema Serialization Properties", () => {
 
             const serialized2 = serializeSchema(extendedGraph, version);
 
-            const hash1 = computeSchemaHash(serialized1);
-            const hash2 = computeSchemaHash(serialized2);
+            const hash1 = await computeSchemaHash(serialized1);
+            const hash2 = await computeSchemaHash(serialized2);
 
             expect(hash1).not.toBe(hash2);
           },
@@ -535,11 +535,11 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("hash is a 16-character hex string", () => {
-      fc.assert(
-        fc.property(graphDefArb, versionArb, (graph, version) => {
+    it("hash is a 16-character hex string", async () => {
+      await fc.assert(
+        fc.asyncProperty(graphDefArb, versionArb, async (graph, version) => {
           const serialized = serializeSchema(graph, version);
-          const hash = computeSchemaHash(serialized);
+          const hash = await computeSchemaHash(serialized);
 
           expect(hash).toMatch(/^[a-f0-9]{16}$/);
         }),

@@ -20,10 +20,11 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import type { SQL } from "drizzle-orm";
+import { getTableName,type SQL } from "drizzle-orm";
 import { type PgDatabase } from "drizzle-orm/pg-core";
 
 import { UniquenessError } from "../../errors";
+import type { SqlTableNames } from "../../query/compiler/schema";
 import {
   type BackendCapabilities,
   type CheckUniqueParams,
@@ -271,6 +272,12 @@ export function createPostgresBackend(
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
 
+  const tableNames: SqlTableNames = {
+    nodes: getTableName(tables.nodes),
+    edges: getTableName(tables.edges),
+    embeddings: getTableName(tables.embeddings),
+  };
+
   /**
    * Execute a query and return all rows.
    */
@@ -300,6 +307,7 @@ export function createPostgresBackend(
   const backend: GraphBackend = {
     dialect: "postgres",
     capabilities: POSTGRES_VECTOR_CAPABILITIES,
+    tableNames,
 
     // === Node Operations ===
 

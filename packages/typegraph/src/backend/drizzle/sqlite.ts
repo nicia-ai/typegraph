@@ -20,10 +20,11 @@
  * const backend = createSqliteBackend(db, { tables });
  * ```
  */
-import { type SQL,sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { ConfigurationError, UniquenessError } from "../../errors";
+import type { SqlTableNames } from "../../query/compiler/schema";
 import {
   type CheckUniqueParams,
   type CountEdgesByKindParams,
@@ -235,6 +236,12 @@ export function createSqliteBackend(
   const isD1 = isD1Database(db);
   const isSync = isSyncDatabase(db);
 
+  const tableNames: SqlTableNames = {
+    nodes: getTableName(tables.nodes),
+    edges: getTableName(tables.edges),
+    embeddings: getTableName(tables.embeddings),
+  };
+
   /**
    * Helper to execute a query and handle sync/async uniformly.
    */
@@ -257,6 +264,7 @@ export function createSqliteBackend(
   const backend: GraphBackend = {
     dialect: "sqlite",
     capabilities: isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES,
+    tableNames,
 
     // === Node Operations ===
 

@@ -91,7 +91,7 @@ export async function ensureSchema<G extends GraphDef>(
 
   // Quick hash check - if hashes match, schemas are identical
   const storedHash = activeSchema.schema_hash;
-  const currentHash = computeSchemaHash(currentSchema);
+  const currentHash = await computeSchemaHash(currentSchema);
 
   if (storedHash === currentHash) {
     return { status: "unchanged", version: activeSchema.version };
@@ -163,7 +163,7 @@ export async function initializeSchema<G extends GraphDef>(
   graph: G,
 ): Promise<SchemaVersionRow> {
   const schema = serializeSchema(graph, 1);
-  const hash = computeSchemaHash(schema);
+  const hash = await computeSchemaHash(schema);
 
   return backend.insertSchema({
     graphId: graph.id,
@@ -192,7 +192,7 @@ export async function migrateSchema<G extends GraphDef>(
 ): Promise<number> {
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
-  const hash = computeSchemaHash(schema);
+  const hash = await computeSchemaHash(schema);
 
   // Insert new version (not active yet)
   await backend.insertSchema({
