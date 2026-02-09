@@ -114,3 +114,11 @@ export { type DialectAdapter, getDialect, type SqlDialect } from "./dialect";
 
 // Compiler constants
 export { MAX_RECURSIVE_DEPTH } from "./compiler/index";
+
+// SQL schema configuration
+export {
+  createSqlSchema,
+  DEFAULT_SQL_SCHEMA,
+  type SqlSchema,
+  type SqlTableNames,
+} from "./compiler/schema";

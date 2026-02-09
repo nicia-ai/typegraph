@@ -257,6 +257,8 @@ export type {
   SelectContext,
   SortDirection,
   SqlDialect,
+  SqlSchema,
+  SqlTableNames,
   StreamOptions,
 } from "./query";
 
@@ -270,6 +272,9 @@ export {
   countDistinct,
   createFragment,
   createQueryBuilder,
+  // SQL schema configuration
+  createSqlSchema,
+  DEFAULT_SQL_SCHEMA,
   ExecutableAggregateQuery,
   ExecutableQuery,
   // Subquery predicates

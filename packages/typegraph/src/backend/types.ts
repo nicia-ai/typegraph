@@ -6,6 +6,8 @@
  */
 import { type SQL } from "drizzle-orm";
 
+import { type SqlTableNames } from "../query/compiler/schema";
+
 // ============================================================
 // Vector Search Types
 // ============================================================
@@ -348,6 +350,8 @@ export type GraphBackend = Readonly<{
   dialect: Dialect;
   /** Backend capabilities */
   capabilities: BackendCapabilities;
+  /** Table names used by this backend (for query schema auto-derivation) */
+  tableNames?: SqlTableNames | undefined;
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;

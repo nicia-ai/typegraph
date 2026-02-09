@@ -4,8 +4,6 @@
  * Converts a GraphDef to a SerializedSchema for database storage.
  * Uses Zod's toJSONSchema() for property schema serialization.
  */
-import type * as Crypto from "node:crypto";
-
 import { z } from "zod";
 
 import {
@@ -423,7 +421,9 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
  *
  * Excludes version and generatedAt since those change on every save.
  */
-export function computeSchemaHash(schema: SerializedSchema): SchemaHash {
+export async function computeSchemaHash(
+  schema: SerializedSchema,
+): Promise<SchemaHash> {
   // Create a hashable representation excluding dynamic fields
   const hashable = {
     graphId: schema.graphId,
@@ -453,18 +453,19 @@ function sortedReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
- * Computes SHA-256 hash of a string.
+ * Computes SHA-256 hash of a string using the Web Crypto API.
  *
- * Uses Node.js crypto module for reliable cross-platform hashing.
+ * Works in Node.js 16+, Cloudflare Workers, Deno, and browsers.
  * Returns first 16 hex characters (64 bits) for a compact but collision-resistant hash.
  */
-function sha256Hash(input: string): string {
-  // Dynamic import to avoid bundling issues - crypto is a Node.js built-in
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require("node:crypto") as typeof Crypto;
-  return crypto
-    .createHash("sha256")
-    .update(input, "utf8")
-    .digest("hex")
-    .slice(0, 16);
+async function sha256Hash(input: string): Promise<string> {
+  const encoded = new TextEncoder().encode(input);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
+  const bytes = new Uint8Array(digest);
+  // Only need 8 bytes (16 hex chars) — avoid converting the full 32-byte digest
+  let hex = "";
+  for (let index = 0; index < 8; index++) {
+    hex += bytes[index]!.toString(16).padStart(2, "0");
+  }
+  return hex;
 }

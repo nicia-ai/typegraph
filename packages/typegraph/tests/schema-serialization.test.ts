@@ -291,7 +291,7 @@ describe("serializeSchema", () => {
 });
 
 describe("computeSchemaHash", () => {
-  it("produces consistent hashes for the same schema", () => {
+  it("produces consistent hashes for the same schema", async () => {
     const graph = defineGraph({
       id: "test_graph",
       nodes: { Person: { type: Person } },
@@ -301,13 +301,13 @@ describe("computeSchemaHash", () => {
     const serialized1 = serializeSchema(graph, 1);
     const serialized2 = serializeSchema(graph, 1);
 
-    const hash1 = computeSchemaHash(serialized1);
-    const hash2 = computeSchemaHash(serialized2);
+    const hash1 = await computeSchemaHash(serialized1);
+    const hash2 = await computeSchemaHash(serialized2);
 
     expect(hash1).toBe(hash2);
   });
 
-  it("ignores version and generatedAt for hashing", () => {
+  it("ignores version and generatedAt for hashing", async () => {
     const graph = defineGraph({
       id: "test_graph",
       nodes: { Person: { type: Person } },
@@ -317,13 +317,13 @@ describe("computeSchemaHash", () => {
     const serialized1 = serializeSchema(graph, 1);
     const serialized2 = serializeSchema(graph, 2);
 
-    const hash1 = computeSchemaHash(serialized1);
-    const hash2 = computeSchemaHash(serialized2);
+    const hash1 = await computeSchemaHash(serialized1);
+    const hash2 = await computeSchemaHash(serialized2);
 
     expect(hash1).toBe(hash2);
   });
 
-  it("produces different hashes for different schemas", () => {
+  it("produces different hashes for different schemas", async () => {
     const graph1 = defineGraph({
       id: "test_graph",
       nodes: { Person: { type: Person } },
@@ -336,8 +336,8 @@ describe("computeSchemaHash", () => {
       edges: {},
     });
 
-    const hash1 = computeSchemaHash(serializeSchema(graph1, 1));
-    const hash2 = computeSchemaHash(serializeSchema(graph2, 1));
+    const hash1 = await computeSchemaHash(serializeSchema(graph1, 1));
+    const hash2 = await computeSchemaHash(serializeSchema(graph2, 1));
 
     expect(hash1).not.toBe(hash2);
   });
