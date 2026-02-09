@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.2.0
+
+### Minor Changes
+
+- [`bdd5f34`](https://github.com/nicia-ai/typegraph/commit/bdd5f349453b19e9616f00d7591b436195feb925) Thanks [@pdlug](https://github.com/pdlug)! - Improve support for custom table names and use web crypto to support both node and edge runtimes.
+
 ## 0.1.1
 
 ### Patch Changes
