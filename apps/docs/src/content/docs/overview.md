@@ -102,7 +102,8 @@ Note: TypeGraph **does support** semantic search via database vector extensions
 
 Note: TypeGraph does support **variable-length paths** via `.recursive()` with
 configurable depth limits (`.minHops()`, `.maxHops()`), path collection, and
-cycle detection. See [Recursive Traversals](/queries/recursive) for details.
+cycle detection (for unbounded traversals or when `collectPath()` is enabled).
+See [Recursive Traversals](/queries/recursive) for details.
 
 ## Why TypeGraph?
 

@@ -369,3 +369,5 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 
 Recursive traversals are capped at this depth when no `maxHops()` is specified.
 Explicit `maxHops()` values are capped at 1000.
+Bounded traversals without `collectPath()` run in a faster mode that may revisit
+nodes across hops.

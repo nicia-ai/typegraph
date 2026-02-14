@@ -204,7 +204,7 @@ Find entities connected through relationships:
 
 ```typescript
 async function findRelatedEntities(entityName: string, maxHops = 2) {
-  return store
+  const rows = await store
     .query()
     .from("Entity", "e")
     .whereNode("e", (e) => e.name.eq(entityName))
@@ -216,9 +216,24 @@ async function findRelatedEntities(entityName: string, maxHops = 2) {
     .select((ctx) => ({
       from: ctx.e.name,
       to: ctx.related.name,
+      toId: ctx.related.id,
       depth: ctx.depth,
     }))
     .execute();
+
+  // bounded maxHops() without collectPath() may revisit nodes; dedupe by target
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      if (seen.has(row.toId)) return false;
+      seen.add(row.toId);
+      return true;
+    })
+    .map((row) => ({
+      from: row.from,
+      to: row.to,
+      depth: row.depth,
+    }));
 }
 ```
 

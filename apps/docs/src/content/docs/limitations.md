@@ -45,6 +45,8 @@ Variable-length traversals use two caps:
 
 1. Unbounded traversals (no `maxHops()`) are capped at 100 hops.
 2. Explicit `maxHops()` values are capped at 1000 hops.
+3. Explicit `maxHops()` without `collectPath()` uses a fast bounded mode that
+   skips cycle-path tracking (nodes may be revisited across hops).
 
 This prevents runaway queries while still supporting deep, intentionally bounded traversals.
 
