@@ -135,6 +135,11 @@
     "test:unit": "vitest run",
     "pretest:property": "node --import tsx scripts/ensure-native-sqlite.ts",
     "test:property": "vitest run tests/property",
+    "pretest:perf": "node --import tsx scripts/ensure-native-sqlite.ts",
+    "test:perf": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:check",
+    "bench:perf": "pnpm --filter @nicia-ai/typegraph-benchmarks perf",
+    "test:perf:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres",
+    "bench:perf:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:postgres",
     "test:postgres": "./scripts/test-postgres.sh",
     "test:coverage": "vitest run --coverage",
     "test:mutation": "stryker run"

@@ -23,6 +23,7 @@ export {
 export {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
 } from "./recursive";
 export {
@@ -40,6 +41,7 @@ import { UnsupportedPredicateError } from "../../errors";
 import {
   type AggregateExpr,
   type FieldRef,
+  type PredicateExpression,
   type QueryAst,
   type SelectiveField,
   type SetOperation,
@@ -162,6 +164,586 @@ function quoteIdentifier(identifier: string): SQL {
   return sql.raw(`"${identifier.replaceAll('"', '""')}"`);
 }
 
+const NODE_COLUMNS = [
+  "id",
+  "kind",
+  "props",
+  "version",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+] as const;
+
+const EDGE_COLUMNS = [
+  "id",
+  "kind",
+  "from_id",
+  "to_id",
+  "props",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+] as const;
+
+type RequiredColumnsByAlias = ReadonlyMap<string, ReadonlySet<string>>;
+const EMPTY_REQUIRED_COLUMNS = new Set<string>();
+const TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER = 8;
+const TRAVERSAL_LIMIT_PUSHDOWN_MAX = 10_000;
+
+function isColumnPruningEnabled(ast: QueryAst): boolean {
+  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
+    return true;
+  }
+  if (ast.groupBy || ast.having) {
+    return true;
+  }
+  return ast.projection.fields.some((field) => isAggregateExpr(field.source));
+}
+
+function addRequiredColumn(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  alias: string,
+  column: string,
+): void {
+  const existing = requiredColumnsByAlias.get(alias);
+  if (existing) {
+    existing.add(column);
+    return;
+  }
+
+  requiredColumnsByAlias.set(alias, new Set([column]));
+}
+
+function markFieldRefAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  field: FieldRef,
+): void {
+  const column = field.path[0];
+  if (column === undefined) {
+    return;
+  }
+  addRequiredColumn(requiredColumnsByAlias, field.alias, column);
+}
+
+function markPredicateFieldsAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  expression: PredicateExpression,
+): void {
+  switch (expression.__type) {
+    case "comparison": {
+      markFieldRefAsRequired(requiredColumnsByAlias, expression.left);
+      return;
+    }
+    case "string_op":
+    case "null_check":
+    case "between":
+    case "array_op":
+    case "object_op": {
+      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+      return;
+    }
+    case "and":
+    case "or": {
+      for (const predicate of expression.predicates) {
+        markPredicateFieldsAsRequired(requiredColumnsByAlias, predicate);
+      }
+      return;
+    }
+    case "not": {
+      markPredicateFieldsAsRequired(
+        requiredColumnsByAlias,
+        expression.predicate,
+      );
+      return;
+    }
+    case "aggregate_comparison": {
+      markFieldRefAsRequired(
+        requiredColumnsByAlias,
+        expression.aggregate.field,
+      );
+      return;
+    }
+    case "in_subquery": {
+      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+      return;
+    }
+    case "vector_similarity": {
+      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+      return;
+    }
+    case "exists": {
+      return;
+    }
+  }
+}
+
+function mapSelectiveSystemFieldToColumn(field: string): string {
+  if (field === "fromId") {
+    return "from_id";
+  }
+  if (field === "toId") {
+    return "to_id";
+  }
+  if (field.startsWith("meta.")) {
+    return field
+      .slice(5)
+      .replaceAll(/([A-Z])/g, "_$1")
+      .toLowerCase();
+  }
+  return field;
+}
+
+function markSelectiveFieldAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  field: SelectiveField,
+): void {
+  if (field.isSystemField) {
+    addRequiredColumn(
+      requiredColumnsByAlias,
+      field.alias,
+      mapSelectiveSystemFieldToColumn(field.field),
+    );
+    return;
+  }
+  addRequiredColumn(requiredColumnsByAlias, field.alias, "props");
+}
+
+function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
+  const requiredColumnsByAlias = new Map<string, Set<string>>();
+
+  // Join keys are always required.
+  addRequiredColumn(requiredColumnsByAlias, ast.start.alias, "id");
+  for (const traversal of ast.traversals) {
+    addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "id");
+  }
+
+  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
+    for (const field of ast.selectiveFields) {
+      markSelectiveFieldAsRequired(requiredColumnsByAlias, field);
+    }
+  } else {
+    for (const field of ast.projection.fields) {
+      if (isAggregateExpr(field.source)) {
+        markFieldRefAsRequired(requiredColumnsByAlias, field.source.field);
+      } else {
+        markFieldRefAsRequired(requiredColumnsByAlias, field.source);
+      }
+    }
+  }
+
+  if (ast.groupBy) {
+    for (const field of ast.groupBy.fields) {
+      markFieldRefAsRequired(requiredColumnsByAlias, field);
+    }
+  }
+
+  if (ast.orderBy) {
+    for (const field of ast.orderBy) {
+      markFieldRefAsRequired(requiredColumnsByAlias, field.field);
+    }
+  }
+
+  if (ast.having) {
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.having);
+  }
+
+  for (const predicate of ast.predicates) {
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, predicate.expression);
+  }
+
+  return requiredColumnsByAlias;
+}
+
+function shouldProjectColumn(
+  requiredColumns: ReadonlySet<string> | undefined,
+  column: string,
+): boolean {
+  if (requiredColumns === undefined) {
+    return true;
+  }
+  return requiredColumns.has(column);
+}
+
+function compileColumnReference(
+  tableAlias: string | undefined,
+  column: string,
+): SQL {
+  if (tableAlias === undefined) {
+    return sql.raw(column);
+  }
+  return sql`${sql.raw(tableAlias)}.${sql.raw(column)}`;
+}
+
+function compileNodeSelectColumns(
+  tableAlias: string | undefined,
+  alias: string,
+  requiredColumns: ReadonlySet<string> | undefined,
+): SQL[] {
+  return NODE_COLUMNS.filter(
+    (column) => column === "id" || shouldProjectColumn(requiredColumns, column),
+  ).map(
+    (column) =>
+      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
+  );
+}
+
+function compileEdgeSelectColumns(
+  tableAlias: string | undefined,
+  alias: string,
+  requiredColumns: ReadonlySet<string> | undefined,
+): SQL[] {
+  return EDGE_COLUMNS.filter((column) =>
+    shouldProjectColumn(requiredColumns, column),
+  ).map(
+    (column) =>
+      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
+  );
+}
+
+function compileKindFilter(column: SQL, kinds: readonly string[]): SQL {
+  if (kinds.length === 0) {
+    return sql`1 = 0`;
+  }
+  if (kinds.length === 1) {
+    return sql`${column} = ${kinds[0]}`;
+  }
+  return sql`${column} IN (${sql.join(
+    kinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  )})`;
+}
+
+function getNodeKindsForAlias(ast: QueryAst, alias: string): readonly string[] {
+  if (alias === ast.start.alias) {
+    return ast.start.kinds;
+  }
+
+  for (const traversal of ast.traversals) {
+    if (traversal.nodeAlias === alias) {
+      return traversal.nodeKinds;
+    }
+  }
+
+  throw new UnsupportedPredicateError(
+    `Unknown traversal source alias: ${alias}`,
+  );
+}
+
+function isIdFieldRef(field: FieldRef): boolean {
+  return (
+    field.path.length === 1 &&
+    field.path[0] === "id" &&
+    field.jsonPointer === undefined
+  );
+}
+
+function hasIdEqualityPredicate(
+  expression: PredicateExpression,
+  alias: string,
+): boolean {
+  switch (expression.__type) {
+    case "comparison": {
+      return (
+        expression.op === "eq" &&
+        expression.left.alias === alias &&
+        isIdFieldRef(expression.left)
+      );
+    }
+    case "and": {
+      return expression.predicates.some((predicate) =>
+        hasIdEqualityPredicate(predicate, alias),
+      );
+    }
+    case "or":
+    case "not":
+    case "string_op":
+    case "null_check":
+    case "between":
+    case "array_op":
+    case "object_op":
+    case "aggregate_comparison":
+    case "exists":
+    case "in_subquery":
+    case "vector_similarity": {
+      return false;
+    }
+  }
+}
+
+function isStartAliasBoundToSingleId(ast: QueryAst): boolean {
+  return ast.predicates.some(
+    (predicate) =>
+      predicate.targetAlias === ast.start.alias &&
+      predicate.targetType !== "edge" &&
+      hasIdEqualityPredicate(predicate.expression, ast.start.alias),
+  );
+}
+
+function resolveTraversalCteLimit(ast: QueryAst): number | undefined {
+  if (ast.limit === undefined) {
+    return undefined;
+  }
+
+  if (ast.limit <= 0) {
+    return 0;
+  }
+
+  if (ast.groupBy || ast.having) {
+    return undefined;
+  }
+
+  if (ast.orderBy && ast.orderBy.length > 0) {
+    return undefined;
+  }
+
+  if (ast.traversals.length < 2) {
+    return undefined;
+  }
+
+  if (!isStartAliasBoundToSingleId(ast)) {
+    return undefined;
+  }
+
+  const scaledLimit = ast.limit * TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER;
+  return Math.min(
+    Math.max(ast.limit, scaledLimit),
+    TRAVERSAL_LIMIT_PUSHDOWN_MAX,
+  );
+}
+
+type CountAggregateFastPathPlan = Readonly<{
+  traversal: QueryAst["traversals"][number];
+  requiresCount: boolean;
+  requiresCountDistinct: boolean;
+}>;
+
+function resolveCountAggregateFastPath(
+  ast: QueryAst,
+): CountAggregateFastPathPlan | undefined {
+  if (ast.traversals.length !== 1) {
+    return undefined;
+  }
+
+  if (ast.groupBy?.fields.length !== 1) {
+    return undefined;
+  }
+
+  if (ast.having !== undefined) {
+    return undefined;
+  }
+
+  if (
+    ast.orderBy?.some((orderSpec) => orderSpec.field.alias !== ast.start.alias)
+  ) {
+    return undefined;
+  }
+
+  const traversal = ast.traversals[0]!;
+  if ((traversal.inverseEdgeKinds?.length ?? 0) > 0) {
+    return undefined;
+  }
+
+  const groupField = ast.groupBy.fields[0]!;
+  if (groupField.alias !== ast.start.alias || !isIdFieldRef(groupField)) {
+    return undefined;
+  }
+
+  let requiresCount = false;
+  let requiresCountDistinct = false;
+
+  for (const projectedField of ast.projection.fields) {
+    const source = projectedField.source;
+
+    if (!isAggregateExpr(source)) {
+      if (source.alias !== ast.start.alias) {
+        return undefined;
+      }
+      continue;
+    }
+
+    if (
+      source.field.alias !== traversal.nodeAlias ||
+      !isIdFieldRef(source.field)
+    ) {
+      return undefined;
+    }
+
+    if (source.function === "count") {
+      requiresCount = true;
+      continue;
+    }
+
+    if (source.function === "countDistinct") {
+      requiresCountDistinct = true;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  if (!requiresCount && !requiresCountDistinct) {
+    return undefined;
+  }
+
+  return {
+    traversal,
+    requiresCount,
+    requiresCountDistinct,
+  };
+}
+
+function compileCountAggregateFastPath(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+  requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
+): SQL | undefined {
+  const plan = resolveCountAggregateFastPath(ast);
+  if (!plan) {
+    return undefined;
+  }
+
+  const { traversal, requiresCount, requiresCountDistinct } = plan;
+  const { dialect } = ctx;
+  const startAlias = ast.start.alias;
+  const previousAlias = traversal.joinFromAlias;
+  const previousAliasIdColumn = `${previousAlias}_id`;
+  const countCteAlias = `cte_${traversal.nodeAlias}_counts`;
+  const countColumn = `${traversal.nodeAlias}_count`;
+  const countDistinctColumn = `${traversal.nodeAlias}_count_distinct`;
+
+  const previousNodeKinds = getNodeKindsForAlias(ast, traversal.joinFromAlias);
+  const edgeKinds = [...new Set(traversal.edgeKinds)];
+  const nodeKinds = traversal.nodeKinds;
+
+  const edgeTemporalFilter = compileTemporalFilter(
+    extractTemporalOptions(ast, "e"),
+  );
+  const nodeTemporalFilter = compileTemporalFilter(
+    extractTemporalOptions(ast, "n"),
+  );
+
+  const nodePredicateContext: PredicateCompilerContext = {
+    ...ctx,
+    cteColumnPrefix: "n",
+  };
+  const nodePredicateClauses = ast.predicates
+    .filter(
+      (predicate) =>
+        predicate.targetAlias === traversal.nodeAlias &&
+        predicate.targetType !== "edge",
+    )
+    .map((predicate) =>
+      compilePredicateExpression(predicate.expression, nodePredicateContext),
+    );
+
+  const edgePredicateContext: PredicateCompilerContext = {
+    ...ctx,
+    cteColumnPrefix: "e",
+  };
+  const edgePredicateClauses = ast.predicates
+    .filter(
+      (predicate) =>
+        predicate.targetAlias === traversal.edgeAlias &&
+        predicate.targetType === "edge",
+    )
+    .map((predicate) =>
+      compilePredicateExpression(predicate.expression, edgePredicateContext),
+    );
+
+  const joinField = traversal.direction === "out" ? "from_id" : "to_id";
+  const targetField = traversal.direction === "out" ? "to_id" : "from_id";
+  const joinKindField = traversal.direction === "out" ? "from_kind" : "to_kind";
+  const targetKindField =
+    traversal.direction === "out" ? "to_kind" : "from_kind";
+
+  const whereClauses = [
+    sql`e.graph_id = ${graphId}`,
+    compileKindFilter(sql.raw("e.kind"), edgeKinds),
+    compileKindFilter(sql.raw(`e.${joinKindField}`), previousNodeKinds),
+    compileKindFilter(sql.raw(`e.${targetKindField}`), nodeKinds),
+    compileKindFilter(sql.raw("n.kind"), nodeKinds),
+    edgeTemporalFilter,
+    nodeTemporalFilter,
+    ...nodePredicateClauses,
+    ...edgePredicateClauses,
+  ];
+
+  const aggregateColumns: SQL[] = [];
+  if (requiresCount) {
+    aggregateColumns.push(sql`COUNT(n.id) AS ${sql.raw(countColumn)}`);
+  }
+  if (requiresCountDistinct) {
+    aggregateColumns.push(
+      sql`COUNT(DISTINCT n.id) AS ${sql.raw(countDistinctColumn)}`,
+    );
+  }
+
+  const startCte = compileStartCte(ast, graphId, ctx, requiredColumnsByAlias);
+  const countCte = sql`
+    ${sql.raw(countCteAlias)} AS (
+      SELECT
+        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} AS ${sql.raw(previousAliasIdColumn)},
+        ${sql.join(aggregateColumns, sql`, `)}
+      FROM cte_${sql.raw(previousAlias)}
+      JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(targetField)}
+      WHERE ${sql.join(whereClauses, sql` AND `)}
+      GROUP BY cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)}
+    )
+  `;
+
+  const projection = sql.join(
+    ast.projection.fields.map((projectedField) => {
+      const source = projectedField.source;
+
+      if (!isAggregateExpr(source)) {
+        const value = compileFieldValue(
+          source,
+          dialect,
+          source.valueType,
+          `cte_${source.alias}`,
+        );
+        return sql`${value} AS ${quoteIdentifier(projectedField.outputName)}`;
+      }
+
+      const projectedCountColumn =
+        source.function === "countDistinct" ? countDistinctColumn : countColumn;
+      const countValue = sql`${sql.raw(countCteAlias)}.${sql.raw(projectedCountColumn)}`;
+      const aggregateValue =
+        traversal.optional ? sql`COALESCE(${countValue}, 0)` : countValue;
+
+      return sql`${aggregateValue} AS ${quoteIdentifier(projectedField.outputName)}`;
+    }),
+    sql`, `,
+  );
+
+  const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
+  const fromClause = sql`
+    FROM cte_${sql.raw(startAlias)}
+    ${sql.raw(joinType)} ${sql.raw(countCteAlias)}
+      ON ${sql.raw(countCteAlias)}.${sql.raw(previousAliasIdColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)}
+  `;
+
+  const orderBy = compileOrderBy(ast, dialect);
+  const limitOffset = compileLimitOffsetWithOverride(ast.limit, ast.offset);
+
+  const parts: SQL[] = [
+    sql`WITH ${startCte}, ${countCte}`,
+    sql`SELECT ${projection}`,
+    fromClause,
+  ];
+
+  if (orderBy) parts.push(orderBy);
+  if (limitOffset) parts.push(limitOffset);
+
+  return sql.join(parts, sql` `);
+}
+
 /**
  * Compiles a standard (non-recursive) query to SQL using CTEs.
  */
@@ -182,12 +764,42 @@ function compileStandardQuery(
     );
   }
 
+  const requiredColumnsByAlias =
+    isColumnPruningEnabled(ast) ?
+      collectRequiredColumnsByAlias(ast)
+    : undefined;
+
+  if (!vectorPredicate) {
+    const fastPathSql = compileCountAggregateFastPath(
+      ast,
+      graphId,
+      ctx,
+      requiredColumnsByAlias,
+    );
+    if (fastPathSql) {
+      return fastPathSql;
+    }
+  }
+
+  const traversalCteLimit = resolveTraversalCteLimit(ast);
+
   // Build CTEs
-  const ctes: SQL[] = [compileStartCte(ast, graphId, ctx)];
+  const ctes: SQL[] = [
+    compileStartCte(ast, graphId, ctx, requiredColumnsByAlias),
+  ];
 
   // Traversal CTEs
   for (let index = 0; index < ast.traversals.length; index++) {
-    ctes.push(compileTraversalCte(ast, index, graphId, ctx));
+    ctes.push(
+      compileTraversalCte(
+        ast,
+        index,
+        graphId,
+        ctx,
+        requiredColumnsByAlias,
+        traversalCteLimit,
+      ),
+    );
   }
 
   // Add embeddings CTE if vector similarity is used
@@ -243,18 +855,13 @@ function compileStartCte(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
+  requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
 ): SQL {
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
 
   // Kind filter
-  const kindFilter =
-    kinds.length === 1 ?
-      sql`kind = ${kinds[0]}`
-    : sql`kind IN (${sql.join(
-        kinds.map((k) => sql`${k}`),
-        sql`, `,
-      )})`;
+  const kindFilter = compileKindFilter(sql.raw("kind"), kinds);
 
   // Temporal filter
   const temporalFilter = compileTemporalFilter(extractTemporalOptions(ast));
@@ -275,18 +882,17 @@ function compileStartCte(
     ...predicateClauses,
   ];
 
+  const effectiveRequiredColumns =
+    requiredColumnsByAlias ?
+      (requiredColumnsByAlias.get(alias) ?? EMPTY_REQUIRED_COLUMNS)
+    : undefined;
+
   return sql`
     cte_${sql.raw(alias)} AS (
-      SELECT
-        id AS ${sql.raw(alias)}_id,
-        kind AS ${sql.raw(alias)}_kind,
-        props AS ${sql.raw(alias)}_props,
-        version AS ${sql.raw(alias)}_version,
-        valid_from AS ${sql.raw(alias)}_valid_from,
-        valid_to AS ${sql.raw(alias)}_valid_to,
-        created_at AS ${sql.raw(alias)}_created_at,
-        updated_at AS ${sql.raw(alias)}_updated_at,
-        deleted_at AS ${sql.raw(alias)}_deleted_at
+      SELECT ${sql.join(
+        compileNodeSelectColumns(undefined, alias, effectiveRequiredColumns),
+        sql`, `,
+      )}
       FROM ${ctx.schema.nodesTable}
       WHERE ${sql.join(whereClauses, sql` AND `)}
     )
@@ -301,34 +907,21 @@ function compileTraversalCte(
   traversalIndex: number,
   graphId: string,
   ctx: PredicateCompilerContext,
+  requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
+  traversalLimit: number | undefined,
 ): SQL {
   const traversal = ast.traversals[traversalIndex]!;
 
-  // Determine join condition based on direction
-  const joinField = traversal.direction === "out" ? "from_id" : "to_id";
-  const targetField = traversal.direction === "out" ? "to_id" : "from_id";
+  const previousNodeKinds = getNodeKindsForAlias(ast, traversal.joinFromAlias);
+  const directEdgeKinds = [...new Set(traversal.edgeKinds)];
+  const inverseEdgeKinds =
+    traversal.inverseEdgeKinds === undefined ?
+      []
+    : [...new Set(traversal.inverseEdgeKinds)];
 
-  // Node kind filter
   const nodeKinds = traversal.nodeKinds;
-  const nodeKindFilter =
-    nodeKinds.length === 1 ?
-      sql`n.kind = ${nodeKinds[0]}`
-    : sql`n.kind IN (${sql.join(
-        nodeKinds.map((k) => sql`${k}`),
-        sql`, `,
-      )})`;
+  const nodeKindFilter = compileKindFilter(sql.raw("n.kind"), nodeKinds);
 
-  // Edge kind filter (supports multiple kinds for ontology expansion)
-  const edgeKinds = traversal.edgeKinds;
-  const edgeKindFilter =
-    edgeKinds.length === 1 ?
-      sql`e.kind = ${edgeKinds[0]}`
-    : sql`e.kind IN (${sql.join(
-        edgeKinds.map((k) => sql`${k}`),
-        sql`, `,
-      )})`;
-
-  // Temporal filters
   const edgeTemporalFilter = compileTemporalFilter(
     extractTemporalOptions(ast, "e"),
   );
@@ -361,9 +954,8 @@ function compileTraversalCte(
     )
     .map((p) => compilePredicateExpression(p.expression, edgeCteContext));
 
-  const whereClauses = [
+  const baseWhereClauses = [
     sql`e.graph_id = ${graphId}`,
-    edgeKindFilter,
     nodeKindFilter,
     edgeTemporalFilter,
     nodeTemporalFilter,
@@ -374,34 +966,134 @@ function compileTraversalCte(
   const previousAlias = traversal.joinFromAlias;
   const edgeAlias = traversal.edgeAlias;
   const nodeAlias = traversal.nodeAlias;
+  const requiredNodeColumns =
+    requiredColumnsByAlias ?
+      (requiredColumnsByAlias.get(nodeAlias) ?? EMPTY_REQUIRED_COLUMNS)
+    : undefined;
+  const requiredEdgeColumns =
+    requiredColumnsByAlias ?
+      (requiredColumnsByAlias.get(edgeAlias) ?? EMPTY_REQUIRED_COLUMNS)
+    : undefined;
+  const selectColumns = [
+    ...compileEdgeSelectColumns("e", edgeAlias, requiredEdgeColumns),
+    ...compileNodeSelectColumns("n", nodeAlias, requiredNodeColumns),
+    sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id`,
+  ];
+
+  function compileTraversalBranch(
+    branch: Readonly<{
+      joinField: "from_id" | "to_id";
+      targetField: "from_id" | "to_id";
+      joinKindField: "from_kind" | "to_kind";
+      targetKindField: "from_kind" | "to_kind";
+      edgeKinds: readonly string[];
+      duplicateGuard?: SQL | undefined;
+    }>,
+  ): SQL {
+    const whereClauses = [
+      ...baseWhereClauses,
+      compileKindFilter(sql.raw("e.kind"), branch.edgeKinds),
+      compileKindFilter(
+        sql.raw(`e.${branch.joinKindField}`),
+        previousNodeKinds,
+      ),
+      compileKindFilter(sql.raw(`e.${branch.targetKindField}`), nodeKinds),
+    ];
+
+    if (branch.duplicateGuard !== undefined) {
+      whereClauses.push(branch.duplicateGuard);
+    }
+
+    return sql`
+      SELECT ${sql.join(selectColumns, sql`, `)}
+      FROM ${ctx.schema.edgesTable} e
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(branch.targetField)}
+      JOIN cte_${sql.raw(previousAlias)} ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
+      WHERE ${sql.join(whereClauses, sql` AND `)}
+    `;
+  }
+
+  const directJoinField = traversal.direction === "out" ? "from_id" : "to_id";
+  const directTargetField = traversal.direction === "out" ? "to_id" : "from_id";
+  const directJoinKindField =
+    traversal.direction === "out" ? "from_kind" : "to_kind";
+  const directTargetKindField =
+    traversal.direction === "out" ? "to_kind" : "from_kind";
+
+  const directBranch = compileTraversalBranch({
+    joinField: directJoinField,
+    targetField: directTargetField,
+    joinKindField: directJoinKindField,
+    targetKindField: directTargetKindField,
+    edgeKinds: directEdgeKinds,
+  });
+
+  if (inverseEdgeKinds.length === 0) {
+    if (traversalLimit !== undefined) {
+      return sql`
+        cte_${sql.raw(nodeAlias)} AS (
+          SELECT * FROM (
+            ${directBranch}
+          ) AS traversal_rows
+          LIMIT ${traversalLimit}
+        )
+      `;
+    }
+
+    return sql`
+      cte_${sql.raw(nodeAlias)} AS (
+        ${directBranch}
+      )
+    `;
+  }
+
+  const inverseJoinField = traversal.direction === "out" ? "to_id" : "from_id";
+  const inverseTargetField =
+    traversal.direction === "out" ? "from_id" : "to_id";
+  const inverseJoinKindField =
+    traversal.direction === "out" ? "to_kind" : "from_kind";
+  const inverseTargetKindField =
+    traversal.direction === "out" ? "from_kind" : "to_kind";
+
+  const overlappingKinds = inverseEdgeKinds.filter((kind) =>
+    directEdgeKinds.includes(kind),
+  );
+
+  const duplicateGuard =
+    overlappingKinds.length > 0 ?
+      sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(
+        sql.raw("e.kind"),
+        overlappingKinds,
+      )})`
+    : undefined;
+
+  const inverseBranch = compileTraversalBranch({
+    joinField: inverseJoinField,
+    targetField: inverseTargetField,
+    joinKindField: inverseJoinKindField,
+    targetKindField: inverseTargetKindField,
+    edgeKinds: inverseEdgeKinds,
+    duplicateGuard,
+  });
+
+  if (traversalLimit !== undefined) {
+    return sql`
+      cte_${sql.raw(nodeAlias)} AS (
+        SELECT * FROM (
+          ${directBranch}
+          UNION ALL
+          ${inverseBranch}
+        ) AS traversal_rows
+        LIMIT ${traversalLimit}
+      )
+    `;
+  }
 
   return sql`
     cte_${sql.raw(nodeAlias)} AS (
-      SELECT
-        e.id AS ${sql.raw(edgeAlias)}_id,
-        e.kind AS ${sql.raw(edgeAlias)}_kind,
-        e.from_id AS ${sql.raw(edgeAlias)}_from_id,
-        e.to_id AS ${sql.raw(edgeAlias)}_to_id,
-        e.props AS ${sql.raw(edgeAlias)}_props,
-        e.valid_from AS ${sql.raw(edgeAlias)}_valid_from,
-        e.valid_to AS ${sql.raw(edgeAlias)}_valid_to,
-        e.created_at AS ${sql.raw(edgeAlias)}_created_at,
-        e.updated_at AS ${sql.raw(edgeAlias)}_updated_at,
-        e.deleted_at AS ${sql.raw(edgeAlias)}_deleted_at,
-        n.id AS ${sql.raw(nodeAlias)}_id,
-        n.kind AS ${sql.raw(nodeAlias)}_kind,
-        n.props AS ${sql.raw(nodeAlias)}_props,
-        n.version AS ${sql.raw(nodeAlias)}_version,
-        n.valid_from AS ${sql.raw(nodeAlias)}_valid_from,
-        n.valid_to AS ${sql.raw(nodeAlias)}_valid_to,
-        n.created_at AS ${sql.raw(nodeAlias)}_created_at,
-        n.updated_at AS ${sql.raw(nodeAlias)}_updated_at,
-        n.deleted_at AS ${sql.raw(nodeAlias)}_deleted_at,
-        cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id
-      FROM ${ctx.schema.edgesTable} e
-      JOIN ${ctx.schema.nodesTable} n ON n.id = e.${sql.raw(targetField)}
-      JOIN cte_${sql.raw(previousAlias)} ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(joinField)}
-      WHERE ${sql.join(whereClauses, sql` AND `)}
+      ${directBranch}
+      UNION ALL
+      ${inverseBranch}
     )
   `;
 }

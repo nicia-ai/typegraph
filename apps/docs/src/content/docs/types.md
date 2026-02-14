@@ -359,7 +359,7 @@ const date = decodeDate("2024-01-15T10:30:00.000Z");
 
 ### `MAX_RECURSIVE_DEPTH`
 
-Maximum depth for recursive traversals (100).
+Maximum depth for unbounded recursive traversals (100).
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
@@ -367,4 +367,5 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 100
 ```
 
-Recursive traversals are capped at this depth even when no `maxHops()` is specified.
+Recursive traversals are capped at this depth when no `maxHops()` is specified.
+Explicit `maxHops()` values are capped at 1000.

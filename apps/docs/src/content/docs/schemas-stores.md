@@ -399,7 +399,7 @@ store.nodes.Person.upsert(
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
 Creates multiple nodes efficiently.
 
@@ -410,8 +410,18 @@ store.nodes.Person.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Node<Person>[]>;
+```
+
+Use `returnResults: false` for large ingestion jobs when you do not need created node payloads:
+
+```typescript
+await store.nodes.Person.bulkCreate(batch, { returnResults: false });
+// Returns [] to avoid allocating result objects
 ```
 
 #### `bulkUpsert(items)`
@@ -555,7 +565,7 @@ Soft-deletes an edge.
 store.edges.worksAt.delete(id: string): Promise<void>;
 ```
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
 Creates multiple edges efficiently.
 
@@ -568,8 +578,18 @@ store.edges.worksAt.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Edge<worksAt>[]>;
+```
+
+For high-volume edge ingestion, disable returned payloads:
+
+```typescript
+await store.edges.worksAt.bulkCreate(edgeBatch, { returnResults: false });
+// Returns [] to reduce memory pressure
 ```
 
 #### `bulkDelete(ids)`

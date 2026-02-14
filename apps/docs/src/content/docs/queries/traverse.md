@@ -39,7 +39,16 @@ const employments = await store
 | `edgeAlias` | `string` | Unique alias for referencing this edge |
 | `options.direction` | `"out" \| "in"` | Traversal direction (default: `"out"`) |
 | `options.includeImplyingEdges` | `boolean` | Include edges that imply this edge via ontology |
+| `options.includeInverseEdges` | `boolean` | Include inverse edge kinds defined via ontology |
 | `options.from` | `string` | Fan-out from a different node alias |
+
+### optionalTraverse()
+
+```typescript
+.optionalTraverse(edgeKind, edgeAlias, options?)
+```
+
+Uses the same options as `traverse()`, but returns optional edge/node values in the result context.
 
 ### to()
 
@@ -238,6 +247,35 @@ const connections = await store
   .execute();
 
 // Returns people connected via "knows", "marriedTo", or "bestFriends"
+```
+
+If your ontology defines inverse edge kinds, you can expand traversals to include inverse edges:
+
+```typescript
+// Ontology: inverseOf(manages, managedBy)
+
+const relationships = await store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq("Alice"))
+  .traverse("manages", "e", { includeInverseEdges: true })
+  .to("Person", "other")
+  .select((ctx) => ({
+    name: ctx.other.name,
+    viaEdgeKind: ctx.e.kind,
+  }))
+  .execute();
+
+// Traverses both "manages" and "managedBy"
+```
+
+You can combine both options:
+
+```typescript
+.traverse("knows", "e", {
+  includeImplyingEdges: true,
+  includeInverseEdges: true,
+})
 ```
 
 ## Real-World Examples

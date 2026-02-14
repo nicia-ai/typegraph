@@ -85,6 +85,12 @@ describe("SQLite Backend - Adapter Specific", () => {
       expect(sql).toContain("typegraph_nodes_kind_idx");
       expect(sql).toContain("typegraph_edges_from_idx");
       expect(sql).toContain("typegraph_edges_to_idx");
+      expect(sql).toContain(
+        '"typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind")',
+      );
     });
   });
 });

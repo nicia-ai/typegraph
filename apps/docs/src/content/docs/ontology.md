@@ -157,6 +157,27 @@ inverseOf(follows, followedBy);
 const inverse = registry.getInverseEdge("manages"); // "managedBy"
 ```
 
+You can also expand traversals to include inverse edge kinds at query time:
+
+```typescript
+const relationships = await store
+  .query()
+  .from("Person", "p")
+  .traverse("manages", "e", { includeInverseEdges: true })
+  .to("Person", "other")
+  .select((ctx) => ({
+    other: ctx.other.name,
+    via: ctx.e.kind,
+  }))
+  .execute();
+```
+
+For symmetric relationships, declare an edge as its own inverse:
+
+```typescript
+inverseOf(sameAs, sameAs);
+```
+
 **`implies`**: Declares that one edge kind implies another exists.
 
 ```typescript

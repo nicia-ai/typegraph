@@ -249,7 +249,9 @@ export function createEdgeCollection<
         validFrom?: string;
         validTo?: string;
       }>[],
+      options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Edge<E>[]> {
+      const shouldReturnResults = options?.returnResults ?? true;
       const results: Edge<E>[] = [];
 
       for (const item of items) {
@@ -276,7 +278,9 @@ export function createEdgeCollection<
         if (item.validTo !== undefined) input.validTo = item.validTo;
 
         const result = await executeEdgeCreate(input, backend);
-        results.push(result as Edge<E>);
+        if (shouldReturnResults) {
+          results.push(result as Edge<E>);
+        }
       }
 
       return results;

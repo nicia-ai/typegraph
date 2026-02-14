@@ -564,6 +564,37 @@ describe("Query-Time Implies Expansion", () => {
     expect(traversal.edgeKinds).toContain("manages");
   });
 
+  it("query traverse with includeInverseEdges expands inverse edge kinds", () => {
+    const likedBy = defineEdge("likedBy", {
+      schema: z.object({}),
+    });
+
+    const graph = defineGraph({
+      id: "query_inverse_test",
+      nodes: {
+        Person: { type: Person },
+      },
+      edges: {
+        likes: { type: likes, from: [Person], to: [Person] },
+        likedBy: { type: likedBy, from: [Person], to: [Person] },
+      },
+      ontology: [inverseOf(likes, likedBy)],
+    });
+
+    const registry = buildKindRegistry(graph);
+
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("likes", "e", { includeInverseEdges: true })
+      .to("Person", "friend")
+      .select((context) => ({ person: context.p, friend: context.friend }));
+
+    const traversal = query.toAst().traversals[0]!;
+
+    expect(traversal.edgeKinds).toEqual(["likes"]);
+    expect(traversal.inverseEdgeKinds).toEqual(["likedBy"]);
+  });
+
   it("query traverse without includeImplyingEdges uses single edge kind", () => {
     const graph = defineGraph({
       id: "query_no_implies_test",

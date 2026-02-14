@@ -7,7 +7,13 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  inverseOf,
+  subClassOf,
+} from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import { createQueryBuilder } from "../src/query/builder";
@@ -75,7 +81,7 @@ const testGraph = defineGraph({
       cardinality: "many",
     },
   },
-  ontology: [subClassOf(Company, Organization)],
+  ontology: [subClassOf(Company, Organization), inverseOf(knows, knows)],
 });
 
 // ============================================================
@@ -344,6 +350,35 @@ describe("Query Execution (SQLite)", () => {
       expect(results).toHaveLength(2);
       const employeeNames = results.map((r) => r.employee.name).toSorted();
       expect(employeeNames).toEqual(["Alice", "Bob"]);
+    });
+
+    it("supports symmetric traversal with includeInverseEdges", async () => {
+      const withoutInverseExpansion = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e")
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      expect(withoutInverseExpansion).toHaveLength(1);
+      expect(withoutInverseExpansion[0]!.peerName).toBe("Charlie");
+
+      const withInverseExpansion = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e", { includeInverseEdges: true })
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      const peerNames = withInverseExpansion
+        .map((result) => result.peerName)
+        .toSorted();
+
+      expect(peerNames).toEqual(["Alice", "Charlie"]);
     });
 
     it("chains traversals through intermediate nodes (3-hop)", async () => {

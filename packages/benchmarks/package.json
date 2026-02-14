@@ -3,19 +3,29 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "bench": "tsx src/index.ts",
+    "prebench": "pnpm --filter @nicia-ai/typegraph build",
+    "bench": "tsx src/main.ts",
+    "preperf": "pnpm --filter @nicia-ai/typegraph build",
+    "perf": "tsx src/main.ts",
+    "preperf:check": "pnpm --filter @nicia-ai/typegraph build",
+    "perf:check": "tsx src/main.ts --check",
+    "preperf:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "perf:postgres": "tsx src/main.ts --backend=postgres",
+    "preperf:check:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "perf:check:postgres": "tsx src/main.ts --check --backend=postgres",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {
     "@nicia-ai/typegraph": "workspace:*",
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
-    "tinybench": "^6.0.0",
+    "pg": "^8.18.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.10.13",
+    "@types/pg": "^8.16.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

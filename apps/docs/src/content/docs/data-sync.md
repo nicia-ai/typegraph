@@ -37,6 +37,9 @@ await store.nodes.Document.upsert(id, props);
 // Create many nodes at once
 await store.nodes.Document.bulkCreate(items);
 
+// Create many nodes without returning node payloads (lower memory pressure)
+await store.nodes.Document.bulkCreate(items, { returnResults: false });
+
 // Create or update many nodes at once
 await store.nodes.Document.bulkUpsert(items);
 
@@ -75,6 +78,13 @@ const documents = await store.nodes.Document.bulkCreate([
   { props: { title: "Doc 2", content: "..." } },
   { props: { title: "Doc 3", content: "..." }, id: "custom_id" },
 ]);
+```
+
+If you only need the side effect (writes) and not the created node payloads:
+
+```typescript
+await store.nodes.Document.bulkCreate(items, { returnResults: false });
+// Returns []
 ```
 
 ### bulkUpsert
@@ -118,7 +128,7 @@ await store.edges.relatedTo.bulkCreate([
   { from: doc1, to: doc2, props: { confidence: 0.9 } },
   { from: doc1, to: doc3, props: { confidence: 0.7 } },
   { from: doc2, to: doc3, props: { confidence: 0.8 } },
-]);
+], { returnResults: false });
 
 // Delete many edges at once
 await store.edges.relatedTo.bulkDelete(edgeIds);
@@ -546,7 +556,8 @@ async function syncUsers(users: ExternalUser[]) {
     usersWithManagers.map((u) => ({
       from: { kind: "User" as const, id: u.managerId! },
       to: { kind: "User" as const, id: u.id },
-    }))
+    })),
+    { returnResults: false },
   );
 }
 ```

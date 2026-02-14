@@ -328,6 +328,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
       validFrom?: string;
       validTo?: string;
     }>[],
+    options?: Readonly<{ returnResults?: boolean }>,
   ) => Promise<Node<N>[]>;
 
   /**
@@ -497,6 +498,7 @@ export type EdgeCollection<
       validFrom?: string;
       validTo?: string;
     }>[],
+    options?: Readonly<{ returnResults?: boolean }>,
   ) => Promise<Edge<E>[]>;
 
   /**

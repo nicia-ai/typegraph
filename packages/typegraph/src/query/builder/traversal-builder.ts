@@ -93,6 +93,7 @@ export class TraversalBuilder<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #edgeKinds: readonly string[];
+  readonly #inverseEdgeKinds: readonly string[];
   readonly #edgeAlias: EA;
   readonly #direction: Dir;
   readonly #fromAlias: string;
@@ -107,6 +108,7 @@ export class TraversalBuilder<
     edgeAlias: EA,
     direction: Dir,
     fromAlias: string,
+    inverseEdgeKinds: readonly string[] = [],
     optional: Optional = false as Optional,
     variableLength: VariableLengthState = DEFAULT_VARIABLE_LENGTH_STATE,
     pendingEdgePredicates: readonly NodePredicate[] = [],
@@ -114,6 +116,7 @@ export class TraversalBuilder<
     this.#config = config;
     this.#state = state;
     this.#edgeKinds = edgeKinds;
+    this.#inverseEdgeKinds = inverseEdgeKinds;
     this.#edgeAlias = edgeAlias;
     this.#direction = direction;
     this.#fromAlias = fromAlias;
@@ -142,6 +145,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       { ...this.#variableLength, enabled: true },
       this.#pendingEdgePredicates,
@@ -165,6 +169,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       { ...this.#variableLength, enabled: true, maxDepth: max },
       this.#pendingEdgePredicates,
@@ -188,6 +193,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       { ...this.#variableLength, enabled: true, minDepth: min },
       this.#pendingEdgePredicates,
@@ -216,6 +222,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       newState,
       this.#pendingEdgePredicates,
@@ -243,6 +250,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       newState,
       this.#pendingEdgePredicates,
@@ -279,6 +287,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
@@ -289,6 +298,13 @@ export class TraversalBuilder<
    * Creates a type-safe accessor for edge properties.
    */
   #createEdgeAccessor(alias: string): EdgeAccessor<AnyEdgeType> {
+    const allEdgeKinds = [
+      ...this.#edgeKinds,
+      ...this.#inverseEdgeKinds.filter(
+        (kind) => !this.#edgeKinds.includes(kind),
+      ),
+    ];
+
     // Pre-compute system field accessors
     const idAccessor = stringField(
       fieldRef(alias, ["id"], { valueType: "string" }),
@@ -307,7 +323,7 @@ export class TraversalBuilder<
     const buildFieldAccessor = (propertyName: string): BaseFieldAccessor => {
       const typeInfo =
         this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          this.#edgeKinds,
+          allEdgeKinds,
           propertyName,
         );
 
@@ -415,7 +431,7 @@ export class TraversalBuilder<
       includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
 
     // Build base traversal
-    const baseTraversal = {
+    const traversalBase: Traversal = {
       edgeAlias: this.#edgeAlias,
       edgeKinds: this.#edgeKinds,
       direction: this.#direction,
@@ -424,7 +440,12 @@ export class TraversalBuilder<
       joinFromAlias: this.#fromAlias,
       joinEdgeField: this.#direction === "out" ? "from_id" : "to_id",
       optional: this.#optional,
-    } as const;
+    };
+
+    const baseTraversal: Traversal =
+      this.#inverseEdgeKinds.length > 0 ?
+        { ...traversalBase, inverseEdgeKinds: this.#inverseEdgeKinds }
+      : traversalBase;
 
     // Add variable-length spec if enabled
     const traversal: Traversal =

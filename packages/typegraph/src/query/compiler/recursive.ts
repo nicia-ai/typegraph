@@ -21,14 +21,20 @@ import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
 // ============================================================
 
 /**
- * Maximum depth for recursive CTE queries.
+ * Maximum depth for recursive CTE queries when maxDepth is unlimited (-1).
  *
- * This limit prevents runaway recursion in variable-length path queries.
- * Even when a user specifies "unlimited" depth (-1), this limit is enforced.
- * The limit of 100 is sufficient for most graph traversal use cases while
- * preventing database resource exhaustion.
+ * This default limit prevents runaway recursion for unbounded traversals while
+ * still supporting typical neighborhood/path use-cases.
  */
 export const MAX_RECURSIVE_DEPTH = 100;
+
+/**
+ * Maximum depth for explicit maxDepth traversals.
+ *
+ * Explicit traversal bounds are opt-in and safe to allow at a higher ceiling
+ * for stress testing and long-path workloads.
+ */
+export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 
 // ============================================================
 // Types
@@ -130,18 +136,28 @@ function compileRecursiveCte(
   const startAlias = ast.start.alias;
   const startKinds = ast.start.kinds;
   const nodeAlias = traversal.nodeAlias;
-  const edgeKinds = traversal.edgeKinds;
+  const directEdgeKinds = [...new Set(traversal.edgeKinds)];
+  const inverseEdgeKinds =
+    traversal.inverseEdgeKinds === undefined ?
+      []
+    : [...new Set(traversal.inverseEdgeKinds)];
   const nodeKinds = traversal.nodeKinds;
+  const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
   const direction = traversal.direction;
   const vl = traversal.variableLength;
 
-  // Kind filters
   const startKindFilter = compileKindFilter(startKinds, "n0.kind");
-  const edgeKindFilter = compileKindFilter(edgeKinds, "e.kind");
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
 
-  // Temporal filter
-  const temporalFilter = compileTemporalFilter(extractTemporalOptions(ast));
+  const startTemporalFilter = compileTemporalFilter(
+    extractTemporalOptions(ast, "n0"),
+  );
+  const edgeTemporalFilter = compileTemporalFilter(
+    extractTemporalOptions(ast, "e"),
+  );
+  const nodeTemporalFilter = compileTemporalFilter(
+    extractTemporalOptions(ast, "n"),
+  );
 
   // Start predicates (with cteColumnPrefix "" for raw n0 columns)
   const startContext = { ...ctx, cteColumnPrefix: "" };
@@ -163,14 +179,12 @@ function compileRecursiveCte(
     targetContext,
   );
 
-  // Edge join conditions based on direction
-  const edgeJoinField = direction === "out" ? "from_id" : "to_id";
-  const targetField = direction === "out" ? "to_id" : "from_id";
-
-  // Max depth condition - enforce MAX_RECURSIVE_DEPTH even for "unlimited" queries
+  // Max depth condition:
+  // - unlimited traversals are capped at MAX_RECURSIVE_DEPTH
+  // - explicit maxDepth traversals are capped at MAX_EXPLICIT_RECURSIVE_DEPTH
   const effectiveMaxDepth =
     vl.maxDepth > 0 ?
-      Math.min(vl.maxDepth, MAX_RECURSIVE_DEPTH)
+      Math.min(vl.maxDepth, MAX_EXPLICIT_RECURSIVE_DEPTH)
     : MAX_RECURSIVE_DEPTH;
   const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
 
@@ -187,20 +201,119 @@ function compileRecursiveCte(
   const baseWhereClauses = [
     sql`n0.graph_id = ${graphId}`,
     startKindFilter,
-    temporalFilter,
+    startTemporalFilter,
     ...startPredicates,
   ];
 
-  // Recursive case WHERE clauses
-  const recursiveWhereClauses = [
+  const recursiveBaseWhereClauses = [
     sql`e.graph_id = ${graphId}`,
-    edgeKindFilter,
     nodeKindFilter,
+    edgeTemporalFilter,
+    nodeTemporalFilter,
     maxDepthCondition,
     cycleCheck,
     ...edgePredicates,
     ...targetNodePredicates,
   ];
+
+  function compileRecursiveBranch(
+    branch: Readonly<{
+      joinField: "from_id" | "to_id";
+      targetField: "from_id" | "to_id";
+      joinKindField: "from_kind" | "to_kind";
+      targetKindField: "from_kind" | "to_kind";
+      edgeKinds: readonly string[];
+      duplicateGuard?: SQL | undefined;
+    }>,
+  ): SQL {
+    const recursiveWhereClauses = [
+      ...recursiveBaseWhereClauses,
+      compileKindFilter(branch.edgeKinds, "e.kind"),
+      compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
+      compileKindFilter(nodeKinds, `e.${branch.targetKindField}`),
+    ];
+
+    if (branch.duplicateGuard !== undefined) {
+      recursiveWhereClauses.push(branch.duplicateGuard);
+    }
+
+    return sql`
+      SELECT
+        r.${sql.raw(startAlias)}_id,
+        r.${sql.raw(startAlias)}_kind,
+        r.${sql.raw(startAlias)}_props,
+        r.${sql.raw(startAlias)}_version,
+        r.${sql.raw(startAlias)}_valid_from,
+        r.${sql.raw(startAlias)}_valid_to,
+        r.${sql.raw(startAlias)}_created_at,
+        r.${sql.raw(startAlias)}_updated_at,
+        r.${sql.raw(startAlias)}_deleted_at,
+        n.id AS ${sql.raw(nodeAlias)}_id,
+        n.kind AS ${sql.raw(nodeAlias)}_kind,
+        n.props AS ${sql.raw(nodeAlias)}_props,
+        n.version AS ${sql.raw(nodeAlias)}_version,
+        n.valid_from AS ${sql.raw(nodeAlias)}_valid_from,
+        n.valid_to AS ${sql.raw(nodeAlias)}_valid_to,
+        n.created_at AS ${sql.raw(nodeAlias)}_created_at,
+        n.updated_at AS ${sql.raw(nodeAlias)}_updated_at,
+        n.deleted_at AS ${sql.raw(nodeAlias)}_deleted_at,
+        r.depth + 1 AS depth,
+        ${pathExtension} AS path
+      FROM recursive_cte r
+      JOIN ${ctx.schema.edgesTable} e ON e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(branch.targetField)}
+      WHERE ${sql.join(recursiveWhereClauses, sql` AND `)}
+    `;
+  }
+
+  const directJoinField = direction === "out" ? "from_id" : "to_id";
+  const directTargetField = direction === "out" ? "to_id" : "from_id";
+  const directJoinKindField = direction === "out" ? "from_kind" : "to_kind";
+  const directTargetKindField = direction === "out" ? "to_kind" : "from_kind";
+
+  const directBranch = compileRecursiveBranch({
+    joinField: directJoinField,
+    targetField: directTargetField,
+    joinKindField: directJoinKindField,
+    targetKindField: directTargetKindField,
+    edgeKinds: directEdgeKinds,
+  });
+
+  function compileInverseRecursiveBranch(): SQL {
+    const inverseJoinField = direction === "out" ? "to_id" : "from_id";
+    const inverseTargetField = direction === "out" ? "from_id" : "to_id";
+    const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
+    const inverseTargetKindField =
+      direction === "out" ? "from_kind" : "to_kind";
+    const overlappingKinds = inverseEdgeKinds.filter((kind) =>
+      directEdgeKinds.includes(kind),
+    );
+
+    const duplicateGuard =
+      overlappingKinds.length > 0 ?
+        sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(overlappingKinds, "e.kind")})`
+      : undefined;
+
+    const inverseBranch = compileRecursiveBranch({
+      joinField: inverseJoinField,
+      targetField: inverseTargetField,
+      joinKindField: inverseJoinKindField,
+      targetKindField: inverseTargetKindField,
+      edgeKinds: inverseEdgeKinds,
+      duplicateGuard,
+    });
+
+    return sql`
+      ${directBranch}
+      UNION ALL
+      ${inverseBranch}
+    `;
+  }
+
+  const recursiveBranchSql =
+    inverseEdgeKinds.length === 0 ?
+      directBranch
+    : compileInverseRecursiveBranch();
 
   return sql`
     recursive_cte AS (
@@ -232,31 +345,7 @@ function compileRecursiveCte(
       UNION ALL
 
       -- Recursive case: follow edges
-      SELECT
-        r.${sql.raw(startAlias)}_id,
-        r.${sql.raw(startAlias)}_kind,
-        r.${sql.raw(startAlias)}_props,
-        r.${sql.raw(startAlias)}_version,
-        r.${sql.raw(startAlias)}_valid_from,
-        r.${sql.raw(startAlias)}_valid_to,
-        r.${sql.raw(startAlias)}_created_at,
-        r.${sql.raw(startAlias)}_updated_at,
-        r.${sql.raw(startAlias)}_deleted_at,
-        n.id AS ${sql.raw(nodeAlias)}_id,
-        n.kind AS ${sql.raw(nodeAlias)}_kind,
-        n.props AS ${sql.raw(nodeAlias)}_props,
-        n.version AS ${sql.raw(nodeAlias)}_version,
-        n.valid_from AS ${sql.raw(nodeAlias)}_valid_from,
-        n.valid_to AS ${sql.raw(nodeAlias)}_valid_to,
-        n.created_at AS ${sql.raw(nodeAlias)}_created_at,
-        n.updated_at AS ${sql.raw(nodeAlias)}_updated_at,
-        n.deleted_at AS ${sql.raw(nodeAlias)}_deleted_at,
-        r.depth + 1 AS depth,
-        ${pathExtension} AS path
-      FROM recursive_cte r
-      JOIN ${ctx.schema.edgesTable} e ON e.${sql.raw(edgeJoinField)} = r.${sql.raw(nodeAlias)}_id
-      JOIN ${ctx.schema.nodesTable} n ON n.id = e.${sql.raw(targetField)}
-      WHERE ${sql.join(recursiveWhereClauses, sql` AND `)}
+      ${recursiveBranchSql}
     )
   `;
 }

@@ -477,6 +477,17 @@ describe("Bulk Operations (SQLite)", () => {
       expect(nodes[0]!.id).toBe("person-1");
       expect(nodes[1]!.id).toBe("person-2");
     });
+
+    it("supports skipping returned results for lower memory pressure", async () => {
+      const nodes = await store.nodes.Person.bulkCreate(
+        [{ props: { name: "Alice" } }, { props: { name: "Bob" } }],
+        { returnResults: false },
+      );
+
+      expect(nodes).toEqual([]);
+      const count = await store.nodes.Person.count();
+      expect(count).toBe(2);
+    });
   });
 
   describe("store.nodes.*.bulkUpsert()", () => {
@@ -585,6 +596,20 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges[0]!.id).toBe("edge-1");
+    });
+
+    it("supports skipping returned edge results for lower memory pressure", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Inc" });
+
+      const edges = await store.edges.worksAt.bulkCreate(
+        [{ from: alice, to: acme, props: { role: "Engineer" } }],
+        { returnResults: false },
+      );
+
+      expect(edges).toEqual([]);
+      const count = await store.edges.worksAt.count();
+      expect(count).toBe(1);
     });
   });
 

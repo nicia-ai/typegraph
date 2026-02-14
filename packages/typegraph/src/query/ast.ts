@@ -320,6 +320,12 @@ export type VariableLengthSpec = Readonly<{
 export type Traversal = Readonly<{
   edgeAlias: string;
   edgeKinds: readonly string[]; // Expanded via ontology if includeImplyingEdges
+  /**
+   * Edge kinds traversed in the opposite direction.
+   *
+   * Populated when query options request inverse/symmetric expansion.
+   */
+  inverseEdgeKinds?: readonly string[];
   direction: TraversalDirection;
   nodeAlias: string;
   nodeKinds: readonly string[];

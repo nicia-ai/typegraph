@@ -225,7 +225,9 @@ export function createNodeCollection<
         validFrom?: string;
         validTo?: string;
       }>[],
+      options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Node<N>[]> {
+      const shouldReturnResults = options?.returnResults ?? true;
       const results: Node<N>[] = [];
 
       for (const item of items) {
@@ -244,7 +246,9 @@ export function createNodeCollection<
         if (item.validTo !== undefined) input.validTo = item.validTo;
 
         const result = await executeNodeCreate(input, backend);
-        results.push(result as Node<N>);
+        if (shouldReturnResults) {
+          results.push(result as Node<N>);
+        }
       }
 
       return results;

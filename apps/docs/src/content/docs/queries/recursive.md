@@ -191,15 +191,23 @@ To get unique nodes, deduplicate in your application or use [set operations](/qu
 
 ## Depth Limits
 
-Variable-length traversals have a maximum depth of 100 hops, even when no `maxHops()` is specified:
+Variable-length traversals use two depth caps:
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
-// MAX_RECURSIVE_DEPTH = 100
+// MAX_RECURSIVE_DEPTH = 100 (when maxHops() is omitted)
 
-// Explicit limits are capped at 100
+// Unbounded recursive traversal (implicitly capped at 100)
 .recursive()
-.maxHops(200)  // Silently capped to 100
+// ...
+
+// Explicit limit (honored up to 1000)
+.recursive()
+.maxHops(200)
+
+// Explicit limits above 1000 are capped
+.recursive()
+.maxHops(2000) // Silently capped to 1000
 ```
 
 ## Real-World Examples

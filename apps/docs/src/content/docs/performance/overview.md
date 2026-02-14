@@ -20,17 +20,44 @@ your knowledge graph scales with your application.
 
 ## Benchmarks
 
-The following benchmarks were recorded using `tinybench` on a standard development machine
-(M3 Pro) using an in-memory SQLite database. These represent the baseline overhead of the
-TypeGraph library itself.
+TypeGraph uses a deterministic performance sanity suite as its benchmark and regression gate.
+The suite seeds a realistic graph shape and measures end-to-end query latency across:
 
-| Operation             | Throughput (ops/s) | Avg Latency (ns) |
-| :-------------------- | :----------------- | :--------------- |
-| **Create Node**       | ~34,000            | ~32,000          |
-| **Read Node by ID**   | ~92,000            | ~12,000          |
-| **Simple Query**      | ~6,800             | ~147,000         |
+- forward and reverse traversals
+- 2-hop and 3-hop traversals
+- aggregate queries
+- deep traversals (10-hop, 100-hop recursive, 1000-hop recursive)
 
-*Note: Real-world performance will vary based on your database driver, network latency (for PostgreSQL), and schema complexity.*
+Guardrail thresholds enforce expected behavior in CI (for example, traversal latency caps and
+ratio checks such as reverse/forward and deep-hop scaling).
+
+*Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
+and schema/data shape.*
+
+Current suite configuration:
+
+| Setting | Value |
+|---------|-------|
+| Seed users | 1200 |
+| Follows per user | 10 |
+| Posts per user | 5 |
+| Batch size | 250 |
+| Warmup iterations | 1 |
+| Sample iterations (median reported) | 5 |
+
+Current guardrails:
+
+| Check | Threshold |
+|-------|-----------|
+| reverse/forward ratio | <= 6x |
+| 3-hop latency | <= 500ms |
+| 3-hop/2-hop ratio | <= 8x |
+| aggregate latency | <= 500ms |
+| 10-hop latency | <= 250ms |
+| 100-hop recursive latency | <= 1000ms |
+| 100-hop-recursive/10-hop ratio | <= 30x |
+| 1000-hop recursive latency | <= 5000ms |
+| 1000-hop-recursive/100-hop-recursive ratio | <= 50x |
 
 ## Key Performance Features
 
@@ -179,8 +206,20 @@ You can run the benchmark suite against your own environment:
 pnpm bench
 ```
 
-The benchmark source code is located in `packages/benchmarks/src/index.ts` and can be customized
-to match your specific data model.
+For guardrail mode (fails on regression thresholds):
+
+```bash
+pnpm --filter @nicia-ai/typegraph-benchmarks perf:check
+```
+
+Run the same guardrailed suite against PostgreSQL:
+
+```bash
+POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
+  pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
+```
+
+The benchmark source code is located in `packages/benchmarks/src/`.
 
 ## Next Steps
 

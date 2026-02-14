@@ -30,6 +30,7 @@ import {
   havingGt,
   havingGte,
   inSubquery,
+  inverseOf,
   max,
   min,
   notExists,
@@ -527,6 +528,106 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("INNER JOIN");
   });
 
+  it("adds edge endpoint kind filters for outgoing traversals", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .to("Organization", "o")
+      .select((context) => ({ p: context.p, o: context.o }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("e.from_kind = ?");
+    expect(sql).toContain("e.to_kind = ?");
+    expect(params).toContain("Person");
+    expect(params).toContain("Organization");
+  });
+
+  it("adds edge endpoint kind filters for incoming traversals", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("knows", "e", { direction: "in" })
+      .to("Person", "follower")
+      .select((context) => ({ p: context.p, follower: context.follower }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("e.to_kind = ?");
+    expect(sql).toContain("e.from_kind = ?");
+    expect(params).toContain("Person");
+  });
+
+  it("compiles bidirectional traversal when includeInverseEdges is enabled", () => {
+    const sameAsEdge = defineEdge("sameAs");
+    const bidirectionalGraph = defineGraph({
+      id: "bidirectional_graph",
+      nodes: {
+        Person: { type: Person },
+      },
+      edges: {
+        sameAs: {
+          type: sameAsEdge,
+          from: [Person],
+          to: [Person],
+        },
+      },
+      ontology: [inverseOf(sameAsEdge, sameAsEdge)],
+    });
+    const bidirectionalRegistry = buildKindRegistry(bidirectionalGraph);
+
+    const query = createQueryBuilder<typeof bidirectionalGraph>(
+      bidirectionalGraph.id,
+      bidirectionalRegistry,
+    )
+      .from("Person", "p")
+      .traverse("sameAs", "e", { includeInverseEdges: true })
+      .to("Person", "peer")
+      .select((context) => ({ p: context.p, peer: context.peer }));
+
+    const ast = query.toAst();
+    expect(ast.traversals[0]!.inverseEdgeKinds).toEqual(["sameAs"]);
+
+    const sqlObject = compileQuery(ast, bidirectionalGraph.id);
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("UNION ALL");
+    expect(sql).toContain("e.from_id");
+    expect(sql).toContain("e.to_id");
+    expect(sql).toContain("e.from_id = e.to_id");
+  });
+
+  it("prunes unused traversal columns for selective projections", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("knows", "e")
+      .to("Person", "friend")
+      .select((context) => ({ friendName: context.friend.name }));
+
+    const ast = query.toAst();
+    const selectiveAst = {
+      ...ast,
+      selectiveFields: [
+        {
+          alias: "friend",
+          field: "name",
+          outputName: "friend_name",
+          isSystemField: false,
+          valueType: "string" as const,
+        },
+      ],
+    };
+    const sqlObject = compileQuery(selectiveAst, graph.id);
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("friend_props");
+    expect(sql).not.toContain("p_props");
+    expect(sql).not.toContain("p_version");
+    expect(sql).not.toContain("e_props");
+    expect(sql).not.toContain("friend_version");
+  });
+
   it("compiles LIMIT and OFFSET", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
@@ -541,6 +642,49 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("OFFSET");
     expect(params).toContain(10);
     expect(params).toContain(5);
+  });
+
+  it("pushes traversal limits into deep id-anchored traversals", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }))
+      .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("AS traversal_rows");
+    expect(params.filter((value) => value === 160)).toHaveLength(2);
+  });
+
+  it("does not push traversal limits when ORDER BY is present", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .orderBy("friendOfFriend", "name", "asc")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }))
+      .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = sqlToStrings(sqlObject);
+
+    expect(sql).not.toContain("AS traversal_rows");
+    expect(params).not.toContain(160);
   });
 
   it("uses postgres parameter syntax when dialect is postgres", () => {
@@ -827,6 +971,28 @@ describe("Query Builder - Aggregations", () => {
     expect(params).toContain(5);
   });
 
+  it("uses count aggregate fast path for single-hop groupByNode queries", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k", { direction: "in" })
+      .to("Person", "knower")
+      .groupByNode("p")
+      .selectAggregate({
+        name: field("p", "name"),
+        knowerCount: count("knower"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("cte_knower_counts");
+    expect(sql).toContain("LEFT JOIN cte_knower_counts");
+    expect(sql).toContain("COUNT");
+    expect(sql).toContain("COALESCE");
+    expect(sql).not.toContain("cte_knower AS");
+    expect(sql).toContain("p_props");
+  });
+
   it("supports HAVING clause to filter groups", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
@@ -907,8 +1073,11 @@ describe("Query Builder - Aggregations", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql } = sqlToStrings(sqlObject);
 
-    // COUNT must use qualified column name to avoid ambiguity
-    expect(sql).toContain("COUNT(cte_knower.knower_id)");
+    // COUNT must avoid ambiguous unqualified references in self-joins.
+    // Fast path uses COUNT(n.id); general path uses COUNT(cte_knower.knower_id).
+    expect(sql).toMatch(
+      /COUNT\(n\.id\) AS knower_count|COUNT\(cte_knower\.knower_id\)/,
+    );
   });
 
   it("qualifies ORDER BY columns in self-referential traversals", () => {

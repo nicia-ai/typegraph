@@ -18,6 +18,7 @@ import { type PredicateCompilerContext } from "../src/query/compiler/predicates"
 import {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
@@ -292,6 +293,56 @@ describe("compileVariableLengthQuery", () => {
 
       expect(sql).toContain("e.to_id");
     });
+
+    it("adds endpoint kind filters for outbound traversals", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("e.from_kind");
+      expect(sql).toContain("e.to_kind");
+    });
+
+    it("adds endpoint kind filters for inbound traversals", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "in",
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("e.to_kind");
+      expect(sql).toContain("e.from_kind");
+    });
+
+    it("adds inverse branch for bidirectional recursive traversal", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('JOIN "typegraph_edges" e ON e.from_id');
+      expect(sql).toContain('JOIN "typegraph_edges" e ON e.to_id');
+      expect(sql).toContain("e.from_id = e.to_id");
+    });
   });
 
   // ============================================================
@@ -327,7 +378,7 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("r.depth < 5");
     });
 
-    it("caps maxDepth at MAX_RECURSIVE_DEPTH when exceeded", () => {
+    it("allows explicit maxDepth above MAX_RECURSIVE_DEPTH", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
@@ -338,7 +389,21 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain(`r.depth < ${MAX_RECURSIVE_DEPTH}`);
+      expect(sql).toContain("r.depth < 500");
+    });
+
+    it("caps explicit maxDepth at MAX_EXPLICIT_RECURSIVE_DEPTH when exceeded", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({ maxDepth: 5000 }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain(`r.depth < ${MAX_EXPLICIT_RECURSIVE_DEPTH}`);
     });
 
     it("applies minDepth filter in final SELECT", () => {
@@ -833,5 +898,16 @@ describe("MAX_RECURSIVE_DEPTH", () => {
 
   it("is exported and accessible", () => {
     expect(typeof MAX_RECURSIVE_DEPTH).toBe("number");
+  });
+});
+
+describe("MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
+  it("is a reasonable limit", () => {
+    expect(MAX_EXPLICIT_RECURSIVE_DEPTH).toBeGreaterThanOrEqual(500);
+    expect(MAX_EXPLICIT_RECURSIVE_DEPTH).toBeLessThanOrEqual(5000);
+  });
+
+  it("is exported and accessible", () => {
+    expect(typeof MAX_EXPLICIT_RECURSIVE_DEPTH).toBe("number");
   });
 });
