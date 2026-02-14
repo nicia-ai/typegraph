@@ -59,8 +59,8 @@ export type NodeOperations = Readonly<{
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>;
-  executeCreateNoReturn: (
-    input: CreateNodeInput,
+  executeCreateNoReturnBatch: (
+    inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   executeUpdate: (
@@ -87,8 +87,8 @@ export type EdgeOperations = Readonly<{
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
-  executeCreateNoReturn: (
-    input: CreateEdgeInput,
+  executeCreateNoReturnBatch: (
+    inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   executeUpdate: (
@@ -154,7 +154,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
           operations.executeCreate as Parameters<
             typeof createNodeCollection
           >[5],
-          operations.executeCreateNoReturn as Parameters<
+          operations.executeCreateNoReturnBatch as Parameters<
             typeof createNodeCollection
           >[6],
           operations.executeUpdate as Parameters<
@@ -215,7 +215,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
           operations.executeCreate as Parameters<
             typeof createEdgeCollection
           >[5],
-          operations.executeCreateNoReturn as Parameters<
+          operations.executeCreateNoReturnBatch as Parameters<
             typeof createEdgeCollection
           >[6],
           operations.executeUpdate,

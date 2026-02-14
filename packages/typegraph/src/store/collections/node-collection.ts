@@ -46,14 +46,14 @@ export function createNodeCollection<
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>,
-  executeNodeCreateNoReturn: (
-    input: {
+  executeNodeCreateNoReturnBatch: (
+    inputs: readonly Readonly<{
       kind: string;
       id?: string;
       props: Record<string, unknown>;
       validFrom?: string;
       validTo?: string;
-    },
+    }>[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>,
   executeNodeUpdate: (
@@ -243,6 +243,27 @@ export function createNodeCollection<
       async function runBulkCreate(
         activeBackend: GraphBackend | TransactionBackend,
       ): Promise<void> {
+        if (!shouldReturnResults) {
+          const batchInputs = items.map((item) => {
+            const input: {
+              kind: string;
+              id?: string;
+              props: Record<string, unknown>;
+              validFrom?: string;
+              validTo?: string;
+            } = {
+              kind: kind,
+              props: item.props as Record<string, unknown>,
+            };
+            if (item.id !== undefined) input.id = item.id;
+            if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+            if (item.validTo !== undefined) input.validTo = item.validTo;
+            return input;
+          });
+          await executeNodeCreateNoReturnBatch(batchInputs, activeBackend);
+          return;
+        }
+
         for (const item of items) {
           const input: {
             kind: string;
@@ -258,12 +279,8 @@ export function createNodeCollection<
           if (item.validFrom !== undefined) input.validFrom = item.validFrom;
           if (item.validTo !== undefined) input.validTo = item.validTo;
 
-          if (shouldReturnResults) {
-            const result = await executeNodeCreate(input, activeBackend);
-            results.push(result as Node<N>);
-          } else {
-            await executeNodeCreateNoReturn(input, activeBackend);
-          }
+          const result = await executeNodeCreate(input, activeBackend);
+          results.push(result as Node<N>);
         }
       }
 

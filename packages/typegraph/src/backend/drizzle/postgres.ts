@@ -325,6 +325,17 @@ export function createPostgresBackend(
       await execRun(query);
     },
 
+    async insertNodesNoReturnBatch(
+      params: readonly InsertNodeParams[],
+    ): Promise<void> {
+      if (params.length === 0) {
+        return;
+      }
+      const timestamp = nowIso();
+      const query = ops.buildInsertNodesNoReturnBatch(tables, params, timestamp);
+      await execRun(query);
+    },
+
     async getNode(
       graphId: string,
       kind: string,
@@ -385,6 +396,17 @@ export function createPostgresBackend(
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
       const timestamp = nowIso();
       const query = ops.buildInsertEdgeNoReturn(tables, params, timestamp);
+      await execRun(query);
+    },
+
+    async insertEdgesNoReturnBatch(
+      params: readonly InsertEdgeParams[],
+    ): Promise<void> {
+      if (params.length === 0) {
+        return;
+      }
+      const timestamp = nowIso();
+      const query = ops.buildInsertEdgesNoReturnBatch(tables, params, timestamp);
       await execRun(query);
     },
 

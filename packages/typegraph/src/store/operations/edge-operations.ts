@@ -5,6 +5,7 @@
  */
 import {
   type GraphBackend,
+  type InsertEdgeParams,
   type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
@@ -72,6 +73,305 @@ function getEdgeRegistration<G extends GraphDef>(
   return graph.edges[kind] as EdgeRegistration;
 }
 
+type EdgeCardinality = "many" | "one" | "unique" | "oneActive";
+
+type EdgeCreatePrepared = Readonly<{
+  insertParams: InsertEdgeParams;
+  cardinality: EdgeCardinality;
+}>;
+
+function buildEdgeEndpointCacheKey(
+  graphId: string,
+  kind: string,
+  id: string,
+): string {
+  return `${graphId}\u0000${kind}\u0000${id}`;
+}
+
+function buildEdgeFromCacheKey(
+  graphId: string,
+  edgeKind: string,
+  fromKind: string,
+  fromId: string,
+): string {
+  return `${graphId}\u0000${edgeKind}\u0000${fromKind}\u0000${fromId}`;
+}
+
+function buildEdgeBetweenCacheKey(
+  graphId: string,
+  edgeKind: string,
+  fromKind: string,
+  fromId: string,
+  toKind: string,
+  toId: string,
+): string {
+  return `${graphId}\u0000${edgeKind}\u0000${fromKind}\u0000${fromId}\u0000${toKind}\u0000${toId}`;
+}
+
+function buildCountEdgesFromCacheKey(
+  params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+): string {
+  const activeOnly = params.activeOnly === true ? "1" : "0";
+  return `${params.graphId}\u0000${params.edgeKind}\u0000${params.fromKind}\u0000${params.fromId}\u0000${activeOnly}`;
+}
+
+function buildInsertEdgeParams(
+  graphId: string,
+  id: string,
+  kind: string,
+  fromKind: string,
+  fromId: string,
+  toKind: string,
+  toId: string,
+  props: Record<string, unknown>,
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): InsertEdgeParams {
+  const insertParams: {
+    graphId: string;
+    id: string;
+    kind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    props: Record<string, unknown>;
+    validFrom?: string;
+    validTo?: string;
+  } = {
+    graphId,
+    id,
+    kind,
+    fromKind,
+    fromId,
+    toKind,
+    toId,
+    props,
+  };
+  if (validFrom !== undefined) insertParams.validFrom = validFrom;
+  if (validTo !== undefined) insertParams.validTo = validTo;
+  return insertParams;
+}
+
+function incrementPendingCount(counts: Map<string, number>, key: string): void {
+  const previous = counts.get(key) ?? 0;
+  counts.set(key, previous + 1);
+}
+
+function createEdgeBatchValidationBackend(
+  backend: GraphBackend | TransactionBackend,
+): Readonly<{
+  backend: GraphBackend | TransactionBackend;
+  registerPendingEdgeForCardinality: (
+    insertParams: InsertEdgeParams,
+    cardinality: EdgeCardinality,
+  ) => void;
+}> {
+  const endpointCache = new Map<
+    string,
+    Awaited<ReturnType<GraphBackend["getNode"]>>
+  >();
+  const countEdgesFromCache = new Map<string, number>();
+  const edgeExistsCache = new Map<string, boolean>();
+  const pendingOneCounts = new Map<string, number>();
+  const pendingOneActiveCounts = new Map<string, number>();
+  const pendingUniquePairs = new Set<string>();
+
+  async function getNodeCached(
+    graphId: string,
+    kind: string,
+    id: string,
+  ): Promise<Awaited<ReturnType<GraphBackend["getNode"]>>> {
+    const cacheKey = buildEdgeEndpointCacheKey(graphId, kind, id);
+    if (endpointCache.has(cacheKey)) {
+      return endpointCache.get(cacheKey);
+    }
+    const node = await backend.getNode(graphId, kind, id);
+    endpointCache.set(cacheKey, node);
+    return node;
+  }
+
+  async function countEdgesFromCached(
+    params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+  ): Promise<number> {
+    const cacheKey = buildCountEdgesFromCacheKey(params);
+    let baseCount = countEdgesFromCache.get(cacheKey);
+    if (baseCount === undefined) {
+      baseCount = await backend.countEdgesFrom(params);
+      countEdgesFromCache.set(cacheKey, baseCount);
+    }
+    const pendingKey = buildEdgeFromCacheKey(
+      params.graphId,
+      params.edgeKind,
+      params.fromKind,
+      params.fromId,
+    );
+    const pendingCount =
+      params.activeOnly === true ?
+        (pendingOneActiveCounts.get(pendingKey) ?? 0)
+      : (pendingOneCounts.get(pendingKey) ?? 0);
+    return baseCount + pendingCount;
+  }
+
+  async function edgeExistsBetweenCached(
+    params: Parameters<GraphBackend["edgeExistsBetween"]>[0],
+  ): Promise<boolean> {
+    const cacheKey = buildEdgeBetweenCacheKey(
+      params.graphId,
+      params.edgeKind,
+      params.fromKind,
+      params.fromId,
+      params.toKind,
+      params.toId,
+    );
+    if (pendingUniquePairs.has(cacheKey)) {
+      return true;
+    }
+    if (edgeExistsCache.has(cacheKey)) {
+      return edgeExistsCache.get(cacheKey) ?? false;
+    }
+    const exists = await backend.edgeExistsBetween(params);
+    edgeExistsCache.set(cacheKey, exists);
+    return exists;
+  }
+
+  function registerPendingEdgeForCardinality(
+    insertParams: InsertEdgeParams,
+    cardinality: EdgeCardinality,
+  ): void {
+    const fromCacheKey = buildEdgeFromCacheKey(
+      insertParams.graphId,
+      insertParams.kind,
+      insertParams.fromKind,
+      insertParams.fromId,
+    );
+    if (cardinality === "one") {
+      incrementPendingCount(pendingOneCounts, fromCacheKey);
+      return;
+    }
+    if (cardinality === "oneActive") {
+      if (insertParams.validTo === undefined) {
+        incrementPendingCount(pendingOneActiveCounts, fromCacheKey);
+      }
+      return;
+    }
+    if (cardinality === "unique") {
+      const uniqueCacheKey = buildEdgeBetweenCacheKey(
+        insertParams.graphId,
+        insertParams.kind,
+        insertParams.fromKind,
+        insertParams.fromId,
+        insertParams.toKind,
+        insertParams.toId,
+      );
+      pendingUniquePairs.add(uniqueCacheKey);
+    }
+  }
+
+  const validationBackend = {
+    ...backend,
+    getNode: getNodeCached,
+    countEdgesFrom: countEdgesFromCached,
+    edgeExistsBetween: edgeExistsBetweenCached,
+  } as GraphBackend | TransactionBackend;
+
+  return {
+    backend: validationBackend,
+    registerPendingEdgeForCardinality,
+  };
+}
+
+async function validateAndPrepareEdgeCreate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: CreateEdgeInput,
+  id: string,
+  backend: GraphBackend | TransactionBackend,
+): Promise<EdgeCreatePrepared> {
+  const kind = input.kind;
+  const fromKind = input.fromKind;
+  const toKind = input.toKind;
+
+  // Validate kind exists and get registration
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  const edgeKind = registration.type as EdgeType;
+
+  // Validate endpoint types
+  const endpointError = validateEdgeEndpoints(
+    kind,
+    fromKind,
+    toKind,
+    registration,
+    ctx.registry,
+  );
+  if (endpointError) throw endpointError;
+
+  // Validate source node exists
+  const fromNode = await backend.getNode(ctx.graphId, fromKind, input.fromId);
+  if (!fromNode || fromNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: kind,
+      endpoint: "from",
+      nodeKind: fromKind,
+      nodeId: input.fromId,
+    });
+  }
+
+  // Validate target node exists
+  const toNode = await backend.getNode(ctx.graphId, toKind, input.toId);
+  if (!toNode || toNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: kind,
+      endpoint: "to",
+      nodeKind: toKind,
+      nodeId: input.toId,
+    });
+  }
+
+  // Validate props with full context
+  const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
+    kind,
+    operation: "create",
+  });
+
+  // Validate temporal fields
+  const validFrom = validateOptionalIsoDate(input.validFrom, "validFrom");
+  const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+
+  // Check cardinality constraints
+  const cardinality = (registration.cardinality ?? "many") as EdgeCardinality;
+  const constraintContext: ConstraintContext = {
+    graphId: ctx.graphId,
+    registry: ctx.registry,
+    backend,
+  };
+  await checkCardinalityConstraint(
+    constraintContext,
+    kind,
+    cardinality,
+    fromKind,
+    input.fromId,
+    toKind,
+    input.toId,
+    validTo,
+  );
+
+  return {
+    cardinality,
+    insertParams: buildInsertEdgeParams(
+      ctx.graphId,
+      id,
+      kind,
+      fromKind,
+      input.fromId,
+      toKind,
+      input.toId,
+      validatedProps,
+      validFrom,
+      validTo,
+    ),
+  };
+}
+
 // ============================================================
 // Edge Operations
 // ============================================================
@@ -91,103 +391,20 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const shouldReturnRow = options?.returnRow ?? true;
 
   return ctx.withOperationHooks(opContext, async () => {
-    const fromKind = input.fromKind;
-    const toKind = input.toKind;
-
-    // Validate kind exists and get registration
-    const registration = getEdgeRegistration(ctx.graph, kind);
-    const edgeKind = registration.type as EdgeType;
-
-    // Validate endpoint types
-    const endpointError = validateEdgeEndpoints(
-      kind,
-      fromKind,
-      toKind,
-      registration,
-      ctx.registry,
-    );
-    if (endpointError) throw endpointError;
-
-    // Validate source node exists
-    const fromNode = await backend.getNode(ctx.graphId, fromKind, input.fromId);
-    if (!fromNode || fromNode.deleted_at) {
-      throw new EndpointNotFoundError({
-        edgeKind: kind,
-        endpoint: "from",
-        nodeKind: fromKind,
-        nodeId: input.fromId,
-      });
-    }
-
-    // Validate target node exists
-    const toNode = await backend.getNode(ctx.graphId, toKind, input.toId);
-    if (!toNode || toNode.deleted_at) {
-      throw new EndpointNotFoundError({
-        edgeKind: kind,
-        endpoint: "to",
-        nodeKind: toKind,
-        nodeId: input.toId,
-      });
-    }
-
-    // Validate props with full context
-    const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
-      kind,
-      operation: "create",
-    });
-
-    // Validate temporal fields
-    const validFrom = validateOptionalIsoDate(input.validFrom, "validFrom");
-    const validTo = validateOptionalIsoDate(input.validTo, "validTo");
-
-    // Check cardinality constraints
-    const cardinality = registration.cardinality ?? "many";
-    const constraintContext: ConstraintContext = {
-      graphId: ctx.graphId,
-      registry: ctx.registry,
-      backend,
-    };
-    await checkCardinalityConstraint(
-      constraintContext,
-      kind,
-      cardinality,
-      fromKind,
-      input.fromId,
-      toKind,
-      input.toId,
-      input.validTo,
-    );
-
-    // Insert edge - conditionally include optional temporal fields
-    const insertParams: {
-      graphId: string;
-      id: string;
-      kind: string;
-      fromKind: string;
-      fromId: string;
-      toKind: string;
-      toId: string;
-      props: Record<string, unknown>;
-      validFrom?: string;
-      validTo?: string;
-    } = {
-      graphId: ctx.graphId,
+    const prepared = await validateAndPrepareEdgeCreate(
+      ctx,
+      input,
       id,
-      kind,
-      fromKind,
-      fromId: input.fromId,
-      toKind,
-      toId: input.toId,
-      props: validatedProps,
-    };
-    if (validFrom !== undefined) insertParams.validFrom = validFrom;
-    if (validTo !== undefined) insertParams.validTo = validTo;
+      backend,
+    );
 
     const row =
-      shouldReturnRow ? await backend.insertEdge(insertParams) : undefined;
+      shouldReturnRow ?
+        await backend.insertEdge(prepared.insertParams)
+      : undefined;
     if (!shouldReturnRow) {
-      await (backend.insertEdgeNoReturn?.(insertParams) ??
-        backend.insertEdge(insertParams));
+      await (backend.insertEdgeNoReturn?.(prepared.insertParams) ??
+        backend.insertEdge(prepared.insertParams));
     }
 
     if (row === undefined) return;
@@ -221,6 +438,50 @@ export async function executeEdgeCreateNoReturn<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
   await executeEdgeCreateInternal(ctx, input, backend, { returnRow: false });
+}
+
+/**
+ * Executes batched edge creates without returning inserted edge payloads.
+ */
+export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  if (inputs.length === 0) {
+    return;
+  }
+
+  const { backend: validationBackend, registerPendingEdgeForCardinality } =
+    createEdgeBatchValidationBackend(backend);
+  const preparedCreates: EdgeCreatePrepared[] = [];
+
+  for (const input of inputs) {
+    const id = input.id ?? generateId();
+    const prepared = await validateAndPrepareEdgeCreate(
+      ctx,
+      input,
+      id,
+      validationBackend,
+    );
+    preparedCreates.push(prepared);
+    registerPendingEdgeForCardinality(
+      prepared.insertParams,
+      prepared.cardinality,
+    );
+  }
+
+  const batchInsertParams = preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
+  if (backend.insertEdgesNoReturnBatch === undefined) {
+    for (const insertParams of batchInsertParams) {
+      await (backend.insertEdgeNoReturn?.(insertParams) ??
+        backend.insertEdge(insertParams));
+    }
+    return;
+  }
+  await backend.insertEdgesNoReturnBatch(batchInsertParams);
 }
 
 /**

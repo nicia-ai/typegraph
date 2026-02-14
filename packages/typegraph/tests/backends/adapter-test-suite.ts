@@ -119,6 +119,38 @@ export function createAdapterTestSuite(
         expect(fetched!.id).toBe("person-no-return");
       });
 
+      it("supports insertNodesNoReturnBatch when available", async () => {
+        if (backend.insertNodesNoReturnBatch === undefined) return;
+
+        await backend.insertNodesNoReturnBatch([
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-1",
+            props: { name: "Batch One" },
+          },
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-2",
+            props: { name: "Batch Two" },
+          },
+        ]);
+
+        const first = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-batch-1",
+        );
+        const second = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-batch-2",
+        );
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+      });
+
       it("inserts a node with temporal fields", async () => {
         const validFrom = "2024-01-01T00:00:00.000Z";
         const validTo = "2024-12-31T23:59:59.999Z";
@@ -347,6 +379,38 @@ export function createAdapterTestSuite(
         const fetched = await backend.getEdge("test_graph", "edge-no-return");
         expect(fetched).toBeDefined();
         expect(fetched!.id).toBe("edge-no-return");
+      });
+
+      it("supports insertEdgesNoReturnBatch when available", async () => {
+        if (backend.insertEdgesNoReturnBatch === undefined) return;
+
+        await backend.insertEdgesNoReturnBatch([
+          {
+            graphId: "test_graph",
+            id: "edge-batch-1",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-1",
+            props: { role: "Batch One" },
+          },
+          {
+            graphId: "test_graph",
+            id: "edge-batch-2",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-2",
+            props: { role: "Batch Two" },
+          },
+        ]);
+
+        const first = await backend.getEdge("test_graph", "edge-batch-1");
+        const second = await backend.getEdge("test_graph", "edge-batch-2");
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
       });
 
       it("inserts an edge with temporal fields", async () => {

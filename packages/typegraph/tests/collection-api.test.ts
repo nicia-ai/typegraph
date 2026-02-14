@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { createStore } from "../src/store";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
@@ -497,6 +497,70 @@ describe("Bulk Operations (SQLite)", () => {
       expect(count).toBe(2);
     });
 
+    it("uses batched backend node inserts for returnResults=false bulk creates", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let nodeNoReturnCalls = 0;
+      let nodeBatchCalls = 0;
+
+      async function insertNodeNoReturnWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: Parameters<GraphBackend["insertNode"]>[0],
+      ): Promise<void> {
+        await (activeBackend.insertNodeNoReturn?.(params) ??
+          activeBackend.insertNode(params));
+      }
+
+      async function insertNodesNoReturnBatchWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: readonly Parameters<GraphBackend["insertNode"]>[0][],
+      ): Promise<void> {
+        if (activeBackend.insertNodesNoReturnBatch !== undefined) {
+          await activeBackend.insertNodesNoReturnBatch(params);
+          return;
+        }
+        for (const insertParams of params) {
+          await insertNodeNoReturnWithFallback(activeBackend, insertParams);
+        }
+      }
+
+      const backendWithCounters: GraphBackend = {
+        ...baseBackend,
+        async insertNodeNoReturn(params) {
+          nodeNoReturnCalls += 1;
+          await insertNodeNoReturnWithFallback(baseBackend, params);
+        },
+        async insertNodesNoReturnBatch(params) {
+          nodeBatchCalls += 1;
+          await insertNodesNoReturnBatchWithFallback(baseBackend, params);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx: TransactionBackend = {
+              ...tx,
+              async insertNodeNoReturn(params) {
+                nodeNoReturnCalls += 1;
+                await insertNodeNoReturnWithFallback(tx, params);
+              },
+              async insertNodesNoReturnBatch(params) {
+                nodeBatchCalls += 1;
+                await insertNodesNoReturnBatchWithFallback(tx, params);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithCounters);
+      await localStore.nodes.Person.bulkCreate(
+        [{ props: { name: "Alice" } }, { props: { name: "Bob" } }],
+        { returnResults: false },
+      );
+
+      expect(nodeBatchCalls).toBe(1);
+      expect(nodeNoReturnCalls).toBe(0);
+    });
+
     it("rolls back returnResults=false batches when an item fails", async () => {
       await expect(
         store.nodes.Person.bulkCreate(
@@ -633,6 +697,75 @@ describe("Bulk Operations (SQLite)", () => {
       expect(edges).toEqual([]);
       const count = await store.edges.worksAt.count();
       expect(count).toBe(1);
+    });
+
+    it("uses batched backend edge inserts for returnResults=false bulk creates", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let edgeNoReturnCalls = 0;
+      let edgeBatchCalls = 0;
+
+      async function insertEdgeNoReturnWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: Parameters<GraphBackend["insertEdge"]>[0],
+      ): Promise<void> {
+        await (activeBackend.insertEdgeNoReturn?.(params) ??
+          activeBackend.insertEdge(params));
+      }
+
+      async function insertEdgesNoReturnBatchWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: readonly Parameters<GraphBackend["insertEdge"]>[0][],
+      ): Promise<void> {
+        if (activeBackend.insertEdgesNoReturnBatch !== undefined) {
+          await activeBackend.insertEdgesNoReturnBatch(params);
+          return;
+        }
+        for (const insertParams of params) {
+          await insertEdgeNoReturnWithFallback(activeBackend, insertParams);
+        }
+      }
+
+      const backendWithCounters: GraphBackend = {
+        ...baseBackend,
+        async insertEdgeNoReturn(params) {
+          edgeNoReturnCalls += 1;
+          await insertEdgeNoReturnWithFallback(baseBackend, params);
+        },
+        async insertEdgesNoReturnBatch(params) {
+          edgeBatchCalls += 1;
+          await insertEdgesNoReturnBatchWithFallback(baseBackend, params);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx: TransactionBackend = {
+              ...tx,
+              async insertEdgeNoReturn(params) {
+                edgeNoReturnCalls += 1;
+                await insertEdgeNoReturnWithFallback(tx, params);
+              },
+              async insertEdgesNoReturnBatch(params) {
+                edgeBatchCalls += 1;
+                await insertEdgesNoReturnBatchWithFallback(tx, params);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithCounters);
+      const alice = await localStore.nodes.Person.create({ name: "Alice" });
+      const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
+      await localStore.edges.worksAt.bulkCreate(
+        [
+          { from: alice, to: acme, props: { role: "Engineer" } },
+          { from: alice, to: acme, props: { role: "Architect" } },
+        ],
+        { returnResults: false },
+      );
+
+      expect(edgeBatchCalls).toBe(1);
+      expect(edgeNoReturnCalls).toBe(0);
     });
 
     it("rolls back edge returnResults=false batches when an item fails", async () => {

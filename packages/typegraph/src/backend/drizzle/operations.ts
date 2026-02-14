@@ -103,6 +103,27 @@ export function buildInsertNodeNoReturn(
 }
 
 /**
+ * Builds a batched INSERT query for nodes without RETURNING payload.
+ */
+export function buildInsertNodesNoReturnBatch(
+  tables: Tables,
+  params: readonly InsertNodeParams[],
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const cols = sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+  const values = params.map((nodeParams) => {
+    const propsJson = JSON.stringify(nodeParams.props);
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(nodeParams.validFrom)}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+  });
+
+  return sql`
+    INSERT INTO ${nodes} (${cols})
+    VALUES ${sql.join(values, sql`, `)}
+  `;
+}
+
+/**
  * Builds a SELECT query to get a node by kind and id.
  * Returns the node regardless of deletion status (store layer handles filtering).
  */
@@ -270,6 +291,27 @@ export function buildInsertEdgeNoReturn(
       ${propsJson}, ${sqlNull(params.validFrom)}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
+  `;
+}
+
+/**
+ * Builds a batched INSERT query for edges without RETURNING payload.
+ */
+export function buildInsertEdgesNoReturnBatch(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+): SQL {
+  const { edges } = tables;
+  const cols = sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+  const values = params.map((edgeParams) => {
+    const propsJson = JSON.stringify(edgeParams.props);
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(edgeParams.validFrom)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+  });
+
+  return sql`
+    INSERT INTO ${edges} (${cols})
+    VALUES ${sql.join(values, sql`, `)}
   `;
 }
 

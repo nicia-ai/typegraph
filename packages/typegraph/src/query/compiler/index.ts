@@ -41,6 +41,7 @@ import { UnsupportedPredicateError } from "../../errors";
 import {
   type AggregateExpr,
   type FieldRef,
+  type NodePredicate,
   type PredicateExpression,
   type QueryAst,
   type SelectiveField,
@@ -225,8 +226,62 @@ const EDGE_COLUMNS = [
 
 type RequiredColumnsByAlias = ReadonlyMap<string, ReadonlySet<string>>;
 const EMPTY_REQUIRED_COLUMNS = new Set<string>();
+const EMPTY_PREDICATES: readonly NodePredicate[] = [];
 const TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER = 8;
 const TRAVERSAL_LIMIT_PUSHDOWN_MAX = 10_000;
+
+type PredicateIndex = Readonly<{
+  byAliasAndType: ReadonlyMap<string, readonly NodePredicate[]>;
+}>;
+
+function buildPredicateIndexKey(
+  alias: string,
+  targetType: "node" | "edge",
+): string {
+  return `${alias}\u0000${targetType}`;
+}
+
+function resolvePredicateTargetType(predicate: NodePredicate): "node" | "edge" {
+  return predicate.targetType === "edge" ? "edge" : "node";
+}
+
+function buildPredicateIndex(ast: QueryAst): PredicateIndex {
+  const byAliasAndType = new Map<string, NodePredicate[]>();
+  for (const predicate of ast.predicates) {
+    const key = buildPredicateIndexKey(
+      predicate.targetAlias,
+      resolvePredicateTargetType(predicate),
+    );
+    const existing = byAliasAndType.get(key);
+    if (existing === undefined) {
+      byAliasAndType.set(key, [predicate]);
+    } else {
+      existing.push(predicate);
+    }
+  }
+  return { byAliasAndType };
+}
+
+function getPredicatesForAlias(
+  predicateIndex: PredicateIndex,
+  alias: string,
+  targetType: "node" | "edge",
+): readonly NodePredicate[] {
+  return (
+    predicateIndex.byAliasAndType.get(
+      buildPredicateIndexKey(alias, targetType),
+    ) ?? EMPTY_PREDICATES
+  );
+}
+
+function compilePredicateClauses(
+  predicates: readonly NodePredicate[],
+  predicateContext: PredicateCompilerContext,
+): SQL[] {
+  return predicates.map((predicate) =>
+    compilePredicateExpression(predicate.expression, predicateContext),
+  );
+}
 
 function isColumnPruningEnabled(ast: QueryAst): boolean {
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
@@ -511,16 +566,20 @@ function hasIdEqualityPredicate(
   }
 }
 
-function isStartAliasBoundToSingleId(ast: QueryAst): boolean {
-  return ast.predicates.some(
+function isStartAliasBoundToSingleId(
+  ast: QueryAst,
+  predicateIndex: PredicateIndex,
+): boolean {
+  return getPredicatesForAlias(predicateIndex, ast.start.alias, "node").some(
     (predicate) =>
-      predicate.targetAlias === ast.start.alias &&
-      predicate.targetType !== "edge" &&
       hasIdEqualityPredicate(predicate.expression, ast.start.alias),
   );
 }
 
-function resolveTraversalCteLimit(ast: QueryAst): number | undefined {
+function resolveTraversalCteLimit(
+  ast: QueryAst,
+  predicateIndex: PredicateIndex,
+): number | undefined {
   if (ast.limit === undefined) {
     return undefined;
   }
@@ -545,7 +604,7 @@ function resolveTraversalCteLimit(ast: QueryAst): number | undefined {
     return undefined;
   }
 
-  if (!isStartAliasBoundToSingleId(ast)) {
+  if (!isStartAliasBoundToSingleId(ast, predicateIndex)) {
     return undefined;
   }
 
@@ -642,6 +701,7 @@ function compileCountAggregateFastPath(
   graphId: string,
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
+  predicateIndex: PredicateIndex,
 ): SQL | undefined {
   const plan = resolveCountAggregateFastPath(ast);
   if (!plan) {
@@ -673,29 +733,19 @@ function compileCountAggregateFastPath(
     ...ctx,
     cteColumnPrefix: "n",
   };
-  const nodePredicateClauses = ast.predicates
-    .filter(
-      (predicate) =>
-        predicate.targetAlias === traversal.nodeAlias &&
-        predicate.targetType !== "edge",
-    )
-    .map((predicate) =>
-      compilePredicateExpression(predicate.expression, nodePredicateContext),
-    );
+  const nodePredicateClauses = compilePredicateClauses(
+    getPredicatesForAlias(predicateIndex, traversal.nodeAlias, "node"),
+    nodePredicateContext,
+  );
 
   const edgePredicateContext: PredicateCompilerContext = {
     ...ctx,
     cteColumnPrefix: "e",
   };
-  const edgePredicateClauses = ast.predicates
-    .filter(
-      (predicate) =>
-        predicate.targetAlias === traversal.edgeAlias &&
-        predicate.targetType === "edge",
-    )
-    .map((predicate) =>
-      compilePredicateExpression(predicate.expression, edgePredicateContext),
-    );
+  const edgePredicateClauses = compilePredicateClauses(
+    getPredicatesForAlias(predicateIndex, traversal.edgeAlias, "edge"),
+    edgePredicateContext,
+  );
 
   const joinField = traversal.direction === "out" ? "from_id" : "to_id";
   const targetField = traversal.direction === "out" ? "to_id" : "from_id";
@@ -725,7 +775,13 @@ function compileCountAggregateFastPath(
     );
   }
 
-  const startCte = compileStartCte(ast, graphId, ctx, requiredColumnsByAlias);
+  const startCte = compileStartCte(
+    ast,
+    graphId,
+    ctx,
+    requiredColumnsByAlias,
+    predicateIndex,
+  );
   const countCte = sql`
     ${sql.raw(countCteAlias)} AS (
       SELECT
@@ -802,6 +858,7 @@ function compileStandardQuery(
   ctx: PredicateCompilerContext,
 ): SQL {
   const { dialect } = ctx;
+  const predicateIndex = buildPredicateIndex(ast);
 
   // Check for vector similarity predicates - they require special handling
   const vectorPredicates = extractVectorSimilarityPredicates(ast.predicates);
@@ -824,17 +881,18 @@ function compileStandardQuery(
       graphId,
       ctx,
       requiredColumnsByAlias,
+      predicateIndex,
     );
     if (fastPathSql) {
       return fastPathSql;
     }
   }
 
-  const traversalCteLimit = resolveTraversalCteLimit(ast);
+  const traversalCteLimit = resolveTraversalCteLimit(ast, predicateIndex);
 
   // Build CTEs
   const ctes: SQL[] = [
-    compileStartCte(ast, graphId, ctx, requiredColumnsByAlias),
+    compileStartCte(ast, graphId, ctx, requiredColumnsByAlias, predicateIndex),
   ];
 
   // Traversal CTEs
@@ -847,6 +905,7 @@ function compileStandardQuery(
         ctx,
         requiredColumnsByAlias,
         traversalCteLimit,
+        predicateIndex,
       ),
     );
   }
@@ -905,6 +964,7 @@ function compileStartCte(
   graphId: string,
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
+  predicateIndex: PredicateIndex,
 ): SQL {
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
@@ -919,9 +979,10 @@ function compileStartCte(
   // Use cteColumnPrefix: "" to generate raw column names (e.g., "props" not "p_props")
   // because CTE WHERE clauses operate on raw table columns before aliasing
   const cteContext: PredicateCompilerContext = { ...ctx, cteColumnPrefix: "" };
-  const predicateClauses = ast.predicates
-    .filter((p) => p.targetAlias === alias)
-    .map((p) => compilePredicateExpression(p.expression, cteContext));
+  const predicateClauses = compilePredicateClauses(
+    getPredicatesForAlias(predicateIndex, alias, "node"),
+    cteContext,
+  );
 
   // Combine all WHERE clauses
   const whereClauses = [
@@ -958,6 +1019,7 @@ function compileTraversalCte(
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   traversalLimit: number | undefined,
+  predicateIndex: PredicateIndex,
 ): SQL {
   const traversal = ast.traversals[traversalIndex]!;
 
@@ -985,11 +1047,10 @@ function compileTraversalCte(
     ...ctx,
     cteColumnPrefix: "n",
   };
-  const nodePredicateClauses = ast.predicates
-    .filter(
-      (p) => p.targetAlias === traversal.nodeAlias && p.targetType !== "edge",
-    )
-    .map((p) => compilePredicateExpression(p.expression, nodeCteContext));
+  const nodePredicateClauses = compilePredicateClauses(
+    getPredicatesForAlias(predicateIndex, traversal.nodeAlias, "node"),
+    nodeCteContext,
+  );
 
   // Edge predicates for this traversal's edge alias
   // Use cteColumnPrefix: "e" for edge table columns
@@ -997,11 +1058,10 @@ function compileTraversalCte(
     ...ctx,
     cteColumnPrefix: "e",
   };
-  const edgePredicateClauses = ast.predicates
-    .filter(
-      (p) => p.targetAlias === traversal.edgeAlias && p.targetType === "edge",
-    )
-    .map((p) => compilePredicateExpression(p.expression, edgeCteContext));
+  const edgePredicateClauses = compilePredicateClauses(
+    getPredicatesForAlias(predicateIndex, traversal.edgeAlias, "edge"),
+    edgeCteContext,
+  );
 
   const baseWhereClauses = [
     sql`e.graph_id = ${graphId}`,
