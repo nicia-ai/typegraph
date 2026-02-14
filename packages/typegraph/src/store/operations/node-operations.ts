@@ -89,14 +89,16 @@ function getNodeRegistration<G extends GraphDef>(graph: G, kind: string) {
 /**
  * Executes a node create operation.
  */
-export async function executeNodeCreate<G extends GraphDef>(
+async function executeNodeCreateInternal<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   backend: GraphBackend | TransactionBackend,
-): Promise<Node> {
+  options?: Readonly<{ returnRow?: boolean }>,
+): Promise<Node | undefined> {
   const kind = input.kind;
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "node", kind, id);
+  const shouldReturnRow = options?.returnRow ?? true;
 
   return ctx.withOperationHooks(opContext, async () => {
     // Validate kind exists and get registration
@@ -170,7 +172,12 @@ export async function executeNodeCreate<G extends GraphDef>(
     if (validFrom !== undefined) insertParams.validFrom = validFrom;
     if (validTo !== undefined) insertParams.validTo = validTo;
 
-    const row = await backend.insertNode(insertParams);
+    const row =
+      shouldReturnRow ? await backend.insertNode(insertParams) : undefined;
+    if (!shouldReturnRow) {
+      await (backend.insertNodeNoReturn?.(insertParams) ??
+        backend.insertNode(insertParams));
+    }
 
     // Insert uniqueness entries
     await insertUniquenessEntries(
@@ -190,8 +197,37 @@ export async function executeNodeCreate<G extends GraphDef>(
     };
     await syncEmbeddings(embeddingSyncContext, nodeKind.schema, validatedProps);
 
+    if (row === undefined) return;
     return rowToNode(row as NodeRow);
   });
+}
+
+/**
+ * Executes a node create operation and returns the created node.
+ */
+export async function executeNodeCreate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: CreateNodeInput,
+  backend: GraphBackend | TransactionBackend,
+): Promise<Node> {
+  const result = await executeNodeCreateInternal(ctx, input, backend, {
+    returnRow: true,
+  });
+  if (!result) {
+    throw new Error("Node create failed: expected created node row");
+  }
+  return result;
+}
+
+/**
+ * Executes a node create operation without returning the created node payload.
+ */
+export async function executeNodeCreateNoReturn<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: CreateNodeInput,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  await executeNodeCreateInternal(ctx, input, backend, { returnRow: false });
 }
 
 /**

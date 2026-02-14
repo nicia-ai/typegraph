@@ -124,11 +124,45 @@ export function compileQuery(
 
   // Check for variable-length traversals
   if (hasVariableLengthTraversal(ast)) {
+    const lowered = tryLowerSingleHopRecursiveTraversal(ast);
+    if (lowered !== undefined) {
+      return compileStandardQuery(lowered, graphId, ctx);
+    }
     return compileVariableLengthQuery(ast, graphId, ctx);
   }
 
   // Standard query compilation
   return compileStandardQuery(ast, graphId, ctx);
+}
+
+function tryLowerSingleHopRecursiveTraversal(
+  ast: QueryAst,
+): QueryAst | undefined {
+  if (ast.traversals.length !== 1) {
+    return undefined;
+  }
+
+  const traversal = ast.traversals[0]!;
+  const variableLength = traversal.variableLength;
+  if (!variableLength) {
+    return undefined;
+  }
+
+  if (variableLength.minDepth !== 1 || variableLength.maxDepth !== 1) {
+    return undefined;
+  }
+  if (variableLength.collectPath) {
+    return undefined;
+  }
+
+  const { variableLength: _variableLength, ...nonRecursiveTraversal } =
+    traversal;
+  void _variableLength;
+
+  return {
+    ...ast,
+    traversals: [nonRecursiveTraversal],
+  };
 }
 
 /**

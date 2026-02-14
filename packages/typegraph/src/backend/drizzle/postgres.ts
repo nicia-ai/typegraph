@@ -319,6 +319,12 @@ export function createPostgresBackend(
       return toNodeRow(row);
     },
 
+    async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = ops.buildInsertNodeNoReturn(tables, params, timestamp);
+      await execRun(query);
+    },
+
     async getNode(
       graphId: string,
       kind: string,
@@ -374,6 +380,12 @@ export function createPostgresBackend(
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert edge failed: no row returned");
       return toEdgeRow(row);
+    },
+
+    async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = ops.buildInsertEdgeNoReturn(tables, params, timestamp);
+      await execRun(query);
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {

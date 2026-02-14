@@ -18,6 +18,34 @@ import {
   type QueryOptions,
 } from "../types";
 
+function withCachedNodeLookup(
+  backend: GraphBackend | TransactionBackend,
+): GraphBackend | TransactionBackend {
+  const nodeCache = new Map<
+    string,
+    Awaited<ReturnType<GraphBackend["getNode"]>>
+  >();
+
+  async function getNodeCached(
+    graphId: string,
+    kind: string,
+    id: string,
+  ): Promise<Awaited<ReturnType<GraphBackend["getNode"]>>> {
+    const cacheKey = `${graphId}\u0000${kind}\u0000${id}`;
+    if (nodeCache.has(cacheKey)) {
+      return nodeCache.get(cacheKey);
+    }
+    const value = await backend.getNode(graphId, kind, id);
+    nodeCache.set(cacheKey, value);
+    return value;
+  }
+
+  return {
+    ...backend,
+    getNode: getNodeCached,
+  } as GraphBackend | TransactionBackend;
+}
+
 /**
  * Creates an EdgeCollection for a specific edge type.
  */
@@ -57,6 +85,20 @@ export function createEdgeCollection<
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>,
+  executeEdgeCreateNoReturn: (
+    input: {
+      kind: string;
+      id?: string;
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    },
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>,
   executeEdgeUpdate: (
     input: {
       id: string;
@@ -257,6 +299,11 @@ export function createEdgeCollection<
       async function runBulkCreate(
         activeBackend: GraphBackend | TransactionBackend,
       ): Promise<void> {
+        const createBackend =
+          shouldReturnResults ? activeBackend : (
+            withCachedNodeLookup(activeBackend)
+          );
+
         for (const item of items) {
           const input: {
             kind: string;
@@ -280,9 +327,11 @@ export function createEdgeCollection<
           if (item.validFrom !== undefined) input.validFrom = item.validFrom;
           if (item.validTo !== undefined) input.validTo = item.validTo;
 
-          const result = await executeEdgeCreate(input, activeBackend);
           if (shouldReturnResults) {
+            const result = await executeEdgeCreate(input, createBackend);
             results.push(result as Edge<E>);
+          } else {
+            await executeEdgeCreateNoReturn(input, createBackend);
           }
         }
       }

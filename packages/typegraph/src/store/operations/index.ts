@@ -7,12 +7,14 @@
 export {
   type EdgeOperationContext,
   executeEdgeCreate,
+  executeEdgeCreateNoReturn,
   executeEdgeDelete,
   executeEdgeHardDelete,
   executeEdgeUpdate,
 } from "./edge-operations";
 export {
   executeNodeCreate,
+  executeNodeCreateNoReturn,
   executeNodeDelete,
   executeNodeHardDelete,
   executeNodeUpdate,

@@ -100,6 +100,25 @@ export function createAdapterTestSuite(
         expect(fetched!.kind).toBe("Person");
       });
 
+      it("supports insertNodeNoReturn when available", async () => {
+        if (backend.insertNodeNoReturn === undefined) return;
+
+        await backend.insertNodeNoReturn({
+          graphId: "test_graph",
+          kind: "Person",
+          id: "person-no-return",
+          props: { name: "No Return Node" },
+        });
+
+        const fetched = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-no-return",
+        );
+        expect(fetched).toBeDefined();
+        expect(fetched!.id).toBe("person-no-return");
+      });
+
       it("inserts a node with temporal fields", async () => {
         const validFrom = "2024-01-01T00:00:00.000Z";
         const validTo = "2024-12-31T23:59:59.999Z";
@@ -311,6 +330,25 @@ export function createAdapterTestSuite(
         expect(fetched!.kind).toBe("worksAt");
       });
 
+      it("supports insertEdgeNoReturn when available", async () => {
+        if (backend.insertEdgeNoReturn === undefined) return;
+
+        await backend.insertEdgeNoReturn({
+          graphId: "test_graph",
+          id: "edge-no-return",
+          kind: "worksAt",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-1",
+          props: { role: "No Return Edge" },
+        });
+
+        const fetched = await backend.getEdge("test_graph", "edge-no-return");
+        expect(fetched).toBeDefined();
+        expect(fetched!.id).toBe("edge-no-return");
+      });
+
       it("inserts an edge with temporal fields", async () => {
         const validFrom = "2024-01-01T00:00:00.000Z";
         const validTo = "2024-12-31T23:59:59.999Z";
@@ -433,6 +471,58 @@ export function createAdapterTestSuite(
 
         expect(JSON.parse(fromA!.props).graph).toBe("a");
         expect(JSON.parse(fromB!.props).graph).toBe("b");
+      });
+    });
+
+    // ============================================================
+    // Edge Query Operations
+    // ============================================================
+
+    describe("Edge Query Operations", () => {
+      it("finds incoming and outgoing edges for a node without duplicating self-loops", async () => {
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-outgoing",
+          kind: "relatedTo",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-1",
+          props: {},
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-incoming",
+          kind: "relatedTo",
+          fromKind: "Company",
+          fromId: "company-2",
+          toKind: "Person",
+          toId: "person-1",
+          props: {},
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-self-loop",
+          kind: "relatedTo",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Person",
+          toId: "person-1",
+          props: {},
+        });
+
+        const edges = await backend.findEdgesConnectedTo({
+          graphId: "test_graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+        });
+
+        const edgeIds = edges.map((edge) => edge.id).toSorted();
+        expect(edgeIds).toEqual([
+          "edge-incoming",
+          "edge-outgoing",
+          "edge-self-loop",
+        ]);
       });
     });
 

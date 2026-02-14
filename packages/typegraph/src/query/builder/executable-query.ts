@@ -529,25 +529,23 @@ export class ExecutableQuery<
     cursor: string | undefined,
     isBackward: boolean,
   ): Promise<PaginatedResult<R> | undefined> {
-    // Skip optimization for variable-length traversals (recursive compiler path)
-    const hasVariableLength = this.#state.traversals.some(
-      (t) => t.variableLength !== undefined,
-    );
-    if (hasVariableLength) return undefined;
-
     const selectiveFields = this.#getSelectiveFieldsForPagination();
     if (selectiveFields === undefined) {
       return undefined;
     }
 
-    const rows = await this.#executeWithCursor(
-      cursorData,
-      direction,
-      fetchLimit,
-      {
+    let rows: readonly Record<string, unknown>[];
+    try {
+      rows = await this.#executeWithCursor(cursorData, direction, fetchLimit, {
         selectiveFields,
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      throw error;
+    }
 
     const hasMore = rows.length > pageLimit;
     const resultRows = hasMore ? rows.slice(0, pageLimit) : rows;
@@ -564,6 +562,10 @@ export class ExecutableQuery<
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForPagination = undefined;
         return undefined;
       }
@@ -587,6 +589,10 @@ export class ExecutableQuery<
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {
+          this.#cachedSelectiveFieldsForPagination = undefined;
+          return undefined;
+        }
+        if (error instanceof UnsupportedPredicateError) {
           this.#cachedSelectiveFieldsForPagination = undefined;
           return undefined;
         }

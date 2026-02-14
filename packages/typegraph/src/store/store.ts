@@ -24,10 +24,12 @@ import {
 import {
   type EdgeOperationContext,
   executeEdgeCreate,
+  executeEdgeCreateNoReturn,
   executeEdgeDelete,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeNodeCreate,
+  executeNodeCreateNoReturn,
   executeNodeDelete,
   executeNodeHardDelete,
   executeNodeUpdate,
@@ -191,6 +193,8 @@ export class Store<G extends GraphDef> {
     return {
       rowToNode: (row) => rowToNode(row as NodeRow),
       executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
+      executeCreateNoReturn: (input, backend) =>
+        executeNodeCreateNoReturn(ctx, input, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
       executeDelete: (kind, id, backend) =>
@@ -210,6 +214,8 @@ export class Store<G extends GraphDef> {
     return {
       rowToEdge: (row) => rowToEdge(row as EdgeRow),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
+      executeCreateNoReturn: (input, backend) =>
+        executeEdgeCreateNoReturn(ctx, input, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
       executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
       executeHardDelete: (id, backend) =>

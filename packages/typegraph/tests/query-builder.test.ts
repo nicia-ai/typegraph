@@ -1785,6 +1785,46 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(sql).toContain("r.depth < ?");
   });
 
+  it("lowers maxHops(1) recursive traversal to a standard single-hop query", () => {
+    const q = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive()
+      .maxHops(1)
+      .to("Organization", "o")
+      .select((context) => ({
+        person: context.p.name,
+        org: context.o.name,
+      }));
+
+    const sqlObject = q.compile();
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).not.toContain("WITH RECURSIVE");
+    expect(sql).not.toContain("recursive_cte");
+    expect(sql).toContain("cte_o");
+  });
+
+  it("keeps recursive compilation when path collection is requested", () => {
+    const q = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive()
+      .maxHops(1)
+      .collectPath("path")
+      .to("Organization", "o")
+      .select((context) => ({
+        person: context.p.name,
+        org: context.o.name,
+      }));
+
+    const sqlObject = q.compile();
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("WITH RECURSIVE");
+    expect(sql).toContain("recursive_cte");
+  });
+
   it("includes path in projection when collectPath is true", () => {
     const q = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")

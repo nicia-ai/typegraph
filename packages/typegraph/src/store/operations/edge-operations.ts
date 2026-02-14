@@ -79,14 +79,16 @@ function getEdgeRegistration<G extends GraphDef>(
 /**
  * Executes an edge create operation.
  */
-export async function executeEdgeCreate<G extends GraphDef>(
+async function executeEdgeCreateInternal<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
   backend: GraphBackend | TransactionBackend,
-): Promise<Edge> {
+  options?: Readonly<{ returnRow?: boolean }>,
+): Promise<Edge | undefined> {
   const kind = input.kind;
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
+  const shouldReturnRow = options?.returnRow ?? true;
 
   return ctx.withOperationHooks(opContext, async () => {
     const fromKind = input.fromKind;
@@ -181,10 +183,44 @@ export async function executeEdgeCreate<G extends GraphDef>(
     if (validFrom !== undefined) insertParams.validFrom = validFrom;
     if (validTo !== undefined) insertParams.validTo = validTo;
 
-    const row = await backend.insertEdge(insertParams);
+    const row =
+      shouldReturnRow ? await backend.insertEdge(insertParams) : undefined;
+    if (!shouldReturnRow) {
+      await (backend.insertEdgeNoReturn?.(insertParams) ??
+        backend.insertEdge(insertParams));
+    }
 
+    if (row === undefined) return;
     return rowToEdge(row as EdgeRow);
   });
+}
+
+/**
+ * Executes an edge create operation and returns the created edge.
+ */
+export async function executeEdgeCreate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: CreateEdgeInput,
+  backend: GraphBackend | TransactionBackend,
+): Promise<Edge> {
+  const result = await executeEdgeCreateInternal(ctx, input, backend, {
+    returnRow: true,
+  });
+  if (!result) {
+    throw new Error("Edge create failed: expected created edge row");
+  }
+  return result;
+}
+
+/**
+ * Executes an edge create operation without returning the created edge payload.
+ */
+export async function executeEdgeCreateNoReturn<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: CreateEdgeInput,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  await executeEdgeCreateInternal(ctx, input, backend, { returnRow: false });
 }
 
 /**

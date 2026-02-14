@@ -59,6 +59,10 @@ export type NodeOperations = Readonly<{
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>;
+  executeCreateNoReturn: (
+    input: CreateNodeInput,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeUpdate: (
     input: UpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
@@ -83,6 +87,10 @@ export type EdgeOperations = Readonly<{
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
+  executeCreateNoReturn: (
+    input: CreateEdgeInput,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeUpdate: (
     input: {
       id: string;
@@ -138,14 +146,17 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
           operations.executeCreate as Parameters<
             typeof createNodeCollection
           >[5],
-          operations.executeUpdate as Parameters<
+          operations.executeCreateNoReturn as Parameters<
             typeof createNodeCollection
           >[6],
+          operations.executeUpdate as Parameters<
+            typeof createNodeCollection
+          >[7],
           operations.executeDelete,
           operations.executeHardDelete,
           operations.matchesTemporalMode as Parameters<
             typeof createNodeCollection
-          >[9],
+          >[10],
         );
       },
     },
@@ -186,12 +197,15 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
           operations.executeCreate as Parameters<
             typeof createEdgeCollection
           >[5],
+          operations.executeCreateNoReturn as Parameters<
+            typeof createEdgeCollection
+          >[6],
           operations.executeUpdate,
           operations.executeDelete,
           operations.executeHardDelete,
           operations.matchesTemporalMode as Parameters<
             typeof createEdgeCollection
-          >[9],
+          >[10],
         );
       },
     },

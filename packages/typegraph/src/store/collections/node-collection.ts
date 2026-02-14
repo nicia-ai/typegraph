@@ -46,6 +46,16 @@ export function createNodeCollection<
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>,
+  executeNodeCreateNoReturn: (
+    input: {
+      kind: string;
+      id?: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    },
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>,
   executeNodeUpdate: (
     input: {
       kind: string;
@@ -248,9 +258,11 @@ export function createNodeCollection<
           if (item.validFrom !== undefined) input.validFrom = item.validFrom;
           if (item.validTo !== undefined) input.validTo = item.validTo;
 
-          const result = await executeNodeCreate(input, activeBackend);
           if (shouldReturnResults) {
+            const result = await executeNodeCreate(input, activeBackend);
             results.push(result as Node<N>);
+          } else {
+            await executeNodeCreateNoReturn(input, activeBackend);
           }
         }
       }

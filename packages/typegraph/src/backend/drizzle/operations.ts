@@ -81,6 +81,28 @@ export function buildInsertNode(
 }
 
 /**
+ * Builds an INSERT query for a node without RETURNING payload.
+ */
+export function buildInsertNodeNoReturn(
+  tables: Tables,
+  params: InsertNodeParams,
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const cols = sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+
+  return sql`
+    INSERT INTO ${nodes} (${cols})
+    VALUES (
+      ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
+      1, ${sqlNull(params.validFrom)}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    )
+  `;
+}
+
+/**
  * Builds a SELECT query to get a node by kind and id.
  * Returns the node regardless of deletion status (store layer handles filtering).
  */
@@ -225,6 +247,29 @@ export function buildInsertEdge(
       ${timestamp}, ${timestamp}
     )
     RETURNING *
+  `;
+}
+
+/**
+ * Builds an INSERT query for an edge without RETURNING payload.
+ */
+export function buildInsertEdgeNoReturn(
+  tables: Tables,
+  params: InsertEdgeParams,
+  timestamp: string,
+): SQL {
+  const { edges } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const cols = sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+
+  return sql`
+    INSERT INTO ${edges} (${cols})
+    VALUES (
+      ${params.graphId}, ${params.id}, ${params.kind},
+      ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
+      ${propsJson}, ${sqlNull(params.validFrom)}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    )
   `;
 }
 
@@ -597,10 +642,17 @@ export function buildFindEdgesConnectedTo(
     SELECT * FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
       AND ${edges.deletedAt} IS NULL
-      AND (
-        (${edges.fromKind} = ${params.nodeKind} AND ${edges.fromId} = ${params.nodeId})
-        OR
-        (${edges.toKind} = ${params.nodeKind} AND ${edges.toId} = ${params.nodeId})
+      AND ${edges.fromKind} = ${params.nodeKind}
+      AND ${edges.fromId} = ${params.nodeId}
+    UNION ALL
+    SELECT * FROM ${edges}
+    WHERE ${edges.graphId} = ${params.graphId}
+      AND ${edges.deletedAt} IS NULL
+      AND ${edges.toKind} = ${params.nodeKind}
+      AND ${edges.toId} = ${params.nodeId}
+      AND NOT (
+        ${edges.fromKind} = ${params.nodeKind}
+        AND ${edges.fromId} = ${params.nodeId}
       )
   `;
 }

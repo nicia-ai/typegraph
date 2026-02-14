@@ -355,6 +355,7 @@ export type GraphBackend = Readonly<{
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
+  insertNodeNoReturn?: (params: InsertNodeParams) => Promise<void>;
   updateNode: (params: UpdateNodeParams) => Promise<NodeRow>;
   deleteNode: (params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (params: HardDeleteNodeParams) => Promise<void>;
@@ -366,6 +367,7 @@ export type GraphBackend = Readonly<{
 
   // === Edge Operations ===
   insertEdge: (params: InsertEdgeParams) => Promise<EdgeRow>;
+  insertEdgeNoReturn?: (params: InsertEdgeParams) => Promise<void>;
   updateEdge: (params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (params: DeleteEdgeParams) => Promise<void>;
   hardDeleteEdge: (params: HardDeleteEdgeParams) => Promise<void>;

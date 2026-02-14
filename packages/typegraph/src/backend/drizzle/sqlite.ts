@@ -78,6 +78,25 @@ export type SqliteBackendOptions = Readonly<{
  */
 type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
+type PreparedAllStatement = Readonly<{
+  all: (...params: readonly unknown[]) => readonly unknown[];
+}>;
+
+type CompiledSqlQuery = Readonly<{
+  sql: string;
+  params: readonly unknown[];
+}>;
+
+type SqlCompiler = Readonly<{
+  sqlToQuery: (query: SQL) => CompiledSqlQuery;
+}>;
+
+type DatabaseWithCompiler = Readonly<{
+  dialect: SqlCompiler;
+}>;
+
+const EXECUTE_STATEMENT_CACHE_MAX = 256;
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -215,6 +234,18 @@ function isSyncDatabase(db: AnySqliteDatabase): boolean {
   return sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession";
 }
 
+function compileSqlQuery(
+  db: AnySqliteDatabase,
+  query: SQL,
+): CompiledSqlQuery {
+  const databaseWithCompiler = db as unknown as Partial<DatabaseWithCompiler>;
+  const compiler = databaseWithCompiler.dialect;
+  if (compiler === undefined) {
+    throw new Error("SQLite backend is missing a SQL compiler");
+  }
+  return compiler.sqlToQuery(query);
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -235,6 +266,10 @@ export function createSqliteBackend(
   const tables = options.tables ?? defaultTables;
   const isD1 = isD1Database(db);
   const isSync = isSyncDatabase(db);
+  const sqliteClient = (db as { $client?: { prepare?: (sqlText: string) => PreparedAllStatement } })
+    .$client;
+  const executeStatementCache =
+    isSync && !isD1 ? new Map<string, PreparedAllStatement>() : undefined;
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -260,6 +295,27 @@ export function createSqliteBackend(
     if (result instanceof Promise) await result;
   }
 
+  function getPreparedStatement(sqlText: string): PreparedAllStatement {
+    if (executeStatementCache === undefined || sqliteClient?.prepare === undefined) {
+      throw new Error("Prepared statement cache is unavailable for this SQLite backend");
+    }
+
+    const cached = executeStatementCache.get(sqlText);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const prepared = sqliteClient.prepare(sqlText);
+    executeStatementCache.set(sqlText, prepared);
+    if (executeStatementCache.size > EXECUTE_STATEMENT_CACHE_MAX) {
+      const oldestKey = executeStatementCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        executeStatementCache.delete(oldestKey);
+      }
+    }
+    return prepared;
+  }
+
   // Create the backend operations
   const backend: GraphBackend = {
     dialect: "sqlite",
@@ -274,6 +330,12 @@ export function createSqliteBackend(
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert node failed: no row returned");
       return toNodeRow(row);
+    },
+
+    async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = ops.buildInsertNodeNoReturn(tables, params, timestamp);
+      await execRun(query);
     },
 
     async getNode(
@@ -331,6 +393,12 @@ export function createSqliteBackend(
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert edge failed: no row returned");
       return toEdgeRow(row);
+    },
+
+    async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = ops.buildInsertEdgeNoReturn(tables, params, timestamp);
+      await execRun(query);
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {
@@ -481,6 +549,15 @@ export function createSqliteBackend(
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
+      if (
+        executeStatementCache !== undefined &&
+        sqliteClient?.prepare !== undefined
+      ) {
+        const compiled = compileSqlQuery(db, query);
+        const statement = getPreparedStatement(compiled.sql);
+        const rows = statement.all(...compiled.params);
+        return rows as readonly T[];
+      }
       return execAll<T>(query);
     },
 

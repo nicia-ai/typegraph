@@ -654,6 +654,63 @@ describe("Bulk Operations (SQLite)", () => {
       const count = await store.edges.worksAt.count();
       expect(count).toBe(0);
     });
+
+    it("reuses endpoint existence checks for returnResults=false edge batches", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let getNodeCalls = 0;
+
+      const backendWithNodeCounter: GraphBackend = {
+        ...baseBackend,
+        async getNode(graphId, kind, id) {
+          getNodeCalls += 1;
+          return baseBackend.getNode(graphId, kind, id);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx = {
+              ...tx,
+              async getNode(graphId: string, kind: string, id: string) {
+                getNodeCalls += 1;
+                return tx.getNode(graphId, kind, id);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithNodeCounter);
+      const alice = await localStore.nodes.Person.create({ name: "Alice" });
+      const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
+
+      getNodeCalls = 0;
+      await localStore.edges.worksAt.bulkCreate(
+        [
+          {
+            id: "edge-cache-1",
+            from: alice,
+            to: acme,
+            props: { role: "Engineer" },
+          },
+          {
+            id: "edge-cache-2",
+            from: alice,
+            to: acme,
+            props: { role: "Architect" },
+          },
+          {
+            id: "edge-cache-3",
+            from: alice,
+            to: acme,
+            props: { role: "Manager" },
+          },
+        ],
+        { returnResults: false },
+      );
+
+      // Two endpoint checks total: one for from-node, one for to-node.
+      expect(getNodeCalls).toBe(2);
+    });
   });
 
   describe("store.edges.*.bulkDelete()", () => {
