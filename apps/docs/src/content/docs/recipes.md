@@ -304,7 +304,7 @@ const tagCounts = await store
   .traverse("taggedWith", "e")
   .to("Tag", "t")
   .groupBy("t", "name")
-  .selectAggregate({
+  .aggregate({
     tag: field("t", "name"),
     count: count("i"),
   })
@@ -383,8 +383,7 @@ const breadcrumb = await store
   .from("Category", "c")
   .whereNode("c", (c) => c.slug.eq("electronics/phones/iphone"))
   .traverse("parentOf", "e")
-  .recursive()
-  .collectPath("path")
+  .recursive({ path: "path" })
   .to("Category", "ancestor")
   .select((ctx) => ({
     name: ctx.ancestor.name,
@@ -402,8 +401,7 @@ const allChildren = await store
   .from("Category", "root")
   .whereNode("root", (c) => c.slug.eq("electronics"))
   .traverse("parentOf", "e", { direction: "in" })
-  .recursive()
-  .withDepth("level")
+  .recursive({ depth: "level" })
   .to("Category", "child")
   .select((ctx) => ({
     name: ctx.child.name,
@@ -422,8 +420,7 @@ async function buildTree(rootSlug: string): Promise<TreeNode> {
     .from("Category", "root")
     .whereNode("root", (c) => c.slug.eq(rootSlug))
     .traverse("parentOf", "e", { direction: "in" })
-    .recursive()
-    .maxHops(10)
+    .recursive({ maxHops: 10 })
     .to("Category", "child")
     .select((ctx) => ({
       id: ctx.child.id,
@@ -501,7 +498,7 @@ const docStats = await store
   .traverse("relatedTo", "e")
   .to("Document", "r")
   .groupByNode("d")
-  .selectAggregate({
+  .aggregate({
     docId: field("d", "id"),
     title: field("d", "title"),
     relationCount: count("e"),

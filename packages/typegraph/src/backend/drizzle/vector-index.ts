@@ -5,9 +5,9 @@
  * on the embeddings table for efficient similarity search.
  */
 import { type SQL, sql } from "drizzle-orm";
-import { type PgDatabase } from "drizzle-orm/pg-core";
 
 import { type VectorIndexType, type VectorMetric } from "../types";
+import { type AnyPgDatabase } from "./execution/postgres-execution";
 
 // ============================================================
 // Validation
@@ -59,6 +59,8 @@ export type VectorIndexOptions = Readonly<{
   hnswEfConstruction?: number;
   /** IVFFlat-specific: number of inverted lists (default: 100) */
   ivfflatLists?: number;
+  /** Embeddings table name. Defaults to typegraph_node_embeddings. */
+  embeddingsTableName?: string;
 }>;
 
 /**
@@ -77,14 +79,40 @@ export type VectorIndexResult = Readonly<{
 // Index Name Generation
 // ============================================================
 
+const MAX_IDENTIFIER_LENGTH = 63;
+
 /**
  * Sanitizes a string to be a valid SQL identifier component.
  */
 function sanitizeIdentifier(s: string): string {
-  return s
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9_]/g, "_")
-    .slice(0, 20);
+  return s.toLowerCase().replaceAll(/[^a-z0-9_]/g, "_");
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+/**
+ * Simple deterministic hash for identifier deduplication.
+ * Returns an 8-char hex string.
+ */
+function shortHash(input: string): string {
+  let h1 = 0xde_ad_be_ef;
+  let h2 = 0x41_c6_ce_57;
+  for (let index = 0; index < input.length; index++) {
+    const ch = input.codePointAt(index)!;
+    h1 = Math.imul(h1 ^ ch, 0x9e_37_79_b1);
+    h2 = Math.imul(h2 ^ ch, 0x5f_35_64_95);
+  }
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 0x85_eb_ca_6b) ^
+    Math.imul(h2 ^ (h2 >>> 13), 0xc2_b2_ae_35);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 0x85_eb_ca_6b) ^
+    Math.imul(h1 ^ (h1 >>> 13), 0xc2_b2_ae_35);
+  const hi = (h2 >>> 0).toString(16).padStart(8, "0");
+  const lo = (h1 >>> 0).toString(16).padStart(8, "0");
+  return `${hi}${lo}`.slice(0, 8);
 }
 
 /**
@@ -92,6 +120,8 @@ function sanitizeIdentifier(s: string): string {
  *
  * Format: `idx_emb_{graphId}_{nodeKind}_{fieldPath}_{metric}`
  * Names are sanitized to be valid SQL identifiers.
+ * If the name exceeds PostgreSQL's 63-char identifier limit,
+ * it is truncated with a hash suffix to prevent collisions.
  */
 export function generateVectorIndexName(
   graphId: string,
@@ -107,7 +137,16 @@ export function generateVectorIndexName(
     metric,
   ];
 
-  return parts.join("_");
+  const name = parts.join("_");
+
+  if (name.length <= MAX_IDENTIFIER_LENGTH) {
+    return name;
+  }
+
+  const hash = shortHash(name);
+  // Reserve space for _hash suffix
+  const truncated = name.slice(0, MAX_IDENTIFIER_LENGTH - 1 - hash.length);
+  return `${truncated}_${hash}`;
 }
 
 // ============================================================
@@ -128,6 +167,10 @@ function getOperatorClass(metric: VectorMetric): string {
     case "inner_product": {
       return "vector_ip_ops";
     }
+    default: {
+      const _exhaustive: never = metric;
+      throw new Error("Unsupported vector metric: " + String(_exhaustive));
+    }
   }
 }
 
@@ -136,9 +179,7 @@ function getOperatorClass(metric: VectorMetric): string {
  * Uses dollar quoting to avoid issues with embedded quotes.
  */
 function escapeSqlString(value: string): string {
-  // Use dollar quoting with a unique tag to safely embed any string
-  // This handles single quotes, backslashes, and any other special chars
-  const tag = `tg${Date.now()}`;
+  const tag = `tg${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
   return `$${tag}$${value}$${tag}$`;
 }
 
@@ -161,8 +202,7 @@ function escapeSqlString(value: string): string {
  * ```
  */
 export async function createPostgresVectorIndex(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Drizzle's generic database type
-  db: PgDatabase<any>,
+  db: AnyPgDatabase,
   options: VectorIndexOptions,
 ): Promise<VectorIndexResult> {
   const {
@@ -170,6 +210,7 @@ export async function createPostgresVectorIndex(
     nodeKind,
     fieldPath,
     dimensions,
+    embeddingsTableName = "typegraph_node_embeddings",
     indexType = "hnsw",
     metric = "cosine",
     hnswM = 16,
@@ -185,6 +226,7 @@ export async function createPostgresVectorIndex(
 
   const indexName = generateVectorIndexName(graphId, nodeKind, fieldPath, metric);
   const operatorClass = getOperatorClass(metric);
+  const quotedEmbeddingsTableName = quoteIdentifier(embeddingsTableName);
 
   // Validate that the generated index name is safe
   assertSafeIdentifier(indexName, "indexName");
@@ -203,7 +245,7 @@ export async function createPostgresVectorIndex(
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
       CREATE INDEX IF NOT EXISTS ${indexName}
-      ON typegraph_node_embeddings
+      ON ${quotedEmbeddingsTableName}
       USING hnsw ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (m = ${hnswM}, ef_construction = ${hnswEfConstruction})
       WHERE graph_id = ${safeGraphId}
@@ -216,7 +258,7 @@ export async function createPostgresVectorIndex(
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
       CREATE INDEX IF NOT EXISTS ${indexName}
-      ON typegraph_node_embeddings
+      ON ${quotedEmbeddingsTableName}
       USING ivfflat ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (lists = ${ivfflatLists})
       WHERE graph_id = ${safeGraphId}
@@ -254,8 +296,7 @@ export async function createPostgresVectorIndex(
  * @param indexName - Must be a valid SQL identifier (alphanumeric + underscore only)
  */
 export async function dropPostgresVectorIndex(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Drizzle's generic database type
-  db: PgDatabase<any>,
+  db: AnyPgDatabase,
   indexName: string,
 ): Promise<VectorIndexResult> {
   // Validate index name to prevent SQL injection

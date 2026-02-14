@@ -20,8 +20,8 @@ export {
   createPostgresBackend,
   createPostgresTables,
   type PostgresBackendOptions,
+  type PostgresTableNames,
   type PostgresTables,
-  type TableNames,
   tables,
 } from "../drizzle/postgres";
 
@@ -35,4 +35,7 @@ export {
 } from "../drizzle/schema/postgres";
 
 // Re-export migration SQL generation
-export { getPostgresMigrationSQL } from "../drizzle/test-helpers";
+export {
+  generatePostgresDDL,
+  getPostgresMigrationSQL,
+} from "../drizzle/test-helpers";

@@ -4,12 +4,13 @@
  * Transforms raw database rows into typed SelectContext and result objects.
  */
 import { type NodeType } from "../../core/types";
-import { parseSqlitePath } from "../../utils";
+import { normalizePath } from "../../utils";
 import { type Traversal } from "../ast";
 import type {
   AliasMap,
   EdgeAliasMap,
   QueryBuilderState,
+  RecursiveAliasMap,
   SelectableEdge,
   SelectableNode,
   SelectContext,
@@ -23,31 +24,38 @@ import { type SqlDialect } from "../compiler/index";
 export function transformPathColumns(
   rows: readonly Record<string, unknown>[],
   state: QueryBuilderState,
-  dialect: SqlDialect,
+  _dialect: SqlDialect,
 ): readonly Record<string, unknown>[] {
-  if (dialect !== "sqlite") return rows;
-
   // Find path columns from variable-length traversals
   const pathAliases: string[] = [];
   for (const t of state.traversals) {
-    if (t.variableLength?.collectPath) {
-      pathAliases.push(t.variableLength.pathAlias ?? `${t.nodeAlias}_path`);
+    if (t.variableLength?.pathAlias !== undefined) {
+      pathAliases.push(t.variableLength.pathAlias);
     }
   }
 
   if (pathAliases.length === 0) return rows;
 
-  return rows.map((row) => {
+  const result: Record<string, unknown>[] = [];
+  let changed = false;
+  for (const row of rows) {
     let transformed: Record<string, unknown> | undefined;
     for (const alias of pathAliases) {
       const value = row[alias];
-      if (typeof value === "string") {
+      if (value !== undefined && !Array.isArray(value)) {
         transformed ??= { ...row };
-        transformed[alias] = parseSqlitePath(value);
+        transformed[alias] = normalizePath(value);
       }
     }
-    return transformed ?? row;
-  });
+    if (transformed === undefined) {
+      result.push(row);
+    } else {
+      changed = true;
+      result.push(transformed);
+    }
+  }
+  // Preserve reference identity when no rows were transformed
+  return changed ? result : rows;
 }
 
 // Reserved keys that cannot be overwritten by user props
@@ -203,20 +211,26 @@ function buildSelectableEdge(
 
 /**
  * Builds a SelectContext from a raw database row.
- * Includes both node aliases and edge aliases.
+ * Includes node aliases, edge aliases, and recursive metadata (depth/path).
  */
 export function buildSelectContext<
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RecursiveAliases extends RecursiveAliasMap = {},
 >(
   row: Record<string, unknown>,
   startAlias: string,
   traversals: readonly Traversal[],
-): SelectContext<Aliases, EdgeAliases> {
+): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
   // Build the start node as initial context entry
   const context: Record<
     string,
-    SelectableNode<NodeType> | SelectableEdge | undefined
+    | SelectableNode<NodeType>
+    | SelectableEdge
+    | number
+    | readonly string[]
+    | undefined
   > = {
     [startAlias]: buildSelectableNode(row, startAlias),
   };
@@ -234,9 +248,20 @@ export function buildSelectContext<
 
     // Add edge (may be undefined for optional traversals)
     context[edgeAlias] = buildSelectableEdge(row, edgeAlias);
+
+    // Add recursive depth/path values
+    const vl = traversal.variableLength;
+    if (vl !== undefined) {
+      if (vl.depthAlias !== undefined) {
+        context[vl.depthAlias] = row[vl.depthAlias] as number;
+      }
+      if (vl.pathAlias !== undefined) {
+        context[vl.pathAlias] = row[vl.pathAlias] as readonly string[];
+      }
+    }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases>;
+  return context as SelectContext<Aliases, EdgeAliases, RecursiveAliases>;
 }
 
 /**
@@ -246,14 +271,16 @@ export function mapResults<
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap,
   R,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RA extends RecursiveAliasMap = {},
 >(
   rows: readonly Record<string, unknown>[],
   startAlias: string,
   traversals: readonly Traversal[],
-  selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
+  selectFunction: (context: SelectContext<Aliases, EdgeAliases, RA>) => R,
 ): readonly R[] {
   return rows.map((row) => {
-    const context = buildSelectContext<Aliases, EdgeAliases>(
+    const context = buildSelectContext<Aliases, EdgeAliases, RA>(
       row,
       startAlias,
       traversals,

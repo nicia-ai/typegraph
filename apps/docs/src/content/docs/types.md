@@ -14,7 +14,7 @@ The full node type returned from store operations.
 ```typescript
 type Node<N extends NodeType> = Readonly<{
   id: NodeId<N>;     // Branded ID type
-  kind: N["name"];   // Node kind name
+  kind: N["kind"];   // Node kind name
   meta: {
     version: number;                 // Monotonic version counter
     validFrom: string | undefined;   // Temporal validity start (ISO string)
@@ -85,7 +85,7 @@ Type-safe reference to a node of a specific type. Used for edge collection
 methods to enforce that endpoints match the allowed node types.
 
 ```typescript
-type TypedNodeRef<N extends NodeType> = Node<N> | Readonly<{ kind: N["name"]; id: string }>;
+type TypedNodeRef<N extends NodeType> = Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
 ```
 
 Accepts either:
@@ -100,7 +100,7 @@ The node type available in `select()` context. Properties are flattened (not nes
 ```typescript
 type SelectableNode<N extends NodeType> = Readonly<{
   id: string;
-  kind: N["name"];
+  kind: N["kind"];
   meta: {
     version: number;
     validFrom: string | undefined;
@@ -133,7 +133,7 @@ The full edge type returned from store operations.
 ```typescript
 type Edge<E extends EdgeType> = Readonly<{
   id: string;
-  kind: E["name"];
+  kind: E["kind"];
   fromKind: string;
   fromId: string;
   toKind: string;
@@ -172,7 +172,7 @@ The edge type available in `select()` context. Properties are flattened.
 ```typescript
 type SelectableEdge<E extends EdgeType> = Readonly<{
   id: string;
-  kind: E["name"];
+  kind: E["kind"];
   fromId: string;
   toId: string;
   meta: {
@@ -264,11 +264,11 @@ Configuration for variable-length (recursive) traversals.
 
 ```typescript
 type VariableLengthSpec = Readonly<{
-  minDepth: number;      // Minimum hops (default: 1)
-  maxDepth: number;      // Maximum hops (-1 = unlimited)
-  collectPath: boolean;  // Include path array in results
-  pathAlias?: string;    // Column alias for path
-  depthAlias?: string;   // Column alias for depth
+  minDepth: number;                   // Minimum hops (default: 1)
+  maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  cyclePolicy: "prevent" | "allow";   // Cycle handling mode
+  pathAlias?: string;                 // Column alias for projected path
+  depthAlias?: string;                // Column alias for projected depth
 }>;
 ```
 
@@ -331,35 +331,11 @@ function generateId(): string;
 const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 ```
 
-### `encodeDate(date)`
-
-Encodes a Date to ISO string format.
-
-```typescript
-import { encodeDate } from "@nicia-ai/typegraph";
-
-function encodeDate(date: Date): string;
-
-const iso = encodeDate(new Date()); // "2024-01-15T10:30:00.000Z"
-```
-
-### `decodeDate(str)`
-
-Decodes an ISO string to Date.
-
-```typescript
-import { decodeDate } from "@nicia-ai/typegraph";
-
-function decodeDate(str: string): Date;
-
-const date = decodeDate("2024-01-15T10:30:00.000Z");
-```
-
 ## Constants
 
 ### `MAX_RECURSIVE_DEPTH`
 
-Maximum depth for recursive traversals (100).
+Maximum depth for unbounded recursive traversals (100).
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
@@ -367,4 +343,17 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 100
 ```
 
-Recursive traversals are capped at this depth even when no `maxHops()` is specified.
+Recursive traversals are capped at this depth when no `maxHops` is specified in
+the `recursive()` options object. Explicit `maxHops` values are validated against
+`MAX_EXPLICIT_RECURSIVE_DEPTH` (1000). Cycle prevention is enabled by default.
+To allow revisits for maximum performance, use `cyclePolicy: "allow"`.
+
+### `MAX_EXPLICIT_RECURSIVE_DEPTH`
+
+Maximum allowed value for the `maxHops` option in recursive traversals (1000).
+
+```typescript
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+
+// MAX_EXPLICIT_RECURSIVE_DEPTH = 1000
+```

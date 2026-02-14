@@ -15,7 +15,6 @@ import type {
   EdgeAliasMap,
   PaginatedResult,
   PaginateOptions,
-  QueryBuilderState,
   SelectContext,
   StreamOptions,
 } from "../builder/types";
@@ -25,17 +24,6 @@ import {
   decodeCursor,
   validateCursorColumns,
 } from "../cursor";
-
-/**
- * Validates pagination parameters.
- */
-export function validatePaginationParams(state: QueryBuilderState): void {
-  if (state.orderBy.length === 0) {
-    throw new Error(
-      "Cursor pagination requires ORDER BY. Add .orderBy() before .paginate()",
-    );
-  }
-}
 
 /**
  * Parses pagination options into internal format.

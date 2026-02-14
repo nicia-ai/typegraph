@@ -10,7 +10,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  buildKindRegistry,
   count,
   createQueryBuilder,
   createStore,
@@ -19,6 +18,7 @@ import {
   defineNode,
   sum,
 } from "../../src";
+import { buildKindRegistry } from "../../src/registry";
 import { createTestBackend } from "../test-utils";
 import { sortDirectionArb, unicodeStringArb } from "./arbitraries";
 
@@ -349,7 +349,7 @@ describe("Large Dataset Execution", () => {
           const countResult = await store
             .query()
             .from("TestNode", "n")
-            .selectAggregate({
+            .aggregate({
               total: count("n"),
             })
             .execute();
@@ -361,7 +361,7 @@ describe("Large Dataset Execution", () => {
           const sumResult = await store
             .query()
             .from("TestNode", "n")
-            .selectAggregate({
+            .aggregate({
               total: sum("n", "value"),
             })
             .execute();

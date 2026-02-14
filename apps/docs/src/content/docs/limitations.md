@@ -41,8 +41,14 @@ if (backend.capabilities.transactions) {
 
 ## Recursive Traversal Depth
 
-Variable-length traversals have a maximum depth of 100 hops, even when no
-`maxHops()` is specified. This prevents runaway queries on deeply connected graphs.
+Variable-length traversals use two caps:
+
+1. Unbounded traversals (no `maxHops` option) are capped at 100 hops.
+2. Explicit `maxHops` values are validated up to 1000 hops (`maxHops: >1000` throws).
+3. Cycle prevention is on by default. To skip cycle checks for speed, opt into
+   `cyclePolicy: "allow"` (which may revisit nodes across hops).
+
+This prevents runaway queries while still supporting deep, intentionally bounded traversals.
 
 ```typescript
 // Implicitly limited to 100 hops
@@ -53,17 +59,24 @@ store
   .recursive()
   .to("Person", "manager");
 
-// Explicit limits are capped at 100
+// Explicit limits up to 1000 are honored
 store
   .query()
   .from("Person", "p")
   .traverse("reportsTo", "e")
-  .recursive()
-  .maxHops(200) // Capped to 100
+  .recursive({ maxHops: 200 }) // honored
+  .to("Person", "manager");
+
+// Explicit limits above 1000 throw
+store
+  .query()
+  .from("Person", "p")
+  .traverse("reportsTo", "e")
+  .recursive({ maxHops: 2000 }) // throws
   .to("Person", "manager");
 ```
 
-The limit is defined as `MAX_RECURSIVE_DEPTH`:
+The unbounded-traversal limit is defined as `MAX_RECURSIVE_DEPTH`:
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
@@ -178,7 +191,7 @@ const results = await store
 
 ## Bulk Operation Limits
 
-Bulk operations (`bulkCreate`, `bulkUpsert`, `bulkDelete`) have practical limits based on your database:
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`, `bulkDelete`) have practical limits based on your database:
 
 | Database | Recommended Batch Size |
 |----------|----------------------|

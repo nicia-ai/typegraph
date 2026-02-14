@@ -23,7 +23,6 @@ export {
   getStreamBatchSize,
   parsePaginateOptions,
   validateCursor,
-  validatePaginationParams,
 } from "./pagination";
 
 // Field tracking for smart select optimization

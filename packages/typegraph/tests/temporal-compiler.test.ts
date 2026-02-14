@@ -50,6 +50,13 @@ describe("compileTemporalFilter", () => {
       expect(sql).toContain("e.valid_from");
       expect(sql).toContain("e.valid_to");
     });
+
+    it("uses execution-time timestamp expression", () => {
+      const sql = getSqlString({ mode: "current" });
+
+      expect(sql).toContain("CURRENT_TIMESTAMP");
+      expect(sql).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    });
   });
 
   describe("asOf mode", () => {

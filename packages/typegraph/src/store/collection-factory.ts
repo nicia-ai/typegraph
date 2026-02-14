@@ -6,9 +6,12 @@
  */
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import { type TemporalMode } from "../core/types";
 import { KindNotFoundError } from "../errors";
+import { type QueryBuilder } from "../query/builder";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
+import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -21,45 +24,29 @@ import {
 } from "./types";
 
 /**
- * Row shape from database queries.
- */
-type NodeRow = Readonly<{
-  kind: string;
-  id: string;
-  props: string;
-  version: number;
-  valid_from: string | undefined;
-  valid_to: string | undefined;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | undefined;
-}>;
-
-type EdgeRow = Readonly<{
-  id: string;
-  kind: string;
-  from_kind: string;
-  from_id: string;
-  to_kind: string;
-  to_id: string;
-  props: string;
-  valid_from: string | undefined;
-  valid_to: string | undefined;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | undefined;
-}>;
-
-/**
  * Operation functions passed to collections.
  */
 export type NodeOperations = Readonly<{
+  defaultTemporalMode: TemporalMode;
   rowToNode: (row: NodeRow) => Node;
   executeCreate: (
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>;
+  executeCreateBatch: (
+    inputs: readonly CreateNodeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Node[]>;
+  executeCreateNoReturnBatch: (
+    inputs: readonly CreateNodeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeUpdate: (
+    input: UpdateNodeInput,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{ clearDeleted?: boolean }>,
+  ) => Promise<Node>;
+  executeUpsertUpdate: (
     input: UpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
@@ -75,14 +62,24 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
 
 export type EdgeOperations = Readonly<{
+  defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
   executeCreate: (
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
+  executeCreateBatch: (
+    inputs: readonly CreateEdgeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Edge[]>;
+  executeCreateNoReturnBatch: (
+    inputs: readonly CreateEdgeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeUpdate: (
     input: {
       id: string;
@@ -90,6 +87,15 @@ export type EdgeOperations = Readonly<{
       validTo?: string;
     },
     backend: GraphBackend | TransactionBackend,
+  ) => Promise<Edge>;
+  executeUpsertUpdate: (
+    input: {
+      id: string;
+      props: Partial<Record<string, unknown>>;
+      validTo?: string;
+    },
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
   executeDelete: (
     id: string,
@@ -100,6 +106,7 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
 
 /**
@@ -117,6 +124,8 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
 ): {
   [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
 } {
+  const collectionCache = new Map<string, unknown>();
+
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific node types at compile time.
@@ -129,24 +138,20 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         if (!(kind in graph.nodes)) {
           throw new KindNotFoundError(kind, "node");
         }
-        return createNodeCollection(
+
+        const cached = collectionCache.get(kind);
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        const collection = createNodeCollection({
           graphId,
           kind,
-          registry,
           backend,
-          operations.rowToNode,
-          operations.executeCreate as Parameters<
-            typeof createNodeCollection
-          >[5],
-          operations.executeUpdate as Parameters<
-            typeof createNodeCollection
-          >[6],
-          operations.executeDelete,
-          operations.executeHardDelete,
-          operations.matchesTemporalMode as Parameters<
-            typeof createNodeCollection
-          >[9],
-        );
+          ...operations,
+        });
+        collectionCache.set(kind, collection);
+        return collection;
       },
     },
   );
@@ -165,6 +170,8 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   operations: EdgeOperations,
 ): { [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]> } {
+  const collectionCache = new Map<string, unknown>();
+
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific edge types at compile time.
@@ -177,22 +184,20 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         if (!(kind in graph.edges)) {
           throw new KindNotFoundError(kind, "edge");
         }
-        return createEdgeCollection(
+
+        const cached = collectionCache.get(kind);
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        const collection = createEdgeCollection({
           graphId,
           kind,
-          registry,
           backend,
-          operations.rowToEdge,
-          operations.executeCreate as Parameters<
-            typeof createEdgeCollection
-          >[5],
-          operations.executeUpdate,
-          operations.executeDelete,
-          operations.executeHardDelete,
-          operations.matchesTemporalMode as Parameters<
-            typeof createEdgeCollection
-          >[9],
-        );
+          ...operations,
+        });
+        collectionCache.set(kind, collection);
+        return collection;
       },
     },
   );

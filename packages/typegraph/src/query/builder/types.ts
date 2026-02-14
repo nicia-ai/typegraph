@@ -21,15 +21,20 @@ import {
   type GroupBySpec,
   type NodePredicate,
   type OrderSpec,
+  type ParameterRef,
   type PredicateExpression,
   type ProjectedField,
+  type RecursiveCyclePolicy,
   type Traversal,
   type TraversalDirection,
+  type TraversalExpansion,
 } from "../ast";
 import { type SqlDialect, type SqlSchema } from "../compiler/index";
 import { type JsonPointerInput } from "../json-pointer";
 import type { Predicate, SimilarToOptions } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+
+export type { TraversalExpansion } from "../ast";
 
 // ============================================================
 // Edge Target Type Helpers
@@ -53,8 +58,8 @@ export type ValidEdgeTargets<
 > =
   G["edges"][EK] extends EdgeRegistration ?
     Dir extends "out" ?
-      G["edges"][EK]["to"][number]["name"]
-    : G["edges"][EK]["from"][number]["name"]
+      G["edges"][EK]["to"][number]["kind"]
+    : G["edges"][EK]["from"][number]["kind"]
   : never;
 
 // ============================================================
@@ -62,13 +67,13 @@ export type ValidEdgeTargets<
 // ============================================================
 
 /**
- * A node alias with its associated kind.
+ * A node alias with its associated type.
  */
 export type NodeAlias<
   K extends NodeType = NodeType,
   Optional extends boolean = false,
 > = Readonly<{
-  kind: K;
+  type: K;
   alias: string;
   optional: Optional;
 }>;
@@ -79,13 +84,13 @@ export type NodeAlias<
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
 
 /**
- * An edge alias with its associated kind and optional flag.
+ * An edge alias with its associated type and optional flag.
  */
 export type EdgeAlias<
   E extends AnyEdgeType = EdgeType,
   Optional extends boolean = false,
 > = Readonly<{
-  kind: E;
+  type: E;
   alias: string;
   optional: Optional;
 }>;
@@ -96,6 +101,61 @@ export type EdgeAlias<
 export type EdgeAliasMap = Readonly<
   Record<string, EdgeAlias<EdgeType, boolean>>
 >;
+
+// ============================================================
+// Recursive Alias Types
+// ============================================================
+
+/**
+ * A recursive alias marker with its associated type (depth or path).
+ */
+export type RecursiveAlias<T extends "depth" | "path"> = Readonly<{ type: T }>;
+
+/**
+ * A map of recursive alias names to their types.
+ */
+export type RecursiveAliasMap = Readonly<
+  Record<string, RecursiveAlias<"depth" | "path">>
+>;
+
+/**
+ * Resolves a recursive alias marker to its runtime value type.
+ */
+export type RecursiveAliasValue<RA> =
+  RA extends RecursiveAlias<"depth"> ? number
+  : RA extends RecursiveAlias<"path"> ? readonly string[]
+  : never;
+
+/**
+ * Resolves the depth alias name from the recursive config.
+ * If a string is provided, uses it directly. If `true`, defaults to `${A}_depth`.
+ */
+type ResolveDepthAlias<DC, A extends string> =
+  DC extends string ? DC
+  : DC extends true ? `${A}_depth`
+  : never;
+
+/**
+ * Resolves the path alias name from the recursive config.
+ * If a string is provided, uses it directly. If `true`, defaults to `${A}_path`.
+ */
+type ResolvePathAlias<PC, A extends string> =
+  PC extends string ? PC
+  : PC extends true ? `${A}_path`
+  : never;
+
+/**
+ * Builds the recursive alias map from depth/path config and target node alias.
+ */
+/* eslint-disable @typescript-eslint/no-empty-object-type -- Empty when depth/path config is false */
+export type BuildRecursiveAliases<DC, PC, A extends string> = ([DC] extends (
+  [false]
+) ?
+  {}
+: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth">>) &
+  ([PC] extends [false] ? {}
+  : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path">>);
+/* eslint-enable @typescript-eslint/no-empty-object-type */
 
 /**
  * Type utility for compile-time alias collision detection.
@@ -145,31 +205,37 @@ export type BaseFieldAccessor = Readonly<{
 
 export type StringFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    contains: (pattern: string) => Predicate;
-    startsWith: (pattern: string) => Predicate;
-    endsWith: (pattern: string) => Predicate;
-    like: (pattern: string) => Predicate;
-    ilike: (pattern: string) => Predicate;
+    contains: (pattern: string | ParameterRef) => Predicate;
+    startsWith: (pattern: string | ParameterRef) => Predicate;
+    endsWith: (pattern: string | ParameterRef) => Predicate;
+    like: (pattern: string | ParameterRef) => Predicate;
+    ilike: (pattern: string | ParameterRef) => Predicate;
   }>;
 
 export type NumberFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: number) => Predicate;
-    gte: (value: number) => Predicate;
-    lt: (value: number) => Predicate;
-    lte: (value: number) => Predicate;
-    between: (lower: number, upper: number) => Predicate;
+    gt: (value: number | ParameterRef) => Predicate;
+    gte: (value: number | ParameterRef) => Predicate;
+    lt: (value: number | ParameterRef) => Predicate;
+    lte: (value: number | ParameterRef) => Predicate;
+    between: (
+      lower: number | ParameterRef,
+      upper: number | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type BooleanFieldAccessor = BaseFieldAccessor;
 
 export type DateFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: Date | string) => Predicate;
-    gte: (value: Date | string) => Predicate;
-    lt: (value: Date | string) => Predicate;
-    lte: (value: Date | string) => Predicate;
-    between: (lower: Date | string, upper: Date | string) => Predicate;
+    gt: (value: Date | string | ParameterRef) => Predicate;
+    gte: (value: Date | string | ParameterRef) => Predicate;
+    lt: (value: Date | string | ParameterRef) => Predicate;
+    lte: (value: Date | string | ParameterRef) => Predicate;
+    between: (
+      lower: Date | string | ParameterRef,
+      upper: Date | string | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type ArrayFieldAccessor<U> = BaseFieldAccessor &
@@ -284,7 +350,7 @@ export type SelectableNodeMeta = Readonly<{
  */
 export type SelectableNode<N extends NodeType> = Readonly<{
   id: string;
-  kind: N["name"];
+  kind: N["kind"];
   meta: SelectableNodeMeta;
 }> &
   Readonly<z.infer<N["schema"]>>;
@@ -309,7 +375,7 @@ export type SelectableEdgeMeta = Readonly<{
  */
 export type SelectableEdge<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: string;
-  kind: E["name"];
+  kind: E["kind"];
   fromId: string;
   toId: string;
   meta: SelectableEdgeMeta;
@@ -319,21 +385,27 @@ export type SelectableEdge<E extends AnyEdgeType = EdgeType> = Readonly<{
 /**
  * Selection context passed to select callback.
  *
- * Includes both node aliases and edge aliases. Edge aliases from optional
+ * Includes node aliases, edge aliases, and recursive metadata aliases
+ * (depth/path from variable-length traversals). Edge aliases from optional
  * traversals are nullable.
  */
 export type SelectContext<
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap = Record<string, never>,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RecursiveAliases extends RecursiveAliasMap = {},
 > = Readonly<{
   [A in keyof Aliases]: Aliases[A]["optional"] extends true ?
-    SelectableNode<Aliases[A]["kind"]> | undefined
-  : SelectableNode<Aliases[A]["kind"]>;
+    SelectableNode<Aliases[A]["type"]> | undefined
+  : SelectableNode<Aliases[A]["type"]>;
 }> &
   Readonly<{
     [EA in keyof EdgeAliases]: EdgeAliases[EA]["optional"] extends true ?
-      SelectableEdge<EdgeAliases[EA]["kind"]> | undefined
-    : SelectableEdge<EdgeAliases[EA]["kind"]>;
+      SelectableEdge<EdgeAliases[EA]["type"]> | undefined
+    : SelectableEdge<EdgeAliases[EA]["type"]>;
+  }> &
+  Readonly<{
+    [RA in keyof RecursiveAliases]: RecursiveAliasValue<RecursiveAliases[RA]>;
   }>;
 
 // ============================================================
@@ -380,6 +452,22 @@ export type StreamOptions = Readonly<{
   batchSize?: number;
 }>;
 
+/**
+ * Options for recursive traversals.
+ */
+export type RecursiveTraversalOptions = Readonly<{
+  /** Minimum number of hops before including results (default: 1) */
+  minHops?: number;
+  /** Maximum number of hops (-1 means unlimited) */
+  maxHops?: number;
+  /** Cycle handling policy (default: "prevent") */
+  cyclePolicy?: RecursiveCyclePolicy;
+  /** Include path in output. Pass a string to customize alias. */
+  path?: boolean | string;
+  /** Include depth in output. Pass a string to customize alias. */
+  depth?: boolean | string;
+}>;
+
 // ============================================================
 // Configuration Types
 // ============================================================
@@ -391,6 +479,8 @@ export type QueryBuilderConfig = Readonly<{
   graphId: string;
   registry: KindRegistry;
   schemaIntrospector: SchemaIntrospector;
+  /** Default traversal ontology expansion mode. */
+  defaultTraversalExpansion: TraversalExpansion;
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names. */
@@ -428,4 +518,6 @@ export type CreateQueryBuilderOptions = Readonly<{
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
+  /** Default traversal ontology expansion mode (default: "inverse"). */
+  defaultTraversalExpansion?: TraversalExpansion;
 }>;

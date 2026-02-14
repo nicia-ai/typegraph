@@ -34,6 +34,18 @@ export type LiteralValue = Readonly<{
 }>;
 
 /**
+ * A parameter reference for prepared queries.
+ *
+ * Used in place of a literal value to create parameterized queries
+ * that can be executed multiple times with different bindings.
+ */
+export type ParameterRef = Readonly<{
+  __type: "parameter";
+  name: string;
+  valueType?: ValueType | undefined;
+}>;
+
+/**
  * Supported value types for predicates.
  */
 export type ValueType =
@@ -76,7 +88,7 @@ export type ComparisonPredicate = Readonly<{
   __type: "comparison";
   op: ComparisonOp;
   left: FieldRef;
-  right: LiteralValue | LiteralValue[];
+  right: LiteralValue | LiteralValue[] | ParameterRef;
 }>;
 
 /**
@@ -86,7 +98,7 @@ export type StringPredicate = Readonly<{
   __type: "string_op";
   op: StringOp;
   field: FieldRef;
-  pattern: string;
+  pattern: string | ParameterRef;
 }>;
 
 /**
@@ -104,8 +116,8 @@ export type NullPredicate = Readonly<{
 export type BetweenPredicate = Readonly<{
   __type: "between";
   field: FieldRef;
-  lower: LiteralValue;
-  upper: LiteralValue;
+  lower: LiteralValue | ParameterRef;
+  upper: LiteralValue | ParameterRef;
 }>;
 
 // ============================================================
@@ -299,6 +311,21 @@ export type QueryStart = Readonly<{
 export type TraversalDirection = "out" | "in";
 
 /**
+ * Traversal ontology expansion behavior.
+ *
+ * - `"none"` — follow only the exact edge kind specified
+ * - `"implying"` — also follow edge kinds that imply the specified kind (subClassOf)
+ * - `"inverse"` — also follow the ontological inverse edge kind (inverseOf)
+ * - `"all"` — follow both implying and inverse expansions
+ */
+export type TraversalExpansion = "none" | "implying" | "inverse" | "all";
+
+/**
+ * Cycle handling policy for recursive traversals.
+ */
+export type RecursiveCyclePolicy = "prevent" | "allow";
+
+/**
  * Variable-length traversal specification for recursive graph traversals.
  */
 export type VariableLengthSpec = Readonly<{
@@ -306,11 +333,16 @@ export type VariableLengthSpec = Readonly<{
   minDepth: number;
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
-  /** Include the traversal path as an array in results */
-  collectPath: boolean;
-  /** Column alias for path array (default: "{nodeAlias}_path") */
+  /**
+   * Cycle handling mode.
+   *
+   * - "prevent": Track visited nodes per path and reject revisits
+   * - "allow": Skip cycle checks (faster, may revisit nodes)
+   */
+  cyclePolicy: RecursiveCyclePolicy;
+  /** Optional column alias for projected traversal path array */
   pathAlias?: string;
-  /** Column alias for depth (default: "{nodeAlias}_depth") */
+  /** Optional column alias for projected traversal depth */
   depthAlias?: string;
 }>;
 
@@ -319,7 +351,13 @@ export type VariableLengthSpec = Readonly<{
  */
 export type Traversal = Readonly<{
   edgeAlias: string;
-  edgeKinds: readonly string[]; // Expanded via ontology if includeImplyingEdges
+  edgeKinds: readonly string[]; // Expanded via ontology based on traversal expand mode
+  /**
+   * Edge kinds traversed in the opposite direction.
+   *
+   * Populated when query options request inverse/symmetric expansion.
+   */
+  inverseEdgeKinds?: readonly string[];
   direction: TraversalDirection;
   nodeAlias: string;
   nodeKinds: readonly string[];
@@ -330,6 +368,20 @@ export type Traversal = Readonly<{
   /** Variable-length traversal configuration (for recursive CTEs) */
   variableLength?: VariableLengthSpec;
 }>;
+
+/**
+ * Returns the full set of edge kind names for a traversal, merging
+ * forward and inverse kinds with deduplication.
+ */
+export function mergeEdgeKinds(traversal: Traversal): readonly string[] {
+  const inverse = traversal.inverseEdgeKinds;
+  if (inverse === undefined || inverse.length === 0) return traversal.edgeKinds;
+
+  return [
+    ...traversal.edgeKinds,
+    ...inverse.filter((kind) => !traversal.edgeKinds.includes(kind)),
+  ];
+}
 
 // ============================================================
 // Aggregations

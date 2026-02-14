@@ -491,7 +491,7 @@ try {
 
 ## Contextual Validation Utilities
 
-For library authors or advanced use cases, TypeGraph exports validation utilities that provide rich context:
+For library authors or advanced use cases, validation utilities are available from the schema sub-export:
 
 ```typescript
 import {
@@ -499,7 +499,7 @@ import {
   validateEdgeProps,
   wrapZodError,
   createValidationError,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/schema";
 
 // Validate node properties with full context
 const validated = validateNodeProps(PersonSchema, inputData, {

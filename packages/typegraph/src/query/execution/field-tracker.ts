@@ -7,7 +7,7 @@
  */
 
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
-import { type SelectiveField, type ValueType } from "../ast";
+import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
 import {
   type FieldTypeInfo,
@@ -87,6 +87,8 @@ export function createTrackingContext(
   };
 
   for (const traversal of state.traversals) {
+    const edgeKindNames = mergeEdgeKinds(traversal);
+
     const optionalAbsent =
       options.optionalTraversalAliases === "absent" && traversal.optional;
 
@@ -104,11 +106,23 @@ export function createTrackingContext(
       optionalAbsent ? undefined : (
         createEdgeTrackingProxy(
           traversal.edgeAlias,
-          traversal.edgeKinds,
+          edgeKindNames,
           tracker,
           options,
         )
       );
+
+    // Provide placeholder values for recursive depth/path so the
+    // select callback can access them without crashing during tracking.
+    const vl = traversal.variableLength;
+    if (vl !== undefined) {
+      if (vl.depthAlias !== undefined) {
+        context[vl.depthAlias] = options.mode === "falsy" ? 0 : 1;
+      }
+      if (vl.pathAlias !== undefined) {
+        context[vl.pathAlias] = options.mode === "falsy" ? [] : ["placeholder"];
+      }
+    }
   }
 
   return context;
@@ -282,13 +296,15 @@ function buildAliasKindMap(
   ]);
 
   for (const traversal of state.traversals) {
+    const edgeKindNames = mergeEdgeKinds(traversal);
+
     map.set(traversal.nodeAlias, {
       kind: "node",
       kindNames: traversal.nodeKinds,
     });
     map.set(traversal.edgeAlias, {
       kind: "edge",
-      kindNames: traversal.edgeKinds,
+      kindNames: edgeKindNames,
     });
   }
 

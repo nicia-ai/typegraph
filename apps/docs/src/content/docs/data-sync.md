@@ -37,6 +37,9 @@ await store.nodes.Document.upsert(id, props);
 // Create many nodes at once
 await store.nodes.Document.bulkCreate(items);
 
+// Insert many nodes without returning results (dedicated fast path)
+await store.nodes.Document.bulkInsert(items);
+
 // Create or update many nodes at once
 await store.nodes.Document.bulkUpsert(items);
 
@@ -67,7 +70,8 @@ const doc2 = await store.nodes.Document.upsert("doc_123", {
 
 ### bulkCreate
 
-Efficiently creates multiple nodes in a single operation:
+Efficiently creates multiple nodes in a single operation. Uses a single
+multi-row INSERT with RETURNING when the backend supports it:
 
 ```typescript
 const documents = await store.nodes.Document.bulkCreate([
@@ -76,6 +80,29 @@ const documents = await store.nodes.Document.bulkCreate([
   { props: { title: "Doc 3", content: "..." }, id: "custom_id" },
 ]);
 ```
+
+If you only need the side effect (writes) and not the created node payloads:
+
+```typescript
+await store.nodes.Document.bulkCreate(items, { returnResults: false });
+// Returns []
+```
+
+### bulkInsert
+
+Inserts multiple nodes without returning results. This is the dedicated fast path
+for bulk ingestion — automatically wrapped in a transaction:
+
+```typescript
+await store.nodes.Document.bulkInsert([
+  { props: { title: "Doc 1", content: "..." } },
+  { props: { title: "Doc 2", content: "..." } },
+  { props: { title: "Doc 3", content: "..." }, id: "custom_id" },
+]);
+```
+
+Prefer `bulkInsert` over `bulkCreate(items, { returnResults: false })` when you
+don't need results — the API is clearer and always transactional.
 
 ### bulkUpsert
 
@@ -113,8 +140,15 @@ await store.nodes.Document.bulkDelete(deletedIds);
 Edges also support bulk operations:
 
 ```typescript
-// Create many edges at once
-await store.edges.relatedTo.bulkCreate([
+// Create many edges at once (returns created edges)
+const edges = await store.edges.relatedTo.bulkCreate([
+  { from: doc1, to: doc2, props: { confidence: 0.9 } },
+  { from: doc1, to: doc3, props: { confidence: 0.7 } },
+  { from: doc2, to: doc3, props: { confidence: 0.8 } },
+]);
+
+// Insert many edges without returning results (fast path)
+await store.edges.relatedTo.bulkInsert([
   { from: doc1, to: doc2, props: { confidence: 0.9 } },
   { from: doc1, to: doc3, props: { confidence: 0.7 } },
   { from: doc2, to: doc3, props: { confidence: 0.8 } },
@@ -130,7 +164,7 @@ Sync individual records when they're accessed or modified. Best for low-volume
 scenarios where you want real-time consistency.
 
 ```typescript
-import { Store } from "@nicia-ai/typegraph";
+import { type Store } from "@nicia-ai/typegraph";
 import { db, documents } from "./drizzle-schema";
 
 interface AppDocument {
@@ -542,11 +576,11 @@ async function syncUsers(users: ExternalUser[]) {
   // Then create edges for users with managers
   const usersWithManagers = users.filter((u) => u.managerId);
 
-  await store.edges.manages.bulkCreate(
+  await store.edges.manages.bulkInsert(
     usersWithManagers.map((u) => ({
       from: { kind: "User" as const, id: u.managerId! },
       to: { kind: "User" as const, id: u.id },
-    }))
+    })),
   );
 }
 ```

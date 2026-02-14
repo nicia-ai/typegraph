@@ -37,7 +37,7 @@ export type ChangeSeverity =
  */
 export type NodeChange = Readonly<{
   type: ChangeType;
-  name: string;
+  kind: string;
   severity: ChangeSeverity;
   details: string;
   before?: SerializedNodeDef | undefined;
@@ -53,7 +53,7 @@ export type NodeChange = Readonly<{
  */
 export type EdgeChange = Readonly<{
   type: ChangeType;
-  name: string;
+  kind: string;
   severity: ChangeSeverity;
   details: string;
   before?: SerializedEdgeDef | undefined;
@@ -98,6 +98,9 @@ export type SchemaDiff = Readonly<{
   /** Whether any breaking changes exist */
   hasBreakingChanges: boolean;
 
+  /** Whether the change is backwards compatible (no breaking changes) */
+  isBackwardsCompatible: boolean;
+
   /** Whether any changes exist at all */
   hasChanges: boolean;
 
@@ -139,6 +142,7 @@ export function computeSchemaDiff(
     edges: edgeChanges,
     ontology: ontologyChanges,
     hasBreakingChanges,
+    isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
     summary,
   };
@@ -164,7 +168,7 @@ function diffNodes(
     if (!afterNames.has(name)) {
       changes.push({
         type: "removed",
-        name,
+        kind: name,
         severity: "breaking",
         details: `Node kind "${name}" was removed`,
         before: before[name],
@@ -177,7 +181,7 @@ function diffNodes(
     if (!beforeNames.has(name)) {
       changes.push({
         type: "added",
-        name,
+        kind: name,
         severity: "safe",
         details: `Node kind "${name}" was added`,
         after: after[name],
@@ -237,7 +241,7 @@ function diffNodeDef(
 
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity,
       details,
       before,
@@ -249,7 +253,7 @@ function diffNodeDef(
   if (before.onDelete !== after.onDelete) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "warning",
       details: `onDelete changed from "${before.onDelete}" to "${after.onDelete}" for "${name}"`,
       before,
@@ -263,7 +267,7 @@ function diffNodeDef(
   if (constraintsBefore !== constraintsAfter) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "warning",
       details: `Unique constraints changed for "${name}"`,
       before,
@@ -327,7 +331,7 @@ function diffEdges(
     if (!afterNames.has(name)) {
       changes.push({
         type: "removed",
-        name,
+        kind: name,
         severity: "breaking",
         details: `Edge kind "${name}" was removed`,
         before: before[name],
@@ -340,7 +344,7 @@ function diffEdges(
     if (!beforeNames.has(name)) {
       changes.push({
         type: "added",
-        name,
+        kind: name,
         severity: "safe",
         details: `Edge kind "${name}" was added`,
         after: after[name],
@@ -377,7 +381,7 @@ function diffEdgeDef(
   if (fromBefore !== fromAfter) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "warning",
       details: `fromKinds changed for "${name}"`,
       before,
@@ -390,7 +394,7 @@ function diffEdgeDef(
   if (toBefore !== toAfter) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "warning",
       details: `toKinds changed for "${name}"`,
       before,
@@ -402,7 +406,7 @@ function diffEdgeDef(
   if (before.cardinality !== after.cardinality) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "warning",
       details: `Cardinality changed from "${before.cardinality}" to "${after.cardinality}" for "${name}"`,
       before,
@@ -416,7 +420,7 @@ function diffEdgeDef(
   if (propsBefore !== propsAfter) {
     changes.push({
       type: "modified",
-      name,
+      kind: name,
       severity: "safe",
       details: `Properties changed for "${name}"`,
       before,
@@ -581,18 +585,18 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
 
   for (const change of diff.nodes) {
     if (change.type === "removed") {
-      actions.push(`DELETE data for removed node kind "${change.name}"`);
+      actions.push(`DELETE data for removed node kind "${change.kind}"`);
     }
     if (change.severity === "breaking" && change.type === "modified") {
       actions.push(
-        `MIGRATE data for node kind "${change.name}": ${change.details}`,
+        `MIGRATE data for node kind "${change.kind}": ${change.details}`,
       );
     }
   }
 
   for (const change of diff.edges) {
     if (change.type === "removed") {
-      actions.push(`DELETE data for removed edge kind "${change.name}"`);
+      actions.push(`DELETE data for removed edge kind "${change.kind}"`);
     }
   }
 

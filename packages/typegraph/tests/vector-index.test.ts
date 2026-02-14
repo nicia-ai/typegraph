@@ -1,14 +1,54 @@
 /**
  * Unit tests for vector index management.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  createPostgresVectorIndex,
   createSqliteVectorIndex,
   dropSqliteVectorIndex,
   generateVectorIndexName,
   type VectorIndexOptions,
 } from "../src/backend/drizzle/vector-index";
+
+function flattenSqlChunk(chunk: unknown): string {
+  if (typeof chunk === "string") {
+    return chunk;
+  }
+
+  if (typeof chunk === "object" && chunk !== null) {
+    if (
+      "value" in chunk &&
+      Array.isArray((chunk as { value: unknown }).value)
+    ) {
+      return (chunk as { value: readonly unknown[] }).value
+        .map((part) => flattenSqlChunk(part))
+        .join("");
+    }
+
+    if (
+      "queryChunks" in chunk &&
+      Array.isArray((chunk as { queryChunks: unknown }).queryChunks)
+    ) {
+      return (chunk as { queryChunks: readonly unknown[] }).queryChunks
+        .map((part) => flattenSqlChunk(part))
+        .join("");
+    }
+  }
+
+  return String(chunk);
+}
+
+function flattenSql(value: unknown): string {
+  if (value && typeof value === "object" && "getSQL" in value) {
+    const maybe = value as { getSQL?: () => unknown };
+    if (typeof maybe.getSQL === "function") {
+      return flattenSqlChunk(maybe.getSQL());
+    }
+  }
+
+  return flattenSqlChunk(value);
+}
 
 // ============================================================
 // generateVectorIndexName
@@ -150,6 +190,39 @@ describe("createSqliteVectorIndex", () => {
     });
 
     expect(result.success).toBe(true);
+  });
+});
+
+describe("createPostgresVectorIndex", () => {
+  it("uses the configured embeddings table name", async () => {
+    const execute = vi.fn((_query: unknown) =>
+      Promise.resolve({ rows: [] as const }),
+    );
+
+    const db = {
+      execute,
+    } as unknown as Parameters<typeof createPostgresVectorIndex>[0];
+
+    const result = await createPostgresVectorIndex(db, {
+      graphId: "test_graph",
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      dimensions: 1536,
+      embeddingsTableName: "custom_embeddings",
+    });
+
+    expect(result.success).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    const firstCall = execute.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sqlInput = firstCall?.[0];
+    if (sqlInput === undefined) {
+      throw new Error("Expected SQL input to be captured");
+    }
+    const sqlText = flattenSql(sqlInput);
+    expect(sqlText).toContain('ON "custom_embeddings"');
+    expect(sqlText).not.toContain("ON typegraph_node_embeddings");
   });
 });
 

@@ -8,8 +8,8 @@ import type { z } from "zod";
 
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import {
-  getEdgeTypeNames,
-  getNodeTypeNames,
+  getEdgeKinds,
+  getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
@@ -150,7 +150,7 @@ function buildNodeSchemaMap(
 ): ReadonlyMap<string, NodeSchemaEntry> {
   const map = new Map<string, NodeSchemaEntry>();
 
-  for (const kindName of getNodeTypeNames(graph)) {
+  for (const kindName of getNodeKinds(graph)) {
     const registration = graph.nodes[kindName] as NodeRegistration;
     map.set(kindName, {
       registration,
@@ -166,13 +166,13 @@ function buildEdgeSchemaMap(
 ): ReadonlyMap<string, EdgeSchemaEntry> {
   const map = new Map<string, EdgeSchemaEntry>();
 
-  for (const kindName of getEdgeTypeNames(graph)) {
+  for (const kindName of getEdgeKinds(graph)) {
     const registration = graph.edges[kindName] as EdgeRegistration;
     map.set(kindName, {
       registration,
       schema: registration.type.schema,
-      fromKinds: new Set(registration.from.map((node) => node.name)),
-      toKinds: new Set(registration.to.map((node) => node.name)),
+      fromKinds: new Set(registration.from.map((node) => node.kind)),
+      toKinds: new Set(registration.to.map((node) => node.kind)),
     });
   }
 

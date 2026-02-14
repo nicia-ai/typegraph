@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   CardinalityError,
+  CompilerInvariantError,
   ConfigurationError,
+  DatabaseOperationError,
   DisjointError,
   EdgeNotFoundError,
   EndpointError,
@@ -322,6 +324,73 @@ describe("UnsupportedPredicateError", () => {
   });
 });
 
+describe("DatabaseOperationError", () => {
+  it("creates error with DATABASE_OPERATION_ERROR code", () => {
+    const error = new DatabaseOperationError("Insert failed", {
+      operation: "insert",
+      entity: "node",
+    });
+    expect(error.code).toBe("DATABASE_OPERATION_ERROR");
+    expect(error.name).toBe("DatabaseOperationError");
+    expect(error.message).toBe("Insert failed");
+    expect(error.category).toBe("system");
+  });
+
+  it("stores operation and entity in details", () => {
+    const error = new DatabaseOperationError("Delete failed", {
+      operation: "delete",
+      entity: "edge",
+    });
+    expect(error.details).toEqual({ operation: "delete", entity: "edge" });
+  });
+
+  it("supports error cause chain", () => {
+    const cause = new Error("connection refused");
+    const error = new DatabaseOperationError(
+      "Insert failed",
+      { operation: "insert", entity: "node" },
+      { cause },
+    );
+    expect(error.cause).toBe(cause);
+  });
+});
+
+describe("CompilerInvariantError", () => {
+  it("creates error with COMPILER_INVARIANT_ERROR code", () => {
+    const error = new CompilerInvariantError("Unexpected empty plan");
+    expect(error.code).toBe("COMPILER_INVARIANT_ERROR");
+    expect(error.name).toBe("CompilerInvariantError");
+    expect(error.message).toBe("Unexpected empty plan");
+    expect(error.category).toBe("system");
+  });
+
+  it("stores arbitrary details", () => {
+    const error = new CompilerInvariantError("Missing state", {
+      phase: "standard-pass-pipeline",
+      component: "emitter",
+    });
+    expect(error.details).toEqual({
+      phase: "standard-pass-pipeline",
+      component: "emitter",
+    });
+  });
+
+  it("defaults to empty details", () => {
+    const error = new CompilerInvariantError("invariant violated");
+    expect(error.details).toEqual({});
+  });
+
+  it("supports error cause chain", () => {
+    const cause = new Error("root cause");
+    const error = new CompilerInvariantError(
+      "invariant violated",
+      { phase: "lowering" },
+      { cause },
+    );
+    expect(error.cause).toBe(cause);
+  });
+});
+
 describe("ConfigurationError", () => {
   it("creates error with CONFIGURATION_ERROR code", () => {
     const error = new ConfigurationError("Invalid config");
@@ -503,6 +572,11 @@ describe("error inheritance chain", () => {
         toVersion: 2,
       }),
       new UnsupportedPredicateError("test"),
+      new DatabaseOperationError("test", {
+        operation: "insert",
+        entity: "node",
+      }),
+      new CompilerInvariantError("test"),
       new ConfigurationError("test"),
       new KindNotFoundError("K", "node"),
       new UniquenessError({

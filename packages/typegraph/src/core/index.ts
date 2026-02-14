@@ -31,14 +31,14 @@ export {
   type AllEdgeTypes,
   type AllNodeTypes,
   defineGraph,
-  type EdgeTypeNames,
+  type EdgeKinds,
+  getEdgeKinds,
   type GetEdgeType,
-  getEdgeTypeNames,
+  getNodeKinds,
   type GetNodeType,
-  getNodeTypeNames,
   type GraphDef,
   isGraphDef,
-  type NodeTypeNames,
+  type NodeKinds,
 } from "./define-graph";
 
 // Core types

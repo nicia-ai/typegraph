@@ -465,7 +465,7 @@ function getKindName(kindOrIri: NodeType | AnyEdgeType | string): string {
   if (typeof kindOrIri === "string") {
     return kindOrIri;
   }
-  return kindOrIri.name;
+  return kindOrIri.kind;
 }
 
 /**

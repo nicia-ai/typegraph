@@ -9,11 +9,12 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  buildKindRegistry,
   createQueryBuilder,
   defineGraph,
   defineNode,
+  param as parameter,
 } from "../src";
+import { buildKindRegistry } from "../src/registry";
 
 /**
  * Helper to extract SQL string from a Drizzle SQL object.
@@ -381,6 +382,22 @@ describe("UnionableQuery.compile", () => {
     expect(sqlString).toContain("UNION");
   });
 
+  it("reuses cached compiled SQL for repeated compile calls", () => {
+    const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("User", "u")
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const q2 = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("User", "u")
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const unionQuery = q1.union(q2);
+    const firstCompile = unionQuery.compile();
+    const secondCompile = unionQuery.compile();
+
+    expect(secondCompile).toBe(firstCompile);
+  });
+
   it("compiles UNION ALL to SQL", () => {
     const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("User", "u")
@@ -620,5 +637,34 @@ describe("UnionableQuery complex scenarios", () => {
 
     expect(ast.limit).toBe(10);
     expect(ast.offset).toBe(20);
+  });
+
+  it("rejects execute() when any leaf query contains param() references", async () => {
+    const mockBackend = {
+      dialect: "sqlite" as const,
+      execute: vi.fn(),
+    };
+
+    const q1 = createQueryBuilder<typeof graph>(graph.id, registry, {
+      backend: mockBackend as never,
+      dialect: "sqlite",
+    })
+      .from("User", "u")
+      .whereNode("u", (u) => u.name.eq(parameter("name")))
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const q2 = createQueryBuilder<typeof graph>(graph.id, registry, {
+      backend: mockBackend as never,
+      dialect: "sqlite",
+    })
+      .from("User", "u")
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const combined = q1.union(q2);
+
+    await expect(combined.execute()).rejects.toThrow(
+      "Query contains param() references",
+    );
+    expect(mockBackend.execute).not.toHaveBeenCalled();
   });
 });

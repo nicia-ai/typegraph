@@ -581,6 +581,32 @@ export class ConfigurationError extends TypeGraphError {
 }
 
 // ============================================================
+// Database Errors (category: "system")
+// ============================================================
+
+/**
+ * Thrown when a database operation fails unexpectedly.
+ *
+ * This indicates a system-level failure in the database backend,
+ * not a user-recoverable error.
+ */
+export class DatabaseOperationError extends TypeGraphError {
+  constructor(
+    message: string,
+    details: Readonly<{ operation: string; entity: string }>,
+    options?: { cause?: unknown },
+  ) {
+    super(message, "DATABASE_OPERATION_ERROR", {
+      details,
+      category: "system",
+      suggestion: `This is a system-level database error. Check the database connection and retry the operation. If the problem persists, investigate the underlying cause.`,
+      cause: options?.cause,
+    });
+    this.name = "DatabaseOperationError";
+  }
+}
+
+// ============================================================
 // Query Errors (category: "system")
 // ============================================================
 
@@ -602,6 +628,32 @@ export class UnsupportedPredicateError extends TypeGraphError {
       cause: options?.cause,
     });
     this.name = "UnsupportedPredicateError";
+  }
+}
+
+// ============================================================
+// Compiler Errors (category: "system")
+// ============================================================
+
+/**
+ * Thrown when a compiler invariant is violated.
+ *
+ * This indicates a bug in the query compiler — the compiler reached
+ * a state that should be unreachable. These errors are not user-recoverable.
+ */
+export class CompilerInvariantError extends TypeGraphError {
+  constructor(
+    message: string,
+    details?: Readonly<Record<string, unknown>>,
+    options?: { cause?: unknown },
+  ) {
+    super(message, "COMPILER_INVARIANT_ERROR", {
+      details: details ?? {},
+      category: "system",
+      suggestion: `This is an internal compiler error. Please report it as a bug with the query that triggered it.`,
+      cause: options?.cause,
+    });
+    this.name = "CompilerInvariantError";
   }
 }
 

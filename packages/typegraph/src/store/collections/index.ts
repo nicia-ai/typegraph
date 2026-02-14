@@ -1,5 +1,11 @@
 /**
  * Collection exports.
  */
-export { createEdgeCollection } from "./edge-collection";
-export { createNodeCollection } from "./node-collection";
+export {
+  createEdgeCollection,
+  type EdgeCollectionConfig,
+} from "./edge-collection";
+export {
+  createNodeCollection,
+  type NodeCollectionConfig,
+} from "./node-collection";

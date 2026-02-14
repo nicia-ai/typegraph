@@ -3,8 +3,9 @@
  */
 import { type SQL } from "drizzle-orm";
 
+import { type GraphBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
-import { ValidationError } from "../../errors";
+import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import {
   type OrderSpec,
   type QueryAst,
@@ -36,6 +37,7 @@ import {
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
 import { buildQueryAst } from "./ast-builder";
+import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   type AliasMap,
   type EdgeAliasMap,
@@ -43,6 +45,7 @@ import {
   type PaginateOptions,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveAliasMap,
   type SelectContext,
   type StreamOptions,
 } from "./types";
@@ -83,11 +86,17 @@ export class ExecutableQuery<
   Aliases extends AliasMap,
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty object for initial empty edge alias map
   EdgeAliases extends EdgeAliasMap = {},
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RecursiveAliases extends RecursiveAliasMap = {},
   R = unknown,
 > {
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
-  readonly #selectFn: (context: SelectContext<Aliases, EdgeAliases>) => R;
+  readonly #selectFn: (
+    context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>,
+  ) => R;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedOptimizedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
   #cachedSelectiveFieldsForExecute:
     | readonly SelectiveField[]
     | typeof NOT_COMPUTED
@@ -100,7 +109,9 @@ export class ExecutableQuery<
   constructor(
     config: QueryBuilderConfig,
     state: QueryBuilderState,
-    selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
+    selectFunction: (
+      context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>,
+    ) => R,
   ) {
     this.#config = config;
     this.#state = state;
@@ -121,7 +132,7 @@ export class ExecutableQuery<
     alias: A,
     field: string,
     direction: SortDirection = "asc",
-  ): ExecutableQuery<G, Aliases, EdgeAliases, R> {
+  ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
     const kindNames =
       alias === this.#state.startAlias ?
         this.#state.startKinds
@@ -153,7 +164,9 @@ export class ExecutableQuery<
   /**
    * Limits the number of results.
    */
-  limit(n: number): ExecutableQuery<G, Aliases, EdgeAliases, R> {
+  limit(
+    n: number,
+  ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, limit: n },
@@ -164,7 +177,9 @@ export class ExecutableQuery<
   /**
    * Offsets the results.
    */
-  offset(n: number): ExecutableQuery<G, Aliases, EdgeAliases, R> {
+  offset(
+    n: number,
+  ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, offset: n },
@@ -194,9 +209,9 @@ export class ExecutableQuery<
    */
   pipe<NewR = R>(
     fragment: (
-      query: ExecutableQuery<G, Aliases, EdgeAliases, R>,
-    ) => ExecutableQuery<G, Aliases, EdgeAliases, NewR>,
-  ): ExecutableQuery<G, Aliases, EdgeAliases, NewR> {
+      query: ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>,
+    ) => ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR>,
+  ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR> {
     return fragment(this);
   }
 
@@ -204,7 +219,7 @@ export class ExecutableQuery<
    * Combines this query with another using UNION (removes duplicates).
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
-  union(other: ExecutableQuery<G, any, any, R>): UnionableQuery<G, R> {
+  union(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "union",
@@ -221,7 +236,7 @@ export class ExecutableQuery<
    * Combines this query with another using UNION ALL (keeps duplicates).
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
-  unionAll(other: ExecutableQuery<G, any, any, R>): UnionableQuery<G, R> {
+  unionAll(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "unionAll",
@@ -238,7 +253,7 @@ export class ExecutableQuery<
    * Combines this query with another using INTERSECT.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
-  intersect(other: ExecutableQuery<G, any, any, R>): UnionableQuery<G, R> {
+  intersect(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "intersect",
@@ -255,7 +270,7 @@ export class ExecutableQuery<
    * Combines this query with another using EXCEPT.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
-  except(other: ExecutableQuery<G, any, any, R>): UnionableQuery<G, R> {
+  except(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "except",
@@ -269,14 +284,121 @@ export class ExecutableQuery<
   }
 
   /**
+   * Compiles the query and returns the SQL text and parameters.
+   *
+   * Requires a backend to be configured (the backend determines the SQL dialect).
+   * Use this for debugging, logging, or running the query with a custom executor.
+   */
+  toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
+    if (!this.#config.backend?.compileSql) {
+      throw new Error(
+        "Cannot convert to SQL: no backend configured or backend does not support compileSql. " +
+          "Use store.query() to get a backend-aware query builder.",
+      );
+    }
+    return this.#config.backend.compileSql(this.compile());
+  }
+
+  /**
    * Compiles the query to a Drizzle SQL object.
    *
    * Returns a Drizzle SQL object that can be executed directly
    * with db.all(), db.get(), etc.
    */
   compile(): SQL {
+    if (this.#cachedCompiled !== NOT_COMPUTED) return this.#cachedCompiled;
     const ast = this.toAst();
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+    const compiled = compileQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    this.#cachedCompiled = compiled;
+    return compiled;
+  }
+
+  /**
+   * Creates a prepared (pre-compiled) query that can be executed
+   * multiple times with different parameter bindings.
+   *
+   * Use `param("name")` in predicates to create parameterized slots,
+   * then pass values via `prepared.execute({ name: "value" })`.
+   *
+   * @example
+   * ```typescript
+   * import { param } from "@nicia-ai/typegraph";
+   *
+   * const prepared = store.query()
+   *   .from("Person", "p")
+   *   .whereNode("p", (p) => p.name.eq(param("name")))
+   *   .select((ctx) => ctx.p)
+   *   .prepare();
+   *
+   * const alice = await prepared.execute({ name: "Alice" });
+   * const bob = await prepared.execute({ name: "Bob" });
+   * ```
+   *
+   * @throws Error if no backend is configured
+   */
+  prepare(): PreparedQuery<R> {
+    if (!this.#config.backend) {
+      throw new Error(
+        "Cannot prepare query: no backend configured. " +
+          "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+
+    // Build AST once
+    const baseAst = buildQueryAst(this.#config, this.#state);
+
+    // Attempt selective field optimization
+    const selectiveFields = this.#getSelectiveFieldsForExecute();
+    const ast =
+      selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields };
+    const unoptimizedAst = baseAst;
+
+    // Compile once
+    const compileOptions = this.#compileOptions();
+    const compiled = compileQuery(ast, this.#config.graphId, compileOptions);
+
+    // Pre-compile to SQL text if the backend supports it
+    let sqlText: string | undefined;
+    let sqlParams: readonly unknown[] | undefined;
+    let unoptimizedSqlText: string | undefined;
+    let unoptimizedSqlParams: readonly unknown[] | undefined;
+    if (this.#config.backend.compileSql !== undefined) {
+      const result = this.#config.backend.compileSql(compiled);
+      sqlText = result.sql;
+      sqlParams = result.params;
+
+      const unoptimizedCompiled = compileQuery(
+        unoptimizedAst,
+        this.#config.graphId,
+        compileOptions,
+      );
+      const unoptimizedResult =
+        this.#config.backend.compileSql(unoptimizedCompiled);
+      unoptimizedSqlText = unoptimizedResult.sql;
+      unoptimizedSqlParams = unoptimizedResult.params;
+    }
+
+    return new PreparedQuery({
+      ast,
+      unoptimizedAst,
+      sqlText,
+      sqlParams,
+      unoptimizedSqlText,
+      unoptimizedSqlParams,
+      backend: this.#config.backend,
+      dialect: this.#config.dialect ?? "sqlite",
+      graphId: this.#config.graphId,
+      compileOptions: compileOptions,
+      state: this.#state,
+      selectiveFields,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Type erasure needed for PreparedQuery which uses AliasMap
+      selectFn: this.#selectFn as (context: SelectContext<any, any>) => R,
+      schemaIntrospector: this.#config.schemaIntrospector,
+    });
   }
 
   /**
@@ -287,6 +409,17 @@ export class ExecutableQuery<
       dialect: this.#config.dialect ?? "sqlite",
       schema: this.#config.schema,
     };
+  }
+
+  #requireBackend(): GraphBackend {
+    const { backend } = this.#config;
+    if (backend === undefined) {
+      throw new Error(
+        "Cannot execute query: no backend configured. " +
+          "Provide a backend when creating the QueryBuilder.",
+      );
+    }
+    return backend;
   }
 
   /**
@@ -307,6 +440,13 @@ export class ExecutableQuery<
       );
     }
 
+    // Guard: reject queries with param() refs — must use .prepare().execute({...})
+    if (hasParameterReferences(this.toAst())) {
+      throw new Error(
+        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+      );
+    }
+
     // Phase 1: Try optimized execution
     const optimizedResult = await this.#tryOptimizedExecution();
     if (optimizedResult !== undefined) {
@@ -322,7 +462,8 @@ export class ExecutableQuery<
     const dialect = this.#config.dialect ?? "sqlite";
     const rows = transformPathColumns(rawRows, this.#state, dialect);
 
-    return mapResults(
+    // Cast: runtime context includes recursive aliases; type erasure in mapResults is safe
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
       rows,
       this.#state.startAlias,
       this.#state.traversals,
@@ -337,46 +478,52 @@ export class ExecutableQuery<
    * computations, or returns whole nodes).
    */
   async #tryOptimizedExecution(): Promise<readonly R[] | undefined> {
-    // Skip optimization for variable-length traversals
-    // The recursive query compiler doesn't support selectiveFields
-    const hasVariableLength = this.#state.traversals.some(
-      (t) => t.variableLength !== undefined,
-    );
-    if (hasVariableLength) {
-      return undefined;
-    }
-
     const selectiveFields = this.#getSelectiveFieldsForExecute();
     if (selectiveFields === undefined) {
       return undefined;
     }
 
-    // Build and compile optimized query
-    const baseAst = buildQueryAst(this.#config, this.#state);
-    const selectiveAst = {
-      ...baseAst,
-      selectiveFields,
-    };
+    // Build and compile optimized query (cached per instance)
+    let compiled: SQL;
+    if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
+      const baseAst = buildQueryAst(this.#config, this.#state);
+      const selectiveAst = {
+        ...baseAst,
+        selectiveFields,
+      };
+      compiled = compileQuery(
+        selectiveAst,
+        this.#config.graphId,
+        this.#compileOptions(),
+      );
+      this.#cachedOptimizedCompiled = compiled;
+    } else {
+      compiled = this.#cachedOptimizedCompiled;
+    }
 
-    const compiled = compileQuery(
-      selectiveAst,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
-    const rows =
-      await this.#config.backend!.execute<Record<string, unknown>>(compiled);
+    const rawSelectiveRows =
+      await this.#requireBackend().execute<Record<string, unknown>>(compiled);
+    const dialect = this.#config.dialect ?? "sqlite";
+    const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
 
     try {
+      // RecursiveAliases are populated at runtime but erased in mapSelectiveResults' signature
       return mapSelectiveResults<Aliases, EdgeAliases, R>(
         rows,
         this.#state,
         selectiveFields,
         this.#config.schemaIntrospector,
-        this.#selectFn,
+        this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
+        return undefined;
+      }
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       throw error;
@@ -426,7 +573,11 @@ export class ExecutableQuery<
         // Execute the select callback against a lightweight tracking context.
         // We intentionally ignore the return value: we only need accessed fields.
         void this.#selectFn(
-          trackingContext as SelectContext<Aliases, EdgeAliases>,
+          trackingContext as SelectContext<
+            Aliases,
+            EdgeAliases,
+            RecursiveAliases
+          >,
         );
       } catch {
         // Best-effort tracking: any runtime errors in the callback (e.g. calling
@@ -534,41 +685,49 @@ export class ExecutableQuery<
     cursor: string | undefined,
     isBackward: boolean,
   ): Promise<PaginatedResult<R> | undefined> {
-    // Skip optimization for variable-length traversals (recursive compiler path)
-    const hasVariableLength = this.#state.traversals.some(
-      (t) => t.variableLength !== undefined,
-    );
-    if (hasVariableLength) return undefined;
-
     const selectiveFields = this.#getSelectiveFieldsForPagination();
     if (selectiveFields === undefined) {
       return undefined;
     }
 
-    const rows = await this.#executeWithCursor(
-      cursorData,
-      direction,
-      fetchLimit,
-      {
+    let rows: readonly Record<string, unknown>[];
+    try {
+      rows = await this.#executeWithCursor(cursorData, direction, fetchLimit, {
         selectiveFields,
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      throw error;
+    }
 
     const hasMore = rows.length > pageLimit;
     const resultRows = hasMore ? rows.slice(0, pageLimit) : rows;
-    const orderedRows = isBackward ? resultRows.toReversed() : resultRows;
+    const paginationDialect = this.#config.dialect ?? "sqlite";
+    const orderedRows = transformPathColumns(
+      isBackward ? resultRows.toReversed() : resultRows,
+      this.#state,
+      paginationDialect,
+    );
 
     let data: readonly R[];
     try {
+      // RecursiveAliases are populated at runtime but erased in mapSelectiveResults' signature
       data = mapSelectiveResults<Aliases, EdgeAliases, R>(
         orderedRows,
         this.#state,
         selectiveFields,
         this.#config.schemaIntrospector,
-        this.#selectFn,
+        this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForPagination = undefined;
         return undefined;
       }
@@ -592,6 +751,10 @@ export class ExecutableQuery<
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {
+          this.#cachedSelectiveFieldsForPagination = undefined;
+          return undefined;
+        }
+        if (error instanceof UnsupportedPredicateError) {
           this.#cachedSelectiveFieldsForPagination = undefined;
           return undefined;
         }
@@ -827,7 +990,7 @@ export class ExecutableQuery<
     const orderedRows = isBackward ? resultRows.toReversed() : resultRows;
 
     // Map to typed results
-    const data = mapResults(
+    const data = mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
       orderedRows,
       this.#state.startAlias,
       this.#state.traversals,
@@ -844,7 +1007,7 @@ export class ExecutableQuery<
       isBackward,
       cursor,
       (row) =>
-        buildSelectContext<Aliases, EdgeAliases>(
+        buildSelectContext<Aliases, EdgeAliases, RecursiveAliases>(
           row,
           this.#state.startAlias,
           this.#state.traversals,
@@ -917,7 +1080,6 @@ export class ExecutableQuery<
     }
 
     // Apply modified ORDER BY, predicates, and limit to AST (discard offset)
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { offset: _discarded, ...astWithoutOffset } = ast;
     const modifiedAst = {
       ...astWithoutOffset,
@@ -936,7 +1098,7 @@ export class ExecutableQuery<
       this.#compileOptions(),
     );
     const rawRows =
-      await this.#config.backend!.execute<Record<string, unknown>>(compiled);
+      await this.#requireBackend().execute<Record<string, unknown>>(compiled);
     const dialect = this.#config.dialect ?? "sqlite";
     return transformPathColumns(rawRows, this.#state, dialect);
   }

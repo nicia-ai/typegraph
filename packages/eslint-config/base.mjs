@@ -64,6 +64,7 @@ export const baseTypeScriptRules = {
     {
       argsIgnorePattern: "^_",
       destructuredArrayIgnorePattern: "^_",
+      ignoreRestSiblings: true,
     },
   ],
   "@typescript-eslint/no-non-null-assertion": "off",

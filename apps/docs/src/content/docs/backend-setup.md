@@ -210,6 +210,16 @@ Returns SQL for creating TypeGraph tables in PostgreSQL, including the pgvector 
 function getPostgresMigrationSQL(): string;
 ```
 
+#### `generatePostgresDDL(tables?)`
+
+Returns individual DDL statements (CREATE TABLE, CREATE INDEX) as an array. Useful when you
+need per-statement control, for example to execute them in separate transactions or log them
+individually.
+
+```typescript
+function generatePostgresDDL(tables?: PostgresTables): string[];
+```
+
 ## Drizzle Entrypoints
 
 TypeGraph exposes Drizzle adapters through three public entrypoints:

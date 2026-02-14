@@ -3,13 +3,9 @@
  *
  * Provides shared functions for building QueryAst objects from builder state.
  */
-import {
-  type GroupBySpec,
-  type OrderSpec,
-  type PredicateExpression,
-  type QueryAst,
-} from "../ast";
+import { type QueryAst } from "../ast";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
+import { validateVectorPredicatePlacement } from "./validation";
 
 /**
  * Builds a QueryAst from builder config and state.
@@ -21,6 +17,8 @@ export function buildQueryAst(
   config: QueryBuilderConfig,
   state: QueryBuilderState,
 ): QueryAst {
+  validateVectorPredicatePlacement(state.predicates);
+
   const temporalMode: { mode: typeof state.temporalMode; asOf?: string } = {
     mode: state.temporalMode,
   };
@@ -28,7 +26,7 @@ export function buildQueryAst(
     temporalMode.asOf = state.asOf;
   }
 
-  const ast: QueryAst = {
+  return {
     graphId: config.graphId,
     start: {
       alias: state.startAlias,
@@ -41,24 +39,10 @@ export function buildQueryAst(
       fields: state.projection,
     },
     temporalMode,
+    ...(state.orderBy.length > 0 && { orderBy: state.orderBy }),
+    ...(state.limit !== undefined && { limit: state.limit }),
+    ...(state.offset !== undefined && { offset: state.offset }),
+    ...(state.groupBy !== undefined && { groupBy: state.groupBy }),
+    ...(state.having !== undefined && { having: state.having }),
   };
-
-  // Add optional fields conditionally
-  if (state.orderBy.length > 0) {
-    (ast as { orderBy?: readonly OrderSpec[] }).orderBy = state.orderBy;
-  }
-  if (state.limit !== undefined) {
-    (ast as { limit?: number }).limit = state.limit;
-  }
-  if (state.offset !== undefined) {
-    (ast as { offset?: number }).offset = state.offset;
-  }
-  if (state.groupBy !== undefined) {
-    (ast as { groupBy?: GroupBySpec }).groupBy = state.groupBy;
-  }
-  if (state.having !== undefined) {
-    (ast as { having?: PredicateExpression }).having = state.having;
-  }
-
-  return ast;
 }

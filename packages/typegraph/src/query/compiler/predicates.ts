@@ -15,7 +15,9 @@ import {
   type InSubquery,
   type LiteralValue,
   type ObjectPredicate,
+  type ParameterRef,
   type PredicateExpression,
+  type QueryAst,
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
@@ -25,7 +27,23 @@ import {
   type JsonPointer,
   jsonPointer,
 } from "../json-pointer";
+import { isParameterRef } from "../predicates";
+import {
+  getSingleSubqueryColumnValueType,
+  getSubqueryColumnCount,
+  isInSubqueryTypeCompatible,
+  isUnsupportedInSubqueryValueType,
+} from "../subquery-utils";
 import { type SqlSchema } from "./schema";
+
+const COMPARISON_OP_SQL: Record<string, string> = {
+  eq: "=",
+  neq: "!=",
+  gt: ">",
+  gte: ">=",
+  lt: "<",
+  lte: "<=",
+};
 
 // ============================================================
 // Field Reference Compilation
@@ -243,8 +261,13 @@ function resolveLiteralValueTypes(
  */
 function resolveComparisonValueType(
   field: FieldRef,
-  right: LiteralValue | readonly LiteralValue[],
+  right: LiteralValue | readonly LiteralValue[] | ParameterRef,
 ): ValueType | undefined {
+  if (isParameterRef(right)) {
+    return (
+      normalizeValueType(right.valueType) ?? normalizeValueType(field.valueType)
+    );
+  }
   const literals = Array.isArray(right) ? right : [right];
   const literalType = resolveLiteralValueTypes(literals);
   const fieldType = normalizeValueType(field.valueType);
@@ -320,6 +343,40 @@ function compileStringPattern(op: string, pattern: string): string {
   }
 }
 
+/**
+ * Escapes wildcard characters in a SQL pattern parameter.
+ */
+function escapeLikePatternParameter(parameter: SQL): SQL {
+  return sql`REPLACE(REPLACE(REPLACE(${parameter}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')`;
+}
+
+/**
+ * Builds a SQL pattern expression for parameterized string operations.
+ */
+function compileParameterizedStringPattern(op: string, parameter: SQL): SQL {
+  switch (op) {
+    case "contains": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`'%' || ${escaped} || '%'`;
+    }
+    case "startsWith": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`${escaped} || '%'`;
+    }
+    case "endsWith": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`'%' || ${escaped}`;
+    }
+    case "like":
+    case "ilike": {
+      return parameter;
+    }
+    default: {
+      return escapeLikePatternParameter(parameter);
+    }
+  }
+}
+
 // ============================================================
 // Predicate Compilation
 // ============================================================
@@ -336,7 +393,7 @@ function compileStringPattern(op: string, pattern: string): string {
 export type PredicateCompilerContext = Readonly<{
   dialect: DialectAdapter;
   schema: SqlSchema;
-  compileQuery: (ast: unknown, graphId: string) => SQL;
+  compileQuery: (ast: QueryAst, graphId: string) => SQL;
   cteColumnPrefix?: string;
 }>;
 
@@ -364,6 +421,21 @@ export function compilePredicateExpression(
         undefined,
         cteColumnPrefix,
       );
+
+      if (isParameterRef(expr.pattern)) {
+        const placeholder = sql`${sql.placeholder(expr.pattern.name)}`;
+        const pattern = compileParameterizedStringPattern(expr.op, placeholder);
+        if (
+          expr.op === "ilike" ||
+          expr.op === "contains" ||
+          expr.op === "startsWith" ||
+          expr.op === "endsWith"
+        ) {
+          return dialect.ilike(field, pattern);
+        }
+        return sql`${field} LIKE ${pattern}`;
+      }
+
       const pattern = compileStringPattern(expr.op, expr.pattern);
       // Use case-insensitive matching for contains, startsWith, endsWith, and ilike
       // This ensures consistent behavior across PostgreSQL (case-sensitive LIKE)
@@ -394,10 +466,19 @@ export function compilePredicateExpression(
     }
 
     case "between": {
-      const valueType = resolveComparisonValueType(expr.field, [
-        expr.lower,
-        expr.upper,
-      ]);
+      const lowerIsParam = isParameterRef(expr.lower);
+      const upperIsParam = isParameterRef(expr.upper);
+
+      // Resolve value type from non-param bounds
+      const boundsForType: LiteralValue[] = [];
+      if (!lowerIsParam) boundsForType.push(expr.lower);
+      if (!upperIsParam) boundsForType.push(expr.upper);
+
+      const valueType =
+        boundsForType.length > 0 ?
+          resolveComparisonValueType(expr.field, boundsForType)
+        : normalizeValueType(expr.field.valueType);
+
       if (valueType === "array" || valueType === "object") {
         throw new UnsupportedPredicateError(
           "Between comparisons are not supported for JSON arrays or objects",
@@ -411,8 +492,14 @@ export function compilePredicateExpression(
         undefined,
         cteColumnPrefix,
       );
-      const lower = convertValueForSql(expr.lower.value, dialect);
-      const upper = convertValueForSql(expr.upper.value, dialect);
+      const lower =
+        lowerIsParam ?
+          sql.placeholder(expr.lower.name)
+        : convertValueForSql(expr.lower.value, dialect);
+      const upper =
+        upperIsParam ?
+          sql.placeholder(expr.upper.name)
+        : convertValueForSql(expr.upper.value, dialect);
       return sql`${field} BETWEEN ${lower} AND ${upper}`;
     }
 
@@ -469,11 +556,33 @@ function compileComparisonPredicate(
     __type: "comparison";
     op: string;
     left: FieldRef;
-    right: LiteralValue | readonly LiteralValue[];
+    right: LiteralValue | readonly LiteralValue[] | ParameterRef;
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
 ): SQL {
+  // Handle ParameterRef on the right side
+  if (isParameterRef(expr.right)) {
+    const parameterValueType =
+      normalizeValueType(expr.right.valueType) ??
+      normalizeValueType(expr.left.valueType);
+    const left = compileFieldValue(
+      expr.left,
+      dialect,
+      parameterValueType,
+      undefined,
+      undefined,
+      cteColumnPrefix,
+    );
+    const opSql = COMPARISON_OP_SQL[expr.op];
+    if (!opSql) {
+      throw new UnsupportedPredicateError(
+        `Comparison operation "${expr.op}" is not supported for parameterized predicates`,
+      );
+    }
+    return sql`${left} ${sql.raw(opSql)} ${sql.placeholder(expr.right.name)}`;
+  }
+
   const valueType = resolveComparisonValueType(expr.left, expr.right);
 
   if (valueType === "array" || valueType === "object") {
@@ -493,7 +602,7 @@ function compileComparisonPredicate(
 
   if (expr.op === "in" || expr.op === "notIn") {
     const values: readonly LiteralValue[] =
-      Array.isArray(expr.right) ? expr.right : [expr.right];
+      Array.isArray(expr.right) ? expr.right : [expr.right as LiteralValue];
     if (values.length === 0) {
       return expr.op === "in" ? sql.raw("1=0") : sql.raw("1=1");
     }
@@ -509,17 +618,14 @@ function compileComparisonPredicate(
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Type narrowing with Array.isArray
   const rightValue: LiteralValue = Array.isArray(right) ? right[0]! : right;
 
-  const opMap: Record<string, string> = {
-    eq: "=",
-    neq: "!=",
-    gt: ">",
-    gte: ">=",
-    lt: "<",
-    lte: "<=",
-  };
-
   const convertedRight = convertValueForSql(rightValue.value, dialect);
-  return sql`${left} ${sql.raw(opMap[expr.op]!)} ${convertedRight}`;
+  const opSql = COMPARISON_OP_SQL[expr.op];
+  if (!opSql) {
+    throw new UnsupportedPredicateError(
+      `Comparison operation "${expr.op}" is not supported`,
+    );
+  }
+  return sql`${left} ${sql.raw(opSql)} ${convertedRight}`;
 }
 
 /**
@@ -671,16 +777,7 @@ function compileAggregatePredicate(
 ): SQL {
   const aggregate = compileAggregateExpr(expr.aggregate, dialect);
 
-  const opMap: Record<string, string> = {
-    eq: "=",
-    neq: "!=",
-    gt: ">",
-    gte: ">=",
-    lt: "<",
-    lte: "<=",
-  };
-
-  const op = opMap[expr.op];
+  const op = COMPARISON_OP_SQL[expr.op];
   if (!op) {
     throw new UnsupportedPredicateError(
       `Comparison operation "${expr.op}" is not supported for aggregate predicates`,
@@ -740,8 +837,10 @@ function compileExistsSubquery(
   expr: ExistsSubquery,
   ctx: PredicateCompilerContext,
 ): SQL {
-  const graphId = expr.subquery.graphId ?? "";
-  const subSql = ctx.compileQuery(expr.subquery, graphId);
+  if (expr.subquery.graphId === undefined) {
+    throw new UnsupportedPredicateError("EXISTS subquery must have a graphId");
+  }
+  const subSql = ctx.compileQuery(expr.subquery, expr.subquery.graphId);
   return expr.negated ? sql`NOT EXISTS (${subSql})` : sql`EXISTS (${subSql})`;
 }
 
@@ -752,15 +851,50 @@ function compileInSubquery(
   expr: InSubquery,
   ctx: PredicateCompilerContext,
 ): SQL {
-  const graphId = expr.subquery.graphId ?? "";
-  const fieldSql = compileFieldTextValue(
+  const subqueryColumnCount = getSubqueryColumnCount(expr.subquery);
+  if (subqueryColumnCount !== 1) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery must project exactly 1 column, but got ${subqueryColumnCount}`,
+      { subqueryColumnCount },
+    );
+  }
+
+  const fieldValueType = normalizeValueType(expr.field.valueType);
+  const subqueryValueType = getSingleSubqueryColumnValueType(expr.subquery);
+  const resolvedValueType = fieldValueType ?? subqueryValueType;
+
+  if (isUnsupportedInSubqueryValueType(resolvedValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery does not support ${String(resolvedValueType)} values`,
+      { valueType: resolvedValueType },
+    );
+  }
+
+  if (!isInSubqueryTypeCompatible(fieldValueType, subqueryValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN type mismatch: field type "${String(fieldValueType)}" does not match subquery column type "${String(subqueryValueType)}"`,
+      {
+        fieldValueType,
+        subqueryValueType,
+      },
+    );
+  }
+
+  const valueType = fieldValueType ?? subqueryValueType;
+  if (expr.subquery.graphId === undefined) {
+    throw new UnsupportedPredicateError(
+      "IN/NOT IN subquery must have a graphId",
+    );
+  }
+  const fieldSql = compileFieldValue(
     expr.field,
     ctx.dialect,
+    valueType,
     undefined,
     undefined,
     ctx.cteColumnPrefix,
   );
-  const subSql = ctx.compileQuery(expr.subquery, graphId);
+  const subSql = ctx.compileQuery(expr.subquery, expr.subquery.graphId);
   return expr.negated ?
       sql`${fieldSql} NOT IN (${subSql})`
     : sql`${fieldSql} IN (${subSql})`;
@@ -783,40 +917,9 @@ function compileVectorSimilarityPredicate(
   _expr: VectorSimilarityPredicate,
   _ctx: PredicateCompilerContext,
 ): SQL {
-  // Vector similarity predicates affect query structure (JOINs, ORDER BY, LIMIT).
-  // The main query compiler detects these predicates and handles:
-  // - Creating a cte_embeddings CTE with the embeddings table
-  // - Computing distance using dialect.vectorDistance()
-  // - Applying minScore filter inside cte_embeddings (if specified)
-  // - Ordering by distance ascending
-  // - Limiting to expr.limit results
-  //
-  // The minScore filtering is handled in compileVectorSimilarityCte(), not here.
-  // This predicate compilation is called for the nodes CTE, which doesn't have
-  // an embedding column. Return a no-op condition (1=1).
-  //
-  // NOTE: The minScore filter is intentionally NOT applied here because:
-  // 1. The nodes table doesn't have an embedding column
-  // 2. The filtering is already done in the cte_embeddings CTE
-  // 3. Applying it here would generate invalid SQL (referencing non-existent column)
-
-  // Return a SQL "true" condition (1=1).
-  //
-  // This is intentional: vector similarity predicates affect query structure
-  // (JOINs to embeddings table, ORDER BY distance, LIMIT k) which are handled
-  // by the main query compiler in compileStandardQuery(). The predicate
-  // compilation here only handles the optional WHERE clause filtering.
-  //
-  // When minScore is not specified, we still need to return valid SQL that
-  // integrates with other predicates via AND. The "1=1" idiom is a standard
-  // SQL no-op that:
-  // - Always evaluates to true
-  // - Has zero performance impact (optimized away by query planners)
-  // - Composes correctly: "WHERE other_condition AND 1=1" = "WHERE other_condition"
-  //
-  // The actual similarity search behavior (k nearest neighbors) is enforced
-  // by the JOIN and ORDER BY clauses added in compileEmbeddingsCte() and
-  // compileVectorOrderBy().
+  // No-op: vector similarity is handled structurally (JOINs, ORDER BY, LIMIT)
+  // by the main query compiler, not as a WHERE predicate. Returns 1=1 so it
+  // composes safely with AND.
   return sql.raw("1=1");
 }
 
@@ -827,27 +930,42 @@ function compileVectorSimilarityPredicate(
 /**
  * Extracts all vector similarity predicates from a query's predicates.
  * Used by the main query compiler to set up JOINs, ORDER BY, and LIMIT.
+ *
+ * Vector predicates must appear at top level or under AND groups only.
+ * Nesting under OR/NOT is rejected because vector search rewrites query
+ * structure rather than behaving like a pure boolean predicate.
  */
 export function extractVectorSimilarityPredicates(
   predicates: readonly { expression: PredicateExpression }[],
 ): VectorSimilarityPredicate[] {
   const results: VectorSimilarityPredicate[] = [];
 
-  function visit(expr: PredicateExpression): void {
+  function visit(expr: PredicateExpression, inDisallowedBranch: boolean): void {
     switch (expr.__type) {
       case "vector_similarity": {
+        if (inDisallowedBranch) {
+          throw new UnsupportedPredicateError(
+            "Vector similarity predicates cannot be nested under OR or NOT. " +
+              "Use top-level AND combinations instead.",
+          );
+        }
         results.push(expr);
         break;
       }
-      case "and":
+      case "and": {
+        for (const p of expr.predicates) {
+          visit(p, inDisallowedBranch);
+        }
+        break;
+      }
       case "or": {
         for (const p of expr.predicates) {
-          visit(p);
+          visit(p, true);
         }
         break;
       }
       case "not": {
-        visit(expr.predicate);
+        visit(expr.predicate, true);
         break;
       }
       case "comparison":
@@ -866,7 +984,7 @@ export function extractVectorSimilarityPredicates(
   }
 
   for (const pred of predicates) {
-    visit(pred.expression);
+    visit(pred.expression, false);
   }
 
   return results;

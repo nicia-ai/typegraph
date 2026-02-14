@@ -57,6 +57,15 @@ function isArrayIndex(segment: string): boolean {
  */
 export const sqliteDialect: DialectAdapter = {
   name: "sqlite",
+  capabilities: {
+    standardQueryStrategy: "cte_project",
+    recursiveQueryStrategy: "recursive_cte",
+    setOperationStrategy: "sqlite_compound",
+    materializeIntermediateTraversalCtes: true,
+    forceRecursiveWorktableOuterJoinOrder: true,
+    vectorPredicateStrategy: "native",
+    vectorMetrics: ["cosine", "l2"] as const,
+  },
 
   // ============================================================
   // JSON Path Operations
@@ -190,7 +199,9 @@ export const sqliteDialect: DialectAdapter = {
   // ============================================================
 
   currentTimestamp() {
-    return sql`datetime('now')`;
+    // Keep ISO-8601 format aligned with stored timestamps from Date.toISOString()
+    // so string-based temporal comparisons remain correct in SQLite TEXT columns.
+    return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
   },
 
   // ============================================================
@@ -244,6 +255,10 @@ export const sqliteDialect: DialectAdapter = {
         throw new Error(
           "Inner product distance is not supported by sqlite-vec. Use 'cosine' or 'l2' metrics instead.",
         );
+      }
+      default: {
+        const _exhaustive: never = metric;
+        throw new Error("Unsupported vector metric: " + String(_exhaustive));
       }
     }
   },

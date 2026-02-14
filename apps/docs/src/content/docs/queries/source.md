@@ -95,7 +95,7 @@ When `includeSubClasses: true`:
 
 - [Filter](/queries/filter) - `whereNode()`, `whereEdge()`
 - [Traverse](/queries/traverse) - `traverse()`, `optionalTraverse()`
-- [Shape](/queries/shape) - `select()`, `selectAggregate()`
+- [Shape](/queries/shape) - `select()`, `aggregate()`
 - [Order](/queries/order) - `orderBy()`, `limit()`, `offset()`
 - [Aggregate](/queries/aggregate) - `groupBy()`, `groupByNode()`
 - [Temporal](/queries/temporal) - `temporal()`

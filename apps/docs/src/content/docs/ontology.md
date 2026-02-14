@@ -157,6 +157,27 @@ inverseOf(follows, followedBy);
 const inverse = registry.getInverseEdge("manages"); // "managedBy"
 ```
 
+You can also expand traversals to include inverse edge kinds at query time:
+
+```typescript
+const relationships = await store
+  .query()
+  .from("Person", "p")
+  .traverse("manages", "e", { expand: "inverse" })
+  .to("Person", "other")
+  .select((ctx) => ({
+    other: ctx.other.name,
+    via: ctx.e.kind,
+  }))
+  .execute();
+```
+
+For symmetric relationships, declare an edge as its own inverse:
+
+```typescript
+inverseOf(sameAs, sameAs);
+```
+
 **`implies`**: Declares that one edge kind implies another exists.
 
 ```typescript
@@ -171,7 +192,7 @@ implies(friends, knows);
 const connections = await store
   .query()
   .from("Person", "p")
-  .traverse("knows", "e", { includeImplyingEdges: true })
+  .traverse("knows", "e", { expand: "implying" })
   .to("Person", "other")
   .select((ctx) => ctx.other)
   .execute();
@@ -212,7 +233,7 @@ const graph = defineGraph({
 
 ### Registry Lookups
 
-The `KindRegistry` provides methods to query the ontology:
+The type registry (accessed via `store.registry`) provides methods to query the ontology:
 
 ```typescript
 const registry = store.registry;
@@ -474,7 +495,7 @@ function metaEdge(
 
 ### Type Registry API
 
-The `KindRegistry` is available via `store.registry` and provides methods to query the ontology at runtime.
+The type registry is available via `store.registry` and provides methods to query the ontology at runtime.
 
 #### `isSubClassOf(child, parent)`
 

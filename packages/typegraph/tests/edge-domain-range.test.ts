@@ -29,7 +29,7 @@ describe("defineEdge() with domain/range", () => {
 
       expect(worksAt.from).toEqual([Person]);
       expect(worksAt.to).toEqual([Company]);
-      expect(worksAt.name).toBe("worksAt");
+      expect(worksAt.kind).toBe("worksAt");
     });
 
     it("creates edge without from/to (backwards compatible)", () => {
@@ -39,7 +39,7 @@ describe("defineEdge() with domain/range", () => {
 
       expect(knows.from).toBeUndefined();
       expect(knows.to).toBeUndefined();
-      expect(knows.name).toBe("knows");
+      expect(knows.kind).toBe("knows");
     });
 
     it("creates edge with no options", () => {
@@ -47,7 +47,7 @@ describe("defineEdge() with domain/range", () => {
 
       expect(follows.from).toBeUndefined();
       expect(follows.to).toBeUndefined();
-      expect(follows.name).toBe("follows");
+      expect(follows.kind).toBe("follows");
     });
 
     it("creates edge with multiple from/to types", () => {

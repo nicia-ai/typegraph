@@ -48,23 +48,38 @@ const Company = defineNode("Company", {
   }),
 });
 
+const Office = defineNode("Office", {
+  schema: z.object({
+    city: z.string(),
+  }),
+});
+
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string().optional(),
   }),
 });
 
+const locatedIn = defineEdge("locatedIn");
+
 const testGraph = defineGraph({
   id: "smart_select_test",
   nodes: {
     Person: { type: Person },
     Company: { type: Company },
+    Office: { type: Office },
   },
   edges: {
     worksAt: {
       type: worksAt,
       from: [Person],
       to: [Company],
+      cardinality: "many",
+    },
+    locatedIn: {
+      type: locatedIn,
+      from: [Company],
+      to: [Office],
       cardinality: "many",
     },
   },
@@ -74,8 +89,12 @@ const schemaIntrospector = createSchemaIntrospector(
   new Map([
     ["Person", { schema: Person.schema }],
     ["Company", { schema: Company.schema }],
+    ["Office", { schema: Office.schema }],
   ]),
-  new Map([["worksAt", { schema: worksAt.schema }]]),
+  new Map([
+    ["worksAt", { schema: worksAt.schema }],
+    ["locatedIn", { schema: locatedIn.schema }],
+  ]),
 );
 
 // ============================================================
@@ -376,6 +395,52 @@ describe("Smart Select Integration", () => {
 
     const { sql } = sqlToStrings(getLastQuery()!);
     expect(sql).not.toContain('AS "p_props"');
+  });
+
+  it("collapses selective multi-hop non-optional traversals to terminal CTE", async () => {
+    const company = await store.nodes.Company.create({ name: "Acme" });
+    const office = await store.nodes.Office.create({ city: "San Francisco" });
+
+    await store.edges.worksAt.create(
+      { kind: "Person", id: aliceId },
+      { kind: "Company", id: company.id },
+      {},
+    );
+    await store.edges.locatedIn.create(
+      { kind: "Company", id: company.id },
+      { kind: "Office", id: office.id },
+      {},
+    );
+
+    const results = await store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (person) => person.id.eq(aliceId))
+      .traverse("worksAt", "w")
+      .to("Company", "c")
+      .traverse("locatedIn", "l")
+      .to("Office", "o")
+      .select((ctx) => ({
+        personName: ctx.p.name,
+        companyName: ctx.c.name,
+        officeCity: ctx.o.city,
+      }))
+      .execute();
+
+    expect(results).toEqual([
+      {
+        personName: "Alice",
+        companyName: "Acme",
+        officeCity: "San Francisco",
+      },
+    ]);
+
+    const { sql } = sqlToStrings(getLastQuery()!);
+    expect(sql).toContain("FROM cte_o");
+    expect(sql).not.toContain("FROM cte_p INNER JOIN cte_c");
+    expect(sql).not.toContain('AS "p_props"');
+    expect(sql).not.toContain('AS "c_props"');
+    expect(sql).not.toContain('AS "o_props"');
   });
 
   it("uses selective projection for paginate (includes ORDER BY fields for cursors)", async () => {

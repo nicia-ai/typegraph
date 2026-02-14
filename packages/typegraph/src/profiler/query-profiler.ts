@@ -241,7 +241,7 @@ function buildNodeSchemaMap(
   graph: GraphDef,
 ): ReadonlyMap<string, Readonly<{ schema: z.ZodType }>> {
   const entries = Object.values(graph.nodes).map(
-    (n) => [n.type.name, { schema: n.type.schema }] as const,
+    (n) => [n.type.kind, { schema: n.type.schema }] as const,
   );
   return new Map(entries);
 }
@@ -252,7 +252,7 @@ function buildEdgeSchemaMap(
   const entries = Object.values(graph.edges).map(
     (edgeRegistration) =>
       [
-        edgeRegistration.type.name,
+        edgeRegistration.type.kind,
         { schema: edgeRegistration.type.schema },
       ] as const,
   );
@@ -437,7 +437,7 @@ function createProfiledStore<G extends GraphDef>(
  * Wraps a query builder to intercept method calls.
  *
  * The builder returns new builders for most methods, and returns
- * ExecutableQuery for select/selectAggregate. We need to recursively
+ * ExecutableQuery for select/aggregate. We need to recursively
  * wrap to ensure all paths lead to wrapped ExecutableQueries.
  */
 function wrapQueryBuilder<T extends object>(

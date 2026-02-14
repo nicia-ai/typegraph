@@ -53,7 +53,8 @@ typegraph/
 # From repository root
 pnpm install              # Install all dependencies
 pnpm build                # Build all packages
-pnpm test                 # Run all tests
+pnpm test                 # Run all tests (SQLite only, postgres tests are skipped)
+pnpm test:postgres        # Run PostgreSQL tests (starts Docker automatically)
 pnpm lint                 # Run ESLint
 pnpm typecheck            # TypeScript type checking
 pnpm fix                  # Auto-fix lint and formatting
@@ -62,10 +63,16 @@ pnpm fix                  # Auto-fix lint and formatting
 pnpm test                 # Run unit tests
 pnpm test:unit            # Run unit tests only
 pnpm test:property        # Run property-based tests
-pnpm test:postgres        # Run PostgreSQL tests (requires Docker)
+pnpm test:postgres        # Run PostgreSQL tests (starts Docker automatically)
 pnpm test:coverage        # Run tests with coverage
 pnpm test:mutation        # Run mutation testing
 ```
+
+**Important:** `pnpm test` runs only SQLite-backed tests. The 214 PostgreSQL
+backend tests are **skipped** unless `POSTGRES_URL` is set. Always run
+`pnpm test:postgres` (from the repo root or `packages/typegraph`) to verify
+changes that touch backend, store, or collection code. The script handles
+Docker lifecycle automatically — no manual setup required.
 
 # Core Principles
 

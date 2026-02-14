@@ -19,16 +19,18 @@ import {
   jsonPointer,
   subClassOf,
 } from "../src";
+import { extractPropertyAccesses } from "../src/profiler/ast-extractor";
 import {
-  type DeclaredIndex,
-  extractPropertyAccesses,
-  generateRecommendations,
-  getUnindexedFilters,
   keyToPath,
   pathToKey,
   ProfileCollector,
-  QueryProfiler,
-} from "../src/profiler";
+} from "../src/profiler/collector";
+import { QueryProfiler } from "../src/profiler/query-profiler";
+import {
+  generateRecommendations,
+  getUnindexedFilters,
+} from "../src/profiler/recommendations";
+import { type DeclaredIndex } from "../src/profiler/types";
 import { createStore, type Store } from "../src/store";
 import { createTestBackend } from "./test-utils";
 
@@ -1119,7 +1121,7 @@ describe("AST Extractor", () => {
       .query()
       .from("Person", "p2")
       .whereNode("p2", (p2) => p2.email.eq("test@example.com"))
-      .selectAggregate({ email: field("p2", "email") })
+      .aggregate({ email: field("p2", "email") })
       .toAst();
 
     const query = store
@@ -1157,7 +1159,7 @@ describe("AST Extractor", () => {
       .from("Person", "p")
       .groupByNode("p")
       .having(havingGt(avg("p", "age"), 20))
-      .selectAggregate({ avgAge: avg("p", "age") });
+      .aggregate({ avgAge: avg("p", "age") });
 
     const accesses = extractPropertyAccesses(query.toAst());
 

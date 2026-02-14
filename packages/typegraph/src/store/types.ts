@@ -12,7 +12,10 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { TraversalExpansion } from "../query/ast";
+import type { NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
+import type { Predicate } from "../query/predicates";
 
 // ============================================================
 // Node Instance Types
@@ -38,7 +41,7 @@ export type NodeMeta = Readonly<{
  * - System metadata is under `node.meta.*`
  */
 export type Node<N extends NodeType = NodeType> = Readonly<{
-  kind: N["name"];
+  kind: N["kind"];
   id: NodeId<N>;
   meta: NodeMeta;
 }> &
@@ -48,7 +51,7 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
  * Input for creating a node.
  */
 export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
-  kind: N["name"];
+  kind: N["kind"];
   id?: string; // Optional - will generate ULID if not provided
   props: z.infer<N["schema"]>;
   validFrom?: string;
@@ -59,7 +62,7 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
  * Input for updating a node.
  */
 export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
-  kind: N["name"];
+  kind: N["kind"];
   id: NodeId<N>;
   props: Partial<z.infer<N["schema"]>>;
   validTo?: string;
@@ -89,7 +92,7 @@ export type EdgeMeta = Readonly<{
  */
 export type Edge<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: string;
-  kind: E["name"];
+  kind: E["kind"];
   fromKind: string;
   fromId: string;
   toKind: string;
@@ -102,7 +105,7 @@ export type Edge<E extends AnyEdgeType = EdgeType> = Readonly<{
  * Input for creating an edge.
  */
 export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
-  kind: E["name"];
+  kind: E["kind"];
   id?: string; // Optional - will generate ULID if not provided
   fromKind: string;
   fromId: string;
@@ -181,6 +184,9 @@ export type OperationHookContext = HookContext &
 /**
  * Observability hooks for monitoring store operations.
  *
+ * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`) skip
+ * per-item operation hooks for throughput. Query hooks still fire normally.
+ *
  * @example
  * ```typescript
  * const hooks: StoreHooks = {
@@ -230,18 +236,11 @@ export type StoreOptions = Readonly<{
   hooks?: StoreHooks;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
-}>;
-
-/**
- * Configuration for creating a store.
- */
-export type StoreConfig<G extends GraphDef> = Readonly<{
-  /** The graph definition */
-  graph: G;
-  /** Database connection string or path */
-  connection?: string;
-  /** Auto-run migrations */
-  autoMigrate?: boolean;
+  /** Query default behaviors. */
+  queryDefaults?: Readonly<{
+    /** Default traversal ontology expansion mode (default: "inverse"). */
+    traversalExpansion?: TraversalExpansion;
+  }>;
 }>;
 
 // ============================================================
@@ -265,6 +264,12 @@ export type NodeCollection<N extends NodeType> = Readonly<{
     id: NodeId<N>,
     options?: QueryOptions,
   ) => Promise<Node<N> | undefined>;
+
+  /** Get multiple nodes by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly NodeId<N>[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Node<N> | undefined)[]>;
 
   /** Update a node */
   update: (
@@ -292,17 +297,21 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   /**
    * Find nodes matching criteria.
    *
+   * Supports predicate filtering via the `where` option for SQL-level filtering.
    * For simple queries. Use store.query() for complex traversals.
    */
   find: (
     options?: Readonly<{
+      where?: (accessor: NodeAccessor<N>) => Predicate;
       limit?: number;
       offset?: number;
+      temporalMode?: TemporalMode;
+      asOf?: string;
     }>,
   ) => Promise<Node<N>[]>;
 
   /** Count nodes matching criteria */
-  count: () => Promise<number>;
+  count: (options?: QueryOptions) => Promise<number>;
 
   /**
    * Create or update a node.
@@ -320,6 +329,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * Create multiple nodes in a batch.
    *
    * More efficient than calling create() multiple times.
+   * Use `bulkInsert` for the dedicated fast path that skips returning results.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -346,9 +356,26 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   ) => Promise<Node<N>[]>;
 
   /**
+   * Insert multiple nodes without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      props: z.input<N["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
+
+  /**
    * Delete multiple nodes by ID.
    *
-   * Silently ignores IDs that don't exist.
+   * Atomic when the backend supports transactions. Silently ignores IDs
+   * that don't exist.
    */
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
 }>;
@@ -372,7 +399,7 @@ export type NodeRef = Readonly<{ kind: string; id: string }>;
  */
 export type TypedNodeRef<N extends NodeType> =
   | Node<N>
-  | Readonly<{ kind: N["name"]; id: string }>;
+  | Readonly<{ kind: N["kind"]; id: string }>;
 
 /**
  * Options for creating an edge.
@@ -438,6 +465,12 @@ export type EdgeCollection<
   /** Get an edge by ID */
   getById: (id: string, options?: QueryOptions) => Promise<Edge<E> | undefined>;
 
+  /** Get multiple edges by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly string[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Edge<E> | undefined)[]>;
+
   /** Update an edge's properties */
   update: (
     id: string,
@@ -465,13 +498,15 @@ export type EdgeCollection<
    */
   hardDelete: (id: string) => Promise<void>;
 
-  /** Find edges matching criteria */
+  /** Find edges matching endpoint and pagination criteria */
   find: (
     options?: Readonly<{
       from?: TypedNodeRef<From>;
       to?: TypedNodeRef<To>;
       limit?: number;
       offset?: number;
+      temporalMode?: TemporalMode;
+      asOf?: string;
     }>,
   ) => Promise<Edge<E>[]>;
 
@@ -480,6 +515,8 @@ export type EdgeCollection<
     options?: Readonly<{
       from?: TypedNodeRef<From>;
       to?: TypedNodeRef<To>;
+      temporalMode?: TemporalMode;
+      asOf?: string;
     }>,
   ) => Promise<number>;
 
@@ -487,6 +524,7 @@ export type EdgeCollection<
    * Create multiple edges in a batch.
    *
    * More efficient than calling create() multiple times.
+   * Use `bulkInsert` for the dedicated fast path that skips returning results.
    */
   bulkCreate: (
     items: readonly Readonly<{
@@ -500,9 +538,45 @@ export type EdgeCollection<
   ) => Promise<Edge<E>[]>;
 
   /**
+   * Create or update multiple edges in a batch.
+   *
+   * For each item, if an edge with the given ID exists, updates it.
+   * Otherwise, creates a new edge with that ID.
+   */
+  bulkUpsert: (
+    items: readonly Readonly<{
+      id: string;
+      from: TypedNodeRef<From>;
+      to: TypedNodeRef<To>;
+      props?: z.input<E["schema"]>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<Edge<E>[]>;
+
+  /**
+   * Insert multiple edges without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      from: TypedNodeRef<From>;
+      to: TypedNodeRef<To>;
+      props?: z.input<E["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
+
+  /**
    * Delete multiple edges by ID.
    *
-   * Silently ignores IDs that don't exist.
+   * Atomic when the backend supports transactions. Silently ignores IDs
+   * that don't exist.
    */
   bulkDelete: (ids: readonly string[]) => Promise<void>;
 }>;

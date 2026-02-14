@@ -145,7 +145,7 @@ describe("externalRef in graph definitions", () => {
       edges: {},
     });
 
-    expect(graph.nodes.Document.type.name).toBe("Document");
+    expect(graph.nodes.Document.type.kind).toBe("Document");
 
     // Verify the schema validates correctly
     const validData = {

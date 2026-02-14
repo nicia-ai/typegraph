@@ -19,6 +19,8 @@ export type TemporalFilterOptions = Readonly<{
   asOf?: string | undefined;
   /** Optional table alias prefix for column references */
   tableAlias?: string | undefined;
+  /** Optional execution-time current timestamp SQL expression */
+  currentTimestamp?: SQL | undefined;
 }>;
 
 /**
@@ -47,7 +49,7 @@ export type TemporalFilterOptions = Readonly<{
  * ```
  */
 export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
-  const { mode, asOf, tableAlias } = options;
+  const { mode, asOf, tableAlias, currentTimestamp } = options;
 
   // Build column references with optional prefix
   const prefix = tableAlias ? sql.raw(`${tableAlias}.`) : sql.raw("");
@@ -57,7 +59,7 @@ export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
 
   switch (mode) {
     case "current": {
-      const now = new Date().toISOString();
+      const now = currentTimestamp ?? sql`CURRENT_TIMESTAMP`;
       return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
     }
 

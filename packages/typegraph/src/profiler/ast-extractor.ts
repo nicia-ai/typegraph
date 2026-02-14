@@ -28,7 +28,7 @@ import {
 /**
  * A property access extracted from the AST.
  */
-export type ExtractedAccess = Readonly<{
+type ExtractedAccess = Readonly<{
   /** Whether the access targets nodes or edges */
   entityType: ProfileEntityType;
   /** Expanded kind names for the alias */

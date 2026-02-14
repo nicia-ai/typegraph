@@ -14,8 +14,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  getEdgeTypeNames,
-  getNodeTypeNames,
+  getEdgeKinds,
+  getNodeKinds,
   subClassOf,
 } from "../src";
 
@@ -28,7 +28,7 @@ describe("defineNode()", () => {
       }),
     });
 
-    expect(Person.name).toBe("Person");
+    expect(Person.kind).toBe("Person");
     expect(Person.schema).toBeDefined();
   });
 
@@ -46,7 +46,7 @@ describe("defineEdge()", () => {
   it("creates an edge kind with just a name (no properties)", () => {
     const knows = defineEdge("knows");
 
-    expect(knows.name).toBe("knows");
+    expect(knows.kind).toBe("knows");
     expect(knows.schema).toBeDefined();
   });
 
@@ -59,7 +59,7 @@ describe("defineEdge()", () => {
       description: "Employment relationship",
     });
 
-    expect(worksAt.name).toBe("worksAt");
+    expect(worksAt.kind).toBe("worksAt");
     expect(worksAt.description).toBe("Employment relationship");
   });
 });
@@ -117,8 +117,8 @@ describe("defineGraph()", () => {
     });
 
     expect(graph.id).toBe("test_graph");
-    expect(getNodeTypeNames(graph)).toEqual(["Person", "Organization"]);
-    expect(getEdgeTypeNames(graph)).toEqual(["worksAt", "knows"]);
+    expect(getNodeKinds(graph)).toEqual(["Person", "Organization"]);
+    expect(getEdgeKinds(graph)).toEqual(["worksAt", "knows"]);
   });
 
   it("applies default settings for delete behavior and temporal mode", () => {

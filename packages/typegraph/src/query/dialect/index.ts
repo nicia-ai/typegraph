@@ -7,7 +7,15 @@
 
 export { postgresDialect } from "./postgres";
 export { sqliteDialect } from "./sqlite";
-export type { DialectAdapter, SqlDialect } from "./types";
+export type {
+  DialectAdapter,
+  DialectCapabilities,
+  DialectRecursiveQueryStrategy,
+  DialectSetOperationStrategy,
+  DialectStandardQueryStrategy,
+  DialectVectorPredicateStrategy,
+  SqlDialect,
+} from "./types";
 
 import { postgresDialect } from "./postgres";
 import { sqliteDialect } from "./sqlite";
@@ -26,7 +34,6 @@ const DIALECT_ADAPTERS: Record<SqlDialect, DialectAdapter> = {
  *
  * @param dialect - The dialect name ("sqlite" or "postgres")
  * @returns The dialect adapter
- * @throws Error if the dialect is not supported
  *
  * @example
  * ```typescript

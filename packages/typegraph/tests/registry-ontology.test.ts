@@ -17,7 +17,6 @@ import { z } from "zod";
 
 import {
   broader,
-  buildKindRegistry,
   defineGraph,
   defineNode,
   disjointWith,
@@ -28,6 +27,7 @@ import {
   sameAs,
   subClassOf,
 } from "../src";
+import { buildKindRegistry } from "../src/registry";
 
 const emptySchema = z.object({});
 

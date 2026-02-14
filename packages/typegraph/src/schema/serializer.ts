@@ -7,15 +7,13 @@
 import { z } from "zod";
 
 import {
-  getEdgeTypeNames,
-  getNodeTypeNames,
+  getEdgeKinds,
+  getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
 import {
   type EdgeRegistration,
-  type EdgeType,
   type NodeRegistration,
-  type NodeType,
   type UniqueConstraint,
 } from "../core/types";
 import {
@@ -83,8 +81,9 @@ function serializeNodes<G extends GraphDef>(
 ): Record<string, SerializedNodeDef> {
   const result: Record<string, SerializedNodeDef> = {};
 
-  for (const kindName of getNodeTypeNames(graph)) {
-    const registration = graph.nodes[kindName] as NodeRegistration;
+  for (const kindName of getNodeKinds(graph)) {
+    const registration = graph.nodes[kindName];
+    if (registration === undefined) continue;
     result[kindName] = serializeNodeDef(registration);
   }
 
@@ -95,10 +94,10 @@ function serializeNodes<G extends GraphDef>(
  * Serializes a single node registration.
  */
 function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
-  const node = registration.type as NodeType;
+  const node = registration.type;
 
   return {
-    name: node.name,
+    kind: node.kind,
     properties: serializeZodSchema(node.schema),
     uniqueConstraints: serializeUniqueConstraints(registration.unique ?? []),
     onDelete: registration.onDelete ?? "restrict",
@@ -232,8 +231,9 @@ function serializeEdges<G extends GraphDef>(
 ): Record<string, SerializedEdgeDef> {
   const result: Record<string, SerializedEdgeDef> = {};
 
-  for (const kindName of getEdgeTypeNames(graph)) {
-    const registration = graph.edges[kindName] as EdgeRegistration;
+  for (const kindName of getEdgeKinds(graph)) {
+    const registration = graph.edges[kindName];
+    if (registration === undefined) continue;
     result[kindName] = serializeEdgeDef(registration);
   }
 
@@ -244,12 +244,12 @@ function serializeEdges<G extends GraphDef>(
  * Serializes a single edge registration.
  */
 function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
-  const edge = registration.type as EdgeType;
+  const edge = registration.type;
 
   return {
-    name: edge.name,
-    fromKinds: registration.from.map((node) => (node as NodeType).name),
-    toKinds: registration.to.map((node) => (node as NodeType).name),
+    kind: edge.kind,
+    fromKinds: registration.from.map((node) => node.kind),
+    toKinds: registration.to.map((node) => node.kind),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
     endpointExistence: registration.endpointExistence ?? "notDeleted",
@@ -465,7 +465,9 @@ async function sha256Hash(input: string): Promise<string> {
   // Only need 8 bytes (16 hex chars) — avoid converting the full 32-byte digest
   let hex = "";
   for (let index = 0; index < 8; index++) {
-    hex += bytes[index]!.toString(16).padStart(2, "0");
+    const byte = bytes[index];
+    if (byte === undefined) break;
+    hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
 }

@@ -16,6 +16,7 @@ import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { GraphBackend } from "../../src/backend/types";
+import type { SerializedSchema } from "../../src/schema/types";
 
 // ============================================================
 // Types
@@ -25,6 +26,38 @@ import type { GraphBackend } from "../../src/backend/types";
  * Factory function that creates a fresh adapter for each test.
  */
 type AdapterFactory = () => GraphBackend;
+
+function createTestSchemaDocument(
+  overrides?: Partial<SerializedSchema>,
+): SerializedSchema {
+  return {
+    graphId: "test_graph",
+    version: 1,
+    generatedAt: "2024-01-01T00:00:00.000Z",
+    nodes: {},
+    edges: {},
+    ontology: {
+      metaEdges: {},
+      relations: [],
+      closures: {
+        subClassAncestors: {},
+        subClassDescendants: {},
+        broaderClosure: {},
+        narrowerClosure: {},
+        equivalenceSets: {},
+        disjointPairs: [],
+        partOfClosure: {},
+        hasPartClosure: {},
+        iriToKind: {},
+        edgeInverses: {},
+        edgeImplicationsClosure: {},
+        edgeImplyingClosure: {},
+      },
+    },
+    defaults: { onNodeDelete: "restrict", temporalMode: "current" },
+    ...overrides,
+  };
+}
 
 /**
  * Options for the test suite.
@@ -98,6 +131,110 @@ export function createAdapterTestSuite(
         expect(fetched).toBeDefined();
         expect(fetched!.id).toBe("person-1");
         expect(fetched!.kind).toBe("Person");
+      });
+
+      it("supports insertNodeNoReturn when available", async () => {
+        if (backend.insertNodeNoReturn === undefined) return;
+
+        await backend.insertNodeNoReturn({
+          graphId: "test_graph",
+          kind: "Person",
+          id: "person-no-return",
+          props: { name: "No Return Node" },
+        });
+
+        const fetched = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-no-return",
+        );
+        expect(fetched).toBeDefined();
+        expect(fetched!.id).toBe("person-no-return");
+      });
+
+      it("supports insertNodesBatch when available", async () => {
+        if (backend.insertNodesBatch === undefined) return;
+
+        await backend.insertNodesBatch([
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-1",
+            props: { name: "Batch One" },
+          },
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-2",
+            props: { name: "Batch Two" },
+          },
+        ]);
+
+        const first = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-batch-1",
+        );
+        const second = await backend.getNode(
+          "test_graph",
+          "Person",
+          "person-batch-2",
+        );
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+      });
+
+      it("supports insertNodesBatchReturning when available", async () => {
+        if (backend.insertNodesBatchReturning === undefined) return;
+
+        const inserted = await backend.insertNodesBatchReturning([
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-returning-1",
+            props: { name: "Batch Returning One" },
+          },
+          {
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-batch-returning-2",
+            props: { name: "Batch Returning Two" },
+          },
+        ]);
+
+        expect(inserted).toHaveLength(2);
+        expect(inserted.map((row) => row.id).toSorted()).toEqual([
+          "person-batch-returning-1",
+          "person-batch-returning-2",
+        ]);
+      });
+
+      it("supports getNodes when available", async () => {
+        if (backend.getNodes === undefined) return;
+
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: "person-get-many-1",
+          props: { name: "Get Many One" },
+        });
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: "person-get-many-2",
+          props: { name: "Get Many Two" },
+        });
+
+        const rows = await backend.getNodes("test_graph", "Person", [
+          "person-get-many-2",
+          "person-get-many-1",
+          "missing-id",
+        ]);
+
+        expect(rows.map((row) => row.id).toSorted()).toEqual([
+          "person-get-many-1",
+          "person-get-many-2",
+        ]);
       });
 
       it("inserts a node with temporal fields", async () => {
@@ -311,6 +448,126 @@ export function createAdapterTestSuite(
         expect(fetched!.kind).toBe("worksAt");
       });
 
+      it("supports insertEdgeNoReturn when available", async () => {
+        if (backend.insertEdgeNoReturn === undefined) return;
+
+        await backend.insertEdgeNoReturn({
+          graphId: "test_graph",
+          id: "edge-no-return",
+          kind: "worksAt",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-1",
+          props: { role: "No Return Edge" },
+        });
+
+        const fetched = await backend.getEdge("test_graph", "edge-no-return");
+        expect(fetched).toBeDefined();
+        expect(fetched!.id).toBe("edge-no-return");
+      });
+
+      it("supports insertEdgesBatch when available", async () => {
+        if (backend.insertEdgesBatch === undefined) return;
+
+        await backend.insertEdgesBatch([
+          {
+            graphId: "test_graph",
+            id: "edge-batch-1",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-1",
+            props: { role: "Batch One" },
+          },
+          {
+            graphId: "test_graph",
+            id: "edge-batch-2",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-2",
+            props: { role: "Batch Two" },
+          },
+        ]);
+
+        const first = await backend.getEdge("test_graph", "edge-batch-1");
+        const second = await backend.getEdge("test_graph", "edge-batch-2");
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+      });
+
+      it("supports insertEdgesBatchReturning when available", async () => {
+        if (backend.insertEdgesBatchReturning === undefined) return;
+
+        const inserted = await backend.insertEdgesBatchReturning([
+          {
+            graphId: "test_graph",
+            id: "edge-batch-returning-1",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-1",
+            props: { role: "Batch Returning One" },
+          },
+          {
+            graphId: "test_graph",
+            id: "edge-batch-returning-2",
+            kind: "worksAt",
+            fromKind: "Person",
+            fromId: "person-1",
+            toKind: "Company",
+            toId: "company-2",
+            props: { role: "Batch Returning Two" },
+          },
+        ]);
+
+        expect(inserted).toHaveLength(2);
+        expect(inserted.map((row) => row.id).toSorted()).toEqual([
+          "edge-batch-returning-1",
+          "edge-batch-returning-2",
+        ]);
+      });
+
+      it("supports getEdges when available", async () => {
+        if (backend.getEdges === undefined) return;
+
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-get-many-1",
+          kind: "worksAt",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-1",
+          props: { role: "Get Many One" },
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-get-many-2",
+          kind: "worksAt",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-2",
+          props: { role: "Get Many Two" },
+        });
+
+        const rows = await backend.getEdges("test_graph", [
+          "edge-get-many-2",
+          "missing-id",
+          "edge-get-many-1",
+        ]);
+
+        expect(rows.map((row) => row.id).toSorted()).toEqual([
+          "edge-get-many-1",
+          "edge-get-many-2",
+        ]);
+      });
+
       it("inserts an edge with temporal fields", async () => {
         const validFrom = "2024-01-01T00:00:00.000Z";
         const validTo = "2024-12-31T23:59:59.999Z";
@@ -433,6 +690,58 @@ export function createAdapterTestSuite(
 
         expect(JSON.parse(fromA!.props).graph).toBe("a");
         expect(JSON.parse(fromB!.props).graph).toBe("b");
+      });
+    });
+
+    // ============================================================
+    // Edge Query Operations
+    // ============================================================
+
+    describe("Edge Query Operations", () => {
+      it("finds incoming and outgoing edges for a node without duplicating self-loops", async () => {
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-outgoing",
+          kind: "relatedTo",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Company",
+          toId: "company-1",
+          props: {},
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-incoming",
+          kind: "relatedTo",
+          fromKind: "Company",
+          fromId: "company-2",
+          toKind: "Person",
+          toId: "person-1",
+          props: {},
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: "edge-self-loop",
+          kind: "relatedTo",
+          fromKind: "Person",
+          fromId: "person-1",
+          toKind: "Person",
+          toId: "person-1",
+          props: {},
+        });
+
+        const edges = await backend.findEdgesConnectedTo({
+          graphId: "test_graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+        });
+
+        const edgeIds = edges.map((edge) => edge.id).toSorted();
+        expect(edgeIds).toEqual([
+          "edge-incoming",
+          "edge-outgoing",
+          "edge-self-loop",
+        ]);
       });
     });
 
@@ -613,7 +922,17 @@ export function createAdapterTestSuite(
           graphId: "test_graph",
           version: 1,
           schemaHash: "abc123",
-          schemaDoc: { nodes: { Person: {} }, edges: {} },
+          schemaDoc: createTestSchemaDocument({
+            nodes: {
+              Person: {
+                kind: "Person",
+                properties: { type: "object" },
+                uniqueConstraints: [],
+                onDelete: "restrict",
+                description: undefined,
+              },
+            },
+          }),
           isActive: true,
         });
 
@@ -641,7 +960,7 @@ export function createAdapterTestSuite(
           graphId: "test_graph",
           version: 1,
           schemaHash: "abc123",
-          schemaDoc: {},
+          schemaDoc: createTestSchemaDocument(),
           isActive: false,
         });
 
@@ -654,7 +973,7 @@ export function createAdapterTestSuite(
           graphId: "graph_a",
           version: 1,
           schemaHash: "hash-a",
-          schemaDoc: { graph: "a" },
+          schemaDoc: createTestSchemaDocument({ graphId: "graph_a" }),
           isActive: true,
         });
 
@@ -662,7 +981,7 @@ export function createAdapterTestSuite(
           graphId: "graph_b",
           version: 1,
           schemaHash: "hash-b",
-          schemaDoc: { graph: "b" },
+          schemaDoc: createTestSchemaDocument({ graphId: "graph_b" }),
           isActive: true,
         });
 
@@ -833,6 +1152,41 @@ export function createAdapterTestSuite(
             "person-1",
             "person-2",
           ]);
+        });
+
+        it("supports compileSql when available", () => {
+          if (backend.compileSql === undefined) return;
+
+          const query = sql`SELECT ${"ok"} AS value`;
+          const compiled = backend.compileSql(query);
+
+          expect(compiled.sql).toContain("SELECT");
+          expect(compiled.params).toEqual(["ok"]);
+        });
+
+        it("supports executeRaw with compiled SQL when available", async () => {
+          if (
+            backend.compileSql === undefined ||
+            backend.executeRaw === undefined
+          )
+            return;
+
+          await backend.insertNode({
+            graphId: "test_graph",
+            kind: "Person",
+            id: "person-raw-1",
+            props: { name: "Alice" },
+          });
+
+          const query = sql`SELECT id FROM typegraph_nodes WHERE graph_id = ${"test_graph"} AND id = ${"person-raw-1"}`;
+          const compiled = backend.compileSql(query);
+          const rows = await backend.executeRaw<{ id: string }>(
+            compiled.sql,
+            compiled.params,
+          );
+
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.id).toBe("person-raw-1");
         });
       });
     }

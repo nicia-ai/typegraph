@@ -3,6 +3,7 @@
  *
  * Provides a fluent API for building type-safe predicates.
  */
+import { UnsupportedPredicateError } from "../errors";
 import {
   type ArrayOp,
   type ArrayPredicate,
@@ -16,6 +17,7 @@ import {
   type NullPredicate,
   type ObjectOp,
   type ObjectPredicate,
+  type ParameterRef,
   type PredicateExpression,
   type QueryAst,
   type StringOp,
@@ -36,6 +38,12 @@ import {
   type ResolveJsonPointerSegments,
 } from "./json-pointer";
 import { type FieldTypeInfo } from "./schema-introspector";
+import {
+  getSingleSubqueryColumnValueType,
+  getSubqueryColumnCount,
+  isInSubqueryTypeCompatible,
+  isUnsupportedInSubqueryValueType,
+} from "./subquery-utils";
 
 // ============================================================
 // Predicate Builder
@@ -76,6 +84,42 @@ function predicate(expr: PredicateExpression): Predicate {
 }
 
 // ============================================================
+// Parameter References
+// ============================================================
+
+/**
+ * Creates a named parameter reference for prepared queries.
+ *
+ * Use with `query.prepare()` to create reusable parameterized queries.
+ * Only supported in scalar comparison positions (eq, neq, gt, etc.),
+ * string operations, and between bounds. Not supported in `in()`/`notIn()`.
+ *
+ * @example
+ * ```typescript
+ * const prepared = store.query()
+ *   .from("Person", "p")
+ *   .whereNode("p", (p) => p.name.eq(param("name")))
+ *   .select((ctx) => ctx.p)
+ *   .prepare();
+ *
+ * const results = await prepared.execute({ name: "Alice" });
+ * ```
+ */
+// eslint-disable-next-line unicorn/prevent-abbreviations -- concise public API
+export function param(name: string): ParameterRef {
+  return { __type: "parameter", name };
+}
+
+/**
+ * Type guard for ParameterRef values.
+ */
+export function isParameterRef(value: unknown): value is ParameterRef {
+  if (typeof value !== "object" || value === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for untyped input
+  return (value as ParameterRef).__type === "parameter";
+}
+
+// ============================================================
 // Field Builder
 // ============================================================
 
@@ -108,11 +152,11 @@ type BaseFieldBuilder = Readonly<{
  */
 type StringFieldBuilder = BaseFieldBuilder &
   Readonly<{
-    contains: (pattern: string) => Predicate;
-    startsWith: (pattern: string) => Predicate;
-    endsWith: (pattern: string) => Predicate;
-    like: (pattern: string) => Predicate;
-    ilike: (pattern: string) => Predicate;
+    contains: (pattern: string | ParameterRef) => Predicate;
+    startsWith: (pattern: string | ParameterRef) => Predicate;
+    endsWith: (pattern: string | ParameterRef) => Predicate;
+    like: (pattern: string | ParameterRef) => Predicate;
+    ilike: (pattern: string | ParameterRef) => Predicate;
   }>;
 
 /**
@@ -120,11 +164,14 @@ type StringFieldBuilder = BaseFieldBuilder &
  */
 type NumberFieldBuilder = BaseFieldBuilder &
   Readonly<{
-    gt: (value: number) => Predicate;
-    gte: (value: number) => Predicate;
-    lt: (value: number) => Predicate;
-    lte: (value: number) => Predicate;
-    between: (lower: number, upper: number) => Predicate;
+    gt: (value: number | ParameterRef) => Predicate;
+    gte: (value: number | ParameterRef) => Predicate;
+    lt: (value: number | ParameterRef) => Predicate;
+    lte: (value: number | ParameterRef) => Predicate;
+    between: (
+      lower: number | ParameterRef,
+      upper: number | ParameterRef,
+    ) => Predicate;
   }>;
 
 /**
@@ -137,11 +184,14 @@ type BooleanFieldBuilder = BaseFieldBuilder;
  */
 type DateFieldBuilder = BaseFieldBuilder &
   Readonly<{
-    gt: (value: Date | string) => Predicate;
-    gte: (value: Date | string) => Predicate;
-    lt: (value: Date | string) => Predicate;
-    lte: (value: Date | string) => Predicate;
-    between: (lower: Date | string, upper: Date | string) => Predicate;
+    gt: (value: Date | string | ParameterRef) => Predicate;
+    gte: (value: Date | string | ParameterRef) => Predicate;
+    lt: (value: Date | string | ParameterRef) => Predicate;
+    lte: (value: Date | string | ParameterRef) => Predicate;
+    between: (
+      lower: Date | string | ParameterRef,
+      upper: Date | string | ParameterRef,
+    ) => Predicate;
   }>;
 
 type ScalarValue = string | number | boolean | Date;
@@ -353,6 +403,15 @@ function comparison(
   field: FieldRef,
   value: unknown,
 ): Predicate {
+  if (isParameterRef(value)) {
+    const expr: ComparisonPredicate = {
+      __type: "comparison",
+      op,
+      left: field,
+      right: value,
+    };
+    return predicate(expr);
+  }
   const coercedValue = coerceLiteralValue(value);
   const expr: ComparisonPredicate = {
     __type: "comparison",
@@ -384,7 +443,20 @@ function inComparison(
 /**
  * Creates a string operation predicate.
  */
-function stringOp(op: StringOp, field: FieldRef, pattern: string): Predicate {
+function stringOp(
+  op: StringOp,
+  field: FieldRef,
+  pattern: string | ParameterRef,
+): Predicate {
+  if (isParameterRef(pattern)) {
+    const expr: StringPredicate = {
+      __type: "string_op",
+      op,
+      field,
+      pattern,
+    };
+    return predicate(expr);
+  }
   const expr: StringPredicate = {
     __type: "string_op",
     op,
@@ -411,14 +483,14 @@ function nullCheck(op: "isNull" | "isNotNull", field: FieldRef): Predicate {
  */
 function between(
   field: FieldRef,
-  lower: string | number | boolean | Date,
-  upper: string | number | boolean | Date,
+  lower: string | number | boolean | Date | ParameterRef,
+  upper: string | number | boolean | Date | ParameterRef,
 ): Predicate {
   const expr: BetweenPredicate = {
     __type: "between",
     field,
-    lower: literal(lower),
-    upper: literal(upper),
+    lower: isParameterRef(lower) ? lower : literal(lower),
+    upper: isParameterRef(upper) ? upper : literal(upper),
   };
   return predicate(expr);
 }
@@ -834,13 +906,17 @@ export function notExists(subquery: QueryAst): Predicate {
  *     inSubquery(
  *       fieldRef("p", ["id"]),
  *       query.from("VIPMember", "v")
- *         .select({ id: field("v.personId") })
+ *         .aggregate({
+ *           id: fieldRef("v", ["props", "personId"], { valueType: "string" }),
+ *         })
  *         .toAst()
  *     )
  *   )
  * ```
  */
 export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
+  assertSingleColumnSubquery(subquery);
+  assertCompatibleSubqueryValueTypes(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -858,6 +934,8 @@ export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
  * @param subquery - The subquery AST that returns a single column
  */
 export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
+  assertSingleColumnSubquery(subquery);
+  assertCompatibleSubqueryValueTypes(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -865,4 +943,56 @@ export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
     negated: true,
   };
   return predicate(expr);
+}
+
+/**
+ * Ensures IN/NOT IN subqueries project exactly one column.
+ */
+function assertSingleColumnSubquery(subquery: QueryAst): void {
+  const columnCount = getSubqueryColumnCount(subquery);
+  if (columnCount === 1) return;
+
+  throw new UnsupportedPredicateError(
+    `IN/NOT IN subquery must project exactly 1 column, but got ${columnCount}`,
+    { subqueryColumnCount: columnCount },
+    {
+      suggestion:
+        "Use aggregate() with exactly one projected field for scalar IN/NOT IN subqueries.",
+    },
+  );
+}
+
+/**
+ * Ensures IN/NOT IN subquery and field value types are compatible when known.
+ */
+function assertCompatibleSubqueryValueTypes(
+  field: FieldRef,
+  subquery: QueryAst,
+): void {
+  const fieldValueType = field.valueType;
+  const subqueryValueType = getSingleSubqueryColumnValueType(subquery);
+  const resolvedValueType = fieldValueType ?? subqueryValueType;
+
+  if (isUnsupportedInSubqueryValueType(resolvedValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery does not support ${String(resolvedValueType)} values`,
+      { valueType: resolvedValueType },
+      {
+        suggestion:
+          "Use scalar fields (string/number/boolean/date) in IN/NOT IN predicates.",
+      },
+    );
+  }
+
+  if (isInSubqueryTypeCompatible(fieldValueType, subqueryValueType)) {
+    return;
+  }
+
+  throw new UnsupportedPredicateError(
+    `IN/NOT IN type mismatch: field type "${String(fieldValueType)}" does not match subquery column type "${String(subqueryValueType)}"`,
+    {
+      fieldValueType,
+      subqueryValueType,
+    },
+  );
 }

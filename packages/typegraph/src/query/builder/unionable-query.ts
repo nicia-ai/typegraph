@@ -16,12 +16,15 @@ import {
   compileSetOperation,
 } from "../compiler/index";
 import { mapResults } from "../execution";
+import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
   type AliasMap,
   type EdgeAliasMap,
   type QueryBuilderConfig,
   type SelectContext,
 } from "./types";
+
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
 // Forward declaration for ExecutableQuery to avoid circular imports
 // G and R are used for type compatibility with ExecutableQuery but not accessed in the interface body
@@ -56,6 +59,7 @@ type UnionableQueryState = Readonly<{
 export class UnionableQuery<G extends GraphDef, R> {
   readonly #config: QueryBuilderConfig;
   readonly #state: UnionableQueryState;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: UnionableQueryState) {
     this.#config = config;
@@ -164,30 +168,47 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Builds the set operation AST.
    */
   toAst(): SetOperation {
-    const ast: SetOperation = {
+    return {
       __type: "set_operation",
       operator: this.#state.operator,
       left: this.#state.left,
       right: this.#state.right,
+      ...(this.#state.limit !== undefined && { limit: this.#state.limit }),
+      ...(this.#state.offset !== undefined && { offset: this.#state.offset }),
     };
-    if (this.#state.limit !== undefined) {
-      (ast as { limit?: number }).limit = this.#state.limit;
+  }
+
+  /**
+   * Compiles the query and returns the SQL text and parameters.
+   *
+   * Requires a backend to be configured (the backend determines the SQL dialect).
+   * Use this for debugging, logging, or running the query with a custom executor.
+   */
+  toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
+    if (!this.#config.backend?.compileSql) {
+      throw new Error(
+        "Cannot convert to SQL: no backend configured or backend does not support compileSql. " +
+          "Use store.query() to get a backend-aware query builder.",
+      );
     }
-    if (this.#state.offset !== undefined) {
-      (ast as { offset?: number }).offset = this.#state.offset;
-    }
-    return ast;
+    return this.#config.backend.compileSql(this.compile());
   }
 
   /**
    * Compiles the set operation to SQL.
    */
   compile(): SQL {
-    return compileSetOperation(
+    if (this.#cachedCompiled !== NOT_COMPUTED) {
+      return this.#cachedCompiled;
+    }
+
+    const compiled = compileSetOperation(
       this.toAst(),
       this.#config.graphId,
       this.#compileOptions(),
     );
+    this.#cachedCompiled = compiled;
+    return compiled;
   }
 
   /**
@@ -208,6 +229,12 @@ export class UnionableQuery<G extends GraphDef, R> {
       throw new Error(
         "Cannot execute query: no backend configured. " +
           "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+
+    if (composableQueryHasParameterReferences(this.toAst())) {
+      throw new Error(
+        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
     }
 

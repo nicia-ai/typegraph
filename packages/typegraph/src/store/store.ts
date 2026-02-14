@@ -8,8 +8,9 @@
  * - Schema management
  * - Transaction handling
  */
-import { type GraphBackend } from "../backend/types";
+import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import type { TraversalExpansion } from "../query/ast";
 import { createQueryBuilder, type QueryBuilder } from "../query/builder";
 import { createSqlSchema } from "../query/compiler/schema";
 import { buildKindRegistry, type KindRegistry } from "../registry";
@@ -24,21 +25,22 @@ import {
 import {
   type EdgeOperationContext,
   executeEdgeCreate,
+  executeEdgeCreateBatch,
+  executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
   executeEdgeHardDelete,
   executeEdgeUpdate,
+  executeEdgeUpsertUpdate,
   executeNodeCreate,
+  executeNodeCreateBatch,
+  executeNodeCreateNoReturnBatch,
   executeNodeDelete,
   executeNodeHardDelete,
   executeNodeUpdate,
+  executeNodeUpsertUpdate,
   type NodeOperationContext,
 } from "./operations";
-import {
-  type EdgeRow,
-  type NodeRow,
-  rowToEdge,
-  rowToNode,
-} from "./row-mappers";
+import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   type HookContext,
   type NodeCollection,
@@ -93,6 +95,19 @@ export class Store<G extends GraphDef> {
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
+  readonly #defaultTraversalExpansion: TraversalExpansion;
+  #nodeCollections:
+    | {
+        [K in keyof G["nodes"] & string]-?: NodeCollection<
+          G["nodes"][K]["type"]
+        >;
+      }
+    | undefined;
+  #edgeCollections:
+    | {
+        [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
+      }
+    | undefined;
 
   constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
     this.#graph = graph;
@@ -102,6 +117,8 @@ export class Store<G extends GraphDef> {
     this.#schema =
       options?.schema ??
       (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
+    this.#defaultTraversalExpansion =
+      options?.queryDefaults?.traversalExpansion ?? "inverse";
   }
 
   // === Accessors ===
@@ -146,13 +163,17 @@ export class Store<G extends GraphDef> {
   get nodes(): {
     [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
   } {
-    return createNodeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      this.#backend,
-      this.#nodeOperations,
-    );
+    if (this.#nodeCollections === undefined) {
+      this.#nodeCollections = createNodeCollectionsProxy(
+        this.#graph,
+        this.graphId,
+        this.#registry,
+        this.#backend,
+        this.#nodeOperations,
+      );
+    }
+
+    return this.#nodeCollections;
   }
 
   /**
@@ -174,13 +195,17 @@ export class Store<G extends GraphDef> {
   get edges(): {
     [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
   } {
-    return createEdgeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      this.#backend,
-      this.#edgeOperations,
-    );
+    if (this.#edgeCollections === undefined) {
+      this.#edgeCollections = createEdgeCollectionsProxy(
+        this.#graph,
+        this.graphId,
+        this.#registry,
+        this.#backend,
+        this.#edgeOperations,
+      );
+    }
+
+    return this.#edgeCollections;
   }
 
   /**
@@ -189,16 +214,29 @@ export class Store<G extends GraphDef> {
   get #nodeOperations(): NodeOperations {
     const ctx = this.#createNodeOperationContext();
     return {
-      rowToNode: (row) => rowToNode(row as NodeRow),
+      defaultTemporalMode: this.#graph.defaults.temporalMode,
+      rowToNode: (row) => rowToNode(row),
       executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
+      executeCreateBatch: (inputs, backend) =>
+        executeNodeCreateBatch(ctx, inputs, backend),
+      executeCreateNoReturnBatch: (inputs, backend) =>
+        executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
+      executeUpsertUpdate: (input, backend, options) =>
+        executeNodeUpsertUpdate(
+          ctx,
+          { ...input, id: input.id },
+          backend,
+          options,
+        ),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
+      createQuery: () => this.query(),
     };
   }
 
@@ -208,14 +246,22 @@ export class Store<G extends GraphDef> {
   get #edgeOperations(): EdgeOperations {
     const ctx = this.#createEdgeOperationContext();
     return {
-      rowToEdge: (row) => rowToEdge(row as EdgeRow),
+      defaultTemporalMode: this.#graph.defaults.temporalMode,
+      rowToEdge: (row) => rowToEdge(row),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
+      executeCreateBatch: (inputs, backend) =>
+        executeEdgeCreateBatch(ctx, inputs, backend),
+      executeCreateNoReturnBatch: (inputs, backend) =>
+        executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
+      executeUpsertUpdate: (input, backend, options) =>
+        executeEdgeUpsertUpdate(ctx, input, backend, options),
       executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
       executeHardDelete: (id, backend) =>
         executeEdgeHardDelete(ctx, id, backend),
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
+      createQuery: () => this.query(),
     };
   }
 
@@ -234,11 +280,7 @@ export class Store<G extends GraphDef> {
    * ```
    */
   query(): QueryBuilder<G> {
-    return createQueryBuilder<G>(this.graphId, this.#registry, {
-      backend: this.#backend,
-      dialect: this.#backend.dialect,
-      ...(this.#schema !== undefined && { schema: this.#schema }),
-    });
+    return this.#createQueryForBackend(this.#backend);
   }
 
   // === Transactions ===
@@ -267,13 +309,22 @@ export class Store<G extends GraphDef> {
     fn: (tx: TransactionContext<G>) => Promise<T>,
   ): Promise<T> {
     return this.#backend.transaction(async (txBackend) => {
+      const txNodeOperations: NodeOperations = {
+        ...this.#nodeOperations,
+        createQuery: () => this.#createQueryForBackend(txBackend),
+      };
+      const txEdgeOperations: EdgeOperations = {
+        ...this.#edgeOperations,
+        createQuery: () => this.#createQueryForBackend(txBackend),
+      };
+
       // Create collections using transaction backend
       const nodes = createNodeCollectionsProxy(
         this.#graph,
         this.graphId,
         this.#registry,
         txBackend,
-        this.#nodeOperations,
+        txNodeOperations,
       );
 
       const edges = createEdgeCollectionsProxy(
@@ -281,7 +332,7 @@ export class Store<G extends GraphDef> {
         this.graphId,
         this.#registry,
         txBackend,
-        this.#edgeOperations,
+        txEdgeOperations,
       );
 
       return fn({ nodes, edges });
@@ -407,6 +458,19 @@ export class Store<G extends GraphDef> {
       }
     }
   }
+
+  #createQueryForBackend(
+    backend: GraphBackend | TransactionBackend,
+  ): QueryBuilder<G> {
+    return createQueryBuilder<G>(this.graphId, this.#registry, {
+      // TransactionBackend omits transaction/close, but query execution only needs
+      // the read-path/query capabilities shared with GraphBackend.
+      backend: backend as GraphBackend,
+      dialect: backend.dialect,
+      defaultTraversalExpansion: this.#defaultTraversalExpansion,
+      ...(this.#schema !== undefined && { schema: this.#schema }),
+    });
+  }
 }
 
 // ============================================================
@@ -488,6 +552,8 @@ import {
  *   console.log("Schema initialized at version", result.version);
  * } else if (result.status === "migrated") {
  *   console.log(`Migrated from v${result.fromVersion} to v${result.toVersion}`);
+ * } else if (result.status === "pending") {
+ *   console.log(`Safe changes pending at version ${result.version}`);
  * }
  * ```
  */

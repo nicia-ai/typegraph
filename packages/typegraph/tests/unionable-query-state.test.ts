@@ -8,12 +8,12 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  buildKindRegistry,
   createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
 } from "../src";
+import { buildKindRegistry } from "../src/registry";
 
 // ============================================================
 // Test Graph

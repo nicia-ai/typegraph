@@ -35,7 +35,22 @@ export type SchemaValidationResult =
       toVersion: number;
       diff: SchemaDiff;
     }
+  | { status: "pending"; version: number; diff: SchemaDiff }
   | { status: "breaking"; diff: SchemaDiff; actions: readonly string[] };
+
+/**
+ * Context passed to migration lifecycle hooks.
+ *
+ * Hooks are intended for observability (logging, metrics, alerts),
+ * not for data transformations. Use an explicit migration runner
+ * for backfill scripts — see the schema evolution guide.
+ */
+export type MigrationHookContext = Readonly<{
+  graphId: string;
+  fromVersion: number;
+  toVersion: number;
+  diff: SchemaDiff;
+}>;
 
 /**
  * Options for schema management.
@@ -45,6 +60,10 @@ export type SchemaManagerOptions = Readonly<{
   autoMigrate?: boolean;
   /** If true, throw on breaking changes. Default: true */
   throwOnBreaking?: boolean;
+  /** Called before a safe auto-migration is applied. For observability only. */
+  onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
+  /** Called after a safe auto-migration is applied. For observability only. */
+  onAfterMigrate?: (context: MigrationHookContext) => void | Promise<void>;
 }>;
 
 // ============================================================
@@ -109,11 +128,19 @@ export async function ensureSchema<G extends GraphDef>(
   if (isBackwardsCompatible(diff)) {
     if (autoMigrate) {
       // Safe changes - auto-migrate
+      const hookContext: MigrationHookContext = {
+        graphId: graph.id,
+        fromVersion: activeSchema.version,
+        toVersion: activeSchema.version + 1,
+        diff,
+      };
+      await options?.onBeforeMigrate?.(hookContext);
       const newVersion = await migrateSchema(
         backend,
         graph,
         activeSchema.version,
       );
+      await options?.onAfterMigrate?.(hookContext);
       return {
         status: "migrated",
         fromVersion: activeSchema.version,
@@ -123,9 +150,8 @@ export async function ensureSchema<G extends GraphDef>(
     }
     // Auto-migrate disabled but changes are safe
     return {
-      status: "migrated",
-      fromVersion: activeSchema.version,
-      toVersion: activeSchema.version,
+      status: "pending",
+      version: activeSchema.version,
       diff,
     };
   }
@@ -137,7 +163,7 @@ export async function ensureSchema<G extends GraphDef>(
     throw new MigrationError(
       `Schema migration required: ${diff.summary}. ` +
         `${actions.length} migration action(s) needed. ` +
-        `Use migrateSchema() with force=true to proceed.`,
+        `Use getSchemaChanges() to review, then migrateSchema() to apply.`,
       {
         graphId: graph.id,
         fromVersion: activeSchema.version,
@@ -169,7 +195,7 @@ export async function initializeSchema<G extends GraphDef>(
     graphId: graph.id,
     version: 1,
     schemaHash: hash,
-    schemaDoc: schema as unknown as Record<string, unknown>,
+    schemaDoc: schema,
     isActive: true,
   });
 }
@@ -199,7 +225,7 @@ export async function migrateSchema<G extends GraphDef>(
     graphId: graph.id,
     version: newVersion,
     schemaHash: hash,
-    schemaDoc: schema as unknown as Record<string, unknown>,
+    schemaDoc: schema,
     isActive: false,
   });
 
@@ -207,6 +233,32 @@ export async function migrateSchema<G extends GraphDef>(
   await backend.setActiveSchema(graph.id, newVersion);
 
   return newVersion;
+}
+
+/**
+ * Rolls back the active schema to a previous version.
+ *
+ * The target version must already exist in the version history.
+ * This does not delete newer versions — it simply switches the active pointer.
+ *
+ * @param backend - The database backend
+ * @param graphId - The graph ID
+ * @param targetVersion - The version to roll back to
+ * @throws MigrationError if the target version does not exist
+ */
+export async function rollbackSchema(
+  backend: GraphBackend,
+  graphId: string,
+  targetVersion: number,
+): Promise<void> {
+  const row = await backend.getSchemaVersion(graphId, targetVersion);
+  if (!row) {
+    throw new MigrationError(
+      `Cannot rollback to version ${targetVersion}: version does not exist.`,
+      { graphId, fromVersion: targetVersion, toVersion: targetVersion },
+    );
+  }
+  await backend.setActiveSchema(graphId, targetVersion);
 }
 
 /**
