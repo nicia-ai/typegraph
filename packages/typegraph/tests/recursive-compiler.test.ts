@@ -520,6 +520,47 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain('AS "target_name_only"');
     });
 
+    it("prunes unreferenced recursive columns for selective projections", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "target",
+            field: "id",
+            outputName: "target_id_only",
+            isSystemField: true,
+          },
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('target_id AS "target_id_only"');
+      expect(sql).toContain("target_kind");
+      expect(sql).not.toContain("source_props");
+      expect(sql).not.toContain("source_version");
+      expect(sql).not.toContain("target_props");
+      expect(sql).not.toContain("target_created_at");
+    });
+
+    it("keeps ORDER BY columns when selective projection is enabled", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "target",
+            field: "id",
+            outputName: "target_id_only",
+            isSystemField: true,
+          },
+        ],
+        orderBy: [createOrderSpec("source", "name", "asc")],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("source_props");
+      expect(sql).toContain('target_id AS "target_id_only"');
+    });
+
     it("throws for recursive selective projection on unsupported aliases", () => {
       const ast = createAst({
         selectiveFields: [
@@ -723,6 +764,42 @@ describe("compileVariableLengthQuery", () => {
       // SQLite uses string concatenation for path
       expect(sql).toContain("'|' ||");
       expect(sql).toContain("|| '|' AS path");
+    });
+
+    it("skips cycle/path tracking for bounded traversals without collectPath", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              maxDepth: 5,
+              collectPath: false,
+            }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).not.toContain("INSTR");
+      expect(sql).not.toContain(" AS path");
+    });
+
+    it("keeps cycle/path tracking when collectPath is enabled", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              maxDepth: 5,
+              collectPath: true,
+            }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("INSTR");
+      expect(sql).toContain(" AS path");
     });
   });
 

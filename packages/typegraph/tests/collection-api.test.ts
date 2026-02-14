@@ -70,6 +70,10 @@ describe("Node Collections (SQLite)", () => {
     store = createStore(testGraph, backend);
   });
 
+  it("reuses node collection instances across repeated access", () => {
+    expect(store.nodes.Person).toBe(store.nodes.Person);
+  });
+
   describe("store.nodes.*.create()", () => {
     it("creates a node with the collection API", async () => {
       const person = await store.nodes.Person.create({
@@ -201,6 +205,10 @@ describe("Edge Collections (SQLite)", () => {
     db = createTestDatabase();
     backend = createSqliteBackend(db);
     store = createStore(testGraph, backend);
+  });
+
+  it("reuses edge collection instances across repeated access", () => {
+    expect(store.edges.worksAt).toBe(store.edges.worksAt);
   });
 
   describe("store.edges.*.create()", () => {

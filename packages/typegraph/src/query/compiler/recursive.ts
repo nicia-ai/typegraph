@@ -8,6 +8,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../errors";
 import {
+  type FieldRef,
   type QueryAst,
   type SelectiveField,
   type Traversal,
@@ -41,6 +42,22 @@ export const MAX_RECURSIVE_DEPTH = 100;
  * for stress testing and long-path workloads.
  */
 export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
+
+const NODE_COLUMNS = [
+  "id",
+  "kind",
+  "props",
+  "version",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+] as const;
+
+type RequiredColumnsByAlias = ReadonlyMap<string, ReadonlySet<string>>;
+const EMPTY_REQUIRED_COLUMNS = new Set<string>();
+const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
 // ============================================================
 // Types
@@ -89,8 +106,19 @@ export function compileVariableLengthQuery(
     );
   }
 
+  const requiredColumnsByAlias = collectRequiredColumnsByAlias(
+    ast,
+    vlTraversal,
+  );
+
   // Build the recursive CTE
-  const recursiveCte = compileRecursiveCte(ast, vlTraversal, graphId, ctx);
+  const recursiveCte = compileRecursiveCte(
+    ast,
+    vlTraversal,
+    graphId,
+    ctx,
+    requiredColumnsByAlias,
+  );
 
   // Build projection
   const projection = compileRecursiveProjection(ast, vlTraversal, dialect);
@@ -137,6 +165,7 @@ function compileRecursiveCte(
   traversal: VariableLengthTraversal,
   graphId: string,
   ctx: PredicateCompilerContext,
+  requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
 ): SQL {
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
@@ -151,6 +180,43 @@ function compileRecursiveCte(
   const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
   const direction = traversal.direction;
   const vl = traversal.variableLength;
+  const shouldEnforceCycleCheck = !(vl.maxDepth > 0 && !vl.collectPath);
+  const shouldTrackPath = shouldEnforceCycleCheck || vl.collectPath;
+  const recursiveJoinRequiredColumns = new Set<string>(["id"]);
+  if (previousNodeKinds.length > 1) {
+    recursiveJoinRequiredColumns.add("kind");
+  }
+  const requiredStartColumns =
+    requiredColumnsByAlias ?
+      (requiredColumnsByAlias.get(startAlias) ?? EMPTY_REQUIRED_COLUMNS)
+    : undefined;
+  const requiredNodeColumns =
+    requiredColumnsByAlias ?
+      (requiredColumnsByAlias.get(nodeAlias) ?? EMPTY_REQUIRED_COLUMNS)
+    : undefined;
+  const startColumnsFromBase = compileNodeSelectColumnsFromTable(
+    "n0",
+    startAlias,
+    requiredStartColumns,
+    NO_ALWAYS_REQUIRED_COLUMNS,
+  );
+  const startColumnsFromRecursive = compileNodeSelectColumnsFromRecursiveRow(
+    startAlias,
+    requiredStartColumns,
+    NO_ALWAYS_REQUIRED_COLUMNS,
+  );
+  const nodeColumnsFromBase = compileNodeSelectColumnsFromTable(
+    "n0",
+    nodeAlias,
+    requiredNodeColumns,
+    recursiveJoinRequiredColumns,
+  );
+  const nodeColumnsFromRecursive = compileNodeSelectColumnsFromTable(
+    "n",
+    nodeAlias,
+    requiredNodeColumns,
+    recursiveJoinRequiredColumns,
+  );
 
   const startKindFilter = compileKindFilter(startKinds, "n0.kind");
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
@@ -194,14 +260,16 @@ function compileRecursiveCte(
     : MAX_RECURSIVE_DEPTH;
   const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
 
-  // Cycle check using dialect adapter
-  const cycleCheck = dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"));
-
-  // Initial path using dialect adapter
-  const initialPath = dialect.initializePath(sql.raw("n0.id"));
-
-  // Path extension using dialect adapter
-  const pathExtension = dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"));
+  const cycleCheck =
+    shouldEnforceCycleCheck ?
+      dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
+    : undefined;
+  const initialPath =
+    shouldTrackPath ? dialect.initializePath(sql.raw("n0.id")) : undefined;
+  const pathExtension =
+    shouldTrackPath ?
+      dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
+    : undefined;
 
   // Base case WHERE clauses
   const baseWhereClauses = [
@@ -211,16 +279,17 @@ function compileRecursiveCte(
     ...startPredicates,
   ];
 
-  const recursiveBaseWhereClauses = [
+  const recursiveBaseWhereClauses: SQL[] = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
     edgeTemporalFilter,
     nodeTemporalFilter,
     maxDepthCondition,
-    cycleCheck,
-    ...edgePredicates,
-    ...targetNodePredicates,
   ];
+  if (cycleCheck !== undefined) {
+    recursiveBaseWhereClauses.push(cycleCheck);
+  }
+  recursiveBaseWhereClauses.push(...edgePredicates, ...targetNodePredicates);
 
   function compileRecursiveBranch(
     branch: Readonly<{
@@ -243,31 +312,27 @@ function compileRecursiveCte(
       recursiveWhereClauses.push(branch.duplicateGuard);
     }
 
+    const recursiveSelectColumns = [
+      ...startColumnsFromRecursive,
+      ...nodeColumnsFromRecursive,
+      sql`r.depth + 1 AS depth`,
+    ];
+    if (pathExtension !== undefined) {
+      recursiveSelectColumns.push(sql`${pathExtension} AS path`);
+    }
+    const recursiveJoinClauses: SQL[] = [
+      sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`,
+    ];
+    if (previousNodeKinds.length > 1) {
+      recursiveJoinClauses.push(
+        sql`e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind`,
+      );
+    }
+
     return sql`
-      SELECT
-        r.${sql.raw(startAlias)}_id,
-        r.${sql.raw(startAlias)}_kind,
-        r.${sql.raw(startAlias)}_props,
-        r.${sql.raw(startAlias)}_version,
-        r.${sql.raw(startAlias)}_valid_from,
-        r.${sql.raw(startAlias)}_valid_to,
-        r.${sql.raw(startAlias)}_created_at,
-        r.${sql.raw(startAlias)}_updated_at,
-        r.${sql.raw(startAlias)}_deleted_at,
-        n.id AS ${sql.raw(nodeAlias)}_id,
-        n.kind AS ${sql.raw(nodeAlias)}_kind,
-        n.props AS ${sql.raw(nodeAlias)}_props,
-        n.version AS ${sql.raw(nodeAlias)}_version,
-        n.valid_from AS ${sql.raw(nodeAlias)}_valid_from,
-        n.valid_to AS ${sql.raw(nodeAlias)}_valid_to,
-        n.created_at AS ${sql.raw(nodeAlias)}_created_at,
-        n.updated_at AS ${sql.raw(nodeAlias)}_updated_at,
-        n.deleted_at AS ${sql.raw(nodeAlias)}_deleted_at,
-        r.depth + 1 AS depth,
-        ${pathExtension} AS path
+      SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
       FROM recursive_cte r
-      JOIN ${ctx.schema.edgesTable} e ON e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id
-        AND e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind
+      JOIN ${ctx.schema.edgesTable} e ON ${sql.join(recursiveJoinClauses, sql` AND `)}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}
@@ -323,31 +388,19 @@ function compileRecursiveCte(
     inverseEdgeKinds.length === 0 ?
       directBranch
     : compileInverseRecursiveBranch();
+  const baseSelectColumns = [
+    ...startColumnsFromBase,
+    ...nodeColumnsFromBase,
+    sql`0 AS depth`,
+  ];
+  if (initialPath !== undefined) {
+    baseSelectColumns.push(sql`${initialPath} AS path`);
+  }
 
   return sql`
     recursive_cte AS (
       -- Base case: starting nodes
-      SELECT
-        n0.id AS ${sql.raw(startAlias)}_id,
-        n0.kind AS ${sql.raw(startAlias)}_kind,
-        n0.props AS ${sql.raw(startAlias)}_props,
-        n0.version AS ${sql.raw(startAlias)}_version,
-        n0.valid_from AS ${sql.raw(startAlias)}_valid_from,
-        n0.valid_to AS ${sql.raw(startAlias)}_valid_to,
-        n0.created_at AS ${sql.raw(startAlias)}_created_at,
-        n0.updated_at AS ${sql.raw(startAlias)}_updated_at,
-        n0.deleted_at AS ${sql.raw(startAlias)}_deleted_at,
-        n0.id AS ${sql.raw(nodeAlias)}_id,
-        n0.kind AS ${sql.raw(nodeAlias)}_kind,
-        n0.props AS ${sql.raw(nodeAlias)}_props,
-        n0.version AS ${sql.raw(nodeAlias)}_version,
-        n0.valid_from AS ${sql.raw(nodeAlias)}_valid_from,
-        n0.valid_to AS ${sql.raw(nodeAlias)}_valid_to,
-        n0.created_at AS ${sql.raw(nodeAlias)}_created_at,
-        n0.updated_at AS ${sql.raw(nodeAlias)}_updated_at,
-        n0.deleted_at AS ${sql.raw(nodeAlias)}_deleted_at,
-        0 AS depth,
-        ${initialPath} AS path
+      SELECT ${sql.join(baseSelectColumns, sql`, `)}
       FROM ${ctx.schema.nodesTable} n0
       WHERE ${sql.join(baseWhereClauses, sql` AND `)}
 
@@ -402,6 +455,119 @@ function compileEdgePredicates(
   return ast.predicates
     .filter((p) => p.targetAlias === edgeAlias && p.targetType === "edge")
     .map((p) => compilePredicateExpression(p.expression, ctx));
+}
+
+function addRequiredColumn(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  alias: string,
+  column: string,
+): void {
+  const existing = requiredColumnsByAlias.get(alias);
+  if (existing !== undefined) {
+    existing.add(column);
+    return;
+  }
+  requiredColumnsByAlias.set(alias, new Set([column]));
+}
+
+function markFieldRefAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  field: FieldRef,
+): void {
+  const column = field.path[0];
+  if (column === undefined) {
+    return;
+  }
+  addRequiredColumn(requiredColumnsByAlias, field.alias, column);
+}
+
+function markSelectiveFieldAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  field: SelectiveField,
+): void {
+  if (field.isSystemField) {
+    addRequiredColumn(
+      requiredColumnsByAlias,
+      field.alias,
+      mapSelectiveSystemFieldToColumn(field.field),
+    );
+    return;
+  }
+  addRequiredColumn(requiredColumnsByAlias, field.alias, "props");
+}
+
+function collectRequiredColumnsByAlias(
+  ast: QueryAst,
+  traversal: VariableLengthTraversal,
+): RequiredColumnsByAlias | undefined {
+  const selectiveFields = ast.selectiveFields;
+  if (selectiveFields === undefined || selectiveFields.length === 0) {
+    return undefined;
+  }
+
+  const requiredColumnsByAlias = new Map<string, Set<string>>();
+  const previousNodeKinds = [
+    ...new Set([...ast.start.kinds, ...traversal.nodeKinds]),
+  ];
+
+  // Recursive expansion always needs node alias id for joins/cycle checks.
+  addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "id");
+  if (previousNodeKinds.length > 1) {
+    addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "kind");
+  }
+
+  for (const field of selectiveFields) {
+    markSelectiveFieldAsRequired(requiredColumnsByAlias, field);
+  }
+
+  if (ast.orderBy) {
+    for (const orderSpec of ast.orderBy) {
+      markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
+    }
+  }
+
+  return requiredColumnsByAlias;
+}
+
+function shouldProjectNodeColumn(
+  requiredColumns: ReadonlySet<string> | undefined,
+  alwaysRequiredColumns: ReadonlySet<string>,
+  column: string,
+): boolean {
+  if (alwaysRequiredColumns.has(column)) {
+    return true;
+  }
+  if (requiredColumns === undefined) {
+    return true;
+  }
+  return requiredColumns.has(column);
+}
+
+function compileNodeSelectColumnsFromTable(
+  tableAlias: string,
+  alias: string,
+  requiredColumns: ReadonlySet<string> | undefined,
+  alwaysRequiredColumns: ReadonlySet<string>,
+): SQL[] {
+  return NODE_COLUMNS.filter((column) =>
+    shouldProjectNodeColumn(requiredColumns, alwaysRequiredColumns, column),
+  ).map(
+    (column) =>
+      sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${sql.raw(`${alias}_${column}`)}`,
+  );
+}
+
+function compileNodeSelectColumnsFromRecursiveRow(
+  alias: string,
+  requiredColumns: ReadonlySet<string> | undefined,
+  alwaysRequiredColumns: ReadonlySet<string>,
+): SQL[] {
+  return NODE_COLUMNS.filter((column) =>
+    shouldProjectNodeColumn(requiredColumns, alwaysRequiredColumns, column),
+  ).map((column) => {
+    const projected = `${alias}_${column}`;
+    return sql`r.${sql.raw(projected)} AS ${sql.raw(projected)}`;
+  });
 }
 
 /**

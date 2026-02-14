@@ -95,6 +95,18 @@ export class Store<G extends GraphDef> {
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
+  #nodeCollections:
+    | {
+        [K in keyof G["nodes"] & string]-?: NodeCollection<
+          G["nodes"][K]["type"]
+        >;
+      }
+    | undefined;
+  #edgeCollections:
+    | {
+        [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
+      }
+    | undefined;
 
   constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
     this.#graph = graph;
@@ -148,13 +160,17 @@ export class Store<G extends GraphDef> {
   get nodes(): {
     [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
   } {
-    return createNodeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      this.#backend,
-      this.#nodeOperations,
-    );
+    if (this.#nodeCollections === undefined) {
+      this.#nodeCollections = createNodeCollectionsProxy(
+        this.#graph,
+        this.graphId,
+        this.#registry,
+        this.#backend,
+        this.#nodeOperations,
+      );
+    }
+
+    return this.#nodeCollections;
   }
 
   /**
@@ -176,13 +192,17 @@ export class Store<G extends GraphDef> {
   get edges(): {
     [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
   } {
-    return createEdgeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      this.#backend,
-      this.#edgeOperations,
-    );
+    if (this.#edgeCollections === undefined) {
+      this.#edgeCollections = createEdgeCollectionsProxy(
+        this.#graph,
+        this.graphId,
+        this.#registry,
+        this.#backend,
+        this.#edgeOperations,
+      );
+    }
+
+    return this.#edgeCollections;
   }
 
   /**

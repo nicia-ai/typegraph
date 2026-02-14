@@ -154,7 +154,16 @@ const networkAnalysis = await store
 
 ## Cycle Detection
 
-Recursive traversals automatically detect and prevent cycles. The same node will not be visited twice in any path:
+Recursive traversals detect and prevent cycles when path tracking is enabled:
+
+- Unbounded traversals (`.recursive()` without `.maxHops()`)
+- Traversals that call `.collectPath(...)`
+
+For explicitly bounded traversals (`.maxHops(n)`) without `collectPath`, TypeGraph uses
+a faster mode that skips cycle-path tracking. This can revisit nodes across different
+hops, but is significantly faster for deep bounded traversals.
+
+With cycle/path tracking enabled, the same node will not be visited twice in any path:
 
 ```typescript
 // Safe even with circular relationships (A → B → C → A)
@@ -163,6 +172,7 @@ const allReachable = await store
   .from("Node", "start")
   .traverse("linkedTo", "e")
   .recursive()
+  .collectPath("path") // keeps cycle protection for bounded and unbounded traversals
   .to("Node", "reachable")
   .select((ctx) => ctx.reachable.id)
   .execute();

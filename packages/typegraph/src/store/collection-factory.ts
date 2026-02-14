@@ -125,6 +125,8 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
 ): {
   [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
 } {
+  const collectionCache = new Map<string, unknown>();
+
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific node types at compile time.
@@ -137,7 +139,13 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         if (!(kind in graph.nodes)) {
           throw new KindNotFoundError(kind, "node");
         }
-        return createNodeCollection(
+
+        const cached = collectionCache.get(kind);
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        const collection = createNodeCollection(
           graphId,
           kind,
           registry,
@@ -158,6 +166,8 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
             typeof createNodeCollection
           >[10],
         );
+        collectionCache.set(kind, collection);
+        return collection;
       },
     },
   );
@@ -176,6 +186,8 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   operations: EdgeOperations,
 ): { [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]> } {
+  const collectionCache = new Map<string, unknown>();
+
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific edge types at compile time.
@@ -188,7 +200,13 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         if (!(kind in graph.edges)) {
           throw new KindNotFoundError(kind, "edge");
         }
-        return createEdgeCollection(
+
+        const cached = collectionCache.get(kind);
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        const collection = createEdgeCollection(
           graphId,
           kind,
           registry,
@@ -207,6 +225,8 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
             typeof createEdgeCollection
           >[10],
         );
+        collectionCache.set(kind, collection);
+        return collection;
       },
     },
   );
