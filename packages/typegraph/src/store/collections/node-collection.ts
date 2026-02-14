@@ -56,6 +56,16 @@ export function createNodeCollection<
     }>[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>,
+  executeNodeCreateBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Node[]>,
   executeNodeUpdate: (
     input: {
       kind: string;
@@ -238,61 +248,35 @@ export function createNodeCollection<
       options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Node<N>[]> {
       const shouldReturnResults = options?.returnResults ?? true;
-      const results: Node<N>[] = [];
 
-      async function runBulkCreate(
-        activeBackend: GraphBackend | TransactionBackend,
-      ): Promise<void> {
-        if (!shouldReturnResults) {
-          const batchInputs = items.map((item) => {
-            const input: {
-              kind: string;
-              id?: string;
-              props: Record<string, unknown>;
-              validFrom?: string;
-              validTo?: string;
-            } = {
-              kind: kind,
-              props: item.props as Record<string, unknown>,
-            };
-            if (item.id !== undefined) input.id = item.id;
-            if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-            return input;
-          });
-          await executeNodeCreateNoReturnBatch(batchInputs, activeBackend);
-          return;
-        }
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          props: item.props as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
 
-        for (const item of items) {
-          const input: {
-            kind: string;
-            id?: string;
-            props: Record<string, unknown>;
-            validFrom?: string;
-            validTo?: string;
-          } = {
-            kind: kind,
-            props: item.props as Record<string, unknown>,
-          };
-          if (item.id !== undefined) input.id = item.id;
-          if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-          if (item.validTo !== undefined) input.validTo = item.validTo;
-
-          const result = await executeNodeCreate(input, activeBackend);
-          results.push(result as Node<N>);
-        }
+      if (!shouldReturnResults) {
+        await ("transaction" in backend ?
+          backend.transaction(async (txBackend) => {
+            await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
+          })
+        : executeNodeCreateNoReturnBatch(batchInputs, backend));
+        return [];
       }
 
-      if (!shouldReturnResults && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => {
-          await runBulkCreate(txBackend);
-        });
-        return results;
-      }
-
-      await runBulkCreate(backend);
-      return results;
+      const results = await executeNodeCreateBatch(batchInputs, backend);
+      return results as Node<N>[];
     },
 
     async bulkUpsert(
@@ -351,6 +335,41 @@ export function createNodeCollection<
       }
 
       return results;
+    },
+
+    async bulkInsert(
+      items: readonly Readonly<{
+        props: z.input<N["schema"]>;
+        id?: string;
+        validFrom?: string;
+        validTo?: string;
+      }>[],
+    ): Promise<void> {
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          props: item.props as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
+
+      if ("transaction" in backend) {
+        await backend.transaction(async (txBackend) => {
+          await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
+        });
+        return;
+      }
+
+      await executeNodeCreateNoReturnBatch(batchInputs, backend);
     },
 
     async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {

@@ -51,6 +51,18 @@ import type { SqliteTables } from "./schema/sqlite";
 type Tables = SqliteTables | PostgresTables;
 
 // ============================================================
+// Shared Column Lists
+// ============================================================
+
+function nodeColumnList(nodes: Tables["nodes"]): SQL {
+  return sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+}
+
+function edgeColumnList(edges: Tables["edges"]): SQL {
+  return sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+}
+
+// ============================================================
 // Node Operations
 // ============================================================
 
@@ -65,9 +77,7 @@ export function buildInsertNode(
 ): SQL {
   const { nodes } = tables;
   const propsJson = JSON.stringify(params.props);
-
-  // Column list uses raw identifiers (not table-qualified)
-  const cols = sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+  const cols = nodeColumnList(nodes);
 
   return sql`
     INSERT INTO ${nodes} (${cols})
@@ -90,7 +100,7 @@ export function buildInsertNodeNoReturn(
 ): SQL {
   const { nodes } = tables;
   const propsJson = JSON.stringify(params.props);
-  const cols = sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+  const cols = nodeColumnList(nodes);
 
   return sql`
     INSERT INTO ${nodes} (${cols})
@@ -105,13 +115,13 @@ export function buildInsertNodeNoReturn(
 /**
  * Builds a batched INSERT query for nodes without RETURNING payload.
  */
-export function buildInsertNodesNoReturnBatch(
+export function buildInsertNodesBatch(
   tables: Tables,
   params: readonly InsertNodeParams[],
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
-  const cols = sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+  const cols = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
     return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(nodeParams.validFrom)}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
@@ -120,6 +130,28 @@ export function buildInsertNodesNoReturnBatch(
   return sql`
     INSERT INTO ${nodes} (${cols})
     VALUES ${sql.join(values, sql`, `)}
+  `;
+}
+
+/**
+ * Builds a batched INSERT query for nodes with RETURNING *.
+ */
+export function buildInsertNodesBatchReturning(
+  tables: Tables,
+  params: readonly InsertNodeParams[],
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const cols = nodeColumnList(nodes);
+  const values = params.map((nodeParams) => {
+    const propsJson = JSON.stringify(nodeParams.props);
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(nodeParams.validFrom)}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+  });
+
+  return sql`
+    INSERT INTO ${nodes} (${cols})
+    VALUES ${sql.join(values, sql`, `)}
+    RETURNING *
   `;
 }
 
@@ -256,8 +288,7 @@ export function buildInsertEdge(
 ): SQL {
   const { edges } = tables;
   const propsJson = JSON.stringify(params.props);
-
-  const cols = sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+  const cols = edgeColumnList(edges);
 
   return sql`
     INSERT INTO ${edges} (${cols})
@@ -281,7 +312,7 @@ export function buildInsertEdgeNoReturn(
 ): SQL {
   const { edges } = tables;
   const propsJson = JSON.stringify(params.props);
-  const cols = sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+  const cols = edgeColumnList(edges);
 
   return sql`
     INSERT INTO ${edges} (${cols})
@@ -297,13 +328,13 @@ export function buildInsertEdgeNoReturn(
 /**
  * Builds a batched INSERT query for edges without RETURNING payload.
  */
-export function buildInsertEdgesNoReturnBatch(
+export function buildInsertEdgesBatch(
   tables: Tables,
   params: readonly InsertEdgeParams[],
   timestamp: string,
 ): SQL {
   const { edges } = tables;
-  const cols = sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+  const cols = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
     return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(edgeParams.validFrom)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
@@ -312,6 +343,28 @@ export function buildInsertEdgesNoReturnBatch(
   return sql`
     INSERT INTO ${edges} (${cols})
     VALUES ${sql.join(values, sql`, `)}
+  `;
+}
+
+/**
+ * Builds a batched INSERT query for edges with RETURNING *.
+ */
+export function buildInsertEdgesBatchReturning(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+): SQL {
+  const { edges } = tables;
+  const cols = edgeColumnList(edges);
+  const values = params.map((edgeParams) => {
+    const propsJson = JSON.stringify(edgeParams.props);
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(edgeParams.validFrom)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+  });
+
+  return sql`
+    INSERT INTO ${edges} (${cols})
+    VALUES ${sql.join(values, sql`, `)}
+    RETURNING *
   `;
 }
 

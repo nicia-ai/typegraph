@@ -4,6 +4,7 @@
  * Handles edge CRUD operations: create, update, delete.
  */
 import {
+  type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
   type TransactionBackend,
@@ -398,11 +399,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       backend,
     );
 
-    const row =
-      shouldReturnRow ?
-        await backend.insertEdge(prepared.insertParams)
-      : undefined;
-    if (!shouldReturnRow) {
+    let row: BackendEdgeRow | undefined;
+    if (shouldReturnRow) {
+      row = await backend.insertEdge(prepared.insertParams);
+    } else {
       await (backend.insertEdgeNoReturn?.(prepared.insertParams) ??
         backend.insertEdge(prepared.insertParams));
     }
@@ -442,6 +442,9 @@ export async function executeEdgeCreateNoReturn<G extends GraphDef>(
 
 /**
  * Executes batched edge creates without returning inserted edge payloads.
+ *
+ * Note: `withOperationHooks` is intentionally skipped for batch throughput.
+ * Per-item hooks would negate the performance benefit of batching.
  */
 export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -474,14 +477,69 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   const batchInsertParams = preparedCreates.map(
     (prepared) => prepared.insertParams,
   );
-  if (backend.insertEdgesNoReturnBatch === undefined) {
+  if (backend.insertEdgesBatch === undefined) {
     for (const insertParams of batchInsertParams) {
       await (backend.insertEdgeNoReturn?.(insertParams) ??
         backend.insertEdge(insertParams));
     }
     return;
   }
-  await backend.insertEdgesNoReturnBatch(batchInsertParams);
+  await backend.insertEdgesBatch(batchInsertParams);
+}
+
+/**
+ * Executes batched edge creates and returns the inserted edge payloads.
+ *
+ * Uses batch validation caching and a single multi-row INSERT with RETURNING
+ * when the backend supports it. Falls back to sequential inserts otherwise.
+ *
+ * Note: `withOperationHooks` is intentionally skipped for batch throughput.
+ * Per-item hooks would negate the performance benefit of batching.
+ */
+export async function executeEdgeCreateBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly Edge[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+
+  const { backend: validationBackend, registerPendingEdgeForCardinality } =
+    createEdgeBatchValidationBackend(backend);
+  const preparedCreates: EdgeCreatePrepared[] = [];
+
+  for (const input of inputs) {
+    const id = input.id ?? generateId();
+    const prepared = await validateAndPrepareEdgeCreate(
+      ctx,
+      input,
+      id,
+      validationBackend,
+    );
+    preparedCreates.push(prepared);
+    registerPendingEdgeForCardinality(
+      prepared.insertParams,
+      prepared.cardinality,
+    );
+  }
+
+  const batchInsertParams = preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
+
+  let rows: readonly BackendEdgeRow[];
+  if (backend.insertEdgesBatchReturning === undefined) {
+    const sequentialRows: BackendEdgeRow[] = [];
+    for (const insertParams of batchInsertParams) {
+      sequentialRows.push(await backend.insertEdge(insertParams));
+    }
+    rows = sequentialRows;
+  } else {
+    rows = await backend.insertEdgesBatchReturning(batchInsertParams);
+  }
+
+  return rows.map((row) => rowToEdge(row as EdgeRow));
 }
 
 /**

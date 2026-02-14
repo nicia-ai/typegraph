@@ -6,6 +6,7 @@
 import {
   type GraphBackend,
   type InsertNodeParams,
+  type NodeRow as BackendNodeRow,
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -444,11 +445,10 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       backend,
     );
 
-    const row =
-      shouldReturnRow ?
-        await backend.insertNode(prepared.insertParams)
-      : undefined;
-    if (!shouldReturnRow) {
+    let row: BackendNodeRow | undefined;
+    if (shouldReturnRow) {
+      row = await backend.insertNode(prepared.insertParams);
+    } else {
       await (backend.insertNodeNoReturn?.(prepared.insertParams) ??
         backend.insertNode(prepared.insertParams));
     }
@@ -490,6 +490,9 @@ export async function executeNodeCreateNoReturn<G extends GraphDef>(
 
 /**
  * Executes batched node creates without returning inserted node payloads.
+ *
+ * Note: `withOperationHooks` is intentionally skipped for batch throughput.
+ * Per-item hooks would negate the performance benefit of batching.
  */
 export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -528,18 +531,83 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   const batchInsertParams = preparedCreates.map(
     (prepared) => prepared.insertParams,
   );
-  if (backend.insertNodesNoReturnBatch === undefined) {
+  if (backend.insertNodesBatch === undefined) {
     for (const insertParams of batchInsertParams) {
       await (backend.insertNodeNoReturn?.(insertParams) ??
         backend.insertNode(insertParams));
     }
   } else {
-    await backend.insertNodesNoReturnBatch(batchInsertParams);
+    await backend.insertNodesBatch(batchInsertParams);
   }
 
   for (const prepared of preparedCreates) {
     await finalizeNodeCreate(ctx, prepared, backend);
   }
+}
+
+/**
+ * Executes batched node creates and returns the inserted node payloads.
+ *
+ * Uses batch validation caching and a single multi-row INSERT with RETURNING
+ * when the backend supports it. Falls back to sequential inserts otherwise.
+ *
+ * Note: `withOperationHooks` is intentionally skipped for batch throughput.
+ * Per-item hooks would negate the performance benefit of batching.
+ */
+export async function executeNodeCreateBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  inputs: readonly CreateNodeInput[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly Node[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+
+  const {
+    backend: validationBackend,
+    registerPendingNode,
+    registerPendingUniqueEntries,
+  } = createNodeBatchValidationBackend(ctx.graphId, ctx.registry, backend);
+  const preparedCreates: NodeCreatePrepared[] = [];
+
+  for (const input of inputs) {
+    const id = input.id ?? generateId();
+    const prepared = await validateAndPrepareNodeCreate(
+      ctx,
+      input,
+      id,
+      validationBackend,
+    );
+    preparedCreates.push(prepared);
+    registerPendingNode(prepared.insertParams);
+    registerPendingUniqueEntries(
+      prepared.kind,
+      prepared.id,
+      prepared.validatedProps,
+      prepared.uniqueConstraints,
+    );
+  }
+
+  const batchInsertParams = preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
+
+  let rows: readonly BackendNodeRow[];
+  if (backend.insertNodesBatchReturning === undefined) {
+    const sequentialRows: BackendNodeRow[] = [];
+    for (const insertParams of batchInsertParams) {
+      sequentialRows.push(await backend.insertNode(insertParams));
+    }
+    rows = sequentialRows;
+  } else {
+    rows = await backend.insertNodesBatchReturning(batchInsertParams);
+  }
+
+  for (const prepared of preparedCreates) {
+    await finalizeNodeCreate(ctx, prepared, backend);
+  }
+
+  return rows.map((row) => rowToNode(row as NodeRow));
 }
 
 /**

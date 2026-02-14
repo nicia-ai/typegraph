@@ -63,6 +63,16 @@ import {
 import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "./schema";
 import { compileSetOperation as compileSetOp } from "./set-operations";
 import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
+import {
+  addRequiredColumn,
+  EMPTY_REQUIRED_COLUMNS,
+  markFieldRefAsRequired,
+  markSelectiveFieldAsRequired,
+  NODE_COLUMNS,
+  quoteIdentifier,
+  type RequiredColumnsByAlias,
+  shouldProjectColumn,
+} from "./utils";
 
 // ============================================================
 // Main Query Compiler
@@ -195,22 +205,6 @@ export function compileSetOperation(
 // Standard Query Compilation
 // ============================================================
 
-function quoteIdentifier(identifier: string): SQL {
-  return sql.raw(`"${identifier.replaceAll('"', '""')}"`);
-}
-
-const NODE_COLUMNS = [
-  "id",
-  "kind",
-  "props",
-  "version",
-  "valid_from",
-  "valid_to",
-  "created_at",
-  "updated_at",
-  "deleted_at",
-] as const;
-
 const EDGE_COLUMNS = [
   "id",
   "kind",
@@ -224,8 +218,6 @@ const EDGE_COLUMNS = [
   "deleted_at",
 ] as const;
 
-type RequiredColumnsByAlias = ReadonlyMap<string, ReadonlySet<string>>;
-const EMPTY_REQUIRED_COLUMNS = new Set<string>();
 const EMPTY_PREDICATES: readonly NodePredicate[] = [];
 const TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER = 8;
 const TRAVERSAL_LIMIT_PUSHDOWN_MAX = 10_000;
@@ -293,31 +285,6 @@ function isColumnPruningEnabled(ast: QueryAst): boolean {
   return ast.projection.fields.some((field) => isAggregateExpr(field.source));
 }
 
-function addRequiredColumn(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  alias: string,
-  column: string,
-): void {
-  const existing = requiredColumnsByAlias.get(alias);
-  if (existing) {
-    existing.add(column);
-    return;
-  }
-
-  requiredColumnsByAlias.set(alias, new Set([column]));
-}
-
-function markFieldRefAsRequired(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  field: FieldRef,
-): void {
-  const column = field.path[0];
-  if (column === undefined) {
-    return;
-  }
-  addRequiredColumn(requiredColumnsByAlias, field.alias, column);
-}
-
 function markPredicateFieldsAsRequired(
   requiredColumnsByAlias: Map<string, Set<string>>,
   expression: PredicateExpression,
@@ -370,37 +337,6 @@ function markPredicateFieldsAsRequired(
   }
 }
 
-function mapSelectiveSystemFieldToColumn(field: string): string {
-  if (field === "fromId") {
-    return "from_id";
-  }
-  if (field === "toId") {
-    return "to_id";
-  }
-  if (field.startsWith("meta.")) {
-    return field
-      .slice(5)
-      .replaceAll(/([A-Z])/g, "_$1")
-      .toLowerCase();
-  }
-  return field;
-}
-
-function markSelectiveFieldAsRequired(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  field: SelectiveField,
-): void {
-  if (field.isSystemField) {
-    addRequiredColumn(
-      requiredColumnsByAlias,
-      field.alias,
-      mapSelectiveSystemFieldToColumn(field.field),
-    );
-    return;
-  }
-  addRequiredColumn(requiredColumnsByAlias, field.alias, "props");
-}
-
 function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
   const requiredColumnsByAlias = new Map<string, Set<string>>();
 
@@ -445,16 +381,6 @@ function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
   }
 
   return requiredColumnsByAlias;
-}
-
-function shouldProjectColumn(
-  requiredColumns: ReadonlySet<string> | undefined,
-  column: string,
-): boolean {
-  if (requiredColumns === undefined) {
-    return true;
-  }
-  return requiredColumns.has(column);
 }
 
 function compileColumnReference(

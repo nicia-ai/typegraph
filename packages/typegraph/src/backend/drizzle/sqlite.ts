@@ -338,15 +338,27 @@ export function createSqliteBackend(
       await execRun(query);
     },
 
-    async insertNodesNoReturnBatch(
+    async insertNodesBatch(
       params: readonly InsertNodeParams[],
     ): Promise<void> {
       if (params.length === 0) {
         return;
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertNodesNoReturnBatch(tables, params, timestamp);
+      const query = ops.buildInsertNodesBatch(tables, params, timestamp);
       await execRun(query);
+    },
+
+    async insertNodesBatchReturning(
+      params: readonly InsertNodeParams[],
+    ): Promise<readonly NodeRow[]> {
+      if (params.length === 0) {
+        return [];
+      }
+      const timestamp = nowIso();
+      const query = ops.buildInsertNodesBatchReturning(tables, params, timestamp);
+      const rows = await execAll<Record<string, unknown>>(query);
+      return rows.map((row) => toNodeRow(row));
     },
 
     async getNode(
@@ -412,15 +424,27 @@ export function createSqliteBackend(
       await execRun(query);
     },
 
-    async insertEdgesNoReturnBatch(
+    async insertEdgesBatch(
       params: readonly InsertEdgeParams[],
     ): Promise<void> {
       if (params.length === 0) {
         return;
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertEdgesNoReturnBatch(tables, params, timestamp);
+      const query = ops.buildInsertEdgesBatch(tables, params, timestamp);
       await execRun(query);
+    },
+
+    async insertEdgesBatchReturning(
+      params: readonly InsertEdgeParams[],
+    ): Promise<readonly EdgeRow[]> {
+      if (params.length === 0) {
+        return [];
+      }
+      const timestamp = nowIso();
+      const query = ops.buildInsertEdgesBatchReturning(tables, params, timestamp);
+      const rows = await execAll<Record<string, unknown>>(query);
+      return rows.map((row) => toEdgeRow(row));
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {

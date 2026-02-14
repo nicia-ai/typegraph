@@ -8,7 +8,6 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../errors";
 import {
-  type FieldRef,
   type QueryAst,
   type SelectiveField,
   type Traversal,
@@ -22,6 +21,17 @@ import {
   type PredicateCompilerContext,
 } from "./predicates";
 import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
+import {
+  addRequiredColumn,
+  EMPTY_REQUIRED_COLUMNS,
+  mapSelectiveSystemFieldToColumn,
+  markFieldRefAsRequired,
+  markSelectiveFieldAsRequired,
+  NODE_COLUMNS,
+  quoteIdentifier,
+  type RequiredColumnsByAlias,
+  shouldProjectColumn,
+} from "./utils";
 
 // ============================================================
 // Constants
@@ -43,20 +53,6 @@ export const MAX_RECURSIVE_DEPTH = 100;
  */
 export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 
-const NODE_COLUMNS = [
-  "id",
-  "kind",
-  "props",
-  "version",
-  "valid_from",
-  "valid_to",
-  "created_at",
-  "updated_at",
-  "deleted_at",
-] as const;
-
-type RequiredColumnsByAlias = ReadonlyMap<string, ReadonlySet<string>>;
-const EMPTY_REQUIRED_COLUMNS = new Set<string>();
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
 // ============================================================
@@ -457,45 +453,6 @@ function compileEdgePredicates(
     .map((p) => compilePredicateExpression(p.expression, ctx));
 }
 
-function addRequiredColumn(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  alias: string,
-  column: string,
-): void {
-  const existing = requiredColumnsByAlias.get(alias);
-  if (existing !== undefined) {
-    existing.add(column);
-    return;
-  }
-  requiredColumnsByAlias.set(alias, new Set([column]));
-}
-
-function markFieldRefAsRequired(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  field: FieldRef,
-): void {
-  const column = field.path[0];
-  if (column === undefined) {
-    return;
-  }
-  addRequiredColumn(requiredColumnsByAlias, field.alias, column);
-}
-
-function markSelectiveFieldAsRequired(
-  requiredColumnsByAlias: Map<string, Set<string>>,
-  field: SelectiveField,
-): void {
-  if (field.isSystemField) {
-    addRequiredColumn(
-      requiredColumnsByAlias,
-      field.alias,
-      mapSelectiveSystemFieldToColumn(field.field),
-    );
-    return;
-  }
-  addRequiredColumn(requiredColumnsByAlias, field.alias, "props");
-}
-
 function collectRequiredColumnsByAlias(
   ast: QueryAst,
   traversal: VariableLengthTraversal,
@@ -529,20 +486,6 @@ function collectRequiredColumnsByAlias(
   return requiredColumnsByAlias;
 }
 
-function shouldProjectNodeColumn(
-  requiredColumns: ReadonlySet<string> | undefined,
-  alwaysRequiredColumns: ReadonlySet<string>,
-  column: string,
-): boolean {
-  if (alwaysRequiredColumns.has(column)) {
-    return true;
-  }
-  if (requiredColumns === undefined) {
-    return true;
-  }
-  return requiredColumns.has(column);
-}
-
 function compileNodeSelectColumnsFromTable(
   tableAlias: string,
   alias: string,
@@ -550,7 +493,7 @@ function compileNodeSelectColumnsFromTable(
   alwaysRequiredColumns: ReadonlySet<string>,
 ): SQL[] {
   return NODE_COLUMNS.filter((column) =>
-    shouldProjectNodeColumn(requiredColumns, alwaysRequiredColumns, column),
+    shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map(
     (column) =>
       sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${sql.raw(`${alias}_${column}`)}`,
@@ -563,7 +506,7 @@ function compileNodeSelectColumnsFromRecursiveRow(
   alwaysRequiredColumns: ReadonlySet<string>,
 ): SQL[] {
   return NODE_COLUMNS.filter((column) =>
-    shouldProjectNodeColumn(requiredColumns, alwaysRequiredColumns, column),
+    shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map((column) => {
     const projected = `${alias}_${column}`;
     return sql`r.${sql.raw(projected)} AS ${sql.raw(projected)}`;
@@ -625,26 +568,6 @@ function compileRecursiveProjection(
   }
 
   return sql.join(fields, sql`, `);
-}
-
-function quoteIdentifier(identifier: string): SQL {
-  return sql.raw(`"${identifier.replaceAll('"', '""')}"`);
-}
-
-function mapSelectiveSystemFieldToColumn(field: string): string {
-  if (field === "fromId") {
-    return "from_id";
-  }
-  if (field === "toId") {
-    return "to_id";
-  }
-  if (field.startsWith("meta.")) {
-    return field
-      .slice(5)
-      .replaceAll(/([A-Z])/g, "_$1")
-      .toLowerCase();
-  }
-  return field;
 }
 
 function compileSelectiveJsonValue(

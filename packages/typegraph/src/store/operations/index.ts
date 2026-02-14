@@ -7,6 +7,7 @@
 export {
   type EdgeOperationContext,
   executeEdgeCreate,
+  executeEdgeCreateBatch,
   executeEdgeCreateNoReturn,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
@@ -15,6 +16,7 @@ export {
 } from "./edge-operations";
 export {
   executeNodeCreate,
+  executeNodeCreateBatch,
   executeNodeCreateNoReturn,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,

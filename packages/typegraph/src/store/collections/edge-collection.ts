@@ -71,6 +71,20 @@ export function createEdgeCollection<
     }>[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>,
+  executeEdgeCreateBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Edge[]>,
   executeEdgeUpdate: (
     input: {
       id: string;
@@ -266,77 +280,88 @@ export function createEdgeCollection<
       options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Edge<E>[]> {
       const shouldReturnResults = options?.returnResults ?? true;
-      const results: Edge<E>[] = [];
 
-      async function runBulkCreate(
-        activeBackend: GraphBackend | TransactionBackend,
-      ): Promise<void> {
-        if (!shouldReturnResults) {
-          const batchInputs = items.map((item) => {
-            const input: {
-              kind: string;
-              id?: string;
-              fromKind: string;
-              fromId: string;
-              toKind: string;
-              toId: string;
-              props: Record<string, unknown>;
-              validFrom?: string;
-              validTo?: string;
-            } = {
-              kind: kind,
-              fromKind: item.from.kind,
-              fromId: item.from.id,
-              toKind: item.to.kind,
-              toId: item.to.id,
-              props: (item.props ?? {}) as Record<string, unknown>,
-            };
-            if (item.id !== undefined) input.id = item.id;
-            if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-            return input;
-          });
-          await executeEdgeCreateNoReturnBatch(batchInputs, activeBackend);
-          return;
-        }
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          fromKind: string;
+          fromId: string;
+          toKind: string;
+          toId: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          fromKind: item.from.kind,
+          fromId: item.from.id,
+          toKind: item.to.kind,
+          toId: item.to.id,
+          props: (item.props ?? {}) as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
 
-        for (const item of items) {
-          const input: {
-            kind: string;
-            id?: string;
-            fromKind: string;
-            fromId: string;
-            toKind: string;
-            toId: string;
-            props: Record<string, unknown>;
-            validFrom?: string;
-            validTo?: string;
-          } = {
-            kind: kind,
-            fromKind: item.from.kind,
-            fromId: item.from.id,
-            toKind: item.to.kind,
-            toId: item.to.id,
-            props: (item.props ?? {}) as Record<string, unknown>,
-          };
-          if (item.id !== undefined) input.id = item.id;
-          if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-          if (item.validTo !== undefined) input.validTo = item.validTo;
-
-          const result = await executeEdgeCreate(input, activeBackend);
-          results.push(result as Edge<E>);
-        }
+      if (!shouldReturnResults) {
+        await ("transaction" in backend ?
+          backend.transaction(async (txBackend) => {
+            await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
+          })
+        : executeEdgeCreateNoReturnBatch(batchInputs, backend));
+        return [];
       }
 
-      if (!shouldReturnResults && "transaction" in backend) {
+      const results = await executeEdgeCreateBatch(batchInputs, backend);
+      return results as Edge<E>[];
+    },
+
+    async bulkInsert(
+      items: readonly Readonly<{
+        from: NodeRef;
+        to: NodeRef;
+        props?: z.input<E["schema"]>;
+        id?: string;
+        validFrom?: string;
+        validTo?: string;
+      }>[],
+    ): Promise<void> {
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          fromKind: string;
+          fromId: string;
+          toKind: string;
+          toId: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          fromKind: item.from.kind,
+          fromId: item.from.id,
+          toKind: item.to.kind,
+          toId: item.to.id,
+          props: (item.props ?? {}) as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
+
+      if ("transaction" in backend) {
         await backend.transaction(async (txBackend) => {
-          await runBulkCreate(txBackend);
+          await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
         });
-        return results;
+        return;
       }
 
-      await runBulkCreate(backend);
-      return results;
+      await executeEdgeCreateNoReturnBatch(batchInputs, backend);
     },
 
     async bulkDelete(ids: readonly string[]): Promise<void> {

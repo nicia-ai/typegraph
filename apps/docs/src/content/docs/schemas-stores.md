@@ -401,7 +401,7 @@ store.nodes.Person.upsert(
 
 #### `bulkCreate(items, options?)`
 
-Creates multiple nodes efficiently.
+Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.nodes.Person.bulkCreate(
@@ -422,6 +422,22 @@ Use `returnResults: false` for large ingestion jobs when you do not need created
 ```typescript
 await store.nodes.Person.bulkCreate(batch, { returnResults: false });
 // Returns [] to avoid allocating result objects
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple nodes without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.nodes.Person.bulkInsert(
+  items: readonly {
+    props: { name: string; email?: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkUpsert(items)`
@@ -567,7 +583,7 @@ store.edges.worksAt.delete(id: string): Promise<void>;
 
 #### `bulkCreate(items, options?)`
 
-Creates multiple edges efficiently.
+Creates multiple edges efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.edges.worksAt.bulkCreate(
@@ -590,6 +606,24 @@ For high-volume edge ingestion, disable returned payloads:
 ```typescript
 await store.edges.worksAt.bulkCreate(edgeBatch, { returnResults: false });
 // Returns [] to reduce memory pressure
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple edges without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.edges.worksAt.bulkInsert(
+  items: readonly {
+    from: TypedNodeRef<Person>;
+    to: TypedNodeRef<Company>;
+    props?: { role: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkDelete(ids)`

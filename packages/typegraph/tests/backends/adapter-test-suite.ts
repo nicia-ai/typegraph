@@ -119,10 +119,10 @@ export function createAdapterTestSuite(
         expect(fetched!.id).toBe("person-no-return");
       });
 
-      it("supports insertNodesNoReturnBatch when available", async () => {
-        if (backend.insertNodesNoReturnBatch === undefined) return;
+      it("supports insertNodesBatch when available", async () => {
+        if (backend.insertNodesBatch === undefined) return;
 
-        await backend.insertNodesNoReturnBatch([
+        await backend.insertNodesBatch([
           {
             graphId: "test_graph",
             kind: "Person",
@@ -381,10 +381,10 @@ export function createAdapterTestSuite(
         expect(fetched!.id).toBe("edge-no-return");
       });
 
-      it("supports insertEdgesNoReturnBatch when available", async () => {
-        if (backend.insertEdgesNoReturnBatch === undefined) return;
+      it("supports insertEdgesBatch when available", async () => {
+        if (backend.insertEdgesBatch === undefined) return;
 
-        await backend.insertEdgesNoReturnBatch([
+        await backend.insertEdgesBatch([
           {
             graphId: "test_graph",
             id: "edge-batch-1",

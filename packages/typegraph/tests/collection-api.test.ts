@@ -510,12 +510,12 @@ describe("Bulk Operations (SQLite)", () => {
           activeBackend.insertNode(params));
       }
 
-      async function insertNodesNoReturnBatchWithFallback(
+      async function insertNodesBatchWithFallback(
         activeBackend: GraphBackend | TransactionBackend,
         params: readonly Parameters<GraphBackend["insertNode"]>[0][],
       ): Promise<void> {
-        if (activeBackend.insertNodesNoReturnBatch !== undefined) {
-          await activeBackend.insertNodesNoReturnBatch(params);
+        if (activeBackend.insertNodesBatch !== undefined) {
+          await activeBackend.insertNodesBatch(params);
           return;
         }
         for (const insertParams of params) {
@@ -529,9 +529,9 @@ describe("Bulk Operations (SQLite)", () => {
           nodeNoReturnCalls += 1;
           await insertNodeNoReturnWithFallback(baseBackend, params);
         },
-        async insertNodesNoReturnBatch(params) {
+        async insertNodesBatch(params) {
           nodeBatchCalls += 1;
-          await insertNodesNoReturnBatchWithFallback(baseBackend, params);
+          await insertNodesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx) => {
@@ -541,9 +541,9 @@ describe("Bulk Operations (SQLite)", () => {
                 nodeNoReturnCalls += 1;
                 await insertNodeNoReturnWithFallback(tx, params);
               },
-              async insertNodesNoReturnBatch(params) {
+              async insertNodesBatch(params) {
                 nodeBatchCalls += 1;
-                await insertNodesNoReturnBatchWithFallback(tx, params);
+                await insertNodesBatchWithFallback(tx, params);
               },
             };
             return fn(wrappedTx);
@@ -712,12 +712,12 @@ describe("Bulk Operations (SQLite)", () => {
           activeBackend.insertEdge(params));
       }
 
-      async function insertEdgesNoReturnBatchWithFallback(
+      async function insertEdgesBatchWithFallback(
         activeBackend: GraphBackend | TransactionBackend,
         params: readonly Parameters<GraphBackend["insertEdge"]>[0][],
       ): Promise<void> {
-        if (activeBackend.insertEdgesNoReturnBatch !== undefined) {
-          await activeBackend.insertEdgesNoReturnBatch(params);
+        if (activeBackend.insertEdgesBatch !== undefined) {
+          await activeBackend.insertEdgesBatch(params);
           return;
         }
         for (const insertParams of params) {
@@ -731,9 +731,9 @@ describe("Bulk Operations (SQLite)", () => {
           edgeNoReturnCalls += 1;
           await insertEdgeNoReturnWithFallback(baseBackend, params);
         },
-        async insertEdgesNoReturnBatch(params) {
+        async insertEdgesBatch(params) {
           edgeBatchCalls += 1;
-          await insertEdgesNoReturnBatchWithFallback(baseBackend, params);
+          await insertEdgesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx) => {
@@ -743,9 +743,9 @@ describe("Bulk Operations (SQLite)", () => {
                 edgeNoReturnCalls += 1;
                 await insertEdgeNoReturnWithFallback(tx, params);
               },
-              async insertEdgesNoReturnBatch(params) {
+              async insertEdgesBatch(params) {
                 edgeBatchCalls += 1;
-                await insertEdgesNoReturnBatchWithFallback(tx, params);
+                await insertEdgesBatchWithFallback(tx, params);
               },
             };
             return fn(wrappedTx);

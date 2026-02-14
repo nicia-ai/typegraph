@@ -193,7 +193,7 @@ const results = await store
 
 ## Bulk Operation Limits
 
-Bulk operations (`bulkCreate`, `bulkUpsert`, `bulkDelete`) have practical limits based on your database:
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`, `bulkDelete`) have practical limits based on your database:
 
 | Database | Recommended Batch Size |
 |----------|----------------------|

@@ -347,6 +347,22 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   ) => Promise<Node<N>[]>;
 
   /**
+   * Insert multiple nodes without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      props: z.input<N["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
+
+  /**
    * Delete multiple nodes by ID.
    *
    * Silently ignores IDs that don't exist.
@@ -500,6 +516,24 @@ export type EdgeCollection<
     }>[],
     options?: Readonly<{ returnResults?: boolean }>,
   ) => Promise<Edge<E>[]>;
+
+  /**
+   * Insert multiple edges without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      from: TypedNodeRef<From>;
+      to: TypedNodeRef<To>;
+      props?: z.input<E["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
 
   /**
    * Delete multiple edges by ID.

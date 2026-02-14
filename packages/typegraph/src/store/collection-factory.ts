@@ -59,6 +59,10 @@ export type NodeOperations = Readonly<{
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>;
+  executeCreateBatch: (
+    inputs: readonly CreateNodeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
@@ -87,6 +91,10 @@ export type EdgeOperations = Readonly<{
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
+  executeCreateBatch: (
+    inputs: readonly CreateEdgeInput[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
@@ -157,14 +165,17 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
           operations.executeCreateNoReturnBatch as Parameters<
             typeof createNodeCollection
           >[6],
-          operations.executeUpdate as Parameters<
+          operations.executeCreateBatch as Parameters<
             typeof createNodeCollection
           >[7],
+          operations.executeUpdate as Parameters<
+            typeof createNodeCollection
+          >[8],
           operations.executeDelete,
           operations.executeHardDelete,
           operations.matchesTemporalMode as Parameters<
             typeof createNodeCollection
-          >[10],
+          >[11],
         );
         collectionCache.set(kind, collection);
         return collection;
@@ -218,12 +229,15 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
           operations.executeCreateNoReturnBatch as Parameters<
             typeof createEdgeCollection
           >[6],
+          operations.executeCreateBatch as Parameters<
+            typeof createEdgeCollection
+          >[7],
           operations.executeUpdate,
           operations.executeDelete,
           operations.executeHardDelete,
           operations.matchesTemporalMode as Parameters<
             typeof createEdgeCollection
-          >[10],
+          >[11],
         );
         collectionCache.set(kind, collection);
         return collection;
