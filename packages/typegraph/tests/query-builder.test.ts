@@ -559,6 +559,21 @@ describe("Query Compilation to SQL", () => {
     expect(params).toContain("Person");
   });
 
+  it("matches traversal joins on both id and kind", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .to("Organization", "o")
+      .select((context) => ({ p: context.p, o: context.o }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("n.kind = e.to_kind");
+    expect(sql).toContain("cte_p.p_kind = e.from_kind");
+    expect(sql).toContain("cte_o.p_kind = cte_p.p_kind");
+  });
+
   it("compiles bidirectional traversal when includeInverseEdges is enabled", () => {
     const sameAsEdge = defineEdge("sameAs");
     const bidirectionalGraph = defineGraph({
@@ -679,6 +694,28 @@ describe("Query Compilation to SQL", () => {
         fofName: context.friendOfFriend.name,
       }))
       .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = sqlToStrings(sqlObject);
+
+    expect(sql).not.toContain("AS traversal_rows");
+    expect(params).not.toContain(160);
+  });
+
+  it("does not push traversal limits when OFFSET is present", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }))
+      .limit(20)
+      .offset(50);
 
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql, params } = sqlToStrings(sqlObject);
@@ -991,6 +1028,8 @@ describe("Query Builder - Aggregations", () => {
     expect(sql).toContain("COALESCE");
     expect(sql).not.toContain("cte_knower AS");
     expect(sql).toContain("p_props");
+    expect(sql).toContain("cte_p.p_kind = e.to_kind");
+    expect(sql).toContain("n.kind = e.from_kind");
   });
 
   it("supports HAVING clause to filter groups", () => {

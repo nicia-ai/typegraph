@@ -277,6 +277,8 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       expect(sql).toContain("e.from_id");
+      expect(sql).toContain("e.from_kind = r.target_kind");
+      expect(sql).toContain("n.kind = e.to_kind");
     });
 
     it("uses to_id for inbound traversals", () => {
@@ -292,6 +294,8 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       expect(sql).toContain("e.to_id");
+      expect(sql).toContain("e.to_kind = r.target_kind");
+      expect(sql).toContain("n.kind = e.from_kind");
     });
 
     it("adds endpoint kind filters for outbound traversals", () => {
@@ -486,6 +490,50 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       expect(sql).toContain("depth AS hop_count");
+    });
+  });
+
+  describe("selective projection", () => {
+    it("compiles selective projection for recursive node aliases", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "source",
+            field: "id",
+            outputName: "source_id_only",
+            isSystemField: true,
+          },
+          {
+            alias: "target",
+            field: "name",
+            outputName: "target_name_only",
+            isSystemField: false,
+            valueType: "string",
+          },
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('source_id AS "source_id_only"');
+      expect(sql).toContain("target_props");
+      expect(sql).toContain('AS "target_name_only"');
+    });
+
+    it("throws for recursive selective projection on unsupported aliases", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "e",
+            field: "id",
+            outputName: "edge_id_only",
+            isSystemField: true,
+          },
+        ],
+      });
+
+      expect(() => getSqlString(ast)).toThrow(UnsupportedPredicateError);
+      expect(() => getSqlString(ast)).toThrow("does not support alias");
     });
   });
 

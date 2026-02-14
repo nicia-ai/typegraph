@@ -488,6 +488,21 @@ describe("Bulk Operations (SQLite)", () => {
       const count = await store.nodes.Person.count();
       expect(count).toBe(2);
     });
+
+    it("rolls back returnResults=false batches when an item fails", async () => {
+      await expect(
+        store.nodes.Person.bulkCreate(
+          [
+            { id: "dup-person", props: { name: "Alice" } },
+            { id: "dup-person", props: { name: "Bob" } },
+          ],
+          { returnResults: false },
+        ),
+      ).rejects.toThrow();
+
+      const count = await store.nodes.Person.count();
+      expect(count).toBe(0);
+    });
   });
 
   describe("store.nodes.*.bulkUpsert()", () => {
@@ -610,6 +625,34 @@ describe("Bulk Operations (SQLite)", () => {
       expect(edges).toEqual([]);
       const count = await store.edges.worksAt.count();
       expect(count).toBe(1);
+    });
+
+    it("rolls back edge returnResults=false batches when an item fails", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Inc" });
+
+      await expect(
+        store.edges.worksAt.bulkCreate(
+          [
+            {
+              id: "dup-edge",
+              from: alice,
+              to: acme,
+              props: { role: "Engineer" },
+            },
+            {
+              id: "dup-edge",
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+            },
+          ],
+          { returnResults: false },
+        ),
+      ).rejects.toThrow();
+
+      const count = await store.edges.worksAt.count();
+      expect(count).toBe(0);
     });
   });
 

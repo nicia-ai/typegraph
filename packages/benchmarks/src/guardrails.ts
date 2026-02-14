@@ -20,6 +20,26 @@ export function evaluateGuardrails(
     });
   }
 
+  if (metrics.inverseTraversalMs > guardrails.inverseTraversalMsMax) {
+    violations.push({
+      label: "inverse traversal latency (ms)",
+      actual: metrics.inverseTraversalMs,
+      expectedMax: guardrails.inverseTraversalMsMax,
+    });
+  }
+
+  const inverseToForward = safeRatio(
+    metrics.inverseTraversalMs,
+    metrics.forwardMs,
+  );
+  if (inverseToForward > guardrails.inverseToForwardRatioMax) {
+    violations.push({
+      label: "inverse/forward ratio",
+      actual: inverseToForward,
+      expectedMax: guardrails.inverseToForwardRatioMax,
+    });
+  }
+
   if (metrics.threeHopMs > guardrails.threeHopMsMax) {
     violations.push({
       label: "3-hop latency (ms)",
@@ -42,6 +62,29 @@ export function evaluateGuardrails(
       label: "aggregate latency (ms)",
       actual: metrics.aggregateMs,
       expectedMax: guardrails.aggregateMsMax,
+    });
+  }
+
+  if (metrics.aggregateDistinctMs > guardrails.aggregateDistinctMsMax) {
+    violations.push({
+      label: "aggregate distinct latency (ms)",
+      actual: metrics.aggregateDistinctMs,
+      expectedMax: guardrails.aggregateDistinctMsMax,
+    });
+  }
+
+  const aggregateDistinctToAggregate = safeRatio(
+    metrics.aggregateDistinctMs,
+    metrics.aggregateMs,
+  );
+  if (
+    aggregateDistinctToAggregate >
+    guardrails.aggregateDistinctToAggregateRatioMax
+  ) {
+    violations.push({
+      label: "aggregateDistinct/aggregate ratio",
+      actual: aggregateDistinctToAggregate,
+      expectedMax: guardrails.aggregateDistinctToAggregateRatioMax,
     });
   }
 
@@ -100,7 +143,15 @@ export function evaluateGuardrails(
 
 export function printSummary(metrics: QueryMetrics): void {
   const reverseToForward = safeRatio(metrics.reverseMs, metrics.forwardMs);
+  const inverseToForward = safeRatio(
+    metrics.inverseTraversalMs,
+    metrics.forwardMs,
+  );
   const threeHopToTwoHop = safeRatio(metrics.threeHopMs, metrics.twoHopMs);
+  const aggregateDistinctToAggregate = safeRatio(
+    metrics.aggregateDistinctMs,
+    metrics.aggregateMs,
+  );
   const recursiveHundredToTenHop = safeRatio(
     metrics.recursiveHundredHopMs,
     metrics.tenHopMs,
@@ -111,7 +162,11 @@ export function printSummary(metrics: QueryMetrics): void {
   );
   console.log("\nRatios:");
   console.log(`reverse/forward: ${reverseToForward.toFixed(2)}x`);
+  console.log(`inverse/forward: ${inverseToForward.toFixed(2)}x`);
   console.log(`3-hop/2-hop: ${threeHopToTwoHop.toFixed(2)}x`);
+  console.log(
+    `aggregateDistinct/aggregate: ${aggregateDistinctToAggregate.toFixed(2)}x`,
+  );
   console.log(
     `100-hop-recursive/10-hop: ${recursiveHundredToTenHop.toFixed(2)}x`,
   );

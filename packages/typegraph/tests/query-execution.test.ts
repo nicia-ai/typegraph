@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  count,
   defineEdge,
   defineGraph,
   defineNode,
@@ -381,6 +382,75 @@ describe("Query Execution (SQLite)", () => {
       expect(peerNames).toEqual(["Alice", "Charlie"]);
     });
 
+    it("does not over-match traversal targets when ids overlap across kinds", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "collision-person",
+        props: { name: "Collision Person" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Company",
+        id: "shared-org-id",
+        props: { name: "Company Winner" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Organization",
+        id: "shared-org-id",
+        props: { name: "Organization Shadow" },
+      });
+
+      await backend.insertEdge({
+        graphId: "test_graph",
+        id: "collision-edge",
+        kind: "worksAt",
+        fromKind: "Person",
+        fromId: "collision-person",
+        toKind: "Company",
+        toId: "shared-org-id",
+        props: { role: "Engineer" },
+      });
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("collision-person"))
+        .traverse("worksAt", "e")
+        .to("Organization", "o", { includeSubClasses: true })
+        .select((context) => ({
+          id: context.o.id,
+          kind: context.o.kind,
+          name: context.o.name,
+        }))
+        .execute();
+
+      expect(results).toEqual([
+        {
+          id: "shared-org-id",
+          kind: "Company",
+          name: "Company Winner",
+        },
+      ]);
+
+      const aggregate = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("collision-person"))
+        .optionalTraverse("worksAt", "e")
+        .to("Organization", "o", { includeSubClasses: true })
+        .groupByNode("p")
+        .selectAggregate({
+          orgCount: count("o"),
+        })
+        .execute();
+
+      expect(aggregate).toEqual([{ orgCount: 1 }]);
+    });
+
     it("chains traversals through intermediate nodes (3-hop)", async () => {
       // Test data: Alice -> knows -> Bob -> knows -> Charlie -> worksAt -> TechCorp
       // This test verifies chaining works by checking we get Charlie's company (TechCorp),
@@ -599,6 +669,63 @@ describe("Query Execution (SQLite)", () => {
       const friends = results.map((r) => r.friend);
       expect(friends).toContain("Bob");
       expect(friends).not.toContain("Charlie"); // Charlie is 2 hops away
+    });
+
+    it("does not over-match recursive traversal targets when ids overlap across kinds", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "recursive-collision-person",
+        props: { name: "Recursive Collision Person" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Company",
+        id: "recursive-shared-org-id",
+        props: { name: "Recursive Company Winner" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Organization",
+        id: "recursive-shared-org-id",
+        props: { name: "Recursive Organization Shadow" },
+      });
+
+      await backend.insertEdge({
+        graphId: "test_graph",
+        id: "recursive-collision-edge",
+        kind: "worksAt",
+        fromKind: "Person",
+        fromId: "recursive-collision-person",
+        toKind: "Company",
+        toId: "recursive-shared-org-id",
+        props: { role: "Lead" },
+      });
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("recursive-collision-person"))
+        .traverse("worksAt", "e")
+        .recursive()
+        .maxHops(1)
+        .to("Organization", "o", { includeSubClasses: true })
+        .select((context) => ({
+          id: context.o.id,
+          kind: context.o.kind,
+          name: context.o.name,
+        }))
+        .execute();
+
+      expect(results).toEqual([
+        {
+          id: "recursive-shared-org-id",
+          kind: "Company",
+          name: "Recursive Company Winner",
+        },
+      ]);
     });
 
     it("respects minHops to skip immediate connections", async () => {

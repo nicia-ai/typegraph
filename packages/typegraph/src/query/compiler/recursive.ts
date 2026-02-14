@@ -7,8 +7,14 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../errors";
-import { type QueryAst, type Traversal, type VariableLengthSpec } from "../ast";
+import {
+  type QueryAst,
+  type SelectiveField,
+  type Traversal,
+  type VariableLengthSpec,
+} from "../ast";
 import { type DialectAdapter } from "../dialect";
+import { jsonPointer } from "../json-pointer";
 import {
   compileFieldValue,
   compilePredicateExpression,
@@ -87,7 +93,7 @@ export function compileVariableLengthQuery(
   const recursiveCte = compileRecursiveCte(ast, vlTraversal, graphId, ctx);
 
   // Build projection
-  const projection = compileRecursiveProjection(ast, vlTraversal);
+  const projection = compileRecursiveProjection(ast, vlTraversal, dialect);
 
   // Build final SELECT
   const minDepth = vlTraversal.variableLength.minDepth;
@@ -261,7 +267,10 @@ function compileRecursiveCte(
         ${pathExtension} AS path
       FROM recursive_cte r
       JOIN ${ctx.schema.edgesTable} e ON e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(branch.targetField)}
+        AND e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+        AND n.id = e.${sql.raw(branch.targetField)}
+        AND n.kind = e.${sql.raw(branch.targetKindField)}
       WHERE ${sql.join(recursiveWhereClauses, sql` AND `)}
     `;
   }
@@ -401,7 +410,17 @@ function compileEdgePredicates(
 function compileRecursiveProjection(
   ast: QueryAst,
   traversal: VariableLengthTraversal,
+  dialect: DialectAdapter,
 ): SQL {
+  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
+    return compileRecursiveSelectiveProjection(
+      ast.selectiveFields,
+      ast,
+      traversal,
+      dialect,
+    );
+  }
+
   const startAlias = ast.start.alias;
   const nodeAlias = traversal.nodeAlias;
   const vl = traversal.variableLength;
@@ -440,6 +459,89 @@ function compileRecursiveProjection(
   }
 
   return sql.join(fields, sql`, `);
+}
+
+function quoteIdentifier(identifier: string): SQL {
+  return sql.raw(`"${identifier.replaceAll('"', '""')}"`);
+}
+
+function mapSelectiveSystemFieldToColumn(field: string): string {
+  if (field === "fromId") {
+    return "from_id";
+  }
+  if (field === "toId") {
+    return "to_id";
+  }
+  if (field.startsWith("meta.")) {
+    return field
+      .slice(5)
+      .replaceAll(/([A-Z])/g, "_$1")
+      .toLowerCase();
+  }
+  return field;
+}
+
+function compileSelectiveJsonValue(
+  dialect: DialectAdapter,
+  column: SQL,
+  pointer: ReturnType<typeof jsonPointer>,
+  valueType: SelectiveField["valueType"],
+): SQL {
+  switch (valueType) {
+    case "string": {
+      return dialect.jsonExtractText(column, pointer);
+    }
+    case "number": {
+      return dialect.jsonExtractNumber(column, pointer);
+    }
+    case "boolean": {
+      return dialect.jsonExtractBoolean(column, pointer);
+    }
+    case "date": {
+      return dialect.jsonExtractDate(column, pointer);
+    }
+    case "array":
+    case "object":
+    case "embedding":
+    case "unknown":
+    case undefined: {
+      return dialect.jsonExtract(column, pointer);
+    }
+  }
+}
+
+function compileRecursiveSelectiveProjection(
+  fields: readonly SelectiveField[],
+  ast: QueryAst,
+  traversal: VariableLengthTraversal,
+  dialect: DialectAdapter,
+): SQL {
+  const allowedAliases = new Set([ast.start.alias, traversal.nodeAlias]);
+
+  return sql.join(
+    fields.map((field) => {
+      if (!allowedAliases.has(field.alias)) {
+        throw new UnsupportedPredicateError(
+          `Selective projection for recursive traversals does not support alias "${field.alias}"`,
+        );
+      }
+
+      if (field.isSystemField) {
+        const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
+        return sql`${sql.raw(`${field.alias}_${dbColumn}`)} AS ${quoteIdentifier(field.outputName)}`;
+      }
+
+      const column = sql.raw(`${field.alias}_props`);
+      const extracted = compileSelectiveJsonValue(
+        dialect,
+        column,
+        jsonPointer([field.field]),
+        field.valueType,
+      );
+      return sql`${extracted} AS ${quoteIdentifier(field.outputName)}`;
+    }),
+    sql`, `,
+  );
 }
 
 /**

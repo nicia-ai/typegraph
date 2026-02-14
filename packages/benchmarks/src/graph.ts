@@ -3,6 +3,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  inverseOf,
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
@@ -49,6 +50,7 @@ export const perfGraph = defineGraph({
       cardinality: "many",
     },
   },
+  ontology: [inverseOf(nextEdge, nextEdge)],
 });
 
 export type PerfStore = ReturnType<typeof createStore<typeof perfGraph>>;

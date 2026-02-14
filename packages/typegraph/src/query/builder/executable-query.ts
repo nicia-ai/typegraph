@@ -4,7 +4,7 @@
 import { type SQL } from "drizzle-orm";
 
 import { type GraphDef } from "../../core/define-graph";
-import { ValidationError } from "../../errors";
+import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import {
   type OrderSpec,
   type QueryAst,
@@ -337,15 +337,6 @@ export class ExecutableQuery<
    * computations, or returns whole nodes).
    */
   async #tryOptimizedExecution(): Promise<readonly R[] | undefined> {
-    // Skip optimization for variable-length traversals
-    // The recursive query compiler doesn't support selectiveFields
-    const hasVariableLength = this.#state.traversals.some(
-      (t) => t.variableLength !== undefined,
-    );
-    if (hasVariableLength) {
-      return undefined;
-    }
-
     const selectiveFields = this.#getSelectiveFieldsForExecute();
     if (selectiveFields === undefined) {
       return undefined;
@@ -376,6 +367,10 @@ export class ExecutableQuery<
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForExecute = undefined;
+        return undefined;
+      }
+      if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
         return undefined;
       }

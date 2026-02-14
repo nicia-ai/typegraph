@@ -3,15 +3,19 @@ export const BENCHMARK_CONFIG = {
   followsPerUser: 10,
   postsPerUser: 5,
   batchSize: 250,
-  warmupIterations: 1,
-  sampleIterations: 5,
+  warmupIterations: 2,
+  sampleIterations: 7,
 } as const;
 
 const BASE_GUARDRAILS = {
   reverseToForwardRatioMax: 6,
+  inverseTraversalMsMax: 500,
+  inverseToForwardRatioMax: 10,
   threeHopMsMax: 500,
   threeHopToTwoHopRatioMax: 8,
   aggregateMsMax: 500,
+  aggregateDistinctMsMax: 700,
+  aggregateDistinctToAggregateRatioMax: 4,
   tenHopMsMax: 250,
   recursiveHundredHopMsMax: 1000,
   recursiveHundredToTenHopRatioMax: 30,
@@ -27,6 +31,8 @@ const BACKEND_GUARDRAIL_OVERRIDES = {
   postgres: {
     // PostgreSQL join planning/execution is slower than SQLite for this shape.
     threeHopMsMax: 1000,
+    inverseTraversalMsMax: 1000,
+    aggregateDistinctMsMax: 1200,
   },
 } as const;
 
@@ -42,9 +48,13 @@ export type PerfCliOptions = Readonly<{
 
 export type Guardrails = Readonly<{
   reverseToForwardRatioMax: number;
+  inverseTraversalMsMax: number;
+  inverseToForwardRatioMax: number;
   threeHopMsMax: number;
   threeHopToTwoHopRatioMax: number;
   aggregateMsMax: number;
+  aggregateDistinctMsMax: number;
+  aggregateDistinctToAggregateRatioMax: number;
   tenHopMsMax: number;
   recursiveHundredHopMsMax: number;
   recursiveHundredToTenHopRatioMax: number;
@@ -68,9 +78,11 @@ export type GuardrailViolation = Readonly<{
 export type QueryMetrics = Readonly<{
   forwardMs: number;
   reverseMs: number;
+  inverseTraversalMs: number;
   twoHopMs: number;
   threeHopMs: number;
   aggregateMs: number;
+  aggregateDistinctMs: number;
   tenHopMs: number;
   recursiveHundredHopMs: number;
   recursiveThousandHopMs: number;

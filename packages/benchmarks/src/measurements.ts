@@ -1,4 +1,4 @@
-import { count, field } from "@nicia-ai/typegraph";
+import { count, countDistinct, field } from "@nicia-ai/typegraph";
 
 import { BENCHMARK_CONFIG, type QueryMetrics } from "./config";
 import { type PerfStore } from "./graph";
@@ -55,6 +55,21 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       .execute();
   });
 
+  const inverseTraversalMs = await benchmarkQuery(
+    "inverse traversal (includeInverseEdges)",
+    async () => {
+      await store
+        .query()
+        .from("User", "u")
+        .whereNode("u", (user) => user.id.eq("user_600"))
+        .traverse("next", "e", { includeInverseEdges: true })
+        .to("User", "neighbor")
+        .select((context) => ({ neighborId: context.neighbor.id }))
+        .limit(20)
+        .execute();
+    },
+  );
+
   const twoHopMs = await benchmarkQuery("2-hop traversal", async () => {
     await store
       .query()
@@ -104,6 +119,24 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
         .selectAggregate({
           name: field("u", "name"),
           followCount: count("target"),
+        })
+        .limit(20)
+        .execute();
+    },
+  );
+
+  const aggregateDistinctMs = await benchmarkQuery(
+    "aggregate distinct follow count",
+    async () => {
+      await store
+        .query()
+        .from("User", "u")
+        .optionalTraverse("follows", "e")
+        .to("User", "target")
+        .groupByNode("u")
+        .selectAggregate({
+          name: field("u", "name"),
+          followCount: countDistinct("target"),
         })
         .limit(20)
         .execute();
@@ -189,9 +222,11 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
   return {
     forwardMs,
     reverseMs,
+    inverseTraversalMs,
     twoHopMs,
     threeHopMs,
     aggregateMs,
+    aggregateDistinctMs,
     tenHopMs,
     recursiveHundredHopMs,
     recursiveThousandHopMs,

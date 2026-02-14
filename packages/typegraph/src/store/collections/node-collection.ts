@@ -230,27 +230,39 @@ export function createNodeCollection<
       const shouldReturnResults = options?.returnResults ?? true;
       const results: Node<N>[] = [];
 
-      for (const item of items) {
-        const input: {
-          kind: string;
-          id?: string;
-          props: Record<string, unknown>;
-          validFrom?: string;
-          validTo?: string;
-        } = {
-          kind: kind,
-          props: item.props as Record<string, unknown>,
-        };
-        if (item.id !== undefined) input.id = item.id;
-        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-        if (item.validTo !== undefined) input.validTo = item.validTo;
+      async function runBulkCreate(
+        activeBackend: GraphBackend | TransactionBackend,
+      ): Promise<void> {
+        for (const item of items) {
+          const input: {
+            kind: string;
+            id?: string;
+            props: Record<string, unknown>;
+            validFrom?: string;
+            validTo?: string;
+          } = {
+            kind: kind,
+            props: item.props as Record<string, unknown>,
+          };
+          if (item.id !== undefined) input.id = item.id;
+          if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+          if (item.validTo !== undefined) input.validTo = item.validTo;
 
-        const result = await executeNodeCreate(input, backend);
-        if (shouldReturnResults) {
-          results.push(result as Node<N>);
+          const result = await executeNodeCreate(input, activeBackend);
+          if (shouldReturnResults) {
+            results.push(result as Node<N>);
+          }
         }
       }
 
+      if (!shouldReturnResults && "transaction" in backend) {
+        await backend.transaction(async (txBackend) => {
+          await runBulkCreate(txBackend);
+        });
+        return results;
+      }
+
+      await runBulkCreate(backend);
       return results;
     },
 

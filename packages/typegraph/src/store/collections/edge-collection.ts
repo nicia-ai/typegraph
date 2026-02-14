@@ -254,35 +254,47 @@ export function createEdgeCollection<
       const shouldReturnResults = options?.returnResults ?? true;
       const results: Edge<E>[] = [];
 
-      for (const item of items) {
-        const input: {
-          kind: string;
-          id?: string;
-          fromKind: string;
-          fromId: string;
-          toKind: string;
-          toId: string;
-          props: Record<string, unknown>;
-          validFrom?: string;
-          validTo?: string;
-        } = {
-          kind: kind,
-          fromKind: item.from.kind,
-          fromId: item.from.id,
-          toKind: item.to.kind,
-          toId: item.to.id,
-          props: (item.props ?? {}) as Record<string, unknown>,
-        };
-        if (item.id !== undefined) input.id = item.id;
-        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-        if (item.validTo !== undefined) input.validTo = item.validTo;
+      async function runBulkCreate(
+        activeBackend: GraphBackend | TransactionBackend,
+      ): Promise<void> {
+        for (const item of items) {
+          const input: {
+            kind: string;
+            id?: string;
+            fromKind: string;
+            fromId: string;
+            toKind: string;
+            toId: string;
+            props: Record<string, unknown>;
+            validFrom?: string;
+            validTo?: string;
+          } = {
+            kind: kind,
+            fromKind: item.from.kind,
+            fromId: item.from.id,
+            toKind: item.to.kind,
+            toId: item.to.id,
+            props: (item.props ?? {}) as Record<string, unknown>,
+          };
+          if (item.id !== undefined) input.id = item.id;
+          if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+          if (item.validTo !== undefined) input.validTo = item.validTo;
 
-        const result = await executeEdgeCreate(input, backend);
-        if (shouldReturnResults) {
-          results.push(result as Edge<E>);
+          const result = await executeEdgeCreate(input, activeBackend);
+          if (shouldReturnResults) {
+            results.push(result as Edge<E>);
+          }
         }
       }
 
+      if (!shouldReturnResults && "transaction" in backend) {
+        await backend.transaction(async (txBackend) => {
+          await runBulkCreate(txBackend);
+        });
+        return results;
+      }
+
+      await runBulkCreate(backend);
       return results;
     },
 

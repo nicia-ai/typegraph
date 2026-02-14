@@ -384,7 +384,10 @@ function compileNodeSelectColumns(
   requiredColumns: ReadonlySet<string> | undefined,
 ): SQL[] {
   return NODE_COLUMNS.filter(
-    (column) => column === "id" || shouldProjectColumn(requiredColumns, column),
+    (column) =>
+      column === "id" ||
+      column === "kind" ||
+      shouldProjectColumn(requiredColumns, column),
   ).map(
     (column) =>
       sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
@@ -485,6 +488,10 @@ function isStartAliasBoundToSingleId(ast: QueryAst): boolean {
 
 function resolveTraversalCteLimit(ast: QueryAst): number | undefined {
   if (ast.limit === undefined) {
+    return undefined;
+  }
+
+  if (ast.offset !== undefined) {
     return undefined;
   }
 
@@ -612,6 +619,7 @@ function compileCountAggregateFastPath(
   const startAlias = ast.start.alias;
   const previousAlias = traversal.joinFromAlias;
   const previousAliasIdColumn = `${previousAlias}_id`;
+  const previousAliasKindColumn = `${previousAlias}_kind`;
   const countCteAlias = `cte_${traversal.nodeAlias}_counts`;
   const countColumn = `${traversal.nodeAlias}_count`;
   const countDistinctColumn = `${traversal.nodeAlias}_count_distinct`;
@@ -688,12 +696,18 @@ function compileCountAggregateFastPath(
     ${sql.raw(countCteAlias)} AS (
       SELECT
         cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} AS ${sql.raw(previousAliasIdColumn)},
+        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} AS ${sql.raw(previousAliasKindColumn)},
         ${sql.join(aggregateColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
       JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(targetField)}
+        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+        AND n.id = e.${sql.raw(targetField)}
+        AND n.kind = e.${sql.raw(targetKindField)}
       WHERE ${sql.join(whereClauses, sql` AND `)}
-      GROUP BY cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)}
+      GROUP BY
+        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)},
+        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
     )
   `;
 
@@ -727,6 +741,7 @@ function compileCountAggregateFastPath(
     FROM cte_${sql.raw(startAlias)}
     ${sql.raw(joinType)} ${sql.raw(countCteAlias)}
       ON ${sql.raw(countCteAlias)}.${sql.raw(previousAliasIdColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)}
+      AND ${sql.raw(countCteAlias)}.${sql.raw(previousAliasKindColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
   `;
 
   const orderBy = compileOrderBy(ast, dialect);
@@ -978,6 +993,7 @@ function compileTraversalCte(
     ...compileEdgeSelectColumns("e", edgeAlias, requiredEdgeColumns),
     ...compileNodeSelectColumns("n", nodeAlias, requiredNodeColumns),
     sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id`,
+    sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind AS ${sql.raw(previousAlias)}_kind`,
   ];
 
   function compileTraversalBranch(
@@ -1007,8 +1023,11 @@ function compileTraversalCte(
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
       FROM ${ctx.schema.edgesTable} e
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(branch.targetField)}
+      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+        AND n.id = e.${sql.raw(branch.targetField)}
+        AND n.kind = e.${sql.raw(branch.targetKindField)}
       JOIN cte_${sql.raw(previousAlias)} ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
+        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind = e.${sql.raw(branch.joinKindField)}
       WHERE ${sql.join(whereClauses, sql` AND `)}
     `;
   }
@@ -1331,7 +1350,7 @@ function compileFromClause(
     const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
     // Each traversal CTE has a column for the previous alias's ID
     joins.push(
-      sql`${sql.raw(joinType)} ${sql.raw(cteAlias)} ON ${sql.raw(cteAlias)}.${sql.raw(previousAlias)}_id = cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id`,
+      sql`${sql.raw(joinType)} ${sql.raw(cteAlias)} ON ${sql.raw(cteAlias)}.${sql.raw(previousAlias)}_id = cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AND ${sql.raw(cteAlias)}.${sql.raw(previousAlias)}_kind = cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind`,
     );
   }
 
