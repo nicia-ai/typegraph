@@ -184,7 +184,7 @@
     "@stryker-mutator/vitest-runner": "^9.5.1",
     "@typegraph/eslint-config": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.10.11",
+    "@types/node": "^24.10.13",
     "@types/pg": "^8.16.0",
     "@vitest/coverage-v8": "^4.0.18",
     "better-sqlite3": "^12.6.2",
