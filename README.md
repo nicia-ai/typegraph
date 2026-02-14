@@ -108,6 +108,18 @@ For production schema management, see:
 - Complete examples: [packages/typegraph/examples](packages/typegraph/examples/)
 - Project docs: [Testing](docs/TESTING.md), [Release Process](docs/RELEASE.md)
 
+## LLM/Coding Agent Support
+
+TypeGraph publishes agent-friendly documentation following the [llms.txt](https://llmstxt.org/) convention:
+
+- Landing page: [LLM Support](https://typegraph.dev/llm-support/)
+- Index: [llms.txt](https://typegraph.dev/llms.txt)
+- Core docs: [llms-small.txt](https://typegraph.dev/llms-small.txt)
+- Full docs: [llms-full.txt](https://typegraph.dev/llms-full.txt)
+- Examples: [examples.txt](https://typegraph.dev/_llms-txt/examples.txt)
+
+Recommended retrieval order: `llms-small` → `llms-full` → `examples`.
+
 ## License
 
 MIT
