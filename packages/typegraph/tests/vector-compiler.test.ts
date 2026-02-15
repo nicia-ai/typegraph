@@ -78,6 +78,14 @@ describe("vector compilation semantics", () => {
     expect(sql).not.toContain("1.0 -");
   });
 
+  it("rejects inner_product vector similarity for sqlite dialect", () => {
+    expect(() =>
+      compileQuery(buildVectorAst("inner_product", 0.6), "graph_1", {
+        dialect: "sqlite",
+      }),
+    ).toThrow(/metric "inner_product" is not supported/i);
+  });
+
   it("rejects vector predicates nested under OR", () => {
     const ast: QueryAst = {
       ...buildVectorAst("cosine", 0.2),

@@ -54,9 +54,13 @@ function toPostgresPath(pointer: JsonPointer): SQL {
 export const postgresDialect: DialectAdapter = {
   name: "postgres",
   capabilities: {
+    standardQueryStrategy: "cte_project",
+    recursiveQueryStrategy: "recursive_cte",
     setOperationStrategy: "standard_parenthesized",
     materializeIntermediateTraversalCtes: false,
     forceRecursiveWorktableOuterJoinOrder: false,
+    vectorPredicateStrategy: "native",
+    vectorMetrics: ["cosine", "l2", "inner_product"] as const,
   },
 
   // ============================================================

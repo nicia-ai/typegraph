@@ -1,5 +1,6 @@
 import { UnsupportedPredicateError } from "../../../errors";
 import type { QueryAst, VectorSimilarityPredicate } from "../../ast";
+import type { DialectAdapter } from "../../dialect";
 import { extractVectorSimilarityPredicates } from "../predicates";
 
 export type VectorPredicatePassResult = Readonly<{
@@ -15,6 +16,7 @@ export type VectorPredicatePassResult = Readonly<{
  */
 export function runVectorPredicatePass(
   ast: QueryAst,
+  dialect: DialectAdapter,
 ): VectorPredicatePassResult {
   const vectorPredicates = extractVectorSimilarityPredicates(ast.predicates);
   if (vectorPredicates.length > 1) {
@@ -23,9 +25,48 @@ export function runVectorPredicatePass(
     );
   }
 
-  return {
-    vectorPredicate: vectorPredicates[0],
-  };
+  const vectorPredicate = vectorPredicates[0];
+  if (vectorPredicate === undefined) {
+    return { vectorPredicate: undefined };
+  }
+
+  const vectorStrategy = dialect.capabilities.vectorPredicateStrategy;
+  if (vectorStrategy === "unsupported" || !dialect.supportsVectors) {
+    throw new UnsupportedPredicateError(
+      `Vector similarity predicates are not supported for dialect "${dialect.name}"`,
+    );
+  }
+
+  if (!dialect.capabilities.vectorMetrics.includes(vectorPredicate.metric)) {
+    throw new UnsupportedPredicateError(
+      `Vector metric "${vectorPredicate.metric}" is not supported for dialect "${dialect.name}"`,
+    );
+  }
+
+  if (!Number.isFinite(vectorPredicate.limit) || vectorPredicate.limit <= 0) {
+    throw new UnsupportedPredicateError(
+      `Vector predicate limit must be a positive finite number, got ${String(vectorPredicate.limit)}`,
+    );
+  }
+
+  const { minScore } = vectorPredicate;
+  if (minScore !== undefined) {
+    if (!Number.isFinite(minScore)) {
+      throw new UnsupportedPredicateError(
+        `Vector minScore must be a finite number, got ${String(minScore)}`,
+      );
+    }
+    if (
+      vectorPredicate.metric === "cosine" &&
+      (minScore < -1 || minScore > 1)
+    ) {
+      throw new UnsupportedPredicateError(
+        `Cosine minScore must be between -1 and 1, got ${String(minScore)}`,
+      );
+    }
+  }
+
+  return { vectorPredicate };
 }
 
 /**

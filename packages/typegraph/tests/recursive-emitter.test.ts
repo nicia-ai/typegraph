@@ -10,6 +10,18 @@ import { toSqlString } from "./sql-test-utils";
 
 function createRecursivePlan(): LogicalPlan {
   const ast = {
+    limit: 5,
+    orderBy: [
+      {
+        direction: "asc" as const,
+        field: {
+          __type: "field_ref" as const,
+          alias: "f",
+          path: ["id"] as const,
+          valueType: "string" as const,
+        },
+      },
+    ],
     predicates: [],
     projection: {
       fields: [

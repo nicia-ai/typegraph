@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import { type LogicalPlan, type LogicalPlanNode } from "../plan";
+import { type LogicalPlan } from "../plan";
+import { inspectSetOperationPlan } from "./plan-inspector";
 
 export type SetOperationQueryEmitterInput = Readonly<{
   baseQuery: SQL;
@@ -9,31 +10,40 @@ export type SetOperationQueryEmitterInput = Readonly<{
   suffixClauses?: readonly SQL[];
 }>;
 
-function planContainsSetOperation(node: LogicalPlanNode): boolean {
-  switch (node.op) {
-    case "set_op": {
-      return true;
-    }
-    case "aggregate":
-    case "filter":
-    case "join":
-    case "limit_offset":
-    case "project":
-    case "recursive_expand":
-    case "sort":
-    case "vector_knn": {
-      return planContainsSetOperation(node.input);
-    }
-    case "scan": {
-      return false;
-    }
-  }
-}
+function assertSetOperationEmitterClauseAlignment(
+  logicalPlan: LogicalPlan,
+  suffixClauses: readonly SQL[] | undefined,
+): void {
+  const shape = inspectSetOperationPlan(logicalPlan);
+  const hasSuffixClauses =
+    suffixClauses !== undefined && suffixClauses.length > 0;
 
-function assertSetOperationPlan(logicalPlan: LogicalPlan): void {
-  if (!planContainsSetOperation(logicalPlan.root)) {
+  if (!shape.hasSort && !shape.hasLimitOffset && hasSuffixClauses) {
     throw new Error(
-      'Set-operation SQL emitter expected logical plan to contain a "set_op" node',
+      "Set-operation SQL emitter received suffix clauses for a plan without top-level sort or limit_offset nodes",
+    );
+  }
+
+  if (!hasSuffixClauses) {
+    if (shape.hasSort || shape.hasLimitOffset) {
+      throw new Error(
+        "Set-operation SQL emitter expected suffix clauses for plan containing top-level sort or limit_offset nodes",
+      );
+    }
+    return;
+  }
+
+  const limitOffsetClauseCount =
+    shape.limitOffsetNode === undefined ?
+      0
+    : (shape.limitOffsetNode.limit === undefined ? 0 : 1) +
+      (shape.limitOffsetNode.offset === undefined ? 0 : 1);
+  const expectedClauseCount =
+    (shape.sortNode === undefined ? 0 : 1) + limitOffsetClauseCount;
+
+  if (suffixClauses.length !== expectedClauseCount) {
+    throw new Error(
+      `Set-operation SQL emitter expected ${String(expectedClauseCount)} top-level suffix clause(s) from logical plan, got ${String(suffixClauses.length)}`,
     );
   }
 }
@@ -41,7 +51,10 @@ function assertSetOperationPlan(logicalPlan: LogicalPlan): void {
 export function emitSetOperationQuerySql(
   input: SetOperationQueryEmitterInput,
 ): SQL {
-  assertSetOperationPlan(input.logicalPlan);
+  assertSetOperationEmitterClauseAlignment(
+    input.logicalPlan,
+    input.suffixClauses,
+  );
 
   const parts: SQL[] = [];
   if (input.ctes !== undefined && input.ctes.length > 0) {

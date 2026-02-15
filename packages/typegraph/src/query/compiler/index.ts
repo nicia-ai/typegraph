@@ -54,7 +54,12 @@ import {
   type SetOperation,
   type VectorSimilarityPredicate,
 } from "../ast";
-import { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
+import {
+  type DialectAdapter,
+  type DialectStandardQueryStrategy,
+  getDialect,
+  type SqlDialect,
+} from "../dialect";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLimitOffsetClause,
@@ -632,7 +637,8 @@ function runStandardQueryPassPipeline(
   const vectorPass = runCompilerPass(state, {
     name: "vector_predicate",
     execute(currentState): VectorSimilarityPredicate | undefined {
-      return runVectorPredicatePass(currentState.ast).vectorPredicate;
+      return runVectorPredicatePass(currentState.ast, currentState.ctx.dialect)
+        .vectorPredicate;
     },
     update(currentState, vectorPredicate): StandardQueryPassState {
       return {
@@ -1002,7 +1008,30 @@ function compileCountAggregateFastPath(
 /**
  * Compiles a standard (non-recursive) query to SQL using CTEs.
  */
+type StandardQueryStrategyHandler = (
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+) => SQL;
+
+const STANDARD_QUERY_STRATEGY_HANDLERS: Record<
+  DialectStandardQueryStrategy,
+  StandardQueryStrategyHandler
+> = {
+  cte_project: compileStandardQueryWithCteStrategy,
+};
+
 function compileStandardQuery(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+): SQL {
+  const strategy = ctx.dialect.capabilities.standardQueryStrategy;
+  const handler = STANDARD_QUERY_STRATEGY_HANDLERS[strategy];
+  return handler(ast, graphId, ctx);
+}
+
+function compileStandardQueryWithCteStrategy(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,

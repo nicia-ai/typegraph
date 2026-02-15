@@ -10,6 +10,18 @@ import { toSqlString } from "./sql-test-utils";
 
 function createBasePlan(): LogicalPlan {
   const ast = {
+    limit: 10,
+    orderBy: [
+      {
+        direction: "asc" as const,
+        field: {
+          __type: "field_ref" as const,
+          alias: "p",
+          path: ["id"] as const,
+          valueType: "string" as const,
+        },
+      },
+    ],
     predicates: [],
     projection: {
       fields: [
@@ -35,6 +47,7 @@ function createBasePlan(): LogicalPlan {
   return lowerStandardQueryToLogicalPlan({
     ast,
     dialect: "sqlite",
+    effectiveLimit: 10,
     graphId: "graph_emitter",
   });
 }

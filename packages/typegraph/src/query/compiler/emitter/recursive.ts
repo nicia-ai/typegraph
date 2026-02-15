@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type LogicalPlan } from "../plan";
+import { inspectRecursiveProjectPlan } from "./plan-inspector";
 
 export type RecursiveQueryEmitterInput = Readonly<{
   depthFilter: SQL;
@@ -11,16 +12,35 @@ export type RecursiveQueryEmitterInput = Readonly<{
   recursiveCte: SQL;
 }>;
 
-function assertRecursivePlanRoot(logicalPlan: LogicalPlan): void {
-  if (logicalPlan.root.op !== "project") {
+function assertRecursiveEmitterClauseAlignment(
+  logicalPlan: LogicalPlan,
+  input: RecursiveQueryEmitterInput,
+): void {
+  const planShape = inspectRecursiveProjectPlan(logicalPlan);
+  if (planShape.hasSort && input.orderBy === undefined) {
     throw new Error(
-      `Recursive SQL emitter expected logical plan root to be "project", got "${logicalPlan.root.op}"`,
+      "Recursive SQL emitter expected ORDER BY clause for plan containing a sort node",
+    );
+  }
+  if (!planShape.hasSort && input.orderBy !== undefined) {
+    throw new Error(
+      "Recursive SQL emitter received ORDER BY clause for a plan without sort nodes",
+    );
+  }
+  if (planShape.hasLimitOffset && input.limitOffset === undefined) {
+    throw new Error(
+      "Recursive SQL emitter expected LIMIT/OFFSET clause for plan containing a limit_offset node",
+    );
+  }
+  if (!planShape.hasLimitOffset && input.limitOffset !== undefined) {
+    throw new Error(
+      "Recursive SQL emitter received LIMIT/OFFSET clause for a plan without limit_offset nodes",
     );
   }
 }
 
 export function emitRecursiveQuerySql(input: RecursiveQueryEmitterInput): SQL {
-  assertRecursivePlanRoot(input.logicalPlan);
+  assertRecursiveEmitterClauseAlignment(input.logicalPlan, input);
 
   const parts: SQL[] = [
     sql`WITH RECURSIVE`,

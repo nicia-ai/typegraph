@@ -6,7 +6,7 @@ import type {
   SetOperation,
   VectorSimilarityPredicate,
 } from "../../ast";
-import type { SqlDialect } from "../../dialect";
+import { getDialect, type SqlDialect } from "../../dialect";
 import {
   resolveVectorAwareLimit,
   runRecursiveTraversalSelectionPass,
@@ -344,7 +344,10 @@ function lowerComposableQueryToLogicalPlanNode(
     });
   }
 
-  const vectorPredicate = runVectorPredicatePass(query).vectorPredicate;
+  const vectorPredicate = runVectorPredicatePass(
+    query,
+    getDialect(dialect),
+  ).vectorPredicate;
   const effectiveLimit = resolveVectorAwareLimit(query.limit, vectorPredicate);
   const loweringInput = {
     ast: query,

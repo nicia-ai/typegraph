@@ -58,9 +58,13 @@ function isArrayIndex(segment: string): boolean {
 export const sqliteDialect: DialectAdapter = {
   name: "sqlite",
   capabilities: {
+    standardQueryStrategy: "cte_project",
+    recursiveQueryStrategy: "recursive_cte",
     setOperationStrategy: "sqlite_compound",
     materializeIntermediateTraversalCtes: true,
     forceRecursiveWorktableOuterJoinOrder: true,
+    vectorPredicateStrategy: "native",
+    vectorMetrics: ["cosine", "l2"] as const,
   },
 
   // ============================================================

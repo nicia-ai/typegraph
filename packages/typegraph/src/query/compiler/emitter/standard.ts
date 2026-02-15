@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type LogicalPlan } from "../plan";
+import { inspectStandardProjectPlan } from "./plan-inspector";
 
 export type StandardQueryEmitterInput = Readonly<{
   ctes: readonly SQL[];
@@ -13,16 +14,46 @@ export type StandardQueryEmitterInput = Readonly<{
   projection: SQL;
 }>;
 
-function assertStandardPlanRoot(logicalPlan: LogicalPlan): void {
-  if (logicalPlan.root.op !== "project") {
+function assertStandardEmitterClauseAlignment(
+  logicalPlan: LogicalPlan,
+  input: StandardQueryEmitterInput,
+): void {
+  const planShape = inspectStandardProjectPlan(logicalPlan);
+  if (input.groupBy !== undefined && !planShape.hasAggregate) {
     throw new Error(
-      `Standard SQL emitter expected logical plan root to be "project", got "${logicalPlan.root.op}"`,
+      "Standard SQL emitter received GROUP BY clause for a plan without aggregate nodes",
+    );
+  }
+  if (input.having !== undefined && !planShape.hasAggregate) {
+    throw new Error(
+      "Standard SQL emitter received HAVING clause for a plan without aggregate nodes",
+    );
+  }
+  const expectsOrderBy = planShape.hasSort || planShape.hasVectorKnn;
+  if (expectsOrderBy && input.orderBy === undefined) {
+    throw new Error(
+      "Standard SQL emitter expected ORDER BY clause for plan containing a sort or vector_knn node",
+    );
+  }
+  if (!expectsOrderBy && input.orderBy !== undefined) {
+    throw new Error(
+      "Standard SQL emitter received ORDER BY clause for a plan without sort or vector_knn nodes",
+    );
+  }
+  if (planShape.hasLimitOffset && input.limitOffset === undefined) {
+    throw new Error(
+      "Standard SQL emitter expected LIMIT/OFFSET clause for plan containing a limit_offset node",
+    );
+  }
+  if (!planShape.hasLimitOffset && input.limitOffset !== undefined) {
+    throw new Error(
+      "Standard SQL emitter received LIMIT/OFFSET clause for a plan without limit_offset nodes",
     );
   }
 }
 
 export function emitStandardQuerySql(input: StandardQueryEmitterInput): SQL {
-  assertStandardPlanRoot(input.logicalPlan);
+  assertStandardEmitterClauseAlignment(input.logicalPlan, input);
 
   const parts: SQL[] = [];
   if (input.ctes.length > 0) {

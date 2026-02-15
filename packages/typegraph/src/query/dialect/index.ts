@@ -10,7 +10,10 @@ export { sqliteDialect } from "./sqlite";
 export type {
   DialectAdapter,
   DialectCapabilities,
+  DialectRecursiveQueryStrategy,
   DialectSetOperationStrategy,
+  DialectStandardQueryStrategy,
+  DialectVectorPredicateStrategy,
   SqlDialect,
 } from "./types";
 

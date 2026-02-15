@@ -53,13 +53,12 @@ describe("emitSetOperationQuerySql", () => {
       baseQuery: sql`SELECT 1 UNION SELECT 2`,
       ctes: [sql.raw("c0 AS (SELECT 1)")],
       logicalPlan,
-      suffixClauses: [sql`ORDER BY 1 ASC`, sql`LIMIT 5`],
+      suffixClauses: [sql`LIMIT 5`],
     });
 
     const sqlText = toSqlString(result);
     expect(sqlText).toContain("WITH c0 AS (SELECT 1)");
     expect(sqlText).toContain("SELECT 1 UNION SELECT 2");
-    expect(sqlText).toContain("ORDER BY 1 ASC");
     expect(sqlText).toContain("LIMIT 5");
   });
 

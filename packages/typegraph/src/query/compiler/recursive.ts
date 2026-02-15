@@ -8,7 +8,10 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../errors";
 import { type QueryAst, type SelectiveField } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import {
+  type DialectAdapter,
+  type DialectRecursiveQueryStrategy,
+} from "../dialect";
 import { jsonPointer } from "../json-pointer";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
@@ -192,6 +195,29 @@ function runRecursiveQueryPassPipeline(
  * @returns SQL for the recursive query
  */
 export function compileVariableLengthQuery(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+): SQL {
+  const strategy = ctx.dialect.capabilities.recursiveQueryStrategy;
+  const handler = RECURSIVE_QUERY_STRATEGY_HANDLERS[strategy];
+  return handler(ast, graphId, ctx);
+}
+
+type RecursiveQueryStrategyHandler = (
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+) => SQL;
+
+const RECURSIVE_QUERY_STRATEGY_HANDLERS: Record<
+  DialectRecursiveQueryStrategy,
+  RecursiveQueryStrategyHandler
+> = {
+  recursive_cte: compileVariableLengthQueryWithRecursiveCteStrategy,
+};
+
+function compileVariableLengthQueryWithRecursiveCteStrategy(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,

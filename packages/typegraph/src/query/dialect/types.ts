@@ -23,9 +23,34 @@ export type DialectSetOperationStrategy =
   | "sqlite_compound";
 
 /**
+ * Strategy for compiling standard (non-recursive, non-set-op) queries.
+ */
+export type DialectStandardQueryStrategy = "cte_project";
+
+/**
+ * Strategy for compiling recursive queries.
+ */
+export type DialectRecursiveQueryStrategy = "recursive_cte";
+
+/**
+ * Strategy for handling vector predicates.
+ */
+export type DialectVectorPredicateStrategy = "native" | "unsupported";
+
+/**
  * Capability and strategy profile for a SQL dialect.
  */
 export type DialectCapabilities = Readonly<{
+  /**
+   * Standard query compilation strategy.
+   */
+  standardQueryStrategy: DialectStandardQueryStrategy;
+
+  /**
+   * Recursive query compilation strategy.
+   */
+  recursiveQueryStrategy: DialectRecursiveQueryStrategy;
+
   /**
    * Set operation compilation strategy.
    */
@@ -40,6 +65,16 @@ export type DialectCapabilities = Readonly<{
    * Whether recursive CTEs should enforce worktable-first join ordering.
    */
   forceRecursiveWorktableOuterJoinOrder: boolean;
+
+  /**
+   * Strategy for vector predicate support.
+   */
+  vectorPredicateStrategy: DialectVectorPredicateStrategy;
+
+  /**
+   * Metrics supported by vector predicates for this dialect.
+   */
+  vectorMetrics: readonly VectorMetric[];
 }>;
 
 /**

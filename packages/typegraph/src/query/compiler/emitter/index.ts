@@ -1,4 +1,11 @@
 export {
+  inspectRecursiveProjectPlan,
+  inspectSetOperationPlan,
+  inspectStandardProjectPlan,
+  type ProjectPlanShape,
+  type SetOperationPlanShape,
+} from "./plan-inspector";
+export {
   emitRecursiveQuerySql,
   type RecursiveQueryEmitterInput,
 } from "./recursive";
