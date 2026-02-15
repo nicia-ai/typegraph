@@ -37,7 +37,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     .query()
     .from("User", "u")
     .whereNode("u", (user) => user.id.eq("user_0"))
-    .traverse("follows", "e")
+    .traverse("follows", "e", { expand: "none" })
     .to("User", "friend")
     .select((context) => ({ friendName: context.friend.name }));
 
@@ -45,7 +45,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     .query()
     .from("User", "u")
     .whereNode("u", (user) => user.id.eq(param("userId")))
-    .traverse("follows", "e")
+    .traverse("follows", "e", { expand: "none" })
     .to("User", "friend")
     .select((context) => ({ friendName: context.friend.name }))
     .prepare();
@@ -55,7 +55,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       .query()
       .from("User", "u")
       .whereNode("u", (user) => user.id.eq("user_0"))
-      .traverse("follows", "e")
+      .traverse("follows", "e", { expand: "none" })
       .to("User", "friend")
       .select((context) => ({ friendName: context.friend.name }))
       .execute();
@@ -79,7 +79,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     await store
       .query()
       .from("User", "follower")
-      .traverse("follows", "e")
+      .traverse("follows", "e", { expand: "none" })
       .to("User", "target")
       .whereNode("target", (target) => target.id.eq("user_0"))
       .select((context) => ({ followerName: context.follower.name }))
@@ -106,9 +106,9 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       .query()
       .from("User", "u")
       .whereNode("u", (user) => user.id.eq("user_0"))
-      .traverse("follows", "e1")
+      .traverse("follows", "e1", { expand: "none" })
       .to("User", "friend")
-      .traverse("authored", "e2")
+      .traverse("authored", "e2", { expand: "none" })
       .to("Post", "post")
       .select((context) => ({
         friendName: context.friend.name,
@@ -123,11 +123,11 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       .query()
       .from("User", "u")
       .whereNode("u", (user) => user.id.eq("user_500"))
-      .traverse("follows", "e1")
+      .traverse("follows", "e1", { expand: "none" })
       .to("User", "f1")
-      .traverse("follows", "e2")
+      .traverse("follows", "e2", { expand: "none" })
       .to("User", "f2")
-      .traverse("authored", "e3")
+      .traverse("authored", "e3", { expand: "none" })
       .to("Post", "post")
       .select((context) => ({
         f1Name: context.f1.name,
@@ -144,7 +144,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       await store
         .query()
         .from("User", "u")
-        .optionalTraverse("follows", "e")
+        .optionalTraverse("follows", "e", { expand: "none" })
         .to("User", "target")
         .groupByNode("u")
         .aggregate({
@@ -162,7 +162,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       await store
         .query()
         .from("User", "u")
-        .optionalTraverse("follows", "e")
+        .optionalTraverse("follows", "e", { expand: "none" })
         .to("User", "target")
         .groupByNode("u")
         .aggregate({
@@ -175,35 +175,21 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
   );
 
   const tenHopMs = await benchmarkQuery(
-    "10-hop traversal (linear next edges)",
+    "10-hop recursive traversal (linear next edges, cyclePolicy: allow)",
     async () => {
       await store
         .query()
-        .from("User", "u0")
-        .whereNode("u0", (user) => user.id.eq("user_0"))
-        .traverse("next", "e1")
-        .to("User", "u1")
-        .traverse("next", "e2")
-        .to("User", "u2")
-        .traverse("next", "e3")
-        .to("User", "u3")
-        .traverse("next", "e4")
-        .to("User", "u4")
-        .traverse("next", "e5")
-        .to("User", "u5")
-        .traverse("next", "e6")
-        .to("User", "u6")
-        .traverse("next", "e7")
-        .to("User", "u7")
-        .traverse("next", "e8")
-        .to("User", "u8")
-        .traverse("next", "e9")
-        .to("User", "u9")
-        .traverse("next", "e10")
-        .to("User", "u10")
+        .from("User", "u")
+        .whereNode("u", (user) => user.id.eq("user_0"))
+        .traverse("next", "e", { expand: "none" })
+        .recursive()
+        .cyclePolicy("allow")
+        .minHops(10)
+        .maxHops(10)
+        .to("User", "target")
         .select((context) => ({
-          id: context.u10.id,
-          name: context.u10.name,
+          id: context.target.id,
+          name: context.target.name,
         }))
         .limit(1)
         .execute();
@@ -211,14 +197,15 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
   );
 
   const recursiveHundredHopMs = await benchmarkQuery(
-    "100-hop recursive traversal (linear next edges)",
+    "100-hop recursive traversal (linear next edges, cyclePolicy: allow)",
     async () => {
       await store
         .query()
         .from("User", "u")
         .whereNode("u", (user) => user.id.eq("user_0"))
-        .traverse("next", "e")
+        .traverse("next", "e", { expand: "none" })
         .recursive()
+        .cyclePolicy("allow")
         .minHops(100)
         .maxHops(100)
         .to("User", "target")
@@ -231,14 +218,15 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
   );
 
   const recursiveThousandHopMs = await benchmarkQuery(
-    "1000-hop recursive traversal (linear next edges)",
+    "1000-hop recursive traversal (linear next edges, cyclePolicy: allow)",
     async () => {
       await store
         .query()
         .from("User", "u")
         .whereNode("u", (user) => user.id.eq("user_0"))
-        .traverse("next", "e")
+        .traverse("next", "e", { expand: "none" })
         .recursive()
+        .cyclePolicy("allow")
         .minHops(1000)
         .maxHops(1000)
         .to("User", "target")

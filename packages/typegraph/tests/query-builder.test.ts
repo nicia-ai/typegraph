@@ -684,6 +684,45 @@ describe("Query Compilation to SQL", () => {
     expect(params.filter((value) => value === 160)).toHaveLength(1);
   });
 
+  it("materializes intermediate traversal CTEs for sqlite multi-hop queries", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id, "sqlite");
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).toContain("cte_friend AS MATERIALIZED");
+    expect(sql).not.toContain("cte_friendOfFriend AS MATERIALIZED");
+  });
+
+  it("does not materialize traversal CTEs for postgres multi-hop queries", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id, "postgres");
+    const { sql } = sqlToStrings(sqlObject, "postgres");
+
+    expect(sql).not.toContain("MATERIALIZED");
+  });
+
   it("does not push traversal limits when ORDER BY is present", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")

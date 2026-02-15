@@ -118,7 +118,7 @@ export function evaluateGuardrails(
 
   if (metrics.tenHopMs > guardrails.tenHopMsMax) {
     violations.push({
-      label: "10-hop traversal latency (ms)",
+      label: "10-hop recursive traversal latency (ms)",
       actual: metrics.tenHopMs,
       expectedMax: guardrails.tenHopMsMax,
     });
@@ -138,7 +138,7 @@ export function evaluateGuardrails(
   );
   if (recursiveHundredToTenHop > guardrails.recursiveHundredToTenHopRatioMax) {
     violations.push({
-      label: "100-hop-recursive/10-hop ratio",
+      label: "100-hop-recursive/10-hop-recursive ratio",
       actual: recursiveHundredToTenHop,
       expectedMax: guardrails.recursiveHundredToTenHopRatioMax,
     });
@@ -201,7 +201,7 @@ export function printSummary(metrics: QueryMetrics): void {
   );
   console.log(`prepared/cached: ${preparedToCached.toFixed(2)}x`);
   console.log(
-    `100-hop-recursive/10-hop: ${recursiveHundredToTenHop.toFixed(2)}x`,
+    `100-hop-recursive/10-hop-recursive: ${recursiveHundredToTenHop.toFixed(2)}x`,
   );
   console.log(
     `1000-hop-recursive/100-hop-recursive: ${recursiveThousandToHundred.toFixed(2)}x`,

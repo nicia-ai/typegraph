@@ -28,10 +28,14 @@ The suite seeds a realistic graph shape and measures end-to-end query latency ac
 - 2-hop and 3-hop traversals
 - aggregate queries
 - cached execute vs prepared execute
-- deep traversals (10-hop, 100-hop recursive, 1000-hop recursive)
+- deep traversals (`10`/`100`/`1000` hop recursive with `cyclePolicy: "allow"`)
 
 Guardrail thresholds enforce expected behavior in CI (for example, traversal latency caps and
 ratio checks such as reverse/forward and deep-hop scaling).
+
+Deep-recursive benchmark probes explicitly set `cyclePolicy: "allow"` to isolate recursive CTE
+expansion cost; the default `cyclePolicy: "prevent"` prioritizes cycle-safe semantics and is
+expected to be slower on long traversals.
 
 *Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
 and schema/data shape.*
@@ -62,9 +66,9 @@ Default guardrails:
 | cached execute latency | <= 500ms |
 | prepared execute latency | <= 500ms |
 | prepared/cached ratio | <= 2x |
-| 10-hop latency | <= 250ms |
+| 10-hop recursive latency | <= 250ms |
 | 100-hop recursive latency | <= 1000ms |
-| 100-hop-recursive/10-hop ratio | <= 30x |
+| 100-hop-recursive/10-hop-recursive ratio | <= 30x |
 | 1000-hop recursive latency | <= 5000ms |
 | 1000-hop-recursive/100-hop-recursive ratio | <= 50x |
 

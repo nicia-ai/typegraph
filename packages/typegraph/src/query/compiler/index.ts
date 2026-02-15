@@ -556,6 +556,61 @@ type CountAggregateFastPathPlan = Readonly<{
   requiresCountDistinct: boolean;
 }>;
 
+function canCollapseSelectiveTraversalRowset(
+  ast: QueryAst,
+  vectorPredicate: VectorSimilarityPredicate | undefined,
+): boolean {
+  if (vectorPredicate !== undefined) {
+    return false;
+  }
+
+  if (ast.traversals.length === 0) {
+    return false;
+  }
+
+  if (ast.traversals.some((traversal) => traversal.optional)) {
+    return false;
+  }
+
+  let expectedJoinFromAlias = ast.start.alias;
+  for (const traversal of ast.traversals) {
+    if (traversal.joinFromAlias !== expectedJoinFromAlias) {
+      return false;
+    }
+    expectedJoinFromAlias = traversal.nodeAlias;
+  }
+
+  if (!ast.selectiveFields || ast.selectiveFields.length === 0) {
+    return false;
+  }
+
+  if (ast.groupBy || ast.having) {
+    return false;
+  }
+
+  if (ast.projection.fields.some((field) => isAggregateExpr(field.source))) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldMaterializeTraversalCte(
+  dialect: SqlDialect,
+  traversalCount: number,
+  traversalIndex: number,
+): boolean {
+  if (dialect !== "sqlite") {
+    return false;
+  }
+
+  if (traversalCount <= 1) {
+    return false;
+  }
+
+  return traversalIndex < traversalCount - 1;
+}
+
 function resolveCountAggregateFastPath(
   ast: QueryAst,
 ): CountAggregateFastPathPlan | undefined {
@@ -810,6 +865,13 @@ function compileStandardQuery(
       collectRequiredColumnsByAlias(ast)
     : undefined;
 
+  const shouldCollapseSelectiveTraversalRowset =
+    canCollapseSelectiveTraversalRowset(ast, vectorPredicate);
+  const collapsedTraversalCteAlias =
+    shouldCollapseSelectiveTraversalRowset ?
+      `cte_${ast.traversals.at(-1)!.nodeAlias}`
+    : undefined;
+
   if (!vectorPredicate) {
     const fastPathSql = compileCountAggregateFastPath(
       ast,
@@ -832,6 +894,11 @@ function compileStandardQuery(
 
   // Traversal CTEs
   for (let index = 0; index < ast.traversals.length; index++) {
+    const materializeTraversalCte = shouldMaterializeTraversalCte(
+      dialect.name,
+      ast.traversals.length,
+      index,
+    );
     ctes.push(
       compileTraversalCte(
         ast,
@@ -841,6 +908,8 @@ function compileStandardQuery(
         requiredColumnsByAlias,
         traversalCteLimit,
         predicateIndex,
+        shouldCollapseSelectiveTraversalRowset,
+        materializeTraversalCte,
       ),
     );
   }
@@ -851,8 +920,16 @@ function compileStandardQuery(
   }
 
   // Build main SELECT
-  const projection = compileProjection(ast, dialect);
-  const fromClause = compileFromClause(ast, vectorPredicate);
+  const projection = compileProjection(
+    ast,
+    dialect,
+    collapsedTraversalCteAlias,
+  );
+  const fromClause = compileFromClause(
+    ast,
+    vectorPredicate,
+    collapsedTraversalCteAlias,
+  );
   const groupBy = compileGroupBy(ast, dialect);
   const having = compileHaving(ast, ctx);
 
@@ -860,7 +937,7 @@ function compileStandardQuery(
   const orderBy =
     vectorPredicate ?
       compileVectorOrderBy(vectorPredicate, ast, dialect)
-    : compileOrderBy(ast, dialect);
+    : compileOrderBy(ast, dialect, collapsedTraversalCteAlias);
 
   // Use vector predicate limit if present and no explicit limit in AST
   const effectiveLimit =
@@ -955,6 +1032,8 @@ function compileTraversalCte(
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   traversalLimit: number | undefined,
   predicateIndex: PredicateIndex,
+  carryForwardPreviousColumns: boolean,
+  materializeCte: boolean,
 ): SQL {
   const traversal = ast.traversals[traversalIndex]!;
   const traversalLimitValue =
@@ -1020,12 +1099,19 @@ function compileTraversalCte(
     requiredColumnsByAlias ?
       (requiredColumnsByAlias.get(edgeAlias) ?? EMPTY_REQUIRED_COLUMNS)
     : undefined;
+  const previousRowColumns =
+    carryForwardPreviousColumns ?
+      [sql`cte_${sql.raw(previousAlias)}.*`]
+    : [
+        sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id`,
+        sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind AS ${sql.raw(previousAlias)}_kind`,
+      ];
   const selectColumns = [
+    ...previousRowColumns,
     ...compileEdgeSelectColumns("e", edgeAlias, requiredEdgeColumns),
     ...compileNodeSelectColumns("n", nodeAlias, requiredNodeColumns),
-    sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id`,
-    sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind AS ${sql.raw(previousAlias)}_kind`,
   ];
+  const cteMaterialization = materializeCte ? sql`MATERIALIZED ` : sql``;
 
   function compileTraversalBranch(
     branch: Readonly<{
@@ -1053,12 +1139,12 @@ function compileTraversalCte(
 
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
-      FROM ${ctx.schema.edgesTable} e
+      FROM cte_${sql.raw(previousAlias)}
+      JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
+        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind = e.${sql.raw(branch.joinKindField)}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}
-      JOIN cte_${sql.raw(previousAlias)} ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind = e.${sql.raw(branch.joinKindField)}
       WHERE ${sql.join(whereClauses, sql` AND `)}
     `;
   }
@@ -1081,7 +1167,7 @@ function compileTraversalCte(
   if (inverseEdgeKinds.length === 0) {
     if (traversalLimitValue !== undefined) {
       return sql`
-        cte_${sql.raw(nodeAlias)} AS (
+        cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
           SELECT * FROM (
             ${directBranch}
           ) AS traversal_rows
@@ -1091,7 +1177,7 @@ function compileTraversalCte(
     }
 
     return sql`
-      cte_${sql.raw(nodeAlias)} AS (
+      cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
         ${directBranch}
       )
     `;
@@ -1128,7 +1214,7 @@ function compileTraversalCte(
 
   if (traversalLimitValue !== undefined) {
     return sql`
-      cte_${sql.raw(nodeAlias)} AS (
+      cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
         SELECT * FROM (
           ${directBranch}
           UNION ALL
@@ -1140,7 +1226,7 @@ function compileTraversalCte(
   }
 
   return sql`
-    cte_${sql.raw(nodeAlias)} AS (
+    cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
       ${directBranch}
       UNION ALL
       ${inverseBranch}
@@ -1237,10 +1323,16 @@ function compileAggregateExprFromSource(
 function compileProjection(
   ast: QueryAst,
   dialect: ReturnType<typeof getDialect>,
+  collapsedTraversalCteAlias?: string,
 ): SQL {
   // Check for selective projection first
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
-    return compileSelectiveProjection(ast.selectiveFields, dialect, ast);
+    return compileSelectiveProjection(
+      ast.selectiveFields,
+      dialect,
+      ast,
+      collapsedTraversalCteAlias,
+    );
   }
 
   const fields = ast.projection.fields;
@@ -1270,6 +1362,7 @@ function compileSelectiveProjection(
   fields: readonly SelectiveField[],
   dialect: ReturnType<typeof getDialect>,
   ast: QueryAst,
+  collapsedTraversalCteAlias?: string,
 ): SQL {
   // Build a mapping from alias to CTE name
   // Start node: alias maps to cte_{alias}
@@ -1290,7 +1383,8 @@ function compileSelectiveProjection(
   }
 
   const columns = fields.map((f) => {
-    const cteAlias = aliasToCte.get(f.alias) ?? `cte_${f.alias}`;
+    const cteAlias =
+      collapsedTraversalCteAlias ?? aliasToCte.get(f.alias) ?? `cte_${f.alias}`;
 
     if (f.isSystemField) {
       // System fields: direct column reference from CTE
@@ -1366,7 +1460,12 @@ function compileSelectiveJsonValue(
 function compileFromClause(
   ast: QueryAst,
   vectorPredicate?: VectorSimilarityPredicate,
+  collapsedTraversalCteAlias?: string,
 ): SQL {
+  if (collapsedTraversalCteAlias !== undefined) {
+    return sql`FROM ${sql.raw(collapsedTraversalCteAlias)}`;
+  }
+
   const startAlias = ast.start.alias;
 
   // Start from the first CTE (start alias)
@@ -1406,6 +1505,7 @@ function compileFromClause(
 function compileOrderBy(
   ast: QueryAst,
   dialect: ReturnType<typeof getDialect>,
+  collapsedTraversalCteAlias?: string,
 ): SQL | undefined {
   if (!ast.orderBy || ast.orderBy.length === 0) {
     return undefined;
@@ -1420,7 +1520,7 @@ function compileOrderBy(
         "Ordering by JSON arrays or objects is not supported",
       );
     }
-    const cteAlias = `cte_${o.field.alias}`;
+    const cteAlias = collapsedTraversalCteAlias ?? `cte_${o.field.alias}`;
     const field = compileFieldValue(o.field, dialect, valueType, cteAlias);
     const dir = sql.raw(o.direction.toUpperCase());
     const nulls = o.nulls ?? (o.direction === "asc" ? "last" : "first");

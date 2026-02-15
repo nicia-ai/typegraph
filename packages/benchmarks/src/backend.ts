@@ -36,7 +36,9 @@ export async function createBackendResources(
   if (backend === "sqlite") {
     const sqlite = createLocalSqliteBackend();
     return {
-      store: createStore(perfGraph, sqlite.backend),
+      store: createStore(perfGraph, sqlite.backend, {
+        queryDefaults: { traversalExpansion: "none" },
+      }),
       close: async () => sqlite.backend.close(),
     };
   }
@@ -61,7 +63,9 @@ export async function createBackendResources(
 
   const postgresBackend = createPostgresBackend(drizzleDb);
   return {
-    store: createStore(perfGraph, postgresBackend),
+    store: createStore(perfGraph, postgresBackend, {
+      queryDefaults: { traversalExpansion: "none" },
+    }),
     close: async () => {
       await postgresBackend.close();
       await pool.end();
