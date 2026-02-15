@@ -21,7 +21,10 @@ import {
   type QueryAst,
   type SetOperation,
 } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import {
+  type DialectAdapter,
+  type DialectSetOperationStrategy,
+} from "../dialect";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import {
   compilePredicateExpression,
@@ -35,6 +38,14 @@ import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
  */
 export type QueryCompilerFunction = (ast: QueryAst, graphId: string) => SQL;
 
+type SetOperationStrategyHandler = (
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  schema: SqlSchema,
+  compileQuery: QueryCompilerFunction,
+) => SQL;
+
 /**
  * Operator mapping for set operations.
  */
@@ -43,6 +54,34 @@ const OPERATOR_MAP: Record<string, string> = {
   unionAll: "UNION ALL",
   intersect: "INTERSECT",
   except: "EXCEPT",
+};
+
+function compileSetOperationWithStandardParenthesizedStrategy(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  _schema: SqlSchema,
+  compileQuery: QueryCompilerFunction,
+): SQL {
+  return compileSetOperationStandard(op, graphId, dialect, compileQuery);
+}
+
+function compileSetOperationWithSqliteCompoundStrategy(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  schema: SqlSchema,
+  _compileQuery: QueryCompilerFunction,
+): SQL {
+  return compileSetOperationForSqlite(op, graphId, dialect, schema);
+}
+
+const SET_OPERATION_STRATEGY_HANDLERS: Record<
+  DialectSetOperationStrategy,
+  SetOperationStrategyHandler
+> = {
+  standard_parenthesized: compileSetOperationWithStandardParenthesizedStrategy,
+  sqlite_compound: compileSetOperationWithSqliteCompoundStrategy,
 };
 
 // ============================================================
@@ -69,13 +108,9 @@ export function compileSetOperation(
   schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ): SQL {
-  // SQLite requires special handling for CTEs in compound statements
-  if (dialect.name === "sqlite") {
-    return compileSetOperationForSqlite(op, graphId, dialect, schema);
-  }
-
-  // PostgreSQL and others support CTEs in parentheses
-  return compileSetOperationStandard(op, graphId, dialect, compileQuery);
+  const strategy = dialect.capabilities.setOperationStrategy;
+  const handler = SET_OPERATION_STRATEGY_HANDLERS[strategy];
+  return handler(op, graphId, dialect, schema, compileQuery);
 }
 
 // ============================================================

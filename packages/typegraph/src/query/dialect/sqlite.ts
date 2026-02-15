@@ -57,6 +57,11 @@ function isArrayIndex(segment: string): boolean {
  */
 export const sqliteDialect: DialectAdapter = {
   name: "sqlite",
+  capabilities: {
+    setOperationStrategy: "sqlite_compound",
+    materializeIntermediateTraversalCtes: true,
+    forceRecursiveWorktableOuterJoinOrder: true,
+  },
 
   // ============================================================
   // JSON Path Operations

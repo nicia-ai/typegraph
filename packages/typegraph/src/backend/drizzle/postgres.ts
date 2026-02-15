@@ -60,7 +60,7 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
-import * as ops from "./operations";
+import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
   type PostgresTables,
   tables as defaultTables,
@@ -335,6 +335,7 @@ export function createPostgresBackend(
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
   };
+  const operationStrategy = createPostgresOperationStrategy(tables);
 
   /**
    * Execute a query and return all rows.
@@ -371,7 +372,7 @@ export function createPostgresBackend(
 
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertNode(tables, params, timestamp);
+      const query = operationStrategy.buildInsertNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert node failed: no row returned");
       return toNodeRow(row);
@@ -379,7 +380,7 @@ export function createPostgresBackend(
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildInsertNodeNoReturn(tables, params, timestamp);
+      const query = operationStrategy.buildInsertNodeNoReturn(params, timestamp);
       await execRun(query);
     },
 
@@ -391,7 +392,7 @@ export function createPostgresBackend(
       }
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, POSTGRES_NODE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertNodesBatch(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertNodesBatch(chunk, timestamp);
         await execRun(query);
       }
     },
@@ -405,7 +406,7 @@ export function createPostgresBackend(
       const timestamp = nowIso();
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(params, POSTGRES_NODE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertNodesBatchReturning(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -417,7 +418,7 @@ export function createPostgresBackend(
       kind: string,
       id: string,
     ): Promise<NodeRow | undefined> {
-      const query = ops.buildGetNode(tables, graphId, kind, id);
+      const query = operationStrategy.buildGetNode(graphId, kind, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toNodeRow(row) : undefined;
     },
@@ -430,7 +431,7 @@ export function createPostgresBackend(
       if (ids.length === 0) return [];
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(ids, POSTGRES_GET_NODES_ID_CHUNK_SIZE)) {
-        const query = ops.buildGetNodes(tables, graphId, kind, chunk);
+        const query = operationStrategy.buildGetNodes(graphId, kind, chunk);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -439,7 +440,7 @@ export function createPostgresBackend(
 
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateNode(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update node failed: no row returned");
       return toNodeRow(row);
@@ -447,22 +448,20 @@ export function createPostgresBackend(
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteNode(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteNode(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       // Delete associated uniqueness entries
-      const deleteUniquesQuery = ops.buildHardDeleteUniquesByNode(
-        tables,
+      const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execRun(deleteUniquesQuery);
 
       // Delete associated embeddings
-      const deleteEmbeddingsQuery = ops.buildHardDeleteEmbeddingsByNode(
-        tables,
+      const deleteEmbeddingsQuery = operationStrategy.buildHardDeleteEmbeddingsByNode(
         params.graphId,
         params.kind,
         params.id,
@@ -470,7 +469,7 @@ export function createPostgresBackend(
       await execRun(deleteEmbeddingsQuery);
 
       // Delete the node itself
-      const query = ops.buildHardDeleteNode(tables, params);
+      const query = operationStrategy.buildHardDeleteNode(params);
       await execRun(query);
     },
 
@@ -478,7 +477,7 @@ export function createPostgresBackend(
 
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertEdge(tables, params, timestamp);
+      const query = operationStrategy.buildInsertEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert edge failed: no row returned");
       return toEdgeRow(row);
@@ -486,7 +485,7 @@ export function createPostgresBackend(
 
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildInsertEdgeNoReturn(tables, params, timestamp);
+      const query = operationStrategy.buildInsertEdgeNoReturn(params, timestamp);
       await execRun(query);
     },
 
@@ -498,7 +497,7 @@ export function createPostgresBackend(
       }
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, POSTGRES_EDGE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertEdgesBatch(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
         await execRun(query);
       }
     },
@@ -512,7 +511,7 @@ export function createPostgresBackend(
       const timestamp = nowIso();
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(params, POSTGRES_EDGE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertEdgesBatchReturning(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -520,7 +519,7 @@ export function createPostgresBackend(
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {
-      const query = ops.buildGetEdge(tables, graphId, id);
+      const query = operationStrategy.buildGetEdge(graphId, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toEdgeRow(row) : undefined;
     },
@@ -532,7 +531,7 @@ export function createPostgresBackend(
       if (ids.length === 0) return [];
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(ids, POSTGRES_GET_EDGES_ID_CHUNK_SIZE)) {
-        const query = ops.buildGetEdges(tables, graphId, chunk);
+        const query = operationStrategy.buildGetEdges(graphId, chunk);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -541,7 +540,7 @@ export function createPostgresBackend(
 
     async updateEdge(params: UpdateEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateEdge(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update edge failed: no row returned");
       return toEdgeRow(row);
@@ -549,26 +548,26 @@ export function createPostgresBackend(
 
     async deleteEdge(params: DeleteEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteEdge(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteEdge(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
-      const query = ops.buildHardDeleteEdge(tables, params);
+      const query = operationStrategy.buildHardDeleteEdge(params);
       await execRun(query);
     },
 
     // === Edge Cardinality Operations ===
 
     async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = ops.buildCountEdgesFrom(tables, params);
+      const query = operationStrategy.buildCountEdgesFrom(params);
       const row = await execGet<{ count: string | number }>(query);
       // PostgreSQL returns count as string for bigint
       return Number(row?.count ?? 0);
     },
 
     async edgeExistsBetween(params: EdgeExistsBetweenParams): Promise<boolean> {
-      const query = ops.buildEdgeExistsBetween(tables, params);
+      const query = operationStrategy.buildEdgeExistsBetween(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row !== undefined;
     },
@@ -578,7 +577,7 @@ export function createPostgresBackend(
     async findEdgesConnectedTo(
       params: FindEdgesConnectedToParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesConnectedTo(tables, params);
+      const query = operationStrategy.buildFindEdgesConnectedTo(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
@@ -588,13 +587,13 @@ export function createPostgresBackend(
     async findNodesByKind(
       params: FindNodesByKindParams,
     ): Promise<readonly NodeRow[]> {
-      const query = ops.buildFindNodesByKind(tables, params);
+      const query = operationStrategy.buildFindNodesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toNodeRow(row));
     },
 
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
-      const query = ops.buildCountNodesByKind(tables, params);
+      const query = operationStrategy.buildCountNodesByKind(params);
       const row = await execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -602,13 +601,13 @@ export function createPostgresBackend(
     async findEdgesByKind(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesByKind(tables, params);
+      const query = operationStrategy.buildFindEdgesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
 
     async countEdgesByKind(params: CountEdgesByKindParams): Promise<number> {
-      const query = ops.buildCountEdgesByKind(tables, params);
+      const query = operationStrategy.buildCountEdgesByKind(params);
       const row = await execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -616,7 +615,7 @@ export function createPostgresBackend(
     // === Unique Constraint Operations ===
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
-      const query = ops.buildInsertUnique(tables, "postgres", params);
+      const query = operationStrategy.buildInsertUnique(params);
       const result = await execGet<{ node_id: string }>(query);
 
       // Check if the returned node_id matches our input
@@ -634,14 +633,14 @@ export function createPostgresBackend(
 
     async deleteUnique(params: DeleteUniqueParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteUnique(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execRun(query);
     },
 
     async checkUnique(
       params: CheckUniqueParams,
     ): Promise<UniqueRow | undefined> {
-      const query = ops.buildCheckUnique(tables, params);
+      const query = operationStrategy.buildCheckUnique(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toUniqueRow(row) : undefined;
     },
@@ -651,14 +650,14 @@ export function createPostgresBackend(
     async getActiveSchema(
       graphId: string,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetActiveSchema(tables, graphId, "postgres");
+      const query = operationStrategy.buildGetActiveSchema(graphId);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async insertSchema(params: InsertSchemaParams): Promise<SchemaVersionRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertSchema(tables, params, timestamp, "postgres");
+      const query = operationStrategy.buildInsertSchema(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert schema failed: no row returned");
       return toSchemaVersionRow(row);
@@ -668,13 +667,13 @@ export function createPostgresBackend(
       graphId: string,
       version: number,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetSchemaVersion(tables, graphId, version);
+      const query = operationStrategy.buildGetSchemaVersion(graphId, version);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {
-      const queries = ops.buildSetActiveSchema(tables, graphId, version, "postgres");
+      const queries = operationStrategy.buildSetActiveSchema(graphId, version);
       await execRun(queries.deactivateAll);
       await execRun(queries.activateVersion);
     },
@@ -683,12 +682,12 @@ export function createPostgresBackend(
 
     async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildUpsertEmbeddingPostgres(tables, params, timestamp);
+      const query = operationStrategy.buildUpsertEmbedding(params, timestamp);
       await execRun(query);
     },
 
     async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-      const query = ops.buildDeleteEmbedding(tables, params);
+      const query = operationStrategy.buildDeleteEmbedding(params);
       await execRun(query);
     },
 
@@ -698,8 +697,7 @@ export function createPostgresBackend(
       nodeId: string,
       fieldPath: string,
     ): Promise<EmbeddingRow | undefined> {
-      const query = ops.buildGetEmbedding(
-        tables,
+      const query = operationStrategy.buildGetEmbedding(
         graphId,
         nodeKind,
         nodeId,
@@ -712,7 +710,7 @@ export function createPostgresBackend(
     async vectorSearch(
       params: VectorSearchParams,
     ): Promise<readonly VectorSearchResult[]> {
-      const query = ops.buildVectorSearchPostgres(tables, params);
+      const query = operationStrategy.buildVectorSearch(params);
       const rows = await execAll<{ node_id: string; score: number }>(query);
       return rows.map((row) => ({
         nodeId: row.node_id,

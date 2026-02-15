@@ -16,6 +16,33 @@ import { type JsonPointer } from "../json-pointer";
 export type SqlDialect = "sqlite" | "postgres";
 
 /**
+ * Strategy for compiling set operations.
+ */
+export type DialectSetOperationStrategy =
+  | "standard_parenthesized"
+  | "sqlite_compound";
+
+/**
+ * Capability and strategy profile for a SQL dialect.
+ */
+export type DialectCapabilities = Readonly<{
+  /**
+   * Set operation compilation strategy.
+   */
+  setOperationStrategy: DialectSetOperationStrategy;
+
+  /**
+   * Whether intermediate traversal CTEs should be materialized.
+   */
+  materializeIntermediateTraversalCtes: boolean;
+
+  /**
+   * Whether recursive CTEs should enforce worktable-first join ordering.
+   */
+  forceRecursiveWorktableOuterJoinOrder: boolean;
+}>;
+
+/**
  * Adapter interface for SQL dialect differences.
  *
  * Each method generates dialect-specific SQL for a common operation.
@@ -26,6 +53,11 @@ export interface DialectAdapter {
    * The dialect name this adapter handles.
    */
   readonly name: SqlDialect;
+
+  /**
+   * Dialect capabilities and strategy selection used by query compilers.
+   */
+  readonly capabilities: DialectCapabilities;
 
   // ============================================================
   // JSON Path Operations

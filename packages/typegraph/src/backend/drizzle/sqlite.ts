@@ -55,8 +55,8 @@ import {
   type UpdateEdgeParams,
   type UpdateNodeParams,
 } from "../types";
-import * as ops from "./operations";
-import { type SqliteTables,tables as defaultTables } from "./schema/sqlite";
+import { createSqliteOperationStrategy } from "./operations/strategy";
+import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 
 // ============================================================
 // Types
@@ -308,6 +308,7 @@ export function createSqliteBackend(
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
   };
+  const operationStrategy = createSqliteOperationStrategy(tables);
 
   /**
    * Helper to execute a query and handle sync/async uniformly.
@@ -358,7 +359,7 @@ export function createSqliteBackend(
 
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertNode(tables, params, timestamp);
+      const query = operationStrategy.buildInsertNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert node failed: no row returned");
       return toNodeRow(row);
@@ -366,7 +367,7 @@ export function createSqliteBackend(
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildInsertNodeNoReturn(tables, params, timestamp);
+      const query = operationStrategy.buildInsertNodeNoReturn(params, timestamp);
       await execRun(query);
     },
 
@@ -378,7 +379,7 @@ export function createSqliteBackend(
       }
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertNodesBatch(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertNodesBatch(chunk, timestamp);
         await execRun(query);
       }
     },
@@ -392,7 +393,7 @@ export function createSqliteBackend(
       const timestamp = nowIso();
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertNodesBatchReturning(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -404,7 +405,7 @@ export function createSqliteBackend(
       kind: string,
       id: string,
     ): Promise<NodeRow | undefined> {
-      const query = ops.buildGetNode(tables, graphId, kind, id);
+      const query = operationStrategy.buildGetNode(graphId, kind, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toNodeRow(row) : undefined;
     },
@@ -417,7 +418,7 @@ export function createSqliteBackend(
       if (ids.length === 0) return [];
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(ids, SQLITE_GET_NODES_ID_CHUNK_SIZE)) {
-        const query = ops.buildGetNodes(tables, graphId, kind, chunk);
+        const query = operationStrategy.buildGetNodes(graphId, kind, chunk);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -426,7 +427,7 @@ export function createSqliteBackend(
 
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateNode(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update node failed: no row returned");
       return toNodeRow(row);
@@ -434,22 +435,20 @@ export function createSqliteBackend(
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteNode(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteNode(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       // Delete associated uniqueness entries
-      const deleteUniquesQuery = ops.buildHardDeleteUniquesByNode(
-        tables,
+      const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execRun(deleteUniquesQuery);
 
       // Delete associated embeddings (if embeddings table exists)
-      const deleteEmbeddingsQuery = ops.buildHardDeleteEmbeddingsByNode(
-        tables,
+      const deleteEmbeddingsQuery = operationStrategy.buildHardDeleteEmbeddingsByNode(
         params.graphId,
         params.kind,
         params.id,
@@ -457,7 +456,7 @@ export function createSqliteBackend(
       await execRun(deleteEmbeddingsQuery);
 
       // Delete the node itself
-      const query = ops.buildHardDeleteNode(tables, params);
+      const query = operationStrategy.buildHardDeleteNode(params);
       await execRun(query);
     },
 
@@ -465,7 +464,7 @@ export function createSqliteBackend(
 
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertEdge(tables, params, timestamp);
+      const query = operationStrategy.buildInsertEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert edge failed: no row returned");
       return toEdgeRow(row);
@@ -473,7 +472,7 @@ export function createSqliteBackend(
 
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildInsertEdgeNoReturn(tables, params, timestamp);
+      const query = operationStrategy.buildInsertEdgeNoReturn(params, timestamp);
       await execRun(query);
     },
 
@@ -485,7 +484,7 @@ export function createSqliteBackend(
       }
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertEdgesBatch(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
         await execRun(query);
       }
     },
@@ -499,7 +498,7 @@ export function createSqliteBackend(
       const timestamp = nowIso();
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
-        const query = ops.buildInsertEdgesBatchReturning(tables, chunk, timestamp);
+        const query = operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -507,7 +506,7 @@ export function createSqliteBackend(
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {
-      const query = ops.buildGetEdge(tables, graphId, id);
+      const query = operationStrategy.buildGetEdge(graphId, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toEdgeRow(row) : undefined;
     },
@@ -519,7 +518,7 @@ export function createSqliteBackend(
       if (ids.length === 0) return [];
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(ids, SQLITE_GET_EDGES_ID_CHUNK_SIZE)) {
-        const query = ops.buildGetEdges(tables, graphId, chunk);
+        const query = operationStrategy.buildGetEdges(graphId, chunk);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -528,7 +527,7 @@ export function createSqliteBackend(
 
     async updateEdge(params: UpdateEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateEdge(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update edge failed: no row returned");
       return toEdgeRow(row);
@@ -536,25 +535,25 @@ export function createSqliteBackend(
 
     async deleteEdge(params: DeleteEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteEdge(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteEdge(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
-      const query = ops.buildHardDeleteEdge(tables, params);
+      const query = operationStrategy.buildHardDeleteEdge(params);
       await execRun(query);
     },
 
     // === Edge Cardinality Operations ===
 
     async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = ops.buildCountEdgesFrom(tables, params);
+      const query = operationStrategy.buildCountEdgesFrom(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
 
     async edgeExistsBetween(params: EdgeExistsBetweenParams): Promise<boolean> {
-      const query = ops.buildEdgeExistsBetween(tables, params);
+      const query = operationStrategy.buildEdgeExistsBetween(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row !== undefined;
     },
@@ -564,7 +563,7 @@ export function createSqliteBackend(
     async findEdgesConnectedTo(
       params: FindEdgesConnectedToParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesConnectedTo(tables, params);
+      const query = operationStrategy.buildFindEdgesConnectedTo(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
@@ -574,13 +573,13 @@ export function createSqliteBackend(
     async findNodesByKind(
       params: FindNodesByKindParams,
     ): Promise<readonly NodeRow[]> {
-      const query = ops.buildFindNodesByKind(tables, params);
+      const query = operationStrategy.buildFindNodesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toNodeRow(row));
     },
 
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
-      const query = ops.buildCountNodesByKind(tables, params);
+      const query = operationStrategy.buildCountNodesByKind(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
@@ -588,13 +587,13 @@ export function createSqliteBackend(
     async findEdgesByKind(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesByKind(tables, params);
+      const query = operationStrategy.buildFindEdgesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
 
     async countEdgesByKind(params: CountEdgesByKindParams): Promise<number> {
-      const query = ops.buildCountEdgesByKind(tables, params);
+      const query = operationStrategy.buildCountEdgesByKind(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
@@ -602,7 +601,7 @@ export function createSqliteBackend(
     // === Unique Constraint Operations ===
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
-      const query = ops.buildInsertUnique(tables, "sqlite", params);
+      const query = operationStrategy.buildInsertUnique(params);
       const result = await execGet<{ node_id: string }>(query);
 
       // Check if the returned node_id matches our input
@@ -620,14 +619,14 @@ export function createSqliteBackend(
 
     async deleteUnique(params: DeleteUniqueParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteUnique(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execRun(query);
     },
 
     async checkUnique(
       params: CheckUniqueParams,
     ): Promise<UniqueRow | undefined> {
-      const query = ops.buildCheckUnique(tables, params);
+      const query = operationStrategy.buildCheckUnique(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toUniqueRow(row) : undefined;
     },
@@ -637,14 +636,14 @@ export function createSqliteBackend(
     async getActiveSchema(
       graphId: string,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetActiveSchema(tables, graphId);
+      const query = operationStrategy.buildGetActiveSchema(graphId);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async insertSchema(params: InsertSchemaParams): Promise<SchemaVersionRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertSchema(tables, params, timestamp);
+      const query = operationStrategy.buildInsertSchema(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert schema failed: no row returned");
       return toSchemaVersionRow(row);
@@ -654,13 +653,13 @@ export function createSqliteBackend(
       graphId: string,
       version: number,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetSchemaVersion(tables, graphId, version);
+      const query = operationStrategy.buildGetSchemaVersion(graphId, version);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {
-      const queries = ops.buildSetActiveSchema(tables, graphId, version);
+      const queries = operationStrategy.buildSetActiveSchema(graphId, version);
       await execRun(queries.deactivateAll);
       await execRun(queries.activateVersion);
     },

@@ -33,7 +33,7 @@ export {
 } from "./temporal";
 
 // Re-export dialect types
-export { getDialect, type SqlDialect } from "../dialect";
+export { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
 
 import { type SQL, sql } from "drizzle-orm";
 
@@ -48,7 +48,7 @@ import {
   type SetOperation,
   type VectorSimilarityPredicate,
 } from "../ast";
-import { getDialect, type SqlDialect } from "../dialect";
+import { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
 import { jsonPointer } from "../json-pointer";
 import {
   compileFieldValue,
@@ -596,11 +596,11 @@ function canCollapseSelectiveTraversalRowset(
 }
 
 function shouldMaterializeTraversalCte(
-  dialect: SqlDialect,
+  dialect: DialectAdapter,
   traversalCount: number,
   traversalIndex: number,
 ): boolean {
-  if (dialect !== "sqlite") {
+  if (!dialect.capabilities.materializeIntermediateTraversalCtes) {
     return false;
   }
 
@@ -897,7 +897,7 @@ function compileStandardQuery(
   // Traversal CTEs
   for (let index = 0; index < ast.traversals.length; index++) {
     const materializeTraversalCte = shouldMaterializeTraversalCte(
-      dialect.name,
+      dialect,
       ast.traversals.length,
       index,
     );

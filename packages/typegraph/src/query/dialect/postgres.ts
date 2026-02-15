@@ -53,6 +53,11 @@ function toPostgresPath(pointer: JsonPointer): SQL {
  */
 export const postgresDialect: DialectAdapter = {
   name: "postgres",
+  capabilities: {
+    setOperationStrategy: "standard_parenthesized",
+    materializeIntermediateTraversalCtes: false,
+    forceRecursiveWorktableOuterJoinOrder: false,
+  },
 
   // ============================================================
   // JSON Path Operations

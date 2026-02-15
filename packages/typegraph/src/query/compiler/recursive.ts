@@ -172,7 +172,8 @@ function compileRecursiveCte(
     traversal.inverseEdgeKinds === undefined ?
       []
     : [...new Set(traversal.inverseEdgeKinds)];
-  const forceWorktableOuterJoinOrder = dialect.name === "sqlite";
+  const forceWorktableOuterJoinOrder =
+    dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
   const nodeKinds = traversal.nodeKinds;
   const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
   const direction = traversal.direction;
