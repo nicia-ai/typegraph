@@ -227,6 +227,7 @@ export class Store<G extends GraphDef> {
         executeNodeHardDelete(ctx, kind, id, backend),
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
+      createQuery: () => this.query(),
     };
   }
 
@@ -248,6 +249,7 @@ export class Store<G extends GraphDef> {
         executeEdgeHardDelete(ctx, id, backend),
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
+      createQuery: () => this.query(),
     };
   }
 

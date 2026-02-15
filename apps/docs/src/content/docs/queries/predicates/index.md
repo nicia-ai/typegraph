@@ -409,6 +409,30 @@ const similar = await store
 
 ---
 
+## Parameterized Predicates
+
+Use `param(name)` to create a named placeholder for [prepared queries](/queries/execute#prepared-queries).
+Parameters work with any scalar predicate — comparisons, string operations, and between bounds.
+
+```typescript
+import { param } from "@nicia-ai/typegraph";
+
+const prepared = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq(param("name")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+const results = await prepared.execute({ name: "Alice" });
+```
+
+Parameters are **not** supported in `in()` / `notIn()` or array predicates, because the array length
+must be known at compile time.
+
+See [Prepared Queries](/queries/execute#prepared-queries) for full usage, supported positions, and
+performance details.
+
 ## Next Steps
 
 - [Filter](/queries/filter) - Using predicates in queries

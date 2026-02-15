@@ -16,6 +16,7 @@ import {
   type NullPredicate,
   type ObjectOp,
   type ObjectPredicate,
+  type ParameterRef,
   type PredicateExpression,
   type QueryAst,
   type StringOp,
@@ -73,6 +74,42 @@ function predicate(expr: PredicateExpression): Predicate {
         predicate: expr,
       }),
   };
+}
+
+// ============================================================
+// Parameter References
+// ============================================================
+
+/**
+ * Creates a named parameter reference for prepared queries.
+ *
+ * Use with `query.prepare()` to create reusable parameterized queries.
+ * Only supported in scalar comparison positions (eq, neq, gt, etc.),
+ * string operations, and between bounds. Not supported in `in()`/`notIn()`.
+ *
+ * @example
+ * ```typescript
+ * const prepared = store.query()
+ *   .from("Person", "p")
+ *   .whereNode("p", (p) => p.name.eq(param("name")))
+ *   .select((ctx) => ctx.p)
+ *   .prepare();
+ *
+ * const results = await prepared.execute({ name: "Alice" });
+ * ```
+ */
+// eslint-disable-next-line unicorn/prevent-abbreviations -- concise public API
+export function param(name: string): ParameterRef {
+  return { __type: "parameter", name };
+}
+
+/**
+ * Type guard for ParameterRef values.
+ */
+export function isParameterRef(value: unknown): value is ParameterRef {
+  if (typeof value !== "object" || value === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for untyped input
+  return (value as ParameterRef).__type === "parameter";
 }
 
 // ============================================================
@@ -353,6 +390,15 @@ function comparison(
   field: FieldRef,
   value: unknown,
 ): Predicate {
+  if (isParameterRef(value)) {
+    const expr: ComparisonPredicate = {
+      __type: "comparison",
+      op,
+      left: field,
+      right: value,
+    };
+    return predicate(expr);
+  }
   const coercedValue = coerceLiteralValue(value);
   const expr: ComparisonPredicate = {
     __type: "comparison",
@@ -384,7 +430,20 @@ function inComparison(
 /**
  * Creates a string operation predicate.
  */
-function stringOp(op: StringOp, field: FieldRef, pattern: string): Predicate {
+function stringOp(
+  op: StringOp,
+  field: FieldRef,
+  pattern: string | ParameterRef,
+): Predicate {
+  if (isParameterRef(pattern)) {
+    const expr: StringPredicate = {
+      __type: "string_op",
+      op,
+      field,
+      pattern,
+    };
+    return predicate(expr);
+  }
   const expr: StringPredicate = {
     __type: "string_op",
     op,
@@ -411,14 +470,14 @@ function nullCheck(op: "isNull" | "isNotNull", field: FieldRef): Predicate {
  */
 function between(
   field: FieldRef,
-  lower: string | number | boolean | Date,
-  upper: string | number | boolean | Date,
+  lower: string | number | boolean | Date | ParameterRef,
+  upper: string | number | boolean | Date | ParameterRef,
 ): Predicate {
   const expr: BetweenPredicate = {
     __type: "between",
     field,
-    lower: literal(lower),
-    upper: literal(upper),
+    lower: isParameterRef(lower) ? lower : literal(lower),
+    upper: isParameterRef(upper) ? upper : literal(upper),
   };
   return predicate(expr);
 }

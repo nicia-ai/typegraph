@@ -176,6 +176,52 @@ export function buildGetNode(
 }
 
 /**
+ * Builds a SELECT query to get multiple nodes by kind and ids.
+ * Returns nodes regardless of deletion status (store layer handles filtering).
+ */
+export function buildGetNodes(
+  tables: Tables,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+): SQL {
+  const { nodes } = tables;
+  const idPlaceholders = sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  return sql`
+    SELECT * FROM ${nodes}
+    WHERE ${nodes.graphId} = ${graphId}
+      AND ${nodes.kind} = ${kind}
+      AND ${nodes.id} IN (${idPlaceholders})
+  `;
+}
+
+/**
+ * Builds a SELECT query to get multiple edges by ids.
+ * Returns edges regardless of deletion status (store layer handles filtering).
+ */
+export function buildGetEdges(
+  tables: Tables,
+  graphId: string,
+  ids: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const idPlaceholders = sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  return sql`
+    SELECT * FROM ${edges}
+    WHERE ${edges.graphId} = ${graphId}
+      AND ${edges.id} IN (${idPlaceholders})
+  `;
+}
+
+/**
  * Builds an UPDATE query for a node.
  * Uses raw column names in SET clause (required by SQL syntax).
  */

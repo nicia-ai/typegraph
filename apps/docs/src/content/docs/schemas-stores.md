@@ -342,6 +342,32 @@ Retrieves a node by ID.
 store.nodes.Person.getById(id: NodeId<Person>): Promise<Node<Person> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple nodes by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.nodes.Person.getByIds(
+  ids: readonly NodeId<Person>[],
+  options?: QueryOptions
+): Promise<readonly (Node<Person> | undefined)[]>;
+```
+
+When the backend supports batch lookups (`getNodes`), this executes a single
+`SELECT ... WHERE id IN (...)` query. Otherwise it falls back to sequential lookups.
+
+```typescript
+const [alice, bob, unknown] = await store.nodes.Person.getByIds([
+  aliceId,
+  bobId,
+  "nonexistent",
+]);
+// alice: Node<Person>
+// bob: Node<Person>
+// unknown: undefined
+```
+
 #### `update(id, props)`
 
 Updates node properties.
@@ -363,14 +389,23 @@ store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
 
 #### `find(options?)`
 
-Finds nodes of this kind with optional pagination.
-For filtering, use the query builder (`store.query()`).
+Finds nodes of this kind with optional filtering and pagination.
 
 ```typescript
 store.nodes.Person.find(options?: {
+  where?: (accessor) => Predicate;
   limit?: number;
   offset?: number;
 }): Promise<Node<Person>[]>;
+```
+
+The optional `where` predicate uses the same accessor API as `whereNode()` in the query builder:
+
+```typescript
+const activeUsers = await store.nodes.Person.find({
+  where: (p) => p.status.eq("active"),
+  limit: 50,
+});
 ```
 
 #### `count()`
@@ -517,6 +552,22 @@ Retrieves an edge by ID.
 store.edges.worksAt.getById(id: string): Promise<Edge<worksAt> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple edges by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.edges.worksAt.getByIds(
+  ids: readonly string[],
+  options?: QueryOptions
+): Promise<readonly (Edge<worksAt> | undefined)[]>;
+```
+
+```typescript
+const [edge1, edge2] = await store.edges.worksAt.getByIds([id1, id2]);
+```
+
 #### `update(id, props, options?)`
 
 Updates edge properties.
@@ -555,6 +606,7 @@ Finds edges with filtering.
 
 ```typescript
 store.edges.worksAt.find(options?: {
+  where?: (accessor) => Predicate;
   from?: TypedNodeRef<Person>;
   to?: TypedNodeRef<Company>;
   limit?: number;
@@ -675,6 +727,7 @@ const results = await store
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
+| `prepare()` | `PreparedQuery<T>` | Pre-compile query for repeated execution with parameters |
 
 ### Registry Access
 

@@ -12,7 +12,9 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { EdgeAccessor, NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
+import type { Predicate } from "../query/predicates";
 
 // ============================================================
 // Node Instance Types
@@ -266,6 +268,12 @@ export type NodeCollection<N extends NodeType> = Readonly<{
     options?: QueryOptions,
   ) => Promise<Node<N> | undefined>;
 
+  /** Get multiple nodes by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly NodeId<N>[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Node<N> | undefined)[]>;
+
   /** Update a node */
   update: (
     id: NodeId<N>,
@@ -292,10 +300,12 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   /**
    * Find nodes matching criteria.
    *
+   * Supports predicate filtering via the `where` option for SQL-level filtering.
    * For simple queries. Use store.query() for complex traversals.
    */
   find: (
     options?: Readonly<{
+      where?: (accessor: NodeAccessor<N>) => Predicate;
       limit?: number;
       offset?: number;
     }>,
@@ -455,6 +465,12 @@ export type EdgeCollection<
   /** Get an edge by ID */
   getById: (id: string, options?: QueryOptions) => Promise<Edge<E> | undefined>;
 
+  /** Get multiple edges by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly string[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Edge<E> | undefined)[]>;
+
   /** Update an edge's properties */
   update: (
     id: string,
@@ -485,6 +501,7 @@ export type EdgeCollection<
   /** Find edges matching criteria */
   find: (
     options?: Readonly<{
+      where?: (accessor: EdgeAccessor<E>) => Predicate;
       from?: TypedNodeRef<From>;
       to?: TypedNodeRef<To>;
       limit?: number;

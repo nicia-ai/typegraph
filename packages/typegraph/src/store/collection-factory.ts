@@ -7,6 +7,7 @@
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { KindNotFoundError } from "../errors";
+import { type QueryBuilder } from "../query/builder";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import {
@@ -83,6 +84,7 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
 
 export type EdgeOperations = Readonly<{
@@ -116,6 +118,7 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
 
 /**
@@ -176,6 +179,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
           operations.matchesTemporalMode as Parameters<
             typeof createNodeCollection
           >[11],
+          operations.createQuery,
         );
         collectionCache.set(kind, collection);
         return collection;
@@ -238,6 +242,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
           operations.matchesTemporalMode as Parameters<
             typeof createEdgeCollection
           >[11],
+          operations.createQuery,
         );
         collectionCache.set(kind, collection);
         return collection;

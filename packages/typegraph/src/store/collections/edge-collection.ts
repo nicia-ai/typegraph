@@ -10,6 +10,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
+import { type QueryBuilder } from "../../query/builder";
 import { type KindRegistry } from "../../registry";
 import {
   type Edge,
@@ -109,6 +110,7 @@ export function createEdgeCollection<
     },
     options?: QueryOptions,
   ) => boolean,
+  _createQuery?: () => QueryBuilder<GraphDef>,
 ): EdgeCollection<G["edges"][K]["type"]> {
   type E = G["edges"][K]["type"];
 
@@ -154,6 +156,38 @@ export function createEdgeCollection<
       if (row.kind !== kind) return undefined; // Edge is a different type
       if (!matchesTemporalMode(row, options)) return undefined;
       return rowToEdge(row) as Edge<E>;
+    },
+
+    async getByIds(
+      ids: readonly string[],
+      options?: QueryOptions,
+    ): Promise<readonly (Edge<E> | undefined)[]> {
+      if (ids.length === 0) return [];
+
+      if (backend.getEdges !== undefined) {
+        const rows = await backend.getEdges(graphId, ids);
+        const rowMap = new Map<string, (typeof rows)[number]>();
+        for (const row of rows) {
+          rowMap.set(row.id, row);
+        }
+        return ids.map((id) => {
+          const row = rowMap.get(id);
+          if (!row) return;
+          if (row.kind !== kind) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToEdge(row) as Edge<E>;
+        });
+      }
+
+      return Promise.all(
+        ids.map(async (id) => {
+          const row = await backend.getEdge(graphId, id);
+          if (!row) return;
+          if (row.kind !== kind) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToEdge(row) as Edge<E>;
+        }),
+      );
     },
 
     async update(
@@ -207,12 +241,17 @@ export function createEdgeCollection<
 
     async find(
       options?: Readonly<{
+        where?: (accessor: never) => unknown;
         from?: NodeRef;
         to?: NodeRef;
         limit?: number;
         offset?: number;
       }>,
     ): Promise<Edge<E>[]> {
+      // Edge predicate filtering via query builder is not yet supported
+      // (the query builder is node-centric; edges require traversals).
+      // The `where` parameter is accepted for API consistency but currently
+      // falls through to the backend path without property-level filtering.
       const params: {
         graphId: string;
         kind: string;

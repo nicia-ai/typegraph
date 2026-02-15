@@ -15,6 +15,7 @@ import {
   type InSubquery,
   type LiteralValue,
   type ObjectPredicate,
+  type ParameterRef,
   type PredicateExpression,
   type ValueType,
   type VectorSimilarityPredicate,
@@ -243,8 +244,13 @@ function resolveLiteralValueTypes(
  */
 function resolveComparisonValueType(
   field: FieldRef,
-  right: LiteralValue | readonly LiteralValue[],
+  right: LiteralValue | readonly LiteralValue[] | ParameterRef,
 ): ValueType | undefined {
+  if (isParameterRef(right)) {
+    return (
+      normalizeValueType(right.valueType) ?? normalizeValueType(field.valueType)
+    );
+  }
   const literals = Array.isArray(right) ? right : [right];
   const literalType = resolveLiteralValueTypes(literals);
   const fieldType = normalizeValueType(field.valueType);
@@ -364,6 +370,16 @@ export function compilePredicateExpression(
         undefined,
         cteColumnPrefix,
       );
+
+      // Handle ParameterRef patterns — caller must provide the complete
+      // LIKE pattern (with % wildcards) in the bound parameter value.
+      // Case-insensitive matching is not applied; use LOWER() in the
+      // bound value or the database's collation settings for case-insensitivity.
+      if (isParameterRef(expr.pattern)) {
+        const placeholder = sql.placeholder(expr.pattern.name);
+        return sql`${field} LIKE ${placeholder}`;
+      }
+
       const pattern = compileStringPattern(expr.op, expr.pattern);
       // Use case-insensitive matching for contains, startsWith, endsWith, and ilike
       // This ensures consistent behavior across PostgreSQL (case-sensitive LIKE)
@@ -394,10 +410,19 @@ export function compilePredicateExpression(
     }
 
     case "between": {
-      const valueType = resolveComparisonValueType(expr.field, [
-        expr.lower,
-        expr.upper,
-      ]);
+      const lowerIsParam = isParameterRef(expr.lower);
+      const upperIsParam = isParameterRef(expr.upper);
+
+      // Resolve value type from non-param bounds
+      const boundsForType: LiteralValue[] = [];
+      if (!lowerIsParam) boundsForType.push(expr.lower);
+      if (!upperIsParam) boundsForType.push(expr.upper);
+
+      const valueType =
+        boundsForType.length > 0 ?
+          resolveComparisonValueType(expr.field, boundsForType)
+        : normalizeValueType(expr.field.valueType);
+
       if (valueType === "array" || valueType === "object") {
         throw new UnsupportedPredicateError(
           "Between comparisons are not supported for JSON arrays or objects",
@@ -411,8 +436,14 @@ export function compilePredicateExpression(
         undefined,
         cteColumnPrefix,
       );
-      const lower = convertValueForSql(expr.lower.value, dialect);
-      const upper = convertValueForSql(expr.upper.value, dialect);
+      const lower =
+        lowerIsParam ?
+          sql.placeholder(expr.lower.name)
+        : convertValueForSql(expr.lower.value, dialect);
+      const upper =
+        upperIsParam ?
+          sql.placeholder(expr.upper.name)
+        : convertValueForSql(expr.upper.value, dialect);
       return sql`${field} BETWEEN ${lower} AND ${upper}`;
     }
 
@@ -462,6 +493,15 @@ export function compilePredicateExpression(
 }
 
 /**
+ * Type guard for ParameterRef values.
+ */
+function isParameterRef(value: unknown): value is ParameterRef {
+  if (typeof value !== "object" || value === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for untyped input
+  return (value as ParameterRef).__type === "parameter";
+}
+
+/**
  * Compiles a comparison predicate.
  */
 function compileComparisonPredicate(
@@ -469,11 +509,35 @@ function compileComparisonPredicate(
     __type: "comparison";
     op: string;
     left: FieldRef;
-    right: LiteralValue | readonly LiteralValue[];
+    right: LiteralValue | readonly LiteralValue[] | ParameterRef;
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
 ): SQL {
+  // Handle ParameterRef on the right side
+  if (isParameterRef(expr.right)) {
+    const parameterValueType =
+      normalizeValueType(expr.right.valueType) ??
+      normalizeValueType(expr.left.valueType);
+    const left = compileFieldValue(
+      expr.left,
+      dialect,
+      parameterValueType,
+      undefined,
+      undefined,
+      cteColumnPrefix,
+    );
+    const opMap: Record<string, string> = {
+      eq: "=",
+      neq: "!=",
+      gt: ">",
+      gte: ">=",
+      lt: "<",
+      lte: "<=",
+    };
+    return sql`${left} ${sql.raw(opMap[expr.op]!)} ${sql.placeholder(expr.right.name)}`;
+  }
+
   const valueType = resolveComparisonValueType(expr.left, expr.right);
 
   if (valueType === "array" || valueType === "object") {
@@ -493,7 +557,7 @@ function compileComparisonPredicate(
 
   if (expr.op === "in" || expr.op === "notIn") {
     const values: readonly LiteralValue[] =
-      Array.isArray(expr.right) ? expr.right : [expr.right];
+      Array.isArray(expr.right) ? expr.right : [expr.right as LiteralValue];
     if (values.length === 0) {
       return expr.op === "in" ? sql.raw("1=0") : sql.raw("1=1");
     }

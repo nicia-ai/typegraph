@@ -36,6 +36,7 @@ import {
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
 import { buildQueryAst } from "./ast-builder";
+import { PreparedQuery } from "./prepared-query";
 import {
   type AliasMap,
   type EdgeAliasMap,
@@ -88,6 +89,8 @@ export class ExecutableQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #selectFn: (context: SelectContext<Aliases, EdgeAliases>) => R;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedOptimizedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
   #cachedSelectiveFieldsForExecute:
     | readonly SelectiveField[]
     | typeof NOT_COMPUTED
@@ -275,8 +278,83 @@ export class ExecutableQuery<
    * with db.all(), db.get(), etc.
    */
   compile(): SQL {
+    if (this.#cachedCompiled !== NOT_COMPUTED) return this.#cachedCompiled;
     const ast = this.toAst();
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+    const compiled = compileQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    this.#cachedCompiled = compiled;
+    return compiled;
+  }
+
+  /**
+   * Creates a prepared (pre-compiled) query that can be executed
+   * multiple times with different parameter bindings.
+   *
+   * Use `param("name")` in predicates to create parameterized slots,
+   * then pass values via `prepared.execute({ name: "value" })`.
+   *
+   * @example
+   * ```typescript
+   * import { param } from "@nicia-ai/typegraph";
+   *
+   * const prepared = store.query()
+   *   .from("Person", "p")
+   *   .whereNode("p", (p) => p.name.eq(param("name")))
+   *   .select((ctx) => ctx.p)
+   *   .prepare();
+   *
+   * const alice = await prepared.execute({ name: "Alice" });
+   * const bob = await prepared.execute({ name: "Bob" });
+   * ```
+   *
+   * @throws Error if no backend is configured
+   */
+  prepare(): PreparedQuery<R> {
+    if (!this.#config.backend) {
+      throw new Error(
+        "Cannot prepare query: no backend configured. " +
+          "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+
+    // Build AST once
+    const baseAst = buildQueryAst(this.#config, this.#state);
+
+    // Attempt selective field optimization
+    const selectiveFields = this.#getSelectiveFieldsForExecute();
+    const ast =
+      selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields };
+
+    // Compile once
+    const compileOptions = this.#compileOptions();
+    const compiled = compileQuery(ast, this.#config.graphId, compileOptions);
+
+    // Pre-compile to SQL text if the backend supports it
+    let sqlText: string | undefined;
+    let sqlParams: readonly unknown[] | undefined;
+    if (this.#config.backend.compileSql !== undefined) {
+      const result = this.#config.backend.compileSql(compiled);
+      sqlText = result.sql;
+      sqlParams = result.params;
+    }
+
+    return new PreparedQuery({
+      ast,
+      sqlText,
+      sqlParams,
+      backend: this.#config.backend,
+      dialect: this.#config.dialect ?? "sqlite",
+      graphId: this.#config.graphId,
+      compileOptions: compileOptions,
+      state: this.#state,
+      selectiveFields,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Type erasure needed for PreparedQuery which uses AliasMap
+      selectFn: this.#selectFn as (context: SelectContext<any, any>) => R,
+      schemaIntrospector: this.#config.schemaIntrospector,
+    });
   }
 
   /**
@@ -342,18 +420,24 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    // Build and compile optimized query
-    const baseAst = buildQueryAst(this.#config, this.#state);
-    const selectiveAst = {
-      ...baseAst,
-      selectiveFields,
-    };
+    // Build and compile optimized query (cached per instance)
+    let compiled: SQL;
+    if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
+      const baseAst = buildQueryAst(this.#config, this.#state);
+      const selectiveAst = {
+        ...baseAst,
+        selectiveFields,
+      };
+      compiled = compileQuery(
+        selectiveAst,
+        this.#config.graphId,
+        this.#compileOptions(),
+      );
+      this.#cachedOptimizedCompiled = compiled;
+    } else {
+      compiled = this.#cachedOptimizedCompiled;
+    }
 
-    const compiled = compileQuery(
-      selectiveAst,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
     const rows =
       await this.#config.backend!.execute<Record<string, unknown>>(compiled);
 
@@ -368,10 +452,12 @@ export class ExecutableQuery<
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       throw error;

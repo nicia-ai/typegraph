@@ -134,6 +134,51 @@ The default TypeGraph schema includes optimized indexes for the most common acce
 
 For application-specific indexes on JSON properties, see [Indexes](/performance/indexes).
 
+### 5. Compilation Caching
+
+Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
+The compiled SQL for each instance is cached internally — repeated `.execute()` calls on the same
+builder skip recompilation entirely. This is transparent and requires no API changes.
+
+```typescript
+const activeUsers = store
+  .query()
+  .from("User", "u")
+  .whereNode("u", (u) => u.status.eq("active"))
+  .select((ctx) => ctx.u);
+
+// First call: compiles AST → SQL → executes
+await activeUsers.execute();
+
+// Second call: reuses cached SQL → executes
+await activeUsers.execute();
+```
+
+### 6. Prepared Queries
+
+For hot paths that execute the same query shape with different values, `.prepare()` pre-compiles the
+entire query pipeline (AST build, SQL compilation, text extraction) once. Subsequent
+`.execute(bindings)` calls only substitute parameter values and execute.
+
+When `executeRaw` is available (both SQLite and PostgreSQL backends), the pre-compiled SQL text is
+sent directly to the driver — zero recompilation overhead.
+
+Best for: API endpoints, hot loops, or any code path that runs the same query shape repeatedly.
+
+See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
+
+### 7. Batch Lookups
+
+`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
+individual queries. Results are returned in input order with `undefined` for missing entries.
+
+```typescript
+const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
+```
+
+When the backend doesn't support batch queries, `getByIds()` automatically falls back to sequential
+lookups.
+
 ## Best Practices
 
 ### Use Specific Kinds

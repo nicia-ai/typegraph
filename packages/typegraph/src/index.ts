@@ -261,6 +261,7 @@ export type {
   SqlTableNames,
   StreamOptions,
 } from "./query";
+export type { ParameterRef } from "./query/ast";
 
 // Functions and classes
 export {
@@ -289,6 +290,7 @@ export {
   havingLt,
   havingLte,
   inSubquery,
+  isParameterRef,
   joinJsonPointers,
   jsonPointer,
   limitFragment,
@@ -301,7 +303,10 @@ export {
   notInSubquery,
   offsetFragment,
   orderByFragment,
+  // Parameterized queries
+  param,
   parseJsonPointer,
+  PreparedQuery,
   QueryBuilder,
   sum,
 } from "./query";

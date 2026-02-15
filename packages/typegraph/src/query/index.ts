@@ -51,13 +51,15 @@ export type {
 // Public Functions
 // ============================================================
 
-// Predicate helpers for subqueries
+// Predicate helpers for subqueries and parameterized queries
 export {
   exists,
   fieldRef,
   inSubquery,
+  isParameterRef,
   notExists,
   notInSubquery,
+  param,
   type Predicate,
 } from "./predicates";
 
@@ -77,6 +79,7 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export { PreparedQuery } from "./builder/prepared-query";
 
 // Aggregate functions
 export {

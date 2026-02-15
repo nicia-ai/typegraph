@@ -34,6 +34,18 @@ export type LiteralValue = Readonly<{
 }>;
 
 /**
+ * A parameter reference for prepared queries.
+ *
+ * Used in place of a literal value to create parameterized queries
+ * that can be executed multiple times with different bindings.
+ */
+export type ParameterRef = Readonly<{
+  __type: "parameter";
+  name: string;
+  valueType?: ValueType | undefined;
+}>;
+
+/**
  * Supported value types for predicates.
  */
 export type ValueType =
@@ -76,7 +88,7 @@ export type ComparisonPredicate = Readonly<{
   __type: "comparison";
   op: ComparisonOp;
   left: FieldRef;
-  right: LiteralValue | LiteralValue[];
+  right: LiteralValue | LiteralValue[] | ParameterRef;
 }>;
 
 /**
@@ -86,7 +98,7 @@ export type StringPredicate = Readonly<{
   __type: "string_op";
   op: StringOp;
   field: FieldRef;
-  pattern: string;
+  pattern: string | ParameterRef;
 }>;
 
 /**
@@ -104,8 +116,8 @@ export type NullPredicate = Readonly<{
 export type BetweenPredicate = Readonly<{
   __type: "between";
   field: FieldRef;
-  lower: LiteralValue;
-  upper: LiteralValue;
+  lower: LiteralValue | ParameterRef;
+  upper: LiteralValue | ParameterRef;
 }>;
 
 // ============================================================

@@ -88,6 +88,31 @@ export type PostgresBackendOptions = Readonly<{
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyPgDatabase = PgDatabase<any>;
 
+type CompiledSqlQuery = Readonly<{
+  sql: string;
+  params: readonly unknown[];
+}>;
+
+type SqlCompiler = Readonly<{
+  sqlToQuery: (query: SQL) => CompiledSqlQuery;
+}>;
+
+type DatabaseWithCompiler = Readonly<{
+  dialect: SqlCompiler;
+}>;
+
+function compileSqlQuery(
+  db: AnyPgDatabase,
+  query: SQL,
+): CompiledSqlQuery {
+  const databaseWithCompiler = db as unknown as Partial<DatabaseWithCompiler>;
+  const compiler = databaseWithCompiler.dialect;
+  if (compiler === undefined) {
+    throw new Error("PostgreSQL backend is missing a SQL compiler");
+  }
+  return compiler.sqlToQuery(query);
+}
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -358,6 +383,17 @@ export function createPostgresBackend(
       return row ? toNodeRow(row) : undefined;
     },
 
+    async getNodes(
+      graphId: string,
+      kind: string,
+      ids: readonly string[],
+    ): Promise<readonly NodeRow[]> {
+      if (ids.length === 0) return [];
+      const query = ops.buildGetNodes(tables, graphId, kind, ids);
+      const rows = await execAll<Record<string, unknown>>(query);
+      return rows.map((row) => toNodeRow(row));
+    },
+
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = ops.buildUpdateNode(tables, params, timestamp);
@@ -438,6 +474,16 @@ export function createPostgresBackend(
       const query = ops.buildGetEdge(tables, graphId, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toEdgeRow(row) : undefined;
+    },
+
+    async getEdges(
+      graphId: string,
+      ids: readonly string[],
+    ): Promise<readonly EdgeRow[]> {
+      if (ids.length === 0) return [];
+      const query = ops.buildGetEdges(tables, graphId, ids);
+      const rows = await execAll<Record<string, unknown>>(query);
+      return rows.map((row) => toEdgeRow(row));
     },
 
     async updateEdge(params: UpdateEdgeParams): Promise<EdgeRow> {
@@ -627,6 +673,10 @@ export function createPostgresBackend(
       return execAll<T>(query);
     },
 
+    compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
+      return compileSqlQuery(db, query);
+    },
+
     // === Transaction ===
 
     async transaction<T>(
@@ -660,6 +710,20 @@ export function createPostgresBackend(
       // Users manage connection lifecycle themselves
     },
   };
+
+  // Add executeRaw when the underlying pg client supports direct query execution
+  const pgClient = (db as { $client?: { query?: (text: string, values: unknown[]) => Promise<{ rows: unknown[] }> } })
+    .$client;
+  const pgQuery = pgClient?.query;
+  if (pgQuery !== undefined) {
+    (backend as { executeRaw?: GraphBackend["executeRaw"] }).executeRaw = async <T>(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<readonly T[]> => {
+      const result = await pgQuery.call(pgClient, sqlText, [...params]);
+      return result.rows as readonly T[];
+    };
+  }
 
   return backend;
 }
