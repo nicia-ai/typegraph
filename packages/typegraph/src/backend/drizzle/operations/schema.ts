@@ -4,62 +4,27 @@ import { getDialect } from "../../../query/dialect";
 import type { Dialect, InsertSchemaParams } from "../../types";
 import { quotedColumn, type Tables } from "./shared";
 
-/**
- * Builds an INSERT query for a schema version (SQLite).
- * Uses raw column names in the column list (required by SQL syntax).
- * Converts boolean to number for SQLite compatibility.
- */
-function buildInsertSchemaSqlite(
-  tables: Tables,
-  params: InsertSchemaParams,
-  timestamp: string,
-): SQL {
-  const { schemaVersions } = tables;
-  const schemaDocumentJson = JSON.stringify(params.schemaDoc);
-  const isActiveValue = params.isActive ? sql.raw("1") : sql.raw("0");
+type SchemaDialectStrategy = Readonly<{
+  booleanLiteral: (value: boolean) => SQL;
+}>;
 
-  const columns = sql.raw(`"${schemaVersions.graphId.name}", "${schemaVersions.version.name}", "${schemaVersions.schemaHash.name}", "${schemaVersions.schemaDoc.name}", "${schemaVersions.createdAt.name}", "${schemaVersions.isActive.name}"`);
-
-  return sql`
-    INSERT INTO ${schemaVersions} (${columns})
-    VALUES (
-      ${params.graphId}, ${params.version},
-      ${params.schemaHash}, ${schemaDocumentJson},
-      ${timestamp}, ${isActiveValue}
-    )
-    RETURNING *
-  `;
+function createSchemaDialectStrategy(dialect: Dialect): SchemaDialectStrategy {
+  const adapter = getDialect(dialect);
+  return {
+    booleanLiteral(value: boolean): SQL {
+      return adapter.booleanLiteral(value);
+    },
+  };
 }
 
-/**
- * Builds an INSERT query for a schema version (PostgreSQL).
- * Uses raw column names in the column list (required by SQL syntax).
- * Uses boolean values for PostgreSQL's native boolean type.
- */
-function buildInsertSchemaPostgres(
-  tables: Tables,
-  params: InsertSchemaParams,
-  timestamp: string,
-): SQL {
-  const { schemaVersions } = tables;
-  const schemaDocumentJson = JSON.stringify(params.schemaDoc);
-  const isActiveValue = params.isActive ? sql.raw("true") : sql.raw("false");
-
-  const columns = sql.raw(`"${schemaVersions.graphId.name}", "${schemaVersions.version.name}", "${schemaVersions.schemaHash.name}", "${schemaVersions.schemaDoc.name}", "${schemaVersions.createdAt.name}", "${schemaVersions.isActive.name}"`);
-
-  return sql`
-    INSERT INTO ${schemaVersions} (${columns})
-    VALUES (
-      ${params.graphId}, ${params.version},
-      ${params.schemaHash}, ${schemaDocumentJson},
-      ${timestamp}, ${isActiveValue}
-    )
-    RETURNING *
-  `;
-}
+const SCHEMA_DIALECT_STRATEGIES: Record<Dialect, SchemaDialectStrategy> = {
+  postgres: createSchemaDialectStrategy("postgres"),
+  sqlite: createSchemaDialectStrategy("sqlite"),
+};
 
 /**
  * Builds an INSERT query for a schema version.
+ * Uses raw column names in the column list (required by SQL syntax).
  */
 export function buildInsertSchema(
   tables: Tables,
@@ -67,10 +32,22 @@ export function buildInsertSchema(
   timestamp: string,
   dialect: Dialect = "sqlite",
 ): SQL {
-  if (dialect === "postgres") {
-    return buildInsertSchemaPostgres(tables, params, timestamp);
-  }
-  return buildInsertSchemaSqlite(tables, params, timestamp);
+  const { schemaVersions } = tables;
+  const strategy = SCHEMA_DIALECT_STRATEGIES[dialect];
+  const schemaDocumentJson = JSON.stringify(params.schemaDoc);
+  const isActiveValue = strategy.booleanLiteral(params.isActive);
+
+  const columns = sql.raw(`"${schemaVersions.graphId.name}", "${schemaVersions.version.name}", "${schemaVersions.schemaHash.name}", "${schemaVersions.schemaDoc.name}", "${schemaVersions.createdAt.name}", "${schemaVersions.isActive.name}"`);
+
+  return sql`
+    INSERT INTO ${schemaVersions} (${columns})
+    VALUES (
+      ${params.graphId}, ${params.version},
+      ${params.schemaHash}, ${schemaDocumentJson},
+      ${timestamp}, ${isActiveValue}
+    )
+    RETURNING *
+  `;
 }
 
 /**
@@ -82,12 +59,12 @@ export function buildGetActiveSchema(
   dialect: Dialect = "sqlite",
 ): SQL {
   const { schemaVersions } = tables;
-  const adapter = getDialect(dialect);
+  const strategy = SCHEMA_DIALECT_STRATEGIES[dialect];
 
   return sql`
     SELECT * FROM ${schemaVersions}
     WHERE ${schemaVersions.graphId} = ${graphId}
-      AND ${schemaVersions.isActive} = ${adapter.booleanLiteral(true)}
+      AND ${schemaVersions.isActive} = ${strategy.booleanLiteral(true)}
   `;
 }
 
@@ -120,17 +97,17 @@ export function buildSetActiveSchema(
   dialect: Dialect = "sqlite",
 ): { deactivateAll: SQL; activateVersion: SQL } {
   const { schemaVersions } = tables;
-  const adapter = getDialect(dialect);
+  const strategy = SCHEMA_DIALECT_STRATEGIES[dialect];
 
   const deactivateAll = sql`
     UPDATE ${schemaVersions}
-    SET ${quotedColumn(schemaVersions.isActive)} = ${adapter.booleanLiteral(false)}
+    SET ${quotedColumn(schemaVersions.isActive)} = ${strategy.booleanLiteral(false)}
     WHERE ${schemaVersions.graphId} = ${graphId}
   `;
 
   const activateVersion = sql`
     UPDATE ${schemaVersions}
-    SET ${quotedColumn(schemaVersions.isActive)} = ${adapter.booleanLiteral(true)}
+    SET ${quotedColumn(schemaVersions.isActive)} = ${strategy.booleanLiteral(true)}
     WHERE ${schemaVersions.graphId} = ${graphId}
       AND ${schemaVersions.version} = ${version}
   `;

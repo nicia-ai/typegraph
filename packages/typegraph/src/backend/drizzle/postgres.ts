@@ -20,8 +20,7 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import { getTableName,type SQL } from "drizzle-orm";
-import { type PgDatabase } from "drizzle-orm/pg-core";
+import { getTableName, type SQL } from "drizzle-orm";
 
 import { UniquenessError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -60,6 +59,10 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
+import {
+  type AnyPgDatabase,
+  createPostgresExecutionAdapter,
+} from "./execution/postgres-execution";
 import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
   type PostgresTables,
@@ -81,26 +84,6 @@ export type PostgresBackendOptions = Readonly<{
   tables?: PostgresTables;
 }>;
 
-/**
- * Any Drizzle PostgreSQL database instance.
- * Using 'any' for the query result type to support all PG drivers.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyPgDatabase = PgDatabase<any>;
-
-type CompiledSqlQuery = Readonly<{
-  sql: string;
-  params: readonly unknown[];
-}>;
-
-type SqlCompiler = Readonly<{
-  sqlToQuery: (query: SQL) => CompiledSqlQuery;
-}>;
-
-type DatabaseWithCompiler = Readonly<{
-  dialect: SqlCompiler;
-}>;
-
 const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
@@ -120,18 +103,6 @@ const POSTGRES_GET_EDGES_ID_CHUNK_SIZE = Math.max(
   1,
   POSTGRES_MAX_BIND_PARAMETERS - 1,
 );
-
-function compileSqlQuery(
-  db: AnyPgDatabase,
-  query: SQL,
-): CompiledSqlQuery {
-  const databaseWithCompiler = db as unknown as Partial<DatabaseWithCompiler>;
-  const compiler = databaseWithCompiler.dialect;
-  if (compiler === undefined) {
-    throw new Error("PostgreSQL backend is missing a SQL compiler");
-  }
-  return compiler.sqlToQuery(query);
-}
 
 function chunkArray<T>(
   values: readonly T[],
@@ -329,6 +300,7 @@ export function createPostgresBackend(
   options: PostgresBackendOptions = {},
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
+  const executionAdapter = createPostgresExecutionAdapter(db);
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -721,11 +693,11 @@ export function createPostgresBackend(
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
-      return execAll<T>(query);
+      return executionAdapter.execute<T>(query);
     },
 
     compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
-      return compileSqlQuery(db, query);
+      return executionAdapter.compile(query);
     },
 
     // === Transaction ===
@@ -762,17 +734,13 @@ export function createPostgresBackend(
     },
   };
 
-  // Add executeRaw when the underlying pg client supports direct query execution
-  const pgClient = (db as { $client?: { query?: (text: string, values: unknown[]) => Promise<{ rows: unknown[] }> } })
-    .$client;
-  const pgQuery = pgClient?.query;
-  if (pgQuery !== undefined) {
+  const executeCompiled = executionAdapter.executeCompiled;
+  if (executeCompiled !== undefined) {
     (backend as { executeRaw?: GraphBackend["executeRaw"] }).executeRaw = async <T>(
       sqlText: string,
       params: readonly unknown[],
     ): Promise<readonly T[]> => {
-      const result = await pgQuery.call(pgClient, sqlText, [...params]);
-      return result.rows as readonly T[];
+      return executeCompiled<T>({ params, sql: sqlText });
     };
   }
 

@@ -8,6 +8,11 @@ import type {
 } from "../../types";
 import { quotedColumn, type Tables } from "./shared";
 
+type InsertUniqueDialectBuilder = (
+  tables: Tables,
+  params: InsertUniqueParams,
+) => SQL;
+
 /**
  * Builds an INSERT query for a uniqueness entry (SQLite).
  *
@@ -104,6 +109,11 @@ function buildInsertUniquePostgres(
   `;
 }
 
+const UNIQUE_INSERT_BUILDERS: Record<Dialect, InsertUniqueDialectBuilder> = {
+  postgres: buildInsertUniquePostgres,
+  sqlite: buildInsertUniqueSqlite,
+};
+
 /**
  * Builds an INSERT query for a uniqueness entry.
  * Returns the node_id that now holds the key (may differ from input if conflict).
@@ -113,10 +123,8 @@ export function buildInsertUnique(
   dialect: Dialect,
   params: InsertUniqueParams,
 ): SQL {
-  if (dialect === "sqlite") {
-    return buildInsertUniqueSqlite(tables, params);
-  }
-  return buildInsertUniquePostgres(tables, params);
+  const builder = UNIQUE_INSERT_BUILDERS[dialect];
+  return builder(tables, params);
 }
 
 /**

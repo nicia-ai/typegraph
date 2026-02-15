@@ -21,7 +21,6 @@
  * ```
  */
 import { getTableName, type SQL, sql } from "drizzle-orm";
-import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { ConfigurationError, UniquenessError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -55,6 +54,10 @@ import {
   type UpdateEdgeParams,
   type UpdateNodeParams,
 } from "../types";
+import {
+  type AnySqliteDatabase,
+  createSqliteExecutionAdapter,
+} from "./execution/sqlite-execution";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 
@@ -73,29 +76,6 @@ export type SqliteBackendOptions = Readonly<{
   tables?: SqliteTables;
 }>;
 
-/**
- * Any Drizzle SQLite database instance.
- */
-type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
-
-type PreparedAllStatement = Readonly<{
-  all: (...params: readonly unknown[]) => readonly unknown[];
-}>;
-
-type CompiledSqlQuery = Readonly<{
-  sql: string;
-  params: readonly unknown[];
-}>;
-
-type SqlCompiler = Readonly<{
-  sqlToQuery: (query: SQL) => CompiledSqlQuery;
-}>;
-
-type DatabaseWithCompiler = Readonly<{
-  dialect: SqlCompiler;
-}>;
-
-const EXECUTE_STATEMENT_CACHE_MAX = 256;
 const SQLITE_MAX_BIND_PARAMETERS = 999;
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
@@ -211,60 +191,6 @@ function toSchemaVersionRow(row: Record<string, unknown>): SchemaVersionRow {
   };
 }
 
-/**
- * Gets the session class name from a Drizzle database instance.
- */
-function getSessionName(db: AnySqliteDatabase): string | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const dbAny: any = db;
-
-  // Try db.session first (current Drizzle structure)
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-  if (dbAny.session?.constructor?.name) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    return dbAny.session.constructor.name as string;
-  }
-
-  // Fallback to db._.session (older Drizzle structure)
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-  if (dbAny._?.session?.constructor?.name) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    return dbAny._.session.constructor.name as string;
-  }
-
-  return undefined;
-}
-
-/**
- * Detects if the database is a D1 database (no transaction support).
- */
-function isD1Database(db: AnySqliteDatabase): boolean {
-  return getSessionName(db) === "SQLiteD1Session";
-}
-
-/**
- * Detects if the database is a synchronous SQLite database (better-sqlite3, bun:sqlite).
- * These drivers don't support async transaction callbacks.
- */
-function isSyncDatabase(db: AnySqliteDatabase): boolean {
-  const sessionName = getSessionName(db);
-  // BetterSQLiteSession is better-sqlite3
-  // BunSQLiteSession is bun:sqlite
-  return sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession";
-}
-
-function compileSqlQuery(
-  db: AnySqliteDatabase,
-  query: SQL,
-): CompiledSqlQuery {
-  const databaseWithCompiler = db as unknown as Partial<DatabaseWithCompiler>;
-  const compiler = databaseWithCompiler.dialect;
-  if (compiler === undefined) {
-    throw new Error("SQLite backend is missing a SQL compiler");
-  }
-  return compiler.sqlToQuery(query);
-}
-
 function chunkArray<T>(
   values: readonly T[],
   size: number,
@@ -296,12 +222,8 @@ export function createSqliteBackend(
   options: SqliteBackendOptions = {},
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
-  const isD1 = isD1Database(db);
-  const isSync = isSyncDatabase(db);
-  const sqliteClient = (db as { $client?: { prepare?: (sqlText: string) => PreparedAllStatement } })
-    .$client;
-  const executeStatementCache =
-    isSync && !isD1 ? new Map<string, PreparedAllStatement>() : undefined;
+  const executionAdapter = createSqliteExecutionAdapter(db);
+  const { isD1, isSync } = executionAdapter.profile;
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -326,27 +248,6 @@ export function createSqliteBackend(
   async function execRun(query: SQL): Promise<void> {
     const result = db.run(query);
     if (result instanceof Promise) await result;
-  }
-
-  function getPreparedStatement(sqlText: string): PreparedAllStatement {
-    if (executeStatementCache === undefined || sqliteClient?.prepare === undefined) {
-      throw new Error("Prepared statement cache is unavailable for this SQLite backend");
-    }
-
-    const cached = executeStatementCache.get(sqlText);
-    if (cached !== undefined) {
-      return cached;
-    }
-
-    const prepared = sqliteClient.prepare(sqlText);
-    executeStatementCache.set(sqlText, prepared);
-    if (executeStatementCache.size > EXECUTE_STATEMENT_CACHE_MAX) {
-      const oldestKey = executeStatementCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        executeStatementCache.delete(oldestKey);
-      }
-    }
-    return prepared;
   }
 
   // Create the backend operations
@@ -667,20 +568,11 @@ export function createSqliteBackend(
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
-      if (
-        executeStatementCache !== undefined &&
-        sqliteClient?.prepare !== undefined
-      ) {
-        const compiled = compileSqlQuery(db, query);
-        const statement = getPreparedStatement(compiled.sql);
-        const rows = statement.all(...compiled.params);
-        return rows as readonly T[];
-      }
-      return execAll<T>(query);
+      return executionAdapter.execute<T>(query);
     },
 
     compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
-      return compileSqlQuery(db, query);
+      return executionAdapter.compile(query);
     },
 
     // === Transaction ===
@@ -739,14 +631,13 @@ export function createSqliteBackend(
     },
   };
 
-  if (executeStatementCache !== undefined && sqliteClient?.prepare !== undefined) {
+  const executeCompiled = executionAdapter.executeCompiled;
+  if (executeCompiled !== undefined) {
     (backend as { executeRaw?: GraphBackend["executeRaw"] }).executeRaw = <T>(
       sqlText: string,
       params: readonly unknown[],
     ): Promise<readonly T[]> => {
-      const statement = getPreparedStatement(sqlText);
-      const rows = statement.all(...params);
-      return Promise.resolve(rows as readonly T[]);
+      return executeCompiled<T>({ params, sql: sqlText });
     };
   }
 
