@@ -22,7 +22,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           productCount: count("p"),
         })
@@ -43,7 +43,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           totalValue: sum("p", "price"),
         })
@@ -62,7 +62,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           avgPrice: avg("p", "price"),
         })
@@ -82,7 +82,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           cheapest: min("p", "price"),
           mostExpensive: max("p", "price"),
@@ -102,7 +102,7 @@ export function registerAggregateIntegrationTests(
         .from("Product", "p")
         .groupBy("p", "category")
         .having(havingGte(count("p"), 3))
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           productCount: count("p"),
         })
@@ -120,7 +120,7 @@ export function registerAggregateIntegrationTests(
         .from("Product", "p")
         .whereNode("p", (p) => p.category.eq("Electronics"))
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           productCount: count("p"),
         })
@@ -146,7 +146,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           avgRating: avg("p", "rating"),
           productCount: count("p"),
@@ -172,7 +172,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           totalRating: sum("p", "rating"),
         })
@@ -191,7 +191,7 @@ export function registerAggregateIntegrationTests(
         .from("Product", "p")
         .groupBy("p", "category")
         .groupBy("p", "inStock")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           inStock: field("p", "inStock"),
           productCount: count("p"),
@@ -249,7 +249,7 @@ export function registerAggregateIntegrationTests(
         .whereNode("p", (p) => p.inStock.eq(true))
         .groupBy("p", "category")
         .having(havingGte(sum("p", "price"), 500))
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           totalPrice: sum("p", "price"),
         })
@@ -268,7 +268,7 @@ export function registerAggregateIntegrationTests(
         .query()
         .from("Product", "p")
         .groupBy("p", "category")
-        .selectAggregate({
+        .aggregate({
           category: field("p", "category"),
           minRating: min("p", "rating"),
           maxRating: max("p", "rating"),
@@ -317,7 +317,7 @@ export function registerAggregateIntegrationTests(
         .traverse("worksAt", "e", { direction: "in" })
         .to("Person", "p")
         .groupByNode("c")
-        .selectAggregate({
+        .aggregate({
           companyId: field("c", "id"),
           companyName: field("c", "name"),
           employeeCount: count("p"),

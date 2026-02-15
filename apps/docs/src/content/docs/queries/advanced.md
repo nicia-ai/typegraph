@@ -78,7 +78,9 @@ const techWorkers = await store
         .query()
         .from("Company", "c")
         .whereNode("c", (c) => c.industry.eq("Technology"))
-        .select((ctx) => ({ id: ctx.c.id }))
+        .aggregate({
+          id: fieldRef("c", ["id"], { valueType: "string" }),
+        })
         .toAst()
     )
   )
@@ -103,7 +105,9 @@ const allowedUsers = await store
       store
         .query()
         .from("BlockedUser", "b")
-        .select((ctx) => ({ id: ctx.b.userId }))
+        .aggregate({
+          userId: fieldRef("b", ["props", "userId"], { valueType: "string" }),
+        })
         .toAst()
     )
   )
@@ -137,6 +141,9 @@ fieldRef("alias", ["nested", "path"])  // Reference a nested field
 | `notExists(subqueryAst)` | True if subquery returns no rows |
 | `inSubquery(fieldRef, subqueryAst)` | True if field value is in subquery results |
 | `notInSubquery(fieldRef, subqueryAst)` | True if field value is not in subquery results |
+
+For `inSubquery()` and `notInSubquery()`, the subquery must project exactly one
+scalar column. Prefer `aggregate({ ... })` with a single field.
 
 ## Real-World Examples
 
@@ -201,7 +208,11 @@ const teamMembers = await store
         .query()
         .from("TeamMembership", "tm")
         .whereNode("tm", (tm) => tm.teamId.in(targetTeamIds))
-        .select((ctx) => ({ userId: ctx.tm.userId }))
+        .aggregate({
+          userId: fieldRef("tm", ["props", "userId"], {
+            valueType: "string",
+          }),
+        })
         .toAst()
     )
   )

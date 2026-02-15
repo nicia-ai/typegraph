@@ -578,7 +578,7 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("cte_o.p_kind = cte_p.p_kind");
   });
 
-  it("compiles bidirectional traversal when includeInverseEdges is enabled", () => {
+  it("compiles bidirectional traversal when expand: inverse is enabled", () => {
     const sameAsEdge = defineEdge("sameAs");
     const bidirectionalGraph = defineGraph({
       id: "bidirectional_graph",
@@ -601,7 +601,7 @@ describe("Query Compilation to SQL", () => {
       bidirectionalRegistry,
     )
       .from("Person", "p")
-      .traverse("sameAs", "e", { includeInverseEdges: true })
+      .traverse("sameAs", "e", { expand: "inverse" })
       .to("Person", "peer")
       .select((context) => ({ p: context.p, peer: context.peer }));
 
@@ -663,7 +663,7 @@ describe("Query Compilation to SQL", () => {
     expect(params).toContain(5);
   });
 
-  it("pushes traversal limits into deep id-anchored traversals", () => {
+  it("pushes traversal limits only into the final deep traversal CTE", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .whereNode("p", (p) => p.id.eq("person-1"))
@@ -681,7 +681,7 @@ describe("Query Compilation to SQL", () => {
     const { sql, params } = sqlToStrings(sqlObject);
 
     expect(sql).toContain("AS traversal_rows");
-    expect(params.filter((value) => value === 160)).toHaveLength(2);
+    expect(params.filter((value) => value === 160)).toHaveLength(1);
   });
 
   it("does not push traversal limits when ORDER BY is present", () => {
@@ -812,7 +812,7 @@ describe("Query Builder - Aggregations", () => {
       .traverse("worksAt", "e")
       .to("Organization", "o")
       .groupBy("o", "name")
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         employeeCount: count("p"),
       });
@@ -829,7 +829,7 @@ describe("Query Builder - Aggregations", () => {
       .from("Person", "p")
       .groupBy("p", "name")
       .groupBy("p", "age")
-      .selectAggregate({
+      .aggregate({
         name: field("p", "name"),
         age: field("p", "age"),
         total: count("p"),
@@ -846,7 +846,7 @@ describe("Query Builder - Aggregations", () => {
       .traverse("worksAt", "e")
       .to("Organization", "o")
       .groupByNode("o")
-      .selectAggregate({
+      .aggregate({
         orgId: field("o", "id"),
         employeeCount: count("p"),
       });
@@ -874,7 +874,7 @@ describe("Query Builder - Aggregations", () => {
       .traverse("worksAt", "e")
       .to("Organization", "o")
       .groupBy("o", "name")
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         employeeCount: count("p"),
       });
@@ -892,7 +892,7 @@ describe("Query Builder - Aggregations", () => {
       .traverse("worksAt", "e")
       .to("Organization", "o")
       .groupBy("o", "name")
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         uniquePeople: countDistinct("p"),
       });
@@ -908,7 +908,7 @@ describe("Query Builder - Aggregations", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .groupBy("p", "isActive")
-      .selectAggregate({
+      .aggregate({
         isActive: field("p", "isActive"),
         totalAge: sum("p", "age"),
       });
@@ -924,7 +924,7 @@ describe("Query Builder - Aggregations", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .groupBy("p", "isActive")
-      .selectAggregate({
+      .aggregate({
         isActive: field("p", "isActive"),
         avgAge: avg("p", "age"),
       });
@@ -940,7 +940,7 @@ describe("Query Builder - Aggregations", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .groupBy("p", "isActive")
-      .selectAggregate({
+      .aggregate({
         isActive: field("p", "isActive"),
         youngestAge: min("p", "age"),
       });
@@ -956,7 +956,7 @@ describe("Query Builder - Aggregations", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .groupBy("p", "isActive")
-      .selectAggregate({
+      .aggregate({
         isActive: field("p", "isActive"),
         oldestAge: max("p", "age"),
       });
@@ -974,7 +974,7 @@ describe("Query Builder - Aggregations", () => {
       .traverse("worksAt", "e")
       .to("Organization", "o")
       .groupBy("o", "name")
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         employeeCount: count("p"),
         avgAge: avg("p", "age"),
@@ -996,7 +996,7 @@ describe("Query Builder - Aggregations", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .groupBy("p", "name")
-      .selectAggregate({
+      .aggregate({
         name: field("p", "name"),
         total: count("p"),
       })
@@ -1018,7 +1018,7 @@ describe("Query Builder - Aggregations", () => {
       .optionalTraverse("knows", "k", { direction: "in" })
       .to("Person", "knower")
       .groupByNode("p")
-      .selectAggregate({
+      .aggregate({
         name: field("p", "name"),
         knowerCount: count("knower"),
       });
@@ -1043,7 +1043,7 @@ describe("Query Builder - Aggregations", () => {
       .to("Organization", "o")
       .groupBy("o", "name")
       .having(havingGt(count("p"), 10))
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         employeeCount: count("p"),
       });
@@ -1061,7 +1061,7 @@ describe("Query Builder - Aggregations", () => {
       .to("Organization", "o")
       .groupBy("o", "name")
       .having(havingGte(count("p"), 5))
-      .selectAggregate({
+      .aggregate({
         orgName: field("o", "name"),
         employeeCount: count("p"),
       });
@@ -1085,7 +1085,7 @@ describe("Query Builder - Aggregations", () => {
       .optionalTraverse("knows", "k", { direction: "in" })
       .to("Person", "knower")
       .groupByNode("p")
-      .selectAggregate({
+      .aggregate({
         name: field("p", "name"),
         knowerCount: count("knower"),
       });
@@ -1108,7 +1108,7 @@ describe("Query Builder - Aggregations", () => {
       .optionalTraverse("knows", "k", { direction: "in" })
       .to("Person", "knower")
       .groupByNode("p")
-      .selectAggregate({
+      .aggregate({
         name: field("p", "name"),
         knowerCount: count("knower"),
       });
@@ -1480,7 +1480,9 @@ describe("Query Builder - Subqueries (EXISTS/IN)", () => {
   it("supports IN subquery predicate", () => {
     const subquery = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
-      .select((context) => ({ id: context.o.id }));
+      .aggregate({
+        id: fieldRef("o", ["id"], { valueType: "string" }),
+      });
 
     const inPred = inSubquery(fieldRef("p", ["id"]), subquery.toAst());
 
@@ -1491,12 +1493,44 @@ describe("Query Builder - Subqueries (EXISTS/IN)", () => {
   it("supports NOT IN subquery predicate", () => {
     const subquery = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
-      .select((context) => ({ id: context.o.id }));
+      .aggregate({
+        id: fieldRef("o", ["id"], { valueType: "string" }),
+      });
 
     const notInPred = notInSubquery(fieldRef("p", ["id"]), subquery.toAst());
 
     expect(notInPred.__expr.__type).toBe("in_subquery");
     expect((notInPred.__expr as { negated: boolean }).negated).toBe(true);
+  });
+
+  it("rejects IN subqueries with multiple projected columns", () => {
+    const invalidSubquery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Organization", "o")
+      .select((context) => ({
+        id: context.o.id,
+        name: context.o.name,
+      }))
+      .toAst();
+
+    expect(() => inSubquery(fieldRef("p", ["id"]), invalidSubquery)).toThrow(
+      "must project exactly 1 column",
+    );
+  });
+
+  it("rejects IN subqueries with known scalar type mismatches", () => {
+    const subquery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Organization", "o")
+      .aggregate({
+        name: fieldRef("o", ["props", "name"], { valueType: "string" }),
+      })
+      .toAst();
+
+    expect(() =>
+      inSubquery(
+        fieldRef("p", ["props", "age"], { valueType: "number" }),
+        subquery,
+      ),
+    ).toThrow("type mismatch");
   });
 
   it("compiles EXISTS subquery to SQL", () => {
@@ -1541,7 +1575,9 @@ describe("Query Builder - Subqueries (EXISTS/IN)", () => {
   it("compiles IN subquery to SQL", () => {
     const subquery = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
-      .select((context) => ({ id: context.o.id }));
+      .aggregate({
+        id: fieldRef("o", ["id"], { valueType: "string" }),
+      });
 
     const inPred = inSubquery(fieldRef("p", ["id"]), subquery.toAst());
 
@@ -1560,7 +1596,9 @@ describe("Query Builder - Subqueries (EXISTS/IN)", () => {
   it("compiles NOT IN subquery to SQL", () => {
     const subquery = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
-      .select((context) => ({ id: context.o.id }));
+      .aggregate({
+        id: fieldRef("o", ["id"], { valueType: "string" }),
+      });
 
     const notInPred = notInSubquery(fieldRef("p", ["id"]), subquery.toAst());
 
@@ -1598,7 +1636,34 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(vl).toBeDefined();
     expect(vl!.minDepth).toBe(1);
     expect(vl!.maxDepth).toBe(-1); // unlimited
-    expect(vl!.collectPath).toBe(false);
+    expect(vl!.cyclePolicy).toBe("prevent");
+    expect(vl!.pathAlias).toBeUndefined();
+    expect(vl!.depthAlias).toBeUndefined();
+  });
+
+  it("builds AST with recursive({...}) options", () => {
+    const q = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive({
+        minHops: 2,
+        maxHops: 6,
+        cyclePolicy: "allow",
+        path: "custom_path",
+        depth: "custom_depth",
+      })
+      .to("Organization", "o")
+      .select((context) => ({
+        person: context.p.name,
+        org: context.o.name,
+      }));
+
+    const vl = q.toAst().traversals[0]!.variableLength!;
+    expect(vl.minDepth).toBe(2);
+    expect(vl.maxDepth).toBe(6);
+    expect(vl.cyclePolicy).toBe("allow");
+    expect(vl.pathAlias).toBe("custom_path");
+    expect(vl.depthAlias).toBe("custom_depth");
   });
 
   it("builds AST with maxHops() limit", () => {
@@ -1633,12 +1698,11 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(ast.traversals[0]!.variableLength!.minDepth).toBe(2);
   });
 
-  it("builds AST with collectPath() option", () => {
+  it("builds AST with recursive({ path }) option", () => {
     const q = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .traverse("worksAt", "e")
-      .recursive()
-      .collectPath("my_path")
+      .recursive({ path: "my_path" })
       .to("Organization", "o")
       .select((context) => ({
         person: context.p.name,
@@ -1646,16 +1710,14 @@ describe("QueryBuilder Variable-Length Paths", () => {
       }));
 
     const ast = q.toAst();
-    expect(ast.traversals[0]!.variableLength!.collectPath).toBe(true);
     expect(ast.traversals[0]!.variableLength!.pathAlias).toBe("my_path");
   });
 
-  it("builds AST with withDepth() option", () => {
+  it("builds AST with recursive({ depth }) option", () => {
     const q = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .traverse("worksAt", "e")
-      .recursive()
-      .withDepth("level")
+      .recursive({ depth: "level" })
       .to("Organization", "o")
       .select((context) => ({
         person: context.p.name,
@@ -1673,8 +1735,8 @@ describe("QueryBuilder Variable-Length Paths", () => {
       .recursive()
       .minHops(1)
       .maxHops(10)
-      .collectPath()
-      .withDepth()
+      .recursive({ path: true })
+      .recursive({ depth: true })
       .to("Organization", "o")
       .select((context) => ({
         person: context.p.name,
@@ -1686,7 +1748,6 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(vl).toBeDefined();
     expect(vl.minDepth).toBe(1);
     expect(vl.maxDepth).toBe(10);
-    expect(vl.collectPath).toBe(true);
     expect(vl.pathAlias).toBe("o_path"); // default alias
     expect(vl.depthAlias).toBe("o_depth"); // default alias
   });
@@ -1730,6 +1791,25 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(sql).toContain("INSTR");
     // SQLite uses string-based path
     expect(sql).toContain("|| n0.id ||");
+  });
+
+  it("skips cycle checks when cyclePolicy('allow') is selected", () => {
+    const q = createQueryBuilder<typeof graph>(graph.id, registry, {
+      dialect: "sqlite",
+    })
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive({ maxHops: 3, cyclePolicy: "allow" })
+      .to("Organization", "o")
+      .select((context) => ({
+        person: context.p.name,
+        org: context.o.name,
+      }));
+
+    const sqlObject = q.compile();
+    const { sql } = sqlToStrings(sqlObject);
+
+    expect(sql).not.toContain("INSTR");
   });
 
   it("compiles PostgreSQL cycle check correctly", () => {
@@ -1815,7 +1895,7 @@ describe("QueryBuilder Variable-Length Paths", () => {
       .traverse("worksAt", "e")
       .recursive()
       .maxHops(1)
-      .collectPath("path")
+      .recursive({ path: "path" })
       .to("Organization", "o")
       .select((context) => ({
         person: context.p.name,
@@ -1829,12 +1909,11 @@ describe("QueryBuilder Variable-Length Paths", () => {
     expect(sql).toContain("recursive_cte");
   });
 
-  it("includes path in projection when collectPath is true", () => {
+  it("includes path in projection when recursive path is enabled", () => {
     const q = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .traverse("worksAt", "e")
-      .recursive()
-      .collectPath("my_path")
+      .recursive({ path: "my_path" })
       .to("Organization", "o")
       .select((context) => ({
         person: context.p.name,
@@ -1857,6 +1936,26 @@ describe("QueryBuilder Variable-Length Paths", () => {
     }).toThrow("maxHops must be >= 1");
   });
 
+  it("throws for non-integer maxHops", () => {
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .recursive()
+        .maxHops(1.5);
+    }).toThrow("maxHops must be a finite integer");
+  });
+
+  it("throws for non-finite maxHops", () => {
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .recursive()
+        .maxHops(Number.NaN);
+    }).toThrow("maxHops must be a finite integer");
+  });
+
   it("throws for maxHops above MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
     expect(() => {
       createQueryBuilder<typeof graph>(graph.id, registry)
@@ -1875,5 +1974,25 @@ describe("QueryBuilder Variable-Length Paths", () => {
         .recursive()
         .minHops(-1);
     }).toThrow("minHops must be >= 0");
+  });
+
+  it("throws for non-integer minHops", () => {
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .recursive()
+        .minHops(1.5);
+    }).toThrow("minHops must be a finite integer");
+  });
+
+  it("throws for non-finite minHops", () => {
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .recursive()
+        .minHops(Number.POSITIVE_INFINITY);
+    }).toThrow("minHops must be a finite integer");
   });
 });

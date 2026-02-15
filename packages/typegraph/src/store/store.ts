@@ -8,8 +8,9 @@
  * - Schema management
  * - Transaction handling
  */
-import { type GraphBackend } from "../backend/types";
+import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import type { TraversalExpansion } from "../query/ast";
 import { createQueryBuilder, type QueryBuilder } from "../query/builder";
 import { createSqlSchema } from "../query/compiler/schema";
 import { buildKindRegistry, type KindRegistry } from "../registry";
@@ -97,6 +98,7 @@ export class Store<G extends GraphDef> {
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
+  readonly #defaultTraversalExpansion: TraversalExpansion;
   #nodeCollections:
     | {
         [K in keyof G["nodes"] & string]-?: NodeCollection<
@@ -118,6 +120,8 @@ export class Store<G extends GraphDef> {
     this.#schema =
       options?.schema ??
       (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
+    this.#defaultTraversalExpansion =
+      options?.queryDefaults?.traversalExpansion ?? "inverse";
   }
 
   // === Accessors ===
@@ -268,11 +272,7 @@ export class Store<G extends GraphDef> {
    * ```
    */
   query(): QueryBuilder<G> {
-    return createQueryBuilder<G>(this.graphId, this.#registry, {
-      backend: this.#backend,
-      dialect: this.#backend.dialect,
-      ...(this.#schema !== undefined && { schema: this.#schema }),
-    });
+    return this.#createQueryForBackend(this.#backend);
   }
 
   // === Transactions ===
@@ -301,13 +301,22 @@ export class Store<G extends GraphDef> {
     fn: (tx: TransactionContext<G>) => Promise<T>,
   ): Promise<T> {
     return this.#backend.transaction(async (txBackend) => {
+      const txNodeOperations: NodeOperations = {
+        ...this.#nodeOperations,
+        createQuery: () => this.#createQueryForBackend(txBackend),
+      };
+      const txEdgeOperations: EdgeOperations = {
+        ...this.#edgeOperations,
+        createQuery: () => this.#createQueryForBackend(txBackend),
+      };
+
       // Create collections using transaction backend
       const nodes = createNodeCollectionsProxy(
         this.#graph,
         this.graphId,
         this.#registry,
         txBackend,
-        this.#nodeOperations,
+        txNodeOperations,
       );
 
       const edges = createEdgeCollectionsProxy(
@@ -315,7 +324,7 @@ export class Store<G extends GraphDef> {
         this.graphId,
         this.#registry,
         txBackend,
-        this.#edgeOperations,
+        txEdgeOperations,
       );
 
       return fn({ nodes, edges });
@@ -440,6 +449,19 @@ export class Store<G extends GraphDef> {
         return true;
       }
     }
+  }
+
+  #createQueryForBackend(
+    backend: GraphBackend | TransactionBackend,
+  ): QueryBuilder<G> {
+    return createQueryBuilder<G>(this.graphId, this.#registry, {
+      // TransactionBackend omits transaction/close, but query execution only needs
+      // the read-path/query capabilities shared with GraphBackend.
+      backend: backend as GraphBackend,
+      dialect: backend.dialect,
+      defaultTraversalExpansion: this.#defaultTraversalExpansion,
+      ...(this.#schema !== undefined && { schema: this.#schema }),
+    });
   }
 }
 

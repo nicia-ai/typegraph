@@ -311,6 +311,16 @@ export type QueryStart = Readonly<{
 export type TraversalDirection = "out" | "in";
 
 /**
+ * Traversal ontology expansion behavior.
+ */
+export type TraversalExpansion = "none" | "implying" | "inverse" | "all";
+
+/**
+ * Cycle handling policy for recursive traversals.
+ */
+export type RecursiveCyclePolicy = "prevent" | "allow";
+
+/**
  * Variable-length traversal specification for recursive graph traversals.
  */
 export type VariableLengthSpec = Readonly<{
@@ -318,11 +328,16 @@ export type VariableLengthSpec = Readonly<{
   minDepth: number;
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
-  /** Include the traversal path as an array in results */
-  collectPath: boolean;
-  /** Column alias for path array (default: "{nodeAlias}_path") */
+  /**
+   * Cycle handling mode.
+   *
+   * - "prevent": Track visited nodes per path and reject revisits
+   * - "allow": Skip cycle checks (faster, may revisit nodes)
+   */
+  cyclePolicy: RecursiveCyclePolicy;
+  /** Optional column alias for projected traversal path array */
   pathAlias?: string;
-  /** Column alias for depth (default: "{nodeAlias}_depth") */
+  /** Optional column alias for projected traversal depth */
   depthAlias?: string;
 }>;
 
@@ -331,7 +346,7 @@ export type VariableLengthSpec = Readonly<{
  */
 export type Traversal = Readonly<{
   edgeAlias: string;
-  edgeKinds: readonly string[]; // Expanded via ontology if includeImplyingEdges
+  edgeKinds: readonly string[]; // Expanded via ontology based on traversal expand mode
   /**
    * Edge kinds traversed in the opposite direction.
    *

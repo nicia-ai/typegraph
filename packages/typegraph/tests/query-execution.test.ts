@@ -12,6 +12,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  exists,
+  fieldRef,
+  inSubquery,
   inverseOf,
   param as parameter,
   subClassOf,
@@ -322,7 +325,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
         .traverse("worksAt", "e2")
         .to("Company", "c")
@@ -354,12 +357,12 @@ describe("Query Execution (SQLite)", () => {
       expect(employeeNames).toEqual(["Alice", "Bob"]);
     });
 
-    it("supports symmetric traversal with includeInverseEdges", async () => {
+    it("supports symmetric traversal with expand: inverse", async () => {
       const withoutInverseExpansion = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Bob"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .to("Person", "peer")
         .select((context) => ({ peerName: context.peer.name }))
         .execute();
@@ -371,7 +374,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Bob"))
-        .traverse("knows", "e", { includeInverseEdges: true })
+        .traverse("knows", "e", { expand: "inverse" })
         .to("Person", "peer")
         .select((context) => ({ peerName: context.peer.name }))
         .execute();
@@ -444,7 +447,7 @@ describe("Query Execution (SQLite)", () => {
         .optionalTraverse("worksAt", "e")
         .to("Organization", "o", { includeSubClasses: true })
         .groupByNode("p")
-        .selectAggregate({
+        .aggregate({
           orgCount: count("o"),
         })
         .execute();
@@ -461,9 +464,9 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
-        .traverse("knows", "e2")
+        .traverse("knows", "e2", { expand: "none" })
         .to("Person", "friendOfFriend")
         .traverse("worksAt", "e3")
         .to("Company", "c")
@@ -491,7 +494,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
         .traverse("worksAt", "e2", { from: "p" }) // Explicit: from "p" (Alice), not "friend"
         .to("Company", "c")
@@ -519,9 +522,9 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend") // Bob
-        .traverse("knows", "e2") // Chains from friend (Bob) by default
+        .traverse("knows", "e2", { expand: "none" }) // Chains from friend (Bob) by default
         .to("Person", "friendOfFriend") // Charlie
         .traverse("worksAt", "e3", { from: "p" }) // Fan-out: Alice's company
         .to("Company", "c")
@@ -635,7 +638,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -657,7 +660,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .maxHops(1)
         .to("Person", "friend")
@@ -735,7 +738,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .minHops(2)
         .to("Person", "friend")
@@ -756,7 +759,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Charlie"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -776,7 +779,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Charlie"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .minHops(0)
         .to("Person", "friend")
@@ -796,9 +799,8 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .withDepth("level")
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ depth: "level" })
         .to("Person", "friend")
         .select((context) => ({
           person: context.p.name,
@@ -828,7 +830,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -848,7 +850,7 @@ describe("Query Execution (SQLite)", () => {
       expect(friends.filter((f) => f === "Alice")).toHaveLength(0);
     });
 
-    it("detects cycles with path collection", async () => {
+    it("detects cycles with recursive path projection", async () => {
       // Create a cycle: Alice -> Bob -> Charlie -> Alice
       await backend.insertEdge({
         graphId: "test_graph",
@@ -861,14 +863,13 @@ describe("Query Execution (SQLite)", () => {
         props: {},
       });
 
-      // Query with collectPath to verify path tracking works with cycles
+      // Query with recursive path projection to verify tracking works with cycles
       const results = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .collectPath("friendship_path")
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ path: "friendship_path" })
         .to("Person", "friend")
         .select((context) => ({
           friend: context.friend.name,
@@ -880,6 +881,77 @@ describe("Query Execution (SQLite)", () => {
       const friends = results.map((r) => r.friend);
       expect(friends).toContain("Bob");
       expect(friends).toContain("Charlie");
+    });
+
+    it("preserves multi-hop limit semantics with downstream filters", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "limit-anchor",
+        props: { name: "Limit Anchor" },
+      });
+
+      for (let index = 1; index <= 200; index++) {
+        const intermediateId = `limit-mid-${index}`;
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: intermediateId,
+          props: { name: `Intermediate ${index}` },
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: `limit-anchor-edge-${index}`,
+          kind: "knows",
+          fromKind: "Person",
+          fromId: "limit-anchor",
+          toKind: "Person",
+          toId: intermediateId,
+          props: {},
+        });
+
+        if (index <= 120) {
+          continue;
+        }
+
+        const targetId = `limit-target-${index}`;
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: targetId,
+          props: { name: "Limit Match" },
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: `limit-mid-target-edge-${index}`,
+          kind: "knows",
+          fromKind: "Person",
+          fromId: intermediateId,
+          toKind: "Person",
+          toId: targetId,
+          props: {},
+        });
+      }
+
+      const baseQuery = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("limit-anchor"))
+        .traverse("knows", "e1", { expand: "none" })
+        .to("Person", "mid")
+        .traverse("knows", "e2", { expand: "none" })
+        .to("Person", "target")
+        .whereNode("target", (target) => target.name.eq("Limit Match"))
+        .select((context) => ({
+          midId: context.mid.id,
+          targetId: context.target.id,
+        }));
+
+      const allRows = await baseQuery.execute();
+      const limitedRows = await baseQuery.limit(10).execute();
+
+      expect(allRows).toHaveLength(80);
+      expect(limitedRows).toHaveLength(10);
     });
   });
 
@@ -966,6 +1038,135 @@ describe("Query Execution (SQLite)", () => {
       await expect(
         prepared.execute({ id: "alice", extra: "unused" }),
       ).rejects.toThrow('Unexpected bindings provided: "extra"');
+    });
+
+    it("supports parameters inside EXISTS subqueries", async () => {
+      const preparedSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq(parameter("needle")))
+        .select((context) => context.q.id)
+        .toAst();
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () => exists(preparedSubquery))
+        .select((context) => context.p.id)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "Alice" });
+
+      const directSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq("Alice"))
+        .select((context) => context.q.id)
+        .toAst();
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () => exists(directSubquery))
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("supports parameters inside IN subqueries", async () => {
+      const preparedSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq(parameter("needle")))
+        .aggregate({
+          id: fieldRef("q", ["id"], { valueType: "string" }),
+        })
+        .toAst();
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["id"], { valueType: "string" }),
+            preparedSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "Alice" });
+
+      const directSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq("Alice"))
+        .aggregate({
+          id: fieldRef("q", ["id"], { valueType: "string" }),
+        })
+        .toAst();
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["id"], { valueType: "string" }),
+            directSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+      expect(preparedResults).toEqual(["alice"]);
+    });
+
+    it("rejects IN subqueries that project multiple columns", () => {
+      const invalidSubquery = store
+        .query()
+        .from("Person", "q")
+        .select((context) => ({
+          id: context.q.id,
+          name: context.q.name,
+        }))
+        .toAst();
+
+      expect(() =>
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", () =>
+            inSubquery(
+              fieldRef("p", ["id"], { valueType: "string" }),
+              invalidSubquery,
+            ),
+          ),
+      ).toThrow("must project exactly 1 column");
+    });
+
+    it("supports numeric IN subqueries with typed field refs", async () => {
+      const ageSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.age.gte(30))
+        .aggregate({
+          age: fieldRef("q", ["props", "age"], { valueType: "number" }),
+        })
+        .toAst();
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["props", "age"], { valueType: "number" }),
+            ageSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(results.toSorted()).toEqual(["alice", "charlie"]);
     });
   });
 });

@@ -24,7 +24,7 @@ TypeGraph uses a deterministic performance sanity suite as its benchmark and reg
 The suite seeds a realistic graph shape and measures end-to-end query latency across:
 
 - forward and reverse traversals
-- inverse/symmetric traversal (`includeInverseEdges`)
+- inverse/symmetric traversal (`expand: "inverse"` / `expand: "all"`)
 - 2-hop and 3-hop traversals
 - aggregate queries
 - cached execute vs prepared execute

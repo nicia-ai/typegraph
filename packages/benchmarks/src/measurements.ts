@@ -87,13 +87,13 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
   });
 
   const inverseTraversalMs = await benchmarkQuery(
-    "inverse traversal (includeInverseEdges)",
+    "inverse traversal (expand: inverse)",
     async () => {
       await store
         .query()
         .from("User", "u")
         .whereNode("u", (user) => user.id.eq("user_600"))
-        .traverse("next", "e", { includeInverseEdges: true })
+        .traverse("next", "e", { expand: "inverse" })
         .to("User", "neighbor")
         .select((context) => ({ neighborId: context.neighbor.id }))
         .limit(20)
@@ -147,7 +147,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
         .optionalTraverse("follows", "e")
         .to("User", "target")
         .groupByNode("u")
-        .selectAggregate({
+        .aggregate({
           name: field("u", "name"),
           followCount: count("target"),
         })
@@ -165,7 +165,7 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
         .optionalTraverse("follows", "e")
         .to("User", "target")
         .groupByNode("u")
-        .selectAggregate({
+        .aggregate({
           name: field("u", "name"),
           followCount: countDistinct("target"),
         })

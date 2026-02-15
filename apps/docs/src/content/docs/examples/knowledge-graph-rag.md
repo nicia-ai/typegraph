@@ -209,9 +209,7 @@ async function findRelatedEntities(entityName: string, maxHops = 2) {
     .from("Entity", "e")
     .whereNode("e", (e) => e.name.eq(entityName))
     .traverse("relatesTo", "r")
-    .recursive()
-    .maxHops(maxHops)
-    .withDepth("depth")
+    .recursive({ maxHops, depth: "depth" })
     .to("Entity", "related")
     .select((ctx) => ({
       from: ctx.e.name,
@@ -221,7 +219,7 @@ async function findRelatedEntities(entityName: string, maxHops = 2) {
     }))
     .execute();
 
-  // bounded maxHops() without collectPath() may revisit nodes; dedupe by target
+  // distinct paths can reach the same target; dedupe by target
   const seen = new Set<string>();
   return rows
     .filter((row) => {

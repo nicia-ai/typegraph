@@ -24,13 +24,17 @@ import {
   type ParameterRef,
   type PredicateExpression,
   type ProjectedField,
+  type RecursiveCyclePolicy,
   type Traversal,
   type TraversalDirection,
+  type TraversalExpansion,
 } from "../ast";
 import { type SqlDialect, type SqlSchema } from "../compiler/index";
 import { type JsonPointerInput } from "../json-pointer";
 import type { Predicate, SimilarToOptions } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+
+export type { TraversalExpansion } from "../ast";
 
 // ============================================================
 // Edge Target Type Helpers
@@ -387,6 +391,22 @@ export type StreamOptions = Readonly<{
   batchSize?: number;
 }>;
 
+/**
+ * Options for recursive traversals.
+ */
+export type RecursiveTraversalOptions = Readonly<{
+  /** Minimum number of hops before including results (default: 1) */
+  minHops?: number;
+  /** Maximum number of hops (-1 means unlimited) */
+  maxHops?: number;
+  /** Cycle handling policy (default: "prevent") */
+  cyclePolicy?: RecursiveCyclePolicy;
+  /** Include path in output. Pass a string to customize alias. */
+  path?: boolean | string;
+  /** Include depth in output. Pass a string to customize alias. */
+  depth?: boolean | string;
+}>;
+
 // ============================================================
 // Configuration Types
 // ============================================================
@@ -398,6 +418,8 @@ export type QueryBuilderConfig = Readonly<{
   graphId: string;
   registry: KindRegistry;
   schemaIntrospector: SchemaIntrospector;
+  /** Default traversal ontology expansion mode. */
+  defaultTraversalExpansion: TraversalExpansion;
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names. */
@@ -435,4 +457,6 @@ export type CreateQueryBuilderOptions = Readonly<{
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
+  /** Default traversal ontology expansion mode (default: "inverse"). */
+  defaultTraversalExpansion?: TraversalExpansion;
 }>;

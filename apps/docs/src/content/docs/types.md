@@ -264,11 +264,11 @@ Configuration for variable-length (recursive) traversals.
 
 ```typescript
 type VariableLengthSpec = Readonly<{
-  minDepth: number;      // Minimum hops (default: 1)
-  maxDepth: number;      // Maximum hops (-1 = unlimited)
-  collectPath: boolean;  // Include path array in results
-  pathAlias?: string;    // Column alias for path
-  depthAlias?: string;   // Column alias for depth
+  minDepth: number;                   // Minimum hops (default: 1)
+  maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  cyclePolicy: "prevent" | "allow";   // Cycle handling mode
+  pathAlias?: string;                 // Column alias for projected path
+  depthAlias?: string;                // Column alias for projected depth
 }>;
 ```
 
@@ -369,8 +369,8 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 
 Recursive traversals are capped at this depth when no `maxHops()` is specified.
 Explicit `maxHops()` values are validated against `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000).
-Bounded traversals without `collectPath()` run in a faster mode that may revisit
-nodes across hops.
+Cycle prevention is enabled by default. To allow revisits for maximum
+performance, use `cyclePolicy: "allow"`.
 
 ### `MAX_EXPLICIT_RECURSIVE_DEPTH`
 

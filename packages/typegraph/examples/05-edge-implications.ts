@@ -183,13 +183,13 @@ export async function main() {
   console.log("\n=== Query with Edge Implication Expansion ===\n");
 
   // Query: "Who does Alice know?" using implication expansion
-  console.log("Query: Who does Alice know? (includeImplyingEdges: true)");
+  console.log('Query: Who does Alice know? (expand: "implying")');
   console.log("  This will find: knows, friends, bestFriends, marriedTo, etc.\n");
 
   const aliceKnows = await store
     .query()
     .from("Person", "alice")
-    .traverse("knows", "e", { includeImplyingEdges: true })
+    .traverse("knows", "e", { expand: "implying" })
     .to("Person", "other")
     .select((ctx) => ({
       person: ctx.other.name,
@@ -207,7 +207,7 @@ export async function main() {
   const aliceExplicitlyKnows = await store
     .query()
     .from("Person", "alice")
-    .traverse("knows", "e") // No includeImplyingEdges
+    .traverse("knows", "e") // No implying-edge expansion
     .to("Person", "other")
     .select((ctx) => ({
       person: ctx.other.name,
@@ -223,12 +223,12 @@ export async function main() {
   }
 
   // Query friends (including best friends)
-  console.log("\nQuery: Who is Alice friends with? (includeImplyingEdges: true)");
+  console.log('\nQuery: Who is Alice friends with? (expand: "implying")');
 
   const aliceFriends = await store
     .query()
     .from("Person", "alice")
-    .traverse("friends", "e", { includeImplyingEdges: true })
+    .traverse("friends", "e", { expand: "implying" })
     .to("Person", "friend")
     .select((ctx) => ({
       friend: ctx.friend.name,

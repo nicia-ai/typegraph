@@ -77,8 +77,8 @@ export function registerRecursiveIntegrationTests(
       expect(results).toContain("Diana");
     });
 
-    it("executes query with collectPath option", async () => {
-      // collectPath() adds a path column to the SQL output
+    it("executes query with recursive path projection", async () => {
+      // recursive({ path }) adds a path column to the SQL output
       // We verify the query compiles and executes correctly
       const store = context.getStore();
       const results = await store
@@ -87,7 +87,7 @@ export function registerRecursiveIntegrationTests(
         .whereNode("p", (p) => p.name.eq("Alice"))
         .traverse("knows", "e")
         .maxHops(2)
-        .collectPath("friend_path")
+        .recursive({ path: "friend_path" })
         .to("Person", "friend")
         .select((ctx) => ctx.friend.name)
         .execute();
@@ -147,8 +147,8 @@ export function registerRecursiveIntegrationTests(
       await seedPeopleForRecursiveDepthTracking(store);
     });
 
-    it("executes recursive query with withDepth option", async () => {
-      // withDepth() adds a depth column to the SQL output
+    it("executes recursive query with depth projection", async () => {
+      // recursive({ depth }) adds a depth column to the SQL output
       // We verify the query compiles and executes correctly
       const store = context.getStore();
       const results = await store
@@ -156,8 +156,7 @@ export function registerRecursiveIntegrationTests(
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("CEO"))
         .traverse("knows", "e")
-        .recursive()
-        .withDepth("level")
+        .recursive({ depth: "level" })
         .to("Person", "report")
         .select((ctx) => ctx.report.name)
         .execute();
@@ -173,16 +172,14 @@ export function registerRecursiveIntegrationTests(
       ]);
     });
 
-    it("combines withDepth and maxHops", async () => {
+    it("combines depth projection and maxHops", async () => {
       const store = context.getStore();
       const results = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("CEO"))
         .traverse("knows", "e")
-        .recursive()
-        .maxHops(2)
-        .withDepth("depth")
+        .recursive({ maxHops: 2, depth: "depth" })
         .to("Person", "report")
         .select((ctx) => ctx.report.name)
         .execute();
@@ -198,16 +195,14 @@ export function registerRecursiveIntegrationTests(
       expect(uniqueResults).not.toContain("Employee1");
     });
 
-    it("combines withDepth and minHops", async () => {
+    it("combines depth projection and minHops", async () => {
       const store = context.getStore();
       const results = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("CEO"))
         .traverse("knows", "e")
-        .recursive()
-        .minHops(2)
-        .withDepth("depth")
+        .recursive({ minHops: 2, depth: "depth" })
         .to("Person", "report")
         .select((ctx) => ctx.report.name)
         .execute();
@@ -225,7 +220,7 @@ export function registerRecursiveIntegrationTests(
       expect(uniqueResults).toContain("Employee1");
     });
 
-    it("combines withDepth and collectPath", async () => {
+    it("combines depth and path projection", async () => {
       // Both options can be used together
       const store = context.getStore();
       const results = await store
@@ -233,10 +228,7 @@ export function registerRecursiveIntegrationTests(
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("CEO"))
         .traverse("knows", "e")
-        .recursive()
-        .maxHops(2)
-        .withDepth("depth")
-        .collectPath("path")
+        .recursive({ maxHops: 2, depth: "depth", path: "path" })
         .to("Person", "report")
         .select((ctx) => ctx.report.name)
         .execute();
@@ -248,7 +240,7 @@ export function registerRecursiveIntegrationTests(
       expect(uniqueResults).toContain("Manager1");
     });
 
-    it("withDepth works for single-path traversals", async () => {
+    it("depth projection works for single-path traversals", async () => {
       // Query from VP1 down - each node only reachable via one path
       const store = context.getStore();
       const results = await store
@@ -256,8 +248,7 @@ export function registerRecursiveIntegrationTests(
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("VP1"))
         .traverse("knows", "e")
-        .recursive()
-        .withDepth("depth")
+        .recursive({ depth: "depth" })
         .to("Person", "report")
         .select((ctx) => ctx.report.name)
         .execute();

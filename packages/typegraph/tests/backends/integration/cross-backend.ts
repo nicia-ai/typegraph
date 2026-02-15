@@ -275,7 +275,7 @@ export function registerCrossBackendConsistencyTests(
           .query()
           .from("Product", "p")
           .whereNode("p", (p) => p.category.eq(uniqueCategory))
-          .selectAggregate({
+          .aggregate({
             totalProducts: count("p"),
           })
           .execute();
@@ -308,7 +308,7 @@ export function registerCrossBackendConsistencyTests(
           .from("Product", "p")
           .groupBy("p", "category")
           .having(havingGt(count("p"), 1))
-          .selectAggregate({
+          .aggregate({
             category: field("p", "category"),
             productCount: count("p"),
           })

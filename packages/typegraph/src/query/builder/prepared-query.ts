@@ -154,10 +154,22 @@ function substitutePredicateExpression(
     case "array_op":
     case "object_op":
     case "aggregate_comparison":
-    case "exists":
-    case "in_subquery":
     case "vector_similarity": {
       return expr;
+    }
+
+    case "exists": {
+      return {
+        ...expr,
+        subquery: substituteParameters(expr.subquery, bindings),
+      };
+    }
+
+    case "in_subquery": {
+      return {
+        ...expr,
+        subquery: substituteParameters(expr.subquery, bindings),
+      };
     }
   }
 }
@@ -404,11 +416,15 @@ export class PreparedQuery<R> {
 function collectParameterNames(ast: QueryAst): ReadonlySet<string> {
   const names = new Set<string>();
 
+  collectParameterNamesFromAst(ast, names);
+
+  return names;
+}
+
+function collectParameterNamesFromAst(ast: QueryAst, names: Set<string>): void {
   for (const predicate of ast.predicates) {
     collectParameterNamesFromExpression(predicate.expression, names);
   }
-
-  return names;
 }
 
 function collectParameterNamesFromExpression(
@@ -452,9 +468,15 @@ function collectParameterNamesFromExpression(
     case "array_op":
     case "object_op":
     case "aggregate_comparison":
-    case "exists":
-    case "in_subquery":
     case "vector_similarity": {
+      return;
+    }
+    case "exists": {
+      collectParameterNamesFromAst(expression.subquery, names);
+      return;
+    }
+    case "in_subquery": {
+      collectParameterNamesFromAst(expression.subquery, names);
       return;
     }
   }

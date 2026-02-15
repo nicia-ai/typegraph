@@ -163,7 +163,7 @@ You can also expand traversals to include inverse edge kinds at query time:
 const relationships = await store
   .query()
   .from("Person", "p")
-  .traverse("manages", "e", { includeInverseEdges: true })
+  .traverse("manages", "e", { expand: "inverse" })
   .to("Person", "other")
   .select((ctx) => ({
     other: ctx.other.name,
@@ -192,7 +192,7 @@ implies(friends, knows);
 const connections = await store
   .query()
   .from("Person", "p")
-  .traverse("knows", "e", { includeImplyingEdges: true })
+  .traverse("knows", "e", { expand: "implying" })
   .to("Person", "other")
   .select((ctx) => ctx.other)
   .execute();

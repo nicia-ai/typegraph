@@ -250,6 +250,7 @@ export type {
   PaginateOptions,
   Predicate,
   PropsAccessor,
+  RecursiveTraversalOptions,
   ResolveJsonPointer,
   ResolveJsonPointerSegments,
   SelectableEdge,
@@ -260,6 +261,7 @@ export type {
   SqlSchema,
   SqlTableNames,
   StreamOptions,
+  TraversalExpansion,
 } from "./query";
 export type { ParameterRef } from "./query/ast";
 

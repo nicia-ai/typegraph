@@ -35,7 +35,7 @@ function createVariableLengthSpec(
   return {
     minDepth: 1,
     maxDepth: -1, // unlimited
-    collectPath: false,
+    cyclePolicy: "prevent",
     ...overrides,
   };
 }
@@ -445,11 +445,13 @@ describe("compileVariableLengthQuery", () => {
   // ============================================================
 
   describe("path collection", () => {
-    it("includes path in projection when collectPath is true", () => {
+    it("includes path in projection when pathAlias is provided", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
-            variableLength: createVariableLengthSpec({ collectPath: true }),
+            variableLength: createVariableLengthSpec({
+              pathAlias: "target_path",
+            }),
           }),
         ],
       });
@@ -464,7 +466,6 @@ describe("compileVariableLengthQuery", () => {
         traversals: [
           createTraversal({
             variableLength: createVariableLengthSpec({
-              collectPath: true,
               pathAlias: "custom_path",
             }),
           }),
@@ -766,13 +767,13 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("|| '|' AS path");
     });
 
-    it("skips cycle/path tracking for bounded traversals without collectPath", () => {
+    it("skips cycle/path tracking when cyclePolicy is allow", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
             variableLength: createVariableLengthSpec({
               maxDepth: 5,
-              collectPath: false,
+              cyclePolicy: "allow",
             }),
           }),
         ],
@@ -784,13 +785,13 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).not.toContain(" AS path");
     });
 
-    it("keeps cycle/path tracking when collectPath is enabled", () => {
+    it("keeps cycle/path tracking when path projection is enabled", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
             variableLength: createVariableLengthSpec({
               maxDepth: 5,
-              collectPath: true,
+              pathAlias: "path",
             }),
           }),
         ],

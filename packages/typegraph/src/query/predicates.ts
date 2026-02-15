@@ -3,6 +3,7 @@
  *
  * Provides a fluent API for building type-safe predicates.
  */
+import { UnsupportedPredicateError } from "../errors";
 import {
   type ArrayOp,
   type ArrayPredicate,
@@ -37,6 +38,12 @@ import {
   type ResolveJsonPointerSegments,
 } from "./json-pointer";
 import { type FieldTypeInfo } from "./schema-introspector";
+import {
+  getSingleSubqueryColumnValueType,
+  getSubqueryColumnCount,
+  isInSubqueryTypeCompatible,
+  isUnsupportedInSubqueryValueType,
+} from "./subquery-utils";
 
 // ============================================================
 // Predicate Builder
@@ -899,13 +906,17 @@ export function notExists(subquery: QueryAst): Predicate {
  *     inSubquery(
  *       fieldRef("p", ["id"]),
  *       query.from("VIPMember", "v")
- *         .select({ id: field("v.personId") })
+ *         .aggregate({
+ *           id: fieldRef("v", ["props", "personId"], { valueType: "string" }),
+ *         })
  *         .toAst()
  *     )
  *   )
  * ```
  */
 export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
+  assertSingleColumnSubquery(subquery);
+  assertCompatibleSubqueryValueTypes(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -923,6 +934,8 @@ export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
  * @param subquery - The subquery AST that returns a single column
  */
 export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
+  assertSingleColumnSubquery(subquery);
+  assertCompatibleSubqueryValueTypes(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -930,4 +943,56 @@ export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
     negated: true,
   };
   return predicate(expr);
+}
+
+/**
+ * Ensures IN/NOT IN subqueries project exactly one column.
+ */
+function assertSingleColumnSubquery(subquery: QueryAst): void {
+  const columnCount = getSubqueryColumnCount(subquery);
+  if (columnCount === 1) return;
+
+  throw new UnsupportedPredicateError(
+    `IN/NOT IN subquery must project exactly 1 column, but got ${columnCount}`,
+    { subqueryColumnCount: columnCount },
+    {
+      suggestion:
+        "Use aggregate() with exactly one projected field for scalar IN/NOT IN subqueries.",
+    },
+  );
+}
+
+/**
+ * Ensures IN/NOT IN subquery and field value types are compatible when known.
+ */
+function assertCompatibleSubqueryValueTypes(
+  field: FieldRef,
+  subquery: QueryAst,
+): void {
+  const fieldValueType = field.valueType;
+  const subqueryValueType = getSingleSubqueryColumnValueType(subquery);
+  const resolvedValueType = fieldValueType ?? subqueryValueType;
+
+  if (isUnsupportedInSubqueryValueType(resolvedValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery does not support ${String(resolvedValueType)} values`,
+      { valueType: resolvedValueType },
+      {
+        suggestion:
+          "Use scalar fields (string/number/boolean/date) in IN/NOT IN predicates.",
+      },
+    );
+  }
+
+  if (isInSubqueryTypeCompatible(fieldValueType, subqueryValueType)) {
+    return;
+  }
+
+  throw new UnsupportedPredicateError(
+    `IN/NOT IN type mismatch: field type "${String(fieldValueType)}" does not match subquery column type "${String(subqueryValueType)}"`,
+    {
+      fieldValueType,
+      subqueryValueType,
+    },
+  );
 }

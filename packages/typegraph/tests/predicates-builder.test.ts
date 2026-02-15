@@ -536,7 +536,7 @@ describe("embeddingField", () => {
 // ============================================================
 
 describe("subquery predicates", () => {
-  const mockQueryAst: QueryAst = {
+  const singleColumnSubqueryAst: QueryAst = {
     graphId: "test",
     start: {
       alias: "u",
@@ -545,24 +545,31 @@ describe("subquery predicates", () => {
     },
     traversals: [],
     predicates: [],
-    projection: { fields: [] },
+    projection: {
+      fields: [
+        {
+          outputName: "u_id",
+          source: fieldRef("u", ["id"], { valueType: "string" }),
+        },
+      ],
+    },
     temporalMode: { mode: "current" },
   };
 
   describe("exists", () => {
     it("creates exists predicate", () => {
-      const pred = exists(mockQueryAst);
+      const pred = exists(singleColumnSubqueryAst);
 
       expect(pred.__expr.__type).toBe("exists");
       const expr = pred.__expr as { negated: boolean; subquery: unknown };
       expect(expr.negated).toBe(false);
-      expect(expr.subquery).toBe(mockQueryAst);
+      expect(expr.subquery).toBe(singleColumnSubqueryAst);
     });
   });
 
   describe("notExists", () => {
     it("creates not exists predicate", () => {
-      const pred = notExists(mockQueryAst);
+      const pred = notExists(singleColumnSubqueryAst);
 
       expect(pred.__expr.__type).toBe("exists");
       const expr = pred.__expr as { negated: boolean };
@@ -573,7 +580,7 @@ describe("subquery predicates", () => {
   describe("inSubquery", () => {
     it("creates in subquery predicate", () => {
       const refField = fieldRef("p", ["id"]);
-      const pred = inSubquery(refField, mockQueryAst);
+      const pred = inSubquery(refField, singleColumnSubqueryAst);
 
       expect(pred.__expr.__type).toBe("in_subquery");
       const expr = pred.__expr as {
@@ -583,18 +590,116 @@ describe("subquery predicates", () => {
       };
       expect(expr.negated).toBe(false);
       expect(expr.field).toBe(refField);
-      expect(expr.subquery).toBe(mockQueryAst);
+      expect(expr.subquery).toBe(singleColumnSubqueryAst);
+    });
+
+    it("rejects subqueries with multiple projected columns", () => {
+      const invalidSubquery: QueryAst = {
+        ...singleColumnSubqueryAst,
+        projection: {
+          fields: [
+            {
+              outputName: "u_id",
+              source: fieldRef("u", ["id"], { valueType: "string" }),
+            },
+            {
+              outputName: "u_name",
+              source: fieldRef("u", ["props", "name"], { valueType: "string" }),
+            },
+          ],
+        },
+      };
+
+      expect(() => inSubquery(fieldRef("p", ["id"]), invalidSubquery)).toThrow(
+        "must project exactly 1 column",
+      );
+    });
+
+    it("rejects subqueries with no projected columns", () => {
+      const invalidSubquery: QueryAst = {
+        ...singleColumnSubqueryAst,
+        projection: { fields: [] },
+      };
+
+      expect(() => inSubquery(fieldRef("p", ["id"]), invalidSubquery)).toThrow(
+        "must project exactly 1 column",
+      );
+    });
+
+    it("rejects mismatched scalar types when both sides are known", () => {
+      const numericField = fieldRef("p", ["props", "age"], {
+        valueType: "number",
+      });
+      const stringSubquery: QueryAst = {
+        ...singleColumnSubqueryAst,
+        projection: {
+          fields: [
+            {
+              outputName: "u_name",
+              source: fieldRef("u", ["props", "name"], { valueType: "string" }),
+            },
+          ],
+        },
+      };
+
+      expect(() => inSubquery(numericField, stringSubquery)).toThrow(
+        "type mismatch",
+      );
+    });
+
+    it("rejects non-scalar value types", () => {
+      const objectField = fieldRef("p", ["props", "profile"], {
+        valueType: "object",
+      });
+      const objectSubquery: QueryAst = {
+        ...singleColumnSubqueryAst,
+        projection: {
+          fields: [
+            {
+              outputName: "u_profile",
+              source: fieldRef("u", ["props", "profile"], {
+                valueType: "object",
+              }),
+            },
+          ],
+        },
+      };
+
+      expect(() => inSubquery(objectField, objectSubquery)).toThrow(
+        "does not support object values",
+      );
     });
   });
 
   describe("notInSubquery", () => {
     it("creates not in subquery predicate", () => {
       const refField = fieldRef("p", ["props", "category"]);
-      const pred = notInSubquery(refField, mockQueryAst);
+      const pred = notInSubquery(refField, singleColumnSubqueryAst);
 
       expect(pred.__expr.__type).toBe("in_subquery");
       const expr = pred.__expr as { negated: boolean };
       expect(expr.negated).toBe(true);
+    });
+
+    it("applies the same type validation as IN subqueries", () => {
+      const numericField = fieldRef("p", ["props", "age"], {
+        valueType: "number",
+      });
+      const stringSubquery: QueryAst = {
+        ...singleColumnSubqueryAst,
+        projection: {
+          fields: [
+            {
+              outputName: "u_name",
+              source: fieldRef("u", ["props", "name"], { valueType: "string" }),
+            },
+          ],
+        },
+      };
+
+      expect(() => notInSubquery(numericField, stringSubquery)).toThrow(
+        "type mismatch",
+      );
     });
   });
 });

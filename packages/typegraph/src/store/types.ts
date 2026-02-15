@@ -12,6 +12,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { TraversalExpansion } from "../query/ast";
 import type { NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
@@ -232,6 +233,11 @@ export type StoreOptions = Readonly<{
   hooks?: StoreHooks;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
+  /** Query default behaviors. */
+  queryDefaults?: Readonly<{
+    /** Default traversal ontology expansion mode (default: "inverse"). */
+    traversalExpansion?: TraversalExpansion;
+  }>;
 }>;
 
 /**

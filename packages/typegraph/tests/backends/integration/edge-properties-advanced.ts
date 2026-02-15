@@ -737,10 +737,10 @@ export function registerAdvancedEdgePropertyIntegrationTests(
     });
 
     // Note: Edge property aggregations (SUM, AVG, GROUP BY on edge fields) are
-    // not yet supported in the selectAggregate API. The aggregation API currently
+    // not yet supported in the aggregate API. The aggregation API currently
     // only supports node aliases. To aggregate edge properties, use the regular
     // select() API to fetch the data and perform aggregation in application code.
     //
-    // Future enhancement: Add edge alias support to groupBy/selectAggregate.
+    // Future enhancement: Add edge alias support to groupBy/aggregate.
   });
 }

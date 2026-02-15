@@ -162,7 +162,10 @@ function tryLowerSingleHopRecursiveTraversal(
   if (variableLength.minDepth !== 1 || variableLength.maxDepth !== 1) {
     return undefined;
   }
-  if (variableLength.collectPath) {
+  if (
+    variableLength.pathAlias !== undefined ||
+    variableLength.depthAlias !== undefined
+  ) {
     return undefined;
   }
 
@@ -527,6 +530,12 @@ function resolveTraversalCteLimit(
   }
 
   if (ast.traversals.length < 2) {
+    return undefined;
+  }
+
+  // Optional traversals require LEFT JOIN semantics. Limiting traversal CTE rows
+  // can incorrectly turn matched rows into unmatched (NULL) rows.
+  if (ast.traversals.some((traversal) => traversal.optional)) {
     return undefined;
   }
 
@@ -948,6 +957,8 @@ function compileTraversalCte(
   predicateIndex: PredicateIndex,
 ): SQL {
   const traversal = ast.traversals[traversalIndex]!;
+  const traversalLimitValue =
+    traversalIndex === ast.traversals.length - 1 ? traversalLimit : undefined;
 
   const previousNodeKinds = getNodeKindsForAlias(ast, traversal.joinFromAlias);
   const directEdgeKinds = [...new Set(traversal.edgeKinds)];
@@ -1068,13 +1079,13 @@ function compileTraversalCte(
   });
 
   if (inverseEdgeKinds.length === 0) {
-    if (traversalLimit !== undefined) {
+    if (traversalLimitValue !== undefined) {
       return sql`
         cte_${sql.raw(nodeAlias)} AS (
           SELECT * FROM (
             ${directBranch}
           ) AS traversal_rows
-          LIMIT ${traversalLimit}
+          LIMIT ${traversalLimitValue}
         )
       `;
     }
@@ -1115,7 +1126,7 @@ function compileTraversalCte(
     duplicateGuard,
   });
 
-  if (traversalLimit !== undefined) {
+  if (traversalLimitValue !== undefined) {
     return sql`
       cte_${sql.raw(nodeAlias)} AS (
         SELECT * FROM (
@@ -1123,7 +1134,7 @@ function compileTraversalCte(
           UNION ALL
           ${inverseBranch}
         ) AS traversal_rows
-        LIMIT ${traversalLimit}
+        LIMIT ${traversalLimitValue}
       )
     `;
   }
@@ -1442,7 +1453,7 @@ function fieldRefKey(field: FieldRef): string {
  * 2. Any explicit GROUP BY fields from ast.groupBy not already in projection
  *
  * IMPORTANT: Projected fields are added first because:
- * - SELECT uses field refs from selectAggregate which may not have valueType set
+ * - SELECT uses field refs from aggregate which may not have valueType set
  * - Explicit .groupBy() fields have valueType from schema introspection
  * - If GROUP BY uses different valueType than SELECT, PostgreSQL sees different expressions
  * - By preferring projected fields' valueType, GROUP BY matches SELECT exactly
@@ -1464,7 +1475,7 @@ function compileGroupBy(
 
   // Add all non-aggregate projected fields FIRST
   // This ensures GROUP BY expressions use the same valueType as SELECT expressions
-  // The field() helper used in selectAggregate doesn't set valueType, while
+  // The field() helper used in aggregate doesn't set valueType, while
   // explicit .groupBy() calls set valueType from schema introspection
   for (const projectedField of ast.projection.fields) {
     if (projectedField.source.__type === "field_ref") {

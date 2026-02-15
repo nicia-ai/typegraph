@@ -41,10 +41,12 @@ export type {
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
   SelectContext,
   StreamOptions,
+  TraversalExpansion,
 } from "./builder";
 
 // ============================================================

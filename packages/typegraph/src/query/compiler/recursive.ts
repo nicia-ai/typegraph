@@ -176,8 +176,8 @@ function compileRecursiveCte(
   const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
   const direction = traversal.direction;
   const vl = traversal.variableLength;
-  const shouldEnforceCycleCheck = !(vl.maxDepth > 0 && !vl.collectPath);
-  const shouldTrackPath = shouldEnforceCycleCheck || vl.collectPath;
+  const shouldEnforceCycleCheck = vl.cyclePolicy !== "allow";
+  const shouldTrackPath = shouldEnforceCycleCheck || vl.pathAlias !== undefined;
   const recursiveJoinRequiredColumns = new Set<string>(["id"]);
   if (previousNodeKinds.length > 1) {
     recursiveJoinRequiredColumns.add("kind");
@@ -559,14 +559,12 @@ function compileRecursiveProjection(
     sql`${sql.raw(nodeAlias)}_deleted_at`,
   ];
 
-  // Always include depth with the alias
-  const depthAlias = vl.depthAlias ?? `${nodeAlias}_depth`;
-  fields.push(sql`depth AS ${sql.raw(depthAlias)}`);
+  if (vl.depthAlias !== undefined) {
+    fields.push(sql`depth AS ${sql.raw(vl.depthAlias)}`);
+  }
 
-  // Include path if requested
-  if (vl.collectPath) {
-    const pathAlias = vl.pathAlias ?? `${nodeAlias}_path`;
-    fields.push(sql`path AS ${sql.raw(pathAlias)}`);
+  if (vl.pathAlias !== undefined) {
+    fields.push(sql`path AS ${sql.raw(vl.pathAlias)}`);
   }
 
   return sql.join(fields, sql`, `);

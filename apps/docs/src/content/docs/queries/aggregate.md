@@ -17,7 +17,7 @@ Aggregations are useful for:
 
 ## Basic Aggregation
 
-Use `groupBy()` and `selectAggregate()` with aggregate helper functions:
+Use `groupBy()` and `aggregate()` with aggregate helper functions:
 
 ```typescript
 import { count, field } from "@nicia-ai/typegraph";
@@ -28,7 +28,7 @@ const companySizes = await store
   .traverse("worksAt", "e")
   .to("Company", "c")
   .groupBy("c", "name")                    // Group by company name
-  .selectAggregate({
+  .aggregate({
     companyName: field("c", "name"),       // Include the grouped field
     employeeCount: count("p"),             // Count people in each group
   })
@@ -109,7 +109,7 @@ const departmentStats = await store
   .query()
   .from("Employee", "e")
   .groupBy("e", "department")
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     headcount: count("e"),
     uniqueRoles: countDistinct("e", "role"),
@@ -131,7 +131,7 @@ const breakdown = await store
   .from("Employee", "e")
   .groupBy("e", "department")
   .groupBy("e", "level")
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     level: field("e", "level"),
     count: count("e"),
@@ -158,7 +158,7 @@ const projectContributions = await store
   .traverse("author", "e")
   .to("Developer", "d")
   .groupByNode("d")                        // Group by developer node
-  .selectAggregate({
+  .aggregate({
     developerId: field("d", "id"),
     developerName: field("d", "name"),
     commitCount: count("c"),
@@ -179,7 +179,7 @@ const largeDepartments = await store
   .from("Employee", "e")
   .groupBy("e", "department")
   .having(havingGt(count("e"), 5))         // HAVING COUNT(e) > 5
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     headcount: count("e"),
   })
@@ -220,7 +220,7 @@ const qualifiedDepartments = await store
   .groupBy("e", "department")
   .having(havingGte(count("e"), 5))        // At least 5 employees
   .having(havingGte(avg("e", "salary"), 100000)) // Average salary >= 100k
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     headcount: count("e"),
     avgSalary: avg("e", "salary"),
@@ -243,7 +243,7 @@ const topContributors = await store
   .to("Developer", "dev")
   .groupBy("repo", "name")
   .groupBy("dev", "name")
-  .selectAggregate({
+  .aggregate({
     repository: field("repo", "name"),
     developer: field("dev", "name"),
     prCount: count("pr"),
@@ -262,7 +262,7 @@ const topDepartments = await store
   .query()
   .from("Employee", "e")
   .groupBy("e", "department")
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     headcount: count("e"),
     totalSalary: sum("e", "salary"),
@@ -285,7 +285,7 @@ const departmentMetrics = await store
   .to("PullRequest", "pr")
   .whereNode("pr", (pr) => pr.state.eq("merged"))
   .groupBy("dev", "department")
-  .selectAggregate({
+  .aggregate({
     department: field("dev", "department"),
     developerCount: countDistinct("dev"),
     totalPRs: count("pr"),
@@ -302,7 +302,7 @@ const activeReviewers = await store
   .to("PullRequest", "pr")
   .groupByNode("d")
   .having(havingGt(count("pr"), 10))
-  .selectAggregate({
+  .aggregate({
     developer: field("d", "name"),
     reviewCount: count("pr"),
   })
@@ -316,7 +316,7 @@ const repoHealth = await store
   .traverse("contains", "e")
   .to("PullRequest", "pr")
   .groupByNode("r")
-  .selectAggregate({
+  .aggregate({
     repo: field("r", "name"),
     openPRs: count("pr"),
     avgAge: avg("pr", "daysOpen"),

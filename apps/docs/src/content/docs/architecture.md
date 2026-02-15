@@ -383,8 +383,8 @@ WHERE step_2.props->>'status' = 'published';
 
 ### Recursive CTEs for Variable-Length Paths
 
-For `recursive()` traversals with cycle/path tracking enabled (unbounded traversals,
-or traversals that call `collectPath()`), TypeGraph generates recursive CTEs like:
+For `recursive()` traversals with cycle prevention enabled (the default),
+TypeGraph generates recursive CTEs like:
 
 ```sql
 WITH RECURSIVE path AS (
@@ -407,8 +407,9 @@ WITH RECURSIVE path AS (
 SELECT * FROM path;
 ```
 
-For bounded traversals (`maxHops(n)`) without `collectPath()`, TypeGraph uses a
-lighter recursive shape without path-array state and cycle predicates.
+When you opt into `cyclePolicy: "allow"` and do not project a path column,
+TypeGraph can use a lighter recursive shape without path-array state and
+cycle predicates.
 
 ## Vector Search Architecture
 

@@ -105,11 +105,13 @@ export {
   type PropsAccessor,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveTraversalOptions,
   type SelectableEdge,
   type SelectableNode,
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";

@@ -168,6 +168,63 @@ describe("Node Collections (SQLite)", () => {
       const page2 = await store.nodes.Person.find({ limit: 2, offset: 2 });
       expect(page2).toHaveLength(1);
     });
+
+    it("uses transaction backend for where-filtered find() inside transactions", async () => {
+      const baseBackend = backend;
+      let rootExecuteCount = 0;
+      let txExecuteCount = 0;
+
+      const observedBackend: GraphBackend = {
+        ...baseBackend,
+        async execute<T>(
+          query: Parameters<GraphBackend["execute"]>[0],
+        ): Promise<readonly T[]> {
+          rootExecuteCount++;
+          return baseBackend.execute<T>(query);
+        },
+        async transaction<T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          options?: Parameters<GraphBackend["transaction"]>[1],
+        ): Promise<T> {
+          return baseBackend.transaction(async (txBackend) => {
+            const observedTxBackend: TransactionBackend = {
+              ...txBackend,
+              async execute<T>(
+                query: Parameters<GraphBackend["execute"]>[0],
+              ): Promise<readonly T[]> {
+                txExecuteCount++;
+                return txBackend.execute<T>(query);
+              },
+            };
+            return fn(observedTxBackend);
+          }, options);
+        },
+      };
+
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.transaction(async (tx) => {
+        await tx.nodes.Person.create(
+          { name: "Transaction Person" },
+          { id: "tx-person" },
+        );
+
+        const txResults = await tx.nodes.Person.find({
+          where: (person) => person.id.eq("tx-person"),
+        });
+
+        expect(txResults).toHaveLength(1);
+        expect(txResults[0]!.id).toBe("tx-person");
+      });
+
+      expect(txExecuteCount).toBeGreaterThan(0);
+      expect(rootExecuteCount).toBe(0);
+
+      const committed = await observedStore.nodes.Person.find({
+        where: (person) => person.id.eq("tx-person"),
+      });
+      expect(committed).toHaveLength(1);
+    });
   });
 
   describe("store.nodes.*.count()", () => {

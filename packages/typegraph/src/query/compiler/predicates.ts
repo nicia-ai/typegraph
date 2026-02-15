@@ -26,6 +26,12 @@ import {
   type JsonPointer,
   jsonPointer,
 } from "../json-pointer";
+import {
+  getSingleSubqueryColumnValueType,
+  getSubqueryColumnCount,
+  isInSubqueryTypeCompatible,
+  isUnsupportedInSubqueryValueType,
+} from "../subquery-utils";
 import { type SqlSchema } from "./schema";
 
 // ============================================================
@@ -855,10 +861,41 @@ function compileInSubquery(
   expr: InSubquery,
   ctx: PredicateCompilerContext,
 ): SQL {
+  const subqueryColumnCount = getSubqueryColumnCount(expr.subquery);
+  if (subqueryColumnCount !== 1) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery must project exactly 1 column, but got ${subqueryColumnCount}`,
+      { subqueryColumnCount },
+    );
+  }
+
+  const fieldValueType = normalizeValueType(expr.field.valueType);
+  const subqueryValueType = getSingleSubqueryColumnValueType(expr.subquery);
+  const resolvedValueType = fieldValueType ?? subqueryValueType;
+
+  if (isUnsupportedInSubqueryValueType(resolvedValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN subquery does not support ${String(resolvedValueType)} values`,
+      { valueType: resolvedValueType },
+    );
+  }
+
+  if (!isInSubqueryTypeCompatible(fieldValueType, subqueryValueType)) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN type mismatch: field type "${String(fieldValueType)}" does not match subquery column type "${String(subqueryValueType)}"`,
+      {
+        fieldValueType,
+        subqueryValueType,
+      },
+    );
+  }
+
+  const valueType = fieldValueType ?? subqueryValueType;
   const graphId = expr.subquery.graphId ?? "";
-  const fieldSql = compileFieldTextValue(
+  const fieldSql = compileFieldValue(
     expr.field,
     ctx.dialect,
+    valueType,
     undefined,
     undefined,
     ctx.cteColumnPrefix,

@@ -38,8 +38,7 @@ const employments = await store
 | `edgeKind` | `string` | The edge kind to traverse |
 | `edgeAlias` | `string` | Unique alias for referencing this edge |
 | `options.direction` | `"out" \| "in"` | Traversal direction (default: `"out"`) |
-| `options.includeImplyingEdges` | `boolean` | Include edges that imply this edge via ontology |
-| `options.includeInverseEdges` | `boolean` | Include inverse edge kinds defined via ontology |
+| `options.expand` | `"none" \| "implying" \| "inverse" \| "all"` | Ontology edge expansion mode (default: `"inverse"`) |
 | `options.from` | `string` | Fan-out from a different node alias |
 
 ### optionalTraverse()
@@ -241,7 +240,7 @@ const connections = await store
   .query()
   .from("Person", "p")
   .whereNode("p", (p) => p.name.eq("Alice"))
-  .traverse("knows", "e", { includeImplyingEdges: true })
+  .traverse("knows", "e", { expand: "implying" })
   .to("Person", "other")
   .select((ctx) => ctx.other.name)
   .execute();
@@ -258,7 +257,7 @@ const relationships = await store
   .query()
   .from("Person", "p")
   .whereNode("p", (p) => p.name.eq("Alice"))
-  .traverse("manages", "e", { includeInverseEdges: true })
+  .traverse("manages", "e", { expand: "inverse" })
   .to("Person", "other")
   .select((ctx) => ({
     name: ctx.other.name,
@@ -272,10 +271,7 @@ const relationships = await store
 You can combine both options:
 
 ```typescript
-.traverse("knows", "e", {
-  includeImplyingEdges: true,
-  includeInverseEdges: true,
-})
+.traverse("knows", "e", { expand: "all" })
 ```
 
 ## Real-World Examples
