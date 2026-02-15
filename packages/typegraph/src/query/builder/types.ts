@@ -21,6 +21,7 @@ import {
   type GroupBySpec,
   type NodePredicate,
   type OrderSpec,
+  type ParameterRef,
   type PredicateExpression,
   type ProjectedField,
   type Traversal,
@@ -145,31 +146,37 @@ export type BaseFieldAccessor = Readonly<{
 
 export type StringFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    contains: (pattern: string) => Predicate;
-    startsWith: (pattern: string) => Predicate;
-    endsWith: (pattern: string) => Predicate;
-    like: (pattern: string) => Predicate;
-    ilike: (pattern: string) => Predicate;
+    contains: (pattern: string | ParameterRef) => Predicate;
+    startsWith: (pattern: string | ParameterRef) => Predicate;
+    endsWith: (pattern: string | ParameterRef) => Predicate;
+    like: (pattern: string | ParameterRef) => Predicate;
+    ilike: (pattern: string | ParameterRef) => Predicate;
   }>;
 
 export type NumberFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: number) => Predicate;
-    gte: (value: number) => Predicate;
-    lt: (value: number) => Predicate;
-    lte: (value: number) => Predicate;
-    between: (lower: number, upper: number) => Predicate;
+    gt: (value: number | ParameterRef) => Predicate;
+    gte: (value: number | ParameterRef) => Predicate;
+    lt: (value: number | ParameterRef) => Predicate;
+    lte: (value: number | ParameterRef) => Predicate;
+    between: (
+      lower: number | ParameterRef,
+      upper: number | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type BooleanFieldAccessor = BaseFieldAccessor;
 
 export type DateFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: Date | string) => Predicate;
-    gte: (value: Date | string) => Predicate;
-    lt: (value: Date | string) => Predicate;
-    lte: (value: Date | string) => Predicate;
-    between: (lower: Date | string, upper: Date | string) => Predicate;
+    gt: (value: Date | string | ParameterRef) => Predicate;
+    gte: (value: Date | string | ParameterRef) => Predicate;
+    lt: (value: Date | string | ParameterRef) => Predicate;
+    lte: (value: Date | string | ParameterRef) => Predicate;
+    between: (
+      lower: Date | string | ParameterRef,
+      upper: Date | string | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type ArrayFieldAccessor<U> = BaseFieldAccessor &

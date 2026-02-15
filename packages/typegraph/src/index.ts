@@ -295,6 +295,7 @@ export {
   jsonPointer,
   limitFragment,
   max,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_JSON_POINTER_DEPTH,
   MAX_RECURSIVE_DEPTH,
   min,

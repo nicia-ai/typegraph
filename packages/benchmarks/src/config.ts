@@ -16,6 +16,9 @@ const BASE_GUARDRAILS = {
   aggregateMsMax: 500,
   aggregateDistinctMsMax: 700,
   aggregateDistinctToAggregateRatioMax: 4,
+  cachedExecuteMsMax: 500,
+  preparedExecuteMsMax: 500,
+  preparedToCachedRatioMax: 2,
   tenHopMsMax: 250,
   recursiveHundredHopMsMax: 1000,
   recursiveHundredToTenHopRatioMax: 30,
@@ -32,7 +35,9 @@ const BACKEND_GUARDRAIL_OVERRIDES = {
     // PostgreSQL join planning/execution is slower than SQLite for this shape.
     threeHopMsMax: 1000,
     inverseTraversalMsMax: 1000,
+    inverseToForwardRatioMax: 30,
     aggregateDistinctMsMax: 1200,
+    preparedExecuteMsMax: 700,
   },
 } as const;
 
@@ -55,6 +60,9 @@ export type Guardrails = Readonly<{
   aggregateMsMax: number;
   aggregateDistinctMsMax: number;
   aggregateDistinctToAggregateRatioMax: number;
+  cachedExecuteMsMax: number;
+  preparedExecuteMsMax: number;
+  preparedToCachedRatioMax: number;
   tenHopMsMax: number;
   recursiveHundredHopMsMax: number;
   recursiveHundredToTenHopRatioMax: number;
@@ -83,6 +91,8 @@ export type QueryMetrics = Readonly<{
   threeHopMs: number;
   aggregateMs: number;
   aggregateDistinctMs: number;
+  cachedExecuteMs: number;
+  preparedExecuteMs: number;
   tenHopMs: number;
   recursiveHundredHopMs: number;
   recursiveThousandHopMs: number;

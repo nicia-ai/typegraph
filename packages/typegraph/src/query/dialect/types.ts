@@ -163,7 +163,7 @@ export interface DialectAdapter {
    * SQLite: LOWER(column) LIKE LOWER(pattern)
    * PostgreSQL: column ILIKE pattern
    */
-  ilike(column: SQL, pattern: string): SQL;
+  ilike(column: SQL, pattern: SQL | string): SQL;
 
   // ============================================================
   // Recursive CTE Path Operations

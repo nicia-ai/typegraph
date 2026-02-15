@@ -1,4 +1,4 @@
-import { count, countDistinct, field } from "@nicia-ai/typegraph";
+import { count, countDistinct, field, param } from "@nicia-ai/typegraph";
 
 import { BENCHMARK_CONFIG, type QueryMetrics } from "./config";
 import { type PerfStore } from "./graph";
@@ -33,6 +33,23 @@ async function benchmarkQuery(
 }
 
 export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
+  const cachedExecuteQuery = store
+    .query()
+    .from("User", "u")
+    .whereNode("u", (user) => user.id.eq("user_0"))
+    .traverse("follows", "e")
+    .to("User", "friend")
+    .select((context) => ({ friendName: context.friend.name }));
+
+  const preparedExecuteQuery = store
+    .query()
+    .from("User", "u")
+    .whereNode("u", (user) => user.id.eq(param("userId")))
+    .traverse("follows", "e")
+    .to("User", "friend")
+    .select((context) => ({ friendName: context.friend.name }))
+    .prepare();
+
   const forwardMs = await benchmarkQuery("forward traversal", async () => {
     await store
       .query()
@@ -43,6 +60,20 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
       .select((context) => ({ friendName: context.friend.name }))
       .execute();
   });
+
+  const cachedExecuteMs = await benchmarkQuery(
+    "cached execute (same query instance)",
+    async () => {
+      await cachedExecuteQuery.execute();
+    },
+  );
+
+  const preparedExecuteMs = await benchmarkQuery(
+    "prepared execute",
+    async () => {
+      await preparedExecuteQuery.execute({ userId: "user_0" });
+    },
+  );
 
   const reverseMs = await benchmarkQuery("reverse traversal", async () => {
     await store
@@ -227,6 +258,8 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     threeHopMs,
     aggregateMs,
     aggregateDistinctMs,
+    cachedExecuteMs,
+    preparedExecuteMs,
     tenHopMs,
     recursiveHundredHopMs,
     recursiveThousandHopMs,

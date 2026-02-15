@@ -13,6 +13,8 @@ import {
   type QueryBuilderState,
 } from "./types";
 
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
 /**
  * Result type for aggregate queries.
  * Maps field refs to their value types and aggregates to numbers.
@@ -36,6 +38,7 @@ export class ExecutableAggregateQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #fields: R;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R) {
     this.#config = config;
@@ -76,8 +79,17 @@ export class ExecutableAggregateQuery<
    * Compiles the query to a Drizzle SQL object.
    */
   compile(): SQL {
+    if (this.#cachedCompiled !== NOT_COMPUTED) {
+      return this.#cachedCompiled;
+    }
     const ast = this.toAst();
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+    const compiled = compileQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    this.#cachedCompiled = compiled;
+    return compiled;
   }
 
   /**

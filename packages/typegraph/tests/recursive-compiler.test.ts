@@ -396,7 +396,7 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("r.depth < 500");
     });
 
-    it("caps explicit maxDepth at MAX_EXPLICIT_RECURSIVE_DEPTH when exceeded", () => {
+    it("throws when explicit maxDepth exceeds MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
@@ -405,9 +405,9 @@ describe("compileVariableLengthQuery", () => {
         ],
       });
 
-      const sql = getSqlString(ast);
-
-      expect(sql).toContain(`r.depth < ${MAX_EXPLICIT_RECURSIVE_DEPTH}`);
+      expect(() => getSqlString(ast)).toThrow(
+        `maxHops(5000) exceeds maximum explicit depth of ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+      );
     });
 
     it("applies minDepth filter in final SELECT", () => {

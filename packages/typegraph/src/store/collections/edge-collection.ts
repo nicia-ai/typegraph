@@ -241,17 +241,22 @@ export function createEdgeCollection<
 
     async find(
       options?: Readonly<{
-        where?: (accessor: never) => unknown;
         from?: NodeRef;
         to?: NodeRef;
         limit?: number;
         offset?: number;
       }>,
     ): Promise<Edge<E>[]> {
-      // Edge predicate filtering via query builder is not yet supported
-      // (the query builder is node-centric; edges require traversals).
-      // The `where` parameter is accepted for API consistency but currently
-      // falls through to the backend path without property-level filtering.
+      const untypedOptions = options as
+        | Readonly<{ where?: unknown }>
+        | undefined;
+      if (untypedOptions?.where !== undefined) {
+        throw new Error(
+          `store.edges.${kind}.find({ where }) is not supported. ` +
+            `Use store.query().traverse(...).whereEdge(...) for edge property filters.`,
+        );
+      }
+
       const params: {
         graphId: string;
         kind: string;

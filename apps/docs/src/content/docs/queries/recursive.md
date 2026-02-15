@@ -204,8 +204,12 @@ To get unique nodes, deduplicate in your application or use [set operations](/qu
 Variable-length traversals use two depth caps:
 
 ```typescript
-import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import {
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
+  MAX_RECURSIVE_DEPTH,
+} from "@nicia-ai/typegraph";
 // MAX_RECURSIVE_DEPTH = 100 (when maxHops() is omitted)
+// MAX_EXPLICIT_RECURSIVE_DEPTH = 1000
 
 // Unbounded recursive traversal (implicitly capped at 100)
 .recursive()
@@ -215,9 +219,9 @@ import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 .recursive()
 .maxHops(200)
 
-// Explicit limits above 1000 are capped
+// Explicit limits above 1000 throw
 .recursive()
-.maxHops(2000) // Silently capped to 1000
+.maxHops(2000) // throws
 ```
 
 ## Real-World Examples

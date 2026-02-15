@@ -292,6 +292,18 @@ describe("Edge Collections (SQLite)", () => {
       expect(edges).toHaveLength(1);
       expect(edges[0]!.role).toBe("Engineer");
     });
+
+    it("rejects unsupported where filter options", async () => {
+      const find = store.edges.worksAt.find as (
+        options: Readonly<{ where: () => unknown }>,
+      ) => Promise<unknown>;
+
+      await expect(
+        find({
+          where: () => true,
+        }),
+      ).rejects.toThrow("store.edges.worksAt.find({ where }) is not supported");
+    });
   });
 
   describe("store.edges.*.update()", () => {

@@ -13,6 +13,7 @@ import {
   defineGraph,
   defineNode,
   inverseOf,
+  param as parameter,
   subClassOf,
 } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
@@ -879,6 +880,92 @@ describe("Query Execution (SQLite)", () => {
       const friends = results.map((r) => r.friend);
       expect(friends).toContain("Bob");
       expect(friends).toContain("Charlie");
+    });
+  });
+
+  describe("Prepared Queries", () => {
+    it("keeps parameterized string-operator semantics aligned with direct execute", async () => {
+      await store.nodes.Person.create({ name: "ALICIA" });
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains(parameter("needle")))
+        .select((context) => context.p.name)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "ali" });
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains("ali"))
+        .select((context) => context.p.name)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("falls back to full fetch when selective prepared mapping is insufficient", async () => {
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq(parameter("id")))
+        .select((context) => ({
+          id: context.p.id,
+          whole: context.p,
+        }))
+        .prepare();
+
+      const results = await prepared.execute({ id: "alice" });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]!.id).toBe("alice");
+      expect(results[0]!.whole.name).toBe("Alice");
+    });
+
+    it("supports prepared fallback when executeRaw is unavailable", async () => {
+      const {
+        compileSql: ignoredCompileSql,
+        executeRaw: ignoredExecuteRaw,
+        ...restBackend
+      } = backend;
+      void ignoredCompileSql;
+      void ignoredExecuteRaw;
+      const backendWithoutRaw: GraphBackend = { ...restBackend };
+      const storeWithoutRaw = createStore(testGraph, backendWithoutRaw);
+
+      const prepared = storeWithoutRaw
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.startsWith(parameter("prefix")))
+        .select((context) => context.p.name)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ prefix: "Al" });
+      const directResults = await storeWithoutRaw
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.startsWith("Al"))
+        .select((context) => context.p.name)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("validates missing and unknown prepared bindings", async () => {
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq(parameter("id")))
+        .select((context) => context.p.id)
+        .prepare();
+
+      await expect(prepared.execute()).rejects.toThrow(
+        'Missing bindings for parameter: "id"',
+      );
+      await expect(
+        prepared.execute({ id: "alice", extra: "unused" }),
+      ).rejects.toThrow('Unexpected bindings provided: "extra"');
     });
   });
 });

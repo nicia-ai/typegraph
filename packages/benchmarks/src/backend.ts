@@ -21,7 +21,7 @@ function getPostgresUrl(): string {
 
 async function resetPostgresTables(pool: Pool): Promise<void> {
   await pool.query(`
-    DROP TABLE IF EXISTS typegraph_embeddings CASCADE;
+    DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;
     DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
     DROP TABLE IF EXISTS typegraph_edges CASCADE;
     DROP TABLE IF EXISTS typegraph_nodes CASCADE;

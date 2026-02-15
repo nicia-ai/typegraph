@@ -602,17 +602,18 @@ store.edges.worksAt.findTo(
 
 #### `find(options?)`
 
-Finds edges with filtering.
+Finds edges with endpoint filtering.
 
 ```typescript
 store.edges.worksAt.find(options?: {
-  where?: (accessor) => Predicate;
   from?: TypedNodeRef<Person>;
   to?: TypedNodeRef<Company>;
   limit?: number;
   offset?: number;
 }): Promise<Edge<worksAt>[]>;
 ```
+
+For edge property filters, use the query builder with `whereEdge(...)`.
 
 #### `count(options?)`
 

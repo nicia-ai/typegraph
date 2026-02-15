@@ -11,6 +11,7 @@
  * executes via the standard `backend.execute` path.
  */
 import { type GraphBackend } from "../../backend/types";
+import { UnsupportedPredicateError } from "../../errors";
 import {
   type BetweenPredicate,
   type ComparisonPredicate,
@@ -26,6 +27,7 @@ import type { SqlDialect } from "../dialect/types";
 import {
   mapResults,
   mapSelectiveResults,
+  MissingSelectiveFieldError,
   transformPathColumns,
 } from "../execution";
 import { type SchemaIntrospector } from "../schema-introspector";
@@ -225,8 +227,11 @@ function fillPlaceholders(
 
 type PreparedQueryConfig<R> = Readonly<{
   ast: QueryAst;
+  unoptimizedAst: QueryAst;
   sqlText: string | undefined;
   sqlParams: readonly unknown[] | undefined;
+  unoptimizedSqlText: string | undefined;
+  unoptimizedSqlParams: readonly unknown[] | undefined;
   backend: GraphBackend;
   dialect: SqlDialect;
   graphId: string;
@@ -255,8 +260,11 @@ type PreparedQueryConfig<R> = Readonly<{
  */
 export class PreparedQuery<R> {
   readonly #ast: QueryAst;
+  readonly #unoptimizedAst: QueryAst;
   readonly #sqlText: string | undefined;
   readonly #sqlParams: readonly unknown[] | undefined;
+  readonly #unoptimizedSqlText: string | undefined;
+  readonly #unoptimizedSqlParams: readonly unknown[] | undefined;
   readonly #backend: GraphBackend;
   readonly #dialect: SqlDialect;
   readonly #graphId: string;
@@ -265,11 +273,16 @@ export class PreparedQuery<R> {
   readonly #selectiveFields: readonly SelectiveField[] | undefined;
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
+  readonly #parameterNames: ReadonlySet<string>;
+  #selectiveEnabled: boolean;
 
   constructor(config: PreparedQueryConfig<R>) {
     this.#ast = config.ast;
+    this.#unoptimizedAst = config.unoptimizedAst;
     this.#sqlText = config.sqlText;
     this.#sqlParams = config.sqlParams;
+    this.#unoptimizedSqlText = config.unoptimizedSqlText;
+    this.#unoptimizedSqlParams = config.unoptimizedSqlParams;
     this.#backend = config.backend;
     this.#dialect = config.dialect;
     this.#graphId = config.graphId;
@@ -278,6 +291,8 @@ export class PreparedQuery<R> {
     this.#selectiveFields = config.selectiveFields;
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
+    this.#parameterNames = collectParameterNames(this.#ast);
+    this.#selectiveEnabled = config.selectiveFields !== undefined;
   }
 
   /**
@@ -289,21 +304,49 @@ export class PreparedQuery<R> {
   async execute(
     bindings: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly R[]> {
-    // Fast path: pre-compiled SQL text + executeRaw
+    validateBindings(bindings, this.#parameterNames);
+
+    if (this.#selectiveEnabled && this.#selectiveFields !== undefined) {
+      try {
+        const rows = await this.#executeSelectiveRows(bindings);
+        return mapSelectiveResults<AliasMap, EdgeAliasMap, R>(
+          rows,
+          this.#state,
+          this.#selectiveFields,
+          this.#schemaIntrospector,
+          this.#selectFn,
+        );
+      } catch (error) {
+        if (
+          error instanceof MissingSelectiveFieldError ||
+          error instanceof UnsupportedPredicateError
+        ) {
+          this.#selectiveEnabled = false;
+          return this.#executeUnoptimized(bindings);
+        }
+        throw error;
+      }
+    }
+
+    return this.#executeUnoptimized(bindings);
+  }
+
+  async #executeSelectiveRows(
+    bindings: Readonly<Record<string, unknown>>,
+  ): Promise<readonly Record<string, unknown>[]> {
     if (
       this.#sqlText !== undefined &&
       this.#sqlParams !== undefined &&
       this.#backend.executeRaw !== undefined
     ) {
       const filledParams = fillPlaceholders(this.#sqlParams, bindings);
-      const rows = await this.#backend.executeRaw<Record<string, unknown>>(
+      const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
         this.#sqlText,
         filledParams,
       );
-      return this.#mapResults(rows);
+      return transformPathColumns(rawRows, this.#state, this.#dialect);
     }
 
-    // Fallback: substitute params in AST, recompile, execute via standard path
     const concreteAst = substituteParameters(this.#ast, bindings);
     const compiled = compileQuery(
       concreteAst,
@@ -312,26 +355,134 @@ export class PreparedQuery<R> {
     );
     const rawRows =
       await this.#backend.execute<Record<string, unknown>>(compiled);
-    const rows = transformPathColumns(rawRows, this.#state, this.#dialect);
-    return this.#mapResults(rows);
+    return transformPathColumns(rawRows, this.#state, this.#dialect);
   }
 
-  #mapResults(rows: readonly Record<string, unknown>[]): readonly R[] {
-    if (this.#selectiveFields !== undefined) {
-      return mapSelectiveResults<AliasMap, EdgeAliasMap, R>(
-        rows,
-        this.#state,
-        this.#selectiveFields,
-        this.#schemaIntrospector,
-        this.#selectFn,
-      );
-    }
-
+  async #executeUnoptimized(
+    bindings: Readonly<Record<string, unknown>>,
+  ): Promise<readonly R[]> {
+    const rows = await this.#executeUnoptimizedRows(bindings);
     return mapResults<AliasMap, EdgeAliasMap, R>(
       rows,
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+    );
+  }
+
+  async #executeUnoptimizedRows(
+    bindings: Readonly<Record<string, unknown>>,
+  ): Promise<readonly Record<string, unknown>[]> {
+    if (
+      this.#unoptimizedSqlText !== undefined &&
+      this.#unoptimizedSqlParams !== undefined &&
+      this.#backend.executeRaw !== undefined
+    ) {
+      const filledParams = fillPlaceholders(
+        this.#unoptimizedSqlParams,
+        bindings,
+      );
+      const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
+        this.#unoptimizedSqlText,
+        filledParams,
+      );
+      return transformPathColumns(rawRows, this.#state, this.#dialect);
+    }
+
+    const concreteAst = substituteParameters(this.#unoptimizedAst, bindings);
+    const compiled = compileQuery(
+      concreteAst,
+      this.#graphId,
+      this.#compileOptions,
+    );
+    const rawRows =
+      await this.#backend.execute<Record<string, unknown>>(compiled);
+    return transformPathColumns(rawRows, this.#state, this.#dialect);
+  }
+}
+
+function collectParameterNames(ast: QueryAst): ReadonlySet<string> {
+  const names = new Set<string>();
+
+  for (const predicate of ast.predicates) {
+    collectParameterNamesFromExpression(predicate.expression, names);
+  }
+
+  return names;
+}
+
+function collectParameterNamesFromExpression(
+  expression: PredicateExpression,
+  names: Set<string>,
+): void {
+  switch (expression.__type) {
+    case "comparison": {
+      if (isParameterRef(expression.right)) {
+        names.add(expression.right.name);
+      }
+      return;
+    }
+    case "string_op": {
+      if (isParameterRef(expression.pattern)) {
+        names.add(expression.pattern.name);
+      }
+      return;
+    }
+    case "between": {
+      if (isParameterRef(expression.lower)) {
+        names.add(expression.lower.name);
+      }
+      if (isParameterRef(expression.upper)) {
+        names.add(expression.upper.name);
+      }
+      return;
+    }
+    case "and":
+    case "or": {
+      for (const predicate of expression.predicates) {
+        collectParameterNamesFromExpression(predicate, names);
+      }
+      return;
+    }
+    case "not": {
+      collectParameterNamesFromExpression(expression.predicate, names);
+      return;
+    }
+    case "null_check":
+    case "array_op":
+    case "object_op":
+    case "aggregate_comparison":
+    case "exists":
+    case "in_subquery":
+    case "vector_similarity": {
+      return;
+    }
+  }
+}
+
+function validateBindings(
+  bindings: Readonly<Record<string, unknown>>,
+  expectedNames: ReadonlySet<string>,
+): void {
+  const missing: string[] = [];
+  for (const name of expectedNames) {
+    if (bindings[name] === undefined) {
+      missing.push(name);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing bindings for parameter${missing.length === 1 ? "" : "s"}: ${missing.map((name) => `"${name}"`).join(", ")}`,
+    );
+  }
+
+  const unknown = Object.keys(bindings).filter(
+    (name) => !expectedNames.has(name),
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unexpected bindings provided: ${unknown.map((name) => `"${name}"`).join(", ")}`,
     );
   }
 }

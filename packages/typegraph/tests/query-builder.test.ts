@@ -39,7 +39,11 @@ import {
   sum,
   ValidationError,
 } from "../src";
-import { compileQuery, compileSetOperation } from "../src/query/compiler";
+import {
+  compileQuery,
+  compileSetOperation,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
+} from "../src/query/compiler";
 
 /**
  * Helper to extract SQL string and params from a Drizzle SQL object for testing.
@@ -1851,6 +1855,16 @@ describe("QueryBuilder Variable-Length Paths", () => {
         .recursive()
         .maxHops(0);
     }).toThrow("maxHops must be >= 1");
+  });
+
+  it("throws for maxHops above MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .recursive()
+        .maxHops(MAX_EXPLICIT_RECURSIVE_DEPTH + 1);
+    }).toThrow(`maxHops must be <= ${MAX_EXPLICIT_RECURSIVE_DEPTH}`);
   });
 
   it("throws for minHops < 0", () => {

@@ -96,6 +96,25 @@ type DatabaseWithCompiler = Readonly<{
 }>;
 
 const EXECUTE_STATEMENT_CACHE_MAX = 256;
+const SQLITE_MAX_BIND_PARAMETERS = 999;
+const NODE_INSERT_PARAM_COUNT = 9;
+const EDGE_INSERT_PARAM_COUNT = 12;
+const SQLITE_NODE_INSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(SQLITE_MAX_BIND_PARAMETERS / NODE_INSERT_PARAM_COUNT),
+);
+const SQLITE_EDGE_INSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(SQLITE_MAX_BIND_PARAMETERS / EDGE_INSERT_PARAM_COUNT),
+);
+const SQLITE_GET_NODES_ID_CHUNK_SIZE = Math.max(
+  1,
+  SQLITE_MAX_BIND_PARAMETERS - 2,
+);
+const SQLITE_GET_EDGES_ID_CHUNK_SIZE = Math.max(
+  1,
+  SQLITE_MAX_BIND_PARAMETERS - 1,
+);
 
 // ============================================================
 // Utilities
@@ -246,6 +265,19 @@ function compileSqlQuery(
   return compiler.sqlToQuery(query);
 }
 
+function chunkArray<T>(
+  values: readonly T[],
+  size: number,
+): readonly (readonly T[])[] {
+  if (values.length <= size) return [values];
+
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -345,8 +377,10 @@ export function createSqliteBackend(
         return;
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertNodesBatch(tables, params, timestamp);
-      await execRun(query);
+      for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
+        const query = ops.buildInsertNodesBatch(tables, chunk, timestamp);
+        await execRun(query);
+      }
     },
 
     async insertNodesBatchReturning(
@@ -356,9 +390,13 @@ export function createSqliteBackend(
         return [];
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertNodesBatchReturning(tables, params, timestamp);
-      const rows = await execAll<Record<string, unknown>>(query);
-      return rows.map((row) => toNodeRow(row));
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
+        const query = ops.buildInsertNodesBatchReturning(tables, chunk, timestamp);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toNodeRow(row)));
+      }
+      return allRows;
     },
 
     async getNode(
@@ -377,9 +415,13 @@ export function createSqliteBackend(
       ids: readonly string[],
     ): Promise<readonly NodeRow[]> {
       if (ids.length === 0) return [];
-      const query = ops.buildGetNodes(tables, graphId, kind, ids);
-      const rows = await execAll<Record<string, unknown>>(query);
-      return rows.map((row) => toNodeRow(row));
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(ids, SQLITE_GET_NODES_ID_CHUNK_SIZE)) {
+        const query = ops.buildGetNodes(tables, graphId, kind, chunk);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toNodeRow(row)));
+      }
+      return allRows;
     },
 
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
@@ -442,8 +484,10 @@ export function createSqliteBackend(
         return;
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertEdgesBatch(tables, params, timestamp);
-      await execRun(query);
+      for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
+        const query = ops.buildInsertEdgesBatch(tables, chunk, timestamp);
+        await execRun(query);
+      }
     },
 
     async insertEdgesBatchReturning(
@@ -453,9 +497,13 @@ export function createSqliteBackend(
         return [];
       }
       const timestamp = nowIso();
-      const query = ops.buildInsertEdgesBatchReturning(tables, params, timestamp);
-      const rows = await execAll<Record<string, unknown>>(query);
-      return rows.map((row) => toEdgeRow(row));
+      const allRows: EdgeRow[] = [];
+      for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
+        const query = ops.buildInsertEdgesBatchReturning(tables, chunk, timestamp);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toEdgeRow(row)));
+      }
+      return allRows;
     },
 
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {
@@ -469,9 +517,13 @@ export function createSqliteBackend(
       ids: readonly string[],
     ): Promise<readonly EdgeRow[]> {
       if (ids.length === 0) return [];
-      const query = ops.buildGetEdges(tables, graphId, ids);
-      const rows = await execAll<Record<string, unknown>>(query);
-      return rows.map((row) => toEdgeRow(row));
+      const allRows: EdgeRow[] = [];
+      for (const chunk of chunkArray(ids, SQLITE_GET_EDGES_ID_CHUNK_SIZE)) {
+        const query = ops.buildGetEdges(tables, graphId, chunk);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toEdgeRow(row)));
+      }
+      return allRows;
     },
 
     async updateEdge(params: UpdateEdgeParams): Promise<EdgeRow> {

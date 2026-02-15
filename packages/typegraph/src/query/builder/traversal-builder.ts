@@ -8,6 +8,7 @@ import {
   type Traversal,
   type TraversalDirection,
 } from "../ast";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../compiler";
 import { jsonPointer } from "../json-pointer";
 import {
   arrayField,
@@ -161,6 +162,12 @@ export class TraversalBuilder<
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
     if (max < 1) {
       throw new Error("maxHops must be >= 1");
+    }
+    if (max > MAX_EXPLICIT_RECURSIVE_DEPTH) {
+      throw new Error(
+        `maxHops must be <= ${MAX_EXPLICIT_RECURSIVE_DEPTH}. ` +
+          `Use a smaller bound to prevent runaway recursive queries.`,
+      );
     }
     return new TraversalBuilder(
       this.#config,

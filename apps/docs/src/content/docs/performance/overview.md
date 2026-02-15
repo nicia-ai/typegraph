@@ -24,8 +24,10 @@ TypeGraph uses a deterministic performance sanity suite as its benchmark and reg
 The suite seeds a realistic graph shape and measures end-to-end query latency across:
 
 - forward and reverse traversals
+- inverse/symmetric traversal (`includeInverseEdges`)
 - 2-hop and 3-hop traversals
 - aggregate queries
+- cached execute vs prepared execute
 - deep traversals (10-hop, 100-hop recursive, 1000-hop recursive)
 
 Guardrail thresholds enforce expected behavior in CI (for example, traversal latency caps and
@@ -42,22 +44,40 @@ Current suite configuration:
 | Follows per user | 10 |
 | Posts per user | 5 |
 | Batch size | 250 |
-| Warmup iterations | 1 |
-| Sample iterations (median reported) | 5 |
+| Warmup iterations | 2 |
+| Sample iterations (median reported) | 7 |
 
-Current guardrails:
+Default guardrails:
 
 | Check | Threshold |
 |-------|-----------|
 | reverse/forward ratio | <= 6x |
+| inverse traversal latency | <= 500ms |
+| inverse/forward ratio | <= 10x |
 | 3-hop latency | <= 500ms |
 | 3-hop/2-hop ratio | <= 8x |
 | aggregate latency | <= 500ms |
+| aggregate distinct latency | <= 700ms |
+| aggregateDistinct/aggregate ratio | <= 4x |
+| cached execute latency | <= 500ms |
+| prepared execute latency | <= 500ms |
+| prepared/cached ratio | <= 2x |
 | 10-hop latency | <= 250ms |
 | 100-hop recursive latency | <= 1000ms |
 | 100-hop-recursive/10-hop ratio | <= 30x |
 | 1000-hop recursive latency | <= 5000ms |
 | 1000-hop-recursive/100-hop-recursive ratio | <= 50x |
+
+Backend-specific overrides:
+
+| Backend | Check | Threshold |
+|---------|-------|-----------|
+| SQLite | 1000-hop recursive latency | <= 7000ms |
+| PostgreSQL | inverse traversal latency | <= 1000ms |
+| PostgreSQL | inverse/forward ratio | <= 30x |
+| PostgreSQL | 3-hop latency | <= 1000ms |
+| PostgreSQL | aggregate distinct latency | <= 1200ms |
+| PostgreSQL | prepared execute latency | <= 700ms |
 
 ## Key Performance Features
 
@@ -138,7 +158,8 @@ For application-specific indexes on JSON properties, see [Indexes](/performance/
 
 Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
 The compiled SQL for each instance is cached internally — repeated `.execute()` calls on the same
-builder skip recompilation entirely. This is transparent and requires no API changes.
+builder skip recompilation entirely. This applies to standard queries, aggregate queries, and
+set-operation queries (`union`, `intersect`, `except`). This is transparent and requires no API changes.
 
 ```typescript
 const activeUsers = store

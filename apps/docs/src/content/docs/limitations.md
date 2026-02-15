@@ -44,7 +44,7 @@ if (backend.capabilities.transactions) {
 Variable-length traversals use two caps:
 
 1. Unbounded traversals (no `maxHops()`) are capped at 100 hops.
-2. Explicit `maxHops()` values are capped at 1000 hops.
+2. Explicit `maxHops()` values are validated up to 1000 hops (`maxHops(>1000)` throws).
 3. Explicit `maxHops()` without `collectPath()` uses a fast bounded mode that
    skips cycle-path tracking (nodes may be revisited across hops).
 
@@ -68,13 +68,13 @@ store
   .maxHops(200) // honored
   .to("Person", "manager");
 
-// Explicit limits above 1000 are capped
+// Explicit limits above 1000 throw
 store
   .query()
   .from("Person", "p")
   .traverse("reportsTo", "e")
   .recursive()
-  .maxHops(2000) // Capped to 1000
+  .maxHops(2000) // throws
   .to("Person", "manager");
 ```
 

@@ -12,7 +12,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
-import type { EdgeAccessor, NodeAccessor } from "../query/builder/types";
+import type { NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
 
@@ -498,10 +498,9 @@ export type EdgeCollection<
    */
   hardDelete: (id: string) => Promise<void>;
 
-  /** Find edges matching criteria */
+  /** Find edges matching endpoint and pagination criteria */
   find: (
     options?: Readonly<{
-      where?: (accessor: EdgeAccessor<E>) => Predicate;
       from?: TypedNodeRef<From>;
       to?: TypedNodeRef<To>;
       limit?: number;

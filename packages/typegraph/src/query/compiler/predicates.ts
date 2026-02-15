@@ -326,6 +326,40 @@ function compileStringPattern(op: string, pattern: string): string {
   }
 }
 
+/**
+ * Escapes wildcard characters in a SQL pattern parameter.
+ */
+function escapeLikePatternParameter(parameter: SQL): SQL {
+  return sql`REPLACE(REPLACE(REPLACE(${parameter}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')`;
+}
+
+/**
+ * Builds a SQL pattern expression for parameterized string operations.
+ */
+function compileParameterizedStringPattern(op: string, parameter: SQL): SQL {
+  switch (op) {
+    case "contains": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`'%' || ${escaped} || '%'`;
+    }
+    case "startsWith": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`${escaped} || '%'`;
+    }
+    case "endsWith": {
+      const escaped = escapeLikePatternParameter(parameter);
+      return sql`'%' || ${escaped}`;
+    }
+    case "like":
+    case "ilike": {
+      return parameter;
+    }
+    default: {
+      return escapeLikePatternParameter(parameter);
+    }
+  }
+}
+
 // ============================================================
 // Predicate Compilation
 // ============================================================
@@ -371,13 +405,18 @@ export function compilePredicateExpression(
         cteColumnPrefix,
       );
 
-      // Handle ParameterRef patterns — caller must provide the complete
-      // LIKE pattern (with % wildcards) in the bound parameter value.
-      // Case-insensitive matching is not applied; use LOWER() in the
-      // bound value or the database's collation settings for case-insensitivity.
       if (isParameterRef(expr.pattern)) {
-        const placeholder = sql.placeholder(expr.pattern.name);
-        return sql`${field} LIKE ${placeholder}`;
+        const placeholder = sql`${sql.placeholder(expr.pattern.name)}`;
+        const pattern = compileParameterizedStringPattern(expr.op, placeholder);
+        if (
+          expr.op === "ilike" ||
+          expr.op === "contains" ||
+          expr.op === "startsWith" ||
+          expr.op === "endsWith"
+        ) {
+          return dialect.ilike(field, pattern);
+        }
+        return sql`${field} LIKE ${pattern}`;
       }
 
       const pattern = compileStringPattern(expr.op, expr.pattern);

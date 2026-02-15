@@ -289,6 +289,9 @@ const youngAdults = await findByAge.execute({ minAge: 18, maxAge: 25 });
 const seniors = await findByAge.execute({ minAge: 65, maxAge: 120 });
 ```
 
+`prepared.execute(bindings)` validates bindings strictly: all declared parameters must be
+provided, and unknown binding keys are rejected.
+
 ### Supported Positions
 
 `param()` works with any scalar predicate:

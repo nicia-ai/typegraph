@@ -381,6 +381,22 @@ describe("UnionableQuery.compile", () => {
     expect(sqlString).toContain("UNION");
   });
 
+  it("reuses cached compiled SQL for repeated compile calls", () => {
+    const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("User", "u")
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const q2 = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("User", "u")
+      .select((ctx) => ({ id: ctx.u.id }));
+
+    const unionQuery = q1.union(q2);
+    const firstCompile = unionQuery.compile();
+    const secondCompile = unionQuery.compile();
+
+    expect(secondCompile).toBe(firstCompile);
+  });
+
   it("compiles UNION ALL to SQL", () => {
     const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("User", "u")

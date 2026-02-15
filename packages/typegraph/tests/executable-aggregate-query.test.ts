@@ -214,6 +214,21 @@ describe("ExecutableAggregateQuery.compile", () => {
     expect(sqlString).toContain("GROUP BY");
   });
 
+  it("reuses cached compiled SQL for repeated compile calls", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .selectAggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      });
+
+    const firstCompile = query.compile();
+    const secondCompile = query.compile();
+
+    expect(secondCompile).toBe(firstCompile);
+  });
+
   it("includes LIMIT and OFFSET in compiled SQL", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")

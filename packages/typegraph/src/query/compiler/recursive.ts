@@ -249,11 +249,13 @@ function compileRecursiveCte(
 
   // Max depth condition:
   // - unlimited traversals are capped at MAX_RECURSIVE_DEPTH
-  // - explicit maxDepth traversals are capped at MAX_EXPLICIT_RECURSIVE_DEPTH
-  const effectiveMaxDepth =
-    vl.maxDepth > 0 ?
-      Math.min(vl.maxDepth, MAX_EXPLICIT_RECURSIVE_DEPTH)
-    : MAX_RECURSIVE_DEPTH;
+  // - explicit maxDepth traversals must not exceed MAX_EXPLICIT_RECURSIVE_DEPTH
+  if (vl.maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH) {
+    throw new UnsupportedPredicateError(
+      `Recursive traversal maxHops(${vl.maxDepth}) exceeds maximum explicit depth of ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+    );
+  }
+  const effectiveMaxDepth = vl.maxDepth > 0 ? vl.maxDepth : MAX_RECURSIVE_DEPTH;
   const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
 
   const cycleCheck =

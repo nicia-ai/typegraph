@@ -327,6 +327,7 @@ export class ExecutableQuery<
     const selectiveFields = this.#getSelectiveFieldsForExecute();
     const ast =
       selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields };
+    const unoptimizedAst = baseAst;
 
     // Compile once
     const compileOptions = this.#compileOptions();
@@ -335,16 +336,33 @@ export class ExecutableQuery<
     // Pre-compile to SQL text if the backend supports it
     let sqlText: string | undefined;
     let sqlParams: readonly unknown[] | undefined;
+    let unoptimizedSqlText: string | undefined;
+    let unoptimizedSqlParams: readonly unknown[] | undefined;
     if (this.#config.backend.compileSql !== undefined) {
       const result = this.#config.backend.compileSql(compiled);
       sqlText = result.sql;
       sqlParams = result.params;
+
+      if (selectiveFields !== undefined) {
+        const unoptimizedCompiled = compileQuery(
+          unoptimizedAst,
+          this.#config.graphId,
+          compileOptions,
+        );
+        const unoptimizedResult =
+          this.#config.backend.compileSql(unoptimizedCompiled);
+        unoptimizedSqlText = unoptimizedResult.sql;
+        unoptimizedSqlParams = unoptimizedResult.params;
+      }
     }
 
     return new PreparedQuery({
       ast,
+      unoptimizedAst,
       sqlText,
       sqlParams,
+      unoptimizedSqlText,
+      unoptimizedSqlParams,
       backend: this.#config.backend,
       dialect: this.#config.dialect ?? "sqlite",
       graphId: this.#config.graphId,

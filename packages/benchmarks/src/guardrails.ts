@@ -88,6 +88,34 @@ export function evaluateGuardrails(
     });
   }
 
+  if (metrics.cachedExecuteMs > guardrails.cachedExecuteMsMax) {
+    violations.push({
+      label: "cached execute latency (ms)",
+      actual: metrics.cachedExecuteMs,
+      expectedMax: guardrails.cachedExecuteMsMax,
+    });
+  }
+
+  if (metrics.preparedExecuteMs > guardrails.preparedExecuteMsMax) {
+    violations.push({
+      label: "prepared execute latency (ms)",
+      actual: metrics.preparedExecuteMs,
+      expectedMax: guardrails.preparedExecuteMsMax,
+    });
+  }
+
+  const preparedToCached = safeRatio(
+    metrics.preparedExecuteMs,
+    metrics.cachedExecuteMs,
+  );
+  if (preparedToCached > guardrails.preparedToCachedRatioMax) {
+    violations.push({
+      label: "prepared/cached ratio",
+      actual: preparedToCached,
+      expectedMax: guardrails.preparedToCachedRatioMax,
+    });
+  }
+
   if (metrics.tenHopMs > guardrails.tenHopMsMax) {
     violations.push({
       label: "10-hop traversal latency (ms)",
@@ -152,6 +180,10 @@ export function printSummary(metrics: QueryMetrics): void {
     metrics.aggregateDistinctMs,
     metrics.aggregateMs,
   );
+  const preparedToCached = safeRatio(
+    metrics.preparedExecuteMs,
+    metrics.cachedExecuteMs,
+  );
   const recursiveHundredToTenHop = safeRatio(
     metrics.recursiveHundredHopMs,
     metrics.tenHopMs,
@@ -167,6 +199,7 @@ export function printSummary(metrics: QueryMetrics): void {
   console.log(
     `aggregateDistinct/aggregate: ${aggregateDistinctToAggregate.toFixed(2)}x`,
   );
+  console.log(`prepared/cached: ${preparedToCached.toFixed(2)}x`);
   console.log(
     `100-hop-recursive/10-hop: ${recursiveHundredToTenHop.toFixed(2)}x`,
   );

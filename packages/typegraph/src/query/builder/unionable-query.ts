@@ -23,6 +23,8 @@ import {
   type SelectContext,
 } from "./types";
 
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
 // Forward declaration for ExecutableQuery to avoid circular imports
 // G and R are used for type compatibility with ExecutableQuery but not accessed in the interface body
 interface ExecutableQueryLike<
@@ -56,6 +58,7 @@ type UnionableQueryState = Readonly<{
 export class UnionableQuery<G extends GraphDef, R> {
   readonly #config: QueryBuilderConfig;
   readonly #state: UnionableQueryState;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: UnionableQueryState) {
     this.#config = config;
@@ -183,11 +186,17 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Compiles the set operation to SQL.
    */
   compile(): SQL {
-    return compileSetOperation(
+    if (this.#cachedCompiled !== NOT_COMPUTED) {
+      return this.#cachedCompiled;
+    }
+
+    const compiled = compileSetOperation(
       this.toAst(),
       this.#config.graphId,
       this.#compileOptions(),
     );
+    this.#cachedCompiled = compiled;
+    return compiled;
   }
 
   /**
