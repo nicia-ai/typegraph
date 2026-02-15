@@ -30,10 +30,12 @@ import {
   type CountEdgesByKindParams,
   type CountEdgesFromParams,
   type CountNodesByKindParams,
+  type CreateVectorIndexParams,
   type DeleteEdgeParams,
   type DeleteEmbeddingParams,
   type DeleteNodeParams,
   type DeleteUniqueParams,
+  type DropVectorIndexParams,
   type EdgeExistsBetweenParams,
   type EdgeRow,
   type EmbeddingRow,
@@ -62,12 +64,19 @@ import {
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
+  type PostgresExecutionAdapter,
 } from "./execution/postgres-execution";
 import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
+import {
+  createPostgresVectorIndex,
+  dropPostgresVectorIndex,
+  generateVectorIndexName,
+  type VectorIndexOptions,
+} from "./vector-index";
 
 // ============================================================
 // Types
@@ -301,41 +310,97 @@ export function createPostgresBackend(
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
   const executionAdapter = createPostgresExecutionAdapter(db);
-
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
   };
   const operationStrategy = createPostgresOperationStrategy(tables);
+  const operations = createPostgresOperationBackend({
+    db,
+    executionAdapter,
+    operationStrategy,
+    tableNames,
+  });
 
-  /**
-   * Execute a query and return all rows.
-   */
+  const backend: GraphBackend = {
+    ...operations,
+
+    async setActiveSchema(graphId: string, version: number): Promise<void> {
+      await backend.transaction(async (txBackend) => {
+        await txBackend.setActiveSchema(graphId, version);
+      });
+    },
+
+    async transaction<T>(
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      const txConfig = options?.isolationLevel
+        ? {
+            isolationLevel: options.isolationLevel.replace("_", " ") as
+              | "read uncommitted"
+              | "read committed"
+              | "repeatable read"
+              | "serializable",
+          }
+        : undefined;
+
+      return db.transaction(async (tx) => {
+        const txBackend = createTransactionBackend({
+          db: tx as unknown as AnyPgDatabase,
+          operationStrategy,
+          tableNames,
+        });
+        return fn(txBackend);
+      }, txConfig);
+    },
+
+    async close(): Promise<void> {
+      // Drizzle doesn't expose a close method
+      // Users manage connection lifecycle themselves
+    },
+  };
+
+  return backend;
+}
+
+type CreatePostgresOperationBackendOptions = Readonly<{
+  db: AnyPgDatabase;
+  executionAdapter: PostgresExecutionAdapter;
+  operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
+  tableNames: SqlTableNames;
+}>;
+
+type CreatePostgresTransactionBackendOptions = Readonly<{
+  db: AnyPgDatabase;
+  executionAdapter?: PostgresExecutionAdapter;
+  operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
+  tableNames: SqlTableNames;
+}>;
+
+function createPostgresOperationBackend(
+  options: CreatePostgresOperationBackendOptions,
+): TransactionBackend {
+  const { db, executionAdapter, operationStrategy, tableNames } = options;
+
   async function execAll<T>(query: SQL): Promise<T[]> {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const result: { rows: T[] } = await db.execute(query);
     return result.rows;
   }
 
-  /**
-   * Execute a query and return the first row.
-   */
   async function execGet<T>(query: SQL): Promise<T | undefined> {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const result: { rows: T[] } = await db.execute(query);
     return result.rows[0];
   }
 
-  /**
-   * Execute a modification query.
-   */
   async function execRun(query: SQL): Promise<void> {
     await db.execute(query);
   }
 
-  // Create the backend operations
-  const backend: GraphBackend = {
+  const operationBackend: TransactionBackend = {
     dialect: "postgres",
     capabilities: POSTGRES_VECTOR_CAPABILITIES,
     tableNames,
@@ -378,7 +443,8 @@ export function createPostgresBackend(
       const timestamp = nowIso();
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(params, POSTGRES_NODE_INSERT_BATCH_SIZE)) {
-        const query = operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
+        const query =
+          operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -425,22 +491,20 @@ export function createPostgresBackend(
     },
 
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
-      // Delete associated uniqueness entries
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execRun(deleteUniquesQuery);
 
-      // Delete associated embeddings
-      const deleteEmbeddingsQuery = operationStrategy.buildHardDeleteEmbeddingsByNode(
-        params.graphId,
-        params.kind,
-        params.id,
-      );
+      const deleteEmbeddingsQuery =
+        operationStrategy.buildHardDeleteEmbeddingsByNode(
+          params.graphId,
+          params.kind,
+          params.id,
+        );
       await execRun(deleteEmbeddingsQuery);
 
-      // Delete the node itself
       const query = operationStrategy.buildHardDeleteNode(params);
       await execRun(query);
     },
@@ -483,7 +547,8 @@ export function createPostgresBackend(
       const timestamp = nowIso();
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(params, POSTGRES_EDGE_INSERT_BATCH_SIZE)) {
-        const query = operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
+        const query =
+          operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -534,7 +599,6 @@ export function createPostgresBackend(
     async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
       const query = operationStrategy.buildCountEdgesFrom(params);
       const row = await execGet<{ count: string | number }>(query);
-      // PostgreSQL returns count as string for bigint
       return Number(row?.count ?? 0);
     },
 
@@ -590,15 +654,13 @@ export function createPostgresBackend(
       const query = operationStrategy.buildInsertUnique(params);
       const result = await execGet<{ node_id: string }>(query);
 
-      // Check if the returned node_id matches our input
-      // If different, another node holds this key (race condition or conflict)
       if (result && result.node_id !== params.nodeId) {
         throw new UniquenessError({
           constraintName: params.constraintName,
           kind: params.nodeKind,
           existingId: result.node_id,
           newId: params.nodeId,
-          fields: [], // Fields not available at this level
+          fields: [],
         });
       }
     },
@@ -690,6 +752,55 @@ export function createPostgresBackend(
       }));
     },
 
+    async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      const indexOptions: VectorIndexOptions = {
+        graphId: params.graphId,
+        nodeKind: params.nodeKind,
+        fieldPath: params.fieldPath,
+        dimensions: params.dimensions,
+        embeddingsTableName: tableNames.embeddings,
+        indexType: params.indexType,
+        metric: params.metric,
+        ...(params.indexParams?.m === undefined
+          ? {}
+          : { hnswM: params.indexParams.m }),
+        ...(params.indexParams?.efConstruction === undefined
+          ? {}
+          : { hnswEfConstruction: params.indexParams.efConstruction }),
+        ...(params.indexParams?.lists === undefined
+          ? {}
+          : { ivfflatLists: params.indexParams.lists }),
+      };
+
+      const result = await createPostgresVectorIndex(db, indexOptions);
+
+      if (!result.success) {
+        throw new Error(
+          result.message ?? "Failed to create PostgreSQL vector index",
+        );
+      }
+    },
+
+    async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
+      const metrics =
+        POSTGRES_VECTOR_CAPABILITIES.vector?.metrics ?? (["cosine"] as const);
+
+      for (const metric of metrics) {
+        const indexName = generateVectorIndexName(
+          params.graphId,
+          params.nodeKind,
+          params.fieldPath,
+          metric,
+        );
+        const result = await dropPostgresVectorIndex(db, indexName);
+        if (!result.success) {
+          throw new Error(
+            result.message ?? "Failed to drop PostgreSQL vector index",
+          );
+        }
+      }
+    },
+
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
@@ -699,69 +810,33 @@ export function createPostgresBackend(
     compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },
-
-    // === Transaction ===
-
-    async transaction<T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
-      options?: TransactionOptions,
-    ): Promise<T> {
-      // Map isolation levels to Drizzle format
-      const txConfig = options?.isolationLevel
-        ? {
-            isolationLevel: options.isolationLevel.replace("_", " ") as
-              | "read uncommitted"
-              | "read committed"
-              | "repeatable read"
-              | "serializable",
-          }
-        : undefined;
-
-      return db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend(
-          tx as unknown as AnyPgDatabase,
-          tables,
-        );
-        return fn(txBackend);
-      }, txConfig);
-    },
-
-    // === Lifecycle ===
-
-    async close(): Promise<void> {
-      // Drizzle doesn't expose a close method
-      // Users manage connection lifecycle themselves
-    },
   };
 
   const executeCompiled = executionAdapter.executeCompiled;
   if (executeCompiled !== undefined) {
-    (backend as { executeRaw?: GraphBackend["executeRaw"] }).executeRaw = async <T>(
+    (operationBackend as { executeRaw?: TransactionBackend["executeRaw"] }).executeRaw = async function <T>(
       sqlText: string,
       params: readonly unknown[],
-    ): Promise<readonly T[]> => {
+    ): Promise<readonly T[]> {
       return executeCompiled<T>({ params, sql: sqlText });
     };
   }
 
-  return backend;
+  return operationBackend;
 }
 
-/**
- * Creates a transaction backend from a Drizzle transaction.
- */
 function createTransactionBackend(
-  tx: AnyPgDatabase,
-  tables: PostgresTables,
+  options: CreatePostgresTransactionBackendOptions,
 ): TransactionBackend {
-  // Create a new backend using the transaction
-  const txBackend = createPostgresBackend(tx, { tables });
+  const txExecutionAdapter =
+    options.executionAdapter ?? createPostgresExecutionAdapter(options.db);
 
-  // Return without transaction and close methods
-  const { transaction: _tx, close: _close, ...ops } = txBackend;
-  void _tx;
-  void _close;
-  return ops;
+  return createPostgresOperationBackend({
+    db: options.db,
+    executionAdapter: txExecutionAdapter,
+    operationStrategy: options.operationStrategy,
+    tableNames: options.tableNames,
+  });
 }
 
 // Re-export schema utilities

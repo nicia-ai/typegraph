@@ -1,4 +1,4 @@
-import { type SQL } from "drizzle-orm";
+import { type SQL, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import {
@@ -35,6 +35,16 @@ type DatabaseWithSession = Readonly<{
   session?: SessionLike;
 }>;
 
+export type SqliteExecutionProfileHints = Readonly<{
+  isD1?: boolean;
+  isSync?: boolean;
+}>;
+
+type SqliteExecutionAdapterOptions = Readonly<{
+  profileHints?: SqliteExecutionProfileHints;
+  statementCacheMax?: number;
+}>;
+
 export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 export type SqliteExecutionProfile = Readonly<{
@@ -59,15 +69,50 @@ function getSessionName(db: AnySqliteDatabase): string | undefined {
   return databaseWithSession._?.session?.constructor?.name;
 }
 
-function isD1Database(db: AnySqliteDatabase): boolean {
+function isD1DatabaseBySessionName(db: AnySqliteDatabase): boolean {
   return getSessionName(db) === "SQLiteD1Session";
 }
 
-function isSyncDatabase(db: AnySqliteDatabase): boolean {
+function isSyncDatabaseBySessionName(db: AnySqliteDatabase): boolean {
   const sessionName = getSessionName(db);
   return (
     sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession"
   );
+}
+
+function detectSyncProfile(
+  db: AnySqliteDatabase,
+  profileHints: SqliteExecutionProfileHints,
+): boolean {
+  if (profileHints.isSync !== undefined) {
+    return profileHints.isSync;
+  }
+
+  const sessionName = getSessionName(db);
+  if (sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession") {
+    return true;
+  }
+  if (sessionName === "SQLiteD1Session") {
+    return false;
+  }
+
+  try {
+    const probeResult = db.get(sql`SELECT 1 AS __typegraph_sync_probe__`);
+    return !(probeResult instanceof Promise);
+  } catch {
+    return isSyncDatabaseBySessionName(db);
+  }
+}
+
+function detectD1Profile(
+  db: AnySqliteDatabase,
+  profileHints: SqliteExecutionProfileHints,
+): boolean {
+  if (profileHints.isD1 !== undefined) {
+    return profileHints.isD1;
+  }
+
+  return isD1DatabaseBySessionName(db);
 }
 
 function resolveSqliteClient(
@@ -135,15 +180,23 @@ function createPreparedStatementExecutor(
 
 export function createSqliteExecutionAdapter(
   db: AnySqliteDatabase,
-  statementCacheMax: number = DEFAULT_PREPARED_STATEMENT_CACHE_MAX,
+  statementCacheMaxOrOptions: number | SqliteExecutionAdapterOptions = {},
 ): SqliteExecutionAdapter {
+  const options: SqliteExecutionAdapterOptions =
+    typeof statementCacheMaxOrOptions === "number"
+      ? { statementCacheMax: statementCacheMaxOrOptions }
+      : statementCacheMaxOrOptions;
+  const statementCacheMax =
+    options.statementCacheMax ?? DEFAULT_PREPARED_STATEMENT_CACHE_MAX;
+  const profileHints = options.profileHints ?? {};
+
   const profileBase: Readonly<{
     isD1: boolean;
     isSync: boolean;
     sqliteClient: SqliteClientWithPrepare | undefined;
   }> = {
-    isD1: isD1Database(db),
-    isSync: isSyncDatabase(db),
+    isD1: detectD1Profile(db, profileHints),
+    isSync: detectSyncProfile(db, profileHints),
     sqliteClient: resolveSqliteClient(db),
   };
 

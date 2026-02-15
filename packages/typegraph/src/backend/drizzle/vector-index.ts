@@ -59,6 +59,8 @@ export type VectorIndexOptions = Readonly<{
   hnswEfConstruction?: number;
   /** IVFFlat-specific: number of inverted lists (default: 100) */
   ivfflatLists?: number;
+  /** Embeddings table name. Defaults to typegraph_node_embeddings. */
+  embeddingsTableName?: string;
 }>;
 
 /**
@@ -85,6 +87,10 @@ function sanitizeIdentifier(s: string): string {
     .toLowerCase()
     .replaceAll(/[^a-z0-9_]/g, "_")
     .slice(0, 20);
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 /**
@@ -170,6 +176,7 @@ export async function createPostgresVectorIndex(
     nodeKind,
     fieldPath,
     dimensions,
+    embeddingsTableName = "typegraph_node_embeddings",
     indexType = "hnsw",
     metric = "cosine",
     hnswM = 16,
@@ -185,6 +192,7 @@ export async function createPostgresVectorIndex(
 
   const indexName = generateVectorIndexName(graphId, nodeKind, fieldPath, metric);
   const operatorClass = getOperatorClass(metric);
+  const quotedEmbeddingsTableName = quoteIdentifier(embeddingsTableName);
 
   // Validate that the generated index name is safe
   assertSafeIdentifier(indexName, "indexName");
@@ -203,7 +211,7 @@ export async function createPostgresVectorIndex(
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
       CREATE INDEX IF NOT EXISTS ${indexName}
-      ON typegraph_node_embeddings
+      ON ${quotedEmbeddingsTableName}
       USING hnsw ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (m = ${hnswM}, ef_construction = ${hnswEfConstruction})
       WHERE graph_id = ${safeGraphId}
@@ -216,7 +224,7 @@ export async function createPostgresVectorIndex(
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
       CREATE INDEX IF NOT EXISTS ${indexName}
-      ON typegraph_node_embeddings
+      ON ${quotedEmbeddingsTableName}
       USING ivfflat ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (lists = ${ivfflatLists})
       WHERE graph_id = ${safeGraphId}

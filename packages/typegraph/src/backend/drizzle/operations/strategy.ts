@@ -162,125 +162,89 @@ export type PostgresOperationStrategy = Readonly<
   CommonOperationStrategy & PostgresVectorOperationStrategy
 >;
 
+type TableOperationBuilder = (
+  tables: Tables,
+  ...args: never[]
+) => SQL;
+
+type TableOperationBuilderMap = Readonly<Record<string, TableOperationBuilder>>;
+
+type BoundTableOperationBuilderMap<TBuilders extends TableOperationBuilderMap> = Readonly<{
+  [K in keyof TBuilders]: TBuilders[K] extends (
+    tables: Tables,
+    ...args: infer TArguments
+  ) => SQL
+    ? (...args: TArguments) => SQL
+    : never;
+}>;
+
+function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
+  tables: Tables,
+  builders: TBuilders,
+): BoundTableOperationBuilderMap<TBuilders> {
+  const boundEntries = Object.entries(builders).map(([name, builder]) => {
+    function boundBuilder(...args: never[]): SQL {
+      return builder(tables, ...args);
+    }
+
+    return [name, boundBuilder] as const;
+  });
+
+  return Object.fromEntries(boundEntries) as BoundTableOperationBuilderMap<TBuilders>;
+}
+
+const COMMON_TABLE_OPERATION_BUILDERS = {
+  buildInsertNode,
+  buildInsertNodeNoReturn,
+  buildInsertNodesBatch,
+  buildInsertNodesBatchReturning,
+  buildGetNode,
+  buildGetNodes,
+  buildUpdateNode,
+  buildDeleteNode,
+  buildHardDeleteNode,
+  buildInsertEdge,
+  buildInsertEdgeNoReturn,
+  buildInsertEdgesBatch,
+  buildInsertEdgesBatchReturning,
+  buildGetEdge,
+  buildGetEdges,
+  buildUpdateEdge,
+  buildDeleteEdge,
+  buildHardDeleteEdge,
+  buildCountEdgesFrom,
+  buildEdgeExistsBetween,
+  buildFindEdgesConnectedTo,
+  buildFindNodesByKind,
+  buildCountNodesByKind,
+  buildFindEdgesByKind,
+  buildCountEdgesByKind,
+  buildDeleteUnique,
+  buildHardDeleteUniquesByNode,
+  buildHardDeleteEmbeddingsByNode,
+  buildCheckUnique,
+  buildGetSchemaVersion,
+} as const satisfies TableOperationBuilderMap;
+
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: Dialect,
 ): CommonOperationStrategy {
+  const tableOperations = bindTableOperationBuilders(
+    tables,
+    COMMON_TABLE_OPERATION_BUILDERS,
+  );
+
   return {
-    buildInsertNode(params: InsertNodeParams, timestamp: string): SQL {
-      return buildInsertNode(tables, params, timestamp);
-    },
-    buildInsertNodeNoReturn(params: InsertNodeParams, timestamp: string): SQL {
-      return buildInsertNodeNoReturn(tables, params, timestamp);
-    },
-    buildInsertNodesBatch(
-      params: readonly InsertNodeParams[],
-      timestamp: string,
-    ): SQL {
-      return buildInsertNodesBatch(tables, params, timestamp);
-    },
-    buildInsertNodesBatchReturning(
-      params: readonly InsertNodeParams[],
-      timestamp: string,
-    ): SQL {
-      return buildInsertNodesBatchReturning(tables, params, timestamp);
-    },
-    buildGetNode(graphId: string, kind: string, id: string): SQL {
-      return buildGetNode(tables, graphId, kind, id);
-    },
-    buildGetNodes(graphId: string, kind: string, ids: readonly string[]): SQL {
-      return buildGetNodes(tables, graphId, kind, ids);
-    },
-    buildUpdateNode(params: UpdateNodeParams, timestamp: string): SQL {
-      return buildUpdateNode(tables, params, timestamp);
-    },
-    buildDeleteNode(params: DeleteNodeParams, timestamp: string): SQL {
-      return buildDeleteNode(tables, params, timestamp);
-    },
-    buildHardDeleteNode(params: HardDeleteNodeParams): SQL {
-      return buildHardDeleteNode(tables, params);
-    },
-    buildInsertEdge(params: InsertEdgeParams, timestamp: string): SQL {
-      return buildInsertEdge(tables, params, timestamp);
-    },
-    buildInsertEdgeNoReturn(params: InsertEdgeParams, timestamp: string): SQL {
-      return buildInsertEdgeNoReturn(tables, params, timestamp);
-    },
-    buildInsertEdgesBatch(
-      params: readonly InsertEdgeParams[],
-      timestamp: string,
-    ): SQL {
-      return buildInsertEdgesBatch(tables, params, timestamp);
-    },
-    buildInsertEdgesBatchReturning(
-      params: readonly InsertEdgeParams[],
-      timestamp: string,
-    ): SQL {
-      return buildInsertEdgesBatchReturning(tables, params, timestamp);
-    },
-    buildGetEdge(graphId: string, id: string): SQL {
-      return buildGetEdge(tables, graphId, id);
-    },
-    buildGetEdges(graphId: string, ids: readonly string[]): SQL {
-      return buildGetEdges(tables, graphId, ids);
-    },
-    buildUpdateEdge(params: UpdateEdgeParams, timestamp: string): SQL {
-      return buildUpdateEdge(tables, params, timestamp);
-    },
-    buildDeleteEdge(params: DeleteEdgeParams, timestamp: string): SQL {
-      return buildDeleteEdge(tables, params, timestamp);
-    },
-    buildHardDeleteEdge(params: HardDeleteEdgeParams): SQL {
-      return buildHardDeleteEdge(tables, params);
-    },
-    buildCountEdgesFrom(params: CountEdgesFromParams): SQL {
-      return buildCountEdgesFrom(tables, params);
-    },
-    buildEdgeExistsBetween(params: EdgeExistsBetweenParams): SQL {
-      return buildEdgeExistsBetween(tables, params);
-    },
-    buildFindEdgesConnectedTo(params: FindEdgesConnectedToParams): SQL {
-      return buildFindEdgesConnectedTo(tables, params);
-    },
-    buildFindNodesByKind(params: FindNodesByKindParams): SQL {
-      return buildFindNodesByKind(tables, params);
-    },
-    buildCountNodesByKind(params: CountNodesByKindParams): SQL {
-      return buildCountNodesByKind(tables, params);
-    },
-    buildFindEdgesByKind(params: FindEdgesByKindParams): SQL {
-      return buildFindEdgesByKind(tables, params);
-    },
-    buildCountEdgesByKind(params: CountEdgesByKindParams): SQL {
-      return buildCountEdgesByKind(tables, params);
-    },
+    ...tableOperations,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
-    },
-    buildDeleteUnique(params: DeleteUniqueParams, timestamp: string): SQL {
-      return buildDeleteUnique(tables, params, timestamp);
-    },
-    buildHardDeleteUniquesByNode(graphId: string, nodeId: string): SQL {
-      return buildHardDeleteUniquesByNode(tables, graphId, nodeId);
-    },
-    buildHardDeleteEmbeddingsByNode(
-      graphId: string,
-      nodeKind: string,
-      nodeId: string,
-    ): SQL {
-      return buildHardDeleteEmbeddingsByNode(tables, graphId, nodeKind, nodeId);
-    },
-    buildCheckUnique(params: CheckUniqueParams): SQL {
-      return buildCheckUnique(tables, params);
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);
     },
     buildInsertSchema(params: InsertSchemaParams, timestamp: string): SQL {
       return buildInsertSchema(tables, params, timestamp, dialect);
-    },
-    buildGetSchemaVersion(graphId: string, version: number): SQL {
-      return buildGetSchemaVersion(tables, graphId, version);
     },
     buildSetActiveSchema(
       graphId: string,

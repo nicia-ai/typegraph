@@ -70,6 +70,20 @@ describe("sqlite execution adapter", () => {
       sqliteClient.prepare = originalPrepare;
     }
   });
+
+  it("respects explicit execution profile hints", () => {
+    const db = createTestDatabase();
+    const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+      profileHints: {
+        isD1: true,
+        isSync: false,
+      },
+    });
+
+    expect(adapter.profile.isD1).toBe(true);
+    expect(adapter.profile.isSync).toBe(false);
+    expect(adapter.profile.supportsCompiledExecution).toBe(false);
+  });
 });
 
 describe("postgres execution adapter", () => {

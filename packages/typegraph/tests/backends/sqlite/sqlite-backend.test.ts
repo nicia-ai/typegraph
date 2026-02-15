@@ -345,6 +345,55 @@ describe("Store with SQLite Backend", () => {
     expect(fetchedPerson).toBeDefined();
   });
 
+  it("keeps sync transaction scope isolated from concurrent operations", async () => {
+    const backend = createSqliteBackend(db);
+
+    const transactionPromise = backend.transaction(async (txBackend) => {
+      await txBackend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "tx-person",
+        props: { name: "Tx User" },
+      });
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 30);
+      });
+
+      throw new Error("rollback transaction");
+    });
+
+    const outsideInsertPromise = (async () => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 5);
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "outside-person",
+        props: { name: "Outside User" },
+      });
+    })();
+
+    await expect(transactionPromise).rejects.toThrow("rollback transaction");
+    await outsideInsertPromise;
+
+    const rolledBackNode = await backend.getNode(
+      "test_graph",
+      "Person",
+      "tx-person",
+    );
+    const outsideNode = await backend.getNode(
+      "test_graph",
+      "Person",
+      "outside-person",
+    );
+
+    expect(rolledBackNode).toBeUndefined();
+    expect(outsideNode).toBeDefined();
+  });
+
   it("updates nodes", async () => {
     const backend = createSqliteBackend(db);
     const store = createStore(testGraph, backend);

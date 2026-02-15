@@ -29,10 +29,12 @@ import {
   type CountEdgesByKindParams,
   type CountEdgesFromParams,
   type CountNodesByKindParams,
+  type CreateVectorIndexParams,
   D1_CAPABILITIES,
   type DeleteEdgeParams,
   type DeleteNodeParams,
   type DeleteUniqueParams,
+  type DropVectorIndexParams,
   type EdgeExistsBetweenParams,
   type EdgeRow,
   type FindEdgesByKindParams,
@@ -57,9 +59,16 @@ import {
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
+  type SqliteExecutionAdapter,
+  type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
+import {
+  createSqliteVectorIndex,
+  dropSqliteVectorIndex,
+  type VectorIndexOptions,
+} from "./vector-index";
 
 // ============================================================
 // Types
@@ -74,6 +83,11 @@ export type SqliteBackendOptions = Readonly<{
    * Defaults to standard TypeGraph table names.
    */
   tables?: SqliteTables;
+  /**
+   * Optional execution profile hints used to avoid runtime driver reflection.
+   * Set `isD1: true` when using Cloudflare D1.
+   */
+  executionProfile?: SqliteExecutionProfileHints;
 }>;
 
 const SQLITE_MAX_BIND_PARAMETERS = 999;
@@ -95,6 +109,10 @@ const SQLITE_GET_EDGES_ID_CHUNK_SIZE = Math.max(
   1,
   SQLITE_MAX_BIND_PARAMETERS - 1,
 );
+
+type SerializedExecutionQueue = Readonly<{
+  runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
+}>;
 
 // ============================================================
 // Utilities
@@ -204,6 +222,30 @@ function chunkArray<T>(
   return chunks;
 }
 
+function createSerializedExecutionQueue(): SerializedExecutionQueue {
+  let tail: Promise<unknown> = Promise.resolve();
+
+  return {
+    async runExclusive<T>(task: () => Promise<T>): Promise<T> {
+      const runTask = async (): Promise<T> => task();
+      const result = tail.then(runTask, runTask);
+      tail = result.then(
+        () => 0,
+        () => 0,
+      );
+      return result;
+    },
+  };
+}
+
+async function runWithSerializedQueue<T>(
+  queue: SerializedExecutionQueue | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (queue === undefined) return task();
+  return queue.runExclusive(task);
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -217,43 +259,60 @@ function chunkArray<T>(
  * @param options - Backend configuration
  * @returns A GraphBackend implementation
  */
-export function createSqliteBackend(
-  db: AnySqliteDatabase,
-  options: SqliteBackendOptions = {},
-): GraphBackend {
-  const tables = options.tables ?? defaultTables;
-  const executionAdapter = createSqliteExecutionAdapter(db);
-  const { isD1, isSync } = executionAdapter.profile;
+type CreateSqliteOperationBackendOptions = Readonly<{
+  capabilities: GraphBackend["capabilities"];
+  db: AnySqliteDatabase;
+  executionAdapter: SqliteExecutionAdapter;
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
+  serializedQueue?: SerializedExecutionQueue;
+  tableNames: SqlTableNames;
+}>;
 
-  const tableNames: SqlTableNames = {
-    nodes: getTableName(tables.nodes),
-    edges: getTableName(tables.edges),
-    embeddings: getTableName(tables.embeddings),
-  };
-  const operationStrategy = createSqliteOperationStrategy(tables);
+type CreateSqliteTransactionBackendOptions = Readonly<{
+  capabilities: GraphBackend["capabilities"];
+  db: AnySqliteDatabase;
+  executionAdapter?: SqliteExecutionAdapter;
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
+  profileHints: SqliteExecutionProfileHints;
+  tableNames: SqlTableNames;
+}>;
 
-  /**
-   * Helper to execute a query and handle sync/async uniformly.
-   */
+function createSqliteOperationBackend(
+  options: CreateSqliteOperationBackendOptions,
+): TransactionBackend {
+  const {
+    capabilities,
+    db,
+    executionAdapter,
+    operationStrategy,
+    serializedQueue,
+    tableNames,
+  } = options;
+
   async function execGet<T>(query: SQL): Promise<T | undefined> {
-    const result = db.get(query);
-    return (result instanceof Promise ? await result : result) as T | undefined;
+    return runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.get(query);
+      return (result instanceof Promise ? await result : result) as T | undefined;
+    });
   }
 
   async function execAll<T>(query: SQL): Promise<T[]> {
-    const result = db.all(query);
-    return (result instanceof Promise ? await result : result) as T[];
+    return runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.all(query);
+      return (result instanceof Promise ? await result : result) as T[];
+    });
   }
 
   async function execRun(query: SQL): Promise<void> {
-    const result = db.run(query);
-    if (result instanceof Promise) await result;
+    await runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.run(query);
+      if (result instanceof Promise) await result;
+    });
   }
 
-  // Create the backend operations
-  const backend: GraphBackend = {
+  const operationBackend: TransactionBackend = {
     dialect: "sqlite",
-    capabilities: isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES,
+    capabilities,
     tableNames,
 
     // === Node Operations ===
@@ -294,7 +353,8 @@ export function createSqliteBackend(
       const timestamp = nowIso();
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
-        const query = operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
+        const query =
+          operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toNodeRow(row)));
       }
@@ -341,22 +401,20 @@ export function createSqliteBackend(
     },
 
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
-      // Delete associated uniqueness entries
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execRun(deleteUniquesQuery);
 
-      // Delete associated embeddings (if embeddings table exists)
-      const deleteEmbeddingsQuery = operationStrategy.buildHardDeleteEmbeddingsByNode(
-        params.graphId,
-        params.kind,
-        params.id,
-      );
+      const deleteEmbeddingsQuery =
+        operationStrategy.buildHardDeleteEmbeddingsByNode(
+          params.graphId,
+          params.kind,
+          params.id,
+        );
       await execRun(deleteEmbeddingsQuery);
 
-      // Delete the node itself
       const query = operationStrategy.buildHardDeleteNode(params);
       await execRun(query);
     },
@@ -399,7 +457,8 @@ export function createSqliteBackend(
       const timestamp = nowIso();
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
-        const query = operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
+        const query =
+          operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
         const rows = await execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => toEdgeRow(row)));
       }
@@ -505,15 +564,13 @@ export function createSqliteBackend(
       const query = operationStrategy.buildInsertUnique(params);
       const result = await execGet<{ node_id: string }>(query);
 
-      // Check if the returned node_id matches our input
-      // If different, another node holds this key (race condition or conflict)
       if (result && result.node_id !== params.nodeId) {
         throw new UniquenessError({
           constraintName: params.constraintName,
           kind: params.nodeKind,
           existingId: result.node_id,
           newId: params.nodeId,
-          fields: [], // Fields not available at this level
+          fields: [],
         });
       }
     },
@@ -565,26 +622,115 @@ export function createSqliteBackend(
       await execRun(queries.activateVersion);
     },
 
+    // === Embedding Operations (SQLite no-op index management) ===
+
+    createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      const indexOptions: VectorIndexOptions = {
+        graphId: params.graphId,
+        nodeKind: params.nodeKind,
+        fieldPath: params.fieldPath,
+        dimensions: params.dimensions,
+        indexType: params.indexType,
+        metric: params.metric,
+        ...(params.indexParams?.m === undefined
+          ? {}
+          : { hnswM: params.indexParams.m }),
+        ...(params.indexParams?.efConstruction === undefined
+          ? {}
+          : { hnswEfConstruction: params.indexParams.efConstruction }),
+        ...(params.indexParams?.lists === undefined
+          ? {}
+          : { ivfflatLists: params.indexParams.lists }),
+      };
+
+      const result = createSqliteVectorIndex(indexOptions);
+
+      if (!result.success) {
+        throw new Error(result.message ?? "Failed to create SQLite vector index");
+      }
+      return Promise.resolve();
+    },
+
+    dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
+      const result = dropSqliteVectorIndex(
+        params.graphId,
+        params.nodeKind,
+        params.fieldPath,
+      );
+      if (!result.success) {
+        throw new Error(result.message ?? "Failed to drop SQLite vector index");
+      }
+      return Promise.resolve();
+    },
+
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
-      return executionAdapter.execute<T>(query);
+      return runWithSerializedQueue(serializedQueue, async () =>
+        executionAdapter.execute<T>(query),
+      );
     },
 
     compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },
+  };
 
-    // === Transaction ===
+  const executeCompiled = executionAdapter.executeCompiled;
+  if (executeCompiled !== undefined) {
+    (operationBackend as { executeRaw?: TransactionBackend["executeRaw"] }).executeRaw = function <T>(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<readonly T[]> {
+      return runWithSerializedQueue(serializedQueue, async () =>
+        executeCompiled<T>({ params, sql: sqlText }),
+      );
+    };
+  }
+
+  return operationBackend;
+}
+
+export function createSqliteBackend(
+  db: AnySqliteDatabase,
+  options: SqliteBackendOptions = {},
+): GraphBackend {
+  const tables = options.tables ?? defaultTables;
+  const profileHints = options.executionProfile ?? {};
+  const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
+  const { isD1, isSync } = executionAdapter.profile;
+  const capabilities = isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES;
+
+  const tableNames: SqlTableNames = {
+    nodes: getTableName(tables.nodes),
+    edges: getTableName(tables.edges),
+    embeddings: getTableName(tables.embeddings),
+  };
+  const operationStrategy = createSqliteOperationStrategy(tables);
+  const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
+  const operations = createSqliteOperationBackend({
+    capabilities,
+    db,
+    executionAdapter,
+    operationStrategy,
+    tableNames,
+    ...(serializedQueue === undefined ? {} : { serializedQueue }),
+  });
+
+  const backend: GraphBackend = {
+    ...operations,
+
+    async setActiveSchema(graphId: string, version: number): Promise<void> {
+      await backend.transaction(async (txBackend) => {
+        await txBackend.setActiveSchema(graphId, version);
+      });
+    },
 
     async transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       _options?: TransactionOptions,
     ): Promise<T> {
       if (isD1) {
-        // D1 doesn't support atomic transactions - operations are auto-committed.
-        // This is a critical limitation that could cause data corruption if
-        // a multi-step operation fails partway through.
         throw new ConfigurationError(
           "Cloudflare D1 does not support atomic transactions. " +
             "Operations within a transaction are not rolled back on failure. " +
@@ -599,31 +745,39 @@ export function createSqliteBackend(
       }
 
       if (isSync) {
-        // Synchronous drivers (better-sqlite3, bun:sqlite) don't support
-        // async transaction callbacks. Use raw SQL BEGIN/COMMIT/ROLLBACK.
-        const txBackend = createTransactionBackend(db, tables);
+        return runWithSerializedQueue(serializedQueue, async () => {
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db,
+            executionAdapter,
+            operationStrategy,
+            profileHints: { isD1: false, isSync: true },
+            tableNames,
+          });
+          db.run(sql`BEGIN`);
 
-        // Begin transaction synchronously
-        db.run(sql`BEGIN`);
-
-        try {
-          const result = await fn(txBackend);
-          db.run(sql`COMMIT`);
-          return result;
-        } catch (error) {
-          db.run(sql`ROLLBACK`);
-          throw error;
-        }
+          try {
+            const result = await fn(txBackend);
+            db.run(sql`COMMIT`);
+            return result;
+          } catch (error) {
+            db.run(sql`ROLLBACK`);
+            throw error;
+          }
+        });
       }
 
-      // Use Drizzle's transaction API for async drivers (libsql, etc.)
       return db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend(tx as AnySqliteDatabase, tables);
+        const txBackend = createTransactionBackend({
+          capabilities,
+          db: tx as AnySqliteDatabase,
+          operationStrategy,
+          profileHints: { isD1: false, isSync: false },
+          tableNames,
+        });
         return fn(txBackend);
       }) as Promise<T>;
     },
-
-    // === Lifecycle ===
 
     async close(): Promise<void> {
       // Drizzle doesn't expose a close method
@@ -631,34 +785,25 @@ export function createSqliteBackend(
     },
   };
 
-  const executeCompiled = executionAdapter.executeCompiled;
-  if (executeCompiled !== undefined) {
-    (backend as { executeRaw?: GraphBackend["executeRaw"] }).executeRaw = <T>(
-      sqlText: string,
-      params: readonly unknown[],
-    ): Promise<readonly T[]> => {
-      return executeCompiled<T>({ params, sql: sqlText });
-    };
-  }
-
   return backend;
 }
 
-/**
- * Creates a transaction backend from a Drizzle transaction.
- */
 function createTransactionBackend(
-  tx: AnySqliteDatabase,
-  tables: SqliteTables,
+  options: CreateSqliteTransactionBackendOptions,
 ): TransactionBackend {
-  // Create a new backend using the transaction
-  const txBackend = createSqliteBackend(tx, { tables });
+  const txExecutionAdapter =
+    options.executionAdapter ??
+    createSqliteExecutionAdapter(options.db, {
+      profileHints: options.profileHints,
+    });
 
-  // Return without transaction and close methods
-  const { transaction: _tx, close: _close, ...ops } = txBackend;
-  void _tx;
-  void _close;
-  return ops;
+  return createSqliteOperationBackend({
+    capabilities: options.capabilities,
+    db: options.db,
+    executionAdapter: txExecutionAdapter,
+    operationStrategy: options.operationStrategy,
+    tableNames: options.tableNames,
+  });
 }
 
 // Re-export schema utilities

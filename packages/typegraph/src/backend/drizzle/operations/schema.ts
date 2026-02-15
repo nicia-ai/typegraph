@@ -1,6 +1,5 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import { getDialect } from "../../../query/dialect";
 import type { Dialect, InsertSchemaParams } from "../../types";
 import { quotedColumn, type Tables } from "./shared";
 
@@ -9,10 +8,12 @@ type SchemaDialectStrategy = Readonly<{
 }>;
 
 function createSchemaDialectStrategy(dialect: Dialect): SchemaDialectStrategy {
-  const adapter = getDialect(dialect);
+  const trueLiteral = dialect === "sqlite" ? sql.raw("1") : sql.raw("TRUE");
+  const falseLiteral = dialect === "sqlite" ? sql.raw("0") : sql.raw("FALSE");
+
   return {
     booleanLiteral(value: boolean): SQL {
-      return adapter.booleanLiteral(value);
+      return value ? trueLiteral : falseLiteral;
     },
   };
 }

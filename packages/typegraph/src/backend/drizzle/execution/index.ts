@@ -8,6 +8,7 @@ export {
   createSqliteExecutionAdapter,
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
+  type SqliteExecutionProfileHints,
 } from "./sqlite-execution";
 export {
   type CompiledSqlQuery,
