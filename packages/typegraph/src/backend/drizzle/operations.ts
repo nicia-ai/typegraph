@@ -1253,6 +1253,44 @@ function buildDistanceExpression(
   }
 }
 
+function buildVectorSearchScoreExpression(
+  distanceExpr: SQL,
+  metric: VectorMetric,
+): SQL {
+  switch (metric) {
+    case "cosine": {
+      return sql`(1 - (${distanceExpr}))`;
+    }
+    case "l2":
+    case "inner_product": {
+      // For non-cosine metrics, return raw distance.
+      return distanceExpr;
+    }
+  }
+}
+
+function buildVectorSearchMinScoreCondition(
+  distanceExpr: SQL,
+  metric: VectorMetric,
+  minScore: number,
+): SQL {
+  switch (metric) {
+    case "cosine": {
+      const threshold = 1 - minScore;
+      return sql`${distanceExpr} <= ${threshold}`;
+    }
+    case "l2": {
+      // For L2, minScore is interpreted as maximum distance.
+      return sql`${distanceExpr} <= ${minScore}`;
+    }
+    case "inner_product": {
+      // pgvector <#> returns negative inner product distance.
+      const negativeThreshold = -minScore;
+      return sql`${distanceExpr} <= ${negativeThreshold}`;
+    }
+  }
+}
+
 /**
  * Builds a vector similarity search query (PostgreSQL).
  * Returns node IDs ordered by similarity (closest first).
@@ -1288,10 +1326,13 @@ export function buildVectorSearchPostgres(
     if (!Number.isFinite(params.minScore)) {
       throw new TypeError(`minScore must be a finite number, got: ${params.minScore}`);
     }
-    // minScore is similarity (1.0 = identical), convert to distance threshold
-    // For cosine: distance = 1 - similarity, so threshold = 1 - minScore
-    const threshold = 1 - params.minScore;
-    conditions.push(sql`${distanceExpr} <= ${threshold}`);
+    conditions.push(
+      buildVectorSearchMinScoreCondition(
+        distanceExpr,
+        params.metric,
+        params.minScore,
+      ),
+    );
   }
 
   // Validate limit is a positive integer
@@ -1301,10 +1342,12 @@ export function buildVectorSearchPostgres(
 
   const whereClause = sql.join(conditions, sql` AND `);
 
+  const scoreExpr = buildVectorSearchScoreExpression(distanceExpr, params.metric);
+
   return sql`
     SELECT
       ${embeddings.nodeId} as node_id,
-      (1 - (${distanceExpr})) as score
+      ${scoreExpr} as score
     FROM ${embeddings}
     WHERE ${whereClause}
     ORDER BY ${distanceExpr} ASC

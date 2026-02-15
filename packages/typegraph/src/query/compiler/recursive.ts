@@ -218,15 +218,18 @@ function compileRecursiveCte(
   const startKindFilter = compileKindFilter(startKinds, "n0.kind");
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
 
-  const startTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "n0"),
-  );
-  const edgeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "e"),
-  );
-  const nodeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "n"),
-  );
+  const startTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "n0"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
+  const edgeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "e"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
+  const nodeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "n"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
 
   // Start predicates (with cteColumnPrefix "" for raw n0 columns)
   const startContext = { ...ctx, cteColumnPrefix: "" };

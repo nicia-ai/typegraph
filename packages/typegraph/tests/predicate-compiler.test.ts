@@ -1512,7 +1512,7 @@ describe("extractVectorSimilarityPredicates", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("extracts from nested OR predicates", () => {
+  it("rejects vector predicates nested under OR", () => {
     const predicates = [
       {
         expression: {
@@ -1536,11 +1536,12 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(2);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 
-  it("extracts from nested NOT predicates", () => {
+  it("rejects vector predicates nested under NOT", () => {
     const predicates = [
       {
         expression: {
@@ -1555,8 +1556,9 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(1);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 
   it("returns empty array when no vector predicates", () => {
@@ -1579,7 +1581,7 @@ describe("extractVectorSimilarityPredicates", () => {
     expect(result).toHaveLength(0);
   });
 
-  it("extracts from deeply nested structure", () => {
+  it("rejects deeply nested vector predicates under OR/NOT", () => {
     const predicates = [
       {
         expression: {
@@ -1627,8 +1629,9 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(1);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 });
 

@@ -10,6 +10,7 @@ import {
   type QueryAst,
 } from "../ast";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
+import { validateVectorPredicatePlacement } from "./validation";
 
 /**
  * Builds a QueryAst from builder config and state.
@@ -21,6 +22,8 @@ export function buildQueryAst(
   config: QueryBuilderConfig,
   state: QueryBuilderState,
 ): QueryAst {
+  validateVectorPredicatePlacement(state.predicates);
+
   const temporalMode: { mode: typeof state.temporalMode; asOf?: string } = {
     mode: state.temporalMode,
   };

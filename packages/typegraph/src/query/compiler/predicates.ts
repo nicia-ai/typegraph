@@ -967,27 +967,42 @@ function compileVectorSimilarityPredicate(
 /**
  * Extracts all vector similarity predicates from a query's predicates.
  * Used by the main query compiler to set up JOINs, ORDER BY, and LIMIT.
+ *
+ * Vector predicates must appear at top level or under AND groups only.
+ * Nesting under OR/NOT is rejected because vector search rewrites query
+ * structure rather than behaving like a pure boolean predicate.
  */
 export function extractVectorSimilarityPredicates(
   predicates: readonly { expression: PredicateExpression }[],
 ): VectorSimilarityPredicate[] {
   const results: VectorSimilarityPredicate[] = [];
 
-  function visit(expr: PredicateExpression): void {
+  function visit(expr: PredicateExpression, inDisallowedBranch: boolean): void {
     switch (expr.__type) {
       case "vector_similarity": {
+        if (inDisallowedBranch) {
+          throw new UnsupportedPredicateError(
+            "Vector similarity predicates cannot be nested under OR or NOT. " +
+              "Use top-level AND combinations instead.",
+          );
+        }
         results.push(expr);
         break;
       }
-      case "and":
+      case "and": {
+        for (const p of expr.predicates) {
+          visit(p, inDisallowedBranch);
+        }
+        break;
+      }
       case "or": {
         for (const p of expr.predicates) {
-          visit(p);
+          visit(p, true);
         }
         break;
       }
       case "not": {
-        visit(expr.predicate);
+        visit(expr.predicate, true);
         break;
       }
       case "comparison":
@@ -1006,7 +1021,7 @@ export function extractVectorSimilarityPredicates(
   }
 
   for (const pred of predicates) {
-    visit(pred.expression);
+    visit(pred.expression, false);
   }
 
   return results;

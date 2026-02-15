@@ -24,6 +24,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  embedding,
   exists,
   field,
   fieldRef,
@@ -841,6 +842,69 @@ describe("Query Builder - Temporal Modes", () => {
     expect(sql).toContain("deleted_at IS NULL");
     expect(sql).toContain("valid_from");
     expect(sql).toContain("valid_to");
+  });
+});
+
+describe("Query Builder - Vector Predicate Validation", () => {
+  const Document = defineNode("Document", {
+    schema: z.object({
+      title: z.string(),
+      status: z.string(),
+      embedding: embedding(3),
+    }),
+  });
+
+  const vectorGraph = defineGraph({
+    id: "vector_test_graph",
+    nodes: {
+      Document: { type: Document },
+    },
+    edges: {},
+  });
+
+  const vectorRegistry = buildKindRegistry(vectorGraph);
+
+  it("throws ValidationError for vector similarity nested under OR", () => {
+    const query = createQueryBuilder<typeof vectorGraph>(
+      vectorGraph.id,
+      vectorRegistry,
+    )
+      .from("Document", "d")
+      .whereNode("d", (d) =>
+        d.embedding.similarTo([0.1, 0.2, 0.3], 5).or(d.status.eq("active")),
+      )
+      .select((context) => context.d);
+
+    expect(() => query.toAst()).toThrow(ValidationError);
+    expect(() => query.toAst()).toThrow(/cannot be nested under OR or NOT/i);
+  });
+
+  it("throws ValidationError for vector similarity nested under NOT", () => {
+    const query = createQueryBuilder<typeof vectorGraph>(
+      vectorGraph.id,
+      vectorRegistry,
+    )
+      .from("Document", "d")
+      .whereNode("d", (d) => d.embedding.similarTo([0.1, 0.2, 0.3], 5).not())
+      .select((context) => context.d);
+
+    expect(() => query.toAst()).toThrow(ValidationError);
+    expect(() => query.toAst()).toThrow(/cannot be nested under OR or NOT/i);
+  });
+
+  it("allows vector similarity at top-level and inside AND", () => {
+    const query = createQueryBuilder<typeof vectorGraph>(
+      vectorGraph.id,
+      vectorRegistry,
+    )
+      .from("Document", "d")
+      .whereNode("d", (d) =>
+        d.embedding.similarTo([0.1, 0.2, 0.3], 5).and(d.status.eq("active")),
+      )
+      .select((context) => context.d);
+
+    const ast = query.toAst();
+    expect(ast.predicates).toHaveLength(1);
   });
 });
 

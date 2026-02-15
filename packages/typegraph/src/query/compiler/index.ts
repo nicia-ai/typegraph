@@ -712,12 +712,14 @@ function compileCountAggregateFastPath(
   const edgeKinds = [...new Set(traversal.edgeKinds)];
   const nodeKinds = traversal.nodeKinds;
 
-  const edgeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "e"),
-  );
-  const nodeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "n"),
-  );
+  const edgeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "e"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
+  const nodeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "n"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
 
   const nodePredicateContext: PredicateCompilerContext = {
     ...ctx,
@@ -985,7 +987,10 @@ function compileStartCte(
   const kindFilter = compileKindFilter(sql.raw("kind"), kinds);
 
   // Temporal filter
-  const temporalFilter = compileTemporalFilter(extractTemporalOptions(ast));
+  const temporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
 
   // Node predicates for this alias
   // Use cteColumnPrefix: "" to generate raw column names (e.g., "props" not "p_props")
@@ -1049,12 +1054,14 @@ function compileTraversalCte(
   const nodeKinds = traversal.nodeKinds;
   const nodeKindFilter = compileKindFilter(sql.raw("n.kind"), nodeKinds);
 
-  const edgeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "e"),
-  );
-  const nodeTemporalFilter = compileTemporalFilter(
-    extractTemporalOptions(ast, "n"),
-  );
+  const edgeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "e"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
+  const nodeTemporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast, "n"),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
 
   // Node predicates for this alias
   // Use cteColumnPrefix: "n" to generate table-qualified column names (e.g., "n.props")
@@ -1666,23 +1673,67 @@ function compileEmbeddingsCte(
 
   // Add minScore filter if specified
   if (minScore !== undefined) {
-    // minScore is similarity (1.0 = identical), convert to distance threshold
-    // For cosine: distance = 1 - similarity, so threshold = 1 - minScore
-    const threshold = 1 - minScore;
-    conditions.push(sql`${distanceExpr} <= ${threshold}`);
+    if (!Number.isFinite(minScore)) {
+      throw new UnsupportedPredicateError(
+        `Vector minScore must be a finite number, got: ${String(minScore)}`,
+      );
+    }
+    conditions.push(
+      compileVectorMinScoreCondition(distanceExpr, metric, minScore),
+    );
   }
+
+  const scoreExpr = compileVectorScoreExpression(distanceExpr, metric);
 
   return sql`
     cte_embeddings AS (
       SELECT
         node_id,
         ${distanceExpr} AS distance,
-        (1.0 - ${distanceExpr}) AS score
+        ${scoreExpr} AS score
       FROM ${ctx.schema.embeddingsTable}
       WHERE ${sql.join(conditions, sql` AND `)}
       ORDER BY ${distanceExpr} ASC
     )
   `;
+}
+
+function compileVectorScoreExpression(
+  distanceExpr: SQL,
+  metric: VectorSimilarityPredicate["metric"],
+): SQL {
+  switch (metric) {
+    case "cosine": {
+      return sql`(1.0 - ${distanceExpr})`;
+    }
+    case "l2":
+    case "inner_product": {
+      // For non-cosine metrics, expose the raw distance value.
+      return distanceExpr;
+    }
+  }
+}
+
+function compileVectorMinScoreCondition(
+  distanceExpr: SQL,
+  metric: VectorSimilarityPredicate["metric"],
+  minScore: number,
+): SQL {
+  switch (metric) {
+    case "cosine": {
+      const threshold = 1 - minScore;
+      return sql`${distanceExpr} <= ${threshold}`;
+    }
+    case "l2": {
+      // For L2, minScore is interpreted as a maximum distance threshold.
+      return sql`${distanceExpr} <= ${minScore}`;
+    }
+    case "inner_product": {
+      // pgvector <#> returns negative inner product distance.
+      const negativeThreshold = -minScore;
+      return sql`${distanceExpr} <= ${negativeThreshold}`;
+    }
+  }
 }
 
 /**

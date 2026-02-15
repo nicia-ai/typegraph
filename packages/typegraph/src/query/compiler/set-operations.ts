@@ -404,7 +404,10 @@ function compilePrefixedStartCte(
       )})`;
 
   // Temporal filter
-  const temporalFilter = compileTemporalFilter(extractTemporalOptions(ast));
+  const temporalFilter = compileTemporalFilter({
+    ...extractTemporalOptions(ast),
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
 
   // Node predicates for this alias
   const cteContext: PredicateCompilerContext = { ...ctx, cteColumnPrefix: "" };

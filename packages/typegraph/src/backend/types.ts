@@ -280,6 +280,10 @@ export type VectorSearchParams = Readonly<{
  */
 export type VectorSearchResult = Readonly<{
   nodeId: string;
+  /**
+   * Cosine metric returns similarity score (higher is better).
+   * L2 and inner_product return raw distance (lower is better).
+   */
   score: number;
 }>;
 
