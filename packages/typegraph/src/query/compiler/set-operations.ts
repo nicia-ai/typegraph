@@ -26,12 +26,18 @@ import {
   type DialectSetOperationStrategy,
 } from "../dialect";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { emitSetOperationQuerySql } from "./emitter";
+import {
+  createTemporalFilterPass,
+  type PassSnapshot,
+  runCompilerPass,
+} from "./passes";
+import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 import {
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
 import { type SqlSchema } from "./schema";
-import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
 
 /**
  * Type for the query compiler function.
@@ -42,6 +48,7 @@ type SetOperationStrategyHandler = (
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ) => SQL;
@@ -60,20 +67,34 @@ function compileSetOperationWithStandardParenthesizedStrategy(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   _schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ): SQL {
-  return compileSetOperationStandard(op, graphId, dialect, compileQuery);
+  return compileSetOperationStandard(
+    op,
+    graphId,
+    dialect,
+    logicalPlan,
+    compileQuery,
+  );
 }
 
 function compileSetOperationWithSqliteCompoundStrategy(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   schema: SqlSchema,
   _compileQuery: QueryCompilerFunction,
 ): SQL {
-  return compileSetOperationForSqlite(op, graphId, dialect, schema);
+  return compileSetOperationForSqlite(
+    op,
+    graphId,
+    dialect,
+    logicalPlan,
+    schema,
+  );
 }
 
 const SET_OPERATION_STRATEGY_HANDLERS: Record<
@@ -83,6 +104,60 @@ const SET_OPERATION_STRATEGY_HANDLERS: Record<
   standard_parenthesized: compileSetOperationWithStandardParenthesizedStrategy,
   sqlite_compound: compileSetOperationWithSqliteCompoundStrategy,
 };
+
+type SetOperationPassName = "logical_plan";
+
+type SetOperationPassSnapshot = PassSnapshot<SetOperationPassName, unknown>;
+
+type SetOperationPassState = Readonly<{
+  dialect: DialectAdapter;
+  graphId: string;
+  logicalPlan: LogicalPlan | undefined;
+  op: SetOperation;
+}>;
+
+type SetOperationPassPipelineResult = Readonly<{
+  snapshots: readonly SetOperationPassSnapshot[];
+  state: SetOperationPassState;
+}>;
+
+function runSetOperationPassPipeline(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+): SetOperationPassPipelineResult {
+  const snapshots: SetOperationPassSnapshot[] = [];
+  let state: SetOperationPassState = {
+    dialect,
+    graphId,
+    logicalPlan: undefined,
+    op,
+  };
+
+  const logicalPlanPass = runCompilerPass(state, {
+    name: "logical_plan",
+    execute(currentState): LogicalPlan {
+      return lowerSetOperationToLogicalPlan({
+        dialect: currentState.dialect.name,
+        graphId: currentState.graphId,
+        op: currentState.op,
+      });
+    },
+    update(currentState, logicalPlan): SetOperationPassState {
+      return {
+        ...currentState,
+        logicalPlan,
+      };
+    },
+  });
+  state = logicalPlanPass.state;
+  snapshots.push(logicalPlanPass.snapshot);
+
+  return {
+    snapshots,
+    state,
+  };
+}
 
 // ============================================================
 // Main Entry Point
@@ -108,9 +183,17 @@ export function compileSetOperation(
   schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ): SQL {
+  const passPipeline = runSetOperationPassPipeline(op, graphId, dialect);
+  const passSnapshots = passPipeline.snapshots;
+  void passSnapshots;
+  const { logicalPlan } = passPipeline.state;
+  if (logicalPlan === undefined) {
+    throw new Error("Logical plan pass did not initialize plan state");
+  }
+
   const strategy = dialect.capabilities.setOperationStrategy;
   const handler = SET_OPERATION_STRATEGY_HANDLERS[strategy];
-  return handler(op, graphId, dialect, schema, compileQuery);
+  return handler(op, graphId, dialect, logicalPlan, schema, compileQuery);
 }
 
 // ============================================================
@@ -124,6 +207,7 @@ function compileSetOperationStandard(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   compileQuery: QueryCompilerFunction,
 ): SQL {
   const coreSql = compileSetOperationCoreStandard(
@@ -133,12 +217,12 @@ function compileSetOperationStandard(
     compileQuery,
   );
 
-  const parts: SQL[] = [coreSql];
-
-  // Handle ORDER BY, LIMIT, OFFSET
-  appendOrderByLimitOffset(parts, op, dialect);
-
-  return sql.join(parts, sql` `);
+  const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
+  return emitSetOperationQuerySql({
+    baseQuery: coreSql,
+    logicalPlan,
+    ...(suffixClauses.length === 0 ? {} : { suffixClauses }),
+  });
 }
 
 /**
@@ -192,6 +276,35 @@ function compileComposableQueryStandard(
 // SQLite Compilation
 // ============================================================
 
+type SqliteSetOperationLeaf = Readonly<{
+  ast: QueryAst;
+  prefix: string;
+}>;
+
+type SqliteSetOperationValidationPassResult = Readonly<{
+  leaves: readonly SqliteSetOperationLeaf[];
+}>;
+
+/**
+ * Validates and prepares SQLite set-operation leaves.
+ *
+ * Invariants:
+ * - All leaves are flattened with stable prefixes.
+ * - Every leaf passes SQLite compound-query compatibility checks.
+ */
+function runSqliteSetOperationValidationPass(
+  op: SetOperation,
+): SqliteSetOperationValidationPassResult {
+  const leaves: SqliteSetOperationLeaf[] = [];
+  collectLeafQueries(op, leaves, "q");
+
+  for (const leaf of leaves) {
+    validateSqliteSetOpLeaf(leaf.ast);
+  }
+
+  return { leaves };
+}
+
 /**
  * SQLite-specific set operation compilation.
  *
@@ -205,16 +318,10 @@ function compileSetOperationForSqlite(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   schema: SqlSchema,
 ): SQL {
-  // Collect all leaf queries and assign unique prefixes
-  const leaves: { ast: QueryAst; prefix: string }[] = [];
-  collectLeafQueries(op, leaves, "q");
-
-  // Validate: SQLite set operations currently only support simple queries
-  for (const leaf of leaves) {
-    validateSqliteSetOpLeaf(leaf.ast);
-  }
+  const { leaves } = runSqliteSetOperationValidationPass(op);
 
   // Build all CTEs with unique prefixes
   const allCtes: SQL[] = [];
@@ -239,19 +346,13 @@ function compileSetOperationForSqlite(
   // Build compound SELECT from the set operation structure
   const compoundSelect = buildCompoundSelect(op, leaves, selectStatements);
 
-  // Assemble final query
-  const parts: SQL[] = [];
-
-  if (allCtes.length > 0) {
-    parts.push(sql`WITH ${sql.join(allCtes, sql`, `)}`);
-  }
-
-  parts.push(compoundSelect);
-
-  // Handle ORDER BY, LIMIT, OFFSET
-  appendOrderByLimitOffset(parts, op, dialect);
-
-  return sql.join(parts, sql` `);
+  const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
+  return emitSetOperationQuerySql({
+    baseQuery: compoundSelect,
+    ...(allCtes.length === 0 ? {} : { ctes: allCtes }),
+    logicalPlan,
+    ...(suffixClauses.length === 0 ? {} : { suffixClauses }),
+  });
 }
 
 /**
@@ -403,7 +504,7 @@ function hasSubqueryInExpression(
  */
 function collectLeafQueries(
   query: ComposableQuery,
-  leaves: { ast: QueryAst; prefix: string }[],
+  leaves: SqliteSetOperationLeaf[],
   basePrefix: string,
 ): void {
   if ("__type" in query) {
@@ -426,6 +527,10 @@ function compilePrefixedStartCte(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): SQL {
+  const temporalFilterPass = createTemporalFilterPass(
+    ast,
+    ctx.dialect.currentTimestamp(),
+  );
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
 
@@ -439,10 +544,7 @@ function compilePrefixedStartCte(
       )})`;
 
   // Temporal filter
-  const temporalFilter = compileTemporalFilter({
-    ...extractTemporalOptions(ast),
-    currentTimestamp: ctx.dialect.currentTimestamp(),
-  });
+  const temporalFilter = temporalFilterPass.forAlias();
 
   // Node predicates for this alias
   const cteContext: PredicateCompilerContext = { ...ctx, cteColumnPrefix: "" };
@@ -611,8 +713,8 @@ function compileFieldColumnForSetOp(
  */
 function buildCompoundSelect(
   op: SetOperation,
-  leaves: { ast: QueryAst; prefix: string }[],
-  selectStatements: SQL[],
+  leaves: readonly SqliteSetOperationLeaf[],
+  selectStatements: readonly SQL[],
 ): SQL {
   // Build a map from prefix to select statement
   const prefixToSelect = new Map<string, SQL>();
@@ -629,7 +731,7 @@ function buildCompoundSelect(
  */
 function buildCompoundSelectRecursive(
   query: ComposableQuery,
-  leaves: { ast: QueryAst; prefix: string }[],
+  leaves: readonly SqliteSetOperationLeaf[],
   prefixToSelect: Map<string, SQL>,
 ): SQL {
   if (!("__type" in query)) {
@@ -727,7 +829,7 @@ function matchFieldToProjection(
 }
 
 /**
- * Appends ORDER BY, LIMIT, OFFSET clauses to the parts array.
+ * Builds ORDER BY, LIMIT, OFFSET clauses for set operations.
  *
  * For set operations, ORDER BY must reference output column names from
  * the compound result, not internal CTE columns. This function:
@@ -735,11 +837,12 @@ function matchFieldToProjection(
  * 2. Uses IS NULL emulation for consistent NULLS FIRST/LAST across dialects
  * 3. Throws a descriptive error if an ORDER BY field isn't in the projection
  */
-function appendOrderByLimitOffset(
-  parts: SQL[],
+function buildSetOperationSuffixClauses(
   op: SetOperation,
   dialect: DialectAdapter,
-): void {
+): SQL[] {
+  const clauses: SQL[] = [];
+
   // Handle ORDER BY if present
   if (op.orderBy && op.orderBy.length > 0) {
     const projection = getLeftmostProjection(op);
@@ -790,16 +893,18 @@ function appendOrderByLimitOffset(
       );
     }
 
-    parts.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
+    clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
   }
 
   // Handle LIMIT
   if (op.limit !== undefined) {
-    parts.push(sql`LIMIT ${op.limit}`);
+    clauses.push(sql`LIMIT ${op.limit}`);
   }
 
   // Handle OFFSET
   if (op.offset !== undefined) {
-    parts.push(sql`OFFSET ${op.offset}`);
+    clauses.push(sql`OFFSET ${op.offset}`);
   }
+
+  return clauses;
 }

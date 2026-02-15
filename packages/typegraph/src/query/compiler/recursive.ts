@@ -7,20 +7,24 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../errors";
-import {
-  type QueryAst,
-  type SelectiveField,
-  type Traversal,
-  type VariableLengthSpec,
-} from "../ast";
+import { type QueryAst, type SelectiveField } from "../ast";
 import { type DialectAdapter } from "../dialect";
 import { jsonPointer } from "../json-pointer";
+import { emitRecursiveQuerySql } from "./emitter";
+import {
+  createTemporalFilterPass,
+  type PassSnapshot,
+  runCompilerPass,
+  runRecursiveTraversalSelectionPass,
+  type TemporalFilterPass,
+  type VariableLengthTraversal,
+} from "./passes";
+import { type LogicalPlan, lowerRecursiveQueryToLogicalPlan } from "./plan";
 import {
   compileFieldValue,
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
-import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
 import {
   addRequiredColumn,
   EMPTY_REQUIRED_COLUMNS,
@@ -55,16 +59,125 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
-// ============================================================
-// Types
-// ============================================================
+type RecursiveQueryPassName =
+  | "recursive_traversal"
+  | "temporal_filters"
+  | "column_pruning"
+  | "logical_plan";
 
-/**
- * Traversal with required variable-length spec.
- */
-type VariableLengthTraversal = Traversal & {
-  variableLength: VariableLengthSpec;
-};
+type RecursiveQueryPassSnapshot = PassSnapshot<RecursiveQueryPassName, unknown>;
+
+type RecursiveQueryPassState = Readonly<{
+  ast: QueryAst;
+  ctx: PredicateCompilerContext;
+  graphId: string;
+  logicalPlan: LogicalPlan | undefined;
+  requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
+  temporalFilterPass: TemporalFilterPass | undefined;
+  traversal: VariableLengthTraversal | undefined;
+}>;
+
+type RecursiveQueryPassPipelineResult = Readonly<{
+  snapshots: readonly RecursiveQueryPassSnapshot[];
+  state: RecursiveQueryPassState;
+}>;
+
+function runRecursiveQueryPassPipeline(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+): RecursiveQueryPassPipelineResult {
+  const snapshots: RecursiveQueryPassSnapshot[] = [];
+  let state: RecursiveQueryPassState = {
+    ast,
+    ctx,
+    graphId,
+    logicalPlan: undefined,
+    requiredColumnsByAlias: undefined,
+    temporalFilterPass: undefined,
+    traversal: undefined,
+  };
+
+  const recursiveTraversalPass = runCompilerPass(state, {
+    name: "recursive_traversal",
+    execute(currentState): VariableLengthTraversal {
+      return runRecursiveTraversalSelectionPass(currentState.ast);
+    },
+    update(currentState, traversal): RecursiveQueryPassState {
+      return {
+        ...currentState,
+        traversal,
+      };
+    },
+  });
+  state = recursiveTraversalPass.state;
+  snapshots.push(recursiveTraversalPass.snapshot);
+
+  const temporalPass = runCompilerPass(state, {
+    name: "temporal_filters",
+    execute(currentState): TemporalFilterPass {
+      return createTemporalFilterPass(
+        currentState.ast,
+        currentState.ctx.dialect.currentTimestamp(),
+      );
+    },
+    update(currentState, temporalFilterPass): RecursiveQueryPassState {
+      return {
+        ...currentState,
+        temporalFilterPass,
+      };
+    },
+  });
+  state = temporalPass.state;
+  snapshots.push(temporalPass.snapshot);
+
+  const columnPruningPass = runCompilerPass(state, {
+    name: "column_pruning",
+    execute(currentState): RequiredColumnsByAlias | undefined {
+      const traversal = currentState.traversal;
+      if (traversal === undefined) {
+        throw new Error("Recursive traversal pass did not select traversal");
+      }
+      return collectRequiredColumnsByAlias(currentState.ast, traversal);
+    },
+    update(currentState, requiredColumnsByAlias): RecursiveQueryPassState {
+      return {
+        ...currentState,
+        requiredColumnsByAlias,
+      };
+    },
+  });
+  state = columnPruningPass.state;
+  snapshots.push(columnPruningPass.snapshot);
+
+  const logicalPlanPass = runCompilerPass(state, {
+    name: "logical_plan",
+    execute(currentState): LogicalPlan {
+      const loweringInput = {
+        ast: currentState.ast,
+        dialect: currentState.ctx.dialect.name,
+        graphId: currentState.graphId,
+        ...(currentState.traversal === undefined ?
+          {}
+        : { traversal: currentState.traversal }),
+      };
+      return lowerRecursiveQueryToLogicalPlan(loweringInput);
+    },
+    update(currentState, logicalPlan): RecursiveQueryPassState {
+      return {
+        ...currentState,
+        logicalPlan,
+      };
+    },
+  });
+  state = logicalPlanPass.state;
+  snapshots.push(logicalPlanPass.snapshot);
+
+  return {
+    snapshots,
+    state,
+  };
+}
 
 // ============================================================
 // Main Compiler
@@ -83,29 +196,27 @@ export function compileVariableLengthQuery(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): SQL {
+  const passPipeline = runRecursiveQueryPassPipeline(ast, graphId, ctx);
+  const passSnapshots = passPipeline.snapshots;
+  void passSnapshots;
+
   const { dialect } = ctx;
+  const {
+    logicalPlan,
+    requiredColumnsByAlias,
+    temporalFilterPass,
+    traversal: vlTraversal,
+  } = passPipeline.state;
 
-  // Find the variable-length traversal
-  const vlTraversal = ast.traversals.find(
-    (t): t is VariableLengthTraversal => t.variableLength !== undefined,
-  );
-
-  if (!vlTraversal) {
-    throw new Error("No variable-length traversal found");
+  if (temporalFilterPass === undefined) {
+    throw new Error("Temporal filter pass did not initialize temporal state");
   }
-
-  // Currently we only support a single variable-length traversal
-  if (ast.traversals.length > 1) {
-    throw new UnsupportedPredicateError(
-      "Variable-length traversals with multiple traversals are not yet supported. " +
-        "Please use a single variable-length traversal.",
-    );
+  if (logicalPlan === undefined) {
+    throw new Error("Logical plan pass did not initialize plan state");
   }
-
-  const requiredColumnsByAlias = collectRequiredColumnsByAlias(
-    ast,
-    vlTraversal,
-  );
+  if (vlTraversal === undefined) {
+    throw new Error("Recursive traversal pass did not select traversal");
+  }
 
   // Build the recursive CTE
   const recursiveCte = compileRecursiveCte(
@@ -114,6 +225,7 @@ export function compileVariableLengthQuery(
     graphId,
     ctx,
     requiredColumnsByAlias,
+    temporalFilterPass,
   );
 
   // Build projection
@@ -128,18 +240,14 @@ export function compileVariableLengthQuery(
   const orderBy = compileRecursiveOrderBy(ast, dialect);
   const limitOffset = compileLimitOffset(ast);
 
-  const parts: SQL[] = [
-    sql`WITH RECURSIVE`,
-    recursiveCte,
-    sql`SELECT ${projection}`,
-    sql`FROM recursive_cte`,
+  return emitRecursiveQuerySql({
     depthFilter,
-  ];
-
-  if (orderBy) parts.push(orderBy);
-  if (limitOffset) parts.push(limitOffset);
-
-  return sql.join(parts, sql` `);
+    ...(limitOffset === undefined ? {} : { limitOffset }),
+    logicalPlan,
+    ...(orderBy === undefined ? {} : { orderBy }),
+    projection,
+    recursiveCte,
+  });
 }
 
 /**
@@ -162,6 +270,7 @@ function compileRecursiveCte(
   graphId: string,
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
+  temporalFilterPass: TemporalFilterPass,
 ): SQL {
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
@@ -219,18 +328,9 @@ function compileRecursiveCte(
   const startKindFilter = compileKindFilter(startKinds, "n0.kind");
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
 
-  const startTemporalFilter = compileTemporalFilter({
-    ...extractTemporalOptions(ast, "n0"),
-    currentTimestamp: ctx.dialect.currentTimestamp(),
-  });
-  const edgeTemporalFilter = compileTemporalFilter({
-    ...extractTemporalOptions(ast, "e"),
-    currentTimestamp: ctx.dialect.currentTimestamp(),
-  });
-  const nodeTemporalFilter = compileTemporalFilter({
-    ...extractTemporalOptions(ast, "n"),
-    currentTimestamp: ctx.dialect.currentTimestamp(),
-  });
+  const startTemporalFilter = temporalFilterPass.forAlias("n0");
+  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   // Start predicates (with cteColumnPrefix "" for raw n0 columns)
   const startContext = { ...ctx, cteColumnPrefix: "" };
