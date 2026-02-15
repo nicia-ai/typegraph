@@ -172,6 +172,7 @@ function compileRecursiveCte(
     traversal.inverseEdgeKinds === undefined ?
       []
     : [...new Set(traversal.inverseEdgeKinds)];
+  const forceWorktableOuterJoinOrder = dialect.name === "sqlite";
   const nodeKinds = traversal.nodeKinds;
   const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
   const direction = traversal.direction;
@@ -299,7 +300,7 @@ function compileRecursiveCte(
       duplicateGuard?: SQL | undefined;
     }>,
   ): SQL {
-    const recursiveWhereClauses = [
+    const recursiveFilterClauses = [
       ...recursiveBaseWhereClauses,
       compileKindFilter(branch.edgeKinds, "e.kind"),
       compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
@@ -307,7 +308,7 @@ function compileRecursiveCte(
     ];
 
     if (branch.duplicateGuard !== undefined) {
-      recursiveWhereClauses.push(branch.duplicateGuard);
+      recursiveFilterClauses.push(branch.duplicateGuard);
     }
 
     const recursiveSelectColumns = [
@@ -327,6 +328,23 @@ function compileRecursiveCte(
       );
     }
 
+    if (forceWorktableOuterJoinOrder) {
+      const recursiveWhereClauses = [
+        ...recursiveJoinClauses,
+        ...recursiveFilterClauses,
+      ];
+
+      return sql`
+        SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
+        FROM recursive_cte r
+        CROSS JOIN ${ctx.schema.edgesTable} e
+        JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+          AND n.id = e.${sql.raw(branch.targetField)}
+          AND n.kind = e.${sql.raw(branch.targetKindField)}
+        WHERE ${sql.join(recursiveWhereClauses, sql` AND `)}
+      `;
+    }
+
     return sql`
       SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
       FROM recursive_cte r
@@ -334,7 +352,7 @@ function compileRecursiveCte(
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}
-      WHERE ${sql.join(recursiveWhereClauses, sql` AND `)}
+      WHERE ${sql.join(recursiveFilterClauses, sql` AND `)}
     `;
   }
 

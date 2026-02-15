@@ -22,7 +22,7 @@ import {
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
-import { sqliteDialect } from "../src/query/dialect";
+import { postgresDialect, sqliteDialect } from "../src/query/dialect";
 import { toSqlString } from "./sql-test-utils";
 
 // ============================================================
@@ -84,9 +84,11 @@ function createAst(overrides: Partial<QueryAst> = {}): QueryAst {
   };
 }
 
-function createContext(): PredicateCompilerContext {
+function createContext(
+  dialect: PredicateCompilerContext["dialect"] = sqliteDialect,
+): PredicateCompilerContext {
   return {
-    dialect: sqliteDialect,
+    dialect,
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
   };
@@ -343,9 +345,32 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain('JOIN "typegraph_edges" e ON e.from_id');
-      expect(sql).toContain('JOIN "typegraph_edges" e ON e.to_id');
+      expect(sql).toContain('"typegraph_edges" e');
+      expect(sql).toContain("e.from_id = r.target_id");
+      expect(sql).toContain("e.to_id = r.target_id");
       expect(sql).toContain("e.from_id = e.to_id");
+    });
+
+    it("forces worktable-first join order on sqlite recursive steps", () => {
+      const ast = createAst();
+
+      const sql = getSqlString(ast, createContext(sqliteDialect));
+
+      expect(sql).toMatch(
+        /FROM recursive_cte r\s+CROSS JOIN "typegraph_edges" e/,
+      );
+      expect(sql).toMatch(/WHERE e\.from_id = r\.target_id/);
+    });
+
+    it("keeps ON-clause joins for postgres recursive steps", () => {
+      const ast = createAst();
+
+      const sql = getSqlString(ast, createContext(postgresDialect));
+
+      expect(sql).toMatch(
+        /FROM recursive_cte r\s+JOIN "typegraph_edges" e ON e\.from_id = r\.target_id/,
+      );
+      expect(sql).not.toContain("CROSS JOIN");
     });
   });
 
