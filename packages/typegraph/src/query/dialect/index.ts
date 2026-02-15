@@ -7,7 +7,15 @@
 
 export { postgresDialect } from "./postgres";
 export { sqliteDialect } from "./sqlite";
-export type { DialectAdapter, SqlDialect } from "./types";
+export type {
+  DialectAdapter,
+  DialectCapabilities,
+  DialectRecursiveQueryStrategy,
+  DialectSetOperationStrategy,
+  DialectStandardQueryStrategy,
+  DialectVectorPredicateStrategy,
+  SqlDialect,
+} from "./types";
 
 import { postgresDialect } from "./postgres";
 import { sqliteDialect } from "./sqlite";

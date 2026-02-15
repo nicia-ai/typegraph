@@ -87,7 +87,7 @@ const networkAnalysis = await store
 
 ## Collecting Path Information
 
-### collectPath()
+### `recursive({ path })`
 
 Include the traversal path as an array in results:
 
@@ -97,8 +97,7 @@ const pathsToRoot = await store
   .from("Category", "cat")
   .whereNode("cat", (c) => c.name.eq("Electronics"))
   .traverse("parentCategory", "e")
-  .recursive()
-  .collectPath("categoryPath")    // Include path as array
+  .recursive({ path: "categoryPath" })    // Include path as array
   .to("Category", "ancestor")
   .select((ctx) => ({
     category: ctx.cat.name,
@@ -108,7 +107,7 @@ const pathsToRoot = await store
   .execute();
 ```
 
-### withDepth()
+### `recursive({ depth })`
 
 Include the traversal depth as a column:
 
@@ -118,8 +117,7 @@ const orgChart = await store
   .from("Person", "ceo")
   .whereNode("ceo", (p) => p.role.eq("CEO"))
   .traverse("manages", "e")
-  .recursive()
-  .withDepth("level")             // Include depth as column
+  .recursive({ depth: "level" })             // Include depth as column
   .to("Person", "employee")
   .select((ctx) => ({
     ceo: ctx.ceo.name,
@@ -137,11 +135,12 @@ const networkAnalysis = await store
   .from("Person", "p")
   .whereNode("p", (p) => p.name.eq("Alice"))
   .traverse("knows", "e")
-  .recursive()
-  .minHops(1)
-  .maxHops(6)                     // Six degrees of separation
-  .collectPath("path")
-  .withDepth("distance")
+  .recursive({
+    minHops: 1,
+    maxHops: 6,                   // Six degrees of separation
+    path: "path",
+    depth: "distance",
+  })
   .to("Person", "connection")
   .select((ctx) => ({
     person: ctx.p.name,
@@ -154,7 +153,19 @@ const networkAnalysis = await store
 
 ## Cycle Detection
 
-Recursive traversals automatically detect and prevent cycles. The same node will not be visited twice in any path:
+Recursive traversals prevent cycles by default:
+
+- `.recursive()` defaults to `cyclePolicy: "prevent"`
+- Cycle prevention is independent from path projection
+
+If you want maximum speed and accept revisits, opt in explicitly:
+
+```typescript
+.traverse("linkedTo", "e")
+.recursive({ maxHops: 8, cyclePolicy: "allow" })
+```
+
+With cycle prevention enabled, the same node is not visited twice in a path:
 
 ```typescript
 // Safe even with circular relationships (A → B → C → A)
@@ -162,7 +173,7 @@ const allReachable = await store
   .query()
   .from("Node", "start")
   .traverse("linkedTo", "e")
-  .recursive()
+  .recursive({ cyclePolicy: "prevent", path: "path" })
   .to("Node", "reachable")
   .select((ctx) => ctx.reachable.id)
   .execute();
@@ -191,15 +202,25 @@ To get unique nodes, deduplicate in your application or use [set operations](/qu
 
 ## Depth Limits
 
-Variable-length traversals have a maximum depth of 100 hops, even when no `maxHops()` is specified:
+Variable-length traversals use two depth caps:
 
 ```typescript
-import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
-// MAX_RECURSIVE_DEPTH = 100
+import {
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
+  MAX_RECURSIVE_DEPTH,
+} from "@nicia-ai/typegraph";
+// MAX_RECURSIVE_DEPTH = 100 (when maxHops() is omitted)
+// MAX_EXPLICIT_RECURSIVE_DEPTH = 1000
 
-// Explicit limits are capped at 100
+// Unbounded recursive traversal (implicitly capped at 100)
 .recursive()
-.maxHops(200)  // Silently capped to 100
+// ...
+
+// Explicit limit (honored up to 1000)
+.recursive({ maxHops: 200 })
+
+// Explicit limits above 1000 throw
+.recursive({ maxHops: 2000 }) // throws
 ```
 
 ## Real-World Examples
@@ -214,8 +235,7 @@ const allReports = await store
   .from("Person", "manager")
   .whereNode("manager", (p) => p.name.eq("VP Engineering"))
   .traverse("manages", "e")
-  .recursive()
-  .withDepth("level")
+  .recursive({ depth: "level" })
   .to("Person", "report")
   .select((ctx) => ({
     manager: ctx.manager.name,
@@ -237,9 +257,7 @@ const dependencies = await store
   .from("Package", "pkg")
   .whereNode("pkg", (p) => p.name.eq("my-app"))
   .traverse("dependsOn", "e")
-  .recursive()
-  .collectPath("chain")
-  .withDepth("depth")
+  .recursive({ path: "chain", depth: "depth" })
   .to("Package", "dep")
   .select((ctx) => ({
     package: ctx.pkg.name,
@@ -280,9 +298,7 @@ const breadcrumbs = await store
   .from("Category", "current")
   .whereNode("current", (c) => c.slug.eq("smartphones"))
   .traverse("parentCategory", "e")
-  .recursive()
-  .collectPath("pathIds")
-  .withDepth("depth")
+  .recursive({ path: "pathIds", depth: "depth" })
   .to("Category", "ancestor")
   .select((ctx) => ({
     name: ctx.ancestor.name,

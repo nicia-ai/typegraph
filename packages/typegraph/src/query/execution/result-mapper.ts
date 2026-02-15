@@ -30,8 +30,8 @@ export function transformPathColumns(
   // Find path columns from variable-length traversals
   const pathAliases: string[] = [];
   for (const t of state.traversals) {
-    if (t.variableLength?.collectPath) {
-      pathAliases.push(t.variableLength.pathAlias ?? `${t.nodeAlias}_path`);
+    if (t.variableLength?.pathAlias !== undefined) {
+      pathAliases.push(t.variableLength.pathAlias);
     }
   }
 

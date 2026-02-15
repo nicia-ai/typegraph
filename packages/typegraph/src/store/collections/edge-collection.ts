@@ -10,6 +10,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
+import { type QueryBuilder } from "../../query/builder";
 import { type KindRegistry } from "../../registry";
 import {
   type Edge,
@@ -57,6 +58,34 @@ export function createEdgeCollection<
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>,
+  executeEdgeCreateNoReturnBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>,
+  executeEdgeCreateBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Edge[]>,
   executeEdgeUpdate: (
     input: {
       id: string;
@@ -81,6 +110,7 @@ export function createEdgeCollection<
     },
     options?: QueryOptions,
   ) => boolean,
+  _createQuery?: () => QueryBuilder<GraphDef>,
 ): EdgeCollection<G["edges"][K]["type"]> {
   type E = G["edges"][K]["type"];
 
@@ -126,6 +156,38 @@ export function createEdgeCollection<
       if (row.kind !== kind) return undefined; // Edge is a different type
       if (!matchesTemporalMode(row, options)) return undefined;
       return rowToEdge(row) as Edge<E>;
+    },
+
+    async getByIds(
+      ids: readonly string[],
+      options?: QueryOptions,
+    ): Promise<readonly (Edge<E> | undefined)[]> {
+      if (ids.length === 0) return [];
+
+      if (backend.getEdges !== undefined) {
+        const rows = await backend.getEdges(graphId, ids);
+        const rowMap = new Map<string, (typeof rows)[number]>();
+        for (const row of rows) {
+          rowMap.set(row.id, row);
+        }
+        return ids.map((id) => {
+          const row = rowMap.get(id);
+          if (!row) return;
+          if (row.kind !== kind) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToEdge(row) as Edge<E>;
+        });
+      }
+
+      return Promise.all(
+        ids.map(async (id) => {
+          const row = await backend.getEdge(graphId, id);
+          if (!row) return;
+          if (row.kind !== kind) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToEdge(row) as Edge<E>;
+        }),
+      );
     },
 
     async update(
@@ -185,6 +247,16 @@ export function createEdgeCollection<
         offset?: number;
       }>,
     ): Promise<Edge<E>[]> {
+      const untypedOptions = options as
+        | Readonly<{ where?: unknown }>
+        | undefined;
+      if (untypedOptions?.where !== undefined) {
+        throw new Error(
+          `store.edges.${kind}.find({ where }) is not supported. ` +
+            `Use store.query().traverse(...).whereEdge(...) for edge property filters.`,
+        );
+      }
+
       const params: {
         graphId: string;
         kind: string;
@@ -249,10 +321,11 @@ export function createEdgeCollection<
         validFrom?: string;
         validTo?: string;
       }>[],
+      options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Edge<E>[]> {
-      const results: Edge<E>[] = [];
+      const shouldReturnResults = options?.returnResults ?? true;
 
-      for (const item of items) {
+      const batchInputs = items.map((item) => {
         const input: {
           kind: string;
           id?: string;
@@ -274,12 +347,65 @@ export function createEdgeCollection<
         if (item.id !== undefined) input.id = item.id;
         if (item.validFrom !== undefined) input.validFrom = item.validFrom;
         if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
 
-        const result = await executeEdgeCreate(input, backend);
-        results.push(result as Edge<E>);
+      if (!shouldReturnResults) {
+        await ("transaction" in backend ?
+          backend.transaction(async (txBackend) => {
+            await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
+          })
+        : executeEdgeCreateNoReturnBatch(batchInputs, backend));
+        return [];
       }
 
-      return results;
+      const results = await executeEdgeCreateBatch(batchInputs, backend);
+      return results as Edge<E>[];
+    },
+
+    async bulkInsert(
+      items: readonly Readonly<{
+        from: NodeRef;
+        to: NodeRef;
+        props?: z.input<E["schema"]>;
+        id?: string;
+        validFrom?: string;
+        validTo?: string;
+      }>[],
+    ): Promise<void> {
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          fromKind: string;
+          fromId: string;
+          toKind: string;
+          toId: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          fromKind: item.from.kind,
+          fromId: item.from.id,
+          toKind: item.to.kind,
+          toId: item.to.id,
+          props: (item.props ?? {}) as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
+
+      if ("transaction" in backend) {
+        await backend.transaction(async (txBackend) => {
+          await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
+        });
+        return;
+      }
+
+      await executeEdgeCreateNoReturnBatch(batchInputs, backend);
     },
 
     async bulkDelete(ids: readonly string[]): Promise<void> {

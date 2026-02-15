@@ -181,6 +181,17 @@ function buildAliasPlans(
   ]);
 
   for (const traversal of state.traversals) {
+    const inverseEdgeKinds = traversal.inverseEdgeKinds ?? [];
+    const edgeKindNames =
+      inverseEdgeKinds.length === 0 ?
+        traversal.edgeKinds
+      : [
+          ...traversal.edgeKinds,
+          ...inverseEdgeKinds.filter(
+            (kind) => !traversal.edgeKinds.includes(kind),
+          ),
+        ];
+
     aliasInfo.set(traversal.nodeAlias, {
       kind: "node",
       optional: traversal.optional,
@@ -189,7 +200,7 @@ function buildAliasPlans(
     aliasInfo.set(traversal.edgeAlias, {
       kind: "edge",
       optional: traversal.optional,
-      kindNames: traversal.edgeKinds,
+      kindNames: edgeKindNames,
     });
   }
 

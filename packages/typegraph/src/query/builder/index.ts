@@ -27,6 +27,7 @@ export {
   ExecutableAggregateQuery,
 } from "./executable-aggregate-query";
 export { ExecutableQuery } from "./executable-query";
+export { PreparedQuery } from "./prepared-query";
 export { QueryBuilder } from "./query-builder";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
@@ -104,11 +105,13 @@ export {
   type PropsAccessor,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveTraversalOptions,
   type SelectableEdge,
   type SelectableNode,
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";

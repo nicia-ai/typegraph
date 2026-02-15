@@ -12,7 +12,10 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { TraversalExpansion } from "../query/ast";
+import type { NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
+import type { Predicate } from "../query/predicates";
 
 // ============================================================
 // Node Instance Types
@@ -230,6 +233,11 @@ export type StoreOptions = Readonly<{
   hooks?: StoreHooks;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
+  /** Query default behaviors. */
+  queryDefaults?: Readonly<{
+    /** Default traversal ontology expansion mode (default: "inverse"). */
+    traversalExpansion?: TraversalExpansion;
+  }>;
 }>;
 
 /**
@@ -266,6 +274,12 @@ export type NodeCollection<N extends NodeType> = Readonly<{
     options?: QueryOptions,
   ) => Promise<Node<N> | undefined>;
 
+  /** Get multiple nodes by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly NodeId<N>[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Node<N> | undefined)[]>;
+
   /** Update a node */
   update: (
     id: NodeId<N>,
@@ -292,10 +306,12 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   /**
    * Find nodes matching criteria.
    *
+   * Supports predicate filtering via the `where` option for SQL-level filtering.
    * For simple queries. Use store.query() for complex traversals.
    */
   find: (
     options?: Readonly<{
+      where?: (accessor: NodeAccessor<N>) => Predicate;
       limit?: number;
       offset?: number;
     }>,
@@ -328,6 +344,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
       validFrom?: string;
       validTo?: string;
     }>[],
+    options?: Readonly<{ returnResults?: boolean }>,
   ) => Promise<Node<N>[]>;
 
   /**
@@ -344,6 +361,22 @@ export type NodeCollection<N extends NodeType> = Readonly<{
       validTo?: string;
     }>[],
   ) => Promise<Node<N>[]>;
+
+  /**
+   * Insert multiple nodes without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      props: z.input<N["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
 
   /**
    * Delete multiple nodes by ID.
@@ -438,6 +471,12 @@ export type EdgeCollection<
   /** Get an edge by ID */
   getById: (id: string, options?: QueryOptions) => Promise<Edge<E> | undefined>;
 
+  /** Get multiple edges by ID, preserving input order (undefined for missing) */
+  getByIds: (
+    ids: readonly string[],
+    options?: QueryOptions,
+  ) => Promise<readonly (Edge<E> | undefined)[]>;
+
   /** Update an edge's properties */
   update: (
     id: string,
@@ -465,7 +504,7 @@ export type EdgeCollection<
    */
   hardDelete: (id: string) => Promise<void>;
 
-  /** Find edges matching criteria */
+  /** Find edges matching endpoint and pagination criteria */
   find: (
     options?: Readonly<{
       from?: TypedNodeRef<From>;
@@ -497,7 +536,26 @@ export type EdgeCollection<
       validFrom?: string;
       validTo?: string;
     }>[],
+    options?: Readonly<{ returnResults?: boolean }>,
   ) => Promise<Edge<E>[]>;
+
+  /**
+   * Insert multiple edges without returning results.
+   *
+   * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`
+   * with `returnResults: false`, the intent is unambiguous: no results
+   * are returned and the operation is wrapped in a transaction.
+   */
+  bulkInsert: (
+    items: readonly Readonly<{
+      from: TypedNodeRef<From>;
+      to: TypedNodeRef<To>;
+      props?: z.input<E["schema"]>;
+      id?: string;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+  ) => Promise<void>;
 
   /**
    * Delete multiple edges by ID.

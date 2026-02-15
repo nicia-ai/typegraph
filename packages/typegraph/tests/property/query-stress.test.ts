@@ -349,7 +349,7 @@ describe("Large Dataset Execution", () => {
           const countResult = await store
             .query()
             .from("TestNode", "n")
-            .selectAggregate({
+            .aggregate({
               total: count("n"),
             })
             .execute();
@@ -361,7 +361,7 @@ describe("Large Dataset Execution", () => {
           const sumResult = await store
             .query()
             .from("TestNode", "n")
-            .selectAggregate({
+            .aggregate({
               total: sum("n", "value"),
             })
             .execute();

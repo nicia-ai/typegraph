@@ -99,6 +99,12 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.kind, t.id] }),
       index(`${n.nodes}_kind_idx`).on(t.graphId, t.kind),
+      index(`${n.nodes}_kind_created_idx`).on(
+        t.graphId,
+        t.kind,
+        t.deletedAt,
+        t.createdAt,
+      ),
       index(`${n.nodes}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.nodes}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
       ...buildPostgresNodeIndexBuilders(t, indexes),
@@ -125,8 +131,33 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
       index(`${n.edges}_kind_idx`).on(t.graphId, t.kind),
-      index(`${n.edges}_from_idx`).on(t.graphId, t.fromKind, t.fromId),
-      index(`${n.edges}_to_idx`).on(t.graphId, t.toKind, t.toId),
+      // Directional traversal index (outgoing): supports endpoint lookups
+      // and extra filtering by edge kind / target kind.
+      index(`${n.edges}_from_idx`).on(
+        t.graphId,
+        t.fromKind,
+        t.fromId,
+        t.kind,
+        t.toKind,
+        t.deletedAt,
+        t.validTo,
+      ),
+      // Directional traversal index (incoming): mirrors from_idx for reverse traversals.
+      index(`${n.edges}_to_idx`).on(
+        t.graphId,
+        t.toKind,
+        t.toId,
+        t.kind,
+        t.fromKind,
+        t.deletedAt,
+        t.validTo,
+      ),
+      index(`${n.edges}_kind_created_idx`).on(
+        t.graphId,
+        t.kind,
+        t.deletedAt,
+        t.createdAt,
+      ),
       index(`${n.edges}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.edges}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
       index(`${n.edges}_cardinality_idx`).on(

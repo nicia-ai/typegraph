@@ -437,7 +437,7 @@ function createProfiledStore<G extends GraphDef>(
  * Wraps a query builder to intercept method calls.
  *
  * The builder returns new builders for most methods, and returns
- * ExecutableQuery for select/selectAggregate. We need to recursively
+ * ExecutableQuery for select/aggregate. We need to recursively
  * wrap to ensure all paths lead to wrapped ExecutableQueries.
  */
 function wrapQueryBuilder<T extends object>(

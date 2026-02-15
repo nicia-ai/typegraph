@@ -17,6 +17,7 @@ import {
   type ProjectedField,
   type SortDirection,
   type TraversalDirection,
+  type TraversalExpansion,
 } from "../ast";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
@@ -291,7 +292,7 @@ export class QueryBuilder<
    * By default, traverses from the current node (last traversal target, or start node).
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -299,7 +300,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: "out";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA>;
@@ -311,7 +312,7 @@ export class QueryBuilder<
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
    * @param options.direction - Set to "in" for incoming edge traversal
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -319,7 +320,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options: {
       direction: "in";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "in">;
@@ -329,7 +330,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, TraversalDirection> {
@@ -337,15 +338,22 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    const includeImplyingEdges = options?.includeImplyingEdges ?? false;
+    const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    const includeImplyingEdges =
+      expansion === "implying" || expansion === "all";
+    const includeInverseEdges = expansion === "inverse" || expansion === "all";
     // Use explicit `from` if provided, otherwise chain from currentAlias
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     // Expand edge kinds if including implying edges
-    const edgeKinds =
-      includeImplyingEdges ?
-        this.#config.registry.expandImplyingEdges(edgeKind)
-      : [edgeKind];
+    const edgeKinds = this.#expandTraversalEdgeKinds(
+      edgeKind,
+      includeImplyingEdges,
+    );
+    const inverseEdgeKinds =
+      includeInverseEdges ?
+        this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
+      : [];
 
     return new TraversalBuilder(
       this.#config,
@@ -354,6 +362,7 @@ export class QueryBuilder<
       edgeAlias,
       direction,
       fromAlias,
+      inverseEdgeKinds,
       false,
     );
   }
@@ -366,7 +375,7 @@ export class QueryBuilder<
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
    * @param options.direction - Direction of traversal: "out" (default) or "in"
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -374,7 +383,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: "out";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "out", true>;
@@ -384,7 +393,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options: {
       direction: "in";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "in", true>;
@@ -394,7 +403,7 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<
@@ -410,15 +419,22 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    const includeImplyingEdges = options?.includeImplyingEdges ?? false;
+    const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    const includeImplyingEdges =
+      expansion === "implying" || expansion === "all";
+    const includeInverseEdges = expansion === "inverse" || expansion === "all";
     // Use explicit `from` if provided, otherwise chain from currentAlias
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     // Expand edge kinds if including implying edges
-    const edgeKinds =
-      includeImplyingEdges ?
-        this.#config.registry.expandImplyingEdges(edgeKind)
-      : [edgeKind];
+    const edgeKinds = this.#expandTraversalEdgeKinds(
+      edgeKind,
+      includeImplyingEdges,
+    );
+    const inverseEdgeKinds =
+      includeInverseEdges ?
+        this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
+      : [];
 
     return new TraversalBuilder(
       this.#config,
@@ -427,6 +443,7 @@ export class QueryBuilder<
       edgeAlias,
       direction,
       fromAlias,
+      inverseEdgeKinds,
       true,
     );
   }
@@ -466,7 +483,7 @@ export class QueryBuilder<
    *
    * @param fields - Object mapping output names to field refs or aggregate expressions
    */
-  selectAggregate<R extends Record<string, FieldRef | AggregateExpr>>(
+  aggregate<R extends Record<string, FieldRef | AggregateExpr>>(
     fields: R,
   ): ExecutableAggregateQuery<G, Aliases, R> {
     const resolvedFields = Object.fromEntries(
@@ -833,13 +850,60 @@ export class QueryBuilder<
     });
   }
 
+  #expandTraversalEdgeKinds(
+    edgeKind: keyof G["edges"] & string,
+    includeImplyingEdges: boolean,
+  ): readonly string[] {
+    return includeImplyingEdges ?
+        this.#config.registry.expandImplyingEdges(edgeKind)
+      : [edgeKind];
+  }
+
+  #expandInverseTraversalEdgeKinds(
+    edgeKinds: readonly string[],
+    includeImplyingEdges: boolean,
+  ): readonly string[] {
+    const inverseKinds = new Set<string>();
+
+    for (const kind of edgeKinds) {
+      const inverseKind = this.#config.registry.getInverseEdge(kind);
+      if (inverseKind === undefined) {
+        continue;
+      }
+
+      inverseKinds.add(inverseKind);
+
+      if (!includeImplyingEdges) {
+        continue;
+      }
+
+      for (const implyingKind of this.#config.registry.expandImplyingEdges(
+        inverseKind,
+      )) {
+        inverseKinds.add(implyingKind);
+      }
+    }
+
+    return [...inverseKinds];
+  }
+
   /**
    * Gets edge kind names for an edge alias.
    */
   #getEdgeKindNamesForAlias(alias: string): readonly string[] | undefined {
     for (const traversal of this.#state.traversals) {
       if (traversal.edgeAlias === alias) {
-        return traversal.edgeKinds;
+        const inverseEdgeKinds = traversal.inverseEdgeKinds ?? [];
+        if (inverseEdgeKinds.length === 0) {
+          return traversal.edgeKinds;
+        }
+
+        return [
+          ...traversal.edgeKinds,
+          ...inverseEdgeKinds.filter(
+            (kind) => !traversal.edgeKinds.includes(kind),
+          ),
+        ];
       }
     }
     return undefined;

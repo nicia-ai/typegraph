@@ -16,7 +16,7 @@ Every query builder method falls into one of these categories:
 | [Filter](/queries/filter) | Reduce the result set | `whereNode()`, `whereEdge()` |
 | [Traverse](/queries/traverse) | Navigate relationships | `traverse()`, `optionalTraverse()`, `to()` |
 | [Recursive](/queries/recursive) | Variable-length paths | `recursive()`, `maxHops()`, `minHops()` |
-| [Shape](/queries/shape) | Transform output structure | `select()`, `selectAggregate()` |
+| [Shape](/queries/shape) | Transform output structure | `select()`, `aggregate()` |
 | [Aggregate](/queries/aggregate) | Summarize data | `groupBy()`, `count()`, `sum()`, `avg()` |
 | [Order](/queries/order) | Control result ordering/size | `orderBy()`, `limit()`, `offset()` |
 | [Temporal](/queries/temporal) | Time-based queries | `temporal()` |

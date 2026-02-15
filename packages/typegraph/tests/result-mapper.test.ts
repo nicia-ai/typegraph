@@ -49,7 +49,12 @@ describe("transformPathColumns", () => {
             joinFromAlias: "p",
             joinEdgeField: "to_id",
             optional: false,
-            variableLength: { minDepth: 1, maxDepth: 3, collectPath: true },
+            variableLength: {
+              minDepth: 1,
+              maxDepth: 3,
+              cyclePolicy: "prevent",
+              pathAlias: "friend_path",
+            },
           },
         ],
       };
@@ -75,7 +80,12 @@ describe("transformPathColumns", () => {
             joinFromAlias: "p",
             joinEdgeField: "to_id",
             optional: false,
-            variableLength: { minDepth: 1, maxDepth: 3, collectPath: true },
+            variableLength: {
+              minDepth: 1,
+              maxDepth: 3,
+              cyclePolicy: "prevent",
+              pathAlias: "friend_path",
+            },
           },
         ],
       };
@@ -95,7 +105,7 @@ describe("transformPathColumns", () => {
       expect(result).toBe(rows);
     });
 
-    it("returns rows unchanged when collectPath is false", () => {
+    it("returns rows unchanged when no pathAlias is configured", () => {
       const rows = [{ friend_path: "a|b|c" }];
       const state: QueryBuilderState = {
         ...baseState,
@@ -109,7 +119,11 @@ describe("transformPathColumns", () => {
             joinFromAlias: "p",
             joinEdgeField: "to_id",
             optional: false,
-            variableLength: { minDepth: 1, maxDepth: 3, collectPath: false },
+            variableLength: {
+              minDepth: 1,
+              maxDepth: 3,
+              cyclePolicy: "prevent",
+            },
           },
         ],
       };
@@ -137,7 +151,7 @@ describe("transformPathColumns", () => {
             variableLength: {
               minDepth: 1,
               maxDepth: 3,
-              collectPath: true,
+              cyclePolicy: "prevent",
               pathAlias: "custom_path",
             },
           },
@@ -171,7 +185,12 @@ describe("transformPathColumns", () => {
             joinFromAlias: "p",
             joinEdgeField: "to_id",
             optional: false,
-            variableLength: { minDepth: 1, maxDepth: 3, collectPath: true },
+            variableLength: {
+              minDepth: 1,
+              maxDepth: 3,
+              cyclePolicy: "prevent",
+              pathAlias: "friend_path",
+            },
           },
         ],
       };
@@ -196,7 +215,12 @@ describe("transformPathColumns", () => {
             joinFromAlias: "p",
             joinEdgeField: "to_id",
             optional: false,
-            variableLength: { minDepth: 1, maxDepth: 3, collectPath: true },
+            variableLength: {
+              minDepth: 1,
+              maxDepth: 3,
+              cyclePolicy: "prevent",
+              pathAlias: "friend_path",
+            },
           },
         ],
       };

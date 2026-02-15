@@ -242,6 +242,80 @@ async function exportAllUsers(): Promise<void> {
 }
 ```
 
+## Prepared Queries
+
+Prepared queries let you compile a query once and execute it many times with different parameter
+values. This eliminates recompilation overhead for repeated query shapes.
+
+### `param(name)`
+
+Use `param()` to declare a named placeholder inside any predicate position:
+
+```typescript
+import { param } from "@nicia-ai/typegraph";
+```
+
+### `prepare()`
+
+Call `.prepare()` on an executable query to pre-compile the AST and SQL. Returns a `PreparedQuery<R>`
+that can be executed with different bindings.
+
+```typescript
+const findByName = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq(param("name")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+// Execute with different bindings — no recompilation
+const alices = await findByName.execute({ name: "Alice" });
+const bobs = await findByName.execute({ name: "Bob" });
+```
+
+### Parameterized Bounds
+
+Parameters work anywhere a scalar value is accepted:
+
+```typescript
+const findByAge = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.age.between(param("minAge"), param("maxAge")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+const youngAdults = await findByAge.execute({ minAge: 18, maxAge: 25 });
+const seniors = await findByAge.execute({ minAge: 65, maxAge: 120 });
+```
+
+`prepared.execute(bindings)` validates bindings strictly: all declared parameters must be
+provided, and unknown binding keys are rejected.
+
+### Supported Positions
+
+`param()` works with any scalar predicate:
+
+| Predicate | Example |
+|-----------|---------|
+| `eq` / `neq` | `p.name.eq(param("name"))` |
+| `gt` / `gte` / `lt` / `lte` | `p.age.gt(param("minAge"))` |
+| `between` | `p.age.between(param("lo"), param("hi"))` |
+| `contains` | `p.name.contains(param("substr"))` |
+| `startsWith` / `endsWith` | `p.name.startsWith(param("prefix"))` |
+| `like` / `ilike` | `p.email.like(param("pattern"))` |
+
+:::caution
+`param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
+:::
+
+### Performance
+
+When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the pre-compiled
+SQL text is sent directly to the database driver with substituted parameter values — zero
+recompilation overhead. When `executeRaw` is unavailable, the prepared query substitutes parameters
+into the AST and recompiles.
+
 ## Query Debugging
 
 ### toAst()

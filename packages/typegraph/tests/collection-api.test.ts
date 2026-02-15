@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { createStore } from "../src/store";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
@@ -68,6 +68,10 @@ describe("Node Collections (SQLite)", () => {
     db = createTestDatabase();
     backend = createSqliteBackend(db);
     store = createStore(testGraph, backend);
+  });
+
+  it("reuses node collection instances across repeated access", () => {
+    expect(store.nodes.Person).toBe(store.nodes.Person);
   });
 
   describe("store.nodes.*.create()", () => {
@@ -164,6 +168,63 @@ describe("Node Collections (SQLite)", () => {
       const page2 = await store.nodes.Person.find({ limit: 2, offset: 2 });
       expect(page2).toHaveLength(1);
     });
+
+    it("uses transaction backend for where-filtered find() inside transactions", async () => {
+      const baseBackend = backend;
+      let rootExecuteCount = 0;
+      let txExecuteCount = 0;
+
+      const observedBackend: GraphBackend = {
+        ...baseBackend,
+        async execute<T>(
+          query: Parameters<GraphBackend["execute"]>[0],
+        ): Promise<readonly T[]> {
+          rootExecuteCount++;
+          return baseBackend.execute<T>(query);
+        },
+        async transaction<T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          options?: Parameters<GraphBackend["transaction"]>[1],
+        ): Promise<T> {
+          return baseBackend.transaction(async (txBackend) => {
+            const observedTxBackend: TransactionBackend = {
+              ...txBackend,
+              async execute<T>(
+                query: Parameters<GraphBackend["execute"]>[0],
+              ): Promise<readonly T[]> {
+                txExecuteCount++;
+                return txBackend.execute<T>(query);
+              },
+            };
+            return fn(observedTxBackend);
+          }, options);
+        },
+      };
+
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.transaction(async (tx) => {
+        await tx.nodes.Person.create(
+          { name: "Transaction Person" },
+          { id: "tx-person" },
+        );
+
+        const txResults = await tx.nodes.Person.find({
+          where: (person) => person.id.eq("tx-person"),
+        });
+
+        expect(txResults).toHaveLength(1);
+        expect(txResults[0]!.id).toBe("tx-person");
+      });
+
+      expect(txExecuteCount).toBeGreaterThan(0);
+      expect(rootExecuteCount).toBe(0);
+
+      const committed = await observedStore.nodes.Person.find({
+        where: (person) => person.id.eq("tx-person"),
+      });
+      expect(committed).toHaveLength(1);
+    });
   });
 
   describe("store.nodes.*.count()", () => {
@@ -201,6 +262,10 @@ describe("Edge Collections (SQLite)", () => {
     db = createTestDatabase();
     backend = createSqliteBackend(db);
     store = createStore(testGraph, backend);
+  });
+
+  it("reuses edge collection instances across repeated access", () => {
+    expect(store.edges.worksAt).toBe(store.edges.worksAt);
   });
 
   describe("store.edges.*.create()", () => {
@@ -283,6 +348,18 @@ describe("Edge Collections (SQLite)", () => {
 
       expect(edges).toHaveLength(1);
       expect(edges[0]!.role).toBe("Engineer");
+    });
+
+    it("rejects unsupported where filter options", async () => {
+      const find = store.edges.worksAt.find as (
+        options: Readonly<{ where: () => unknown }>,
+      ) => Promise<unknown>;
+
+      await expect(
+        find({
+          where: () => true,
+        }),
+      ).rejects.toThrow("store.edges.worksAt.find({ where }) is not supported");
     });
   });
 
@@ -477,6 +554,96 @@ describe("Bulk Operations (SQLite)", () => {
       expect(nodes[0]!.id).toBe("person-1");
       expect(nodes[1]!.id).toBe("person-2");
     });
+
+    it("supports skipping returned results for lower memory pressure", async () => {
+      const nodes = await store.nodes.Person.bulkCreate(
+        [{ props: { name: "Alice" } }, { props: { name: "Bob" } }],
+        { returnResults: false },
+      );
+
+      expect(nodes).toEqual([]);
+      const count = await store.nodes.Person.count();
+      expect(count).toBe(2);
+    });
+
+    it("uses batched backend node inserts for returnResults=false bulk creates", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let nodeNoReturnCalls = 0;
+      let nodeBatchCalls = 0;
+
+      async function insertNodeNoReturnWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: Parameters<GraphBackend["insertNode"]>[0],
+      ): Promise<void> {
+        await (activeBackend.insertNodeNoReturn?.(params) ??
+          activeBackend.insertNode(params));
+      }
+
+      async function insertNodesBatchWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: readonly Parameters<GraphBackend["insertNode"]>[0][],
+      ): Promise<void> {
+        if (activeBackend.insertNodesBatch !== undefined) {
+          await activeBackend.insertNodesBatch(params);
+          return;
+        }
+        for (const insertParams of params) {
+          await insertNodeNoReturnWithFallback(activeBackend, insertParams);
+        }
+      }
+
+      const backendWithCounters: GraphBackend = {
+        ...baseBackend,
+        async insertNodeNoReturn(params) {
+          nodeNoReturnCalls += 1;
+          await insertNodeNoReturnWithFallback(baseBackend, params);
+        },
+        async insertNodesBatch(params) {
+          nodeBatchCalls += 1;
+          await insertNodesBatchWithFallback(baseBackend, params);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx: TransactionBackend = {
+              ...tx,
+              async insertNodeNoReturn(params) {
+                nodeNoReturnCalls += 1;
+                await insertNodeNoReturnWithFallback(tx, params);
+              },
+              async insertNodesBatch(params) {
+                nodeBatchCalls += 1;
+                await insertNodesBatchWithFallback(tx, params);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithCounters);
+      await localStore.nodes.Person.bulkCreate(
+        [{ props: { name: "Alice" } }, { props: { name: "Bob" } }],
+        { returnResults: false },
+      );
+
+      expect(nodeBatchCalls).toBe(1);
+      expect(nodeNoReturnCalls).toBe(0);
+    });
+
+    it("rolls back returnResults=false batches when an item fails", async () => {
+      await expect(
+        store.nodes.Person.bulkCreate(
+          [
+            { id: "dup-person", props: { name: "Alice" } },
+            { id: "dup-person", props: { name: "Bob" } },
+          ],
+          { returnResults: false },
+        ),
+      ).rejects.toThrow();
+
+      const count = await store.nodes.Person.count();
+      expect(count).toBe(0);
+    });
   });
 
   describe("store.nodes.*.bulkUpsert()", () => {
@@ -585,6 +752,174 @@ describe("Bulk Operations (SQLite)", () => {
       ]);
 
       expect(edges[0]!.id).toBe("edge-1");
+    });
+
+    it("supports skipping returned edge results for lower memory pressure", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Inc" });
+
+      const edges = await store.edges.worksAt.bulkCreate(
+        [{ from: alice, to: acme, props: { role: "Engineer" } }],
+        { returnResults: false },
+      );
+
+      expect(edges).toEqual([]);
+      const count = await store.edges.worksAt.count();
+      expect(count).toBe(1);
+    });
+
+    it("uses batched backend edge inserts for returnResults=false bulk creates", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let edgeNoReturnCalls = 0;
+      let edgeBatchCalls = 0;
+
+      async function insertEdgeNoReturnWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: Parameters<GraphBackend["insertEdge"]>[0],
+      ): Promise<void> {
+        await (activeBackend.insertEdgeNoReturn?.(params) ??
+          activeBackend.insertEdge(params));
+      }
+
+      async function insertEdgesBatchWithFallback(
+        activeBackend: GraphBackend | TransactionBackend,
+        params: readonly Parameters<GraphBackend["insertEdge"]>[0][],
+      ): Promise<void> {
+        if (activeBackend.insertEdgesBatch !== undefined) {
+          await activeBackend.insertEdgesBatch(params);
+          return;
+        }
+        for (const insertParams of params) {
+          await insertEdgeNoReturnWithFallback(activeBackend, insertParams);
+        }
+      }
+
+      const backendWithCounters: GraphBackend = {
+        ...baseBackend,
+        async insertEdgeNoReturn(params) {
+          edgeNoReturnCalls += 1;
+          await insertEdgeNoReturnWithFallback(baseBackend, params);
+        },
+        async insertEdgesBatch(params) {
+          edgeBatchCalls += 1;
+          await insertEdgesBatchWithFallback(baseBackend, params);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx: TransactionBackend = {
+              ...tx,
+              async insertEdgeNoReturn(params) {
+                edgeNoReturnCalls += 1;
+                await insertEdgeNoReturnWithFallback(tx, params);
+              },
+              async insertEdgesBatch(params) {
+                edgeBatchCalls += 1;
+                await insertEdgesBatchWithFallback(tx, params);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithCounters);
+      const alice = await localStore.nodes.Person.create({ name: "Alice" });
+      const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
+      await localStore.edges.worksAt.bulkCreate(
+        [
+          { from: alice, to: acme, props: { role: "Engineer" } },
+          { from: alice, to: acme, props: { role: "Architect" } },
+        ],
+        { returnResults: false },
+      );
+
+      expect(edgeBatchCalls).toBe(1);
+      expect(edgeNoReturnCalls).toBe(0);
+    });
+
+    it("rolls back edge returnResults=false batches when an item fails", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Inc" });
+
+      await expect(
+        store.edges.worksAt.bulkCreate(
+          [
+            {
+              id: "dup-edge",
+              from: alice,
+              to: acme,
+              props: { role: "Engineer" },
+            },
+            {
+              id: "dup-edge",
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+            },
+          ],
+          { returnResults: false },
+        ),
+      ).rejects.toThrow();
+
+      const count = await store.edges.worksAt.count();
+      expect(count).toBe(0);
+    });
+
+    it("reuses endpoint existence checks for returnResults=false edge batches", async () => {
+      const baseBackend = createSqliteBackend(createTestDatabase());
+      let getNodeCalls = 0;
+
+      const backendWithNodeCounter: GraphBackend = {
+        ...baseBackend,
+        async getNode(graphId, kind, id) {
+          getNodeCalls += 1;
+          return baseBackend.getNode(graphId, kind, id);
+        },
+        async transaction(fn, options) {
+          return baseBackend.transaction(async (tx) => {
+            const wrappedTx = {
+              ...tx,
+              async getNode(graphId: string, kind: string, id: string) {
+                getNodeCalls += 1;
+                return tx.getNode(graphId, kind, id);
+              },
+            };
+            return fn(wrappedTx);
+          }, options);
+        },
+      };
+
+      const localStore = createStore(testGraph, backendWithNodeCounter);
+      const alice = await localStore.nodes.Person.create({ name: "Alice" });
+      const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
+
+      getNodeCalls = 0;
+      await localStore.edges.worksAt.bulkCreate(
+        [
+          {
+            id: "edge-cache-1",
+            from: alice,
+            to: acme,
+            props: { role: "Engineer" },
+          },
+          {
+            id: "edge-cache-2",
+            from: alice,
+            to: acme,
+            props: { role: "Architect" },
+          },
+          {
+            id: "edge-cache-3",
+            from: alice,
+            to: acme,
+            props: { role: "Manager" },
+          },
+        ],
+        { returnResults: false },
+      );
+
+      // Two endpoint checks total: one for from-node, one for to-node.
+      expect(getNodeCalls).toBe(2);
     });
   });
 

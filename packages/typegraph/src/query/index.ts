@@ -41,23 +41,27 @@ export type {
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
   SelectContext,
   StreamOptions,
+  TraversalExpansion,
 } from "./builder";
 
 // ============================================================
 // Public Functions
 // ============================================================
 
-// Predicate helpers for subqueries
+// Predicate helpers for subqueries and parameterized queries
 export {
   exists,
   fieldRef,
   inSubquery,
+  isParameterRef,
   notExists,
   notInSubquery,
+  param,
   type Predicate,
 } from "./predicates";
 
@@ -77,6 +81,7 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export { PreparedQuery } from "./builder/prepared-query";
 
 // Aggregate functions
 export {
@@ -113,7 +118,10 @@ export {
 export { type DialectAdapter, getDialect, type SqlDialect } from "./dialect";
 
 // Compiler constants
-export { MAX_RECURSIVE_DEPTH } from "./compiler/index";
+export {
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
+  MAX_RECURSIVE_DEPTH,
+} from "./compiler/index";
 
 // SQL schema configuration
 export {

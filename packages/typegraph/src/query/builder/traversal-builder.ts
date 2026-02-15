@@ -5,9 +5,11 @@ import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
 import {
   type NodePredicate,
+  type RecursiveCyclePolicy,
   type Traversal,
   type TraversalDirection,
 } from "../ast";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../compiler";
 import { jsonPointer } from "../json-pointer";
 import {
   arrayField,
@@ -30,6 +32,7 @@ import {
   type NodeAlias,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveTraversalOptions,
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";
@@ -59,8 +62,10 @@ interface VariableLengthState {
   enabled: boolean;
   minDepth: number;
   maxDepth: number;
-  collectPath: boolean;
+  cyclePolicy: RecursiveCyclePolicy;
+  pathEnabled: boolean;
   pathAlias?: string;
+  depthEnabled: boolean;
   depthAlias?: string;
 }
 
@@ -71,8 +76,48 @@ const DEFAULT_VARIABLE_LENGTH_STATE: VariableLengthState = {
   enabled: false,
   minDepth: 1,
   maxDepth: -1,
-  collectPath: false,
+  cyclePolicy: "prevent",
+  pathEnabled: false,
+  depthEnabled: false,
 };
+
+function validateMaxHops(max: number): void {
+  if (!Number.isFinite(max) || !Number.isInteger(max)) {
+    throw new TypeError("maxHops must be a finite integer");
+  }
+  if (max < 1) {
+    throw new Error("maxHops must be >= 1");
+  }
+  if (max > MAX_EXPLICIT_RECURSIVE_DEPTH) {
+    throw new Error(
+      `maxHops must be <= ${MAX_EXPLICIT_RECURSIVE_DEPTH}. ` +
+        `Use a smaller bound to prevent runaway recursive queries.`,
+    );
+  }
+}
+
+function validateMinHops(min: number): void {
+  if (!Number.isFinite(min) || !Number.isInteger(min)) {
+    throw new TypeError("minHops must be a finite integer");
+  }
+  if (min < 0) {
+    throw new Error("minHops must be >= 0");
+  }
+}
+
+function resolveAliasOption(
+  option: boolean | string | undefined,
+): string | undefined {
+  if (option === undefined || option === false) {
+    return;
+  }
+
+  if (option === true) {
+    return;
+  }
+
+  return option;
+}
 
 /**
  * Intermediate builder for traversal operations.
@@ -93,6 +138,7 @@ export class TraversalBuilder<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #edgeKinds: readonly string[];
+  readonly #inverseEdgeKinds: readonly string[];
   readonly #edgeAlias: EA;
   readonly #direction: Dir;
   readonly #fromAlias: string;
@@ -107,6 +153,7 @@ export class TraversalBuilder<
     edgeAlias: EA,
     direction: Dir,
     fromAlias: string,
+    inverseEdgeKinds: readonly string[] = [],
     optional: Optional = false as Optional,
     variableLength: VariableLengthState = DEFAULT_VARIABLE_LENGTH_STATE,
     pendingEdgePredicates: readonly NodePredicate[] = [],
@@ -114,6 +161,7 @@ export class TraversalBuilder<
     this.#config = config;
     this.#state = state;
     this.#edgeKinds = edgeKinds;
+    this.#inverseEdgeKinds = inverseEdgeKinds;
     this.#edgeAlias = edgeAlias;
     this.#direction = direction;
     this.#fromAlias = fromAlias;
@@ -124,17 +172,26 @@ export class TraversalBuilder<
 
   /**
    * Enables variable-length (recursive) traversal.
-   * By default, traverses unlimited depth with cycle detection.
+   * By default, traverses unlimited depth with cycle prevention.
    */
-  recursive(): TraversalBuilder<
-    G,
-    Aliases,
-    EdgeAliases,
-    EK,
-    EA,
-    Dir,
-    Optional
-  > {
+  recursive(
+    options?: RecursiveTraversalOptions,
+  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
+    const minDepth = options?.minHops ?? this.#variableLength.minDepth;
+    const maxDepth = options?.maxHops ?? this.#variableLength.maxDepth;
+    validateMinHops(minDepth);
+    if (maxDepth > 0) {
+      validateMaxHops(maxDepth);
+      if (minDepth > maxDepth) {
+        throw new Error("minHops must be <= maxHops");
+      }
+    }
+
+    const pathAlias = resolveAliasOption(options?.path);
+    const depthAlias = resolveAliasOption(options?.depth);
+    const cyclePolicy =
+      options?.cyclePolicy ?? this.#variableLength.cyclePolicy;
+
     return new TraversalBuilder(
       this.#config,
       this.#state,
@@ -142,8 +199,23 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
-      { ...this.#variableLength, enabled: true },
+      {
+        ...this.#variableLength,
+        enabled: true,
+        minDepth,
+        maxDepth,
+        cyclePolicy,
+        ...(options?.path !== undefined && {
+          pathEnabled: options.path !== false,
+          ...(pathAlias !== undefined && { pathAlias }),
+        }),
+        ...(options?.depth !== undefined && {
+          depthEnabled: options.depth !== false,
+          ...(depthAlias !== undefined && { depthAlias }),
+        }),
+      },
       this.#pendingEdgePredicates,
     );
   }
@@ -155,8 +227,9 @@ export class TraversalBuilder<
   maxHops(
     max: number,
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
-    if (max < 1) {
-      throw new Error("maxHops must be >= 1");
+    validateMaxHops(max);
+    if (this.#variableLength.minDepth > max) {
+      throw new Error("minHops must be <= maxHops");
     }
     return new TraversalBuilder(
       this.#config,
@@ -165,6 +238,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       { ...this.#variableLength, enabled: true, maxDepth: max },
       this.#pendingEdgePredicates,
@@ -178,8 +252,10 @@ export class TraversalBuilder<
   minHops(
     min: number,
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
-    if (min < 0) {
-      throw new Error("minHops must be >= 0");
+    validateMinHops(min);
+    const maxDepth = this.#variableLength.maxDepth;
+    if (maxDepth > 0 && min > maxDepth) {
+      throw new Error("minHops must be <= maxHops");
     }
     return new TraversalBuilder(
       this.#config,
@@ -188,6 +264,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       { ...this.#variableLength, enabled: true, minDepth: min },
       this.#pendingEdgePredicates,
@@ -195,20 +272,14 @@ export class TraversalBuilder<
   }
 
   /**
-   * Includes the traversal path as an array in results.
-   * @param alias Column alias for the path array (default: "{nodeAlias}_path")
+   * Sets cycle handling policy for recursive traversals.
+   *
+   * - "prevent": prevents revisiting nodes in a path (default)
+   * - "allow": skips cycle checks for maximum performance
    */
-  collectPath(
-    alias?: string,
+  cyclePolicy(
+    policy: RecursiveCyclePolicy,
   ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
-    const newState: VariableLengthState = {
-      ...this.#variableLength,
-      enabled: true,
-      collectPath: true,
-    };
-    if (alias !== undefined) {
-      newState.pathAlias = alias;
-    }
     return new TraversalBuilder(
       this.#config,
       this.#state,
@@ -216,35 +287,9 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
-      newState,
-      this.#pendingEdgePredicates,
-    );
-  }
-
-  /**
-   * Includes the traversal depth in results.
-   * @param alias Column alias for the depth (default: "{nodeAlias}_depth")
-   */
-  withDepth(
-    alias?: string,
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional> {
-    const newState: VariableLengthState = {
-      ...this.#variableLength,
-      enabled: true,
-    };
-    if (alias !== undefined) {
-      newState.depthAlias = alias;
-    }
-    return new TraversalBuilder(
-      this.#config,
-      this.#state,
-      this.#edgeKinds,
-      this.#edgeAlias,
-      this.#direction,
-      this.#fromAlias,
-      this.#optional,
-      newState,
+      { ...this.#variableLength, enabled: true, cyclePolicy: policy },
       this.#pendingEdgePredicates,
     );
   }
@@ -279,6 +324,7 @@ export class TraversalBuilder<
       this.#edgeAlias,
       this.#direction,
       this.#fromAlias,
+      this.#inverseEdgeKinds,
       this.#optional,
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
@@ -289,6 +335,13 @@ export class TraversalBuilder<
    * Creates a type-safe accessor for edge properties.
    */
   #createEdgeAccessor(alias: string): EdgeAccessor<AnyEdgeType> {
+    const allEdgeKinds = [
+      ...this.#edgeKinds,
+      ...this.#inverseEdgeKinds.filter(
+        (kind) => !this.#edgeKinds.includes(kind),
+      ),
+    ];
+
     // Pre-compute system field accessors
     const idAccessor = stringField(
       fieldRef(alias, ["id"], { valueType: "string" }),
@@ -307,7 +360,7 @@ export class TraversalBuilder<
     const buildFieldAccessor = (propertyName: string): BaseFieldAccessor => {
       const typeInfo =
         this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          this.#edgeKinds,
+          allEdgeKinds,
           propertyName,
         );
 
@@ -415,7 +468,7 @@ export class TraversalBuilder<
       includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
 
     // Build base traversal
-    const baseTraversal = {
+    const traversalBase: Traversal = {
       edgeAlias: this.#edgeAlias,
       edgeKinds: this.#edgeKinds,
       direction: this.#direction,
@@ -424,7 +477,12 @@ export class TraversalBuilder<
       joinFromAlias: this.#fromAlias,
       joinEdgeField: this.#direction === "out" ? "from_id" : "to_id",
       optional: this.#optional,
-    } as const;
+    };
+
+    const baseTraversal: Traversal =
+      this.#inverseEdgeKinds.length > 0 ?
+        { ...traversalBase, inverseEdgeKinds: this.#inverseEdgeKinds }
+      : traversalBase;
 
     // Add variable-length spec if enabled
     const traversal: Traversal =
@@ -434,9 +492,13 @@ export class TraversalBuilder<
           variableLength: {
             minDepth: this.#variableLength.minDepth,
             maxDepth: this.#variableLength.maxDepth,
-            collectPath: this.#variableLength.collectPath,
-            pathAlias: this.#variableLength.pathAlias ?? `${alias}_path`,
-            depthAlias: this.#variableLength.depthAlias ?? `${alias}_depth`,
+            cyclePolicy: this.#variableLength.cyclePolicy,
+            ...(this.#variableLength.pathEnabled && {
+              pathAlias: this.#variableLength.pathAlias ?? `${alias}_path`,
+            }),
+            ...(this.#variableLength.depthEnabled && {
+              depthAlias: this.#variableLength.depthAlias ?? `${alias}_depth`,
+            }),
           },
         }
       : baseTraversal;

@@ -21,7 +21,6 @@
  * ```
  */
 import { getTableName, type SQL, sql } from "drizzle-orm";
-import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { ConfigurationError, UniquenessError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -30,10 +29,12 @@ import {
   type CountEdgesByKindParams,
   type CountEdgesFromParams,
   type CountNodesByKindParams,
+  type CreateVectorIndexParams,
   D1_CAPABILITIES,
   type DeleteEdgeParams,
   type DeleteNodeParams,
   type DeleteUniqueParams,
+  type DropVectorIndexParams,
   type EdgeExistsBetweenParams,
   type EdgeRow,
   type FindEdgesByKindParams,
@@ -55,8 +56,19 @@ import {
   type UpdateEdgeParams,
   type UpdateNodeParams,
 } from "../types";
-import * as ops from "./operations";
-import { type SqliteTables,tables as defaultTables } from "./schema/sqlite";
+import {
+  type AnySqliteDatabase,
+  createSqliteExecutionAdapter,
+  type SqliteExecutionAdapter,
+  type SqliteExecutionProfileHints,
+} from "./execution/sqlite-execution";
+import { createSqliteOperationStrategy } from "./operations/strategy";
+import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
+import {
+  createSqliteVectorIndex,
+  dropSqliteVectorIndex,
+  type VectorIndexOptions,
+} from "./vector-index";
 
 // ============================================================
 // Types
@@ -71,12 +83,36 @@ export type SqliteBackendOptions = Readonly<{
    * Defaults to standard TypeGraph table names.
    */
   tables?: SqliteTables;
+  /**
+   * Optional execution profile hints used to avoid runtime driver reflection.
+   * Set `isD1: true` when using Cloudflare D1.
+   */
+  executionProfile?: SqliteExecutionProfileHints;
 }>;
 
-/**
- * Any Drizzle SQLite database instance.
- */
-type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
+const SQLITE_MAX_BIND_PARAMETERS = 999;
+const NODE_INSERT_PARAM_COUNT = 9;
+const EDGE_INSERT_PARAM_COUNT = 12;
+const SQLITE_NODE_INSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(SQLITE_MAX_BIND_PARAMETERS / NODE_INSERT_PARAM_COUNT),
+);
+const SQLITE_EDGE_INSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(SQLITE_MAX_BIND_PARAMETERS / EDGE_INSERT_PARAM_COUNT),
+);
+const SQLITE_GET_NODES_ID_CHUNK_SIZE = Math.max(
+  1,
+  SQLITE_MAX_BIND_PARAMETERS - 2,
+);
+const SQLITE_GET_EDGES_ID_CHUNK_SIZE = Math.max(
+  1,
+  SQLITE_MAX_BIND_PARAMETERS - 1,
+);
+
+type SerializedExecutionQueue = Readonly<{
+  runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
+}>;
 
 // ============================================================
 // Utilities
@@ -173,46 +209,41 @@ function toSchemaVersionRow(row: Record<string, unknown>): SchemaVersionRow {
   };
 }
 
-/**
- * Gets the session class name from a Drizzle database instance.
- */
-function getSessionName(db: AnySqliteDatabase): string | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const dbAny: any = db;
+function chunkArray<T>(
+  values: readonly T[],
+  size: number,
+): readonly (readonly T[])[] {
+  if (values.length <= size) return [values];
 
-  // Try db.session first (current Drizzle structure)
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-  if (dbAny.session?.constructor?.name) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    return dbAny.session.constructor.name as string;
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
   }
-
-  // Fallback to db._.session (older Drizzle structure)
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-  if (dbAny._?.session?.constructor?.name) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    return dbAny._.session.constructor.name as string;
-  }
-
-  return undefined;
+  return chunks;
 }
 
-/**
- * Detects if the database is a D1 database (no transaction support).
- */
-function isD1Database(db: AnySqliteDatabase): boolean {
-  return getSessionName(db) === "SQLiteD1Session";
+function createSerializedExecutionQueue(): SerializedExecutionQueue {
+  let tail: Promise<unknown> = Promise.resolve();
+
+  return {
+    async runExclusive<T>(task: () => Promise<T>): Promise<T> {
+      const runTask = async (): Promise<T> => task();
+      const result = tail.then(runTask, runTask);
+      tail = result.then(
+        () => 0,
+        () => 0,
+      );
+      return result;
+    },
+  };
 }
 
-/**
- * Detects if the database is a synchronous SQLite database (better-sqlite3, bun:sqlite).
- * These drivers don't support async transaction callbacks.
- */
-function isSyncDatabase(db: AnySqliteDatabase): boolean {
-  const sessionName = getSessionName(db);
-  // BetterSQLiteSession is better-sqlite3
-  // BunSQLiteSession is bun:sqlite
-  return sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession";
+async function runWithSerializedQueue<T>(
+  queue: SerializedExecutionQueue | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (queue === undefined) return task();
+  return queue.runExclusive(task);
 }
 
 // ============================================================
@@ -228,52 +259,106 @@ function isSyncDatabase(db: AnySqliteDatabase): boolean {
  * @param options - Backend configuration
  * @returns A GraphBackend implementation
  */
-export function createSqliteBackend(
-  db: AnySqliteDatabase,
-  options: SqliteBackendOptions = {},
-): GraphBackend {
-  const tables = options.tables ?? defaultTables;
-  const isD1 = isD1Database(db);
-  const isSync = isSyncDatabase(db);
+type CreateSqliteOperationBackendOptions = Readonly<{
+  capabilities: GraphBackend["capabilities"];
+  db: AnySqliteDatabase;
+  executionAdapter: SqliteExecutionAdapter;
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
+  serializedQueue?: SerializedExecutionQueue;
+  tableNames: SqlTableNames;
+}>;
 
-  const tableNames: SqlTableNames = {
-    nodes: getTableName(tables.nodes),
-    edges: getTableName(tables.edges),
-    embeddings: getTableName(tables.embeddings),
-  };
+type CreateSqliteTransactionBackendOptions = Readonly<{
+  capabilities: GraphBackend["capabilities"];
+  db: AnySqliteDatabase;
+  executionAdapter?: SqliteExecutionAdapter;
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
+  profileHints: SqliteExecutionProfileHints;
+  tableNames: SqlTableNames;
+}>;
 
-  /**
-   * Helper to execute a query and handle sync/async uniformly.
-   */
+function createSqliteOperationBackend(
+  options: CreateSqliteOperationBackendOptions,
+): TransactionBackend {
+  const {
+    capabilities,
+    db,
+    executionAdapter,
+    operationStrategy,
+    serializedQueue,
+    tableNames,
+  } = options;
+
   async function execGet<T>(query: SQL): Promise<T | undefined> {
-    const result = db.get(query);
-    return (result instanceof Promise ? await result : result) as T | undefined;
+    return runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.get(query);
+      return (result instanceof Promise ? await result : result) as T | undefined;
+    });
   }
 
   async function execAll<T>(query: SQL): Promise<T[]> {
-    const result = db.all(query);
-    return (result instanceof Promise ? await result : result) as T[];
+    return runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.all(query);
+      return (result instanceof Promise ? await result : result) as T[];
+    });
   }
 
   async function execRun(query: SQL): Promise<void> {
-    const result = db.run(query);
-    if (result instanceof Promise) await result;
+    await runWithSerializedQueue(serializedQueue, async () => {
+      const result = db.run(query);
+      if (result instanceof Promise) await result;
+    });
   }
 
-  // Create the backend operations
-  const backend: GraphBackend = {
+  const operationBackend: TransactionBackend = {
     dialect: "sqlite",
-    capabilities: isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES,
+    capabilities,
     tableNames,
 
     // === Node Operations ===
 
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertNode(tables, params, timestamp);
+      const query = operationStrategy.buildInsertNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert node failed: no row returned");
       return toNodeRow(row);
+    },
+
+    async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = operationStrategy.buildInsertNodeNoReturn(params, timestamp);
+      await execRun(query);
+    },
+
+    async insertNodesBatch(
+      params: readonly InsertNodeParams[],
+    ): Promise<void> {
+      if (params.length === 0) {
+        return;
+      }
+      const timestamp = nowIso();
+      for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
+        const query = operationStrategy.buildInsertNodesBatch(chunk, timestamp);
+        await execRun(query);
+      }
+    },
+
+    async insertNodesBatchReturning(
+      params: readonly InsertNodeParams[],
+    ): Promise<readonly NodeRow[]> {
+      if (params.length === 0) {
+        return [];
+      }
+      const timestamp = nowIso();
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(params, SQLITE_NODE_INSERT_BATCH_SIZE)) {
+        const query =
+          operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toNodeRow(row)));
+      }
+      return allRows;
     },
 
     async getNode(
@@ -281,14 +366,29 @@ export function createSqliteBackend(
       kind: string,
       id: string,
     ): Promise<NodeRow | undefined> {
-      const query = ops.buildGetNode(tables, graphId, kind, id);
+      const query = operationStrategy.buildGetNode(graphId, kind, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toNodeRow(row) : undefined;
     },
 
+    async getNodes(
+      graphId: string,
+      kind: string,
+      ids: readonly string[],
+    ): Promise<readonly NodeRow[]> {
+      if (ids.length === 0) return [];
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(ids, SQLITE_GET_NODES_ID_CHUNK_SIZE)) {
+        const query = operationStrategy.buildGetNodes(graphId, kind, chunk);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toNodeRow(row)));
+      }
+      return allRows;
+    },
+
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateNode(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateNode(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update node failed: no row returned");
       return toNodeRow(row);
@@ -296,30 +396,26 @@ export function createSqliteBackend(
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteNode(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteNode(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
-      // Delete associated uniqueness entries
-      const deleteUniquesQuery = ops.buildHardDeleteUniquesByNode(
-        tables,
+      const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execRun(deleteUniquesQuery);
 
-      // Delete associated embeddings (if embeddings table exists)
-      const deleteEmbeddingsQuery = ops.buildHardDeleteEmbeddingsByNode(
-        tables,
-        params.graphId,
-        params.kind,
-        params.id,
-      );
+      const deleteEmbeddingsQuery =
+        operationStrategy.buildHardDeleteEmbeddingsByNode(
+          params.graphId,
+          params.kind,
+          params.id,
+        );
       await execRun(deleteEmbeddingsQuery);
 
-      // Delete the node itself
-      const query = ops.buildHardDeleteNode(tables, params);
+      const query = operationStrategy.buildHardDeleteNode(params);
       await execRun(query);
     },
 
@@ -327,21 +423,71 @@ export function createSqliteBackend(
 
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertEdge(tables, params, timestamp);
+      const query = operationStrategy.buildInsertEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert edge failed: no row returned");
       return toEdgeRow(row);
     },
 
+    async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
+      const timestamp = nowIso();
+      const query = operationStrategy.buildInsertEdgeNoReturn(params, timestamp);
+      await execRun(query);
+    },
+
+    async insertEdgesBatch(
+      params: readonly InsertEdgeParams[],
+    ): Promise<void> {
+      if (params.length === 0) {
+        return;
+      }
+      const timestamp = nowIso();
+      for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
+        const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
+        await execRun(query);
+      }
+    },
+
+    async insertEdgesBatchReturning(
+      params: readonly InsertEdgeParams[],
+    ): Promise<readonly EdgeRow[]> {
+      if (params.length === 0) {
+        return [];
+      }
+      const timestamp = nowIso();
+      const allRows: EdgeRow[] = [];
+      for (const chunk of chunkArray(params, SQLITE_EDGE_INSERT_BATCH_SIZE)) {
+        const query =
+          operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toEdgeRow(row)));
+      }
+      return allRows;
+    },
+
     async getEdge(graphId: string, id: string): Promise<EdgeRow | undefined> {
-      const query = ops.buildGetEdge(tables, graphId, id);
+      const query = operationStrategy.buildGetEdge(graphId, id);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toEdgeRow(row) : undefined;
     },
 
+    async getEdges(
+      graphId: string,
+      ids: readonly string[],
+    ): Promise<readonly EdgeRow[]> {
+      if (ids.length === 0) return [];
+      const allRows: EdgeRow[] = [];
+      for (const chunk of chunkArray(ids, SQLITE_GET_EDGES_ID_CHUNK_SIZE)) {
+        const query = operationStrategy.buildGetEdges(graphId, chunk);
+        const rows = await execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => toEdgeRow(row)));
+      }
+      return allRows;
+    },
+
     async updateEdge(params: UpdateEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
-      const query = ops.buildUpdateEdge(tables, params, timestamp);
+      const query = operationStrategy.buildUpdateEdge(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Update edge failed: no row returned");
       return toEdgeRow(row);
@@ -349,25 +495,25 @@ export function createSqliteBackend(
 
     async deleteEdge(params: DeleteEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteEdge(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteEdge(params, timestamp);
       await execRun(query);
     },
 
     async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
-      const query = ops.buildHardDeleteEdge(tables, params);
+      const query = operationStrategy.buildHardDeleteEdge(params);
       await execRun(query);
     },
 
     // === Edge Cardinality Operations ===
 
     async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = ops.buildCountEdgesFrom(tables, params);
+      const query = operationStrategy.buildCountEdgesFrom(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
 
     async edgeExistsBetween(params: EdgeExistsBetweenParams): Promise<boolean> {
-      const query = ops.buildEdgeExistsBetween(tables, params);
+      const query = operationStrategy.buildEdgeExistsBetween(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row !== undefined;
     },
@@ -377,7 +523,7 @@ export function createSqliteBackend(
     async findEdgesConnectedTo(
       params: FindEdgesConnectedToParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesConnectedTo(tables, params);
+      const query = operationStrategy.buildFindEdgesConnectedTo(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
@@ -387,13 +533,13 @@ export function createSqliteBackend(
     async findNodesByKind(
       params: FindNodesByKindParams,
     ): Promise<readonly NodeRow[]> {
-      const query = ops.buildFindNodesByKind(tables, params);
+      const query = operationStrategy.buildFindNodesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toNodeRow(row));
     },
 
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
-      const query = ops.buildCountNodesByKind(tables, params);
+      const query = operationStrategy.buildCountNodesByKind(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
@@ -401,13 +547,13 @@ export function createSqliteBackend(
     async findEdgesByKind(
       params: FindEdgesByKindParams,
     ): Promise<readonly EdgeRow[]> {
-      const query = ops.buildFindEdgesByKind(tables, params);
+      const query = operationStrategy.buildFindEdgesByKind(params);
       const rows = await execAll<Record<string, unknown>>(query);
       return rows.map((row) => toEdgeRow(row));
     },
 
     async countEdgesByKind(params: CountEdgesByKindParams): Promise<number> {
-      const query = ops.buildCountEdgesByKind(tables, params);
+      const query = operationStrategy.buildCountEdgesByKind(params);
       const row = await execGet<{ count: number }>(query);
       return row?.count ?? 0;
     },
@@ -415,32 +561,30 @@ export function createSqliteBackend(
     // === Unique Constraint Operations ===
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
-      const query = ops.buildInsertUnique(tables, "sqlite", params);
+      const query = operationStrategy.buildInsertUnique(params);
       const result = await execGet<{ node_id: string }>(query);
 
-      // Check if the returned node_id matches our input
-      // If different, another node holds this key (race condition or conflict)
       if (result && result.node_id !== params.nodeId) {
         throw new UniquenessError({
           constraintName: params.constraintName,
           kind: params.nodeKind,
           existingId: result.node_id,
           newId: params.nodeId,
-          fields: [], // Fields not available at this level
+          fields: [],
         });
       }
     },
 
     async deleteUnique(params: DeleteUniqueParams): Promise<void> {
       const timestamp = nowIso();
-      const query = ops.buildDeleteUnique(tables, params, timestamp);
+      const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execRun(query);
     },
 
     async checkUnique(
       params: CheckUniqueParams,
     ): Promise<UniqueRow | undefined> {
-      const query = ops.buildCheckUnique(tables, params);
+      const query = operationStrategy.buildCheckUnique(params);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toUniqueRow(row) : undefined;
     },
@@ -450,14 +594,14 @@ export function createSqliteBackend(
     async getActiveSchema(
       graphId: string,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetActiveSchema(tables, graphId);
+      const query = operationStrategy.buildGetActiveSchema(graphId);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async insertSchema(params: InsertSchemaParams): Promise<SchemaVersionRow> {
       const timestamp = nowIso();
-      const query = ops.buildInsertSchema(tables, params, timestamp);
+      const query = operationStrategy.buildInsertSchema(params, timestamp);
       const row = await execGet<Record<string, unknown>>(query);
       if (!row) throw new Error("Insert schema failed: no row returned");
       return toSchemaVersionRow(row);
@@ -467,33 +611,126 @@ export function createSqliteBackend(
       graphId: string,
       version: number,
     ): Promise<SchemaVersionRow | undefined> {
-      const query = ops.buildGetSchemaVersion(tables, graphId, version);
+      const query = operationStrategy.buildGetSchemaVersion(graphId, version);
       const row = await execGet<Record<string, unknown>>(query);
       return row ? toSchemaVersionRow(row) : undefined;
     },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {
-      const queries = ops.buildSetActiveSchema(tables, graphId, version);
+      const queries = operationStrategy.buildSetActiveSchema(graphId, version);
       await execRun(queries.deactivateAll);
       await execRun(queries.activateVersion);
+    },
+
+    // === Embedding Operations (SQLite no-op index management) ===
+
+    createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      const indexOptions: VectorIndexOptions = {
+        graphId: params.graphId,
+        nodeKind: params.nodeKind,
+        fieldPath: params.fieldPath,
+        dimensions: params.dimensions,
+        indexType: params.indexType,
+        metric: params.metric,
+        ...(params.indexParams?.m === undefined
+          ? {}
+          : { hnswM: params.indexParams.m }),
+        ...(params.indexParams?.efConstruction === undefined
+          ? {}
+          : { hnswEfConstruction: params.indexParams.efConstruction }),
+        ...(params.indexParams?.lists === undefined
+          ? {}
+          : { ivfflatLists: params.indexParams.lists }),
+      };
+
+      const result = createSqliteVectorIndex(indexOptions);
+
+      if (!result.success) {
+        throw new Error(result.message ?? "Failed to create SQLite vector index");
+      }
+      return Promise.resolve();
+    },
+
+    dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
+      const result = dropSqliteVectorIndex(
+        params.graphId,
+        params.nodeKind,
+        params.fieldPath,
+      );
+      if (!result.success) {
+        throw new Error(result.message ?? "Failed to drop SQLite vector index");
+      }
+      return Promise.resolve();
     },
 
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
-      return execAll<T>(query);
+      return runWithSerializedQueue(serializedQueue, async () =>
+        executionAdapter.execute<T>(query),
+      );
     },
 
-    // === Transaction ===
+    compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
+      return executionAdapter.compile(query);
+    },
+  };
+
+  const executeCompiled = executionAdapter.executeCompiled;
+  if (executeCompiled !== undefined) {
+    (operationBackend as { executeRaw?: TransactionBackend["executeRaw"] }).executeRaw = function <T>(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<readonly T[]> {
+      return runWithSerializedQueue(serializedQueue, async () =>
+        executeCompiled<T>({ params, sql: sqlText }),
+      );
+    };
+  }
+
+  return operationBackend;
+}
+
+export function createSqliteBackend(
+  db: AnySqliteDatabase,
+  options: SqliteBackendOptions = {},
+): GraphBackend {
+  const tables = options.tables ?? defaultTables;
+  const profileHints = options.executionProfile ?? {};
+  const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
+  const { isD1, isSync } = executionAdapter.profile;
+  const capabilities = isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES;
+
+  const tableNames: SqlTableNames = {
+    nodes: getTableName(tables.nodes),
+    edges: getTableName(tables.edges),
+    embeddings: getTableName(tables.embeddings),
+  };
+  const operationStrategy = createSqliteOperationStrategy(tables);
+  const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
+  const operations = createSqliteOperationBackend({
+    capabilities,
+    db,
+    executionAdapter,
+    operationStrategy,
+    tableNames,
+    ...(serializedQueue === undefined ? {} : { serializedQueue }),
+  });
+
+  const backend: GraphBackend = {
+    ...operations,
+
+    async setActiveSchema(graphId: string, version: number): Promise<void> {
+      await backend.transaction(async (txBackend) => {
+        await txBackend.setActiveSchema(graphId, version);
+      });
+    },
 
     async transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       _options?: TransactionOptions,
     ): Promise<T> {
       if (isD1) {
-        // D1 doesn't support atomic transactions - operations are auto-committed.
-        // This is a critical limitation that could cause data corruption if
-        // a multi-step operation fails partway through.
         throw new ConfigurationError(
           "Cloudflare D1 does not support atomic transactions. " +
             "Operations within a transaction are not rolled back on failure. " +
@@ -508,31 +745,39 @@ export function createSqliteBackend(
       }
 
       if (isSync) {
-        // Synchronous drivers (better-sqlite3, bun:sqlite) don't support
-        // async transaction callbacks. Use raw SQL BEGIN/COMMIT/ROLLBACK.
-        const txBackend = createTransactionBackend(db, tables);
+        return runWithSerializedQueue(serializedQueue, async () => {
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db,
+            executionAdapter,
+            operationStrategy,
+            profileHints: { isD1: false, isSync: true },
+            tableNames,
+          });
+          db.run(sql`BEGIN`);
 
-        // Begin transaction synchronously
-        db.run(sql`BEGIN`);
-
-        try {
-          const result = await fn(txBackend);
-          db.run(sql`COMMIT`);
-          return result;
-        } catch (error) {
-          db.run(sql`ROLLBACK`);
-          throw error;
-        }
+          try {
+            const result = await fn(txBackend);
+            db.run(sql`COMMIT`);
+            return result;
+          } catch (error) {
+            db.run(sql`ROLLBACK`);
+            throw error;
+          }
+        });
       }
 
-      // Use Drizzle's transaction API for async drivers (libsql, etc.)
       return db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend(tx as AnySqliteDatabase, tables);
+        const txBackend = createTransactionBackend({
+          capabilities,
+          db: tx as AnySqliteDatabase,
+          operationStrategy,
+          profileHints: { isD1: false, isSync: false },
+          tableNames,
+        });
         return fn(txBackend);
       }) as Promise<T>;
     },
-
-    // === Lifecycle ===
 
     async close(): Promise<void> {
       // Drizzle doesn't expose a close method
@@ -543,21 +788,22 @@ export function createSqliteBackend(
   return backend;
 }
 
-/**
- * Creates a transaction backend from a Drizzle transaction.
- */
 function createTransactionBackend(
-  tx: AnySqliteDatabase,
-  tables: SqliteTables,
+  options: CreateSqliteTransactionBackendOptions,
 ): TransactionBackend {
-  // Create a new backend using the transaction
-  const txBackend = createSqliteBackend(tx, { tables });
+  const txExecutionAdapter =
+    options.executionAdapter ??
+    createSqliteExecutionAdapter(options.db, {
+      profileHints: options.profileHints,
+    });
 
-  // Return without transaction and close methods
-  const { transaction: _tx, close: _close, ...ops } = txBackend;
-  void _tx;
-  void _close;
-  return ops;
+  return createSqliteOperationBackend({
+    capabilities: options.capabilities,
+    db: options.db,
+    executionAdapter: txExecutionAdapter,
+    operationStrategy: options.operationStrategy,
+    tableNames: options.tableNames,
+  });
 }
 
 // Re-export schema utilities

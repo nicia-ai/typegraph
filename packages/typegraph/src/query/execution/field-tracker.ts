@@ -87,6 +87,17 @@ export function createTrackingContext(
   };
 
   for (const traversal of state.traversals) {
+    const inverseEdgeKinds = traversal.inverseEdgeKinds ?? [];
+    const edgeKindNames =
+      inverseEdgeKinds.length === 0 ?
+        traversal.edgeKinds
+      : [
+          ...traversal.edgeKinds,
+          ...inverseEdgeKinds.filter(
+            (kind) => !traversal.edgeKinds.includes(kind),
+          ),
+        ];
+
     const optionalAbsent =
       options.optionalTraversalAliases === "absent" && traversal.optional;
 
@@ -104,7 +115,7 @@ export function createTrackingContext(
       optionalAbsent ? undefined : (
         createEdgeTrackingProxy(
           traversal.edgeAlias,
-          traversal.edgeKinds,
+          edgeKindNames,
           tracker,
           options,
         )
@@ -282,13 +293,24 @@ function buildAliasKindMap(
   ]);
 
   for (const traversal of state.traversals) {
+    const inverseEdgeKinds = traversal.inverseEdgeKinds ?? [];
+    const edgeKindNames =
+      inverseEdgeKinds.length === 0 ?
+        traversal.edgeKinds
+      : [
+          ...traversal.edgeKinds,
+          ...inverseEdgeKinds.filter(
+            (kind) => !traversal.edgeKinds.includes(kind),
+          ),
+        ];
+
     map.set(traversal.nodeAlias, {
       kind: "node",
       kindNames: traversal.nodeKinds,
     });
     map.set(traversal.edgeAlias, {
       kind: "edge",
-      kindNames: traversal.edgeKinds,
+      kindNames: edgeKindNames,
     });
   }
 

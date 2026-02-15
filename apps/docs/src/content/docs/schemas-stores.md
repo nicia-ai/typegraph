@@ -342,6 +342,32 @@ Retrieves a node by ID.
 store.nodes.Person.getById(id: NodeId<Person>): Promise<Node<Person> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple nodes by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.nodes.Person.getByIds(
+  ids: readonly NodeId<Person>[],
+  options?: QueryOptions
+): Promise<readonly (Node<Person> | undefined)[]>;
+```
+
+When the backend supports batch lookups (`getNodes`), this executes a single
+`SELECT ... WHERE id IN (...)` query. Otherwise it falls back to sequential lookups.
+
+```typescript
+const [alice, bob, unknown] = await store.nodes.Person.getByIds([
+  aliceId,
+  bobId,
+  "nonexistent",
+]);
+// alice: Node<Person>
+// bob: Node<Person>
+// unknown: undefined
+```
+
 #### `update(id, props)`
 
 Updates node properties.
@@ -363,14 +389,23 @@ store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
 
 #### `find(options?)`
 
-Finds nodes of this kind with optional pagination.
-For filtering, use the query builder (`store.query()`).
+Finds nodes of this kind with optional filtering and pagination.
 
 ```typescript
 store.nodes.Person.find(options?: {
+  where?: (accessor) => Predicate;
   limit?: number;
   offset?: number;
 }): Promise<Node<Person>[]>;
+```
+
+The optional `where` predicate uses the same accessor API as `whereNode()` in the query builder:
+
+```typescript
+const activeUsers = await store.nodes.Person.find({
+  where: (p) => p.status.eq("active"),
+  limit: 50,
+});
 ```
 
 #### `count()`
@@ -399,9 +434,9 @@ store.nodes.Person.upsert(
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
-Creates multiple nodes efficiently.
+Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.nodes.Person.bulkCreate(
@@ -410,8 +445,34 @@ store.nodes.Person.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Node<Person>[]>;
+```
+
+Use `returnResults: false` for large ingestion jobs when you do not need created node payloads:
+
+```typescript
+await store.nodes.Person.bulkCreate(batch, { returnResults: false });
+// Returns [] to avoid allocating result objects
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple nodes without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.nodes.Person.bulkInsert(
+  items: readonly {
+    props: { name: string; email?: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkUpsert(items)`
@@ -491,6 +552,22 @@ Retrieves an edge by ID.
 store.edges.worksAt.getById(id: string): Promise<Edge<worksAt> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple edges by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.edges.worksAt.getByIds(
+  ids: readonly string[],
+  options?: QueryOptions
+): Promise<readonly (Edge<worksAt> | undefined)[]>;
+```
+
+```typescript
+const [edge1, edge2] = await store.edges.worksAt.getByIds([id1, id2]);
+```
+
 #### `update(id, props, options?)`
 
 Updates edge properties.
@@ -525,7 +602,7 @@ store.edges.worksAt.findTo(
 
 #### `find(options?)`
 
-Finds edges with filtering.
+Finds edges with endpoint filtering.
 
 ```typescript
 store.edges.worksAt.find(options?: {
@@ -535,6 +612,8 @@ store.edges.worksAt.find(options?: {
   offset?: number;
 }): Promise<Edge<worksAt>[]>;
 ```
+
+For edge property filters, use the query builder with `whereEdge(...)`.
 
 #### `count(options?)`
 
@@ -555,9 +634,9 @@ Soft-deletes an edge.
 store.edges.worksAt.delete(id: string): Promise<void>;
 ```
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
-Creates multiple edges efficiently.
+Creates multiple edges efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.edges.worksAt.bulkCreate(
@@ -568,8 +647,36 @@ store.edges.worksAt.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Edge<worksAt>[]>;
+```
+
+For high-volume edge ingestion, disable returned payloads:
+
+```typescript
+await store.edges.worksAt.bulkCreate(edgeBatch, { returnResults: false });
+// Returns [] to reduce memory pressure
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple edges without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.edges.worksAt.bulkInsert(
+  items: readonly {
+    from: TypedNodeRef<Person>;
+    to: TypedNodeRef<Company>;
+    props?: { role: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkDelete(ids)`
@@ -621,6 +728,7 @@ const results = await store
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
+| `prepare()` | `PreparedQuery<T>` | Pre-compile query for repeated execution with parameters |
 
 ### Registry Access
 

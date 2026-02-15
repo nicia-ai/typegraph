@@ -4,6 +4,7 @@
  * Validates aliases and identifiers to prevent SQL injection.
  */
 import { ValidationError } from "../../errors";
+import { type PredicateExpression } from "../ast";
 
 /**
  * Pattern for valid SQL identifiers (aliases).
@@ -107,6 +108,100 @@ export function validateSqlIdentifier(alias: string): void {
       {
         suggestion: `Choose a different alias. Reserved words like SELECT, FROM, WHERE cannot be used.`,
       },
+    );
+  }
+}
+
+function throwInvalidVectorPredicatePlacement(path: string): never {
+  throw new ValidationError(
+    "Vector similarity predicates cannot be nested under OR or NOT. " +
+      "Use top-level AND combinations instead.",
+    {
+      issues: [
+        {
+          path,
+          message:
+            "Vector similarity predicates are only supported at top-level " +
+            "or inside AND groups.",
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Rewrite the predicate to keep vector similarity at top-level " +
+        "or combine with additional filters using AND.",
+    },
+  );
+}
+
+function validateVectorPredicateExpression(
+  expression: PredicateExpression,
+  inDisallowedBranch: boolean,
+  path: string,
+): void {
+  switch (expression.__type) {
+    case "vector_similarity": {
+      if (inDisallowedBranch) {
+        throwInvalidVectorPredicatePlacement(path);
+      }
+      return;
+    }
+    case "and": {
+      for (const [
+        predicateIndex,
+        predicate,
+      ] of expression.predicates.entries()) {
+        validateVectorPredicateExpression(
+          predicate,
+          inDisallowedBranch,
+          `${path}.predicates[${predicateIndex}]`,
+        );
+      }
+      return;
+    }
+    case "or": {
+      for (const [
+        predicateIndex,
+        predicate,
+      ] of expression.predicates.entries()) {
+        validateVectorPredicateExpression(
+          predicate,
+          true,
+          `${path}.predicates[${predicateIndex}]`,
+        );
+      }
+      return;
+    }
+    case "not": {
+      validateVectorPredicateExpression(
+        expression.predicate,
+        true,
+        `${path}.predicate`,
+      );
+      return;
+    }
+    case "comparison":
+    case "string_op":
+    case "null_check":
+    case "between":
+    case "array_op":
+    case "object_op":
+    case "aggregate_comparison":
+    case "exists":
+    case "in_subquery": {
+      return;
+    }
+  }
+}
+
+export function validateVectorPredicatePlacement(
+  predicates: readonly { expression: PredicateExpression }[],
+): void {
+  for (const [predicateIndex, predicate] of predicates.entries()) {
+    validateVectorPredicateExpression(
+      predicate.expression,
+      false,
+      `predicates[${predicateIndex}].expression`,
     );
   }
 }

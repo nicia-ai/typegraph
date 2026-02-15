@@ -20,17 +20,68 @@ your knowledge graph scales with your application.
 
 ## Benchmarks
 
-The following benchmarks were recorded using `tinybench` on a standard development machine
-(M3 Pro) using an in-memory SQLite database. These represent the baseline overhead of the
-TypeGraph library itself.
+TypeGraph uses a deterministic performance sanity suite as its benchmark and regression gate.
+The suite seeds a realistic graph shape and measures end-to-end query latency across:
 
-| Operation             | Throughput (ops/s) | Avg Latency (ns) |
-| :-------------------- | :----------------- | :--------------- |
-| **Create Node**       | ~34,000            | ~32,000          |
-| **Read Node by ID**   | ~92,000            | ~12,000          |
-| **Simple Query**      | ~6,800             | ~147,000         |
+- forward and reverse traversals
+- inverse/symmetric traversal (`expand: "inverse"` / `expand: "all"`)
+- 2-hop and 3-hop traversals
+- aggregate queries
+- cached execute vs prepared execute
+- deep traversals (`10`/`100`/`1000` hop recursive with `cyclePolicy: "allow"`)
 
-*Note: Real-world performance will vary based on your database driver, network latency (for PostgreSQL), and schema complexity.*
+Guardrail thresholds enforce expected behavior in CI (for example, traversal latency caps and
+ratio checks such as reverse/forward and deep-hop scaling).
+
+Deep-recursive benchmark probes explicitly set `cyclePolicy: "allow"` to isolate recursive CTE
+expansion cost; the default `cyclePolicy: "prevent"` prioritizes cycle-safe semantics and is
+expected to be slower on long traversals.
+
+*Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
+and schema/data shape.*
+
+Current suite configuration:
+
+| Setting | Value |
+|---------|-------|
+| Seed users | 1200 |
+| Follows per user | 10 |
+| Posts per user | 5 |
+| Batch size | 250 |
+| Warmup iterations | 2 |
+| Sample iterations (median reported) | 7 |
+
+Default guardrails:
+
+| Check | Threshold |
+|-------|-----------|
+| reverse/forward ratio | <= 6x |
+| inverse traversal latency | <= 500ms |
+| inverse/forward ratio | <= 10x |
+| 3-hop latency | <= 500ms |
+| 3-hop/2-hop ratio | <= 8x |
+| aggregate latency | <= 500ms |
+| aggregate distinct latency | <= 700ms |
+| aggregateDistinct/aggregate ratio | <= 4x |
+| cached execute latency | <= 500ms |
+| prepared execute latency | <= 500ms |
+| prepared/cached ratio | <= 2x |
+| 10-hop recursive latency | <= 250ms |
+| 100-hop recursive latency | <= 1000ms |
+| 100-hop-recursive/10-hop-recursive ratio | <= 30x |
+| 1000-hop recursive latency | <= 5000ms |
+| 1000-hop-recursive/100-hop-recursive ratio | <= 50x |
+
+Backend-specific overrides:
+
+| Backend | Check | Threshold |
+|---------|-------|-----------|
+| SQLite | 1000-hop recursive latency | <= 7000ms |
+| PostgreSQL | inverse traversal latency | <= 1000ms |
+| PostgreSQL | inverse/forward ratio | <= 30x |
+| PostgreSQL | 3-hop latency | <= 1000ms |
+| PostgreSQL | aggregate distinct latency | <= 1200ms |
+| PostgreSQL | prepared execute latency | <= 700ms |
 
 ## Key Performance Features
 
@@ -107,6 +158,52 @@ The default TypeGraph schema includes optimized indexes for the most common acce
 
 For application-specific indexes on JSON properties, see [Indexes](/performance/indexes).
 
+### 5. Compilation Caching
+
+Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
+The compiled SQL for each instance is cached internally — repeated `.execute()` calls on the same
+builder skip recompilation entirely. This applies to standard queries, aggregate queries, and
+set-operation queries (`union`, `intersect`, `except`). This is transparent and requires no API changes.
+
+```typescript
+const activeUsers = store
+  .query()
+  .from("User", "u")
+  .whereNode("u", (u) => u.status.eq("active"))
+  .select((ctx) => ctx.u);
+
+// First call: compiles AST → SQL → executes
+await activeUsers.execute();
+
+// Second call: reuses cached SQL → executes
+await activeUsers.execute();
+```
+
+### 6. Prepared Queries
+
+For hot paths that execute the same query shape with different values, `.prepare()` pre-compiles the
+entire query pipeline (AST build, SQL compilation, text extraction) once. Subsequent
+`.execute(bindings)` calls only substitute parameter values and execute.
+
+When `executeRaw` is available (both SQLite and PostgreSQL backends), the pre-compiled SQL text is
+sent directly to the driver — zero recompilation overhead.
+
+Best for: API endpoints, hot loops, or any code path that runs the same query shape repeatedly.
+
+See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
+
+### 7. Batch Lookups
+
+`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
+individual queries. Results are returned in input order with `undefined` for missing entries.
+
+```typescript
+const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
+```
+
+When the backend doesn't support batch queries, `getByIds()` automatically falls back to sequential
+lookups.
+
 ## Best Practices
 
 ### Use Specific Kinds
@@ -179,8 +276,20 @@ You can run the benchmark suite against your own environment:
 pnpm bench
 ```
 
-The benchmark source code is located in `packages/benchmarks/src/index.ts` and can be customized
-to match your specific data model.
+For guardrail mode (fails on regression thresholds):
+
+```bash
+pnpm --filter @nicia-ai/typegraph-benchmarks perf:check
+```
+
+Run the same guardrailed suite against PostgreSQL:
+
+```bash
+POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
+  pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
+```
+
+The benchmark source code is located in `packages/benchmarks/src/`.
 
 ## Next Steps
 

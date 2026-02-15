@@ -21,15 +21,20 @@ import {
   type GroupBySpec,
   type NodePredicate,
   type OrderSpec,
+  type ParameterRef,
   type PredicateExpression,
   type ProjectedField,
+  type RecursiveCyclePolicy,
   type Traversal,
   type TraversalDirection,
+  type TraversalExpansion,
 } from "../ast";
 import { type SqlDialect, type SqlSchema } from "../compiler/index";
 import { type JsonPointerInput } from "../json-pointer";
 import type { Predicate, SimilarToOptions } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+
+export type { TraversalExpansion } from "../ast";
 
 // ============================================================
 // Edge Target Type Helpers
@@ -145,31 +150,37 @@ export type BaseFieldAccessor = Readonly<{
 
 export type StringFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    contains: (pattern: string) => Predicate;
-    startsWith: (pattern: string) => Predicate;
-    endsWith: (pattern: string) => Predicate;
-    like: (pattern: string) => Predicate;
-    ilike: (pattern: string) => Predicate;
+    contains: (pattern: string | ParameterRef) => Predicate;
+    startsWith: (pattern: string | ParameterRef) => Predicate;
+    endsWith: (pattern: string | ParameterRef) => Predicate;
+    like: (pattern: string | ParameterRef) => Predicate;
+    ilike: (pattern: string | ParameterRef) => Predicate;
   }>;
 
 export type NumberFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: number) => Predicate;
-    gte: (value: number) => Predicate;
-    lt: (value: number) => Predicate;
-    lte: (value: number) => Predicate;
-    between: (lower: number, upper: number) => Predicate;
+    gt: (value: number | ParameterRef) => Predicate;
+    gte: (value: number | ParameterRef) => Predicate;
+    lt: (value: number | ParameterRef) => Predicate;
+    lte: (value: number | ParameterRef) => Predicate;
+    between: (
+      lower: number | ParameterRef,
+      upper: number | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type BooleanFieldAccessor = BaseFieldAccessor;
 
 export type DateFieldAccessor = BaseFieldAccessor &
   Readonly<{
-    gt: (value: Date | string) => Predicate;
-    gte: (value: Date | string) => Predicate;
-    lt: (value: Date | string) => Predicate;
-    lte: (value: Date | string) => Predicate;
-    between: (lower: Date | string, upper: Date | string) => Predicate;
+    gt: (value: Date | string | ParameterRef) => Predicate;
+    gte: (value: Date | string | ParameterRef) => Predicate;
+    lt: (value: Date | string | ParameterRef) => Predicate;
+    lte: (value: Date | string | ParameterRef) => Predicate;
+    between: (
+      lower: Date | string | ParameterRef,
+      upper: Date | string | ParameterRef,
+    ) => Predicate;
   }>;
 
 export type ArrayFieldAccessor<U> = BaseFieldAccessor &
@@ -380,6 +391,22 @@ export type StreamOptions = Readonly<{
   batchSize?: number;
 }>;
 
+/**
+ * Options for recursive traversals.
+ */
+export type RecursiveTraversalOptions = Readonly<{
+  /** Minimum number of hops before including results (default: 1) */
+  minHops?: number;
+  /** Maximum number of hops (-1 means unlimited) */
+  maxHops?: number;
+  /** Cycle handling policy (default: "prevent") */
+  cyclePolicy?: RecursiveCyclePolicy;
+  /** Include path in output. Pass a string to customize alias. */
+  path?: boolean | string;
+  /** Include depth in output. Pass a string to customize alias. */
+  depth?: boolean | string;
+}>;
+
 // ============================================================
 // Configuration Types
 // ============================================================
@@ -391,6 +418,8 @@ export type QueryBuilderConfig = Readonly<{
   graphId: string;
   registry: KindRegistry;
   schemaIntrospector: SchemaIntrospector;
+  /** Default traversal ontology expansion mode. */
+  defaultTraversalExpansion: TraversalExpansion;
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names. */
@@ -428,4 +457,6 @@ export type CreateQueryBuilderOptions = Readonly<{
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names */
   schema?: SqlSchema;
+  /** Default traversal ontology expansion mode (default: "inverse"). */
+  defaultTraversalExpansion?: TraversalExpansion;
 }>;

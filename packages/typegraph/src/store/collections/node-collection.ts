@@ -11,6 +11,7 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type NodeId } from "../../core/types";
+import { type QueryBuilder } from "../../query/builder";
 import { type KindRegistry } from "../../registry";
 import { type Node, type NodeCollection, type QueryOptions } from "../types";
 
@@ -46,6 +47,26 @@ export function createNodeCollection<
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Node>,
+  executeNodeCreateNoReturnBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>,
+  executeNodeCreateBatch: (
+    inputs: readonly Readonly<{
+      kind: string;
+      id?: string;
+      props: Record<string, unknown>;
+      validFrom?: string;
+      validTo?: string;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Node[]>,
   executeNodeUpdate: (
     input: {
       kind: string;
@@ -74,6 +95,7 @@ export function createNodeCollection<
     },
     options?: QueryOptions,
   ) => boolean,
+  createQuery?: () => QueryBuilder<GraphDef>,
 ): NodeCollection<G["nodes"][K]["type"]> {
   type N = G["nodes"][K]["type"];
 
@@ -110,6 +132,40 @@ export function createNodeCollection<
       return rowToNode(row) as Node<N>;
     },
 
+    async getByIds(
+      ids: readonly NodeId<N>[],
+      options?: QueryOptions,
+    ): Promise<readonly (Node<N> | undefined)[]> {
+      if (ids.length === 0) return [];
+
+      if (backend.getNodes !== undefined) {
+        const rows = await backend.getNodes(
+          graphId,
+          kind,
+          ids as readonly string[],
+        );
+        const rowMap = new Map<string, (typeof rows)[number]>();
+        for (const row of rows) {
+          rowMap.set(row.id, row);
+        }
+        return ids.map((id) => {
+          const row = rowMap.get(id as string);
+          if (!row) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToNode(row) as Node<N>;
+        });
+      }
+
+      return Promise.all(
+        ids.map(async (id) => {
+          const row = await backend.getNode(graphId, kind, id as string);
+          if (!row) return;
+          if (!matchesTemporalMode(row, options)) return;
+          return rowToNode(row) as Node<N>;
+        }),
+      );
+    },
+
     async update(
       id: NodeId<N>,
       props: Partial<z.input<N["schema"]>>,
@@ -140,8 +196,23 @@ export function createNodeCollection<
     },
 
     async find(
-      options?: Readonly<{ limit?: number; offset?: number }>,
+      options?: Readonly<{
+        where?: (accessor: never) => unknown;
+        limit?: number;
+        offset?: number;
+      }>,
     ): Promise<Node<N>[]> {
+      if (options?.where !== undefined && createQuery !== undefined) {
+        let query = createQuery()
+          .from(kind, "_n")
+          .whereNode("_n", options.where as never)
+          .select((ctx: Record<string, unknown>) => ctx._n);
+        if (options.limit !== undefined) query = query.limit(options.limit);
+        if (options.offset !== undefined) query = query.offset(options.offset);
+        const results = await query.execute();
+        return results as Node<N>[];
+      }
+
       const params: {
         graphId: string;
         kind: string;
@@ -225,10 +296,11 @@ export function createNodeCollection<
         validFrom?: string;
         validTo?: string;
       }>[],
+      options?: Readonly<{ returnResults?: boolean }>,
     ): Promise<Node<N>[]> {
-      const results: Node<N>[] = [];
+      const shouldReturnResults = options?.returnResults ?? true;
 
-      for (const item of items) {
+      const batchInputs = items.map((item) => {
         const input: {
           kind: string;
           id?: string;
@@ -242,12 +314,20 @@ export function createNodeCollection<
         if (item.id !== undefined) input.id = item.id;
         if (item.validFrom !== undefined) input.validFrom = item.validFrom;
         if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
 
-        const result = await executeNodeCreate(input, backend);
-        results.push(result as Node<N>);
+      if (!shouldReturnResults) {
+        await ("transaction" in backend ?
+          backend.transaction(async (txBackend) => {
+            await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
+          })
+        : executeNodeCreateNoReturnBatch(batchInputs, backend));
+        return [];
       }
 
-      return results;
+      const results = await executeNodeCreateBatch(batchInputs, backend);
+      return results as Node<N>[];
     },
 
     async bulkUpsert(
@@ -306,6 +386,41 @@ export function createNodeCollection<
       }
 
       return results;
+    },
+
+    async bulkInsert(
+      items: readonly Readonly<{
+        props: z.input<N["schema"]>;
+        id?: string;
+        validFrom?: string;
+        validTo?: string;
+      }>[],
+    ): Promise<void> {
+      const batchInputs = items.map((item) => {
+        const input: {
+          kind: string;
+          id?: string;
+          props: Record<string, unknown>;
+          validFrom?: string;
+          validTo?: string;
+        } = {
+          kind: kind,
+          props: item.props as Record<string, unknown>,
+        };
+        if (item.id !== undefined) input.id = item.id;
+        if (item.validFrom !== undefined) input.validFrom = item.validFrom;
+        if (item.validTo !== undefined) input.validTo = item.validTo;
+        return input;
+      });
+
+      if ("transaction" in backend) {
+        await backend.transaction(async (txBackend) => {
+          await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
+        });
+        return;
+      }
+
+      await executeNodeCreateNoReturnBatch(batchInputs, backend);
     },
 
     async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {

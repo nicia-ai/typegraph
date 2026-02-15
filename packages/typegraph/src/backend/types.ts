@@ -280,6 +280,10 @@ export type VectorSearchParams = Readonly<{
  */
 export type VectorSearchResult = Readonly<{
   nodeId: string;
+  /**
+   * Cosine metric returns similarity score (higher is better).
+   * L2 and inner_product return raw distance (lower is better).
+   */
   score: number;
 }>;
 
@@ -355,6 +359,11 @@ export type GraphBackend = Readonly<{
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
+  insertNodeNoReturn?: (params: InsertNodeParams) => Promise<void>;
+  insertNodesBatch?: (params: readonly InsertNodeParams[]) => Promise<void>;
+  insertNodesBatchReturning?: (
+    params: readonly InsertNodeParams[],
+  ) => Promise<readonly NodeRow[]>;
   updateNode: (params: UpdateNodeParams) => Promise<NodeRow>;
   deleteNode: (params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (params: HardDeleteNodeParams) => Promise<void>;
@@ -363,13 +372,27 @@ export type GraphBackend = Readonly<{
     kind: string,
     id: string,
   ) => Promise<NodeRow | undefined>;
+  getNodes?: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+  ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
   insertEdge: (params: InsertEdgeParams) => Promise<EdgeRow>;
+  insertEdgeNoReturn?: (params: InsertEdgeParams) => Promise<void>;
+  insertEdgesBatch?: (params: readonly InsertEdgeParams[]) => Promise<void>;
+  insertEdgesBatchReturning?: (
+    params: readonly InsertEdgeParams[],
+  ) => Promise<readonly EdgeRow[]>;
   updateEdge: (params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (params: DeleteEdgeParams) => Promise<void>;
   hardDeleteEdge: (params: HardDeleteEdgeParams) => Promise<void>;
   getEdge: (graphId: string, id: string) => Promise<EdgeRow | undefined>;
+  getEdges?: (
+    graphId: string,
+    ids: readonly string[],
+  ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
   countEdgesFrom: (params: CountEdgesFromParams) => Promise<number>;
@@ -421,6 +444,17 @@ export type GraphBackend = Readonly<{
 
   // === Query Execution ===
   execute: <T>(query: SQL) => Promise<readonly T[]>;
+
+  /** Execute pre-compiled SQL text with bound parameters. Available on sync SQLite and pg backends. */
+  executeRaw?: <T>(
+    sqlText: string,
+    params: readonly unknown[],
+  ) => Promise<readonly T[]>;
+
+  /** Compile a Drizzle SQL object to { sql, params } without executing. */
+  compileSql?: (
+    query: SQL,
+  ) => Readonly<{ sql: string; params: readonly unknown[] }>;
 
   // === Transaction ===
   transaction: <T>(

@@ -310,8 +310,22 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const sql = ddl.join("\n");
 
       expect(sql).toContain('"typegraph_nodes_kind_idx"');
+      expect(sql).toContain('"typegraph_nodes_kind_created_idx"');
       expect(sql).toContain('"typegraph_edges_from_idx"');
       expect(sql).toContain('"typegraph_edges_to_idx"');
+      expect(sql).toContain('"typegraph_edges_kind_created_idx"');
+      expect(sql).toContain(
+        '"typegraph_edges_from_idx" ON "typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges_to_idx" ON "typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_nodes_kind_created_idx" ON "typegraph_nodes" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges_kind_created_idx" ON "typegraph_edges" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
     });
   });
 

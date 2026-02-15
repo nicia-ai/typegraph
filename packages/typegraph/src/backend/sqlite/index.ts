@@ -179,7 +179,13 @@ export function createLocalSqliteBackend(
     sqlite.exec(statement);
   }
 
-  const backend = createSqliteBackend(db, { tables });
+  const backend = createSqliteBackend(db, {
+    executionProfile: {
+      isD1: false,
+      isSync: true,
+    },
+    tables,
+  });
   let isClosed = false;
 
   function close(): Promise<void> {
