@@ -1,6 +1,6 @@
 {
   "name": "@nicia-ai/typegraph",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript-first embedded knowledge graph library with ontological reasoning",
   "type": "module",
   "main": "./dist/index.cjs",
