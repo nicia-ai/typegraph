@@ -3,6 +3,9 @@ title: Schema Migrations
 description: Schema versioning, migration, and lifecycle management
 ---
 
+For a practical guide on evolving schemas across deployments, see
+[Evolving Schemas in Production](/schema-evolution).
+
 ## When Do You Need Schema Management?
 
 As your application evolves, your graph schema changes:
@@ -54,6 +57,9 @@ switch (result.status) {
   case "migrated":
     console.log(`Migrated from v${result.fromVersion} to v${result.toVersion}`);
     break;
+  case "pending":
+    console.log(`Safe changes pending at version ${result.version}`);
+    break;
   case "breaking":
     console.log("Breaking changes detected:", result.actions);
     break;
@@ -85,6 +91,12 @@ import { createStoreWithSchema } from "@nicia-ai/typegraph";
 const [store, result] = await createStoreWithSchema(graph, backend, {
   autoMigrate: true, // Auto-apply safe changes (default: true)
   throwOnBreaking: true, // Throw on breaking changes (default: true)
+  onBeforeMigrate: (context) => {
+    console.log(`Migrating ${context.graphId} from v${context.fromVersion} to v${context.toVersion}`);
+  },
+  onAfterMigrate: (context) => {
+    console.log(`Migration complete: v${context.toVersion}`);
+  },
 });
 ```
 
@@ -92,12 +104,13 @@ const [store, result] = await createStoreWithSchema(graph, backend, {
 
 The validation result indicates what happened during store initialization:
 
-| Status        | Meaning                                        |
-| ------------- | ---------------------------------------------- |
-| `initialized` | First run - schema version 1 was created       |
-| `unchanged`   | Schema matches stored version - no changes     |
-| `migrated`    | Safe changes auto-applied, new version created |
-| `breaking`    | Breaking changes detected, action required     |
+| Status        | Meaning                                            |
+| ------------- | -------------------------------------------------- |
+| `initialized` | First run - schema version 1 was created           |
+| `unchanged`   | Schema matches stored version - no changes         |
+| `migrated`    | Safe changes auto-applied, new version created     |
+| `pending`     | Safe changes detected but `autoMigrate` is `false` |
+| `breaking`    | Breaking changes detected, action required         |
 
 ## Safe vs Breaking Changes
 
@@ -140,6 +153,7 @@ if (result.status === "breaking") {
   // Option 1: Fix your schema to be backwards compatible
 
   // Option 2: Force migration (data loss possible!)
+  // import { migrateSchema } from "@nicia-ai/typegraph/schema";
   // await migrateSchema(backend, graph, currentVersion);
 }
 ```
@@ -149,7 +163,7 @@ if (result.status === "breaking") {
 Query the stored schema at runtime:
 
 ```typescript
-import { getActiveSchema, isSchemaInitialized, getSchemaChanges } from "@nicia-ai/typegraph";
+import { getActiveSchema, isSchemaInitialized, getSchemaChanges } from "@nicia-ai/typegraph/schema";
 
 // Check if schema exists
 const initialized = await isSchemaInitialized(backend, "my_graph");
@@ -167,7 +181,7 @@ if (schema) {
 const diff = await getSchemaChanges(backend, graph);
 if (diff?.hasChanges) {
   console.log("Pending changes:", diff.summary);
-  console.log("Is backwards compatible:", diff.isBackwardsCompatible);
+  console.log("Is backwards compatible:", !diff.hasBreakingChanges);
 }
 ```
 
@@ -176,7 +190,12 @@ if (diff?.hasChanges) {
 For full control over migrations:
 
 ```typescript
-import { initializeSchema, migrateSchema, ensureSchema } from "@nicia-ai/typegraph";
+import {
+  initializeSchema,
+  migrateSchema,
+  rollbackSchema,
+  ensureSchema,
+} from "@nicia-ai/typegraph/schema";
 
 // Initialize schema (first run only)
 const row = await initializeSchema(backend, graph);
@@ -185,6 +204,10 @@ console.log("Created version:", row.version);
 // Migrate to new version
 const newVersion = await migrateSchema(backend, graph, currentVersion);
 console.log("Migrated to version:", newVersion);
+
+// Rollback to a previous version
+await rollbackSchema(backend, "my_graph", 1);
+console.log("Rolled back to version 1");
 
 // Or use ensureSchema for automatic handling
 const result = await ensureSchema(backend, graph, {
@@ -198,7 +221,7 @@ const result = await ensureSchema(backend, graph, {
 Schemas are stored as JSON documents with computed hashes for fast comparison:
 
 ```typescript
-import { serializeSchema, computeSchemaHash } from "@nicia-ai/typegraph";
+import { serializeSchema, computeSchemaHash } from "@nicia-ai/typegraph/schema";
 
 // Serialize a graph definition
 const serialized = serializeSchema(graph, 1);
@@ -265,6 +288,8 @@ async function initializeApp() {
 ### 3. Preview Changes Before Deployment
 
 ```typescript
+import { getSchemaChanges } from "@nicia-ai/typegraph/schema";
+
 // In your CI/CD pipeline or migration script
 const diff = await getSchemaChanges(backend, graph);
 

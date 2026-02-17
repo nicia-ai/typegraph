@@ -3,7 +3,23 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { err, isErr, isOk, ok, unwrap, unwrapOr } from "../src/utils/result";
+import {
+  err,
+  flatMap,
+  isErr,
+  isOk,
+  map,
+  mapErr,
+  ok,
+  orElse,
+  unwrap,
+  unwrapOr,
+} from "../src/utils/result";
+
+function divide(a: number, b: number) {
+  if (b === 0) return err(new Error("division by zero"));
+  return ok(a / b);
+}
 
 describe("result utilities", () => {
   describe("ok", () => {
@@ -101,6 +117,84 @@ describe("result utilities", () => {
       expect(isOk(result)).toBe(true);
       // TypeScript narrowing verified - access data after confirming success
       expect((result as { success: true; data: number }).data).toBe(42);
+    });
+  });
+
+  describe("map", () => {
+    it("transforms the success value", () => {
+      const result = map(ok(2), (n) => n * 3);
+      expect(result).toEqual({ success: true, data: 6 });
+    });
+
+    it("passes through errors unchanged", () => {
+      const error = new Error("fail");
+      const result = map(err(error), (n: number) => n * 3);
+      expect(result).toEqual({ success: false, error });
+    });
+
+    it("can change the data type", () => {
+      const result = map(ok(42), String);
+      expect(result).toEqual({ success: true, data: "42" });
+    });
+  });
+
+  describe("mapErr", () => {
+    it("transforms the error value", () => {
+      const result = mapErr(err("not found"), (message) => new Error(message));
+      expect(result).toEqual({ success: false, error: new Error("not found") });
+    });
+
+    it("passes through successes unchanged", () => {
+      const result = mapErr(ok(42), (message: string) => new Error(message));
+      expect(result).toEqual({ success: true, data: 42 });
+    });
+  });
+
+  describe("flatMap", () => {
+    it("chains successful operations", () => {
+      const result = flatMap(ok(10), (n) => divide(n, 2));
+      expect(result).toEqual({ success: true, data: 5 });
+    });
+
+    it("short-circuits on initial error", () => {
+      const error = new Error("earlier failure");
+      const result = flatMap(err(error), (n: number) => divide(n, 2));
+      expect(result).toEqual({ success: false, error });
+    });
+
+    it("propagates error from chained operation", () => {
+      const result = flatMap(ok(10), (n) => divide(n, 0));
+      expect(result).toEqual({
+        success: false,
+        error: new Error("division by zero"),
+      });
+    });
+  });
+
+  describe("orElse", () => {
+    it("returns success unchanged", () => {
+      const result = orElse(ok(42), () => ok(0));
+      expect(result).toEqual({ success: true, data: 42 });
+    });
+
+    it("recovers from error with fallback result", () => {
+      const result = orElse(err(new Error("fail")), () => ok(0));
+      expect(result).toEqual({ success: true, data: 0 });
+    });
+
+    it("can produce a new error", () => {
+      const result = orElse(err("not found"), (message) =>
+        err(new Error(`wrapped: ${message}`)),
+      );
+      expect(result).toEqual({
+        success: false,
+        error: new Error("wrapped: not found"),
+      });
+    });
+
+    it("receives the error value", () => {
+      const result = orElse(err(404), (code) => ok(`fallback for ${code}`));
+      expect(result).toEqual({ success: true, data: "fallback for 404" });
     });
   });
 

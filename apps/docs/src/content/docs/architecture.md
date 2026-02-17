@@ -212,6 +212,8 @@ This enables:
 | **Runtime introspection** | Applications can query the schema at runtime for dynamic UI, validation, or documentation |
 
 ```typescript
+import { getActiveSchema, getSchemaChanges } from "@nicia-ai/typegraph/schema";
+
 // Query the active schema at runtime
 const schema = await getActiveSchema(backend, "my_graph");
 console.log("Node types:", Object.keys(schema.nodes));
@@ -383,7 +385,8 @@ WHERE step_2.props->>'status' = 'published';
 
 ### Recursive CTEs for Variable-Length Paths
 
-For `recursive()` traversals, TypeGraph generates recursive CTEs:
+For `recursive()` traversals with cycle prevention enabled (the default),
+TypeGraph generates recursive CTEs like:
 
 ```sql
 WITH RECURSIVE path AS (
@@ -400,11 +403,15 @@ WITH RECURSIVE path AS (
   JOIN typegraph_edges e ON e.from_id = p.id
   JOIN typegraph_nodes n ON n.id = e.to_id
   WHERE e.kind = 'reportsTo'
-    AND p.depth < 100           -- Max depth limit
+    AND p.depth < 100           -- Implicit cap for unbounded traversal
     AND NOT n.id = ANY(p.path)  -- Cycle detection
 )
 SELECT * FROM path;
 ```
+
+When you opt into `cyclePolicy: "allow"` and do not project a path column,
+TypeGraph can use a lighter recursive shape without path-array state and
+cycle predicates.
 
 ## Vector Search Architecture
 

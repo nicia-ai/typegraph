@@ -136,7 +136,7 @@ export function defineEdge<
 
   return Object.freeze({
     [EDGE_TYPE_BRAND]: true as const,
-    name,
+    kind: name,
     schema,
     description: options?.description,
     from: options?.from,

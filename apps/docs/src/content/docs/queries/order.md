@@ -107,7 +107,7 @@ const topDepartments = await store
   .query()
   .from("Employee", "e")
   .groupBy("e", "department")
-  .selectAggregate({
+  .aggregate({
     department: field("e", "department"),
     headcount: count("e"),
   })

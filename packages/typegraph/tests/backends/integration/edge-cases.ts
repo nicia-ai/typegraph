@@ -56,7 +56,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .query()
         .from("Product", "p")
         .whereNode("p", (p) => p.category.eq("NonExistent"))
-        .selectAggregate({ total: count("p") })
+        .aggregate({ total: count("p") })
         .execute();
 
       expect(results[0]!.total).toBe(0);
@@ -69,7 +69,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .query()
         .from("Product", "p")
         .whereNode("p", (p) => p.category.eq("NonExistent"))
-        .selectAggregate({ total: sum("p", "price") })
+        .aggregate({ total: sum("p", "price") })
         .execute();
 
       // SQL SUM of empty set returns NULL
@@ -83,7 +83,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .query()
         .from("Product", "p")
         .whereNode("p", (p) => p.category.eq("NonExistent"))
-        .selectAggregate({ average: avg("p", "price") })
+        .aggregate({ average: avg("p", "price") })
         .execute();
 
       expect(results[0]!.average).toBeNull();
@@ -96,7 +96,7 @@ function registerEmptyResultTests(context: IntegrationTestContext): void {
         .query()
         .from("Product", "p")
         .whereNode("p", (p) => p.category.eq("NonExistent"))
-        .selectAggregate({
+        .aggregate({
           minPrice: min("p", "price"),
           maxPrice: max("p", "price"),
         })

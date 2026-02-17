@@ -27,6 +27,7 @@ export {
   ExecutableAggregateQuery,
 } from "./executable-aggregate-query";
 export { ExecutableQuery } from "./executable-query";
+export { PreparedQuery } from "./prepared-query";
 export { QueryBuilder } from "./query-builder";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
@@ -63,27 +64,6 @@ export {
 // AST building utilities
 export { buildQueryAst } from "./ast-builder";
 
-// Pagination utilities (re-exported from execution/)
-export {
-  adjustOrderByForDirection,
-  buildCursorFromContext,
-  buildCursorPredicate,
-  buildPaginatedResult,
-  createStreamIterable,
-  getStreamBatchSize,
-  parsePaginateOptions,
-  validateCursor,
-  validatePaginationParams,
-} from "../execution/pagination";
-
-// Result mapping utilities (re-exported from execution/)
-export {
-  buildSelectableNode,
-  buildSelectContext,
-  mapResults,
-  transformPathColumns,
-} from "../execution/result-mapper";
-
 // Types
 export {
   type AliasMap,
@@ -104,11 +84,16 @@ export {
   type PropsAccessor,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveAlias,
+  type RecursiveAliasMap,
+  type RecursiveAliasValue,
+  type RecursiveTraversalOptions,
   type SelectableEdge,
   type SelectableNode,
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";

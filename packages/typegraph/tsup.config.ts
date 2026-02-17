@@ -5,6 +5,7 @@ export default defineConfig({
     index: "src/index.ts",
     "interchange/index": "src/interchange/index.ts",
     "profiler/index": "src/profiler/index.ts",
+    "schema/index": "src/schema/index.ts",
     "indexes/index": "src/indexes/index.ts",
     "backend/sqlite/index": "src/backend/sqlite/index.ts",
     "backend/postgres/index": "src/backend/postgres/index.ts",

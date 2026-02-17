@@ -271,10 +271,26 @@ function createStore<G extends GraphDef>(
 ): Store<G>;
 ```
 
+**Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `hooks` | `StoreHooks` | Observability hooks for monitoring operations |
+| `schema` | `SqlSchema` | Custom table name configuration |
+| `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
+
 **Example:**
 
 ```typescript
 const store = createStore(graph, backend);
+```
+
+Override the default traversal expansion:
+
+```typescript
+const store = createStore(graph, backend, {
+  queryDefaults: { traversalExpansion: "none" },
+});
 ```
 
 ### `createStoreWithSchema(graph, backend, options?)`
@@ -296,9 +312,11 @@ function createStoreWithSchema<G extends GraphDef>(
 
 The validation result indicates what happened:
 
-- `status: "unchanged"` - Schema matches, no changes needed
 - `status: "initialized"` - Schema created for the first time
+- `status: "unchanged"` - Schema matches, no changes needed
 - `status: "migrated"` - Safe changes auto-applied (additive only)
+- `status: "pending"` - Safe changes detected but `autoMigrate` is `false`
+- `status: "breaking"` - Breaking changes detected, action required
 
 **Example:**
 
@@ -309,11 +327,13 @@ if (result.status === "initialized") {
   console.log("Schema initialized at version", result.version);
 } else if (result.status === "migrated") {
   console.log(`Migrated from v${result.fromVersion} to v${result.toVersion}`);
+} else if (result.status === "pending") {
+  console.log(`Safe changes pending at version ${result.version}`);
 }
 ```
 
-**Throws:** `MigrationError` if breaking changes are detected that require
-manual migration.
+**Throws:** `MigrationError` if breaking changes are detected and
+`throwOnBreaking` is `true` (the default).
 
 ## Store API
 
@@ -342,6 +362,32 @@ Retrieves a node by ID.
 store.nodes.Person.getById(id: NodeId<Person>): Promise<Node<Person> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple nodes by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.nodes.Person.getByIds(
+  ids: readonly NodeId<Person>[],
+  options?: QueryOptions
+): Promise<readonly (Node<Person> | undefined)[]>;
+```
+
+When the backend supports batch lookups (`getNodes`), this executes a single
+`SELECT ... WHERE id IN (...)` query. Otherwise it falls back to sequential lookups.
+
+```typescript
+const [alice, bob, unknown] = await store.nodes.Person.getByIds([
+  aliceId,
+  bobId,
+  "nonexistent",
+]);
+// alice: Node<Person>
+// bob: Node<Person>
+// unknown: undefined
+```
+
 #### `update(id, props)`
 
 Updates node properties.
@@ -363,14 +409,23 @@ store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
 
 #### `find(options?)`
 
-Finds nodes of this kind with optional pagination.
-For filtering, use the query builder (`store.query()`).
+Finds nodes of this kind with optional filtering and pagination.
 
 ```typescript
 store.nodes.Person.find(options?: {
+  where?: (accessor) => Predicate;
   limit?: number;
   offset?: number;
 }): Promise<Node<Person>[]>;
+```
+
+The optional `where` predicate uses the same accessor API as `whereNode()` in the query builder:
+
+```typescript
+const activeUsers = await store.nodes.Person.find({
+  where: (p) => p.status.eq("active"),
+  limit: 50,
+});
 ```
 
 #### `count()`
@@ -399,9 +454,9 @@ store.nodes.Person.upsert(
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
-Creates multiple nodes efficiently.
+Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.nodes.Person.bulkCreate(
@@ -410,8 +465,34 @@ store.nodes.Person.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Node<Person>[]>;
+```
+
+Use `returnResults: false` for large ingestion jobs when you do not need created node payloads:
+
+```typescript
+await store.nodes.Person.bulkCreate(batch, { returnResults: false });
+// Returns [] to avoid allocating result objects
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple nodes without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.nodes.Person.bulkInsert(
+  items: readonly {
+    props: { name: string; email?: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkUpsert(items)`
@@ -491,6 +572,22 @@ Retrieves an edge by ID.
 store.edges.worksAt.getById(id: string): Promise<Edge<worksAt> | undefined>;
 ```
 
+#### `getByIds(ids)`
+
+Retrieves multiple edges by ID in a single query. Returns results in input order,
+with `undefined` for missing IDs.
+
+```typescript
+store.edges.worksAt.getByIds(
+  ids: readonly string[],
+  options?: QueryOptions
+): Promise<readonly (Edge<worksAt> | undefined)[]>;
+```
+
+```typescript
+const [edge1, edge2] = await store.edges.worksAt.getByIds([id1, id2]);
+```
+
 #### `update(id, props, options?)`
 
 Updates edge properties.
@@ -525,7 +622,7 @@ store.edges.worksAt.findTo(
 
 #### `find(options?)`
 
-Finds edges with filtering.
+Finds edges with endpoint filtering.
 
 ```typescript
 store.edges.worksAt.find(options?: {
@@ -535,6 +632,8 @@ store.edges.worksAt.find(options?: {
   offset?: number;
 }): Promise<Edge<worksAt>[]>;
 ```
+
+For edge property filters, use the query builder with `whereEdge(...)`.
 
 #### `count(options?)`
 
@@ -555,9 +654,9 @@ Soft-deletes an edge.
 store.edges.worksAt.delete(id: string): Promise<void>;
 ```
 
-#### `bulkCreate(items)`
+#### `bulkCreate(items, options?)`
 
-Creates multiple edges efficiently.
+Creates multiple edges efficiently. Uses a single multi-row INSERT when the backend supports it.
 
 ```typescript
 store.edges.worksAt.bulkCreate(
@@ -568,8 +667,36 @@ store.edges.worksAt.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[]
+  }[],
+  options?: {
+    returnResults?: boolean; // Default: true
+  }
 ): Promise<Edge<worksAt>[]>;
+```
+
+For high-volume edge ingestion, disable returned payloads:
+
+```typescript
+await store.edges.worksAt.bulkCreate(edgeBatch, { returnResults: false });
+// Returns [] to reduce memory pressure
+```
+
+#### `bulkInsert(items)`
+
+Inserts multiple edges without returning results. This is the dedicated fast path for bulk
+ingestion — wrapped in a transaction when the backend supports it.
+
+```typescript
+store.edges.worksAt.bulkInsert(
+  items: readonly {
+    from: TypedNodeRef<Person>;
+    to: TypedNodeRef<Company>;
+    props?: { role: string };
+    id?: string;
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<void>;
 ```
 
 #### `bulkDelete(ids)`
@@ -586,7 +713,9 @@ store.edges.worksAt.bulkDelete(
 
 #### `store.transaction(fn)`
 
-Executes operations in a transaction. The transaction context has the same collection API.
+Executes a callback within an atomic transaction. All operations succeed together or are
+rolled back together. The transaction context (`tx`) provides the same `nodes.*` and
+`edges.*` collection API as the store itself.
 
 ```typescript
 await store.transaction(async (tx) => {
@@ -594,6 +723,56 @@ await store.transaction(async (tx) => {
   const company = await tx.nodes.Company.create({ name: "Acme" });
   await tx.edges.worksAt.create(person, company, { role: "Engineer" });
 });
+```
+
+#### Return values
+
+The callback's return value is forwarded to the caller:
+
+```typescript
+const personId = await store.transaction(async (tx) => {
+  const person = await tx.nodes.Person.create({ name: "Alice" });
+  return person.id;
+});
+// personId is available here
+```
+
+#### Rollback and error propagation
+
+If the callback throws, the transaction is rolled back and the error re-throws to the
+caller. No partial writes are persisted.
+
+```typescript
+try {
+  await store.transaction(async (tx) => {
+    await tx.nodes.Person.create({ name: "Alice" });
+    throw new Error("something went wrong");
+    // Alice is NOT persisted — the entire transaction is rolled back
+  });
+} catch (error) {
+  // error.message === "something went wrong"
+}
+```
+
+#### Nesting
+
+Transactions do **not** nest. The transaction context intentionally omits the
+`transaction()` method, so attempting to start a transaction inside another transaction is
+a compile-time error. If you need to compose transactional operations, pass the `tx`
+context through your call chain.
+
+#### Backend support
+
+Not all backends support atomic transactions. Cloudflare D1, for example, does not —
+calling `store.transaction()` on a D1-backed store throws a `ConfigurationError`. Check
+support at runtime with:
+
+```typescript
+if (backend.capabilities.transactions) {
+  await store.transaction(async (tx) => { /* ... */ });
+} else {
+  // fall back to individual operations with manual error handling
+}
 ```
 
 ### Query Builder
@@ -621,16 +800,14 @@ const results = await store
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
+| `prepare()` | `PreparedQuery<T>` | Pre-compile query for repeated execution with parameters |
 
 ### Registry Access
 
 #### `store.registry`
 
-Access to the type registry for ontology lookups.
-
-```typescript
-readonly registry: KindRegistry;
-```
+Access to the type registry for ontology lookups. The registry is an internal type;
+use `store.registry` directly without importing its type.
 
 See [Ontology](/ontology) for registry methods.
 
@@ -643,7 +820,18 @@ TypeGraph supports observability hooks for monitoring and logging store operatio
 Configuration for observability callbacks:
 
 ```typescript
+import type {
+  HookContext,
+  QueryHookContext,
+  OperationHookContext,
+  StoreHooks,
+} from "@nicia-ai/typegraph";
+```
+
+```typescript
 type StoreHooks = Readonly<{
+  onQueryStart?: (ctx: QueryHookContext) => void;
+  onQueryEnd?: (ctx: QueryHookContext, result: { rowCount: number; durationMs: number }) => void;
   onOperationStart?: (ctx: OperationHookContext) => void;
   onOperationEnd?: (ctx: OperationHookContext, result: { durationMs: number }) => void;
   onError?: (ctx: HookContext, error: Error) => void;
@@ -655,6 +843,12 @@ type HookContext = Readonly<{
   startedAt: Date;
 }>;
 
+type QueryHookContext = HookContext &
+  Readonly<{
+    sql: string;
+    params: readonly unknown[];
+  }>;
+
 type OperationHookContext = HookContext &
   Readonly<{
     operation: "create" | "update" | "delete";
@@ -664,12 +858,21 @@ type OperationHookContext = HookContext &
   }>;
 ```
 
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`) skip per-item
+operation hooks for throughput. Query hooks still fire normally.
+
 **Example:**
 
 ```typescript
 import { createStore, type StoreHooks } from "@nicia-ai/typegraph";
 
 const hooks: StoreHooks = {
+  onQueryStart: (ctx) => {
+    console.log(`[${ctx.operationId}] SQL: ${ctx.sql}`);
+  },
+  onQueryEnd: (ctx, result) => {
+    console.log(`[${ctx.operationId}] ${result.rowCount} rows in ${result.durationMs}ms`);
+  },
   onOperationStart: (ctx) => {
     console.log(`[${ctx.operationId}] ${ctx.operation} ${ctx.entity}:${ctx.kind}`);
   },
@@ -686,6 +889,8 @@ const store = createStore(graph, backend, { hooks });
 // Operations now trigger hooks
 await store.nodes.Person.create({ name: "Alice" });
 // Logs:
-// [abc123] create node:Person
-// [abc123] Completed in 5ms
+// [op-abc123] create node:Person
+// [op-abc123] SQL: INSERT INTO ...
+// [op-abc123] 1 rows in 2ms
+// [op-abc123] Completed in 5ms
 ```

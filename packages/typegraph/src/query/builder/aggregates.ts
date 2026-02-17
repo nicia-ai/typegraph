@@ -146,7 +146,7 @@ export function max(alias: string, field: string): AggregateExpr {
 }
 
 /**
- * Creates a field reference for use in selectAggregate.
+ * Creates a field reference for use in aggregate.
  *
  * @param alias - The node alias
  * @param path - Path to the field. Use "id" for node ID, "kind" for node kind,

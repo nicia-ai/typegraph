@@ -264,6 +264,8 @@ if (result.status === "initialized") {
 } else if (result.status === "migrated") {
   console.log(`Migrated from v${result.fromVersion} to v${result.toVersion}`);
 }
+// Other statuses: "unchanged", "pending", "breaking"
+// See Schema Migrations for full details
 ```
 
 #### Graph ID

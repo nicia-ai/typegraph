@@ -6,6 +6,7 @@
  * and run migrations to create TypeGraph tables.
  */
 import Database from "better-sqlite3";
+import { sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -60,6 +61,53 @@ describe("SQLite Backend - Adapter Specific", () => {
       expect(backend.capabilities.jsonb).toBe(false);
       expect(backend.capabilities.ginIndexes).toBe(false);
     });
+
+    it("reuses prepared statements in execute() for repeated SQL shapes", async () => {
+      const sqliteClient = (
+        db as {
+          $client?: {
+            prepare?: (sqlText: string) => {
+              all: (...params: unknown[]) => unknown[];
+            };
+          };
+        }
+      ).$client;
+      if (sqliteClient?.prepare === undefined) return;
+
+      const originalPrepare = sqliteClient.prepare;
+      let prepareCalls = 0;
+
+      try {
+        const backend = createSqliteBackend(db);
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: "person-cache-1",
+          props: { name: "Alice" },
+        });
+
+        sqliteClient.prepare = (sqlText) => {
+          prepareCalls += 1;
+          return originalPrepare.call(sqliteClient, sqlText);
+        };
+
+        const query = sql`
+          SELECT id
+          FROM typegraph_nodes
+          WHERE graph_id = ${"test_graph"}
+            AND kind = ${"Person"}
+            AND deleted_at IS NULL
+        `;
+
+        await backend.execute<{ id: string }>(query);
+        await backend.execute<{ id: string }>(query);
+        await backend.execute<{ id: string }>(query);
+
+        expect(prepareCalls).toBe(1);
+      } finally {
+        sqliteClient.prepare = originalPrepare;
+      }
+    });
   });
 
   describe("generateSqliteDDL()", () => {
@@ -83,8 +131,22 @@ describe("SQLite Backend - Adapter Specific", () => {
 
       expect(sql).toContain("CREATE INDEX IF NOT EXISTS");
       expect(sql).toContain("typegraph_nodes_kind_idx");
+      expect(sql).toContain("typegraph_nodes_kind_created_idx");
       expect(sql).toContain("typegraph_edges_from_idx");
       expect(sql).toContain("typegraph_edges_to_idx");
+      expect(sql).toContain("typegraph_edges_kind_created_idx");
+      expect(sql).toContain(
+        '"typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_nodes" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
     });
   });
 });
@@ -281,6 +343,55 @@ describe("Store with SQLite Backend", () => {
     // Verify all exist
     const fetchedPerson = await store.nodes.Person.getById(result.person.id);
     expect(fetchedPerson).toBeDefined();
+  });
+
+  it("keeps sync transaction scope isolated from concurrent operations", async () => {
+    const backend = createSqliteBackend(db);
+
+    const transactionPromise = backend.transaction(async (txBackend) => {
+      await txBackend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "tx-person",
+        props: { name: "Tx User" },
+      });
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 30);
+      });
+
+      throw new Error("rollback transaction");
+    });
+
+    const outsideInsertPromise = (async () => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 5);
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "outside-person",
+        props: { name: "Outside User" },
+      });
+    })();
+
+    await expect(transactionPromise).rejects.toThrow("rollback transaction");
+    await outsideInsertPromise;
+
+    const rolledBackNode = await backend.getNode(
+      "test_graph",
+      "Person",
+      "tx-person",
+    );
+    const outsideNode = await backend.getNode(
+      "test_graph",
+      "Person",
+      "outside-person",
+    );
+
+    expect(rolledBackNode).toBeUndefined();
+    expect(outsideNode).toBeDefined();
   });
 
   it("updates nodes", async () => {

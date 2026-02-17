@@ -18,10 +18,11 @@ import { type PredicateCompilerContext } from "../src/query/compiler/predicates"
 import {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
 } from "../src/query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
-import { sqliteDialect } from "../src/query/dialect";
+import { postgresDialect, sqliteDialect } from "../src/query/dialect";
 import { toSqlString } from "./sql-test-utils";
 
 // ============================================================
@@ -34,7 +35,7 @@ function createVariableLengthSpec(
   return {
     minDepth: 1,
     maxDepth: -1, // unlimited
-    collectPath: false,
+    cyclePolicy: "prevent",
     ...overrides,
   };
 }
@@ -83,9 +84,11 @@ function createAst(overrides: Partial<QueryAst> = {}): QueryAst {
   };
 }
 
-function createContext(): PredicateCompilerContext {
+function createContext(
+  dialect: PredicateCompilerContext["dialect"] = sqliteDialect,
+): PredicateCompilerContext {
   return {
-    dialect: sqliteDialect,
+    dialect,
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
   };
@@ -276,6 +279,8 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       expect(sql).toContain("e.from_id");
+      expect(sql).toContain("e.from_kind = r.target_kind");
+      expect(sql).toContain("n.kind = e.to_kind");
     });
 
     it("uses to_id for inbound traversals", () => {
@@ -291,6 +296,81 @@ describe("compileVariableLengthQuery", () => {
       const sql = getSqlString(ast);
 
       expect(sql).toContain("e.to_id");
+      expect(sql).toContain("e.to_kind = r.target_kind");
+      expect(sql).toContain("n.kind = e.from_kind");
+    });
+
+    it("adds endpoint kind filters for outbound traversals", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("e.from_kind");
+      expect(sql).toContain("e.to_kind");
+    });
+
+    it("adds endpoint kind filters for inbound traversals", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "in",
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("e.to_kind");
+      expect(sql).toContain("e.from_kind");
+    });
+
+    it("adds inverse branch for bidirectional recursive traversal", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            direction: "out",
+            inverseEdgeKinds: ["RELATES_TO"],
+            variableLength: createVariableLengthSpec(),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('"typegraph_edges" e');
+      expect(sql).toContain("e.from_id = r.target_id");
+      expect(sql).toContain("e.to_id = r.target_id");
+      expect(sql).toContain("e.from_id = e.to_id");
+    });
+
+    it("forces worktable-first join order on sqlite recursive steps", () => {
+      const ast = createAst();
+
+      const sql = getSqlString(ast, createContext(sqliteDialect));
+
+      expect(sql).toMatch(
+        /FROM recursive_cte r\s+CROSS JOIN "typegraph_edges" e/,
+      );
+      expect(sql).toMatch(/WHERE e\.from_id = r\.target_id/);
+    });
+
+    it("keeps ON-clause joins for postgres recursive steps", () => {
+      const ast = createAst();
+
+      const sql = getSqlString(ast, createContext(postgresDialect));
+
+      expect(sql).toMatch(
+        /FROM recursive_cte r\s+JOIN "typegraph_edges" e ON e\.from_id = r\.target_id/,
+      );
+      expect(sql).not.toContain("CROSS JOIN");
     });
   });
 
@@ -327,7 +407,7 @@ describe("compileVariableLengthQuery", () => {
       expect(sql).toContain("r.depth < 5");
     });
 
-    it("caps maxDepth at MAX_RECURSIVE_DEPTH when exceeded", () => {
+    it("allows explicit maxDepth above MAX_RECURSIVE_DEPTH", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
@@ -338,7 +418,21 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain(`r.depth < ${MAX_RECURSIVE_DEPTH}`);
+      expect(sql).toContain("r.depth < 500");
+    });
+
+    it("throws when explicit maxDepth exceeds MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({ maxDepth: 5000 }),
+          }),
+        ],
+      });
+
+      expect(() => getSqlString(ast)).toThrow(
+        `maxHops(5000) exceeds maximum explicit depth of ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+      );
     });
 
     it("applies minDepth filter in final SELECT", () => {
@@ -376,11 +470,13 @@ describe("compileVariableLengthQuery", () => {
   // ============================================================
 
   describe("path collection", () => {
-    it("includes path in projection when collectPath is true", () => {
+    it("includes path in projection when pathAlias is provided", () => {
       const ast = createAst({
         traversals: [
           createTraversal({
-            variableLength: createVariableLengthSpec({ collectPath: true }),
+            variableLength: createVariableLengthSpec({
+              pathAlias: "target_path",
+            }),
           }),
         ],
       });
@@ -395,7 +491,6 @@ describe("compileVariableLengthQuery", () => {
         traversals: [
           createTraversal({
             variableLength: createVariableLengthSpec({
-              collectPath: true,
               pathAlias: "custom_path",
             }),
           }),
@@ -404,7 +499,7 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain("path AS custom_path");
+      expect(sql).toContain('path AS "custom_path"');
     });
 
     it("uses custom depthAlias when provided", () => {
@@ -420,7 +515,92 @@ describe("compileVariableLengthQuery", () => {
 
       const sql = getSqlString(ast);
 
-      expect(sql).toContain("depth AS hop_count");
+      expect(sql).toContain('depth AS "hop_count"');
+    });
+  });
+
+  describe("selective projection", () => {
+    it("compiles selective projection for recursive node aliases", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "source",
+            field: "id",
+            outputName: "source_id_only",
+            isSystemField: true,
+          },
+          {
+            alias: "target",
+            field: "name",
+            outputName: "target_name_only",
+            isSystemField: false,
+            valueType: "string",
+          },
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('source_id AS "source_id_only"');
+      expect(sql).toContain("target_props");
+      expect(sql).toContain('AS "target_name_only"');
+    });
+
+    it("prunes unreferenced recursive columns for selective projections", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "target",
+            field: "id",
+            outputName: "target_id_only",
+            isSystemField: true,
+          },
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain('target_id AS "target_id_only"');
+      expect(sql).toContain("target_kind");
+      expect(sql).not.toContain("source_props");
+      expect(sql).not.toContain("source_version");
+      expect(sql).not.toContain("target_props");
+      expect(sql).not.toContain("target_created_at");
+    });
+
+    it("keeps ORDER BY columns when selective projection is enabled", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "target",
+            field: "id",
+            outputName: "target_id_only",
+            isSystemField: true,
+          },
+        ],
+        orderBy: [createOrderSpec("source", "name", "asc")],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("source_props");
+      expect(sql).toContain('target_id AS "target_id_only"');
+    });
+
+    it("throws for recursive selective projection on unsupported aliases", () => {
+      const ast = createAst({
+        selectiveFields: [
+          {
+            alias: "e",
+            field: "id",
+            outputName: "edge_id_only",
+            isSystemField: true,
+          },
+        ],
+      });
+
+      expect(() => getSqlString(ast)).toThrow(UnsupportedPredicateError);
+      expect(() => getSqlString(ast)).toThrow("does not support alias");
     });
   });
 
@@ -610,6 +790,42 @@ describe("compileVariableLengthQuery", () => {
       // SQLite uses string concatenation for path
       expect(sql).toContain("'|' ||");
       expect(sql).toContain("|| '|' AS path");
+    });
+
+    it("skips cycle/path tracking when cyclePolicy is allow", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              maxDepth: 5,
+              cyclePolicy: "allow",
+            }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).not.toContain("INSTR");
+      expect(sql).not.toContain(" AS path");
+    });
+
+    it("keeps cycle/path tracking when path projection is enabled", () => {
+      const ast = createAst({
+        traversals: [
+          createTraversal({
+            variableLength: createVariableLengthSpec({
+              maxDepth: 5,
+              pathAlias: "path",
+            }),
+          }),
+        ],
+      });
+
+      const sql = getSqlString(ast);
+
+      expect(sql).toContain("INSTR");
+      expect(sql).toContain(" AS path");
     });
   });
 
@@ -833,5 +1049,16 @@ describe("MAX_RECURSIVE_DEPTH", () => {
 
   it("is exported and accessible", () => {
     expect(typeof MAX_RECURSIVE_DEPTH).toBe("number");
+  });
+});
+
+describe("MAX_EXPLICIT_RECURSIVE_DEPTH", () => {
+  it("is a reasonable limit", () => {
+    expect(MAX_EXPLICIT_RECURSIVE_DEPTH).toBeGreaterThanOrEqual(500);
+    expect(MAX_EXPLICIT_RECURSIVE_DEPTH).toBeLessThanOrEqual(5000);
+  });
+
+  it("is exported and accessible", () => {
+    expect(typeof MAX_EXPLICIT_RECURSIVE_DEPTH).toBe("number");
   });
 });

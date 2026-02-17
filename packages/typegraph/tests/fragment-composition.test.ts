@@ -9,7 +9,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  buildKindRegistry,
   composeFragments,
   createFragment,
   createQueryBuilder,
@@ -21,6 +20,7 @@ import {
   orderByFragment,
 } from "../src";
 import { compileQuery } from "../src/query/compiler";
+import { buildKindRegistry } from "../src/registry";
 
 /**
  * Helper to extract SQL string and params from a Drizzle SQL object.

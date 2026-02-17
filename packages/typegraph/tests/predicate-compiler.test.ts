@@ -27,6 +27,7 @@ import {
   type PredicateCompilerContext,
 } from "../src/query/compiler/predicates";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
+import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { type JsonPointer } from "../src/query/json-pointer";
 import { toSqlString } from "./sql-test-utils";
@@ -71,7 +72,14 @@ function subqueryAst(alias: string, kind: string, graphId?: string): QueryAst {
     },
     traversals: [],
     predicates: [],
-    projection: { fields: [] },
+    projection: {
+      fields: [
+        {
+          outputName: `${alias}_id`,
+          source: field(alias, ["id"], { valueType: "string" }),
+        },
+      ],
+    },
     temporalMode: { mode: "current" },
   };
   if (graphId !== undefined) {
@@ -1273,6 +1281,36 @@ describe("subquery predicates", () => {
     expect(toSqlString(result)).toContain("IN");
   });
 
+  it("compiles IN subquery with type-aware field extraction", () => {
+    const ctx: PredicateCompilerContext = {
+      dialect: postgresDialect,
+      schema: DEFAULT_SQL_SCHEMA,
+      compileQuery: () => sql`SELECT score FROM scores`,
+    };
+
+    const expr: PredicateExpression = {
+      __type: "in_subquery",
+      negated: false,
+      field: field("p", ["props", "score"], { valueType: "number" }),
+      subquery: {
+        ...subqueryAst("s", "Score", "test"),
+        projection: {
+          fields: [
+            {
+              outputName: "score",
+              source: field("s", ["props", "score"], { valueType: "number" }),
+            },
+          ],
+        },
+      },
+    };
+    const result = compilePredicateExpression(expr, ctx);
+    const sqlString = toSqlString(result);
+
+    expect(sqlString).toContain("::numeric");
+    expect(sqlString).toContain(" IN (");
+  });
+
   it("compiles NOT IN subquery", () => {
     const ctx: PredicateCompilerContext = {
       dialect: sqliteDialect,
@@ -1290,15 +1328,104 @@ describe("subquery predicates", () => {
     expect(toSqlString(result)).toContain("NOT IN");
   });
 
-  it("uses default graphId when not specified", () => {
-    let capturedGraphId: string | undefined;
+  it("rejects IN subqueries that project more than one column", () => {
     const ctx: PredicateCompilerContext = {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
-      compileQuery: (_ast, graphId) => {
-        capturedGraphId = graphId;
-        return sql`SELECT 1`;
+      compileQuery: () => sql`SELECT user_id, role FROM admins`,
+    };
+
+    const expr: PredicateExpression = {
+      __type: "in_subquery",
+      negated: false,
+      field: field("p", ["id"]),
+      subquery: {
+        ...subqueryAst("a", "Admin", "test"),
+        projection: {
+          fields: [
+            {
+              outputName: "a_id",
+              source: field("a", ["id"], { valueType: "string" }),
+            },
+            {
+              outputName: "a_role",
+              source: field("a", ["props", "role"], { valueType: "string" }),
+            },
+          ],
+        },
       },
+    };
+
+    expect(() => compilePredicateExpression(expr, ctx)).toThrow(
+      "must project exactly 1 column",
+    );
+  });
+
+  it("rejects IN subqueries with known scalar type mismatches", () => {
+    const ctx: PredicateCompilerContext = {
+      dialect: postgresDialect,
+      schema: DEFAULT_SQL_SCHEMA,
+      compileQuery: () => sql`SELECT name FROM people`,
+    };
+
+    const expr: PredicateExpression = {
+      __type: "in_subquery",
+      negated: false,
+      field: field("p", ["props", "age"], { valueType: "number" }),
+      subquery: {
+        ...subqueryAst("a", "Admin", "test"),
+        projection: {
+          fields: [
+            {
+              outputName: "a_name",
+              source: field("a", ["props", "name"], { valueType: "string" }),
+            },
+          ],
+        },
+      },
+    };
+
+    expect(() => compilePredicateExpression(expr, ctx)).toThrow(
+      "type mismatch",
+    );
+  });
+
+  it("rejects IN subqueries with non-scalar value types", () => {
+    const ctx: PredicateCompilerContext = {
+      dialect: sqliteDialect,
+      schema: DEFAULT_SQL_SCHEMA,
+      compileQuery: () => sql`SELECT profile FROM people`,
+    };
+
+    const expr: PredicateExpression = {
+      __type: "in_subquery",
+      negated: false,
+      field: field("p", ["props", "profile"], { valueType: "object" }),
+      subquery: {
+        ...subqueryAst("a", "Admin", "test"),
+        projection: {
+          fields: [
+            {
+              outputName: "a_profile",
+              source: field("a", ["props", "profile"], {
+                valueType: "object",
+              }),
+            },
+          ],
+        },
+      },
+    };
+
+    expect(() => compilePredicateExpression(expr, ctx)).toThrow(
+      "does not support object values",
+    );
+  });
+
+  it("throws when graphId is not specified on EXISTS subquery", () => {
+    const ctx: PredicateCompilerContext = {
+      dialect: sqliteDialect,
+      schema: DEFAULT_SQL_SCHEMA,
+      compileQuery: () => sql`SELECT 1`,
     };
 
     const expr: PredicateExpression = {
@@ -1306,8 +1433,9 @@ describe("subquery predicates", () => {
       negated: false,
       subquery: subqueryAst("u", "User"), // graphId not specified
     };
-    compilePredicateExpression(expr, ctx);
-    expect(capturedGraphId).toBe("");
+    expect(() => compilePredicateExpression(expr, ctx)).toThrow(
+      "EXISTS subquery must have a graphId",
+    );
   });
 });
 
@@ -1381,7 +1509,7 @@ describe("extractVectorSimilarityPredicates", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("extracts from nested OR predicates", () => {
+  it("rejects vector predicates nested under OR", () => {
     const predicates = [
       {
         expression: {
@@ -1405,11 +1533,12 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(2);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 
-  it("extracts from nested NOT predicates", () => {
+  it("rejects vector predicates nested under NOT", () => {
     const predicates = [
       {
         expression: {
@@ -1424,8 +1553,9 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(1);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 
   it("returns empty array when no vector predicates", () => {
@@ -1448,7 +1578,7 @@ describe("extractVectorSimilarityPredicates", () => {
     expect(result).toHaveLength(0);
   });
 
-  it("extracts from deeply nested structure", () => {
+  it("rejects deeply nested vector predicates under OR/NOT", () => {
     const predicates = [
       {
         expression: {
@@ -1496,8 +1626,9 @@ describe("extractVectorSimilarityPredicates", () => {
         } as PredicateExpression,
       },
     ];
-    const result = extractVectorSimilarityPredicates(predicates);
-    expect(result).toHaveLength(1);
+    expect(() => extractVectorSimilarityPredicates(predicates)).toThrow(
+      /cannot be nested under OR or NOT/i,
+    );
   });
 });
 

@@ -28,7 +28,7 @@ export type NodeType<
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
 > = Readonly<{
   [NODE_TYPE_BRAND]: true;
-  name: K;
+  kind: K;
   schema: S;
   description: string | undefined;
 }>;
@@ -68,7 +68,7 @@ export type EdgeType<
   To extends readonly NodeType[] | undefined = undefined,
 > = Readonly<{
   [EDGE_TYPE_BRAND]: true;
-  name: K;
+  kind: K;
   schema: S;
   description: string | undefined;
   from: From;

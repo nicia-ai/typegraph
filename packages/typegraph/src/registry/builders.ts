@@ -2,8 +2,8 @@
  * Builder functions for creating KindRegistry from GraphDef.
  */
 import {
-  getEdgeTypeNames,
-  getNodeTypeNames,
+  getEdgeKinds,
+  getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
 import {
@@ -68,7 +68,7 @@ function extractNodeTypes<G extends GraphDef>(
 ): ReadonlyMap<string, NodeType> {
   const result = new Map<string, NodeType>();
 
-  for (const typeName of getNodeTypeNames(graph)) {
+  for (const typeName of getNodeKinds(graph)) {
     const registration = graph.nodes[typeName] as NodeRegistration;
     result.set(typeName, registration.type);
   }
@@ -88,7 +88,7 @@ function extractEdgeTypes<G extends GraphDef>(
 ): ReadonlyMap<string, AnyEdgeType> {
   const result = new Map<string, AnyEdgeType>();
 
-  for (const typeName of getEdgeTypeNames(graph)) {
+  for (const typeName of getEdgeKinds(graph)) {
     const registration = graph.edges[typeName] as EdgeRegistration;
     result.set(typeName, registration.type);
   }

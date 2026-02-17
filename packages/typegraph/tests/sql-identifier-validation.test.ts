@@ -210,5 +210,11 @@ describe("validateSqlIdentifier", () => {
         validateSqlIdentifier("user--comment");
       }).toThrow(ValidationError);
     });
+
+    it("rejects recursive alias injection attempts", () => {
+      expect(() => {
+        validateSqlIdentifier("path_alias, 1 as injected");
+      }).toThrow(ValidationError);
+    });
   });
 });

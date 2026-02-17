@@ -52,10 +52,12 @@ export type {
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
   SelectContext,
   StreamOptions,
+  TraversalExpansion,
 } from "./builder/index";
 
 // ============================================================
@@ -97,6 +99,7 @@ export function createQueryBuilder<G extends GraphDef>(
     graphId,
     registry,
     schemaIntrospector,
+    defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),

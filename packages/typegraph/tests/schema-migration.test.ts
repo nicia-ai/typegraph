@@ -15,14 +15,18 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  MigrationError,
+} from "../src";
+import type { MigrationHookContext } from "../src/schema";
+import {
   ensureSchema,
   getActiveSchema,
   getSchemaChanges,
   initializeSchema,
   isSchemaInitialized,
   migrateSchema,
-  MigrationError,
-} from "../src";
+  rollbackSchema,
+} from "../src/schema";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -200,18 +204,18 @@ describe("Safe Migration", () => {
     expect(result.status).toBe("migrated");
     const migrated = result as unknown as {
       diff: {
-        nodes: { type: string; name: string }[];
-        edges: { type: string; name: string }[];
+        nodes: { type: string; kind: string }[];
+        edges: { type: string; kind: string }[];
       };
     };
     expect(
       migrated.diff.nodes.some(
-        (n) => n.type === "added" && n.name === "Company",
+        (n) => n.type === "added" && n.kind === "Company",
       ),
     ).toBe(true);
     expect(
       migrated.diff.edges.some(
-        (edge) => edge.type === "added" && edge.name === "worksAt",
+        (edge) => edge.type === "added" && edge.kind === "worksAt",
       ),
     ).toBe(true);
   });
@@ -348,7 +352,7 @@ describe("Schema Changes Detection", () => {
 });
 
 describe("Migration Options", () => {
-  it("autoMigrate=false skips migration", async () => {
+  it("autoMigrate=false returns pending status", async () => {
     const backend = createTestBackend();
 
     // Initialize with v1
@@ -359,12 +363,15 @@ describe("Migration Options", () => {
     const graphV2 = createGraphV2();
     const result = await ensureSchema(backend, graphV2, { autoMigrate: false });
 
-    // Should still detect changes but not migrate
-    expect(result.status).toBe("migrated"); // Status says it would migrate
-    // But version didn't change
-    const migrated = result as { fromVersion: number; toVersion: number };
-    expect(migrated.fromVersion).toBe(1);
-    expect(migrated.toVersion).toBe(1);
+    // Should detect changes and return pending
+    expect(result.status).toBe("pending");
+    const pending = result as {
+      status: "pending";
+      version: number;
+      diff: { hasChanges: boolean };
+    };
+    expect(pending.version).toBe(1);
+    expect(pending.diff.hasChanges).toBe(true);
 
     // Schema version should still be 1
     const active = await getActiveSchema(backend, graphV2.id);
@@ -386,5 +393,159 @@ describe("Migration Options", () => {
 
     const active = await getActiveSchema(backend, graphV2.id);
     expect(active?.version).toBe(2);
+  });
+});
+
+describe("Schema Rollback", () => {
+  it("rolls back to a previous version", async () => {
+    const backend = createTestBackend();
+
+    // Initialize v1 and migrate to v2
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+    const graphV2 = createGraphV2();
+    await createStoreWithSchema(graphV2, backend);
+
+    // Verify v2 is active
+    const beforeRollback = await getActiveSchema(backend, graphV1.id);
+    expect(beforeRollback?.version).toBe(2);
+
+    // Rollback to v1
+    await rollbackSchema(backend, graphV1.id, 1);
+
+    const afterRollback = await getActiveSchema(backend, graphV1.id);
+    expect(afterRollback?.version).toBe(1);
+  });
+
+  it("throws MigrationError for non-existent version", async () => {
+    const backend = createTestBackend();
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    await expect(rollbackSchema(backend, graphV1.id, 99)).rejects.toThrow(
+      MigrationError,
+    );
+  });
+});
+
+describe("Migration Hooks", () => {
+  it("fires onBeforeMigrate before safe migration", async () => {
+    const backend = createTestBackend();
+    const calls: string[] = [];
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    const graphV2 = createGraphV2();
+    await ensureSchema(backend, graphV2, {
+      onBeforeMigrate: () => {
+        calls.push("before");
+      },
+      onAfterMigrate: () => {
+        calls.push("after");
+      },
+    });
+
+    expect(calls).toEqual(["before", "after"]);
+  });
+
+  it("fires onAfterMigrate after safe migration", async () => {
+    const backend = createTestBackend();
+    let afterVersion: number | undefined;
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    const graphV2 = createGraphV2();
+    await ensureSchema(backend, graphV2, {
+      onAfterMigrate: async () => {
+        const active = await getActiveSchema(backend, graphV2.id);
+        afterVersion = active?.version;
+      },
+    });
+
+    expect(afterVersion).toBe(2);
+  });
+
+  it("passes correct context to hooks", async () => {
+    const backend = createTestBackend();
+    let capturedContext: MigrationHookContext | undefined;
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    const graphV2 = createGraphV2();
+    await ensureSchema(backend, graphV2, {
+      onBeforeMigrate: (context) => {
+        capturedContext = context;
+      },
+    });
+
+    expect(capturedContext).toBeDefined();
+    expect(capturedContext!.graphId).toBe("migration_test");
+    expect(capturedContext!.fromVersion).toBe(1);
+    expect(capturedContext!.toVersion).toBe(2);
+    expect(capturedContext!.diff.hasChanges).toBe(true);
+    expect(capturedContext!.diff.isBackwardsCompatible).toBe(true);
+  });
+
+  it("does not call hooks for initialized status", async () => {
+    const backend = createTestBackend();
+    const calls: string[] = [];
+
+    const graphV1 = createGraphV1();
+    await ensureSchema(backend, graphV1, {
+      onBeforeMigrate: () => {
+        calls.push("before");
+      },
+      onAfterMigrate: () => {
+        calls.push("after");
+      },
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  it("does not call hooks for unchanged status", async () => {
+    const backend = createTestBackend();
+    const calls: string[] = [];
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    // Same graph again — unchanged
+    await ensureSchema(backend, graphV1, {
+      onBeforeMigrate: () => {
+        calls.push("before");
+      },
+      onAfterMigrate: () => {
+        calls.push("after");
+      },
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  it("awaits async hooks", async () => {
+    const backend = createTestBackend();
+    const order: string[] = [];
+
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    const graphV2 = createGraphV2();
+    await ensureSchema(backend, graphV2, {
+      onBeforeMigrate: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        order.push("before");
+      },
+      onAfterMigrate: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        order.push("after");
+      },
+    });
+
+    expect(order).toEqual(["before", "after"]);
   });
 });

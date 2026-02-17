@@ -53,6 +53,15 @@ function toPostgresPath(pointer: JsonPointer): SQL {
  */
 export const postgresDialect: DialectAdapter = {
   name: "postgres",
+  capabilities: {
+    standardQueryStrategy: "cte_project",
+    recursiveQueryStrategy: "recursive_cte",
+    setOperationStrategy: "standard_parenthesized",
+    materializeIntermediateTraversalCtes: false,
+    forceRecursiveWorktableOuterJoinOrder: false,
+    vectorPredicateStrategy: "native",
+    vectorMetrics: ["cosine", "l2", "inner_product"] as const,
+  },
 
   // ============================================================
   // JSON Path Operations
@@ -234,6 +243,10 @@ export const postgresDialect: DialectAdapter = {
         // Note: pgvector uses <#> which returns NEGATIVE inner product
         // More negative = more similar for normalized vectors
         return sql`(${column} <#> ${formatted})`;
+      }
+      default: {
+        const _exhaustive: never = metric;
+        throw new Error("Unsupported vector metric: " + String(_exhaustive));
       }
     }
   },

@@ -7,14 +7,22 @@
 export {
   type EdgeOperationContext,
   executeEdgeCreate,
+  executeEdgeCreateBatch,
+  executeEdgeCreateNoReturn,
+  executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
   executeEdgeHardDelete,
   executeEdgeUpdate,
+  executeEdgeUpsertUpdate,
 } from "./edge-operations";
 export {
   executeNodeCreate,
+  executeNodeCreateBatch,
+  executeNodeCreateNoReturn,
+  executeNodeCreateNoReturnBatch,
   executeNodeDelete,
   executeNodeHardDelete,
   executeNodeUpdate,
+  executeNodeUpsertUpdate,
   type NodeOperationContext,
 } from "./node-operations";

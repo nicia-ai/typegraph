@@ -15,16 +15,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import {
   computeSchemaDiff,
   computeSchemaHash,
-  defineEdge,
-  defineGraph,
-  defineNode,
   deserializeWherePredicate,
   serializeSchema,
-  subClassOf,
-} from "../src";
+} from "../src/schema";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -69,7 +66,7 @@ describe("serializeSchema", () => {
     expect(serialized.graphId).toBe("test_graph");
     expect(serialized.version).toBe(1);
     expect(serialized.nodes.Person).toBeDefined();
-    expect(serialized.nodes.Person?.name).toBe("Person");
+    expect(serialized.nodes.Person?.kind).toBe("Person");
   });
 
   it("includes node descriptions", () => {
@@ -365,7 +362,7 @@ describe("computeSchemaDiff", () => {
     const diff = computeSchemaDiff(oldSchema, newSchema);
 
     const addedNodes = diff.nodes.filter((n) => n.type === "added");
-    expect(addedNodes.map((n) => n.name)).toContain("Organization");
+    expect(addedNodes.map((n) => n.kind)).toContain("Organization");
   });
 
   it("detects removed node kinds", () => {
@@ -390,7 +387,7 @@ describe("computeSchemaDiff", () => {
     );
 
     const removedNodes = diff.nodes.filter((n) => n.type === "removed");
-    expect(removedNodes.map((n) => n.name)).toContain("Organization");
+    expect(removedNodes.map((n) => n.kind)).toContain("Organization");
   });
 
   it("detects added edge kinds", () => {
@@ -424,7 +421,7 @@ describe("computeSchemaDiff", () => {
     );
 
     const addedEdges = diff.edges.filter((edge) => edge.type === "added");
-    expect(addedEdges.map((edge) => edge.name)).toContain("worksAt");
+    expect(addedEdges.map((edge) => edge.kind)).toContain("worksAt");
   });
 
   it("detects when schemas are identical", () => {

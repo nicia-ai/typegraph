@@ -38,8 +38,9 @@ export function isSqlitePath(value: unknown): value is string {
 
 /**
  * Normalizes a path value to an array.
- * - If already an array (PostgreSQL), returns as-is
- * - If a SQLite path string, parses it
+ * - If already an array (PostgreSQL native), returns as-is
+ * - If a SQLite path string (|id1|id2|), parses it
+ * - If a PostgreSQL text array ({id1,id2}), parses it
  * - Otherwise returns empty array
  */
 export function normalizePath(value: unknown): readonly string[] {
@@ -49,5 +50,27 @@ export function normalizePath(value: unknown): readonly string[] {
   if (isSqlitePath(value)) {
     return parseSqlitePath(value);
   }
+  if (isPostgresTextArray(value)) {
+    return parsePostgresTextArray(value);
+  }
   return [];
+}
+
+/**
+ * Type guard for PostgreSQL text array format: {id1,id2,id3}
+ */
+function isPostgresTextArray(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.startsWith("{") && value.endsWith("}")
+  );
+}
+
+/**
+ * Parses a PostgreSQL text array string into an array of strings.
+ * Input format: {id1,id2,id3} or {} for empty.
+ */
+function parsePostgresTextArray(value: string): readonly string[] {
+  const inner = value.slice(1, -1);
+  if (inner === "") return [];
+  return inner.split(",");
 }

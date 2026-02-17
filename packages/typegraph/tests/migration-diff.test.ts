@@ -79,6 +79,7 @@ describe("computeSchemaDiff", () => {
 
       expect(diff.hasChanges).toBe(false);
       expect(diff.hasBreakingChanges).toBe(false);
+      expect(diff.isBackwardsCompatible).toBe(true);
       expect(diff.nodes).toHaveLength(0);
       expect(diff.edges).toHaveLength(0);
       expect(diff.ontology).toHaveLength(0);
@@ -99,7 +100,7 @@ describe("computeSchemaDiff", () => {
       const schema = createSchema({
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -128,7 +129,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -144,10 +145,11 @@ describe("computeSchemaDiff", () => {
 
       expect(diff.hasChanges).toBe(true);
       expect(diff.hasBreakingChanges).toBe(false);
+      expect(diff.isBackwardsCompatible).toBe(true);
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "added",
-        name: "Person",
+        kind: "Person",
         severity: "safe",
       });
       expect(diff.nodes[0]!.details).toContain("Person");
@@ -159,7 +161,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -176,10 +178,11 @@ describe("computeSchemaDiff", () => {
 
       expect(diff.hasChanges).toBe(true);
       expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(false);
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "removed",
-        name: "Person",
+        kind: "Person",
         severity: "breaking",
       });
       expect(diff.nodes[0]!.before).toBeDefined();
@@ -191,7 +194,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -207,7 +210,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: {
@@ -230,7 +233,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "modified",
-        name: "Person",
+        kind: "Person",
         severity: "safe",
       });
       expect(diff.nodes[0]!.details).toContain("email");
@@ -242,7 +245,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: {
@@ -261,7 +264,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -281,7 +284,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "modified",
-        name: "Person",
+        kind: "Person",
         severity: "breaking",
       });
       expect(diff.nodes[0]!.details).toContain("age");
@@ -293,7 +296,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { name: { type: "string" } },
@@ -309,7 +312,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: {
@@ -332,7 +335,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "modified",
-        name: "Person",
+        kind: "Person",
         severity: "breaking",
       });
       expect(diff.nodes[0]!.details).toContain("email");
@@ -344,7 +347,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -356,7 +359,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "cascade",
@@ -372,7 +375,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "modified",
-        name: "Person",
+        kind: "Person",
         severity: "warning",
       });
       expect(diff.nodes[0]!.details).toContain("onDelete");
@@ -385,7 +388,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { email: { type: "string" } },
@@ -400,7 +403,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { email: { type: "string" } },
@@ -427,7 +430,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]).toMatchObject({
         type: "modified",
-        name: "Person",
+        kind: "Person",
         severity: "warning",
       });
       expect(diff.nodes[0]!.details).toContain("Unique constraints");
@@ -438,14 +441,14 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
             description: undefined,
           },
           OldNode: {
-            name: "OldNode",
+            kind: "OldNode",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -457,14 +460,14 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
             description: undefined,
           },
           NewNode: {
-            name: "NewNode",
+            kind: "NewNode",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -476,10 +479,10 @@ describe("computeSchemaDiff", () => {
       const diff = computeSchemaDiff(before, after);
 
       expect(diff.nodes).toHaveLength(2);
-      expect(diff.nodes.find((n) => n.name === "OldNode")?.type).toBe(
+      expect(diff.nodes.find((n) => n.kind === "OldNode")?.type).toBe(
         "removed",
       );
-      expect(diff.nodes.find((n) => n.name === "NewNode")?.type).toBe("added");
+      expect(diff.nodes.find((n) => n.kind === "NewNode")?.type).toBe("added");
     });
 
     it("detects property type change as modification", () => {
@@ -487,7 +490,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { age: { type: "string" } },
@@ -503,7 +506,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: {
               type: "object",
               properties: { age: { type: "number" } },
@@ -535,7 +538,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -553,7 +556,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.edges).toHaveLength(1);
       expect(diff.edges[0]).toMatchObject({
         type: "added",
-        name: "follows",
+        kind: "follows",
         severity: "safe",
       });
     });
@@ -563,7 +566,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -582,7 +585,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.edges).toHaveLength(1);
       expect(diff.edges[0]).toMatchObject({
         type: "removed",
-        name: "follows",
+        kind: "follows",
         severity: "breaking",
       });
     });
@@ -592,7 +595,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -606,7 +609,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person", "Bot"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -623,7 +626,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.edges).toHaveLength(1);
       expect(diff.edges[0]).toMatchObject({
         type: "modified",
-        name: "follows",
+        kind: "follows",
         severity: "warning",
       });
       expect(diff.edges[0]!.details).toContain("fromKinds");
@@ -634,7 +637,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -648,7 +651,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person", "Organization"],
             properties: { type: "object", properties: {} },
@@ -674,7 +677,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           worksAt: {
-            name: "worksAt",
+            kind: "worksAt",
             fromKinds: ["Person"],
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
@@ -688,7 +691,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           worksAt: {
-            name: "worksAt",
+            kind: "worksAt",
             fromKinds: ["Person"],
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
@@ -716,7 +719,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           worksAt: {
-            name: "worksAt",
+            kind: "worksAt",
             fromKinds: ["Person"],
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
@@ -730,7 +733,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           worksAt: {
-            name: "worksAt",
+            kind: "worksAt",
             fromKinds: ["Person"],
             toKinds: ["Company"],
             properties: {
@@ -759,7 +762,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -773,7 +776,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person", "Bot"], // fromKinds changed
             toKinds: ["Person", "Organization"], // toKinds changed
             properties: { type: "object", properties: {} },
@@ -788,7 +791,7 @@ describe("computeSchemaDiff", () => {
 
       // Should have 3 changes for the same edge
       expect(diff.edges).toHaveLength(3);
-      expect(diff.edges.filter((edge) => edge.name === "follows")).toHaveLength(
+      expect(diff.edges.filter((edge) => edge.kind === "follows")).toHaveLength(
         3,
       );
     });
@@ -928,14 +931,14 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
             description: undefined,
           },
           Company: {
-            name: "Company",
+            kind: "Company",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -956,7 +959,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["Person"],
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
@@ -1004,7 +1007,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           OldNode: {
-            name: "OldNode",
+            kind: "OldNode",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1016,7 +1019,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           NewNode: {
-            name: "NewNode",
+            kind: "NewNode",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1025,7 +1028,7 @@ describe("computeSchemaDiff", () => {
         },
         edges: {
           follows: {
-            name: "follows",
+            kind: "follows",
             fromKinds: ["NewNode"],
             toKinds: ["NewNode"],
             properties: { type: "object", properties: {} },
@@ -1056,7 +1059,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1075,7 +1078,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1087,7 +1090,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "cascade",
@@ -1106,7 +1109,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1126,7 +1129,7 @@ describe("computeSchemaDiff", () => {
         version: 1,
         nodes: {
           Person: {
-            name: "Person",
+            kind: "Person",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1138,7 +1141,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         nodes: {
           NewSafeNode: {
-            name: "NewSafeNode",
+            kind: "NewSafeNode",
             properties: { type: "object", properties: {} },
             uniqueConstraints: [],
             onDelete: "restrict",
@@ -1166,7 +1169,7 @@ describe("isBackwardsCompatible", () => {
       version: 2,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
@@ -1185,7 +1188,7 @@ describe("isBackwardsCompatible", () => {
       version: 1,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
@@ -1212,7 +1215,7 @@ describe("getMigrationActions", () => {
       version: 2,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
@@ -1232,7 +1235,7 @@ describe("getMigrationActions", () => {
       version: 1,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
@@ -1255,7 +1258,7 @@ describe("getMigrationActions", () => {
       version: 1,
       edges: {
         follows: {
-          name: "follows",
+          kind: "follows",
           fromKinds: ["Person"],
           toKinds: ["Person"],
           properties: { type: "object", properties: {} },
@@ -1280,7 +1283,7 @@ describe("getMigrationActions", () => {
       version: 1,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: {
             type: "object",
             properties: {
@@ -1299,7 +1302,7 @@ describe("getMigrationActions", () => {
       version: 2,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: {
             type: "object",
             properties: { name: { type: "string" } },
@@ -1325,14 +1328,14 @@ describe("getMigrationActions", () => {
       version: 1,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
           description: undefined,
         },
         Company: {
-          name: "Company",
+          kind: "Company",
           properties: { type: "object", properties: {} },
           uniqueConstraints: [],
           onDelete: "restrict",
@@ -1341,7 +1344,7 @@ describe("getMigrationActions", () => {
       },
       edges: {
         worksAt: {
-          name: "worksAt",
+          kind: "worksAt",
           fromKinds: ["Person"],
           toKinds: ["Company"],
           properties: { type: "object", properties: {} },
@@ -1368,7 +1371,7 @@ describe("getMigrationActions", () => {
       version: 1,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: {
             type: "object",
             properties: { name: { type: "string" } },
@@ -1384,7 +1387,7 @@ describe("getMigrationActions", () => {
       version: 2,
       nodes: {
         Person: {
-          name: "Person",
+          kind: "Person",
           properties: {
             type: "object",
             properties: {

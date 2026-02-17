@@ -36,7 +36,51 @@ export function toSqlString(sqlTemplate: SqlTemplateLike): string {
         continue;
       }
     }
+
+    throw new Error(
+      `toSqlString: unexpected chunk type: ${typeof chunk} (${JSON.stringify(chunk)})`,
+    );
   }
 
   return parts.join("");
+}
+
+/**
+ * Extracts a SQL string and parameter values from a Drizzle SQL template.
+ * Supports both SQLite (?) and PostgreSQL ($1, $2, ...) placeholder styles.
+ */
+export function toSqlWithParams(
+  sqlTemplate: SqlTemplateLike,
+  dialect: "sqlite" | "postgres" = "sqlite",
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [];
+  let parameterIndex = 1;
+
+  function flatten(object: unknown): string {
+    if (
+      typeof object === "object" &&
+      object !== null &&
+      "value" in object &&
+      Array.isArray((object as { value: unknown }).value)
+    ) {
+      return (object as { value: string[] }).value.join("");
+    }
+
+    if (
+      typeof object === "object" &&
+      object !== null &&
+      "queryChunks" in object &&
+      Array.isArray((object as { queryChunks: unknown[] }).queryChunks)
+    ) {
+      return (object as { queryChunks: unknown[] }).queryChunks
+        .map((c) => flatten(c))
+        .join("");
+    }
+
+    params.push(object);
+    return dialect === "postgres" ? `$${parameterIndex++}` : "?";
+  }
+
+  const sqlString = flatten(sqlTemplate);
+  return { sql: sqlString, params };
 }

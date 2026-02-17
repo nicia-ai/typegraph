@@ -57,15 +57,15 @@ function validateConstraintNarrowing(
   edgeType: EdgeTypeWithEndpoints,
   registration: EdgeRegistration,
 ): void {
-  const builtInFromNames = new Set(edgeType.from.map((n) => n.name));
+  const builtInFromNames = new Set(edgeType.from.map((n) => n.kind));
   for (const fromNode of registration.from) {
-    if (!builtInFromNames.has(fromNode.name)) {
+    if (!builtInFromNames.has(fromNode.kind)) {
       throw new ConfigurationError(
-        `Edge "${name}" registration has 'from' kind "${fromNode.name}" ` +
+        `Edge "${name}" registration has 'from' kind "${fromNode.kind}" ` +
           `not in edge's built-in domain: [${[...builtInFromNames].join(", ")}]`,
         {
           edgeName: name,
-          invalidFrom: fromNode.name,
+          invalidFrom: fromNode.kind,
           allowedFrom: [...builtInFromNames],
         },
         {
@@ -75,15 +75,15 @@ function validateConstraintNarrowing(
     }
   }
 
-  const builtInToNames = new Set(edgeType.to.map((n) => n.name));
+  const builtInToNames = new Set(edgeType.to.map((n) => n.kind));
   for (const toNode of registration.to) {
-    if (!builtInToNames.has(toNode.name)) {
+    if (!builtInToNames.has(toNode.kind)) {
       throw new ConfigurationError(
-        `Edge "${name}" registration has 'to' kind "${toNode.name}" ` +
+        `Edge "${name}" registration has 'to' kind "${toNode.kind}" ` +
           `not in edge's built-in range: [${[...builtInToNames].join(", ")}]`,
         {
           edgeName: name,
-          invalidTo: toNode.name,
+          invalidTo: toNode.kind,
           allowedTo: [...builtInToNames],
         },
         {
@@ -189,44 +189,44 @@ export type GraphDef<
 // ============================================================
 
 /**
- * Extract node type names from a GraphDef.
+ * Extract node kind names from a GraphDef.
  */
-export type NodeTypeNames<G extends GraphDef> = keyof G["nodes"] & string;
+export type NodeKinds<G extends GraphDef> = keyof G["nodes"] & string;
 
 /**
- * Extract edge type names from a GraphDef.
+ * Extract edge kind names from a GraphDef.
  */
-export type EdgeTypeNames<G extends GraphDef> = keyof G["edges"] & string;
+export type EdgeKinds<G extends GraphDef> = keyof G["edges"] & string;
 
 /**
- * Get a NodeType from a GraphDef by name.
+ * Get a NodeType from a GraphDef by kind name.
  */
 export type GetNodeType<
   G extends GraphDef,
-  K extends NodeTypeNames<G>,
+  K extends NodeKinds<G>,
 > = G["nodes"][K]["type"];
 
 /**
- * Get an EdgeType from a GraphDef by name.
+ * Get an EdgeType from a GraphDef by kind name.
  */
 export type GetEdgeType<
   G extends GraphDef,
-  K extends EdgeTypeNames<G>,
+  K extends EdgeKinds<G>,
 > = G["edges"][K]["type"];
 
 /**
  * Get all NodeTypes from a GraphDef.
  */
 export type AllNodeTypes<G extends GraphDef> = {
-  [K in NodeTypeNames<G>]: G["nodes"][K]["type"];
-}[NodeTypeNames<G>];
+  [K in NodeKinds<G>]: G["nodes"][K]["type"];
+}[NodeKinds<G>];
 
 /**
  * Get all EdgeTypes from a GraphDef.
  */
 export type AllEdgeTypes<G extends GraphDef> = {
-  [K in EdgeTypeNames<G>]: G["edges"][K]["type"];
-}[EdgeTypeNames<G>];
+  [K in EdgeKinds<G>]: G["edges"][K]["type"];
+}[EdgeKinds<G>];
 
 // ============================================================
 // Define Graph Function
@@ -306,19 +306,15 @@ export function isGraphDef(value: unknown): value is GraphDef {
 }
 
 /**
- * Gets all node type names from a GraphDef.
+ * Gets all node kind names from a GraphDef.
  */
-export function getNodeTypeNames<G extends GraphDef>(
-  graph: G,
-): readonly string[] {
+export function getNodeKinds<G extends GraphDef>(graph: G): readonly string[] {
   return Object.keys(graph.nodes);
 }
 
 /**
- * Gets all edge type names from a GraphDef.
+ * Gets all edge kind names from a GraphDef.
  */
-export function getEdgeTypeNames<G extends GraphDef>(
-  graph: G,
-): readonly string[] {
+export function getEdgeKinds<G extends GraphDef>(graph: G): readonly string[] {
   return Object.keys(graph.edges);
 }

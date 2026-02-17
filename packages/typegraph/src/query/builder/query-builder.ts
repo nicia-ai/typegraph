@@ -12,11 +12,13 @@ import {
   type AggregateExpr,
   type FieldRef,
   type GroupBySpec,
+  mergeEdgeKinds,
   type OrderSpec,
   type PredicateExpression,
   type ProjectedField,
   type SortDirection,
   type TraversalDirection,
+  type TraversalExpansion,
 } from "../ast";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
@@ -43,6 +45,7 @@ import {
   type NodeAlias,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type RecursiveAliasMap,
   type SelectContext,
   type UniqueAlias,
 } from "./types";
@@ -171,6 +174,8 @@ export class QueryBuilder<
   Aliases extends AliasMap = {},
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty object for initial empty edge alias map
   EdgeAliases extends EdgeAliasMap = {},
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RecursiveAliases extends RecursiveAliasMap = {},
 > {
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
@@ -193,20 +198,31 @@ export class QueryBuilder<
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
-    EdgeAliases
+    EdgeAliases,
+    RecursiveAliases
   >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
     options: { includeSubClasses: true },
-  ): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases>;
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias>,
+    EdgeAliases,
+    RecursiveAliases
+  >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
     options?: { includeSubClasses?: boolean },
-  ): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases> {
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias>,
+    EdgeAliases,
+    RecursiveAliases
+  > {
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
 
@@ -232,11 +248,11 @@ export class QueryBuilder<
    */
   whereNode<A extends keyof Aliases & string>(
     alias: A,
-    predicateFunction: (n: NodeAccessor<Aliases[A]["kind"]>) => Predicate,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+    predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     const accessor = this.#createNodeAccessor(alias);
     const predicate = predicateFunction(
-      accessor as NodeAccessor<Aliases[A]["kind"]>,
+      accessor as NodeAccessor<Aliases[A]["type"]>,
     );
 
     const newState: QueryBuilderState = {
@@ -262,12 +278,12 @@ export class QueryBuilder<
   whereEdge<EA extends keyof EdgeAliases & string>(
     alias: EA,
     predicateFunction: (
-      edge: EdgeAccessor<EdgeAliases[EA]["kind"]>,
+      edge: EdgeAccessor<EdgeAliases[EA]["type"]>,
     ) => Predicate,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
-      accessor as EdgeAccessor<EdgeAliases[EA]["kind"]>,
+      accessor as EdgeAccessor<EdgeAliases[EA]["type"]>,
     );
 
     const newState: QueryBuilderState = {
@@ -291,7 +307,7 @@ export class QueryBuilder<
    * By default, traverses from the current node (last traversal target, or start node).
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -299,10 +315,21 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: "out";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA>;
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    EK,
+    EA,
+    "out",
+    false,
+    false,
+    false,
+    RecursiveAliases
+  >;
 
   /**
    * Traverses an edge to another node (incoming direction).
@@ -311,7 +338,7 @@ export class QueryBuilder<
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
    * @param options.direction - Set to "in" for incoming edge traversal
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -319,33 +346,62 @@ export class QueryBuilder<
     edgeAlias: EA,
     options: {
       direction: "in";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "in">;
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    EK,
+    EA,
+    "in",
+    false,
+    false,
+    false,
+    RecursiveAliases
+  >;
 
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
     edgeKind: EK,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, TraversalDirection> {
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    EK,
+    EA,
+    TraversalDirection,
+    false,
+    false,
+    false,
+    RecursiveAliases
+  > {
     // Validate edge alias to prevent SQL injection
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    const includeImplyingEdges = options?.includeImplyingEdges ?? false;
+    const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    const includeImplyingEdges =
+      expansion === "implying" || expansion === "all";
+    const includeInverseEdges = expansion === "inverse" || expansion === "all";
     // Use explicit `from` if provided, otherwise chain from currentAlias
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     // Expand edge kinds if including implying edges
-    const edgeKinds =
-      includeImplyingEdges ?
-        this.#config.registry.expandImplyingEdges(edgeKind)
-      : [edgeKind];
+    const edgeKinds = this.#expandTraversalEdgeKinds(
+      edgeKind,
+      includeImplyingEdges,
+    );
+    const inverseEdgeKinds =
+      includeInverseEdges ?
+        this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
+      : [];
 
     return new TraversalBuilder(
       this.#config,
@@ -354,6 +410,7 @@ export class QueryBuilder<
       edgeAlias,
       direction,
       fromAlias,
+      inverseEdgeKinds,
       false,
     );
   }
@@ -366,7 +423,7 @@ export class QueryBuilder<
    * Use the `from` option to traverse from a different alias (fan-out pattern).
    *
    * @param options.direction - Direction of traversal: "out" (default) or "in"
-   * @param options.includeImplyingEdges - If true, also match edges that imply this edge kind
+   * @param options.expand - Ontology expansion mode for implying/inverse edges
    * @param options.from - Alias to traverse from (defaults to current/last traversal target)
    */
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -374,27 +431,49 @@ export class QueryBuilder<
     edgeAlias: EA,
     options?: {
       direction?: "out";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "out", true>;
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    EK,
+    EA,
+    "out",
+    true,
+    false,
+    false,
+    RecursiveAliases
+  >;
 
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
     edgeKind: EK,
     edgeAlias: EA,
     options: {
       direction: "in";
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
-  ): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, "in", true>;
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    EK,
+    EA,
+    "in",
+    true,
+    false,
+    false,
+    RecursiveAliases
+  >;
 
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
     edgeKind: EK,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
-      includeImplyingEdges?: boolean;
+      expand?: TraversalExpansion;
       from?: keyof Aliases & string;
     },
   ): TraversalBuilder<
@@ -404,21 +483,31 @@ export class QueryBuilder<
     EK,
     EA,
     TraversalDirection,
-    true
+    true,
+    false,
+    false,
+    RecursiveAliases
   > {
     // Validate edge alias to prevent SQL injection
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    const includeImplyingEdges = options?.includeImplyingEdges ?? false;
+    const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    const includeImplyingEdges =
+      expansion === "implying" || expansion === "all";
+    const includeInverseEdges = expansion === "inverse" || expansion === "all";
     // Use explicit `from` if provided, otherwise chain from currentAlias
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     // Expand edge kinds if including implying edges
-    const edgeKinds =
-      includeImplyingEdges ?
-        this.#config.registry.expandImplyingEdges(edgeKind)
-      : [edgeKind];
+    const edgeKinds = this.#expandTraversalEdgeKinds(
+      edgeKind,
+      includeImplyingEdges,
+    );
+    const inverseEdgeKinds =
+      includeInverseEdges ?
+        this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
+      : [];
 
     return new TraversalBuilder(
       this.#config,
@@ -427,6 +516,7 @@ export class QueryBuilder<
       edgeAlias,
       direction,
       fromAlias,
+      inverseEdgeKinds,
       true,
     );
   }
@@ -435,8 +525,10 @@ export class QueryBuilder<
    * Selects fields to return.
    */
   select<R>(
-    selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
-  ): ExecutableQuery<G, Aliases, EdgeAliases, R> {
+    selectFunction: (
+      context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>,
+    ) => R,
+  ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
     // For now, project all fields from all aliases
     // A more sophisticated implementation would parse the selectFn
 
@@ -466,7 +558,7 @@ export class QueryBuilder<
    *
    * @param fields - Object mapping output names to field refs or aggregate expressions
    */
-  selectAggregate<R extends Record<string, FieldRef | AggregateExpr>>(
+  aggregate<R extends Record<string, FieldRef | AggregateExpr>>(
     fields: R,
   ): ExecutableAggregateQuery<G, Aliases, R> {
     const resolvedFields = Object.fromEntries(
@@ -540,7 +632,7 @@ export class QueryBuilder<
     alias: A,
     field: string,
     direction: SortDirection = "asc",
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     const kindNames = this.#getKindNamesForAlias(alias);
     const typeInfo =
       kindNames ?
@@ -567,7 +659,7 @@ export class QueryBuilder<
   /**
    * Limits the number of results.
    */
-  limit(n: number): QueryBuilder<G, Aliases, EdgeAliases> {
+  limit(n: number): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       limit: n,
@@ -577,7 +669,7 @@ export class QueryBuilder<
   /**
    * Offsets the results.
    */
-  offset(n: number): QueryBuilder<G, Aliases, EdgeAliases> {
+  offset(n: number): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       offset: n,
@@ -594,7 +686,7 @@ export class QueryBuilder<
   temporal(
     mode: TemporalMode,
     asOf?: string,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     if (mode === "asOf" && asOf === undefined) {
       throw new ValidationError(
         'Temporal mode "asOf" requires a timestamp',
@@ -625,7 +717,7 @@ export class QueryBuilder<
   groupBy<A extends keyof Aliases & string>(
     alias: A,
     field: string,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     const kindNames = this.#getKindNamesForAlias(alias);
     const typeInfo =
       kindNames ?
@@ -660,7 +752,7 @@ export class QueryBuilder<
    */
   groupByNode<A extends keyof Aliases & string>(
     alias: A,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     const fieldRefValue: FieldRef = {
       __type: "field_ref",
       alias,
@@ -687,7 +779,7 @@ export class QueryBuilder<
    */
   having(
     predicate: PredicateExpression,
-  ): QueryBuilder<G, Aliases, EdgeAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       having: predicate,
@@ -722,11 +814,12 @@ export class QueryBuilder<
   pipe<
     OutAliases extends AliasMap,
     OutEdgeAliases extends EdgeAliasMap = EdgeAliases,
+    OutRecAliases extends RecursiveAliasMap = RecursiveAliases,
   >(
     fragment: (
-      builder: QueryBuilder<G, Aliases, EdgeAliases>,
-    ) => QueryBuilder<G, OutAliases, OutEdgeAliases>,
-  ): QueryBuilder<G, OutAliases, OutEdgeAliases> {
+      builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases>,
+    ) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases>,
+  ): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases> {
     return fragment(this);
   }
 
@@ -833,13 +926,50 @@ export class QueryBuilder<
     });
   }
 
+  #expandTraversalEdgeKinds(
+    edgeKind: keyof G["edges"] & string,
+    includeImplyingEdges: boolean,
+  ): readonly string[] {
+    return includeImplyingEdges ?
+        this.#config.registry.expandImplyingEdges(edgeKind)
+      : [edgeKind];
+  }
+
+  #expandInverseTraversalEdgeKinds(
+    edgeKinds: readonly string[],
+    includeImplyingEdges: boolean,
+  ): readonly string[] {
+    const inverseKinds = new Set<string>();
+
+    for (const kind of edgeKinds) {
+      const inverseKind = this.#config.registry.getInverseEdge(kind);
+      if (inverseKind === undefined) {
+        continue;
+      }
+
+      inverseKinds.add(inverseKind);
+
+      if (!includeImplyingEdges) {
+        continue;
+      }
+
+      for (const implyingKind of this.#config.registry.expandImplyingEdges(
+        inverseKind,
+      )) {
+        inverseKinds.add(implyingKind);
+      }
+    }
+
+    return [...inverseKinds];
+  }
+
   /**
    * Gets edge kind names for an edge alias.
    */
   #getEdgeKindNamesForAlias(alias: string): readonly string[] | undefined {
     for (const traversal of this.#state.traversals) {
       if (traversal.edgeAlias === alias) {
-        return traversal.edgeKinds;
+        return mergeEdgeKinds(traversal);
       }
     }
     return undefined;

@@ -74,14 +74,3 @@ export type {
   RecommendationPriority,
   UsageContext,
 } from "./types";
-
-// ============================================================
-// Utilities (for advanced usage)
-// ============================================================
-
-export { type ExtractedAccess, extractPropertyAccesses } from "./ast-extractor";
-export { keyToPath, pathToKey, ProfileCollector } from "./collector";
-export {
-  generateRecommendations,
-  getUnindexedFilters,
-} from "./recommendations";

@@ -135,7 +135,7 @@ export type SerializedUniqueConstraint = Readonly<{
  * Serialized representation of a node kind.
  */
 export type SerializedNodeDef = Readonly<{
-  name: string;
+  kind: string;
   properties: JsonSchema;
   uniqueConstraints: readonly SerializedUniqueConstraint[];
   onDelete: DeleteBehavior;
@@ -150,7 +150,7 @@ export type SerializedNodeDef = Readonly<{
  * Serialized representation of an edge kind.
  */
 export type SerializedEdgeDef = Readonly<{
-  name: string;
+  kind: string;
   fromKinds: readonly string[];
   toKinds: readonly string[];
   properties: JsonSchema;

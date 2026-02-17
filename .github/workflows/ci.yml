@@ -126,6 +126,10 @@ jobs:
       - name: Run property tests
         run: pnpm turbo run test:property
 
+      - name: Run SQLite perf sanity
+        if: ${{ matrix.node-version == 22 }}
+        run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check
+
       - name: Run example smoke test
         run: pnpm --filter @nicia-ai/typegraph exec tsx examples/01-basic-usage.ts
 
@@ -187,6 +191,12 @@ jobs:
 
       - name: Run PostgreSQL integration tests
         run: pnpm --filter @nicia-ai/typegraph test:postgres
+        env:
+          # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+          POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
+
+      - name: Run PostgreSQL perf sanity
+        run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test

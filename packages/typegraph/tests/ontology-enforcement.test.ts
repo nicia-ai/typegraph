@@ -528,7 +528,7 @@ describe("Query-Time Implies Expansion", () => {
     expect(expanded).toHaveLength(3);
   });
 
-  it("query traverse with includeImplyingEdges expands edge kinds", () => {
+  it("query traverse with expand: implying expands edge kinds", () => {
     const graph = defineGraph({
       id: "query_implies_test",
       nodes: {
@@ -547,10 +547,10 @@ describe("Query-Time Implies Expansion", () => {
 
     const registry = buildKindRegistry(graph);
 
-    // Create a query that uses includeImplyingEdges
+    // Create a query that uses implying-edge expansion
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
-      .traverse("likes", "e", { includeImplyingEdges: true })
+      .traverse("likes", "e", { expand: "implying" })
       .to("Person", "friend")
       .select((context) => ({ person: context.p, friend: context.friend }));
 
@@ -564,7 +564,38 @@ describe("Query-Time Implies Expansion", () => {
     expect(traversal.edgeKinds).toContain("manages");
   });
 
-  it("query traverse without includeImplyingEdges uses single edge kind", () => {
+  it("query traverse with expand: inverse expands inverse edge kinds", () => {
+    const likedBy = defineEdge("likedBy", {
+      schema: z.object({}),
+    });
+
+    const graph = defineGraph({
+      id: "query_inverse_test",
+      nodes: {
+        Person: { type: Person },
+      },
+      edges: {
+        likes: { type: likes, from: [Person], to: [Person] },
+        likedBy: { type: likedBy, from: [Person], to: [Person] },
+      },
+      ontology: [inverseOf(likes, likedBy)],
+    });
+
+    const registry = buildKindRegistry(graph);
+
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("likes", "e", { expand: "inverse" })
+      .to("Person", "friend")
+      .select((context) => ({ person: context.p, friend: context.friend }));
+
+    const traversal = query.toAst().traversals[0]!;
+
+    expect(traversal.edgeKinds).toEqual(["likes"]);
+    expect(traversal.inverseEdgeKinds).toEqual(["likedBy"]);
+  });
+
+  it("query traverse without implying expansion uses single edge kind", () => {
     const graph = defineGraph({
       id: "query_no_implies_test",
       nodes: {
@@ -579,7 +610,7 @@ describe("Query-Time Implies Expansion", () => {
 
     const registry = buildKindRegistry(graph);
 
-    // Create a query without includeImplyingEdges
+    // Create a query without implying-edge expansion
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .traverse("likes", "e")

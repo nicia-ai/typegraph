@@ -14,6 +14,11 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import {
+  CompilerInvariantError,
+  UnsupportedPredicateError,
+} from "../../errors";
+import type { SetOperationType } from "../ast";
+import {
   type ComposableQuery,
   type FieldRef,
   type ProjectedField,
@@ -21,29 +26,126 @@ import {
   type QueryAst,
   type SetOperation,
 } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import {
+  type DialectAdapter,
+  type DialectSetOperationStrategy,
+} from "../dialect";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { emitSetOperationQuerySql } from "./emitter";
+import { createTemporalFilterPass, runCompilerPass } from "./passes";
+import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 import {
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
 import { type SqlSchema } from "./schema";
-import { compileTemporalFilter, extractTemporalOptions } from "./temporal";
+import { compileTypedJsonExtract } from "./typed-json-extract";
 
 /**
  * Type for the query compiler function.
  */
 export type QueryCompilerFunction = (ast: QueryAst, graphId: string) => SQL;
 
+type SetOperationStrategyHandler = (
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
+  schema: SqlSchema,
+  compileQuery: QueryCompilerFunction,
+) => SQL;
+
 /**
  * Operator mapping for set operations.
  */
-const OPERATOR_MAP: Record<string, string> = {
+const OPERATOR_MAP: Record<SetOperationType, string> = {
   union: "UNION",
   unionAll: "UNION ALL",
   intersect: "INTERSECT",
   except: "EXCEPT",
 };
+
+function compileSetOperationWithStandardParenthesizedStrategy(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
+  _schema: SqlSchema,
+  compileQuery: QueryCompilerFunction,
+): SQL {
+  return compileSetOperationStandard(
+    op,
+    graphId,
+    dialect,
+    logicalPlan,
+    compileQuery,
+  );
+}
+
+function compileSetOperationWithSqliteCompoundStrategy(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
+  schema: SqlSchema,
+  _compileQuery: QueryCompilerFunction,
+): SQL {
+  return compileSetOperationForSqlite(
+    op,
+    graphId,
+    dialect,
+    logicalPlan,
+    schema,
+  );
+}
+
+const SET_OPERATION_STRATEGY_HANDLERS: Record<
+  DialectSetOperationStrategy,
+  SetOperationStrategyHandler
+> = {
+  standard_parenthesized: compileSetOperationWithStandardParenthesizedStrategy,
+  sqlite_compound: compileSetOperationWithSqliteCompoundStrategy,
+};
+
+type SetOperationPassState = Readonly<{
+  dialect: DialectAdapter;
+  graphId: string;
+  logicalPlan: LogicalPlan | undefined;
+  op: SetOperation;
+}>;
+
+function runSetOperationPassPipeline(
+  op: SetOperation,
+  graphId: string,
+  dialect: DialectAdapter,
+): SetOperationPassState {
+  let state: SetOperationPassState = {
+    dialect,
+    graphId,
+    logicalPlan: undefined,
+    op,
+  };
+
+  const logicalPlanPass = runCompilerPass(state, {
+    name: "logical_plan",
+    execute(currentState): LogicalPlan {
+      return lowerSetOperationToLogicalPlan({
+        dialect: currentState.dialect.name,
+        graphId: currentState.graphId,
+        op: currentState.op,
+      });
+    },
+    update(currentState, logicalPlan): SetOperationPassState {
+      return {
+        ...currentState,
+        logicalPlan,
+      };
+    },
+  });
+  state = logicalPlanPass.state;
+
+  return state;
+}
 
 // ============================================================
 // Main Entry Point
@@ -69,13 +171,17 @@ export function compileSetOperation(
   schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ): SQL {
-  // SQLite requires special handling for CTEs in compound statements
-  if (dialect.name === "sqlite") {
-    return compileSetOperationForSqlite(op, graphId, dialect, schema);
+  const passState = runSetOperationPassPipeline(op, graphId, dialect);
+  const { logicalPlan } = passState;
+  if (logicalPlan === undefined) {
+    throw new CompilerInvariantError(
+      "Logical plan pass did not initialize plan state",
+    );
   }
 
-  // PostgreSQL and others support CTEs in parentheses
-  return compileSetOperationStandard(op, graphId, dialect, compileQuery);
+  const strategy = dialect.capabilities.setOperationStrategy;
+  const handler = SET_OPERATION_STRATEGY_HANDLERS[strategy];
+  return handler(op, graphId, dialect, logicalPlan, schema, compileQuery);
 }
 
 // ============================================================
@@ -89,6 +195,7 @@ function compileSetOperationStandard(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   compileQuery: QueryCompilerFunction,
 ): SQL {
   const coreSql = compileSetOperationCoreStandard(
@@ -98,12 +205,12 @@ function compileSetOperationStandard(
     compileQuery,
   );
 
-  const parts: SQL[] = [coreSql];
-
-  // Handle ORDER BY, LIMIT, OFFSET
-  appendOrderByLimitOffset(parts, op, dialect);
-
-  return sql.join(parts, sql` `);
+  const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
+  return emitSetOperationQuerySql({
+    baseQuery: coreSql,
+    logicalPlan,
+    ...(suffixClauses.length === 0 ? {} : { suffixClauses }),
+  });
 }
 
 /**
@@ -128,7 +235,7 @@ function compileSetOperationCoreStandard(
     compileQuery,
   );
 
-  const opSql = sql.raw(OPERATOR_MAP[op.operator]!);
+  const opSql = sql.raw(OPERATOR_MAP[op.operator]);
 
   return sql`(${left}) ${opSql} (${right})`;
 }
@@ -157,6 +264,35 @@ function compileComposableQueryStandard(
 // SQLite Compilation
 // ============================================================
 
+type SqliteSetOperationLeaf = Readonly<{
+  ast: QueryAst;
+  prefix: string;
+}>;
+
+type SqliteSetOperationValidationPassResult = Readonly<{
+  leaves: readonly SqliteSetOperationLeaf[];
+}>;
+
+/**
+ * Validates and prepares SQLite set-operation leaves.
+ *
+ * Invariants:
+ * - All leaves are flattened with stable prefixes.
+ * - Every leaf passes SQLite compound-query compatibility checks.
+ */
+function runSqliteSetOperationValidationPass(
+  op: SetOperation,
+): SqliteSetOperationValidationPassResult {
+  const leaves: SqliteSetOperationLeaf[] = [];
+  collectLeafQueries(op, leaves, "q");
+
+  for (const leaf of leaves) {
+    validateSqliteSetOpLeaf(leaf.ast);
+  }
+
+  return { leaves };
+}
+
 /**
  * SQLite-specific set operation compilation.
  *
@@ -170,23 +306,21 @@ function compileSetOperationForSqlite(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  logicalPlan: LogicalPlan,
   schema: SqlSchema,
 ): SQL {
-  // Collect all leaf queries and assign unique prefixes
-  const leaves: { ast: QueryAst; prefix: string }[] = [];
-  collectLeafQueries(op, leaves, "q");
-
-  // Validate: SQLite set operations currently only support simple queries
-  for (const leaf of leaves) {
-    validateSqliteSetOpLeaf(leaf.ast);
-  }
+  const { leaves } = runSqliteSetOperationValidationPass(op);
 
   // Build all CTEs with unique prefixes
   const allCtes: SQL[] = [];
   const ctx: PredicateCompilerContext = {
     dialect,
     schema,
-    compileQuery: () => sql``, // Not used in CTE compilation
+    compileQuery: () => {
+      throw new CompilerInvariantError(
+        "compileQuery is not available in set-operation CTE compilation",
+      );
+    },
   };
 
   for (const leaf of leaves) {
@@ -204,19 +338,13 @@ function compileSetOperationForSqlite(
   // Build compound SELECT from the set operation structure
   const compoundSelect = buildCompoundSelect(op, leaves, selectStatements);
 
-  // Assemble final query
-  const parts: SQL[] = [];
-
-  if (allCtes.length > 0) {
-    parts.push(sql`WITH ${sql.join(allCtes, sql`, `)}`);
-  }
-
-  parts.push(compoundSelect);
-
-  // Handle ORDER BY, LIMIT, OFFSET
-  appendOrderByLimitOffset(parts, op, dialect);
-
-  return sql.join(parts, sql` `);
+  const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
+  return emitSetOperationQuerySql({
+    baseQuery: compoundSelect,
+    ...(allCtes.length === 0 ? {} : { ctes: allCtes }),
+    logicalPlan,
+    ...(suffixClauses.length === 0 ? {} : { suffixClauses }),
+  });
 }
 
 /**
@@ -266,7 +394,7 @@ function validateSqliteSetOpLeaf(ast: QueryAst): void {
   }
 
   if (unsupported.length > 0) {
-    throw new Error(
+    throw new UnsupportedPredicateError(
       `SQLite set operations (UNION/INTERSECT/EXCEPT) do not support: ${unsupported.join(", ")}. ` +
         "Use PostgreSQL for complex set operations, or refactor to separate queries.",
     );
@@ -368,7 +496,7 @@ function hasSubqueryInExpression(
  */
 function collectLeafQueries(
   query: ComposableQuery,
-  leaves: { ast: QueryAst; prefix: string }[],
+  leaves: SqliteSetOperationLeaf[],
   basePrefix: string,
 ): void {
   if ("__type" in query) {
@@ -391,6 +519,10 @@ function compilePrefixedStartCte(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): SQL {
+  const temporalFilterPass = createTemporalFilterPass(
+    ast,
+    ctx.dialect.currentTimestamp(),
+  );
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
 
@@ -404,7 +536,7 @@ function compilePrefixedStartCte(
       )})`;
 
   // Temporal filter
-  const temporalFilter = compileTemporalFilter(extractTemporalOptions(ast));
+  const temporalFilter = temporalFilterPass.forAlias();
 
   // Node predicates for this alias
   const cteContext: PredicateCompilerContext = { ...ctx, cteColumnPrefix: "" };
@@ -454,22 +586,21 @@ function compilePrefixedSelect(
   const fields = ast.projection.fields;
 
   // Build projection
-  let projection: SQL;
-  if (fields.length === 0) {
-    projection = sql.raw("*");
-  } else {
-    const projectedFields = fields.map((f) => {
-      const source = compileFieldValueForSetOp(
-        f.source,
-        prefix,
-        alias,
-        dialect,
+  const projection =
+    fields.length === 0 ?
+      sql.raw("*")
+    : sql.join(
+        fields.map((f) => {
+          const source = compileFieldValueForSetOp(
+            f.source,
+            prefix,
+            alias,
+            dialect,
+          );
+          return sql`${source} AS ${sql.raw(dialect.quoteIdentifier(f.outputName))}`;
+        }),
+        sql`, `,
       );
-      // Quote the output name with proper escaping to preserve case and handle special characters
-      return sql`${source} AS ${sql.raw(dialect.quoteIdentifier(f.outputName))}`;
-    });
-    projection = sql.join(projectedFields, sql`, `);
-  }
 
   return sql`SELECT ${projection} FROM ${sql.raw(cteName)}`;
 }
@@ -503,7 +634,9 @@ function compileFieldValueForSetOp(
         return sql`${sql.raw(fn.toUpperCase())}(${column})`;
       }
       default: {
-        throw new Error(`Unknown aggregate function: ${fn as string}`);
+        throw new CompilerInvariantError(
+          `Unknown aggregate function: ${String(fn)}`,
+        );
       }
     }
   }
@@ -557,15 +690,13 @@ function compileFieldColumnForSetOp(
     return column;
   }
 
-  // Use appropriate JSON extraction based on value type
-  const valueType = field.valueType;
-  if (valueType === "number") {
-    return dialect.jsonExtractNumber(column, pointer);
-  }
-  if (valueType === "boolean") {
-    return dialect.jsonExtractBoolean(column, pointer);
-  }
-  return dialect.jsonExtractText(column, pointer);
+  return compileTypedJsonExtract({
+    column,
+    dialect,
+    fallback: "text",
+    pointer,
+    valueType: field.valueType,
+  });
 }
 
 /**
@@ -573,8 +704,8 @@ function compileFieldColumnForSetOp(
  */
 function buildCompoundSelect(
   op: SetOperation,
-  leaves: { ast: QueryAst; prefix: string }[],
-  selectStatements: SQL[],
+  leaves: readonly SqliteSetOperationLeaf[],
+  selectStatements: readonly SQL[],
 ): SQL {
   // Build a map from prefix to select statement
   const prefixToSelect = new Map<string, SQL>();
@@ -591,14 +722,14 @@ function buildCompoundSelect(
  */
 function buildCompoundSelectRecursive(
   query: ComposableQuery,
-  leaves: { ast: QueryAst; prefix: string }[],
+  leaves: readonly SqliteSetOperationLeaf[],
   prefixToSelect: Map<string, SQL>,
 ): SQL {
   if (!("__type" in query)) {
     // This is a leaf QueryAst - find its prefix and return the SELECT
     const leaf = leaves.find((l) => l.ast === query);
     if (!leaf) {
-      throw new Error("Leaf query not found in leaves array");
+      throw new CompilerInvariantError("Leaf query not found in leaves array");
     }
     return prefixToSelect.get(leaf.prefix)!;
   }
@@ -610,7 +741,7 @@ function buildCompoundSelectRecursive(
     leaves,
     prefixToSelect,
   );
-  const opSql = sql.raw(OPERATOR_MAP[query.operator]!);
+  const opSql = sql.raw(OPERATOR_MAP[query.operator]);
 
   return sql`${left} ${opSql} ${right}`;
 }
@@ -689,7 +820,7 @@ function matchFieldToProjection(
 }
 
 /**
- * Appends ORDER BY, LIMIT, OFFSET clauses to the parts array.
+ * Builds ORDER BY, LIMIT, OFFSET clauses for set operations.
  *
  * For set operations, ORDER BY must reference output column names from
  * the compound result, not internal CTE columns. This function:
@@ -697,18 +828,19 @@ function matchFieldToProjection(
  * 2. Uses IS NULL emulation for consistent NULLS FIRST/LAST across dialects
  * 3. Throws a descriptive error if an ORDER BY field isn't in the projection
  */
-function appendOrderByLimitOffset(
-  parts: SQL[],
+function buildSetOperationSuffixClauses(
   op: SetOperation,
   dialect: DialectAdapter,
-): void {
+): SQL[] {
+  const clauses: SQL[] = [];
+
   // Handle ORDER BY if present
   if (op.orderBy && op.orderBy.length > 0) {
     const projection = getLeftmostProjection(op);
 
     // Check for SELECT * (empty projection) - can't order by named columns
     if (projection.fields.length === 0) {
-      throw new Error(
+      throw new UnsupportedPredicateError(
         "Set operation ORDER BY requires explicit field projection. " +
           "SELECT * does not provide stable output column names for ordering. " +
           "Use .select() to specify which fields to project.",
@@ -729,7 +861,7 @@ function appendOrderByLimitOffset(
         const availableFields = projection.fields
           .map((f) => f.outputName)
           .join(", ");
-        throw new Error(
+        throw new UnsupportedPredicateError(
           `Set operation ORDER BY field "${fieldDesc}" is not in the projection. ` +
             `ORDER BY for UNION/INTERSECT/EXCEPT must reference projected columns. ` +
             `Available columns: ${availableFields}`,
@@ -752,16 +884,18 @@ function appendOrderByLimitOffset(
       );
     }
 
-    parts.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
+    clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
   }
 
   // Handle LIMIT
   if (op.limit !== undefined) {
-    parts.push(sql`LIMIT ${op.limit}`);
+    clauses.push(sql`LIMIT ${op.limit}`);
   }
 
   // Handle OFFSET
   if (op.offset !== undefined) {
-    parts.push(sql`OFFSET ${op.offset}`);
+    clauses.push(sql`OFFSET ${op.offset}`);
   }
+
+  return clauses;
 }

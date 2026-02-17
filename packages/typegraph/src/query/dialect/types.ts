@@ -16,6 +16,68 @@ import { type JsonPointer } from "../json-pointer";
 export type SqlDialect = "sqlite" | "postgres";
 
 /**
+ * Strategy for compiling set operations.
+ */
+export type DialectSetOperationStrategy =
+  | "standard_parenthesized"
+  | "sqlite_compound";
+
+/**
+ * Strategy for compiling standard (non-recursive, non-set-op) queries.
+ */
+export type DialectStandardQueryStrategy = "cte_project";
+
+/**
+ * Strategy for compiling recursive queries.
+ */
+export type DialectRecursiveQueryStrategy = "recursive_cte";
+
+/**
+ * Strategy for handling vector predicates.
+ */
+export type DialectVectorPredicateStrategy = "native" | "unsupported";
+
+/**
+ * Capability and strategy profile for a SQL dialect.
+ */
+export type DialectCapabilities = Readonly<{
+  /**
+   * Standard query compilation strategy.
+   */
+  standardQueryStrategy: DialectStandardQueryStrategy;
+
+  /**
+   * Recursive query compilation strategy.
+   */
+  recursiveQueryStrategy: DialectRecursiveQueryStrategy;
+
+  /**
+   * Set operation compilation strategy.
+   */
+  setOperationStrategy: DialectSetOperationStrategy;
+
+  /**
+   * Whether intermediate traversal CTEs should be materialized.
+   */
+  materializeIntermediateTraversalCtes: boolean;
+
+  /**
+   * Whether recursive CTEs should enforce worktable-first join ordering.
+   */
+  forceRecursiveWorktableOuterJoinOrder: boolean;
+
+  /**
+   * Strategy for vector predicate support.
+   */
+  vectorPredicateStrategy: DialectVectorPredicateStrategy;
+
+  /**
+   * Metrics supported by vector predicates for this dialect.
+   */
+  vectorMetrics: readonly VectorMetric[];
+}>;
+
+/**
  * Adapter interface for SQL dialect differences.
  *
  * Each method generates dialect-specific SQL for a common operation.
@@ -26,6 +88,11 @@ export interface DialectAdapter {
    * The dialect name this adapter handles.
    */
   readonly name: SqlDialect;
+
+  /**
+   * Dialect capabilities and strategy selection used by query compilers.
+   */
+  readonly capabilities: DialectCapabilities;
 
   // ============================================================
   // JSON Path Operations
@@ -163,7 +230,7 @@ export interface DialectAdapter {
    * SQLite: LOWER(column) LIKE LOWER(pattern)
    * PostgreSQL: column ILIKE pattern
    */
-  ilike(column: SQL, pattern: string): SQL;
+  ilike(column: SQL, pattern: SQL | string): SQL;
 
   // ============================================================
   // Recursive CTE Path Operations

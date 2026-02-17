@@ -216,8 +216,8 @@ const uniqueNodeTypesArb = fc
     // Deduplicate by name
     const seen = new Set<string>();
     return nodes.filter((n) => {
-      if (seen.has(n.name)) return false;
-      seen.add(n.name);
+      if (seen.has(n.kind)) return false;
+      seen.add(n.kind);
       return true;
     });
   })
@@ -232,8 +232,8 @@ const uniqueEdgeTypesArb = fc
     // Deduplicate by name
     const seen = new Set<string>();
     return edges.filter((edge) => {
-      if (seen.has(edge.name)) return false;
-      seen.add(edge.name);
+      if (seen.has(edge.kind)) return false;
+      seen.add(edge.kind);
       return true;
     });
   });
@@ -257,7 +257,7 @@ const graphDefArb = fc
           onDelete: fc.option(deleteBehaviorArb, { nil: undefined }),
         })
         .map(({ onDelete }) => ({
-          key: node.name,
+          key: node.kind,
           value: { type: node, onDelete },
         })),
     );
@@ -276,7 +276,7 @@ const graphDefArb = fc
               }),
             })
             .map(({ fromIndex, toIndex, cardinality, endpointExistence }) => ({
-              key: edge.name,
+              key: edge.kind,
               value: {
                 type: edge,
                 from: [nodeTypes[fromIndex]!],
@@ -338,11 +338,11 @@ const graphDefArb = fc
               const fromName =
                 typeof relation.from === "string" ?
                   relation.from
-                : relation.from.name;
+                : relation.from.kind;
               const toName =
                 typeof relation.to === "string" ?
                   relation.to
-                : relation.to.name;
+                : relation.to.kind;
               const key = `${relation.metaEdge.name}:${fromName}:${toName}`;
               if (seen.has(key)) return false;
               seen.add(key);
@@ -412,7 +412,7 @@ describe("Schema Serialization Properties", () => {
           for (const name of expectedNodeNames) {
             const node = deserialized.getNode(name);
             expect(node).toBeDefined();
-            expect(node!.name).toBe(name);
+            expect(node!.kind).toBe(name);
           }
 
           // Check edge names
@@ -424,7 +424,7 @@ describe("Schema Serialization Properties", () => {
           for (const name of expectedEdgeNames) {
             const edge = deserialized.getEdge(name);
             expect(edge).toBeDefined();
-            expect(edge!.name).toBe(name);
+            expect(edge!.kind).toBe(name);
           }
 
           // Check defaults

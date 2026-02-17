@@ -86,6 +86,18 @@ export function registerPredicateIntegrationTests(
       expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
     });
 
+    it("executes IN predicate with empty array (returns no results)", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.in([]))
+        .select((ctx) => ctx.p.name)
+        .execute();
+
+      expect(results).toHaveLength(0);
+    });
+
     it("executes BETWEEN predicate", async () => {
       const store = context.getStore();
       const results = await store

@@ -7,7 +7,18 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
+import {
+  count,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  exists,
+  fieldRef,
+  inSubquery,
+  inverseOf,
+  param as parameter,
+  subClassOf,
+} from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import { createQueryBuilder } from "../src/query/builder";
@@ -23,6 +34,7 @@ const Person = defineNode("Person", {
     name: z.string(),
     email: z.email().optional(),
     age: z.number().int().positive().optional(),
+    active: z.boolean().optional(),
   }),
 });
 
@@ -75,7 +87,7 @@ const testGraph = defineGraph({
       cardinality: "many",
     },
   },
-  ontology: [subClassOf(Company, Organization)],
+  ontology: [subClassOf(Company, Organization), inverseOf(knows, knows)],
 });
 
 // ============================================================
@@ -314,7 +326,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
         .traverse("worksAt", "e2")
         .to("Company", "c")
@@ -346,6 +358,134 @@ describe("Query Execution (SQLite)", () => {
       expect(employeeNames).toEqual(["Alice", "Bob"]);
     });
 
+    it("supports symmetric traversal with expand: inverse", async () => {
+      const withoutInverseExpansion = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e", { expand: "none" })
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      expect(withoutInverseExpansion).toHaveLength(1);
+      expect(withoutInverseExpansion[0]!.peerName).toBe("Charlie");
+
+      const withInverseExpansion = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e", { expand: "inverse" })
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      const peerNames = withInverseExpansion
+        .map((result) => result.peerName)
+        .toSorted();
+
+      expect(peerNames).toEqual(["Alice", "Charlie"]);
+    });
+
+    it("uses inverse expansion as the default expand behavior", async () => {
+      // Default expand (no option) should behave identically to expand: "inverse"
+      const defaultExpandResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e")
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      const explicitInverseResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .traverse("knows", "e", { expand: "inverse" })
+        .to("Person", "peer")
+        .select((context) => ({ peerName: context.peer.name }))
+        .execute();
+
+      const defaultNames = defaultExpandResults
+        .map((result) => result.peerName)
+        .toSorted();
+      const explicitNames = explicitInverseResults
+        .map((result) => result.peerName)
+        .toSorted();
+
+      expect(defaultNames).toEqual(explicitNames);
+    });
+
+    it("does not over-match traversal targets when ids overlap across kinds", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "collision-person",
+        props: { name: "Collision Person" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Company",
+        id: "shared-org-id",
+        props: { name: "Company Winner" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Organization",
+        id: "shared-org-id",
+        props: { name: "Organization Shadow" },
+      });
+
+      await backend.insertEdge({
+        graphId: "test_graph",
+        id: "collision-edge",
+        kind: "worksAt",
+        fromKind: "Person",
+        fromId: "collision-person",
+        toKind: "Company",
+        toId: "shared-org-id",
+        props: { role: "Engineer" },
+      });
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("collision-person"))
+        .traverse("worksAt", "e")
+        .to("Organization", "o", { includeSubClasses: true })
+        .select((context) => ({
+          id: context.o.id,
+          kind: context.o.kind,
+          name: context.o.name,
+        }))
+        .execute();
+
+      expect(results).toEqual([
+        {
+          id: "shared-org-id",
+          kind: "Company",
+          name: "Company Winner",
+        },
+      ]);
+
+      const aggregate = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("collision-person"))
+        .optionalTraverse("worksAt", "e")
+        .to("Organization", "o", { includeSubClasses: true })
+        .groupByNode("p")
+        .aggregate({
+          orgCount: count("o"),
+        })
+        .execute();
+
+      expect(aggregate).toEqual([{ orgCount: 1 }]);
+    });
+
     it("chains traversals through intermediate nodes (3-hop)", async () => {
       // Test data: Alice -> knows -> Bob -> knows -> Charlie -> worksAt -> TechCorp
       // This test verifies chaining works by checking we get Charlie's company (TechCorp),
@@ -355,9 +495,9 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
-        .traverse("knows", "e2")
+        .traverse("knows", "e2", { expand: "none" })
         .to("Person", "friendOfFriend")
         .traverse("worksAt", "e3")
         .to("Company", "c")
@@ -385,7 +525,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend")
         .traverse("worksAt", "e2", { from: "p" }) // Explicit: from "p" (Alice), not "friend"
         .to("Company", "c")
@@ -413,9 +553,9 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e1")
+        .traverse("knows", "e1", { expand: "none" })
         .to("Person", "friend") // Bob
-        .traverse("knows", "e2") // Chains from friend (Bob) by default
+        .traverse("knows", "e2", { expand: "none" }) // Chains from friend (Bob) by default
         .to("Person", "friendOfFriend") // Charlie
         .traverse("worksAt", "e3", { from: "p" }) // Fan-out: Alice's company
         .to("Company", "c")
@@ -508,6 +648,83 @@ describe("Query Execution (SQLite)", () => {
     });
   });
 
+  describe("toSQL()", () => {
+    it("returns SQL text and params from ExecutableQuery", () => {
+      const query = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .select((context) => context.p);
+
+      const result = query.toSQL();
+
+      expect(typeof result.sql).toBe("string");
+      expect(result.sql.length).toBeGreaterThan(0);
+      expect(Array.isArray(result.params)).toBe(true);
+      expect(result.params).toContain("Alice");
+    });
+
+    it("returns SQL text and params from ExecutableAggregateQuery", () => {
+      const query = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .aggregate({
+          total: count("p"),
+        });
+
+      const result = query.toSQL();
+
+      expect(typeof result.sql).toBe("string");
+      expect(result.sql.length).toBeGreaterThan(0);
+      expect(Array.isArray(result.params)).toBe(true);
+    });
+
+    it("returns SQL text and params from UnionableQuery", () => {
+      const q1 = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .select((context) => context.p);
+
+      const q2 = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Bob"))
+        .select((context) => context.p);
+
+      const result = q1.union(q2).toSQL();
+
+      expect(typeof result.sql).toBe("string");
+      expect(result.sql).toContain("UNION");
+      expect(Array.isArray(result.params)).toBe(true);
+    });
+
+    it("throws when no backend is configured", () => {
+      const builder = createQueryBuilder<typeof testGraph>(
+        "test_graph",
+        store.registry,
+      );
+
+      const query = builder.from("Person", "p").select((context) => context.p);
+
+      expect(() => query.toSQL()).toThrow("Cannot convert to SQL");
+    });
+
+    it("throws for aggregate query when no backend is configured", () => {
+      const builder = createQueryBuilder<typeof testGraph>(
+        "test_graph",
+        store.registry,
+      );
+
+      const query = builder
+        .from("Person", "p")
+        .aggregate({ total: count("p") });
+
+      expect(() => query.toSQL()).toThrow("Cannot convert to SQL");
+    });
+  });
+
   describe("Error Handling", () => {
     it("throws when executing without backend", async () => {
       const builder = createQueryBuilder<typeof testGraph>(
@@ -529,7 +746,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -551,9 +768,8 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .maxHops(1)
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ maxHops: 1 })
         .to("Person", "friend")
         .select((context) => ({
           person: context.p.name,
@@ -566,15 +782,70 @@ describe("Query Execution (SQLite)", () => {
       expect(friends).not.toContain("Charlie"); // Charlie is 2 hops away
     });
 
+    it("does not over-match recursive traversal targets when ids overlap across kinds", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "recursive-collision-person",
+        props: { name: "Recursive Collision Person" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Company",
+        id: "recursive-shared-org-id",
+        props: { name: "Recursive Company Winner" },
+      });
+
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Organization",
+        id: "recursive-shared-org-id",
+        props: { name: "Recursive Organization Shadow" },
+      });
+
+      await backend.insertEdge({
+        graphId: "test_graph",
+        id: "recursive-collision-edge",
+        kind: "worksAt",
+        fromKind: "Person",
+        fromId: "recursive-collision-person",
+        toKind: "Company",
+        toId: "recursive-shared-org-id",
+        props: { role: "Lead" },
+      });
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("recursive-collision-person"))
+        .traverse("worksAt", "e")
+        .recursive({ maxHops: 1 })
+        .to("Organization", "o", { includeSubClasses: true })
+        .select((context) => ({
+          id: context.o.id,
+          kind: context.o.kind,
+          name: context.o.name,
+        }))
+        .execute();
+
+      expect(results).toEqual([
+        {
+          id: "recursive-shared-org-id",
+          kind: "Company",
+          name: "Recursive Company Winner",
+        },
+      ]);
+    });
+
     it("respects minHops to skip immediate connections", async () => {
       // With minHops(2), should only find Charlie (friend of friend)
       const results = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .minHops(2)
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ minHops: 2 })
         .to("Person", "friend")
         .select((context) => ({
           person: context.p.name,
@@ -593,7 +864,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Charlie"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -613,9 +884,8 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Charlie"))
-        .traverse("knows", "e")
-        .recursive()
-        .minHops(0)
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ minHops: 0 })
         .to("Person", "friend")
         .select((context) => ({
           person: context.p.name,
@@ -633,9 +903,8 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .withDepth("level")
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ depth: "level" })
         .to("Person", "friend")
         .select((context) => ({
           person: context.p.name,
@@ -665,7 +934,7 @@ describe("Query Execution (SQLite)", () => {
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
+        .traverse("knows", "e", { expand: "none" })
         .recursive()
         .to("Person", "friend")
         .select((context) => ({
@@ -685,7 +954,7 @@ describe("Query Execution (SQLite)", () => {
       expect(friends.filter((f) => f === "Alice")).toHaveLength(0);
     });
 
-    it("detects cycles with path collection", async () => {
+    it("detects cycles with recursive path projection", async () => {
       // Create a cycle: Alice -> Bob -> Charlie -> Alice
       await backend.insertEdge({
         graphId: "test_graph",
@@ -698,14 +967,13 @@ describe("Query Execution (SQLite)", () => {
         props: {},
       });
 
-      // Query with collectPath to verify path tracking works with cycles
+      // Query with recursive path projection to verify tracking works with cycles
       const results = await store
         .query()
         .from("Person", "p")
         .whereNode("p", (p) => p.name.eq("Alice"))
-        .traverse("knows", "e")
-        .recursive()
-        .collectPath("friendship_path")
+        .traverse("knows", "e", { expand: "none" })
+        .recursive({ path: "friendship_path" })
         .to("Person", "friend")
         .select((context) => ({
           friend: context.friend.name,
@@ -717,6 +985,407 @@ describe("Query Execution (SQLite)", () => {
       const friends = results.map((r) => r.friend);
       expect(friends).toContain("Bob");
       expect(friends).toContain("Charlie");
+    });
+
+    it("preserves multi-hop limit semantics with downstream filters", async () => {
+      await backend.insertNode({
+        graphId: "test_graph",
+        kind: "Person",
+        id: "limit-anchor",
+        props: { name: "Limit Anchor" },
+      });
+
+      for (let index = 1; index <= 200; index++) {
+        const intermediateId = `limit-mid-${index}`;
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: intermediateId,
+          props: { name: `Intermediate ${index}` },
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: `limit-anchor-edge-${index}`,
+          kind: "knows",
+          fromKind: "Person",
+          fromId: "limit-anchor",
+          toKind: "Person",
+          toId: intermediateId,
+          props: {},
+        });
+
+        if (index <= 120) {
+          continue;
+        }
+
+        const targetId = `limit-target-${index}`;
+        await backend.insertNode({
+          graphId: "test_graph",
+          kind: "Person",
+          id: targetId,
+          props: { name: "Limit Match" },
+        });
+        await backend.insertEdge({
+          graphId: "test_graph",
+          id: `limit-mid-target-edge-${index}`,
+          kind: "knows",
+          fromKind: "Person",
+          fromId: intermediateId,
+          toKind: "Person",
+          toId: targetId,
+          props: {},
+        });
+      }
+
+      const baseQuery = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq("limit-anchor"))
+        .traverse("knows", "e1", { expand: "none" })
+        .to("Person", "mid")
+        .traverse("knows", "e2", { expand: "none" })
+        .to("Person", "target")
+        .whereNode("target", (target) => target.name.eq("Limit Match"))
+        .select((context) => ({
+          midId: context.mid.id,
+          targetId: context.target.id,
+        }));
+
+      const allRows = await baseQuery.execute();
+      const limitedRows = await baseQuery.limit(10).execute();
+
+      expect(allRows).toHaveLength(80);
+      expect(limitedRows).toHaveLength(10);
+    });
+  });
+
+  describe("Prepared Queries", () => {
+    it("keeps parameterized string-operator semantics aligned with direct execute", async () => {
+      await store.nodes.Person.create({ name: "ALICIA" });
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains(parameter("needle")))
+        .select((context) => context.p.name)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "ali" });
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains("ali"))
+        .select((context) => context.p.name)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("falls back to full fetch when selective prepared mapping is insufficient", async () => {
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq(parameter("id")))
+        .select((context) => ({
+          id: context.p.id,
+          whole: context.p,
+        }))
+        .prepare();
+
+      const results = await prepared.execute({ id: "alice" });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]!.id).toBe("alice");
+      expect(results[0]!.whole.name).toBe("Alice");
+    });
+
+    it("supports prepared fallback when executeRaw is unavailable", async () => {
+      const {
+        compileSql: ignoredCompileSql,
+        executeRaw: ignoredExecuteRaw,
+        ...restBackend
+      } = backend;
+      void ignoredCompileSql;
+      void ignoredExecuteRaw;
+      const backendWithoutRaw: GraphBackend = { ...restBackend };
+      const storeWithoutRaw = createStore(testGraph, backendWithoutRaw);
+
+      const prepared = storeWithoutRaw
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.startsWith(parameter("prefix")))
+        .select((context) => context.p.name)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ prefix: "Al" });
+      const directResults = await storeWithoutRaw
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.startsWith("Al"))
+        .select((context) => context.p.name)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("validates missing and unknown prepared bindings", async () => {
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.id.eq(parameter("id")))
+        .select((context) => context.p.id)
+        .prepare();
+
+      await expect(prepared.execute()).rejects.toThrow(
+        'Missing bindings for parameter: "id"',
+      );
+      await expect(
+        prepared.execute({ id: "alice", extra: "unused" }),
+      ).rejects.toThrow('Unexpected bindings provided: "extra"');
+    });
+
+    it("rejects null binding values on both execution paths", async () => {
+      const makePrepared = (
+        target: ReturnType<typeof createStore<typeof testGraph>>,
+      ) =>
+        target
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.id.eq(parameter("id")))
+          .select((context) => context.p.id)
+          .prepare();
+
+      // eslint-disable-next-line unicorn/no-null -- intentionally testing null rejection
+      const nullValue = null as unknown as string;
+
+      // Fast path (executeRaw available)
+      const fastPrepared = makePrepared(store);
+      await expect(fastPrepared.execute({ id: nullValue })).rejects.toThrow(
+        "must not be null",
+      );
+
+      // Fallback path (executeRaw stripped)
+      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackPrepared = makePrepared(fallbackStore);
+      await expect(fallbackPrepared.execute({ id: nullValue })).rejects.toThrow(
+        "must not be null",
+      );
+    });
+
+    it("rejects non-string binding for string operations on both paths", async () => {
+      const makePrepared = (
+        target: ReturnType<typeof createStore<typeof testGraph>>,
+      ) =>
+        target
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.name.contains(parameter("needle")))
+          .select((context) => context.p.name)
+          .prepare();
+
+      // Fast path
+      const fastPrepared = makePrepared(store);
+      await expect(
+        fastPrepared.execute({ needle: 42 as unknown as string }),
+      ).rejects.toThrow("must be a string for string operations");
+
+      // Fallback path
+      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackPrepared = makePrepared(fallbackStore);
+      await expect(
+        fallbackPrepared.execute({ needle: 42 as unknown as string }),
+      ).rejects.toThrow("must be a string for string operations");
+    });
+
+    it("rejects object/array binding values on both execution paths", async () => {
+      const makePrepared = (
+        target: ReturnType<typeof createStore<typeof testGraph>>,
+      ) =>
+        target
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.id.eq(parameter("id")))
+          .select((context) => context.p.id)
+          .prepare();
+
+      // Fast path
+      const fastPrepared = makePrepared(store);
+      await expect(
+        fastPrepared.execute({ id: { nested: true } as unknown as string }),
+      ).rejects.toThrow("Unsupported parameter value type");
+
+      // Fallback path
+      const { compileSql: _cs, executeRaw: _er, ...restBackend } = backend;
+      const fallbackStore = createStore(testGraph, { ...restBackend });
+      const fallbackPrepared = makePrepared(fallbackStore);
+      await expect(
+        fallbackPrepared.execute({ id: [1, 2, 3] as unknown as string }),
+      ).rejects.toThrow("Unsupported parameter value type");
+    });
+
+    it("supports parameters inside EXISTS subqueries", async () => {
+      const preparedSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq(parameter("needle")))
+        .select((context) => context.q.id)
+        .toAst();
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () => exists(preparedSubquery))
+        .select((context) => context.p.id)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "Alice" });
+
+      const directSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq("Alice"))
+        .select((context) => context.q.id)
+        .toAst();
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () => exists(directSubquery))
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+    });
+
+    it("supports parameters inside IN subqueries", async () => {
+      const preparedSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq(parameter("needle")))
+        .aggregate({
+          id: fieldRef("q", ["id"], { valueType: "string" }),
+        })
+        .toAst();
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["id"], { valueType: "string" }),
+            preparedSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .prepare();
+
+      const preparedResults = await prepared.execute({ needle: "Alice" });
+
+      const directSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.name.eq("Alice"))
+        .aggregate({
+          id: fieldRef("q", ["id"], { valueType: "string" }),
+        })
+        .toAst();
+      const directResults = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["id"], { valueType: "string" }),
+            directSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(preparedResults.toSorted()).toEqual(directResults.toSorted());
+      expect(preparedResults).toEqual(["alice"]);
+    });
+
+    it("rejects IN subqueries that project multiple columns", () => {
+      const invalidSubquery = store
+        .query()
+        .from("Person", "q")
+        .select((context) => ({
+          id: context.q.id,
+          name: context.q.name,
+        }))
+        .toAst();
+
+      expect(() =>
+        store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", () =>
+            inSubquery(
+              fieldRef("p", ["id"], { valueType: "string" }),
+              invalidSubquery,
+            ),
+          ),
+      ).toThrow("must project exactly 1 column");
+    });
+
+    it("supports numeric IN subqueries with typed field refs", async () => {
+      const ageSubquery = store
+        .query()
+        .from("Person", "q")
+        .whereNode("q", (q) => q.age.gte(30))
+        .aggregate({
+          age: fieldRef("q", ["props", "age"], { valueType: "number" }),
+        })
+        .toAst();
+
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", () =>
+          inSubquery(
+            fieldRef("p", ["props", "age"], { valueType: "number" }),
+            ageSubquery,
+          ),
+        )
+        .select((context) => context.p.id)
+        .execute();
+
+      expect(results.toSorted()).toEqual(["alice", "charlie"]);
+    });
+
+    it("handles boolean parameter bindings on SQLite (fast path)", async () => {
+      await store.nodes.Person.create(
+        { name: "Active User", active: true },
+        { id: "active-user" },
+      );
+      await store.nodes.Person.create(
+        { name: "Inactive User", active: false },
+        { id: "inactive-user" },
+      );
+
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.active.eq(parameter("isActive")))
+        .select((context) => context.p.name)
+        .prepare();
+
+      const activeResults = await prepared.execute({ isActive: true });
+      const inactiveResults = await prepared.execute({ isActive: false });
+
+      const directActive = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.active.eq(true))
+        .select((context) => context.p.name)
+        .execute();
+
+      expect(activeResults.toSorted()).toEqual(directActive.toSorted());
+      expect(activeResults).toHaveLength(1);
+      expect(activeResults[0]).toBe("Active User");
+      expect(inactiveResults).toHaveLength(1);
+      expect(inactiveResults[0]).toBe("Inactive User");
     });
   });
 });

@@ -101,8 +101,9 @@ Note: TypeGraph **does support** semantic search via database vector extensions
 (pgvector for PostgreSQL, sqlite-vec for SQLite). See [Semantic Search](/semantic-search) for details.
 
 Note: TypeGraph does support **variable-length paths** via `.recursive()` with
-configurable depth limits (`.minHops()`, `.maxHops()`), path collection, and
-cycle detection. See [Recursive Traversals](/queries/recursive) for details.
+configurable depth limits, optional path/depth projection, and explicit cycle
+policy. Cycle prevention is the default.
+See [Recursive Traversals](/queries/recursive) for details.
 
 ## Why TypeGraph?
 

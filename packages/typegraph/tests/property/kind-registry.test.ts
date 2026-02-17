@@ -668,7 +668,7 @@ describe("KindRegistry Type Existence", () => {
       createEmptyClosures(),
     );
 
-    expect(registry.getNodeType("Person")?.name).toBe("Person");
+    expect(registry.getNodeType("Person")?.kind).toBe("Person");
     expect(registry.getNodeType("Unknown")).toBeUndefined();
   });
 });

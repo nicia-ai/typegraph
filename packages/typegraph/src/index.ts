@@ -59,7 +59,7 @@ export {
   defineEdge,
   defineGraph,
   defineNode,
-  type EdgeTypeNames,
+  type EdgeKinds,
   // Embedding type for vector search
   embedding,
   type EmbeddingSchema,
@@ -67,12 +67,12 @@ export {
   externalRef,
   type ExternalRefSchema,
   type ExternalRefValue,
+  getEdgeKinds,
   type GetEdgeType,
-  getEdgeTypeNames,
   getEmbeddingDimensions,
   getExternalRefTable,
+  getNodeKinds,
   type GetNodeType,
-  getNodeTypeNames,
   type GraphDef,
   // Type guards
   isEdgeType,
@@ -82,7 +82,7 @@ export {
   isGraphDef,
   isNodeType,
   metaEdge,
-  type NodeTypeNames,
+  type NodeKinds,
 } from "./core";
 
 // ============================================================
@@ -161,7 +161,9 @@ export type {
 export {
   // Error classes
   CardinalityError,
+  CompilerInvariantError,
   ConfigurationError,
+  DatabaseOperationError,
   DisjointError,
   EdgeNotFoundError,
   EndpointError,
@@ -184,27 +186,12 @@ export {
   VersionConflictError,
 } from "./errors";
 
-// Contextual validation utilities
-export type { ValidationContext } from "./errors/validation";
-export {
-  createValidationError,
-  validateEdgeProps,
-  validateNodeProps,
-  validateProps,
-  wrapZodError,
-} from "./errors/validation";
-
-// ============================================================
-// Registry
-// ============================================================
-
-export { buildKindRegistry, KindRegistry } from "./registry";
-
 // ============================================================
 // Store
 // ============================================================
 
-export { createStore, createStoreWithSchema, Store } from "./store";
+export type { Store } from "./store";
+export { createStore, createStoreWithSchema } from "./store";
 export type {
   CreateEdgeInput,
   CreateNodeInput,
@@ -217,7 +204,6 @@ export type {
   OperationHookContext,
   QueryHookContext,
   QueryOptions,
-  StoreConfig,
   StoreHooks,
   StoreOptions,
   TransactionContext,
@@ -233,6 +219,7 @@ export type {
 
 // Types
 export type {
+  AggregateResult,
   AliasMap,
   EdgeAccessor,
   FieldAccessor,
@@ -250,6 +237,7 @@ export type {
   PaginateOptions,
   Predicate,
   PropsAccessor,
+  RecursiveTraversalOptions,
   ResolveJsonPointer,
   ResolveJsonPointerSegments,
   SelectableEdge,
@@ -260,7 +248,9 @@ export type {
   SqlSchema,
   SqlTableNames,
   StreamOptions,
+  TraversalExpansion,
 } from "./query";
+export type { ParameterRef } from "./query/ast";
 
 // Functions and classes
 export {
@@ -289,10 +279,12 @@ export {
   havingLt,
   havingLte,
   inSubquery,
+  isParameterRef,
   joinJsonPointers,
   jsonPointer,
   limitFragment,
   max,
+  MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_JSON_POINTER_DEPTH,
   MAX_RECURSIVE_DEPTH,
   min,
@@ -301,9 +293,13 @@ export {
   notInSubquery,
   offsetFragment,
   orderByFragment,
+  // Parameterized queries
+  param,
   parseJsonPointer,
+  PreparedQuery,
   QueryBuilder,
   sum,
+  UnionableQuery,
 } from "./query";
 
 // Fragment composition types
@@ -314,70 +310,12 @@ export type {
 } from "./query";
 
 // ============================================================
-// Schema Serialization
-// ============================================================
-
-export {
-  type DeserializedSchema,
-  deserializeSchema,
-} from "./schema/deserializer";
-export {
-  ensureSchema,
-  getActiveSchema,
-  getSchemaChanges,
-  initializeSchema,
-  isSchemaInitialized,
-  migrateSchema,
-  type SchemaManagerOptions,
-  type SchemaValidationResult,
-} from "./schema/manager";
-export {
-  type ChangeSeverity,
-  type ChangeType,
-  computeSchemaDiff,
-  type EdgeChange,
-  getMigrationActions,
-  isBackwardsCompatible,
-  type NodeChange,
-  type OntologyChange,
-  type SchemaDiff,
-} from "./schema/migration";
-export {
-  computeSchemaHash,
-  deserializeWherePredicate,
-  serializeSchema,
-} from "./schema/serializer";
-export type {
-  JsonSchema,
-  SchemaHash,
-  SerializedClosures,
-  SerializedEdgeDef,
-  SerializedMetaEdge,
-  SerializedNodeDef,
-  SerializedOntology,
-  SerializedOntologyRelation,
-  SerializedSchema,
-  SerializedUniqueConstraint,
-} from "./schema/types";
-
-// ============================================================
 // Utilities
 // ============================================================
 
 export {
-  // Date utilities
-  decodeDate,
-  encodeDate,
-  // Result type
-  err,
   // ID utilities
   generateId,
   type IdConfig,
   type IdGenerator,
-  isErr,
-  isOk,
-  ok,
-  type Result,
-  unwrap,
-  unwrapOr,
 } from "./utils";

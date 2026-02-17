@@ -156,7 +156,7 @@ const activeEmail = defineNodeIndex(Person, {
 
 ## Covering Indexes
 
-To maximize the benefit of [smart select optimization](/performance/overview#3-smart-select-optimization),
+To maximize the benefit of [smart select optimization](/performance/overview#smart-select),
 create indexes that include both the filter columns and selected columns. This enables index-only
 scans where the database satisfies the entire query from the index.
 
@@ -184,6 +184,85 @@ CREATE INDEX idx_person_email_name ON typegraph_nodes
   (graph_id, kind, json_extract(props, '$.email'), json_extract(props, '$.name'))
   WHERE deleted_at IS NULL;
 ```
+
+## Choosing the Right Index Type
+
+TypeGraph's `defineNodeIndex` / `defineEdgeIndex` generate **B-tree expression indexes** — the right
+choice for scalar equality, range, and ordering queries. But JSON properties can also hold arrays
+and objects, which need different index strategies.
+
+| Data shape | Query pattern | Index type | TypeGraph utility? |
+|------------|--------------|------------|-------------------|
+| Scalar (`string`, `number`, `boolean`) | `eq()`, `gt()`, `in()`, `orderBy()` | B-tree expression | Yes — `defineNodeIndex` |
+| Array of scalars | `contains()`, `containsAll()`, `containsAny()` | GIN (PostgreSQL) | No — use raw SQL |
+| Nested object | `hasKey()`, `pathEquals()`, `pathContains()` | GIN or B-tree expression | Partially — B-tree on specific paths |
+
+### B-tree expression indexes (scalar properties)
+
+Best for equality, range, sorting, and prefix matching on individual JSON fields. This is what
+`defineNodeIndex` and `defineEdgeIndex` generate.
+
+```ts
+// Good for: .whereNode("p", (p) => p.email.eq("..."))
+defineNodeIndex(Person, { fields: ["email"] });
+
+// Good for: .orderBy("p", "createdScore", "desc")
+defineNodeIndex(Person, { fields: ["createdScore"] });
+```
+
+### GIN indexes (array and object containment — PostgreSQL only)
+
+TypeGraph compiles array predicates to PostgreSQL's JSONB containment operator (`@>`), which is
+optimized by GIN indexes. If you filter on array properties, create a GIN index on the `props`
+column:
+
+```sql
+-- Covers ALL array containment queries on Person nodes
+CREATE INDEX idx_person_props_gin ON typegraph_nodes
+  USING GIN (props)
+  WHERE graph_id = 'my_graph' AND kind = 'Person' AND deleted_at IS NULL;
+```
+
+This single GIN index accelerates all of the following predicates:
+
+```typescript
+// contains: does the tags array include "typescript"?
+.whereNode("p", (p) => p.tags.contains("typescript"))
+
+// containsAll: does it include BOTH "typescript" AND "graphql"?
+.whereNode("p", (p) => p.tags.containsAll(["typescript", "graphql"]))
+
+// containsAny: does it include "typescript" OR "graphql"?
+.whereNode("p", (p) => p.tags.containsAny(["typescript", "graphql"]))
+```
+
+Unlike B-tree expression indexes, a single GIN index covers queries on **any** JSON path within
+`props` — you don't need a separate index per field.
+
+:::note[SQLite]
+SQLite has no GIN equivalent. Array containment queries on SQLite use `json_each()` scans,
+which can't be indexed. If array filtering is performance-critical, consider PostgreSQL.
+:::
+
+### Combining B-tree and GIN
+
+For tables where you filter on both scalar fields (equality, range) and array fields (containment),
+use both index types:
+
+```sql
+-- B-tree for scalar equality + ordering
+CREATE INDEX idx_person_email ON typegraph_nodes
+  (graph_id, kind, ((props #>> ARRAY['email'])))
+  WHERE deleted_at IS NULL;
+
+-- GIN for array containment
+CREATE INDEX idx_person_props_gin ON typegraph_nodes
+  USING GIN (props)
+  WHERE graph_id = 'my_graph' AND kind = 'Person' AND deleted_at IS NULL;
+```
+
+PostgreSQL's query planner can use both indexes together via a BitmapAnd scan when a query filters
+on both a scalar field and an array field.
 
 ## Generating SQL (No drizzle-kit)
 
@@ -236,11 +315,13 @@ const profiler = new QueryProfiler({
 
 ## Limitations
 
-- Index utilities generate B-tree expression indexes for **scalar** properties (`string`, `number`,
-  `boolean`, `Date`). Array/object properties require a JSON/GIN strategy (use raw SQL).
+- `defineNodeIndex` / `defineEdgeIndex` generate B-tree expression indexes for **scalar** properties
+  (`string`, `number`, `boolean`, `Date`). For array containment queries, create
+  [GIN indexes](#gin-indexes-array-and-object-containment--postgresql-only) manually.
+- GIN indexes are PostgreSQL-only. SQLite has no equivalent for JSON containment acceleration.
 - Embedding fields are indexed via the embeddings table; see [Semantic Search](/semantic-search).
 
 ## Next Steps
 
-- [Performance Overview](/performance/overview) - Best practices and smart select
-- [Query Profiler](/performance/profiler) - Automatic index recommendations
+- [Performance Overview](/performance/overview) — Best practices, N+1 prevention, batch patterns
+- [Query Profiler](/performance/profiler) — Automatic index recommendations

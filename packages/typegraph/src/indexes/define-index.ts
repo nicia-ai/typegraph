@@ -46,7 +46,7 @@ export function defineNodeIndex<N extends NodeType>(
   const unique = config.unique ?? false;
 
   const schemaIntrospector = createSchemaIntrospector(
-    new Map([[node.name, { schema: node.schema }]]),
+    new Map([[node.kind, { schema: node.schema }]]),
   );
 
   const { pointers: fields, valueTypes: fieldValueTypes } =
@@ -76,7 +76,7 @@ export function defineNodeIndex<N extends NodeType>(
     config.name ??
     generateDefaultIndexName({
       kind: "node",
-      kindName: node.name,
+      kindName: node.kind,
       unique,
       scope,
       direction: "none",
@@ -87,7 +87,7 @@ export function defineNodeIndex<N extends NodeType>(
   return {
     __type: "typegraph_node_index",
     node,
-    nodeKind: node.name,
+    nodeKind: node.kind,
     fields,
     fieldValueTypes,
     coveringFields,
@@ -109,7 +109,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
 
   const schemaIntrospector = createSchemaIntrospector(
     new Map(),
-    new Map([[edge.name, { schema: edge.schema }]]),
+    new Map([[edge.kind, { schema: edge.schema }]]),
   );
 
   const { pointers: fields, valueTypes: fieldValueTypes } =
@@ -139,7 +139,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     config.name ??
     generateDefaultIndexName({
       kind: "edge",
-      kindName: edge.name,
+      kindName: edge.kind,
       unique,
       scope,
       direction,
@@ -150,7 +150,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
   return {
     __type: "typegraph_edge_index",
     edge,
-    edgeKind: edge.name,
+    edgeKind: edge.kind,
     fields,
     fieldValueTypes,
     coveringFields,
@@ -216,11 +216,11 @@ function createNodeWhereBuilder<N extends NodeType>(
 
     if (!(key in shape)) {
       throw new Error(
-        `Unknown field "${key}" in node index WHERE clause for "${node.name}"`,
+        `Unknown field "${key}" in node index WHERE clause for "${node.kind}"`,
       );
     }
 
-    const info = schemaIntrospector.getFieldTypeInfo(node.name, key);
+    const info = schemaIntrospector.getFieldTypeInfo(node.kind, key);
     const valueType = info?.valueType;
 
     return {
@@ -252,11 +252,11 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
 
     if (!(key in shape)) {
       throw new Error(
-        `Unknown field "${key}" in edge index WHERE clause for "${edge.name}"`,
+        `Unknown field "${key}" in edge index WHERE clause for "${edge.kind}"`,
       );
     }
 
-    const info = schemaIntrospector.getEdgeFieldTypeInfo(edge.name, key);
+    const info = schemaIntrospector.getEdgeFieldTypeInfo(edge.kind, key);
     const valueType = info?.valueType;
 
     return {
@@ -528,11 +528,11 @@ function normalizeNodeIndexFieldsOrThrow<N extends NodeType>(
   for (const input of inputs) {
     const pointer = normalizeIndexFieldPointer(input);
     const info = resolveNodeFieldTypeInfoOrThrow(
-      node.name,
+      node.kind,
       pointer,
       schemaIntrospector,
     );
-    assertIndexableValueType(info.valueType, `node "${node.name}" ${pointer}`);
+    assertIndexableValueType(info.valueType, `node "${node.kind}" ${pointer}`);
     pointers.push(pointer);
     valueTypes.push(info.valueType);
   }
@@ -560,11 +560,11 @@ function normalizeEdgeIndexFieldsOrThrow<E extends AnyEdgeType>(
   for (const input of inputs) {
     const pointer = normalizeIndexFieldPointer(input);
     const info = resolveEdgeFieldTypeInfoOrThrow(
-      edge.name,
+      edge.kind,
       pointer,
       schemaIntrospector,
     );
-    assertIndexableValueType(info.valueType, `edge "${edge.name}" ${pointer}`);
+    assertIndexableValueType(info.valueType, `edge "${edge.kind}" ${pointer}`);
     pointers.push(pointer);
     valueTypes.push(info.valueType);
   }

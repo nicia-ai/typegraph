@@ -11,6 +11,7 @@ const LLMS_SMALL_PAGES = new Set([
   "core-concepts",
   "backend-setup",
   "schema-management",
+  "schema-evolution",
   "integration",
   "multiple-graphs",
   "queries/overview",
@@ -40,8 +41,10 @@ const sidebar = [
       { label: "Semantic Search", slug: "semantic-search" },
       { label: "Backend Setup", slug: "backend-setup" },
       { label: "Schema Migrations", slug: "schema-management" },
+      { label: "Evolving Schemas", slug: "schema-evolution" },
       { label: "Multiple Graphs", slug: "multiple-graphs" },
       { label: "Import/export", slug: "interchange" },
+      { label: "Testing", slug: "testing" },
     ],
   },
   {

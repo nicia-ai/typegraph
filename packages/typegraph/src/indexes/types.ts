@@ -196,7 +196,7 @@ export type EdgeIndexConfig<E extends AnyEdgeType> = Readonly<{
 export type NodeIndex<N extends NodeType = NodeType> = Readonly<{
   __type: "typegraph_node_index";
   node: N;
-  nodeKind: N["name"];
+  nodeKind: N["kind"];
   fields: readonly JsonPointer[];
   fieldValueTypes: readonly (ValueType | undefined)[];
   coveringFields: readonly JsonPointer[];
@@ -210,7 +210,7 @@ export type NodeIndex<N extends NodeType = NodeType> = Readonly<{
 export type EdgeIndex<E extends AnyEdgeType = EdgeType> = Readonly<{
   __type: "typegraph_edge_index";
   edge: E;
-  edgeKind: E["name"];
+  edgeKind: E["kind"];
   fields: readonly JsonPointer[];
   fieldValueTypes: readonly (ValueType | undefined)[];
   coveringFields: readonly JsonPointer[];

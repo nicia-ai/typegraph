@@ -18,6 +18,15 @@ import {
 import { type PostgresTables, tables as postgresTables } from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
 
+// Narrow interfaces for Drizzle column internals not exposed in public types.
+// These are accessed only in DDL generation for migration scripts.
+type TimestampColumnConfig = Readonly<{
+  config?: Readonly<{ withTimezone?: boolean }>;
+}>;
+type CustomColumnType = Readonly<{
+  getSQLType?: () => string;
+}>;
+
 // ============================================================
 // SQLite DDL Generation
 // ============================================================
@@ -247,9 +256,9 @@ function getPgColumnType(column: PgColumn): string {
       return "JSONB";
     }
     case "PgTimestamp": {
-      // Check if it has timezone
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-      return (column as any).config?.withTimezone ? "TIMESTAMPTZ" : "TIMESTAMP";
+      return (column as unknown as TimestampColumnConfig).config?.withTimezone ?
+        "TIMESTAMPTZ"
+      : "TIMESTAMP";
     }
     case "PgReal": {
       return "REAL";
@@ -258,10 +267,7 @@ function getPgColumnType(column: PgColumn): string {
       return "DOUBLE PRECISION";
     }
     case "PgCustomColumn": {
-      // Custom column type - get the SQL type from dataType()
-      // This handles our vector column type
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
-      const dataType = (column as any).getSQLType?.() as string | undefined;
+      const dataType = (column as unknown as CustomColumnType).getSQLType?.();
       return dataType ?? "TEXT";
     }
     default: {

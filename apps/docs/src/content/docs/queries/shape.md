@@ -1,10 +1,10 @@
 ---
 title: Shape
-description: Transform output structure with select() and selectAggregate()
+description: Transform output structure with select() and aggregate()
 ---
 
 Shape operations transform how results are returned. Use `select()` to define the output structure
-and `selectAggregate()` for grouped/aggregated results.
+and `aggregate()` for grouped/aggregated results.
 
 ## select()
 
@@ -167,9 +167,9 @@ const results = await store
   .execute();
 ```
 
-## selectAggregate()
+## aggregate()
 
-Use `selectAggregate()` with aggregate functions for grouped queries:
+Use `aggregate()` with aggregate functions for grouped queries:
 
 ```typescript
 import { count, sum, avg, field } from "@nicia-ai/typegraph";
@@ -180,7 +180,7 @@ const stats = await store
   .traverse("worksAt", "e")
   .to("Company", "c")
   .groupBy("c", "name")
-  .selectAggregate({
+  .aggregate({
     companyName: field("c", "name"),
     employeeCount: count("p"),
     totalSalary: sum("e", "salary"),
@@ -200,9 +200,7 @@ const results = await store
   .query()
   .from("Category", "cat")
   .traverse("parentCategory", "e")
-  .recursive()
-  .collectPath("pathIds")
-  .withDepth("depth")
+  .recursive({ path: "pathIds", depth: "depth" })
   .to("Category", "ancestor")
   .select((ctx) => ({
     category: ctx.cat.name,

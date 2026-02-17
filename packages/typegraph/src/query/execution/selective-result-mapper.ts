@@ -6,7 +6,8 @@
  * missing fields and unsupported "return whole node/edge" selections.
  */
 
-import { type SelectiveField } from "../ast";
+import { normalizePath } from "../../utils";
+import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
   EdgeAliasMap,
@@ -137,7 +138,11 @@ export function mapSelectiveResults<
   const plans = buildAliasPlans(state, selectiveFields, schemaIntrospector);
 
   return rows.map((row) => {
-    const context = buildSelectiveContext<Aliases, EdgeAliases>(row, plans);
+    const context = buildSelectiveContext<Aliases, EdgeAliases>(
+      row,
+      plans,
+      state.traversals,
+    );
     const result = selectFunction(context);
 
     // Returning whole alias objects is not supported by selective projection.
@@ -181,6 +186,8 @@ function buildAliasPlans(
   ]);
 
   for (const traversal of state.traversals) {
+    const edgeKindNames = mergeEdgeKinds(traversal);
+
     aliasInfo.set(traversal.nodeAlias, {
       kind: "node",
       optional: traversal.optional,
@@ -189,7 +196,7 @@ function buildAliasPlans(
     aliasInfo.set(traversal.edgeAlias, {
       kind: "edge",
       optional: traversal.optional,
-      kindNames: traversal.edgeKinds,
+      kindNames: edgeKindNames,
     });
   }
 
@@ -273,6 +280,7 @@ function buildSelectiveContext<
 >(
   row: Record<string, unknown>,
   plans: readonly AliasPlan[],
+  traversals: readonly Traversal[],
 ): SelectContext<Aliases, EdgeAliases> {
   const context: Record<string, unknown> = {};
 
@@ -282,6 +290,19 @@ function buildSelectiveContext<
         buildOptionalAliasValue(row, plan)
       : buildRequiredAliasValue(row, plan);
     context[plan.alias] = value;
+  }
+
+  // Extract recursive depth/path values from the row
+  for (const traversal of traversals) {
+    const vl = traversal.variableLength;
+    if (vl !== undefined) {
+      if (vl.depthAlias !== undefined) {
+        context[vl.depthAlias] = row[vl.depthAlias];
+      }
+      if (vl.pathAlias !== undefined) {
+        context[vl.pathAlias] = normalizePath(row[vl.pathAlias]);
+      }
+    }
   }
 
   return context as SelectContext<Aliases, EdgeAliases>;

@@ -4,13 +4,11 @@
  * Tests the aggregate query builder that supports aggregate functions like
  * count, sum, avg, min, max with groupBy and having clauses.
  */
-import { type SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   avg,
-  buildKindRegistry,
   count,
   createQueryBuilder,
   defineGraph,
@@ -18,34 +16,8 @@ import {
   field,
   sum,
 } from "../src";
-
-/**
- * Helper to extract SQL string from a Drizzle SQL object.
- */
-function sqlToString(sqlObject: SQL): string {
-  function flatten(object: unknown): string {
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "value" in object &&
-      Array.isArray((object as { value: unknown }).value)
-    ) {
-      return (object as { value: string[] }).value.join("");
-    }
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "queryChunks" in object &&
-      Array.isArray((object as { queryChunks: unknown[] }).queryChunks)
-    ) {
-      return (object as { queryChunks: unknown[] }).queryChunks
-        .map((c) => flatten(c))
-        .join("");
-    }
-    return "?";
-  }
-  return flatten(sqlObject);
-}
+import { buildKindRegistry } from "../src/registry";
+import { toSqlString } from "./sql-test-utils";
 
 // Test schema definitions
 const Product = defineNode("Product", {
@@ -76,7 +48,7 @@ describe("ExecutableAggregateQuery.toAst", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         totalQuantity: sum("p", "quantity"),
         productCount: count("p"),
@@ -96,7 +68,7 @@ describe("ExecutableAggregateQuery.toAst", () => {
       .from("Product", "p")
       .whereNode("p", (p) => p.price.gt(100))
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -117,7 +89,7 @@ describe("ExecutableAggregateQuery.limit", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -132,7 +104,7 @@ describe("ExecutableAggregateQuery.limit", () => {
     const original = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -147,7 +119,7 @@ describe("ExecutableAggregateQuery.limit", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       })
@@ -166,7 +138,7 @@ describe("ExecutableAggregateQuery.offset", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       })
@@ -181,7 +153,7 @@ describe("ExecutableAggregateQuery.offset", () => {
     const original = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -202,23 +174,38 @@ describe("ExecutableAggregateQuery.compile", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
 
     const sql = query.compile();
-    const sqlString = sqlToString(sql);
+    const sqlString = toSqlString(sql);
 
     expect(sqlString).toContain("SELECT");
     expect(sqlString).toContain("GROUP BY");
+  });
+
+  it("reuses cached compiled SQL for repeated compile calls", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      });
+
+    const firstCompile = query.compile();
+    const secondCompile = query.compile();
+
+    expect(secondCompile).toBe(firstCompile);
   });
 
   it("includes LIMIT and OFFSET in compiled SQL", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       })
@@ -226,7 +213,7 @@ describe("ExecutableAggregateQuery.compile", () => {
       .offset(5);
 
     const sql = query.compile();
-    const sqlString = sqlToString(sql);
+    const sqlString = toSqlString(sql);
 
     expect(sqlString).toContain("LIMIT");
     expect(sqlString).toContain("OFFSET");
@@ -242,7 +229,7 @@ describe("ExecutableAggregateQuery.execute", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -256,7 +243,7 @@ describe("ExecutableAggregateQuery.execute", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -279,7 +266,7 @@ describe("ExecutableAggregateQuery.execute", () => {
     })
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -306,14 +293,14 @@ describe("ExecutableAggregateQuery.execute", () => {
     })
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
 
     const results = await query.execute();
 
-    // Result should include only the fields specified in selectAggregate
+    // Result should include only the fields specified in aggregate
     expect(results[0]).toHaveProperty("category");
     expect(results[0]).toHaveProperty("count");
   });
@@ -328,7 +315,7 @@ describe("ExecutableAggregateQuery.execute", () => {
     })
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -348,7 +335,7 @@ describe("ExecutableAggregateQuery with multiple aggregates", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         totalQuantity: sum("p", "quantity"),
         productCount: count("p"),
@@ -365,14 +352,14 @@ describe("ExecutableAggregateQuery with multiple aggregates", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         totalQuantity: sum("p", "quantity"),
         productCount: count("p"),
       });
 
     const sql = query.compile();
-    const sqlString = sqlToString(sql);
+    const sqlString = toSqlString(sql);
 
     expect(sqlString).toContain("SUM");
     expect(sqlString).toContain("COUNT");
@@ -388,7 +375,7 @@ describe("ExecutableAggregateQuery immutability", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -402,7 +389,7 @@ describe("ExecutableAggregateQuery immutability", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });
@@ -416,7 +403,7 @@ describe("ExecutableAggregateQuery immutability", () => {
     const base = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
-      .selectAggregate({
+      .aggregate({
         category: field("p", "category"),
         count: count("p"),
       });

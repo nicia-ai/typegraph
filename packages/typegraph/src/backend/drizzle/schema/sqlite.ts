@@ -36,7 +36,7 @@ import {
 /**
  * Table name configuration.
  */
-export type TableNames = Readonly<{
+export type SqliteTableNames = Readonly<{
   nodes: string;
   edges: string;
   uniques: string;
@@ -54,7 +54,7 @@ export type CreateSqliteTablesOptions = Readonly<{
   indexes?: readonly TypeGraphIndex[] | undefined;
 }>;
 
-const DEFAULT_TABLE_NAMES: TableNames = {
+const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
   uniques: "typegraph_node_uniques",
@@ -67,10 +67,10 @@ const DEFAULT_TABLE_NAMES: TableNames = {
  * Index names are derived from table names.
  */
 export function createSqliteTables(
-  names: Partial<TableNames> = {},
+  names: Partial<SqliteTableNames> = {},
   options: CreateSqliteTablesOptions = {},
 ) {
-  const n: TableNames = { ...DEFAULT_TABLE_NAMES, ...names };
+  const n: SqliteTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
 
   const nodes = sqliteTable(
@@ -90,6 +90,12 @@ export function createSqliteTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.kind, t.id] }),
       index(`${n.nodes}_kind_idx`).on(t.graphId, t.kind),
+      index(`${n.nodes}_kind_created_idx`).on(
+        t.graphId,
+        t.kind,
+        t.deletedAt,
+        t.createdAt,
+      ),
       index(`${n.nodes}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.nodes}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
       ...buildSqliteNodeIndexBuilders(t, indexes),
@@ -116,8 +122,33 @@ export function createSqliteTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
       index(`${n.edges}_kind_idx`).on(t.graphId, t.kind),
-      index(`${n.edges}_from_idx`).on(t.graphId, t.fromKind, t.fromId),
-      index(`${n.edges}_to_idx`).on(t.graphId, t.toKind, t.toId),
+      // Directional traversal index (outgoing): supports endpoint lookups
+      // and extra filtering by edge kind / target kind.
+      index(`${n.edges}_from_idx`).on(
+        t.graphId,
+        t.fromKind,
+        t.fromId,
+        t.kind,
+        t.toKind,
+        t.deletedAt,
+        t.validTo,
+      ),
+      // Directional traversal index (incoming): mirrors from_idx for reverse traversals.
+      index(`${n.edges}_to_idx`).on(
+        t.graphId,
+        t.toKind,
+        t.toId,
+        t.kind,
+        t.fromKind,
+        t.deletedAt,
+        t.validTo,
+      ),
+      index(`${n.edges}_kind_created_idx`).on(
+        t.graphId,
+        t.kind,
+        t.deletedAt,
+        t.createdAt,
+      ),
       index(`${n.edges}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.edges}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
       index(`${n.edges}_cardinality_idx`).on(

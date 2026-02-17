@@ -100,5 +100,5 @@ export function getTypeName(typeOrIri: NodeType | EdgeType | string): string {
   if (typeof typeOrIri === "string") {
     return typeOrIri;
   }
-  return typeOrIri.name;
+  return typeOrIri.kind;
 }

@@ -317,7 +317,7 @@ export function validateEdgeEndpoints(
   registry: KindRegistry,
 ): EndpointError | undefined {
   // Check from kinds
-  const validFromKinds = registration.from.map((node) => node.name);
+  const validFromKinds = registration.from.map((node) => node.kind);
   const fromValid = validFromKinds.some((validKind) =>
     registry.isAssignableTo(fromKind, validKind),
   );
@@ -332,7 +332,7 @@ export function validateEdgeEndpoints(
   }
 
   // Check to kinds
-  const validToKinds = registration.to.map((node) => node.name);
+  const validToKinds = registration.to.map((node) => node.kind);
   const toValid = validToKinds.some((validKind) =>
     registry.isAssignableTo(toKind, validKind),
   );

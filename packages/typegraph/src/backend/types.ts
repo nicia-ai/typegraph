@@ -6,7 +6,9 @@
  */
 import { type SQL } from "drizzle-orm";
 
+import { type TemporalMode } from "../core/types";
 import { type SqlTableNames } from "../query/compiler/schema";
+import { type SerializedSchema } from "../schema/types";
 
 // ============================================================
 // Vector Search Types
@@ -37,16 +39,12 @@ export type VectorCapabilities = Readonly<{
 }>;
 
 // ============================================================
-// Dialect & Capabilities
+// SQL Dialect & Capabilities
 // ============================================================
 
-/**
- * Supported database dialects.
- * Re-exported from query/dialect for consistency across the codebase.
- */
 import { type SqlDialect } from "../query/dialect/types";
 
-export type Dialect = SqlDialect;
+export type { SqlDialect } from "../query/dialect/types";
 
 /**
  * Backend capabilities that vary by dialect.
@@ -209,6 +207,7 @@ export type UpdateEdgeParams = Readonly<{
   id: string;
   props: Record<string, unknown>;
   validTo?: string;
+  clearDeleted?: boolean;
 }>;
 
 /**
@@ -280,6 +279,10 @@ export type VectorSearchParams = Readonly<{
  */
 export type VectorSearchResult = Readonly<{
   nodeId: string;
+  /**
+   * Cosine metric returns similarity score (higher is better).
+   * L2 and inner_product return raw distance (lower is better).
+   */
   score: number;
 }>;
 
@@ -347,7 +350,7 @@ export type TransactionBackend = Omit<GraphBackend, "transaction" | "close">;
  */
 export type GraphBackend = Readonly<{
   /** The SQL dialect */
-  dialect: Dialect;
+  dialect: SqlDialect;
   /** Backend capabilities */
   capabilities: BackendCapabilities;
   /** Table names used by this backend (for query schema auto-derivation) */
@@ -355,6 +358,11 @@ export type GraphBackend = Readonly<{
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
+  insertNodeNoReturn?: (params: InsertNodeParams) => Promise<void>;
+  insertNodesBatch?: (params: readonly InsertNodeParams[]) => Promise<void>;
+  insertNodesBatchReturning?: (
+    params: readonly InsertNodeParams[],
+  ) => Promise<readonly NodeRow[]>;
   updateNode: (params: UpdateNodeParams) => Promise<NodeRow>;
   deleteNode: (params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (params: HardDeleteNodeParams) => Promise<void>;
@@ -363,13 +371,27 @@ export type GraphBackend = Readonly<{
     kind: string,
     id: string,
   ) => Promise<NodeRow | undefined>;
+  getNodes?: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+  ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
   insertEdge: (params: InsertEdgeParams) => Promise<EdgeRow>;
+  insertEdgeNoReturn?: (params: InsertEdgeParams) => Promise<void>;
+  insertEdgesBatch?: (params: readonly InsertEdgeParams[]) => Promise<void>;
+  insertEdgesBatchReturning?: (
+    params: readonly InsertEdgeParams[],
+  ) => Promise<readonly EdgeRow[]>;
   updateEdge: (params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (params: DeleteEdgeParams) => Promise<void>;
   hardDeleteEdge: (params: HardDeleteEdgeParams) => Promise<void>;
   getEdge: (graphId: string, id: string) => Promise<EdgeRow | undefined>;
+  getEdges?: (
+    graphId: string,
+    ids: readonly string[],
+  ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
   countEdgesFrom: (params: CountEdgesFromParams) => Promise<number>;
@@ -421,6 +443,17 @@ export type GraphBackend = Readonly<{
 
   // === Query Execution ===
   execute: <T>(query: SQL) => Promise<readonly T[]>;
+
+  /** Execute pre-compiled SQL text with bound parameters. Available on sync SQLite and pg backends. */
+  executeRaw?: <T>(
+    sqlText: string,
+    params: readonly unknown[],
+  ) => Promise<readonly T[]>;
+
+  /** Compile a Drizzle SQL object to { sql, params } without executing. */
+  compileSql?: (
+    query: SQL,
+  ) => Readonly<{ sql: string; params: readonly unknown[] }>;
 
   // === Transaction ===
   transaction: <T>(
@@ -475,7 +508,7 @@ export type InsertSchemaParams = Readonly<{
   graphId: string;
   version: number;
   schemaHash: string;
-  schemaDoc: Record<string, unknown>;
+  schemaDoc: SerializedSchema;
   isActive: boolean;
 }>;
 
@@ -522,6 +555,10 @@ export type FindNodesByKindParams = Readonly<{
   offset?: number;
   /** If true, exclude deleted nodes. Default true. */
   excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
 }>;
 
 /**
@@ -532,6 +569,10 @@ export type CountNodesByKindParams = Readonly<{
   kind: string;
   /** If true, exclude deleted nodes. Default true. */
   excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
 }>;
 
 /**
@@ -548,6 +589,10 @@ export type FindEdgesByKindParams = Readonly<{
   offset?: number;
   /** If true, exclude deleted edges. Default true. */
   excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
 }>;
 
 /**
@@ -562,6 +607,10 @@ export type CountEdgesByKindParams = Readonly<{
   toId?: string;
   /** If true, exclude deleted edges. Default true. */
   excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
 }>;
 
 // ============================================================

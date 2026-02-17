@@ -3,40 +3,23 @@
  *
  * Transforms database rows into typed Node and Edge objects.
  */
+import {
+  type EdgeRow as BackendEdgeRow,
+  type NodeRow as BackendNodeRow,
+} from "../backend/types";
 import { type Edge, type Node } from "./types";
 
 /**
- * Raw node row from database.
+ * Raw node row from database (without graph_id).
+ * Derived from BackendNodeRow so BackendNodeRow is assignable without casts.
  */
-export type NodeRow = Readonly<{
-  kind: string;
-  id: string;
-  props: string;
-  version: number;
-  valid_from: string | undefined;
-  valid_to: string | undefined;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | undefined;
-}>;
+export type NodeRow = Omit<BackendNodeRow, "graph_id">;
 
 /**
- * Raw edge row from database.
+ * Raw edge row from database (without graph_id).
+ * Derived from BackendEdgeRow so BackendEdgeRow is assignable without casts.
  */
-export type EdgeRow = Readonly<{
-  id: string;
-  kind: string;
-  from_kind: string;
-  from_id: string;
-  to_kind: string;
-  to_id: string;
-  props: string;
-  valid_from: string | undefined;
-  valid_to: string | undefined;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | undefined;
-}>;
+export type EdgeRow = Omit<BackendEdgeRow, "graph_id">;
 
 // Reserved keys that cannot be overwritten by user props
 const RESERVED_NODE_KEYS = new Set(["id", "kind", "meta"]);

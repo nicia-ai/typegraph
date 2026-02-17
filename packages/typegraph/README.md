@@ -45,3 +45,26 @@ await store.edges.knows.create(alice, bob);
 See the repo README for more.
 
 Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](https://github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples)
+
+## Performance Smoke Check
+
+The perf harness lives in `@nicia-ai/typegraph-benchmarks`; these commands delegate to it.
+
+Run a deterministic SQLite perf sanity suite with guardrails:
+
+```bash
+pnpm --filter @nicia-ai/typegraph test:perf
+```
+
+Run the same guardrailed suite against PostgreSQL (requires `POSTGRES_URL`):
+
+```bash
+POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
+  pnpm --filter @nicia-ai/typegraph test:perf:postgres
+```
+
+For report-only mode (no pass/fail guardrails):
+
+```bash
+pnpm --filter @nicia-ai/typegraph bench:perf
+```

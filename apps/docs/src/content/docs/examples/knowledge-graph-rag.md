@@ -204,21 +204,34 @@ Find entities connected through relationships:
 
 ```typescript
 async function findRelatedEntities(entityName: string, maxHops = 2) {
-  return store
+  const rows = await store
     .query()
     .from("Entity", "e")
     .whereNode("e", (e) => e.name.eq(entityName))
     .traverse("relatesTo", "r")
-    .recursive()
-    .maxHops(maxHops)
-    .withDepth("depth")
+    .recursive({ maxHops, depth: "depth" })
     .to("Entity", "related")
     .select((ctx) => ({
       from: ctx.e.name,
       to: ctx.related.name,
+      toId: ctx.related.id,
       depth: ctx.depth,
     }))
     .execute();
+
+  // distinct paths can reach the same target; dedupe by target
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      if (seen.has(row.toId)) return false;
+      seen.add(row.toId);
+      return true;
+    })
+    .map((row) => ({
+      from: row.from,
+      to: row.to,
+      depth: row.depth,
+    }));
 }
 ```
 
@@ -234,8 +247,7 @@ async function getChunkWithContext(chunkId: string, windowSize = 1) {
       .from("Chunk", "c")
       .whereNode("c", (c) => c.id.eq(chunkId))
       .traverse("prevChunk", "e")
-      .recursive()
-      .maxHops(windowSize)
+      .recursive({ maxHops: windowSize })
       .to("Chunk", "prev")
       .orderBy("prev", "position", "desc")
       .select((ctx) => ctx.prev.text)
@@ -245,8 +257,7 @@ async function getChunkWithContext(chunkId: string, windowSize = 1) {
       .from("Chunk", "c")
       .whereNode("c", (c) => c.id.eq(chunkId))
       .traverse("nextChunk", "e")
-      .recursive()
-      .maxHops(windowSize)
+      .recursive({ maxHops: windowSize })
       .to("Chunk", "next")
       .orderBy("next", "position", "asc")
       .select((ctx) => ctx.next.text)

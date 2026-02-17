@@ -7,6 +7,8 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { ConfigurationError } from "../../errors";
+
 /**
  * Table names for TypeGraph SQL schema.
  */
@@ -65,15 +67,15 @@ const VALID_IDENTIFIER_PATTERN = /^[a-z_][a-z0-9_$]*$/i;
  */
 function validateTableName(name: string, label: string): void {
   if (!name || name.length === 0) {
-    throw new Error(`${label} table name cannot be empty`);
+    throw new ConfigurationError(`${label} table name cannot be empty`);
   }
   if (name.length > MAX_IDENTIFIER_LENGTH) {
-    throw new Error(
+    throw new ConfigurationError(
       `${label} table name exceeds maximum length of ${MAX_IDENTIFIER_LENGTH} characters`,
     );
   }
   if (!VALID_IDENTIFIER_PATTERN.test(name)) {
-    throw new Error(
+    throw new ConfigurationError(
       `${label} table name "${name}" is not a valid SQL identifier. ` +
         `Table names must start with a letter or underscore and contain only letters, digits, underscores, or dollar signs.`,
     );

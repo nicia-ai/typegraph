@@ -216,7 +216,7 @@ async function getSubcategories(
     .traverse("parentCategory", "e", { direction: "in" });
 
   if (includeNested) {
-    query = query.recursive().withDepth("depth");
+    query = query.recursive({ depth: "depth" });
   }
 
   return query
@@ -518,7 +518,7 @@ async function getLowStockItems(): Promise<LowStockItem[]> {
     .to("Inventory", "i")
     .groupByNode("v")
     .having(havingLt(sum("i", "quantity"), field("i", "reorderPoint")))
-    .selectAggregate({
+    .aggregate({
       productName: field("p", "name"),
       variantSku: field("v", "sku"),
       variantName: field("v", "name"),

@@ -5,8 +5,8 @@
  */
 import { type GraphBackend } from "../backend/types";
 import {
-  getEdgeTypeNames,
-  getNodeTypeNames,
+  getEdgeKinds,
+  getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
 import { type Store } from "../store/store";
@@ -58,8 +58,8 @@ export async function exportGraph<G extends GraphDef>(
   const backend = store.backend;
 
   // Determine which kinds to export
-  const nodeKindsToExport = options_.nodeKinds ?? getNodeTypeNames(graph);
-  const edgeKindsToExport = options_.edgeKinds ?? getEdgeTypeNames(graph);
+  const nodeKindsToExport = options_.nodeKinds ?? getNodeKinds(graph);
+  const edgeKindsToExport = options_.edgeKinds ?? getEdgeKinds(graph);
 
   // Export nodes
   const nodes: InterchangeNode[] = [];

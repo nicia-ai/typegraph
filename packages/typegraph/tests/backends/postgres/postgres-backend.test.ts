@@ -47,6 +47,21 @@ let sharedDb: NodePgDatabase | undefined;
 let isPostgresAvailable = false;
 
 /**
+ * Skips the current test if PostgreSQL is not available.
+ * Returns narrowed pool and db references for use in the test.
+ */
+function requirePostgres(ctx: { skip: () => void }): {
+  pool: Pool;
+  db: NodePgDatabase;
+} {
+  if (!isPostgresAvailable || !sharedPool || !sharedDb) {
+    ctx.skip();
+    throw new Error("unreachable");
+  }
+  return { pool: sharedPool, db: sharedDb };
+}
+
+/**
  * Creates a new pool and db instance.
  * Used for tests that need isolated connections.
  */
@@ -205,11 +220,8 @@ describe("PostgreSQL Adapter", () => {
     await clearTestData();
   });
 
-  it("should be available for testing", () => {
-    if (!isPostgresAvailable) {
-      console.log("PostgreSQL not available - skipping integration tests");
-      return;
-    }
+  it("should be available for testing", (ctx) => {
+    requirePostgres(ctx);
     expect(sharedPool).toBeDefined();
     expect(sharedDb).toBeDefined();
   });
@@ -262,9 +274,9 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
   });
 
   describe("createPostgresBackend()", () => {
-    it("creates a backend with correct dialect and capabilities", () => {
-      if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-      const backend = createPostgresBackend(sharedDb);
+    it("creates a backend with correct dialect and capabilities", (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
 
       expect(backend.dialect).toBe("postgres");
       expect(backend.capabilities.cte).toBe(true);
@@ -310,15 +322,29 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const sql = ddl.join("\n");
 
       expect(sql).toContain('"typegraph_nodes_kind_idx"');
+      expect(sql).toContain('"typegraph_nodes_kind_created_idx"');
       expect(sql).toContain('"typegraph_edges_from_idx"');
       expect(sql).toContain('"typegraph_edges_to_idx"');
+      expect(sql).toContain('"typegraph_edges_kind_created_idx"');
+      expect(sql).toContain(
+        '"typegraph_edges_from_idx" ON "typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges_to_idx" ON "typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_to")',
+      );
+      expect(sql).toContain(
+        '"typegraph_nodes_kind_created_idx" ON "typegraph_nodes" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
+      expect(sql).toContain(
+        '"typegraph_edges_kind_created_idx" ON "typegraph_edges" ("graph_id", "kind", "deleted_at", "created_at")',
+      );
     });
   });
 
   describe("JSONB handling", () => {
-    it("stores and retrieves complex JSON props", async () => {
-      if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-      const backend = createPostgresBackend(sharedDb);
+    it("stores and retrieves complex JSON props", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
 
       const complexProps = {
         name: "Alice",
@@ -346,9 +372,9 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
   });
 
   describe("Transaction isolation", () => {
-    it("supports serializable transactions", async () => {
-      if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-      const backend = createPostgresBackend(sharedDb);
+    it("supports serializable transactions", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
 
       await backend.transaction(
         async (tx) => {
@@ -378,18 +404,18 @@ describe("Store with PostgreSQL Backend", () => {
     await clearTestData();
   });
 
-  it("creates a store with PostgreSQL backend", () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("creates a store with PostgreSQL backend", (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     expect(store.graphId).toBe("test_graph");
     expect(store.registry).toBeDefined();
   });
 
-  it("creates and retrieves nodes through the store", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("creates and retrieves nodes through the store", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person = await store.nodes.Person.create({
@@ -407,9 +433,9 @@ describe("Store with PostgreSQL Backend", () => {
     expect(fetched!.name).toBe("Alice");
   });
 
-  it("validates node props against schema", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("validates node props against schema", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     await expect(
@@ -417,9 +443,9 @@ describe("Store with PostgreSQL Backend", () => {
     ).rejects.toThrow();
   });
 
-  it("creates edges between nodes", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("creates edges between nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person = await store.nodes.Person.create({ name: "Alice" });
@@ -437,9 +463,9 @@ describe("Store with PostgreSQL Backend", () => {
     expect(createdEdge.role).toBe("Engineer");
   });
 
-  it("validates edge endpoint types using ontology", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("validates edge endpoint types using ontology", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person = await store.nodes.Person.create({ name: "Alice" });
@@ -454,9 +480,9 @@ describe("Store with PostgreSQL Backend", () => {
     expect(createdEdge).toBeDefined();
   });
 
-  it("rejects edges with invalid endpoint types", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("rejects edges with invalid endpoint types", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person1 = await store.nodes.Person.create({ name: "Alice" });
@@ -474,9 +500,9 @@ describe("Store with PostgreSQL Backend", () => {
     ).rejects.toThrow();
   });
 
-  it("executes transactions atomically", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("executes transactions atomically", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const result = await store.transaction(async (tx) => {
@@ -500,9 +526,9 @@ describe("Store with PostgreSQL Backend", () => {
     expect(fetchedPerson).toBeDefined();
   });
 
-  it("updates nodes", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("updates nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person = await store.nodes.Person.create({ name: "Alice" });
@@ -517,9 +543,9 @@ describe("Store with PostgreSQL Backend", () => {
     expect(updated.meta.version).toBe(2);
   });
 
-  it("soft deletes nodes", async () => {
-    if (!isPostgresAvailable || !sharedDb || !sharedPool) return;
-    const backend = createPostgresBackend(sharedDb);
+  it("soft deletes nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
     const store = createStore(testGraph, backend);
 
     const person = await store.nodes.Person.create({ name: "Alice" });
@@ -594,24 +620,17 @@ describe("Vector Search with PostgreSQL", () => {
     await sharedPool?.query("TRUNCATE typegraph_embeddings");
   });
 
-  it("should detect pgvector availability", () => {
-    if (!isPostgresAvailable) {
-      console.log("PostgreSQL not available - skipping vector tests");
-      return;
-    }
-    if (!hasPgvector) {
-      console.log("pgvector extension not available - skipping vector tests");
-      return;
-    }
+  it("should detect pgvector availability", (ctx) => {
+    requirePostgres(ctx);
     expect(hasPgvector).toBe(true);
   });
 
-  it("should store embeddings in the embeddings table", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should store embeddings in the embeddings table", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert test embedding directly
     const testEmbedding = [0.1, 0.2, 0.3, 0.4];
-    await sharedPool.query(
+    await pool.query(
       `INSERT INTO typegraph_embeddings
        (id, graph_id, node_kind, node_id, field_path, embedding)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -626,7 +645,7 @@ describe("Vector Search with PostgreSQL", () => {
     );
 
     // Verify it was stored
-    const result = await sharedPool.query(
+    const result = await pool.query(
       "SELECT * FROM typegraph_embeddings WHERE id = $1",
       ["emb-1"],
     );
@@ -634,8 +653,8 @@ describe("Vector Search with PostgreSQL", () => {
     expect(result.rows[0].node_id).toBe("doc-1");
   });
 
-  it("should compute cosine distance correctly", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should compute cosine distance correctly", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert test embeddings
     const embeddings = [
@@ -645,7 +664,7 @@ describe("Vector Search with PostgreSQL", () => {
     ];
 
     for (const emb of embeddings) {
-      await sharedPool.query(
+      await pool.query(
         `INSERT INTO typegraph_embeddings
          (id, graph_id, node_kind, node_id, field_path, embedding)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -662,7 +681,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query for similar to [1, 0, 0, 0]
     const queryEmbedding = "[1,0,0,0]";
-    const result = await sharedPool.query(
+    const result = await pool.query(
       `SELECT node_id, embedding <=> $1::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC`,
@@ -679,8 +698,8 @@ describe("Vector Search with PostgreSQL", () => {
     expect(result.rows[2].node_id).toBe("doc-2");
   });
 
-  it("should filter by minimum score", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should filter by minimum score", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert test embeddings
     const embeddings = [
@@ -690,7 +709,7 @@ describe("Vector Search with PostgreSQL", () => {
     ];
 
     for (const emb of embeddings) {
-      await sharedPool.query(
+      await pool.query(
         `INSERT INTO typegraph_embeddings
          (id, graph_id, node_kind, node_id, field_path, embedding)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -710,7 +729,7 @@ describe("Vector Search with PostgreSQL", () => {
     const minScore = 0.5; // Only results with similarity >= 0.5
     const threshold = 1 - minScore;
 
-    const result = await sharedPool.query(
+    const result = await pool.query(
       `SELECT node_id, 1 - (embedding <=> $1::vector) AS score
        FROM typegraph_embeddings
        WHERE (embedding <=> $1::vector) <= $2
@@ -728,13 +747,13 @@ describe("Vector Search with PostgreSQL", () => {
     );
   });
 
-  it("should limit results to k nearest", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should limit results to k nearest", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert 10 test embeddings
     for (let index = 0; index < 10; index++) {
       const emb = [Math.cos(index * 0.3), Math.sin(index * 0.3), 0, 0];
-      await sharedPool.query(
+      await pool.query(
         `INSERT INTO typegraph_embeddings
          (id, graph_id, node_kind, node_id, field_path, embedding)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -751,7 +770,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query for top 3
     const queryEmbedding = "[1,0,0,0]";
-    const result = await sharedPool.query(
+    const result = await pool.query(
       `SELECT node_id, embedding <=> $1::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC
@@ -762,11 +781,11 @@ describe("Vector Search with PostgreSQL", () => {
     expect(result.rows.length).toBe(3);
   });
 
-  it("should support L2 (Euclidean) distance", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should support L2 (Euclidean) distance", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert test embeddings
-    await sharedPool.query(
+    await pool.query(
       `INSERT INTO typegraph_embeddings
        (id, graph_id, node_kind, node_id, field_path, embedding)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -779,7 +798,7 @@ describe("Vector Search with PostgreSQL", () => {
         "[1,0,0,0]",
       ],
     );
-    await sharedPool.query(
+    await pool.query(
       `INSERT INTO typegraph_embeddings
        (id, graph_id, node_kind, node_id, field_path, embedding)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -794,7 +813,7 @@ describe("Vector Search with PostgreSQL", () => {
     );
 
     // Query using L2 distance operator <->
-    const result = await sharedPool.query(
+    const result = await pool.query(
       `SELECT node_id, embedding <-> '[1,0,0,0]'::vector AS distance
        FROM typegraph_embeddings
        ORDER BY distance ASC`,
@@ -809,11 +828,11 @@ describe("Vector Search with PostgreSQL", () => {
     expect(Number.parseFloat(result.rows[1].distance)).toBeCloseTo(1, 5);
   });
 
-  it("should support inner product distance", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool) return;
+  it("should support inner product distance", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
 
     // Insert test embeddings (normalized for inner product)
-    await sharedPool.query(
+    await pool.query(
       `INSERT INTO typegraph_embeddings
        (id, graph_id, node_kind, node_id, field_path, embedding)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -826,7 +845,7 @@ describe("Vector Search with PostgreSQL", () => {
         "[1,0,0,0]",
       ],
     );
-    await sharedPool.query(
+    await pool.query(
       `INSERT INTO typegraph_embeddings
        (id, graph_id, node_kind, node_id, field_path, embedding)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -842,7 +861,7 @@ describe("Vector Search with PostgreSQL", () => {
 
     // Query using inner product operator <#>
     // Note: pgvector returns negative inner product, so lower = more similar
-    const result = await sharedPool.query(
+    const result = await pool.query(
       `SELECT node_id, embedding <#> '[1,0,0,0]'::vector AS neg_ip
        FROM typegraph_embeddings
        ORDER BY neg_ip ASC`,
@@ -908,15 +927,10 @@ describe("Vector Search End-to-End (Query Builder)", () => {
     await sharedPool?.query("TRUNCATE typegraph_node_embeddings");
   });
 
-  it("should execute similarTo query via store.query()", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool || !sharedDb) {
-      console.log(
-        "Skipping end-to-end vector test - prerequisites not available",
-      );
-      return;
-    }
+  it("should execute similarTo query via store.query()", async (ctx) => {
+    const { pool, db } = requirePostgres(ctx);
 
-    const backend = createPostgresBackend(sharedDb);
+    const backend = createPostgresBackend(db);
     const store = createStore(vectorTestGraph, backend);
 
     // Create documents with embeddings
@@ -945,7 +959,7 @@ describe("Vector Search End-to-End (Query Builder)", () => {
       { id: document2.id, embedding: [0, 1, 0, 0] },
       { id: document3.id, embedding: [0.9, 0.1, 0, 0] },
     ]) {
-      await sharedPool.query(
+      await pool.query(
         `INSERT INTO typegraph_node_embeddings
          (graph_id, node_kind, node_id, field_path, embedding, dimensions)
          VALUES ($1, $2, $3, $4, $5, $6)
@@ -989,12 +1003,10 @@ describe("Vector Search End-to-End (Query Builder)", () => {
     expect(results[2]?.title).toBe("Web Development");
   });
 
-  it("should filter by minScore", async () => {
-    if (!isPostgresAvailable || !hasPgvector || !sharedPool || !sharedDb) {
-      return;
-    }
+  it("should filter by minScore", async (ctx) => {
+    const { pool, db } = requirePostgres(ctx);
 
-    const backend = createPostgresBackend(sharedDb);
+    const backend = createPostgresBackend(db);
     const store = createStore(vectorTestGraph, backend);
 
     // Create documents
@@ -1015,7 +1027,7 @@ describe("Vector Search End-to-End (Query Builder)", () => {
       { id: document1.id, embedding: [1, 0, 0, 0] },
       { id: document2.id, embedding: [0, 1, 0, 0] },
     ]) {
-      await sharedPool.query(
+      await pool.query(
         `INSERT INTO typegraph_node_embeddings
          (graph_id, node_kind, node_id, field_path, embedding, dimensions)
          VALUES ($1, $2, $3, $4, $5, $6)

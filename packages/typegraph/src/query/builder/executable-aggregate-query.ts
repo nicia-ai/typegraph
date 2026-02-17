@@ -13,6 +13,8 @@ import {
   type QueryBuilderState,
 } from "./types";
 
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
 /**
  * Result type for aggregate queries.
  * Maps field refs to their value types and aggregates to numbers.
@@ -36,6 +38,7 @@ export class ExecutableAggregateQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #fields: R;
+  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R) {
     this.#config = config;
@@ -73,11 +76,36 @@ export class ExecutableAggregateQuery<
   }
 
   /**
+   * Compiles the query and returns the SQL text and parameters.
+   *
+   * Requires a backend to be configured (the backend determines the SQL dialect).
+   * Use this for debugging, logging, or running the query with a custom executor.
+   */
+  toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
+    if (!this.#config.backend?.compileSql) {
+      throw new Error(
+        "Cannot convert to SQL: no backend configured or backend does not support compileSql. " +
+          "Use store.query() to get a backend-aware query builder.",
+      );
+    }
+    return this.#config.backend.compileSql(this.compile());
+  }
+
+  /**
    * Compiles the query to a Drizzle SQL object.
    */
   compile(): SQL {
+    if (this.#cachedCompiled !== NOT_COMPUTED) {
+      return this.#cachedCompiled;
+    }
     const ast = this.toAst();
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+    const compiled = compileQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    this.#cachedCompiled = compiled;
+    return compiled;
   }
 
   /**

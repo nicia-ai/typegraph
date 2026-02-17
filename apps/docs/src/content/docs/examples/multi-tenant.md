@@ -537,7 +537,7 @@ async function getTenantMetrics(): Promise<
     .query()
     .from("Project", "p")
     .groupBy("p", "tenantId")
-    .selectAggregate({
+    .aggregate({
       tenantId: field("p", "tenantId"),
       projectCount: count("p"),
     })
@@ -548,7 +548,7 @@ async function getTenantMetrics(): Promise<
     .query()
     .from("Task", "t")
     .groupBy("t", "tenantId")
-    .selectAggregate({
+    .aggregate({
       tenantId: field("t", "tenantId"),
       taskCount: count("t"),
     })
@@ -559,7 +559,7 @@ async function getTenantMetrics(): Promise<
     .query()
     .from("User", "u")
     .groupBy("u", "tenantId")
-    .selectAggregate({
+    .aggregate({
       tenantId: field("u", "tenantId"),
       userCount: count("u"),
     })

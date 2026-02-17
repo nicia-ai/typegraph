@@ -67,5 +67,10 @@ function decodeByValueType(value: unknown, valueType: ValueType): unknown {
     case "unknown": {
       return value;
     }
+    default: {
+      const _exhaustive: never = valueType;
+      void _exhaustive;
+      return value;
+    }
   }
 }

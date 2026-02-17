@@ -16,18 +16,25 @@ Predicates are accessed through property accessors in `whereNode()` and `whereEd
 ```
 
 The accessor provides type-safe access to the field, and returns a predicate builder with methods
-appropriate for that field's type.
+appropriate for that field's type. Edge fields work the same way:
+
+```typescript
+.whereEdge("e", (e) => e.role.eq("admin"))
+```
 
 ## Predicate Types
 
-| Type | Common Predicates | Documentation |
-|------|-------------------|---------------|
-| String | `eq`, `contains`, `startsWith`, `like`, `ilike` | [String Predicates](#string) |
-| Number | `eq`, `gt`, `gte`, `lt`, `lte`, `between` | [Number Predicates](#number) |
-| Date | `eq`, `gt`, `gte`, `lt`, `lte`, `between` | [Date Predicates](#date) |
-| Array | `contains`, `containsAll`, `containsAny`, `isEmpty` | [Array Predicates](#array) |
-| Object | `get()`, `hasKey`, `pathEquals` | [Object Predicates](#object) |
-| Embedding | `similarTo()` | [Embedding Predicates](#embedding) |
+| Type | Predicates | Section |
+|------|------------|---------|
+| All types | `eq`, `neq`, `in`, `notIn`, `isNull`, `isNotNull` | [Common](#common-predicates) |
+| String | `contains`, `startsWith`, `endsWith`, `like`, `ilike` | [String](#string) |
+| Number | `gt`, `gte`, `lt`, `lte`, `between` | [Number](#number) |
+| Boolean | *(common only)* | [Boolean](#boolean) |
+| Date | `gt`, `gte`, `lt`, `lte`, `between` | [Date](#date) |
+| Array | `contains`, `containsAll`, `containsAny`, `isEmpty`, `isNotEmpty`, `lengthEq/Gt/Gte/Lt/Lte` | [Array](#array) |
+| Object | `get`, `field`, `hasKey`, `hasPath`, `pathEquals`, `pathContains`, `pathIsNull`, `pathIsNotNull` | [Object](#object) |
+| Embedding | `similarTo` | [Embedding](#embedding) |
+| Subquery | `exists`, `notExists`, `inSubquery`, `notInSubquery` | [Subqueries](/queries/advanced) |
 
 ## Combining Predicates
 
@@ -59,18 +66,26 @@ p.status
   .and(p.role.eq("admin").or(p.role.eq("moderator")))
 ```
 
-## Common Predicates (All Types)
+Parenthesization is handled automatically. Vector similarity predicates cannot be nested under
+`OR` or `NOT`.
 
-These predicates work on all field types:
+---
 
-| Predicate | Description |
-|-----------|-------------|
-| `eq(value)` | Equals |
-| `neq(value)` | Not equals |
-| `in(values[])` | Value is in array |
-| `notIn(values[])` | Value is not in array |
-| `isNull()` | Is null/undefined |
-| `isNotNull()` | Is not null |
+## Common Predicates
+
+These predicates are available on **all** field types:
+
+| Predicate | Description | SQL |
+|-----------|-------------|-----|
+| `eq(value)` | Equals | `= value` |
+| `neq(value)` | Not equals | `!= value` |
+| `in(values[])` | Value is in array | `IN (...)` |
+| `notIn(values[])` | Value is not in array | `NOT IN (...)` |
+| `isNull()` | Is null/undefined | `IS NULL` |
+| `isNotNull()` | Is not null | `IS NOT NULL` |
+
+`eq` and `neq` accept `param()` references for [prepared queries](/queries/execute#prepared-queries).
+`in` and `notIn` do **not** support `param()` because the array length must be known at compile time.
 
 ---
 
@@ -85,24 +100,24 @@ p.name.eq("Alice")       // Exact match
 p.name.neq("Bob")        // Not equal
 ```
 
-### Contains
+### Substring Match
 
 ```typescript
-p.name.contains("ali")   // Substring match (case-sensitive)
+p.name.contains("ali")   // Case-insensitive substring match
 ```
 
 ### Prefix/Suffix
 
 ```typescript
-p.name.startsWith("A")   // Starts with
-p.name.endsWith("ice")   // Ends with
+p.name.startsWith("A")   // Case-insensitive prefix match
+p.name.endsWith("ice")   // Case-insensitive suffix match
 ```
 
 ### Pattern Matching
 
 ```typescript
-p.email.like("%@example.com")  // SQL LIKE (% = any chars, _ = single char)
-p.name.ilike("alice")          // Case-insensitive LIKE
+p.email.like("%@example.com")  // SQL LIKE (case-sensitive) — % = any chars, _ = single char
+p.name.ilike("alice%")         // Case-insensitive LIKE
 ```
 
 ### List Membership
@@ -119,21 +134,25 @@ p.email.isNull()
 p.email.isNotNull()
 ```
 
-### Full Reference
+### Reference
 
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `eq(value)` | Exact match | `name.eq("Alice")` |
-| `neq(value)` | Not equal | `name.neq("Bob")` |
-| `contains(str)` | Contains substring | `name.contains("ali")` |
-| `startsWith(str)` | Starts with prefix | `name.startsWith("A")` |
-| `endsWith(str)` | Ends with suffix | `name.endsWith("ice")` |
-| `like(pattern)` | SQL LIKE pattern | `email.like("%@example.com")` |
-| `ilike(pattern)` | Case-insensitive LIKE | `name.ilike("alice")` |
-| `in(values[])` | In array | `status.in(["a", "b"])` |
-| `notIn(values[])` | Not in array | `status.notIn(["x"])` |
-| `isNull()` | Is null | `email.isNull()` |
-| `isNotNull()` | Is not null | `email.isNotNull()` |
+| Predicate | Accepts | Description | SQL | Case |
+|-----------|---------|-------------|-----|------|
+| `eq(value)` | `string \| param()` | Exact match | `=` | sensitive |
+| `neq(value)` | `string \| param()` | Not equal | `!=` | sensitive |
+| `contains(str)` | `string \| param()` | Substring match | `ILIKE '%str%'` | insensitive |
+| `startsWith(str)` | `string \| param()` | Prefix match | `ILIKE 'str%'` | insensitive |
+| `endsWith(str)` | `string \| param()` | Suffix match | `ILIKE '%str'` | insensitive |
+| `like(pattern)` | `string \| param()` | SQL LIKE pattern | `LIKE` | sensitive |
+| `ilike(pattern)` | `string \| param()` | Case-insensitive LIKE | `ILIKE` | insensitive |
+| `in(values[])` | `string[]` | In array | `IN (...)` | sensitive |
+| `notIn(values[])` | `string[]` | Not in array | `NOT IN (...)` | sensitive |
+| `isNull()` | — | Is null | `IS NULL` | — |
+| `isNotNull()` | — | Is not null | `IS NOT NULL` | — |
+
+> **Wildcard escaping:** User input passed to `contains`, `startsWith`, and `endsWith` is
+> automatically escaped — `%` and `_` characters are treated as literals. Use `like` or `ilike`
+> when you need wildcard control.
 
 ---
 
@@ -160,7 +179,7 @@ p.age.lte(65)        // Less than or equal
 ### Range
 
 ```typescript
-p.age.between(18, 65)  // Inclusive range
+p.age.between(18, 65)  // Inclusive on both bounds
 ```
 
 ### List Membership
@@ -177,21 +196,37 @@ p.score.isNull()
 p.score.isNotNull()
 ```
 
-### Full Reference
+### Reference
 
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `eq(value)` | Equals | `age.eq(30)` |
-| `neq(value)` | Not equals | `age.neq(0)` |
-| `gt(value)` | Greater than | `salary.gt(50000)` |
-| `gte(value)` | Greater than or equal | `salary.gte(50000)` |
-| `lt(value)` | Less than | `age.lt(65)` |
-| `lte(value)` | Less than or equal | `age.lte(65)` |
-| `between(lo, hi)` | Inclusive range | `age.between(18, 65)` |
-| `in(values[])` | In array | `priority.in([1, 2])` |
-| `notIn(values[])` | Not in array | `priority.notIn([0])` |
-| `isNull()` | Is null | `score.isNull()` |
-| `isNotNull()` | Is not null | `score.isNotNull()` |
+| Predicate | Accepts | Description | SQL |
+|-----------|---------|-------------|-----|
+| `eq(value)` | `number \| param()` | Equals | `=` |
+| `neq(value)` | `number \| param()` | Not equals | `!=` |
+| `gt(value)` | `number \| param()` | Greater than | `>` |
+| `gte(value)` | `number \| param()` | Greater than or equal | `>=` |
+| `lt(value)` | `number \| param()` | Less than | `<` |
+| `lte(value)` | `number \| param()` | Less than or equal | `<=` |
+| `between(lo, hi)` | `number \| param()` | Inclusive range | `BETWEEN lo AND hi` |
+| `in(values[])` | `number[]` | In array | `IN (...)` |
+| `notIn(values[])` | `number[]` | Not in array | `NOT IN (...)` |
+| `isNull()` | — | Is null | `IS NULL` |
+| `isNotNull()` | — | Is not null | `IS NOT NULL` |
+
+---
+
+## Boolean
+
+Boolean fields support only the [common predicates](#common-predicates):
+
+```typescript
+p.isActive.eq(true)
+p.isActive.neq(false)
+p.isVerified.isNull()
+p.role.in(["admin", "moderator"])  // works on string enums too
+```
+
+No additional boolean-specific predicates are provided — `eq(true)` and `eq(false)` cover the
+typical cases.
 
 ---
 
@@ -234,21 +269,21 @@ p.deletedAt.isNull()
 p.verifiedAt.isNotNull()
 ```
 
-### Full Reference
+### Reference
 
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `eq(value)` | Equals | `createdAt.eq("2024-01-01")` |
-| `neq(value)` | Not equals | `createdAt.neq("2024-01-01")` |
-| `gt(value)` | After | `createdAt.gt("2024-01-01")` |
-| `gte(value)` | On or after | `createdAt.gte("2024-01-01")` |
-| `lt(value)` | Before | `createdAt.lt(new Date())` |
-| `lte(value)` | On or before | `createdAt.lte("2024-12-31")` |
-| `between(lo, hi)` | Inclusive range | `createdAt.between("2024-01-01", "2024-12-31")` |
-| `in(values[])` | In array | `date.in(["2024-01-01"])` |
-| `notIn(values[])` | Not in array | `date.notIn(["2024-01-01"])` |
-| `isNull()` | Is null | `deletedAt.isNull()` |
-| `isNotNull()` | Is not null | `verifiedAt.isNotNull()` |
+| Predicate | Accepts | Description | SQL |
+|-----------|---------|-------------|-----|
+| `eq(value)` | `Date \| string \| param()` | Equals | `=` |
+| `neq(value)` | `Date \| string \| param()` | Not equals | `!=` |
+| `gt(value)` | `Date \| string \| param()` | After | `>` |
+| `gte(value)` | `Date \| string \| param()` | On or after | `>=` |
+| `lt(value)` | `Date \| string \| param()` | Before | `<` |
+| `lte(value)` | `Date \| string \| param()` | On or before | `<=` |
+| `between(lo, hi)` | `Date \| string \| param()` | Inclusive range | `BETWEEN lo AND hi` |
+| `in(values[])` | `(Date \| string)[]` | In array | `IN (...)` |
+| `notIn(values[])` | `(Date \| string)[]` | Not in array | `NOT IN (...)` |
+| `isNull()` | — | Is null | `IS NULL` |
+| `isNotNull()` | — | Is not null | `IS NOT NULL` |
 
 ---
 
@@ -256,13 +291,17 @@ p.verifiedAt.isNotNull()
 
 Array predicates for fields that contain arrays (e.g., `tags: z.array(z.string())`).
 
-### Contains
+### Containment
 
 ```typescript
 p.tags.contains("typescript")              // Has specific value
 p.tags.containsAll(["typescript", "nodejs"]) // Has ALL values
 p.tags.containsAny(["typescript", "rust"])   // Has ANY value
 ```
+
+Containment predicates (`contains`, `containsAll`, `containsAny`) are only available when the
+array element type is a scalar — `string`, `number`, `boolean`, or `Date`. They will not
+type-check for arrays of objects or arrays.
 
 ### Empty Checks
 
@@ -281,29 +320,20 @@ p.scores.lengthLt(10)   // Fewer than 10 elements
 p.scores.lengthLte(5)   // 5 or fewer elements
 ```
 
-### Length Accessor
+### Reference
 
-Access the array length as a number for complex predicates:
-
-```typescript
-p.tags.length.between(1, 5)  // 1-5 tags
-```
-
-### Full Reference
-
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `contains(value)` | Has value | `tags.contains("ts")` |
-| `containsAll(values[])` | Has all values | `tags.containsAll(["a", "b"])` |
-| `containsAny(values[])` | Has any value | `tags.containsAny(["a", "b"])` |
-| `isEmpty()` | Empty or null | `tags.isEmpty()` |
-| `isNotEmpty()` | Has elements | `tags.isNotEmpty()` |
-| `lengthEq(n)` | Exactly n elements | `tags.lengthEq(3)` |
-| `lengthGt(n)` | More than n | `tags.lengthGt(0)` |
-| `lengthGte(n)` | n or more | `tags.lengthGte(3)` |
-| `lengthLt(n)` | Fewer than n | `tags.lengthLt(10)` |
-| `lengthLte(n)` | n or fewer | `tags.lengthLte(5)` |
-| `length` | Length accessor | `tags.length.between(1, 5)` |
+| Predicate | Accepts | Description | SQL |
+|-----------|---------|-------------|-----|
+| `contains(value)` | `T` | Has value | JSON array contains |
+| `containsAll(values[])` | `T[]` | Has all values | AND of contains |
+| `containsAny(values[])` | `T[]` | Has any value | OR of contains |
+| `isEmpty()` | — | Empty or null | `IS NULL OR length = 0` |
+| `isNotEmpty()` | — | Has elements | `IS NOT NULL AND length > 0` |
+| `lengthEq(n)` | `number` | Exactly n elements | `json_array_length(col) = n` |
+| `lengthGt(n)` | `number` | More than n | `json_array_length(col) > n` |
+| `lengthGte(n)` | `number` | n or more | `json_array_length(col) >= n` |
+| `lengthLt(n)` | `number` | Fewer than n | `json_array_length(col) < n` |
+| `lengthLte(n)` | `number` | n or fewer | `json_array_length(col) <= n` |
 
 > **Note:** `isEmpty()` matches both empty arrays (`[]`) and null/undefined values. Use `isNull()`
 > to check specifically for null.
@@ -312,14 +342,32 @@ p.tags.length.between(1, 5)  // 1-5 tags
 
 ## Object
 
-Object predicates for JSON/object fields. Use JSON Pointer syntax for nested access.
+Object predicates for JSON/object fields. Supports both fluent chaining with `get()` and
+[JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) syntax for deep access.
 
-### Nested Access
+### Nested Access with `get()`
+
+Type-safe chaining through known keys:
 
 ```typescript
-p.metadata.get("theme").eq("dark")           // Access nested field
-p.settings.get("notifications").get("email").eq(true)  // Deep nesting
+p.metadata.get("theme").eq("dark")
+p.settings.get("notifications").get("email").eq(true)
 ```
+
+`get()` returns a typed field builder — if the nested field is a string you get string predicates,
+if it's a number you get number predicates, and so on.
+
+### Nested Access with `field()`
+
+Access nested fields by JSON Pointer path:
+
+```typescript
+p.config.field("/settings/theme").eq("dark")
+p.config.field(["settings", "theme"]).eq("dark")  // Array form
+```
+
+Like `get()`, `field()` returns a typed field builder for the resolved path. Use `field()` when
+you need to reach deeply nested paths in a single call.
 
 ### Key Existence
 
@@ -331,23 +379,28 @@ p.metadata.hasKey("theme")                   // Has top-level key
 
 ```typescript
 p.config.hasPath("/nested/key")              // Has nested path
-p.config.pathEquals("/settings/theme", "dark")  // Path equals value
-p.config.pathContains("/tags", "featured")   // Path array contains
-p.config.pathIsNull("/optional")             // Path is null
-p.config.pathIsNotNull("/required")          // Path is not null
+p.config.pathEquals("/settings/theme", "dark")  // Value at path equals scalar
+p.config.pathContains("/tags", "featured")   // Array at path contains value
+p.config.pathIsNull("/optional")             // Value at path is null
+p.config.pathIsNotNull("/required")          // Value at path is not null
 ```
 
-### Full Reference
+### Reference
 
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `get(key)` | Access nested field | `meta.get("theme").eq("dark")` |
-| `hasKey(key)` | Has top-level key | `meta.hasKey("theme")` |
-| `hasPath(pointer)` | Has nested path | `config.hasPath("/a/b")` |
-| `pathEquals(pointer, value)` | Path equals value | `config.pathEquals("/theme", "dark")` |
-| `pathContains(pointer, value)` | Path array contains | `config.pathContains("/tags", "x")` |
-| `pathIsNull(pointer)` | Path is null | `config.pathIsNull("/opt")` |
-| `pathIsNotNull(pointer)` | Path is not null | `config.pathIsNotNull("/req")` |
+| Predicate | Accepts | Description |
+|-----------|---------|-------------|
+| `get(key)` | `string` (key name) | Access nested field, returns typed field builder |
+| `field(pointer)` | `string \| string[]` (JSON Pointer) | Access field by path, returns typed field builder |
+| `hasKey(key)` | `string` | Has top-level key |
+| `hasPath(pointer)` | `string \| string[]` | Has nested path |
+| `pathEquals(pointer, value)` | pointer + `string \| number \| boolean \| Date` | Value at path equals scalar |
+| `pathContains(pointer, value)` | pointer + `string \| number \| boolean \| Date` | Array at path contains value |
+| `pathIsNull(pointer)` | `string \| string[]` | Value at path is null |
+| `pathIsNotNull(pointer)` | `string \| string[]` | Value at path is not null |
+
+> **JSON Pointer syntax:** Use `/key/nested/value` string form or `["key", "nested", "value"]`
+> array form. `pathEquals` only works on scalar values (not objects or arrays). `pathContains`
+> requires the path to point to an array.
 
 ---
 
@@ -360,7 +413,7 @@ Embedding predicates for vector similarity search on embedding fields.
 Find similar vectors using distance metrics:
 
 ```typescript
-p.embedding.similarTo(queryEmbedding, 10)  // Top 10 similar
+p.embedding.similarTo(queryEmbedding, 10)  // Top 10 similar (cosine)
 ```
 
 ### With Options
@@ -372,20 +425,20 @@ p.embedding.similarTo(queryEmbedding, 10, {
 })
 ```
 
-### Full Reference
+### Reference
 
-| Predicate | Description | Example |
-|-----------|-------------|---------|
-| `similarTo(embedding, k)` | Top k similar | `emb.similarTo(vec, 10)` |
-| `similarTo(embedding, k, opts)` | With options | `emb.similarTo(vec, 10, { metric: "cosine" })` |
+| Predicate | Accepts | Description |
+|-----------|---------|-------------|
+| `similarTo(embedding, k)` | `number[], number` | Top k most similar vectors (cosine) |
+| `similarTo(embedding, k, opts)` | `number[], number, SimilarToOptions` | Top k with custom metric and threshold |
 
 ### Distance Metrics
 
-| Metric | Description | Best For |
-|--------|-------------|----------|
-| `cosine` | Cosine similarity (default) | Normalized embeddings, semantic similarity |
-| `l2` | Euclidean (L2) distance | Absolute distances, unnormalized vectors |
-| `inner_product` | Inner product (PostgreSQL only) | Maximum inner product search (MIPS) |
+| Metric | Description | Range | Default | Best For |
+|--------|-------------|-------|---------|----------|
+| `cosine` | Cosine similarity | 0–1 (1 = identical) | Yes | Normalized embeddings, semantic similarity |
+| `l2` | Euclidean distance | 0–∞ (0 = identical) | | Absolute distances, unnormalized vectors |
+| `inner_product` | Inner product (PostgreSQL only) | -∞ to ∞ | | Maximum Inner Product Search (MIPS) |
 
 ### Example: Semantic Search
 
@@ -407,9 +460,44 @@ const similar = await store
   .execute();
 ```
 
+> **Limitations:** Results are automatically ordered by similarity (most similar first).
+> `similarTo` cannot be nested under `OR` or `NOT`. SQLite does not support embeddings —
+> vector search requires PostgreSQL with pgvector.
+
 ---
+
+## Parameterized Predicates
+
+Use `param(name)` to create a named placeholder for [prepared queries](/queries/execute#prepared-queries).
+
+```typescript
+import { param } from "@nicia-ai/typegraph";
+
+const prepared = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq(param("name")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+const results = await prepared.execute({ name: "Alice" });
+```
+
+### Supported Positions
+
+| Position | Supported | Example |
+|----------|-----------|---------|
+| Scalar comparisons (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`) | Yes | `p.age.gt(param("minAge"))` |
+| `between` bounds | Yes | `p.age.between(param("lo"), param("hi"))` |
+| String operations (`contains`, `startsWith`, `endsWith`, `like`, `ilike`) | Yes | `p.name.contains(param("search"))` |
+| `in` / `notIn` | No | Array length must be known at compile time |
+| Array predicates | No | — |
+| Subquery predicates | No | — |
+
+See [Prepared Queries](/queries/execute#prepared-queries) for full usage and performance details.
 
 ## Next Steps
 
-- [Filter](/queries/filter) - Using predicates in queries
-- [Overview](/queries/overview) - Query builder categories
+- [Filter](/queries/filter) — Using predicates in queries
+- [Subqueries](/queries/advanced) — `exists()`, `notExists()`, `inSubquery()`, `notInSubquery()`
+- [Overview](/queries/overview) — Query builder categories

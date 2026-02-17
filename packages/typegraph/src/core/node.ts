@@ -75,7 +75,7 @@ export function defineNode<
 
   return Object.freeze({
     [NODE_TYPE_BRAND]: true as const,
-    name,
+    kind: name,
     schema: options.schema,
     description: options.description,
   }) as NodeType<K, S>;

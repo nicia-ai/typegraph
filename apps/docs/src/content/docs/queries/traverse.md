@@ -38,8 +38,16 @@ const employments = await store
 | `edgeKind` | `string` | The edge kind to traverse |
 | `edgeAlias` | `string` | Unique alias for referencing this edge |
 | `options.direction` | `"out" \| "in"` | Traversal direction (default: `"out"`) |
-| `options.includeImplyingEdges` | `boolean` | Include edges that imply this edge via ontology |
+| `options.expand` | `"none" \| "implying" \| "inverse" \| "all"` | Ontology edge expansion mode (default: `"inverse"`) |
 | `options.from` | `string` | Fan-out from a different node alias |
+
+### optionalTraverse()
+
+```typescript
+.optionalTraverse(edgeKind, edgeAlias, options?)
+```
+
+Uses the same options as `traverse()`, but returns optional edge/node values in the result context.
 
 ### to()
 
@@ -232,13 +240,45 @@ const connections = await store
   .query()
   .from("Person", "p")
   .whereNode("p", (p) => p.name.eq("Alice"))
-  .traverse("knows", "e", { includeImplyingEdges: true })
+  .traverse("knows", "e", { expand: "implying" })
   .to("Person", "other")
   .select((ctx) => ctx.other.name)
   .execute();
 
 // Returns people connected via "knows", "marriedTo", or "bestFriends"
 ```
+
+If your ontology defines inverse edge kinds, you can expand traversals to include inverse edges:
+
+```typescript
+// Ontology: inverseOf(manages, managedBy)
+
+const relationships = await store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq("Alice"))
+  .traverse("manages", "e", { expand: "inverse" })
+  .to("Person", "other")
+  .select((ctx) => ({
+    name: ctx.other.name,
+    viaEdgeKind: ctx.e.kind,
+  }))
+  .execute();
+
+// Traverses both "manages" and "managedBy"
+```
+
+You can combine both options:
+
+```typescript
+.traverse("knows", "e", { expand: "all" })
+```
+
+:::note[Default expansion mode]
+The default expansion mode is `"inverse"`, meaning traversals automatically include inverse edge kinds
+from your ontology. To opt out for a single traversal, pass `expand: "none"`. To change the default
+for all traversals, set `queryDefaults.traversalExpansion` in `createStore` options.
+:::
 
 ## Real-World Examples
 
@@ -297,6 +337,6 @@ const orderDetails = await store
 
 ## Next Steps
 
-- [Recursive](/queries/recursive) - Variable-length paths with `recursive()`, `maxHops()`, `minHops()`
+- [Recursive](/queries/recursive) - Variable-length paths with `recursive()`
 - [Filter](/queries/filter) - Filter nodes and edges with predicates
 - [Shape](/queries/shape) - Transform output with `select()`

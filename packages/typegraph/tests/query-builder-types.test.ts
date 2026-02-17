@@ -15,13 +15,13 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  buildKindRegistry,
   createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   type TypedEdgeCollection,
 } from "../src";
+import { buildKindRegistry } from "../src/registry";
 
 // ============================================================
 // Test Graph Definition
