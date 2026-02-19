@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.3.1
+
+### Patch Changes
+
+- [#8](https://github.com/nicia-ai/typegraph/pull/8) [`4732792`](https://github.com/nicia-ai/typegraph/commit/4732792a9ff7ed665f55bb314029c06024f5b62e) Thanks [@pdlug](https://github.com/pdlug)! - Fix `AnyPgDatabase` type to accept standard Drizzle instances created without an explicit schema
+
 ## 0.3.0
 
 ### Minor Changes
