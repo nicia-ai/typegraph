@@ -20,7 +20,7 @@ type PgClientCarrier = Readonly<{
   $client?: PgQueryClient;
 }>;
 
-export type AnyPgDatabase = PgDatabase<PgQueryResultHKT>;
+export type AnyPgDatabase = PgDatabase<PgQueryResultHKT, Record<string, unknown>>;
 
 export type PostgresExecutionAdapter = SqlExecutionAdapter;
 
