@@ -2,7 +2,7 @@
   "name": "typegraph-monorepo",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.29.1",
+  "packageManager": "pnpm@10.30.1",
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
@@ -27,12 +27,12 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
-    "knip": "^5.83.1",
+    "knip": "^5.84.1",
     "markdownlint-cli2": "^0.21.0",
     "npm-run-all2": "^8.0.4",
     "prettier": "^3.8.1",
     "tsx": "^4.21.0",
-    "turbo": "^2.8.9",
+    "turbo": "^2.8.10",
     "typescript": "^5.9.3"
   }
 }
