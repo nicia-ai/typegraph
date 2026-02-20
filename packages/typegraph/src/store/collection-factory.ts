@@ -16,6 +16,7 @@ import {
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
+  type FindOrCreateOptions,
   type Node,
   type NodeCollection,
   type QueryOptions,
@@ -63,6 +64,20 @@ export type NodeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeFindOrCreate: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: FindOrCreateOptions,
+  ) => Promise<Readonly<{ node: Node; created: boolean }>>;
+  executeBulkFindOrCreate: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: FindOrCreateOptions,
+  ) => Promise<Readonly<{ node: Node; created: boolean }>[]>;
 }>;
 
 export type EdgeOperations = Readonly<{

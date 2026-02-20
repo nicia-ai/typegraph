@@ -18,6 +18,7 @@ import {
 import { type GraphDef } from "../../core/define-graph";
 import { type NodeType, type UniqueConstraint } from "../../core/types";
 import {
+  ConstraintNotFoundError,
   DatabaseOperationError,
   KindNotFoundError,
   NodeNotFoundError,
@@ -40,6 +41,7 @@ import {
 import { rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
+  type FindOrCreateOptions,
   type Node,
   type OperationHookContext,
   type UpdateNodeInput,
@@ -950,4 +952,329 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       backend.transaction(async (tx) => hardDelete(tx))
     : hardDelete(backend));
   });
+}
+
+// ============================================================
+// FindOrCreate Operations
+// ============================================================
+
+function resolveConstraint<G extends GraphDef>(
+  graph: G,
+  kind: string,
+  constraintName: string,
+): UniqueConstraint {
+  const registration = getNodeRegistration(graph, kind);
+  const constraints = registration.unique ?? [];
+  const constraint = constraints.find((c) => c.name === constraintName);
+  if (constraint === undefined) {
+    throw new ConstraintNotFoundError(constraintName, kind);
+  }
+  return constraint;
+}
+
+/**
+ * Executes a findOrCreate operation for a single node.
+ *
+ * Looks up an existing node by uniqueness constraint key.
+ * If found, returns it (with optional update). If not found, creates a new one.
+ * Soft-deleted matches are always resurrected.
+ */
+export async function executeNodeFindOrCreate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  constraintName: string,
+  props: Record<string, unknown>,
+  backend: GraphBackend | TransactionBackend,
+  options?: FindOrCreateOptions,
+): Promise<Readonly<{ node: Node; created: boolean }>> {
+  const onConflict = options?.onConflict ?? "skip";
+
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const nodeKind = registration.type;
+  const validatedProps = validateNodeProps(nodeKind.schema, props, {
+    kind,
+    operation: "create",
+  });
+
+  const constraint = resolveConstraint(ctx.graph, kind, constraintName);
+
+  if (!checkWherePredicate(constraint, validatedProps)) {
+    // Constraint where predicate doesn't apply — always create
+    const input: CreateNodeInput = { kind, props: validatedProps };
+    const node = await executeNodeCreate(ctx, input, backend);
+    return { node, created: true };
+  }
+
+  const key = computeUniqueKey(
+    validatedProps,
+    constraint.fields,
+    constraint.collation,
+  );
+
+  // Check uniques table across all applicable kinds
+  const kindsToCheck = getKindsForUniquenessCheck(
+    kind,
+    constraint.scope,
+    ctx.registry,
+  );
+
+  let existingUniqueRow:
+    | { node_id: string; concrete_kind: string; deleted_at: string | undefined }
+    | undefined;
+  for (const kindToCheck of kindsToCheck) {
+    const row = await backend.checkUnique({
+      graphId: ctx.graphId,
+      nodeKind: kindToCheck,
+      constraintName: constraint.name,
+      key,
+      includeDeleted: true,
+    });
+    if (row !== undefined) {
+      existingUniqueRow = row;
+      break;
+    }
+  }
+
+  if (existingUniqueRow === undefined) {
+    // No match — create new node
+    const input: CreateNodeInput = { kind, props: validatedProps };
+    const node = await executeNodeCreate(ctx, input, backend);
+    return { node, created: true };
+  }
+
+  // Match found — fetch using concrete_kind (may differ from requested kind
+  // when scope is "kindWithSubClasses" and the match is on a sibling/parent kind)
+  const existingRow = await backend.getNode(
+    ctx.graphId,
+    existingUniqueRow.concrete_kind,
+    existingUniqueRow.node_id,
+  );
+
+  if (existingRow === undefined) {
+    // Unique entry exists but node doesn't — create fresh
+    const input: CreateNodeInput = { kind, props: validatedProps };
+    const node = await executeNodeCreate(ctx, input, backend);
+    return { node, created: true };
+  }
+
+  const isSoftDeleted = existingRow.deleted_at !== undefined;
+
+  if (isSoftDeleted || onConflict === "update") {
+    const concreteKind = existingUniqueRow.concrete_kind;
+    const node = await executeNodeUpsertUpdate(
+      ctx,
+      { kind: concreteKind, id: existingRow.id as UpdateNodeInput["id"], props: validatedProps },
+      backend,
+      { clearDeleted: isSoftDeleted },
+    );
+    return { node, created: false };
+  }
+
+  // onConflict === "skip" and node is live — return as-is
+  return { node: rowToNode(existingRow), created: false };
+}
+
+/**
+ * Executes a bulk findOrCreate operation.
+ *
+ * Batch-checks existing keys, partitions into creates and fetches,
+ * and assembles results in input order.
+ */
+export async function executeNodeBulkFindOrCreate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  constraintName: string,
+  items: readonly Readonly<{ props: Record<string, unknown> }>[],
+  backend: GraphBackend | TransactionBackend,
+  options?: FindOrCreateOptions,
+): Promise<Readonly<{ node: Node; created: boolean }>[]> {
+  if (items.length === 0) return [];
+
+  const onConflict = options?.onConflict ?? "skip";
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const nodeKind = registration.type;
+  const constraint = resolveConstraint(ctx.graph, kind, constraintName);
+
+  // Step 1: Validate all props and compute keys
+  const validated: {
+    validatedProps: Record<string, unknown>;
+    key: string | undefined;
+  }[] = [];
+
+  for (const item of items) {
+    const validatedProps = validateNodeProps(nodeKind.schema, item.props, {
+      kind,
+      operation: "create",
+    });
+    const applies = checkWherePredicate(constraint, validatedProps);
+    const key =
+      applies ?
+        computeUniqueKey(
+          validatedProps,
+          constraint.fields,
+          constraint.collation,
+        )
+      : undefined;
+    validated.push({ validatedProps, key });
+  }
+
+  // Step 2: Batch-check existing keys
+  const uniqueKeys = [
+    ...new Set(
+      validated
+        .map((v) => v.key)
+        .filter((k): k is string => k !== undefined),
+    ),
+  ];
+
+  const kindsToCheck = getKindsForUniquenessCheck(
+    kind,
+    constraint.scope,
+    ctx.registry,
+  );
+
+  // Map from key -> UniqueRow for matches found
+  const existingByKey = new Map<
+    string,
+    { node_id: string; concrete_kind: string; deleted_at: string | undefined }
+  >();
+
+  if (uniqueKeys.length > 0) {
+    for (const kindToCheck of kindsToCheck) {
+      if (backend.checkUniqueBatch === undefined) {
+        // Fallback to sequential checkUnique
+        for (const key of uniqueKeys) {
+          if (existingByKey.has(key)) continue;
+          const row = await backend.checkUnique({
+            graphId: ctx.graphId,
+            nodeKind: kindToCheck,
+            constraintName: constraint.name,
+            key,
+            includeDeleted: true,
+          });
+          if (row !== undefined) {
+            existingByKey.set(row.key, row);
+          }
+        }
+      } else {
+        const rows = await backend.checkUniqueBatch({
+          graphId: ctx.graphId,
+          nodeKind: kindToCheck,
+          constraintName: constraint.name,
+          keys: uniqueKeys,
+          includeDeleted: true,
+        });
+        for (const row of rows) {
+          if (!existingByKey.has(row.key)) {
+            existingByKey.set(row.key, row);
+          }
+        }
+      }
+    }
+  }
+
+  // Step 3: Partition into toCreate, toFetch, and duplicates
+  const toCreate: { index: number; input: CreateNodeInput }[] = [];
+  const toFetch: {
+    index: number;
+    nodeId: string;
+    concreteKind: string;
+    validatedProps: Record<string, unknown>;
+    isSoftDeleted: boolean;
+  }[] = [];
+  // Indices that duplicate another entry (within-batch or same existing key).
+  // These reuse the result from the first occurrence rather than re-fetching.
+  const duplicateOf: { index: number; sourceIndex: number }[] = [];
+
+  // Track keys we've already seen in this batch to handle duplicates within the input
+  const seenKeys = new Map<string, number>(); // key -> first index
+
+  for (const [index, { validatedProps, key }] of validated.entries()) {
+
+    if (key === undefined) {
+      // Constraint doesn't apply — always create
+      toCreate.push({
+        index,
+        input: { kind, props: validatedProps },
+      });
+      continue;
+    }
+
+    // Check if we've already handled this key in a previous input item
+    const previousIndex = seenKeys.get(key);
+    if (previousIndex !== undefined) {
+      // Duplicate within the batch — reuse the first item's result
+      duplicateOf.push({ index, sourceIndex: previousIndex });
+      continue;
+    }
+
+    seenKeys.set(key, index);
+
+    const existing = existingByKey.get(key);
+    if (existing === undefined) {
+      toCreate.push({
+        index,
+        input: { kind, props: validatedProps },
+      });
+    } else {
+      toFetch.push({
+        index,
+        nodeId: existing.node_id,
+        concreteKind: existing.concrete_kind,
+        validatedProps,
+        isSoftDeleted: existing.deleted_at !== undefined,
+      });
+    }
+  }
+
+  type Result = Readonly<{ node: Node; created: boolean }>;
+
+  // Step 4: Execute creates
+  const results: Result[] = Array.from({ length: items.length });
+
+  if (toCreate.length > 0) {
+    const createInputs = toCreate.map((entry) => entry.input);
+    const createdNodes = await executeNodeCreateBatch(
+      ctx,
+      createInputs,
+      backend,
+    );
+    for (const [batchIndex, entry] of toCreate.entries()) {
+      results[entry.index] = { node: createdNodes[batchIndex]!, created: true };
+    }
+  }
+
+  // Step 5: Handle existing nodes (fetch/update/resurrect)
+  for (const entry of toFetch) {
+    const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } = entry;
+
+    const existingRow = await backend.getNode(ctx.graphId, concreteKind, nodeId);
+
+    if (existingRow === undefined) {
+      const input: CreateNodeInput = { kind, props: validatedProps };
+      const node = await executeNodeCreate(ctx, input, backend);
+      results[index] = { node, created: true };
+      continue;
+    }
+
+    if (isSoftDeleted || onConflict === "update") {
+      const node = await executeNodeUpsertUpdate(
+        ctx,
+        { kind: concreteKind, id: existingRow.id as UpdateNodeInput["id"], props: validatedProps },
+        backend,
+        { clearDeleted: isSoftDeleted },
+      );
+      results[index] = { node, created: false };
+    } else {
+      results[index] = { node: rowToNode(existingRow), created: false };
+    }
+  }
+
+  // Step 6: Resolve within-batch duplicates by copying the first occurrence's result
+  for (const { index, sourceIndex } of duplicateOf) {
+    const sourceResult = results[sourceIndex]!;
+    results[index] = { node: sourceResult.node, created: false };
+  }
+
+  return results;
 }

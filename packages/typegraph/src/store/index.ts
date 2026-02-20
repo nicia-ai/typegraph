@@ -4,6 +4,8 @@ export {
   type CreateNodeInput,
   type Edge,
   type EdgeCollection,
+  type FindOrCreateOptions,
+  type FindOrCreateResult,
   type HookContext,
   type Node,
   type NodeCollection,

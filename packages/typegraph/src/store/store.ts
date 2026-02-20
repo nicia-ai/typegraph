@@ -31,10 +31,12 @@ import {
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
+  executeNodeBulkFindOrCreate,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeFindOrCreate,
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
@@ -237,6 +239,10 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
+      executeFindOrCreate: (kind, constraintName, props, backend, options) =>
+        executeNodeFindOrCreate(ctx, kind, constraintName, props, backend, options),
+      executeBulkFindOrCreate: (kind, constraintName, items, backend, options) =>
+        executeNodeBulkFindOrCreate(ctx, kind, constraintName, items, backend, options),
     };
   }
 

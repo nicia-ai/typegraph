@@ -7,6 +7,16 @@
  * - Endpoint type constraints on edges
  * - Disjointness constraints between node kinds
  */
+
+/**
+ * Separator used between field values in composite unique keys.
+ * Uses ASCII Record Separator (0x1E) — valid UTF-8 and safe for PostgreSQL
+ * TEXT columns (unlike \0 which PostgreSQL rejects).
+ */
+const UNIQUE_KEY_SEPARATOR = "\u001E";
+
+/** Marker for undefined/null field values in unique keys. */
+const UNIQUE_KEY_NULL_MARKER = "\u001F"; // ASCII Unit Separator
 import {
   type Cardinality,
   type Collation,
@@ -40,7 +50,7 @@ export function computeUniqueKey(
   const values = fields.map((field) => {
     const value = props[field];
     if (value === undefined || value === null) {
-      return "\0"; // Null marker
+      return UNIQUE_KEY_NULL_MARKER;
     }
     // Convert to string, handling primitives safely
     const stringValue =
@@ -52,7 +62,7 @@ export function computeUniqueKey(
         stringValue.toLowerCase()
       : stringValue;
   });
-  return values.join("\0");
+  return values.join(UNIQUE_KEY_SEPARATOR);
 }
 
 /**

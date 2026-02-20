@@ -18,6 +18,8 @@ import { nowIso } from "../../utils/date";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
+  type FindOrCreateOptions,
+  type FindOrCreateResult,
   type Node,
   type NodeCollection,
   type QueryOptions,
@@ -82,6 +84,20 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeFindOrCreate: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: FindOrCreateOptions,
+  ) => Promise<Readonly<{ node: Node; created: boolean }>>;
+  executeBulkFindOrCreate: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: FindOrCreateOptions,
+  ) => Promise<Readonly<{ node: Node; created: boolean }>[]>;
 }>;
 
 function mapBulkNodeInputs(
@@ -135,6 +151,8 @@ export function createNodeCollection<
     executeHardDelete: executeNodeHardDelete,
     matchesTemporalMode,
     createQuery,
+    executeFindOrCreate,
+    executeBulkFindOrCreate,
   } = config;
 
   return {
@@ -546,6 +564,64 @@ export function createNodeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async findOrCreate(
+      constraintName: string,
+      props: z.input<N["schema"]>,
+      options?: FindOrCreateOptions,
+    ): Promise<FindOrCreateResult<N>> {
+      const execute = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<FindOrCreateResult<N>> => {
+        const result = await executeFindOrCreate(
+          kind,
+          constraintName,
+          props as Record<string, unknown>,
+          target,
+          options,
+        );
+        return result as FindOrCreateResult<N>;
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) => execute(txBackend));
+      }
+      return execute(backend);
+    },
+
+    async bulkFindOrCreate(
+      constraintName: string,
+      items: readonly Readonly<{
+        props: z.input<N["schema"]>;
+      }>[],
+      options?: FindOrCreateOptions,
+    ): Promise<FindOrCreateResult<N>[]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        props: item.props as Record<string, unknown>,
+      }));
+
+      const findOrCreateAll = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<FindOrCreateResult<N>[]> => {
+        const results = await executeBulkFindOrCreate(
+          kind,
+          constraintName,
+          mappedItems,
+          target,
+          options,
+        );
+        return results as FindOrCreateResult<N>[];
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) =>
+          findOrCreateAll(txBackend),
+        );
+      }
+      return findOrCreateAll(backend);
     },
   };
 }

@@ -244,6 +244,26 @@ export type StoreOptions = Readonly<{
 }>;
 
 // ============================================================
+// FindOrCreate Types
+// ============================================================
+
+/**
+ * Result of a findOrCreate operation.
+ */
+export type FindOrCreateResult<N extends NodeType> = Readonly<{
+  node: Node<N>;
+  created: boolean;
+}>;
+
+/**
+ * Options for findOrCreate operations.
+ */
+export type FindOrCreateOptions = Readonly<{
+  /** Conflict resolution strategy. Default: "skip" */
+  onConflict?: "skip" | "update";
+}>;
+
+// ============================================================
 // Collection Interfaces
 // ============================================================
 
@@ -378,6 +398,37 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * that don't exist.
    */
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+
+  /**
+   * Find an existing node by uniqueness constraint, or create a new one.
+   *
+   * Looks up a node by the named constraint key computed from `props`.
+   * If found, returns it (optionally updating with `onConflict: "update"`).
+   * If not found, creates a new node. Soft-deleted matches are always resurrected.
+   *
+   * @param constraintName - Name of the uniqueness constraint to match on
+   * @param props - Full properties for create, or merge source for update
+   * @param options - Conflict resolution strategy (default: "skip")
+   */
+  findOrCreate: (
+    constraintName: string,
+    props: z.input<N["schema"]>,
+    options?: FindOrCreateOptions,
+  ) => Promise<FindOrCreateResult<N>>;
+
+  /**
+   * Batch version of findOrCreate.
+   *
+   * Results are returned in the same order as the input items.
+   * Atomic when the backend supports transactions.
+   */
+  bulkFindOrCreate: (
+    constraintName: string,
+    items: readonly Readonly<{
+      props: z.input<N["schema"]>;
+    }>[],
+    options?: FindOrCreateOptions,
+  ) => Promise<FindOrCreateResult<N>[]>;
 }>;
 
 /**

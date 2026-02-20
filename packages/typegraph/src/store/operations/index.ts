@@ -16,11 +16,13 @@ export {
   executeEdgeUpsertUpdate,
 } from "./edge-operations";
 export {
+  executeNodeBulkFindOrCreate,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturn,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeFindOrCreate,
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,

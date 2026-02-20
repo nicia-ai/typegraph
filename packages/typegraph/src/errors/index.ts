@@ -289,6 +289,29 @@ export class KindNotFoundError extends TypeGraphError {
   }
 }
 
+/**
+ * Thrown when a uniqueness constraint name is not found on a node kind.
+ */
+export class ConstraintNotFoundError extends TypeGraphError {
+  constructor(
+    constraintName: string,
+    kind: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Constraint not found: "${constraintName}" on node kind "${kind}"`,
+      "CONSTRAINT_NOT_FOUND",
+      {
+        details: { constraintName, kind },
+        category: "user",
+        suggestion: `Verify the constraint name "${constraintName}" is defined in the unique constraints for "${kind}".`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "ConstraintNotFoundError";
+  }
+}
+
 // ============================================================
 // Constraint Errors (category: "constraint")
 // ============================================================
