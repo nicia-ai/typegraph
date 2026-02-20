@@ -24,10 +24,12 @@ import {
 } from "./collection-factory";
 import {
   type EdgeOperationContext,
+  executeEdgeBulkFindOrCreate,
   executeEdgeCreate,
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeFindOrCreate,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
@@ -240,9 +242,29 @@ export class Store<G extends GraphDef> {
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
       executeFindOrCreate: (kind, constraintName, props, backend, options) =>
-        executeNodeFindOrCreate(ctx, kind, constraintName, props, backend, options),
-      executeBulkFindOrCreate: (kind, constraintName, items, backend, options) =>
-        executeNodeBulkFindOrCreate(ctx, kind, constraintName, items, backend, options),
+        executeNodeFindOrCreate(
+          ctx,
+          kind,
+          constraintName,
+          props,
+          backend,
+          options,
+        ),
+      executeBulkFindOrCreate: (
+        kind,
+        constraintName,
+        items,
+        backend,
+        options,
+      ) =>
+        executeNodeBulkFindOrCreate(
+          ctx,
+          kind,
+          constraintName,
+          items,
+          backend,
+          options,
+        ),
     };
   }
 
@@ -268,6 +290,29 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
+      executeFindOrCreate: (
+        kind,
+        fromKind,
+        fromId,
+        toKind,
+        toId,
+        props,
+        backend,
+        options,
+      ) =>
+        executeEdgeFindOrCreate(
+          ctx,
+          kind,
+          fromKind,
+          fromId,
+          toKind,
+          toId,
+          props,
+          backend,
+          options,
+        ),
+      executeBulkFindOrCreate: (kind, items, backend, options) =>
+        executeEdgeBulkFindOrCreate(ctx, kind, items, backend, options),
     };
   }
 

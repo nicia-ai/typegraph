@@ -1063,7 +1063,11 @@ export async function executeNodeFindOrCreate<G extends GraphDef>(
     const concreteKind = existingUniqueRow.concrete_kind;
     const node = await executeNodeUpsertUpdate(
       ctx,
-      { kind: concreteKind, id: existingRow.id as UpdateNodeInput["id"], props: validatedProps },
+      {
+        kind: concreteKind,
+        id: existingRow.id as UpdateNodeInput["id"],
+        props: validatedProps,
+      },
       backend,
       { clearDeleted: isSoftDeleted },
     );
@@ -1121,9 +1125,7 @@ export async function executeNodeBulkFindOrCreate<G extends GraphDef>(
   // Step 2: Batch-check existing keys
   const uniqueKeys = [
     ...new Set(
-      validated
-        .map((v) => v.key)
-        .filter((k): k is string => k !== undefined),
+      validated.map((v) => v.key).filter((k): k is string => k !== undefined),
     ),
   ];
 
@@ -1190,7 +1192,6 @@ export async function executeNodeBulkFindOrCreate<G extends GraphDef>(
   const seenKeys = new Map<string, number>(); // key -> first index
 
   for (const [index, { validatedProps, key }] of validated.entries()) {
-
     if (key === undefined) {
       // Constraint doesn't apply — always create
       toCreate.push({
@@ -1246,9 +1247,14 @@ export async function executeNodeBulkFindOrCreate<G extends GraphDef>(
 
   // Step 5: Handle existing nodes (fetch/update/resurrect)
   for (const entry of toFetch) {
-    const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } = entry;
+    const { index, concreteKind, validatedProps, isSoftDeleted, nodeId } =
+      entry;
 
-    const existingRow = await backend.getNode(ctx.graphId, concreteKind, nodeId);
+    const existingRow = await backend.getNode(
+      ctx.graphId,
+      concreteKind,
+      nodeId,
+    );
 
     if (existingRow === undefined) {
       const input: CreateNodeInput = { kind, props: validatedProps };
@@ -1260,7 +1266,11 @@ export async function executeNodeBulkFindOrCreate<G extends GraphDef>(
     if (isSoftDeleted || onConflict === "update") {
       const node = await executeNodeUpsertUpdate(
         ctx,
-        { kind: concreteKind, id: existingRow.id as UpdateNodeInput["id"], props: validatedProps },
+        {
+          kind: concreteKind,
+          id: existingRow.id as UpdateNodeInput["id"],
+          props: validatedProps,
+        },
         backend,
         { clearDeleted: isSoftDeleted },
       );

@@ -263,6 +263,27 @@ export type FindOrCreateOptions = Readonly<{
   onConflict?: "skip" | "update";
 }>;
 
+/**
+ * Result of an edge findOrCreate operation.
+ */
+export type EdgeFindOrCreateResult<E extends AnyEdgeType> = Readonly<{
+  edge: Edge<E>;
+  created: boolean;
+}>;
+
+/**
+ * Options for edge findOrCreate operations.
+ */
+export type EdgeFindOrCreateOptions<E extends AnyEdgeType> = Readonly<{
+  /**
+   * Edge property fields to include in the match key alongside the (from, to) endpoints.
+   * Default: `[]` — match on endpoints only.
+   */
+  matchOn?: readonly (keyof z.input<E["schema"]>)[];
+  /** Conflict resolution strategy. Default: "skip" */
+  onConflict?: "skip" | "update";
+}>;
+
 // ============================================================
 // Collection Interfaces
 // ============================================================
@@ -630,6 +651,40 @@ export type EdgeCollection<
    * that don't exist.
    */
   bulkDelete: (ids: readonly string[]) => Promise<void>;
+
+  /**
+   * Find an existing edge by endpoints and optional property fields, or create a new one.
+   *
+   * Matches edges of this kind between `(from, to)`. When `matchOn` specifies
+   * property fields, only edges whose properties match on those fields are considered.
+   * Soft-deleted matches are resurrected when cardinality allows.
+   *
+   * @param from - Source node
+   * @param to - Target node
+   * @param props - Full properties for create, or merge source for update
+   * @param options - Match criteria and conflict resolution
+   */
+  findOrCreate: (
+    from: TypedNodeRef<From>,
+    to: TypedNodeRef<To>,
+    props: z.input<E["schema"]>,
+    options?: EdgeFindOrCreateOptions<E>,
+  ) => Promise<EdgeFindOrCreateResult<E>>;
+
+  /**
+   * Batch version of findOrCreate.
+   *
+   * Results are returned in the same order as the input items.
+   * Atomic when the backend supports transactions.
+   */
+  bulkFindOrCreate: (
+    items: readonly Readonly<{
+      from: TypedNodeRef<From>;
+      to: TypedNodeRef<To>;
+      props: z.input<E["schema"]>;
+    }>[],
+    options?: EdgeFindOrCreateOptions<E>,
+  ) => Promise<EdgeFindOrCreateResult<E>[]>;
 }>;
 
 // ============================================================

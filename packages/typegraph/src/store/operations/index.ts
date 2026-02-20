@@ -6,11 +6,13 @@
 
 export {
   type EdgeOperationContext,
+  executeEdgeBulkFindOrCreate,
   executeEdgeCreate,
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturn,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeFindOrCreate,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,

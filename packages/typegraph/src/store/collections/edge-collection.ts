@@ -19,6 +19,8 @@ import {
   type CreateEdgeInput,
   type Edge,
   type EdgeCollection,
+  type EdgeFindOrCreateOptions,
+  type EdgeFindOrCreateResult,
   type NodeRef,
   type QueryOptions,
 } from "../types";
@@ -86,6 +88,34 @@ export type EdgeCollectionConfig = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeFindOrCreate: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      onConflict?: "skip" | "update";
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; created: boolean }>>;
+  executeBulkFindOrCreate: (
+    kind: string,
+    items: readonly Readonly<{
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      onConflict?: "skip" | "update";
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; created: boolean }>[]>;
 }>;
 
 function mapBulkEdgeInputs(
@@ -457,7 +487,7 @@ export function createEdgeCollection<
               validTo?: string;
             } = {
               id: item.id,
-              props: (item.props ?? {}) as Record<string, unknown>,
+              props: item.props as Record<string, unknown>,
             };
             if (item.validTo !== undefined) input.validTo = item.validTo;
 
@@ -484,7 +514,7 @@ export function createEdgeCollection<
               fromId: item.from.id,
               toKind: item.to.kind,
               toId: item.to.id,
-              props: (item.props ?? {}) as Record<string, unknown>,
+              props: item.props as Record<string, unknown>,
             };
             if (item.validFrom !== undefined) input.validFrom = item.validFrom;
             if (item.validTo !== undefined) input.validTo = item.validTo;
@@ -568,6 +598,84 @@ export function createEdgeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async findOrCreate(
+      from: NodeRef,
+      to: NodeRef,
+      props: z.input<E["schema"]>,
+      options?: EdgeFindOrCreateOptions<E>,
+    ): Promise<EdgeFindOrCreateResult<E>> {
+      const findOrCreateOptions: {
+        matchOn?: readonly string[];
+        onConflict?: "skip" | "update";
+      } = {};
+      if (options?.matchOn !== undefined)
+        findOrCreateOptions.matchOn = options.matchOn as readonly string[];
+      if (options?.onConflict !== undefined)
+        findOrCreateOptions.onConflict = options.onConflict;
+
+      const result = await config.executeFindOrCreate(
+        kind,
+        from.kind,
+        from.id,
+        to.kind,
+        to.id,
+        props as Record<string, unknown>,
+        backend,
+        findOrCreateOptions,
+      );
+      return { edge: narrowEdge<E>(result.edge), created: result.created };
+    },
+
+    async bulkFindOrCreate(
+      items: readonly Readonly<{
+        from: NodeRef;
+        to: NodeRef;
+        props: z.input<E["schema"]>;
+      }>[],
+      options?: EdgeFindOrCreateOptions<E>,
+    ): Promise<EdgeFindOrCreateResult<E>[]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        fromKind: item.from.kind,
+        fromId: item.from.id,
+        toKind: item.to.kind,
+        toId: item.to.id,
+        props: item.props as Record<string, unknown>,
+      }));
+
+      const findOrCreateOptions: {
+        matchOn?: readonly string[];
+        onConflict?: "skip" | "update";
+      } = {};
+      if (options?.matchOn !== undefined)
+        findOrCreateOptions.matchOn = options.matchOn as readonly string[];
+      if (options?.onConflict !== undefined)
+        findOrCreateOptions.onConflict = options.onConflict;
+
+      const findOrCreateAll = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<EdgeFindOrCreateResult<E>[]> => {
+        const results = await config.executeBulkFindOrCreate(
+          kind,
+          mappedItems,
+          target,
+          findOrCreateOptions,
+        );
+        return results.map((result) => ({
+          edge: narrowEdge<E>(result.edge),
+          created: result.created,
+        }));
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) =>
+          findOrCreateAll(txBackend),
+        );
+      }
+      return findOrCreateAll(backend);
     },
   };
 }

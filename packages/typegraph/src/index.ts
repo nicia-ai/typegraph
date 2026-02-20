@@ -198,6 +198,8 @@ export type {
   CreateNodeInput,
   Edge,
   EdgeCollection,
+  EdgeFindOrCreateOptions,
+  EdgeFindOrCreateResult,
   FindOrCreateOptions,
   FindOrCreateResult,
   HookContext,

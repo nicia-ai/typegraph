@@ -122,6 +122,34 @@ export type EdgeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeFindOrCreate: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      onConflict?: "skip" | "update";
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; created: boolean }>>;
+  executeBulkFindOrCreate: (
+    kind: string,
+    items: readonly Readonly<{
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      onConflict?: "skip" | "update";
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; created: boolean }>[]>;
 }>;
 
 /**
