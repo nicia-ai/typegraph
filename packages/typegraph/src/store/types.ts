@@ -184,7 +184,7 @@ export type OperationHookContext = HookContext &
 /**
  * Observability hooks for monitoring store operations.
  *
- * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`) skip
+ * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip
  * per-item operation hooks for throughput. Query hooks still fire normally.
  *
  * @example
@@ -244,45 +244,56 @@ export type StoreOptions = Readonly<{
 }>;
 
 // ============================================================
-// FindOrCreate Types
+// Get-Or-Create Types
 // ============================================================
 
 /**
- * Result of a findOrCreate operation.
+ * Behavior when a get-or-create operation matches an existing record.
  */
-export type FindOrCreateResult<N extends NodeType> = Readonly<{
+export type IfExistsMode = "return" | "update";
+
+/**
+ * Action taken by a get-or-create operation.
+ */
+export type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
+
+/**
+ * Result of a node getOrCreateByConstraint operation.
+ */
+export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
   node: Node<N>;
-  created: boolean;
+  action: GetOrCreateAction;
 }>;
 
 /**
- * Options for findOrCreate operations.
+ * Options for node getOrCreateByConstraint operations.
  */
-export type FindOrCreateOptions = Readonly<{
-  /** Conflict resolution strategy. Default: "skip" */
-  onConflict?: "skip" | "update";
+export type NodeGetOrCreateByConstraintOptions = Readonly<{
+  /** Existing record behavior. Default: "return" */
+  ifExists?: IfExistsMode;
 }>;
 
 /**
- * Result of an edge findOrCreate operation.
+ * Result of an edge getOrCreateByEndpoints operation.
  */
-export type EdgeFindOrCreateResult<E extends AnyEdgeType> = Readonly<{
+export type EdgeGetOrCreateByEndpointsResult<E extends AnyEdgeType> = Readonly<{
   edge: Edge<E>;
-  created: boolean;
+  action: GetOrCreateAction;
 }>;
 
 /**
- * Options for edge findOrCreate operations.
+ * Options for edge getOrCreateByEndpoints operations.
  */
-export type EdgeFindOrCreateOptions<E extends AnyEdgeType> = Readonly<{
-  /**
-   * Edge property fields to include in the match key alongside the (from, to) endpoints.
-   * Default: `[]` — match on endpoints only.
-   */
-  matchOn?: readonly (keyof z.input<E["schema"]>)[];
-  /** Conflict resolution strategy. Default: "skip" */
-  onConflict?: "skip" | "update";
-}>;
+export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
+  Readonly<{
+    /**
+     * Edge property fields to include in the match key alongside the (from, to) endpoints.
+     * Default: `[]` — match on endpoints only.
+     */
+    matchOn?: readonly (keyof z.input<E["schema"]>)[];
+    /** Existing record behavior. Default: "return" */
+    ifExists?: IfExistsMode;
+  }>;
 
 // ============================================================
 // Collection Interfaces
@@ -360,7 +371,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * If a node with the given ID exists, updates it with the provided props.
    * Otherwise, creates a new node with that ID.
    */
-  upsert: (
+  upsertById: (
     id: string,
     props: z.input<N["schema"]>,
     options?: Readonly<{ validFrom?: string; validTo?: string }>,
@@ -387,7 +398,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * For each item, if a node with the given ID exists, updates it.
    * Otherwise, creates a new node with that ID.
    */
-  bulkUpsert: (
+  bulkUpsertById: (
     items: readonly Readonly<{
       id: string;
       props: z.input<N["schema"]>;
@@ -421,35 +432,35 @@ export type NodeCollection<N extends NodeType> = Readonly<{
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
 
   /**
-   * Find an existing node by uniqueness constraint, or create a new one.
+   * Get an existing node by uniqueness constraint, or create a new one.
    *
    * Looks up a node by the named constraint key computed from `props`.
-   * If found, returns it (optionally updating with `onConflict: "update"`).
+   * If found, returns it (optionally updating with `ifExists: "update"`).
    * If not found, creates a new node. Soft-deleted matches are always resurrected.
    *
    * @param constraintName - Name of the uniqueness constraint to match on
    * @param props - Full properties for create, or merge source for update
-   * @param options - Conflict resolution strategy (default: "skip")
+   * @param options - Existing record behavior (default: "return")
    */
-  findOrCreate: (
+  getOrCreateByConstraint: (
     constraintName: string,
     props: z.input<N["schema"]>,
-    options?: FindOrCreateOptions,
-  ) => Promise<FindOrCreateResult<N>>;
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
 
   /**
-   * Batch version of findOrCreate.
+   * Batch version of getOrCreateByConstraint.
    *
    * Results are returned in the same order as the input items.
    * Atomic when the backend supports transactions.
    */
-  bulkFindOrCreate: (
+  bulkGetOrCreateByConstraint: (
     constraintName: string,
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
     }>[],
-    options?: FindOrCreateOptions,
-  ) => Promise<FindOrCreateResult<N>[]>;
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
 /**
@@ -615,7 +626,7 @@ export type EdgeCollection<
    * For each item, if an edge with the given ID exists, updates it.
    * Otherwise, creates a new edge with that ID.
    */
-  bulkUpsert: (
+  bulkUpsertById: (
     items: readonly Readonly<{
       id: string;
       from: TypedNodeRef<From>;
@@ -653,7 +664,7 @@ export type EdgeCollection<
   bulkDelete: (ids: readonly string[]) => Promise<void>;
 
   /**
-   * Find an existing edge by endpoints and optional property fields, or create a new one.
+   * Get an existing edge by endpoints and optional property fields, or create a new one.
    *
    * Matches edges of this kind between `(from, to)`. When `matchOn` specifies
    * property fields, only edges whose properties match on those fields are considered.
@@ -664,27 +675,27 @@ export type EdgeCollection<
    * @param props - Full properties for create, or merge source for update
    * @param options - Match criteria and conflict resolution
    */
-  findOrCreate: (
+  getOrCreateByEndpoints: (
     from: TypedNodeRef<From>,
     to: TypedNodeRef<To>,
     props: z.input<E["schema"]>,
-    options?: EdgeFindOrCreateOptions<E>,
-  ) => Promise<EdgeFindOrCreateResult<E>>;
+    options?: EdgeGetOrCreateByEndpointsOptions<E>,
+  ) => Promise<EdgeGetOrCreateByEndpointsResult<E>>;
 
   /**
-   * Batch version of findOrCreate.
+   * Batch version of getOrCreateByEndpoints.
    *
    * Results are returned in the same order as the input items.
    * Atomic when the backend supports transactions.
    */
-  bulkFindOrCreate: (
+  bulkGetOrCreateByEndpoints: (
     items: readonly Readonly<{
       from: TypedNodeRef<From>;
       to: TypedNodeRef<To>;
       props: z.input<E["schema"]>;
     }>[],
-    options?: EdgeFindOrCreateOptions<E>,
-  ) => Promise<EdgeFindOrCreateResult<E>[]>;
+    options?: EdgeGetOrCreateByEndpointsOptions<E>,
+  ) => Promise<EdgeGetOrCreateByEndpointsResult<E>[]>;
 }>;
 
 // ============================================================

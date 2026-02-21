@@ -75,7 +75,17 @@ export const graph = defineGraph({
   nodes: {
     Document: { type: Document },
     Chunk: { type: Chunk },
-    Entity: { type: Entity },
+    Entity: {
+      type: Entity,
+      unique: [
+        {
+          name: "entity_name_type",
+          fields: ["name", "type"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
   },
   edges: {
     containsChunk: { type: containsChunk, from: [Document], to: [Chunk] },
@@ -114,6 +124,8 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 The key graph RAG capability: linking chunks to disambiguated entities.
 
 ```typescript
+import type { Node } from "@nicia-ai/typegraph";
+
 interface ChunkData {
   text: string;
   entities: Array<{
@@ -133,7 +145,7 @@ async function ingestDocument(
     // Batch embed all chunks
     const chunkEmbeddings = await generateEmbeddings(chunks.map((c) => c.text));
 
-    let prevChunk: typeof Chunk.$node | undefined;
+    let prevChunk: Node<typeof Chunk> | undefined;
 
     for (const [i, chunkData] of chunks.entries()) {
       const chunk = await tx.nodes.Chunk.create({
@@ -148,26 +160,29 @@ async function ingestDocument(
         await tx.edges.nextChunk.create(prevChunk, chunk, {});
       }
 
-      // Link to entities (find-or-create for deduplication)
+      // Link to entities (dedupe by unique constraint)
       for (const entityData of chunkData.entities) {
-        let entity = await tx
-          .query()
-          .from("Entity", "e")
-          .whereNode("e", (e) =>
-            e.name.eq(entityData.name).and(e.type.eq(entityData.type))
-          )
-          .select((ctx) => ctx.e)
-          .first();
-
-        if (!entity) {
-          entity = await tx.nodes.Entity.create({
+        const entityResult = await tx.nodes.Entity.getOrCreateByConstraint(
+          "entity_name_type",
+          {
             name: entityData.name,
             type: entityData.type,
+          }
+        );
+
+        // Compute expensive derived fields only for newly created entities
+        if (entityResult.action === "created") {
+          await tx.nodes.Entity.update(entityResult.node.id, {
             embedding: await generateEmbedding(entityData.name),
           });
         }
 
-        await tx.edges.mentions.create(chunk, entity, {});
+        await tx.edges.mentions.getOrCreateByEndpoints(
+          chunk,
+          entityResult.node,
+          {},
+          { ifExists: "return" }
+        );
       }
 
       prevChunk = chunk;

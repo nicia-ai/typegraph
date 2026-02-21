@@ -1,5 +1,5 @@
 /**
- * Tests for findOrCreate and bulkFindOrCreate on NodeCollection and EdgeCollection.
+ * Tests for getOrCreateBy* APIs on NodeCollection and EdgeCollection.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -8,7 +8,7 @@ import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import {
   CardinalityError,
-  ConstraintNotFoundError,
+  NodeConstraintNotFoundError,
   ValidationError,
 } from "../src/errors";
 import { createStore } from "../src/store";
@@ -55,10 +55,10 @@ const graph = defineGraph({
 });
 
 // ============================================================
-// findOrCreate Tests
+// getOrCreateByConstraint Tests
 // ============================================================
 
-describe("store.nodes.*.findOrCreate()", () => {
+describe("store.nodes.*.getOrCreateByConstraint()", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -67,59 +67,71 @@ describe("store.nodes.*.findOrCreate()", () => {
 
   it("creates a node when none exists", async () => {
     const store = createStore(graph, backend);
-    const result = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "eng",
-    });
+    const result = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
 
-    expect(result.created).toBe(true);
+    expect(result.action).toBe("created");
     expect(result.node.entityType).toBe("Person");
     expect(result.node.name).toBe("Alice");
     expect(result.node.role).toBe("eng");
     expect(result.node.meta.version).toBe(1);
   });
 
-  it("finds existing node with onConflict: skip (default)", async () => {
+  it("finds existing node with ifExists: return (default)", async () => {
     const store = createStore(graph, backend);
 
     // Create first
-    const first = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "eng",
-    });
-    expect(first.created).toBe(true);
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
+    expect(first.action).toBe("created");
 
     // Find existing — role should NOT change
-    const second = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "manager",
-    });
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "manager",
+      },
+    );
 
-    expect(second.created).toBe(false);
+    expect(second.action).toBe("found");
     expect(second.node.id).toBe(first.node.id);
     expect(second.node.role).toBe("eng"); // unchanged
     expect(second.node.meta.version).toBe(1); // no version bump
   });
 
-  it("updates existing node with onConflict: update", async () => {
+  it("updates existing node with ifExists: update", async () => {
     const store = createStore(graph, backend);
 
-    const first = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "eng",
-    });
-
-    const second = await store.nodes.Entity.findOrCreate(
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
       "entity_key",
-      { entityType: "Person", name: "Alice", role: "manager" },
-      { onConflict: "update" },
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
     );
 
-    expect(second.created).toBe(false);
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      { entityType: "Person", name: "Alice", role: "manager" },
+      { ifExists: "update" },
+    );
+
+    expect(second.action).toBe("updated");
     expect(second.node.id).toBe(first.node.id);
     expect(second.node.role).toBe("manager"); // updated
     expect(second.node.meta.version).toBe(2); // version bumped
@@ -129,43 +141,49 @@ describe("store.nodes.*.findOrCreate()", () => {
     const store = createStore(graph, backend);
 
     // Create and then delete
-    const first = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "eng",
-    });
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
     await store.nodes.Entity.delete(first.node.id);
 
-    // findOrCreate should resurrect the soft-deleted node
-    const second = await store.nodes.Entity.findOrCreate("entity_key", {
-      entityType: "Person",
-      name: "Alice",
-      role: "resurrected",
-    });
+    // getOrCreateByConstraint should resurrect the soft-deleted node
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "resurrected",
+      },
+    );
 
-    expect(second.created).toBe(false);
+    expect(second.action).toBe("resurrected");
     expect(second.node.id).toBe(first.node.id);
     expect(second.node.role).toBe("resurrected");
     expect(second.node.meta.deletedAt).toBeUndefined();
   });
 
-  it("throws ConstraintNotFoundError for invalid constraint name", async () => {
+  it("throws NodeConstraintNotFoundError for invalid constraint name", async () => {
     const store = createStore(graph, backend);
 
     await expect(
-      store.nodes.Entity.findOrCreate("nonexistent_constraint", {
+      store.nodes.Entity.getOrCreateByConstraint("nonexistent_constraint", {
         entityType: "Person",
         name: "Alice",
       }),
-    ).rejects.toThrow(ConstraintNotFoundError);
+    ).rejects.toThrow(NodeConstraintNotFoundError);
   });
 });
 
 // ============================================================
-// bulkFindOrCreate Tests
+// bulkGetOrCreateByConstraint Tests
 // ============================================================
 
-describe("store.nodes.*.bulkFindOrCreate()", () => {
+describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -174,24 +192,30 @@ describe("store.nodes.*.bulkFindOrCreate()", () => {
 
   it("returns empty array for empty input", async () => {
     const store = createStore(graph, backend);
-    const results = await store.nodes.Entity.bulkFindOrCreate("entity_key", []);
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [],
+    );
     expect(results).toEqual([]);
   });
 
   it("creates all new nodes", async () => {
     const store = createStore(graph, backend);
-    const results = await store.nodes.Entity.bulkFindOrCreate("entity_key", [
-      { props: { entityType: "Person", name: "Alice" } },
-      { props: { entityType: "Person", name: "Bob" } },
-      { props: { entityType: "Company", name: "Acme" } },
-    ]);
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Alice" } },
+        { props: { entityType: "Person", name: "Bob" } },
+        { props: { entityType: "Company", name: "Acme" } },
+      ],
+    );
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.created).toBe(true);
+    expect(results[0]!.action).toBe("created");
     expect(results[0]!.node.name).toBe("Alice");
-    expect(results[1]!.created).toBe(true);
+    expect(results[1]!.action).toBe("created");
     expect(results[1]!.node.name).toBe("Bob");
-    expect(results[2]!.created).toBe(true);
+    expect(results[2]!.action).toBe("created");
     expect(results[2]!.node.name).toBe("Acme");
   });
 
@@ -202,14 +226,17 @@ describe("store.nodes.*.bulkFindOrCreate()", () => {
     await store.nodes.Entity.create({ entityType: "Person", name: "Alice" });
     await store.nodes.Entity.create({ entityType: "Person", name: "Bob" });
 
-    const results = await store.nodes.Entity.bulkFindOrCreate("entity_key", [
-      { props: { entityType: "Person", name: "Alice" } },
-      { props: { entityType: "Person", name: "Bob" } },
-    ]);
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Alice" } },
+        { props: { entityType: "Person", name: "Bob" } },
+      ],
+    );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(false);
-    expect(results[1]!.created).toBe(false);
+    expect(results[0]!.action).toBe("found");
+    expect(results[1]!.action).toBe("found");
   });
 
   it("handles mixed creates and finds with correct ordering", async () => {
@@ -222,29 +249,32 @@ describe("store.nodes.*.bulkFindOrCreate()", () => {
       role: "eng",
     });
 
-    const results = await store.nodes.Entity.bulkFindOrCreate("entity_key", [
-      { props: { entityType: "Person", name: "Bob" } }, // new
-      { props: { entityType: "Person", name: "Alice" } }, // existing
-      { props: { entityType: "Company", name: "Acme" } }, // new
-    ]);
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Bob" } }, // new
+        { props: { entityType: "Person", name: "Alice" } }, // existing
+        { props: { entityType: "Company", name: "Acme" } }, // new
+      ],
+    );
 
     expect(results).toHaveLength(3);
 
     // Bob is new
-    expect(results[0]!.created).toBe(true);
+    expect(results[0]!.action).toBe("created");
     expect(results[0]!.node.name).toBe("Bob");
 
     // Alice is found
-    expect(results[1]!.created).toBe(false);
+    expect(results[1]!.action).toBe("found");
     expect(results[1]!.node.id).toBe(alice.id);
     expect(results[1]!.node.role).toBe("eng");
 
     // Acme is new
-    expect(results[2]!.created).toBe(true);
+    expect(results[2]!.action).toBe("created");
     expect(results[2]!.node.name).toBe("Acme");
   });
 
-  it("bulk with onConflict: update updates existing nodes", async () => {
+  it("bulk with ifExists: update updates existing nodes", async () => {
     const store = createStore(graph, backend);
 
     await store.nodes.Entity.create({
@@ -253,19 +283,19 @@ describe("store.nodes.*.bulkFindOrCreate()", () => {
       role: "eng",
     });
 
-    const results = await store.nodes.Entity.bulkFindOrCreate(
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
       "entity_key",
       [
         { props: { entityType: "Person", name: "Alice", role: "manager" } },
         { props: { entityType: "Person", name: "Bob", role: "intern" } },
       ],
-      { onConflict: "update" },
+      { ifExists: "update" },
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(false);
+    expect(results[0]!.action).toBe("updated");
     expect(results[0]!.node.role).toBe("manager"); // updated
-    expect(results[1]!.created).toBe(true);
+    expect(results[1]!.action).toBe("created");
     expect(results[1]!.node.role).toBe("intern");
   });
 
@@ -279,30 +309,31 @@ describe("store.nodes.*.bulkFindOrCreate()", () => {
     });
     await store.nodes.Entity.delete(alice.id);
 
-    const results = await store.nodes.Entity.bulkFindOrCreate("entity_key", [
-      { props: { entityType: "Person", name: "Alice", role: "resurrected" } },
-    ]);
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [{ props: { entityType: "Person", name: "Alice", role: "resurrected" } }],
+    );
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.created).toBe(false);
+    expect(results[0]!.action).toBe("resurrected");
     expect(results[0]!.node.id).toBe(alice.id);
     expect(results[0]!.node.role).toBe("resurrected");
     expect(results[0]!.node.meta.deletedAt).toBeUndefined();
   });
 
-  it("throws ConstraintNotFoundError for invalid constraint name", async () => {
+  it("throws NodeConstraintNotFoundError for invalid constraint name", async () => {
     const store = createStore(graph, backend);
 
     await expect(
-      store.nodes.Entity.bulkFindOrCreate("nonexistent", [
+      store.nodes.Entity.bulkGetOrCreateByConstraint("nonexistent", [
         { props: { entityType: "Person", name: "Alice" } },
       ]),
-    ).rejects.toThrow(ConstraintNotFoundError);
+    ).rejects.toThrow(NodeConstraintNotFoundError);
   });
 });
 
 // ============================================================
-// Edge findOrCreate Test Schema
+// Edge getOrCreateByEndpoints Test Schema
 // ============================================================
 
 const Person = defineNode("Person", {
@@ -366,10 +397,10 @@ const edgeGraph = defineGraph({
 });
 
 // ============================================================
-// Edge findOrCreate Tests
+// Edge getOrCreateByEndpoints Tests
 // ============================================================
 
-describe("store.edges.*.findOrCreate()", () => {
+describe("store.edges.*.getOrCreateByEndpoints()", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -381,57 +412,73 @@ describe("store.edges.*.findOrCreate()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const result = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
+    const result = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
 
-    expect(result.created).toBe(true);
+    expect(result.action).toBe("created");
     expect(result.edge.role).toBe("eng");
     expect(result.edge.since).toBe(2020);
     expect(result.edge.fromId).toBe(alice.id);
     expect(result.edge.toId).toBe(acme.id);
   });
 
-  it("finds existing with onConflict: skip (default)", async () => {
+  it("finds existing with ifExists: return (default)", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
-    expect(first.created).toBe(true);
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
+    expect(first.action).toBe("created");
 
-    const second = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "manager",
-      since: 2024,
-    });
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "manager",
+        since: 2024,
+      },
+    );
 
-    expect(second.created).toBe(false);
+    expect(second.action).toBe("found");
     expect(second.edge.id).toBe(first.edge.id);
     expect(second.edge.role).toBe("eng"); // unchanged
   });
 
-  it("updates existing with onConflict: update", async () => {
+  it("updates existing with ifExists: update", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
 
-    const second = await store.edges.worksAt.findOrCreate(
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
       alice,
       acme,
       { role: "manager", since: 2024 },
-      { onConflict: "update" },
+      { ifExists: "update" },
     );
 
-    expect(second.created).toBe(false);
+    expect(second.action).toBe("updated");
     expect(second.edge.id).toBe(first.edge.id);
     expect(second.edge.role).toBe("manager");
     expect(second.edge.since).toBe(2024);
@@ -442,18 +489,26 @@ describe("store.edges.*.findOrCreate()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
     await store.edges.worksAt.delete(first.edge.id);
 
-    const second = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "resurrected",
-      since: 2025,
-    });
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "resurrected",
+        since: 2025,
+      },
+    );
 
-    expect(second.created).toBe(false);
+    expect(second.action).toBe("resurrected");
     expect(second.edge.id).toBe(first.edge.id);
     expect(second.edge.role).toBe("resurrected");
     expect(second.edge.meta.deletedAt).toBeUndefined();
@@ -465,32 +520,32 @@ describe("store.edges.*.findOrCreate()", () => {
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
     // Create first edge with role "eng"
-    const first = await store.edges.worksAt.findOrCreate(
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
       alice,
       acme,
       { role: "eng", since: 2020 },
       { matchOn: ["role"] },
     );
-    expect(first.created).toBe(true);
+    expect(first.action).toBe("created");
 
     // Same pair but different role → should create new edge
-    const second = await store.edges.worksAt.findOrCreate(
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
       alice,
       acme,
       { role: "manager", since: 2024 },
       { matchOn: ["role"] },
     );
-    expect(second.created).toBe(true);
+    expect(second.action).toBe("created");
     expect(second.edge.id).not.toBe(first.edge.id);
 
     // Same pair and same role → should find existing
-    const third = await store.edges.worksAt.findOrCreate(
+    const third = await store.edges.worksAt.getOrCreateByEndpoints(
       alice,
       acme,
       { role: "eng", since: 2025 },
       { matchOn: ["role"] },
     );
-    expect(third.created).toBe(false);
+    expect(third.action).toBe("found");
     expect(third.edge.id).toBe(first.edge.id);
   });
 
@@ -499,16 +554,24 @@ describe("store.edges.*.findOrCreate()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-    });
-    expect(first.created).toBe(true);
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+      },
+    );
+    expect(first.action).toBe("created");
 
     // Different props but same endpoints → should find existing
-    const second = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "manager",
-    });
-    expect(second.created).toBe(false);
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "manager",
+      },
+    );
+    expect(second.action).toBe("found");
     expect(second.edge.id).toBe(first.edge.id);
   });
 
@@ -530,13 +593,17 @@ describe("store.edges.*.findOrCreate()", () => {
       since: 2022,
     });
 
-    // findOrCreate should prefer the live edge
-    const result = await store.edges.worksAt.findOrCreate(alice, acme, {
-      role: "eng",
-      since: 2025,
-    });
+    // getOrCreateByEndpoints should prefer the live edge
+    const result = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2025,
+      },
+    );
 
-    expect(result.created).toBe(false);
+    expect(result.action).toBe("found");
     expect(result.edge.id).toBe(live.id);
   });
 
@@ -546,7 +613,7 @@ describe("store.edges.*.findOrCreate()", () => {
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
     await expect(
-      store.edges.worksAt.findOrCreate(
+      store.edges.worksAt.getOrCreateByEndpoints(
         alice,
         acme,
         { role: "eng" },
@@ -574,7 +641,7 @@ describe("store.edges.*.findOrCreate()", () => {
     // Trying to resurrect the deleted edge should throw because
     // there's already an active edge from alice
     await expect(
-      store.edges.oneActiveEdge.findOrCreate(alice, acme, {
+      store.edges.oneActiveEdge.getOrCreateByEndpoints(alice, acme, {
         label: "resurrected",
       }),
     ).rejects.toThrow(CardinalityError);
@@ -582,10 +649,10 @@ describe("store.edges.*.findOrCreate()", () => {
 });
 
 // ============================================================
-// Edge bulkFindOrCreate Tests
+// Edge bulkGetOrCreateByEndpoints Tests
 // ============================================================
 
-describe("store.edges.*.bulkFindOrCreate()", () => {
+describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -594,7 +661,7 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
 
   it("returns empty array for empty input", async () => {
     const store = createStore(edgeGraph, backend);
-    const results = await store.edges.worksAt.bulkFindOrCreate([]);
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([]);
     expect(results).toEqual([]);
   });
 
@@ -604,15 +671,15 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
     const bob = await store.nodes.Person.create({ name: "Bob" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const results = await store.edges.worksAt.bulkFindOrCreate([
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
       { from: alice, to: acme, props: { role: "eng" } },
       { from: bob, to: acme, props: { role: "manager" } },
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(true);
+    expect(results[0]!.action).toBe("created");
     expect(results[0]!.edge.role).toBe("eng");
-    expect(results[1]!.created).toBe(true);
+    expect(results[1]!.action).toBe("created");
     expect(results[1]!.edge.role).toBe("manager");
   });
 
@@ -628,15 +695,15 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
       since: 2020,
     });
 
-    const results = await store.edges.worksAt.bulkFindOrCreate([
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
       { from: bob, to: acme, props: { role: "manager" } }, // new
       { from: alice, to: acme, props: { role: "cto" } }, // existing
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(true);
+    expect(results[0]!.action).toBe("created");
     expect(results[0]!.edge.role).toBe("manager");
-    expect(results[1]!.created).toBe(false);
+    expect(results[1]!.action).toBe("found");
     expect(results[1]!.edge.id).toBe(existing.id);
   });
 
@@ -645,7 +712,7 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const results = await store.edges.worksAt.bulkFindOrCreate(
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
       [
         { from: alice, to: acme, props: { role: "eng", since: 2020 } },
         { from: alice, to: acme, props: { role: "eng", since: 2024 } }, // dup
@@ -654,25 +721,25 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(true);
-    expect(results[1]!.created).toBe(false);
+    expect(results[0]!.action).toBe("created");
+    expect(results[1]!.action).toBe("found");
     expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
   });
 
-  it("onConflict: update updates existing edges", async () => {
+  it("ifExists: update updates existing edges", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
     await store.edges.worksAt.create(alice, acme, { role: "eng", since: 2020 });
 
-    const results = await store.edges.worksAt.bulkFindOrCreate(
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
       [{ from: alice, to: acme, props: { role: "manager", since: 2024 } }],
-      { onConflict: "update" },
+      { ifExists: "update" },
     );
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.created).toBe(false);
+    expect(results[0]!.action).toBe("updated");
     expect(results[0]!.edge.role).toBe("manager");
     expect(results[0]!.edge.since).toBe(2024);
   });
@@ -688,33 +755,33 @@ describe("store.edges.*.bulkFindOrCreate()", () => {
     });
     await store.edges.worksAt.delete(first.id);
 
-    const results = await store.edges.worksAt.bulkFindOrCreate([
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
       { from: alice, to: acme, props: { role: "resurrected", since: 2025 } },
     ]);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.created).toBe(false);
+    expect(results[0]!.action).toBe("resurrected");
     expect(results[0]!.edge.id).toBe(first.id);
     expect(results[0]!.edge.role).toBe("resurrected");
     expect(results[0]!.edge.meta.deletedAt).toBeUndefined();
   });
 
-  it("duplicate inputs with onConflict: update → first creates, second updates", async () => {
+  it("duplicate inputs with ifExists: update → first creates, second updates", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const results = await store.edges.worksAt.bulkFindOrCreate(
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
       [
         { from: alice, to: acme, props: { role: "eng", since: 2020 } },
         { from: alice, to: acme, props: { role: "eng", since: 2024 } }, // dup
       ],
-      { matchOn: ["role"], onConflict: "update" },
+      { matchOn: ["role"], ifExists: "update" },
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.created).toBe(true);
-    expect(results[1]!.created).toBe(false);
+    expect(results[0]!.action).toBe("created");
+    expect(results[1]!.action).toBe("found");
     // Both reference the same edge
     expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
   });

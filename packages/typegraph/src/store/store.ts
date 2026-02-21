@@ -24,21 +24,21 @@ import {
 } from "./collection-factory";
 import {
   type EdgeOperationContext,
-  executeEdgeBulkFindOrCreate,
+  executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
-  executeEdgeFindOrCreate,
+  executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
-  executeNodeBulkFindOrCreate,
+  executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
-  executeNodeFindOrCreate,
+  executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
@@ -241,8 +241,14 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
-      executeFindOrCreate: (kind, constraintName, props, backend, options) =>
-        executeNodeFindOrCreate(
+      executeGetOrCreateByConstraint: (
+        kind,
+        constraintName,
+        props,
+        backend,
+        options,
+      ) =>
+        executeNodeGetOrCreateByConstraint(
           ctx,
           kind,
           constraintName,
@@ -250,14 +256,14 @@ export class Store<G extends GraphDef> {
           backend,
           options,
         ),
-      executeBulkFindOrCreate: (
+      executeBulkGetOrCreateByConstraint: (
         kind,
         constraintName,
         items,
         backend,
         options,
       ) =>
-        executeNodeBulkFindOrCreate(
+        executeNodeBulkGetOrCreateByConstraint(
           ctx,
           kind,
           constraintName,
@@ -290,7 +296,7 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
-      executeFindOrCreate: (
+      executeGetOrCreateByEndpoints: (
         kind,
         fromKind,
         fromId,
@@ -300,7 +306,7 @@ export class Store<G extends GraphDef> {
         backend,
         options,
       ) =>
-        executeEdgeFindOrCreate(
+        executeEdgeGetOrCreateByEndpoints(
           ctx,
           kind,
           fromKind,
@@ -311,8 +317,14 @@ export class Store<G extends GraphDef> {
           backend,
           options,
         ),
-      executeBulkFindOrCreate: (kind, items, backend, options) =>
-        executeEdgeBulkFindOrCreate(ctx, kind, items, backend, options),
+      executeBulkGetOrCreateByEndpoints: (kind, items, backend, options) =>
+        executeEdgeBulkGetOrCreateByEndpoints(
+          ctx,
+          kind,
+          items,
+          backend,
+          options,
+        ),
     };
   }
 

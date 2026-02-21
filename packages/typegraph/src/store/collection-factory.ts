@@ -16,9 +16,11 @@ import {
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
-  type FindOrCreateOptions,
+  type GetOrCreateAction,
+  type IfExistsMode,
   type Node,
   type NodeCollection,
+  type NodeGetOrCreateByConstraintOptions,
   type QueryOptions,
   type TypedEdgeCollection,
   type UpdateNodeInput,
@@ -64,20 +66,20 @@ export type NodeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
-  executeFindOrCreate: (
+  executeGetOrCreateByConstraint: (
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
     backend: GraphBackend | TransactionBackend,
-    options?: FindOrCreateOptions,
-  ) => Promise<Readonly<{ node: Node; created: boolean }>>;
-  executeBulkFindOrCreate: (
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByConstraint: (
     kind: string,
     constraintName: string,
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
     backend: GraphBackend | TransactionBackend,
-    options?: FindOrCreateOptions,
-  ) => Promise<Readonly<{ node: Node; created: boolean }>[]>;
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
 }>;
 
 export type EdgeOperations = Readonly<{
@@ -122,7 +124,7 @@ export type EdgeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
-  executeFindOrCreate: (
+  executeGetOrCreateByEndpoints: (
     kind: string,
     fromKind: string,
     fromId: string,
@@ -132,10 +134,10 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
-      onConflict?: "skip" | "update";
+      ifExists?: IfExistsMode;
     }>,
-  ) => Promise<Readonly<{ edge: Edge; created: boolean }>>;
-  executeBulkFindOrCreate: (
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByEndpoints: (
     kind: string,
     items: readonly Readonly<{
       fromKind: string;
@@ -147,9 +149,9 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
-      onConflict?: "skip" | "update";
+      ifExists?: IfExistsMode;
     }>,
-  ) => Promise<Readonly<{ edge: Edge; created: boolean }>[]>;
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]>;
 }>;
 
 /**

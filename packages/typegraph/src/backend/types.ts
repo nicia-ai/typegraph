@@ -502,7 +502,7 @@ export type CheckUniqueParams = Readonly<{
   nodeKind: string;
   constraintName: string;
   key: string;
-  /** If true, also returns soft-deleted entries. Used by findOrCreate. */
+  /** If true, also returns soft-deleted entries. Used by get-or-create operations. */
   includeDeleted?: boolean;
 }>;
 
@@ -514,7 +514,7 @@ export type CheckUniqueBatchParams = Readonly<{
   nodeKind: string;
   constraintName: string;
   keys: readonly string[];
-  /** If true, also returns soft-deleted entries. Used by findOrCreate. */
+  /** If true, also returns soft-deleted entries. Used by get-or-create operations. */
   includeDeleted?: boolean;
 }>;
 

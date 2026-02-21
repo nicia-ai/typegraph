@@ -5,6 +5,7 @@
  * - Defining node and edge kinds with Zod schemas
  * - Creating a graph definition
  * - Creating nodes and edges
+ * - Using upsert/get-or-create collection APIs
  * - Simple queries
  */
 import { z } from "zod";
@@ -64,7 +65,17 @@ const knows = defineEdge("knows", {
 const graph = defineGraph({
   id: "basic_example",
   nodes: {
-    Person: { type: Person },
+    Person: {
+      type: Person,
+      unique: [
+        {
+          name: "person_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
     Company: { type: Company },
   },
   edges: {
@@ -98,25 +109,46 @@ export async function main() {
   });
   console.log("Created Bob:", bob.id);
 
-  const acme = await store.nodes.Company.create({
+  const acme = await store.nodes.Company.upsertById("company:acme", {
     name: "Acme Corp",
     industry: "Technology",
     founded: 2010,
   });
-  console.log("Created Acme Corp:", acme.id);
+  console.log("Upserted Acme Corp by ID:", acme.id);
+
+  // Get or create by a uniqueness constraint (person_email)
+  const aliceByConstraint = await store.nodes.Person.getOrCreateByConstraint(
+    "person_email",
+    {
+      name: "Alice",
+      email: "alice@example.com",
+      age: 31,
+    },
+    { ifExists: "update" },
+  );
+  console.log(
+    "getOrCreateByConstraint for Alice:",
+    aliceByConstraint.action,
+    aliceByConstraint.node.id,
+  );
 
   // Create edges by passing nodes directly
-  await store.edges.worksAt.create(alice, acme, {
+  await store.edges.worksAt.create(aliceByConstraint.node, acme, {
     role: "Engineer",
     startDate: "2023-01-15",
   });
   console.log("Created edge: Alice worksAt Acme");
 
-  await store.edges.knows.create(alice, bob, { since: "2022-06-01" });
-  console.log("Created edge: Alice knows Bob");
+  const knowsResult = await store.edges.knows.getOrCreateByEndpoints(
+    aliceByConstraint.node,
+    bob,
+    { since: "2022-06-01" },
+    { ifExists: "return" },
+  );
+  console.log("getOrCreateByEndpoints (knows):", knowsResult.action, knowsResult.edge.id);
 
   // Retrieve nodes by ID
-  const retrievedAlice = await store.nodes.Person.getById(alice.id);
+  const retrievedAlice = await store.nodes.Person.getById(aliceByConstraint.node.id);
   console.log(
     "\nRetrieved Alice:",
     retrievedAlice && { name: retrievedAlice.name, email: retrievedAlice.email },

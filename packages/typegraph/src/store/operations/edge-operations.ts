@@ -31,6 +31,8 @@ import { rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
+  type GetOrCreateAction,
+  type IfExistsMode,
   type OperationHookContext,
 } from "../types";
 
@@ -721,7 +723,7 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
 }
 
 // ============================================================
-// FindOrCreate Operations
+// Get-Or-Create Operations
 // ============================================================
 
 // Delimiters for composite match keys
@@ -865,9 +867,9 @@ function findMatchingEdge(
 }
 
 /**
- * Executes a single edge findOrCreate operation.
+ * Executes a single getOrCreateByEndpoints operation.
  */
-export async function executeEdgeFindOrCreate<G extends GraphDef>(
+export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
   fromKind: string,
@@ -878,10 +880,10 @@ export async function executeEdgeFindOrCreate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{
     matchOn?: readonly string[];
-    onConflict?: "skip" | "update";
+    ifExists?: IfExistsMode;
   }>,
-): Promise<Readonly<{ edge: Edge; created: boolean }>> {
-  const onConflict = options?.onConflict ?? "skip";
+): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+  const ifExists = options?.ifExists ?? "return";
   const matchOn = options?.matchOn ?? [];
 
   const registration = getEdgeRegistration(ctx.graph, kind);
@@ -925,21 +927,21 @@ export async function executeEdgeFindOrCreate<G extends GraphDef>(
       props: validatedProps,
     };
     const edge = await executeEdgeCreate(ctx, input, backend);
-    return { edge, created: true };
+    return { edge, action: "created" };
   }
 
   // Live match found
   if (liveRow !== undefined) {
-    if (onConflict === "skip") {
-      return { edge: rowToEdge(liveRow), created: false };
+    if (ifExists === "return") {
+      return { edge: rowToEdge(liveRow), action: "found" };
     }
-    // onConflict === "update"
+    // ifExists === "update"
     const edge = await executeEdgeUpsertUpdate(
       ctx,
       { id: liveRow.id, props: validatedProps },
       backend,
     );
-    return { edge, created: false };
+    return { edge, action: "updated" };
   }
 
   // Deleted match only → check cardinality before resurrect
@@ -969,13 +971,13 @@ export async function executeEdgeFindOrCreate<G extends GraphDef>(
     backend,
     { clearDeleted: true },
   );
-  return { edge, created: false };
+  return { edge, action: "resurrected" };
 }
 
 /**
- * Executes a bulk edge findOrCreate operation.
+ * Executes a bulk getOrCreateByEndpoints operation.
  */
-export async function executeEdgeBulkFindOrCreate<G extends GraphDef>(
+export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
   items: readonly Readonly<{
@@ -988,12 +990,12 @@ export async function executeEdgeBulkFindOrCreate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{
     matchOn?: readonly string[];
-    onConflict?: "skip" | "update";
+    ifExists?: IfExistsMode;
   }>,
-): Promise<Readonly<{ edge: Edge; created: boolean }>[]> {
+): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]> {
   if (items.length === 0) return [];
 
-  const onConflict = options?.onConflict ?? "skip";
+  const ifExists = options?.ifExists ?? "return";
   const matchOn = options?.matchOn ?? [];
 
   const registration = getEdgeRegistration(ctx.graph, kind);
@@ -1144,7 +1146,7 @@ export async function executeEdgeBulkFindOrCreate<G extends GraphDef>(
 
   interface Result {
     readonly edge: Edge;
-    readonly created: boolean;
+    readonly action: GetOrCreateAction;
   }
   const results: Result[] = Array.from({ length: items.length });
 
@@ -1157,7 +1159,10 @@ export async function executeEdgeBulkFindOrCreate<G extends GraphDef>(
       backend,
     );
     for (const [batchIndex, entry] of toCreate.entries()) {
-      results[entry.index] = { edge: createdEdges[batchIndex]!, created: true };
+      results[entry.index] = {
+        edge: createdEdges[batchIndex]!,
+        action: "created",
+      };
     }
   }
 
@@ -1188,23 +1193,23 @@ export async function executeEdgeBulkFindOrCreate<G extends GraphDef>(
         backend,
         { clearDeleted: true },
       );
-      results[entry.index] = { edge, created: false };
-    } else if (onConflict === "update") {
+      results[entry.index] = { edge, action: "resurrected" };
+    } else if (ifExists === "update") {
       const edge = await executeEdgeUpsertUpdate(
         ctx,
         { id: entry.row.id, props: entry.validatedProps },
         backend,
       );
-      results[entry.index] = { edge, created: false };
+      results[entry.index] = { edge, action: "updated" };
     } else {
-      results[entry.index] = { edge: rowToEdge(entry.row), created: false };
+      results[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
     }
   }
 
   // Step 6: Resolve within-batch duplicates
   for (const { index, sourceIndex } of duplicateOf) {
     const sourceResult = results[sourceIndex]!;
-    results[index] = { edge: sourceResult.edge, created: false };
+    results[index] = { edge: sourceResult.edge, action: "found" };
   }
 
   return results;

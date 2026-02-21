@@ -579,9 +579,9 @@ describe("Bulk Operations (SQLite)", () => {
     store = createStore(testGraph, backend);
   });
 
-  describe("store.nodes.*.upsert()", () => {
+  describe("store.nodes.*.upsertById()", () => {
     it("creates a node if it does not exist", async () => {
-      const person = await store.nodes.Person.upsert("person-1", {
+      const person = await store.nodes.Person.upsertById("person-1", {
         name: "Alice",
         email: "alice@example.com",
       });
@@ -594,7 +594,7 @@ describe("Bulk Operations (SQLite)", () => {
     it("updates a node if it exists", async () => {
       await store.nodes.Person.create({ name: "Alice" }, { id: "person-1" });
 
-      const updated = await store.nodes.Person.upsert("person-1", {
+      const updated = await store.nodes.Person.upsertById("person-1", {
         name: "Alice Updated",
         email: "alice@example.com",
       });
@@ -616,7 +616,7 @@ describe("Bulk Operations (SQLite)", () => {
       expect(deleted).toBeUndefined();
 
       // Upsert should un-delete and update the node
-      const recreated = await store.nodes.Person.upsert("person-1", {
+      const recreated = await store.nodes.Person.upsertById("person-1", {
         name: "Alice Reborn",
       });
 
@@ -746,9 +746,9 @@ describe("Bulk Operations (SQLite)", () => {
     });
   });
 
-  describe("store.nodes.*.bulkUpsert()", () => {
+  describe("store.nodes.*.bulkUpsertById()", () => {
     it("creates nodes that do not exist", async () => {
-      const nodes = await store.nodes.Person.bulkUpsert([
+      const nodes = await store.nodes.Person.bulkUpsertById([
         { id: "person-1", props: { name: "Alice" } },
         { id: "person-2", props: { name: "Bob" } },
       ]);
@@ -762,7 +762,7 @@ describe("Bulk Operations (SQLite)", () => {
       await store.nodes.Person.create({ name: "Alice" }, { id: "person-1" });
       await store.nodes.Person.create({ name: "Bob" }, { id: "person-2" });
 
-      const nodes = await store.nodes.Person.bulkUpsert([
+      const nodes = await store.nodes.Person.bulkUpsertById([
         { id: "person-1", props: { name: "Alice Updated" } },
         { id: "person-2", props: { name: "Bob Updated" } },
       ]);
@@ -776,7 +776,7 @@ describe("Bulk Operations (SQLite)", () => {
     it("handles mixed create and update", async () => {
       await store.nodes.Person.create({ name: "Alice" }, { id: "person-1" });
 
-      const nodes = await store.nodes.Person.bulkUpsert([
+      const nodes = await store.nodes.Person.bulkUpsertById([
         { id: "person-1", props: { name: "Alice Updated" } },
         { id: "person-2", props: { name: "Bob New" } },
       ]);
@@ -1012,13 +1012,13 @@ describe("Bulk Operations (SQLite)", () => {
     });
   });
 
-  describe("store.edges.*.bulkUpsert()", () => {
+  describe("store.edges.*.bulkUpsertById()", () => {
     it("creates edges that do not exist", async () => {
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const acme = await store.nodes.Company.create({ name: "Acme Inc" });
       const techCorp = await store.nodes.Company.create({ name: "TechCorp" });
 
-      const edges = await store.edges.worksAt.bulkUpsert([
+      const edges = await store.edges.worksAt.bulkUpsertById([
         {
           id: "edge-1",
           from: alice,
@@ -1052,7 +1052,7 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "edge-1" },
       );
 
-      const edges = await store.edges.worksAt.bulkUpsert([
+      const edges = await store.edges.worksAt.bulkUpsertById([
         {
           id: "edge-1",
           from: alice,
@@ -1077,7 +1077,7 @@ describe("Bulk Operations (SQLite)", () => {
         { id: "edge-existing" },
       );
 
-      const edges = await store.edges.worksAt.bulkUpsert([
+      const edges = await store.edges.worksAt.bulkUpsertById([
         {
           id: "edge-existing",
           from: alice,
@@ -1101,7 +1101,7 @@ describe("Bulk Operations (SQLite)", () => {
     });
 
     it("returns empty array for empty input", async () => {
-      const edges = await store.edges.worksAt.bulkUpsert([]);
+      const edges = await store.edges.worksAt.bulkUpsertById([]);
       expect(edges).toEqual([]);
     });
 
@@ -1120,7 +1120,7 @@ describe("Bulk Operations (SQLite)", () => {
       const deleted = await store.edges.worksAt.getById(edge.id);
       expect(deleted).toBeUndefined();
 
-      const edges = await store.edges.worksAt.bulkUpsert([
+      const edges = await store.edges.worksAt.bulkUpsertById([
         {
           id: "edge-del",
           from: alice,
