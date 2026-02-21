@@ -35,6 +35,7 @@ type CommonOperationBackend = Pick<
   TransactionBackend,
   | "checkUnique"
   | "checkUniqueBatch"
+  | "clearGraph"
   | "countEdgesByKind"
   | "countEdgesFrom"
   | "countNodesByKind"
@@ -423,6 +424,13 @@ export function createCommonOperationBackend(
       const queries = operationStrategy.buildSetActiveSchema(graphId, version);
       await execution.execRun(queries.deactivateAll);
       await execution.execRun(queries.activateVersion);
+    },
+
+    async clearGraph(graphId: string): Promise<void> {
+      const statements = operationStrategy.buildClearGraph(graphId);
+      for (const statement of statements) {
+        await execution.execRun(statement);
+      }
     },
   };
 }

@@ -282,6 +282,19 @@ export type EdgeGetOrCreateByEndpointsResult<E extends AnyEdgeType> = Readonly<{
 }>;
 
 /**
+ * Options for edge findByEndpoints operations.
+ */
+export type EdgeFindByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
+  /**
+   * Edge property fields to include in the match alongside the (from, to) endpoints.
+   * When omitted, matches on endpoints only (returns first live edge).
+   */
+  matchOn?: readonly (keyof z.input<E["schema"]>)[];
+  /** Property values to match against when matchOn is specified. */
+  props?: Partial<z.input<E["schema"]>>;
+}>;
+
+/**
  * Options for edge getOrCreateByEndpoints operations.
  */
 export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
@@ -430,6 +443,33 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * that don't exist.
    */
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+
+  /**
+   * Find a node by uniqueness constraint.
+   *
+   * Looks up a live node by the named constraint key computed from `props`.
+   * Returns the node if found, or undefined. Soft-deleted nodes are excluded.
+   *
+   * @param constraintName - Name of the uniqueness constraint to match on
+   * @param props - Properties to compute the constraint key from
+   */
+  findByConstraint: (
+    constraintName: string,
+    props: z.input<N["schema"]>,
+  ) => Promise<Node<N> | undefined>;
+
+  /**
+   * Batch version of findByConstraint.
+   *
+   * Results are returned in the same order as the input items.
+   * Returns undefined for entries that don't match.
+   */
+  bulkFindByConstraint: (
+    constraintName: string,
+    items: readonly Readonly<{
+      props: z.input<N["schema"]>;
+    }>[],
+  ) => Promise<(Node<N> | undefined)[]>;
 
   /**
    * Get an existing node by uniqueness constraint, or create a new one.
@@ -662,6 +702,22 @@ export type EdgeCollection<
    * that don't exist.
    */
   bulkDelete: (ids: readonly string[]) => Promise<void>;
+
+  /**
+   * Find a live edge by endpoints and optional property fields.
+   *
+   * Returns the first matching live edge, or undefined.
+   * Soft-deleted edges are excluded.
+   *
+   * @param from - Source node
+   * @param to - Target node
+   * @param options - Match criteria (matchOn fields and property values)
+   */
+  findByEndpoints: (
+    from: TypedNodeRef<From>,
+    to: TypedNodeRef<To>,
+    options?: EdgeFindByEndpointsOptions<E>,
+  ) => Promise<Edge<E> | undefined>;
 
   /**
    * Get an existing edge by endpoints and optional property fields, or create a new one.

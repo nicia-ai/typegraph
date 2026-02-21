@@ -867,6 +867,53 @@ function findMatchingEdge(
 }
 
 /**
+ * Executes a single findByEndpoints operation.
+ *
+ * Looks up a live edge by endpoints and optional matchOn fields.
+ * Returns the edge if found, or undefined. Soft-deleted edges are excluded.
+ */
+export async function executeEdgeFindByEndpoints<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  fromKind: string,
+  fromId: string,
+  toKind: string,
+  toId: string,
+  backend: GraphBackend | TransactionBackend,
+  options?: Readonly<{
+    matchOn?: readonly string[];
+    props?: Record<string, unknown>;
+  }>,
+): Promise<Edge | undefined> {
+  const matchOn = options?.matchOn ?? [];
+  const props = options?.props ?? {};
+
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  const edgeKind = registration.type;
+
+  if (matchOn.length > 0) {
+    validateMatchOnFields(edgeKind.schema, matchOn, kind);
+  }
+
+  const candidateRows = await backend.findEdgesByKind({
+    graphId: ctx.graphId,
+    kind,
+    fromKind,
+    fromId,
+    toKind,
+    toId,
+    excludeDeleted: true,
+  });
+
+  if (candidateRows.length === 0) return undefined;
+
+  if (matchOn.length === 0) return rowToEdge(candidateRows[0]!);
+
+  const { liveRow } = findMatchingEdge(candidateRows, matchOn, props);
+  return liveRow === undefined ? undefined : rowToEdge(liveRow);
+}
+
+/**
  * Executes a single getOrCreateByEndpoints operation.
  */
 export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(

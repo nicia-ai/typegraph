@@ -80,6 +80,18 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
+  executeFindByConstraint: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<Node | undefined>;
+  executeBulkFindByConstraint: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<(Node | undefined)[]>;
 }>;
 
 export type EdgeOperations = Readonly<{
@@ -152,6 +164,18 @@ export type EdgeOperations = Readonly<{
       ifExists?: IfExistsMode;
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]>;
+  executeFindByEndpoints: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      props?: Record<string, unknown>;
+    }>,
+  ) => Promise<Edge | undefined>;
 }>;
 
 /**

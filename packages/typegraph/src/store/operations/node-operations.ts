@@ -1080,6 +1080,207 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 }
 
 /**
+ * Executes a single findByConstraint operation.
+ *
+ * Looks up an existing node by uniqueness constraint key.
+ * Returns the node if found (live only), or undefined if not found.
+ * Soft-deleted nodes are excluded.
+ */
+export async function executeNodeFindByConstraint<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  constraintName: string,
+  props: Record<string, unknown>,
+  backend: GraphBackend | TransactionBackend,
+): Promise<Node | undefined> {
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const nodeKind = registration.type;
+  const validatedProps = validateNodeProps(nodeKind.schema, props, {
+    kind,
+    operation: "create",
+  });
+
+  const constraint = resolveConstraint(ctx.graph, kind, constraintName);
+
+  if (!checkWherePredicate(constraint, validatedProps)) return undefined;
+
+  const key = computeUniqueKey(
+    validatedProps,
+    constraint.fields,
+    constraint.collation,
+  );
+
+  const kindsToCheck = getKindsForUniquenessCheck(
+    kind,
+    constraint.scope,
+    ctx.registry,
+  );
+
+  let existingUniqueRow:
+    | { node_id: string; concrete_kind: string; deleted_at: string | undefined }
+    | undefined;
+  for (const kindToCheck of kindsToCheck) {
+    const row = await backend.checkUnique({
+      graphId: ctx.graphId,
+      nodeKind: kindToCheck,
+      constraintName: constraint.name,
+      key,
+      includeDeleted: false,
+    });
+    if (row !== undefined) {
+      existingUniqueRow = row;
+      break;
+    }
+  }
+
+  if (existingUniqueRow === undefined) return undefined;
+
+  const existingRow = await backend.getNode(
+    ctx.graphId,
+    existingUniqueRow.concrete_kind,
+    existingUniqueRow.node_id,
+  );
+
+  if (existingRow === undefined || existingRow.deleted_at !== undefined)
+    return undefined;
+
+  return rowToNode(existingRow);
+}
+
+/**
+ * Executes a bulk findByConstraint operation.
+ *
+ * Batch-checks existing keys and returns matched live nodes in input order.
+ * Returns undefined for entries that don't match.
+ */
+export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  constraintName: string,
+  items: readonly Readonly<{ props: Record<string, unknown> }>[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<(Node | undefined)[]> {
+  if (items.length === 0) return [];
+
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const nodeKind = registration.type;
+  const constraint = resolveConstraint(ctx.graph, kind, constraintName);
+
+  // Step 1: Validate all props and compute keys
+  const validated: {
+    validatedProps: Record<string, unknown>;
+    key: string | undefined;
+  }[] = [];
+
+  for (const item of items) {
+    const validatedProps = validateNodeProps(nodeKind.schema, item.props, {
+      kind,
+      operation: "create",
+    });
+    const applies = checkWherePredicate(constraint, validatedProps);
+    const key =
+      applies ?
+        computeUniqueKey(
+          validatedProps,
+          constraint.fields,
+          constraint.collation,
+        )
+      : undefined;
+    validated.push({ validatedProps, key });
+  }
+
+  // Step 2: Batch-check existing keys (live only)
+  const uniqueKeys = [
+    ...new Set(
+      validated.map((v) => v.key).filter((k): k is string => k !== undefined),
+    ),
+  ];
+
+  const kindsToCheck = getKindsForUniquenessCheck(
+    kind,
+    constraint.scope,
+    ctx.registry,
+  );
+
+  const existingByKey = new Map<
+    string,
+    { node_id: string; concrete_kind: string }
+  >();
+
+  if (uniqueKeys.length > 0) {
+    for (const kindToCheck of kindsToCheck) {
+      if (backend.checkUniqueBatch === undefined) {
+        for (const key of uniqueKeys) {
+          if (existingByKey.has(key)) continue;
+          const row = await backend.checkUnique({
+            graphId: ctx.graphId,
+            nodeKind: kindToCheck,
+            constraintName: constraint.name,
+            key,
+            includeDeleted: false,
+          });
+          if (row !== undefined) {
+            existingByKey.set(row.key, row);
+          }
+        }
+      } else {
+        const rows = await backend.checkUniqueBatch({
+          graphId: ctx.graphId,
+          nodeKind: kindToCheck,
+          constraintName: constraint.name,
+          keys: uniqueKeys,
+          includeDeleted: false,
+        });
+        for (const row of rows) {
+          if (!existingByKey.has(row.key)) {
+            existingByKey.set(row.key, row);
+          }
+        }
+      }
+    }
+  }
+
+  // Step 3: Fetch matched nodes and assemble results
+  const results: (Node | undefined)[] = Array.from({ length: items.length });
+  const seenKeys = new Map<string, number>();
+
+  for (const [index, { key }] of validated.entries()) {
+    if (key === undefined) {
+      results[index] = undefined;
+      continue;
+    }
+
+    const previousIndex = seenKeys.get(key);
+    if (previousIndex !== undefined) {
+      results[index] = results[previousIndex];
+      continue;
+    }
+    seenKeys.set(key, index);
+
+    const existing = existingByKey.get(key);
+    if (existing === undefined) {
+      results[index] = undefined;
+      continue;
+    }
+
+    const existingRow = await backend.getNode(
+      ctx.graphId,
+      existing.concrete_kind,
+      existing.node_id,
+    );
+
+    if (existingRow === undefined || existingRow.deleted_at !== undefined) {
+      results[index] = undefined;
+      continue;
+    }
+
+    results[index] = rowToNode(existingRow);
+  }
+
+  return results;
+}
+
+/**
  * Executes a bulk getOrCreateByConstraint operation.
  *
  * Batch-checks existing keys, partitions into creates and fetches,

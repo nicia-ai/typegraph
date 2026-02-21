@@ -99,6 +99,18 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
+  executeFindByConstraint: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<Node | undefined>;
+  executeBulkFindByConstraint: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<(Node | undefined)[]>;
 }>;
 
 function mapBulkNodeInputs(
@@ -154,6 +166,8 @@ export function createNodeCollection<
     createQuery,
     executeGetOrCreateByConstraint,
     executeBulkGetOrCreateByConstraint,
+    executeFindByConstraint,
+    executeBulkFindByConstraint,
   } = config;
 
   return {
@@ -565,6 +579,42 @@ export function createNodeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async findByConstraint(
+      constraintName: string,
+      props: z.input<N["schema"]>,
+    ): Promise<Node<N> | undefined> {
+      const result = await executeFindByConstraint(
+        kind,
+        constraintName,
+        props as Record<string, unknown>,
+        backend,
+      );
+      return result === undefined ? undefined : narrowNode<N>(result);
+    },
+
+    async bulkFindByConstraint(
+      constraintName: string,
+      items: readonly Readonly<{
+        props: z.input<N["schema"]>;
+      }>[],
+    ): Promise<(Node<N> | undefined)[]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        props: item.props as Record<string, unknown>,
+      }));
+
+      const results = await executeBulkFindByConstraint(
+        kind,
+        constraintName,
+        mappedItems,
+        backend,
+      );
+      return results.map((result) =>
+        result === undefined ? undefined : narrowNode<N>(result),
+      );
     },
 
     async getOrCreateByConstraint(

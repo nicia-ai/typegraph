@@ -19,6 +19,7 @@ import {
   type CreateEdgeInput,
   type Edge,
   type EdgeCollection,
+  type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsResult,
   type GetOrCreateAction,
@@ -118,6 +119,18 @@ export type EdgeCollectionConfig = Readonly<{
       ifExists?: IfExistsMode;
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]>;
+  executeFindByEndpoints: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      props?: Record<string, unknown>;
+    }>,
+  ) => Promise<Edge | undefined>;
 }>;
 
 function mapBulkEdgeInputs(
@@ -600,6 +613,32 @@ export function createEdgeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async findByEndpoints(
+      from: NodeRef,
+      to: NodeRef,
+      options?: EdgeFindByEndpointsOptions<E>,
+    ): Promise<Edge<E> | undefined> {
+      const findOptions: {
+        matchOn?: readonly string[];
+        props?: Record<string, unknown>;
+      } = {};
+      if (options?.matchOn !== undefined)
+        findOptions.matchOn = options.matchOn as readonly string[];
+      if (options?.props !== undefined)
+        findOptions.props = options.props as Record<string, unknown>;
+
+      const result = await config.executeFindByEndpoints(
+        kind,
+        from.kind,
+        from.id,
+        to.kind,
+        to.id,
+        backend,
+        findOptions,
+      );
+      return result === undefined ? undefined : narrowEdge<E>(result);
     },
 
     async getOrCreateByEndpoints(

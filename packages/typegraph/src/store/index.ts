@@ -4,6 +4,7 @@ export {
   type CreateNodeInput,
   type Edge,
   type EdgeCollection,
+  type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsResult,
   type GetOrCreateAction,

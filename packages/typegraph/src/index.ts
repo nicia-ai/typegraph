@@ -198,6 +198,7 @@ export type {
   CreateNodeInput,
   Edge,
   EdgeCollection,
+  EdgeFindByEndpointsOptions,
   EdgeGetOrCreateByEndpointsOptions,
   EdgeGetOrCreateByEndpointsResult,
   GetOrCreateAction,
