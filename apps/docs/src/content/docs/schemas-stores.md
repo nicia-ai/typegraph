@@ -345,13 +345,13 @@ Each node type has a collection with these methods:
 
 #### Naming Guidelines
 
-Mutation method names follow what identifier is used to match an existing record:
+Method names follow what identifier is used to match an existing record:
 
-| If you have... | Use... |
-|----------------|--------|
-| ID | `*ById` |
-| Unique constraint name + props | `*ByConstraint` |
-| Edge endpoints (`from`, `to`) + optional `matchOn` | `*ByEndpoints` |
+| If you have... | Read-only | Get-or-create |
+|----------------|-----------|---------------|
+| ID | `getById` | `upsertById` |
+| Unique constraint name + props | `findByConstraint` | `getOrCreateByConstraint` |
+| Edge endpoints (`from`, `to`) + optional `matchOn` | `findByEndpoints` | `getOrCreateByEndpoints` |
 
 #### `create(props, options?)`
 
@@ -566,6 +566,54 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
     action: "created" | "found" | "updated" | "resurrected";
   }[]
 >;
+```
+
+#### `findByConstraint(constraintName, props)`
+
+Looks up a node by a named uniqueness constraint without creating.
+Returns the matching node or `undefined`. Soft-deleted nodes are excluded.
+
+```typescript
+store.nodes.Person.findByConstraint(
+  constraintName: string,
+  props: { name: string; email?: string }
+): Promise<Node<Person> | undefined>;
+```
+
+```typescript
+const alice = await store.nodes.Person.findByConstraint("email", {
+  email: "alice@example.com",
+  name: "Alice",
+});
+
+if (alice) {
+  console.log(alice.id, alice.name);
+}
+```
+
+Throws `NodeConstraintNotFoundError` if the constraint name is not defined on the node type.
+
+#### `bulkFindByConstraint(constraintName, items)`
+
+Batch version of `findByConstraint`. Returns results in input order,
+with `undefined` for non-matches. Deduplicates within-batch lookups automatically.
+
+```typescript
+store.nodes.Person.bulkFindByConstraint(
+  constraintName: string,
+  items: readonly { props: { name: string; email?: string } }[]
+): Promise<(Node<Person> | undefined)[]>;
+```
+
+```typescript
+const results = await store.nodes.Person.bulkFindByConstraint("email", [
+  { props: { email: "alice@example.com", name: "Alice" } },
+  { props: { email: "nobody@example.com", name: "Nobody" } },
+  { props: { email: "bob@example.com", name: "Bob" } },
+]);
+// results[0]: Node<Person> (Alice)
+// results[1]: undefined
+// results[2]: Node<Person> (Bob)
 ```
 
 ### Edge Collections
@@ -821,6 +869,35 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
 >;
 ```
 
+#### `findByEndpoints(from, to, options?)`
+
+Looks up an edge by its endpoints without creating. Returns the matching edge or `undefined`. Soft-deleted edges are excluded.
+
+When `matchOn` is omitted, returns the first live edge between the two endpoints.
+When `matchOn` is provided, filters by the specified property fields.
+
+```typescript
+store.edges.knows.findByEndpoints(
+  from: TypedNodeRef<Person>,
+  to: TypedNodeRef<Person>,
+  options?: {
+    matchOn?: readonly ("relationship" | "since")[];
+    props?: Partial<{ relationship: string; since: string }>;
+  }
+): Promise<Edge<knows> | undefined>;
+```
+
+```typescript
+// Find any edge between Alice and Bob
+const edge = await store.edges.knows.findByEndpoints(alice, bob);
+
+// Find the specific "colleague" edge between Alice and Bob
+const colleague = await store.edges.knows.findByEndpoints(alice, bob, {
+  matchOn: ["relationship"],
+  props: { relationship: "colleague" },
+});
+```
+
 ### Transactions
 
 #### `store.transaction(fn)`
@@ -885,6 +962,27 @@ if (backend.capabilities.transactions) {
 } else {
   // fall back to individual operations with manual error handling
 }
+```
+
+### Clear
+
+#### `store.clear()`
+
+Hard-deletes all data for the current graph: nodes, edges, uniqueness entries,
+embeddings, and schema versions. Resets collection caches so the store is immediately reusable.
+
+```typescript
+store.clear(): Promise<void>;
+```
+
+Wrapped in a transaction when the backend supports it. Does not affect other graphs sharing the same backend.
+
+```typescript
+// Wipe all data and start fresh
+await store.clear();
+
+// Store is immediately reusable
+const person = await store.nodes.Person.create({ name: "Alice" });
 ```
 
 ### Query Builder
