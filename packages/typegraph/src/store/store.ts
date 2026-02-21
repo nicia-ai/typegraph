@@ -29,15 +29,18 @@ import {
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
+  executeNodeBulkFindByConstraint,
   executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
@@ -271,6 +274,16 @@ export class Store<G extends GraphDef> {
           backend,
           options,
         ),
+      executeFindByConstraint: (kind, constraintName, props, backend) =>
+        executeNodeFindByConstraint(ctx, kind, constraintName, props, backend),
+      executeBulkFindByConstraint: (kind, constraintName, items, backend) =>
+        executeNodeBulkFindByConstraint(
+          ctx,
+          kind,
+          constraintName,
+          items,
+          backend,
+        ),
     };
   }
 
@@ -322,6 +335,25 @@ export class Store<G extends GraphDef> {
           ctx,
           kind,
           items,
+          backend,
+          options,
+        ),
+      executeFindByEndpoints: (
+        kind,
+        fromKind,
+        fromId,
+        toKind,
+        toId,
+        backend,
+        options,
+      ) =>
+        executeEdgeFindByEndpoints(
+          ctx,
+          kind,
+          fromKind,
+          fromId,
+          toKind,
+          toId,
           backend,
           options,
         ),
@@ -400,6 +432,33 @@ export class Store<G extends GraphDef> {
 
       return fn({ nodes, edges });
     });
+  }
+
+  // === Graph Lifecycle ===
+
+  /**
+   * Hard-deletes all data for this graph from the database.
+   *
+   * Removes all nodes, edges, uniqueness entries, embeddings, and schema versions
+   * for this graph's ID. No hooks, no per-row logic. Wrapped in a transaction
+   * when the backend supports it.
+   *
+   * The store is usable after clearing — new data can be created immediately.
+   */
+  async clear(): Promise<void> {
+    const doClear = async (
+      target: GraphBackend | TransactionBackend,
+    ): Promise<void> => {
+      await target.clearGraph(this.graphId);
+    };
+
+    await (this.#backend.capabilities.transactions ?
+      this.#backend.transaction(async (tx) => doClear(tx))
+    : doClear(this.#backend));
+
+    // Reset lazy-initialized collection caches
+    this.#nodeCollections = undefined;
+    this.#edgeCollections = undefined;
   }
 
   // === Lifecycle ===

@@ -28,6 +28,7 @@ import type {
 } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
+import { buildClearGraph } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
@@ -148,6 +149,7 @@ export type CommonOperationStrategy = Readonly<{
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
+  buildClearGraph: (graphId: string) => readonly SQL[];
 }>;
 
 export type PostgresVectorOperationStrategy = Readonly<{
@@ -262,6 +264,9 @@ function createCommonOperationStrategy(
       version: number,
     ): Readonly<{ activateVersion: SQL; deactivateAll: SQL }> {
       return buildSetActiveSchema(tables, graphId, version, dialect);
+    },
+    buildClearGraph(graphId: string): readonly SQL[] {
+      return buildClearGraph(tables, graphId);
     },
   };
 }

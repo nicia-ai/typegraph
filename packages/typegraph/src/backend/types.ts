@@ -444,6 +444,13 @@ export type GraphBackend = Readonly<{
   createVectorIndex?: (params: CreateVectorIndexParams) => Promise<void>;
   dropVectorIndex?: (params: DropVectorIndexParams) => Promise<void>;
 
+  // === Graph Lifecycle ===
+  /**
+   * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
+   * Intended for import-replacement workflows. No hooks, no per-row logic.
+   */
+  clearGraph: (graphId: string) => Promise<void>;
+
   // === Query Execution ===
   execute: <T>(query: SQL) => Promise<readonly T[]>;
 
