@@ -32,7 +32,7 @@ TypeGraph provides bulk operations for efficient sync workflows:
 
 ```typescript
 // Create or update a single node
-await store.nodes.Document.upsert(id, props);
+await store.nodes.Document.upsertById(id, props);
 
 // Create many nodes at once
 await store.nodes.Document.bulkCreate(items);
@@ -41,26 +41,26 @@ await store.nodes.Document.bulkCreate(items);
 await store.nodes.Document.bulkInsert(items);
 
 // Create or update many nodes at once
-await store.nodes.Document.bulkUpsert(items);
+await store.nodes.Document.bulkUpsertById(items);
 
 // Delete many nodes at once
 await store.nodes.Document.bulkDelete(ids);
 ```
 
-### upsert
+### upsertById
 
 Creates a node if it doesn't exist, or updates it if it does. This includes
 "un-deleting" soft-deleted nodes:
 
 ```typescript
 // First call creates the node
-const doc1 = await store.nodes.Document.upsert("doc_123", {
+const doc1 = await store.nodes.Document.upsertById("doc_123", {
   title: "Original Title",
   content: "...",
 });
 
 // Second call updates the existing node
-const doc2 = await store.nodes.Document.upsert("doc_123", {
+const doc2 = await store.nodes.Document.upsertById("doc_123", {
   title: "Updated Title",
   content: "...",
 });
@@ -81,12 +81,7 @@ const documents = await store.nodes.Document.bulkCreate([
 ]);
 ```
 
-If you only need the side effect (writes) and not the created node payloads:
-
-```typescript
-await store.nodes.Document.bulkCreate(items, { returnResults: false });
-// Returns []
-```
+If you only need write side effects and not created payloads, use `bulkInsert`.
 
 ### bulkInsert
 
@@ -101,10 +96,9 @@ await store.nodes.Document.bulkInsert([
 ]);
 ```
 
-Prefer `bulkInsert` over `bulkCreate(items, { returnResults: false })` when you
-don't need results — the API is clearer and always transactional.
+Prefer `bulkInsert` over `bulkCreate` when you don't need results.
 
-### bulkUpsert
+### bulkUpsertById
 
 Creates or updates multiple nodes. Ideal for sync workflows where you don't
 know which records already exist:
@@ -113,7 +107,7 @@ know which records already exist:
 // Sync a batch of external records
 const externalRecords = await fetchExternalData();
 
-const synced = await store.nodes.Document.bulkUpsert(
+const synced = await store.nodes.Document.bulkUpsertById(
   externalRecords.map((record) => ({
     id: record.id, // Use external ID as graph node ID
     props: {
@@ -133,6 +127,29 @@ Deletes multiple nodes by ID. Silently ignores IDs that don't exist:
 // Remove nodes that no longer exist in source
 const deletedIds = await findDeletedRecords();
 await store.nodes.Document.bulkDelete(deletedIds);
+```
+
+### getOrCreate APIs
+
+Use get-or-create methods when your dedupe key is not a direct ID:
+
+```typescript
+// Match by a named uniqueness constraint
+const byEmail = await store.nodes.User.getOrCreateByConstraint(
+  "user_email",
+  { email: "alice@example.com", name: "Alice" },
+  { ifExists: "update" }
+);
+// byEmail.action: "created" | "found" | "updated" | "resurrected"
+
+// Match edges by endpoints (+ optional matchOn fields)
+const membership = await store.edges.memberOf.getOrCreateByEndpoints(
+  user,
+  org,
+  { role: "admin", source: "sync" },
+  { matchOn: ["role"], ifExists: "update" }
+);
+// membership.action: "created" | "found" | "updated" | "resurrected"
 ```
 
 ### Edge Bulk Operations
@@ -179,7 +196,7 @@ async function syncDocument(store: Store, doc: AppDocument) {
   const embedding = await generateEmbedding(doc.content);
 
   // Upsert ensures we create or update as needed
-  return store.nodes.Document.upsert(doc.id, {
+  return store.nodes.Document.upsertById(doc.id, {
     title: doc.title,
     content: doc.content,
     embedding,
@@ -258,7 +275,7 @@ async function syncAllDocuments(store: Store, options: SyncOptions = {}) {
     const embeddings = await batchGenerateEmbeddings(batch.map((d) => d.content));
 
     // Bulk upsert the batch
-    await store.nodes.Document.bulkUpsert(
+    await store.nodes.Document.bulkUpsertById(
       batch.map((doc, i) => ({
         id: doc.id,
         props: {
@@ -310,7 +327,7 @@ async function incrementalSync(store: Store, state: SyncState): Promise<SyncStat
   if (changed.length > 0) {
     const embeddings = await batchGenerateEmbeddings(changed.map((d) => d.content));
 
-    await store.nodes.Document.bulkUpsert(
+    await store.nodes.Document.bulkUpsertById(
       changed.map((doc, i) => ({
         id: doc.id,
         props: {
@@ -430,7 +447,7 @@ const syncWorker = new Worker<SyncJob>(
     const embedding = await generateEmbedding(record.content);
 
     // Upsert to graph
-    await store.nodes[entityType].upsert(entityId, {
+    await store.nodes[entityType].upsertById(entityId, {
       ...record,
       embedding,
       source: { table: entityType.toLowerCase() + "s", id: entityId },
@@ -462,7 +479,7 @@ app.post("/webhooks/documents", async (c) => {
     case "created":
     case "updated": {
       const embedding = await generateEmbedding(event.data.content);
-      await store.nodes.Document.upsert(event.data.id, {
+      await store.nodes.Document.upsertById(event.data.id, {
         title: event.data.title,
         content: event.data.content,
         embedding,
@@ -509,7 +526,7 @@ listener.on("notification", async (msg) => {
 
   if (doc) {
     const embedding = await generateEmbedding(doc.content);
-    await store.nodes.Document.upsert(id, {
+    await store.nodes.Document.upsertById(id, {
       title: doc.title,
       content: doc.content,
       embedding,
@@ -555,7 +572,7 @@ interface ExternalUser {
 
 async function syncUsers(users: ExternalUser[]) {
   // Step 1: Sync all user nodes first
-  await store.nodes.User.bulkUpsert(
+  await store.nodes.User.bulkUpsertById(
     users.map((u) => ({
       id: u.id,
       props: {
@@ -616,7 +633,7 @@ async function syncWithRetry<T>(
 }
 
 // Usage
-await syncWithRetry(() => store.nodes.Document.bulkUpsert(items));
+await syncWithRetry(() => store.nodes.Document.bulkUpsertById(items));
 ```
 
 ### Dead Letter Queue
@@ -667,11 +684,11 @@ Map external IDs to graph node IDs consistently:
 
 ```typescript
 // Good: Use external ID directly when it's unique and stable
-await store.nodes.Document.upsert(externalDoc.id, { ... });
+await store.nodes.Document.upsertById(externalDoc.id, { ... });
 
 // Good: Namespace if IDs might collide across sources
-await store.nodes.Document.upsert(`notion:${notionPage.id}`, { ... });
-await store.nodes.Document.upsert(`gdrive:${driveFile.id}`, { ... });
+await store.nodes.Document.upsertById(`notion:${notionPage.id}`, { ... });
+await store.nodes.Document.upsertById(`gdrive:${driveFile.id}`, { ... });
 ```
 
 ### Track Sync Metadata
@@ -691,7 +708,7 @@ const Document = defineNode("Document", {
   }),
 });
 
-await store.nodes.Document.upsert(doc.id, {
+await store.nodes.Document.upsertById(doc.id, {
   ...props,
   lastSyncedAt: new Date().toISOString(),
   syncVersion: (existingNode?.syncVersion ?? 0) + 1,
@@ -717,7 +734,7 @@ async function syncDocument(rawDoc: unknown) {
     return;
   }
 
-  await store.nodes.Document.upsert(result.data.id, {
+  await store.nodes.Document.upsertById(result.data.id, {
     title: result.data.title,
     content: result.data.content,
   });

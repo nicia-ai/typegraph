@@ -16,8 +16,11 @@ import {
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
+  type GetOrCreateAction,
+  type IfExistsMode,
   type Node,
   type NodeCollection,
+  type NodeGetOrCreateByConstraintOptions,
   type QueryOptions,
   type TypedEdgeCollection,
   type UpdateNodeInput,
@@ -63,6 +66,20 @@ export type NodeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeGetOrCreateByConstraint: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByConstraint: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
 }>;
 
 export type EdgeOperations = Readonly<{
@@ -107,6 +124,34 @@ export type EdgeOperations = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeGetOrCreateByEndpoints: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      ifExists?: IfExistsMode;
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByEndpoints: (
+    kind: string,
+    items: readonly Readonly<{
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      ifExists?: IfExistsMode;
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]>;
 }>;
 
 /**

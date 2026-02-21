@@ -255,8 +255,8 @@ describe("computeUniqueKey Properties", () => {
       const props = { age: 30 };
       const key = computeUniqueKey(props, ["name"], "binary");
 
-      // Should contain null marker
-      expect(key).toBe("\0");
+      // Should contain null marker (Unit Separator)
+      expect(key).toBe("\u001F");
     });
   });
 
@@ -274,8 +274,8 @@ describe("computeUniqueKey Properties", () => {
       const props = { a: "x", b: "y" };
       const key = computeUniqueKey(props, ["a", "b"], "binary");
 
-      // Should contain null separator between fields
-      expect(key).toBe("x\0y");
+      // Should contain Record Separator between fields
+      expect(key).toBe("x\u001Ey");
     });
   });
 

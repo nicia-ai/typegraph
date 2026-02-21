@@ -2,6 +2,7 @@ import { type SQL } from "drizzle-orm";
 
 import { DatabaseOperationError, UniquenessError } from "../../errors";
 import type {
+  CheckUniqueBatchParams,
   CheckUniqueParams,
   CountEdgesByKindParams,
   CountEdgesFromParams,
@@ -33,6 +34,7 @@ import { nowIso as defaultNowIso } from "./row-mappers";
 type CommonOperationBackend = Pick<
   TransactionBackend,
   | "checkUnique"
+  | "checkUniqueBatch"
   | "countEdgesByKind"
   | "countEdgesFrom"
   | "countNodesByKind"
@@ -381,6 +383,15 @@ export function createCommonOperationBackend(
       const query = operationStrategy.buildCheckUnique(params);
       const row = await execution.execGet<Record<string, unknown>>(query);
       return row ? rowMappers.toUniqueRow(row) : undefined;
+    },
+
+    async checkUniqueBatch(
+      params: CheckUniqueBatchParams,
+    ): Promise<readonly UniqueRow[]> {
+      if (params.keys.length === 0) return [];
+      const query = operationStrategy.buildCheckUniqueBatch(params);
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toUniqueRow(row));
     },
 
     async getActiveSchema(

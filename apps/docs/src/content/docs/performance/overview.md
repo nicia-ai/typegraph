@@ -87,9 +87,8 @@ internally.
 | Method | Returns results | Use case |
 |--------|----------------|----------|
 | `bulkCreate(items)` | Yes | Need created nodes back |
-| `bulkCreate(items, { returnResults: false })` | No | Create many, don't need results |
 | `bulkInsert(items)` | No | Maximum throughput ingestion |
-| `bulkUpsert(items)` | Yes | Idempotent import (create or update) |
+| `bulkUpsertById(items)` | Yes | Idempotent import (create or update by ID) |
 | `bulkDelete(ids)` | No | Mass soft-delete |
 
 ### PostgreSQL parameter limits
@@ -134,8 +133,8 @@ const created = await store.nodes.Person.bulkCreate(people);
 // Large batch (10,000+ items): bulkInsert (no result allocation)
 await store.nodes.Person.bulkInsert(people);
 
-// Idempotent import: bulkUpsert (creates or updates by ID)
-await store.nodes.Person.bulkUpsert(itemsWithIds);
+// Idempotent import: bulkUpsertById (creates or updates by ID)
+await store.nodes.Person.bulkUpsertById(itemsWithIds);
 ```
 
 ### Batch reads
@@ -148,7 +147,7 @@ const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
 :::note[Operation hooks]
-Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`) skip per-item operation hooks for
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See [Schemas & Stores](/schemas-stores#hooks) for details.
 :::
 

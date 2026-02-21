@@ -18,6 +18,7 @@ import {
   defineGraph,
   defineNode,
   embedding,
+  NodeConstraintNotFoundError,
   subClassOf,
 } from "../../../src";
 import {
@@ -560,6 +561,604 @@ describe("Store with PostgreSQL Backend", () => {
     });
     expect(fetchedWithTombstones).toBeDefined();
     expect(fetchedWithTombstones!.meta.deletedAt).toBeDefined();
+  });
+});
+
+// ============================================================
+// getOrCreateByConstraint / bulkGetOrCreateByConstraint with PostgreSQL
+// ============================================================
+
+const Entity = defineNode("Entity", {
+  schema: z.object({
+    entityType: z.string(),
+    name: z.string(),
+    role: z.string().optional(),
+  }),
+});
+
+const relatedTo = defineEdge("relatedTo");
+
+const getOrCreateGraph = defineGraph({
+  id: "pg_foc_test",
+  nodes: {
+    Entity: {
+      type: Entity,
+      unique: [
+        {
+          name: "entity_key",
+          fields: ["entityType", "name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {
+    relatedTo: {
+      type: relatedTo,
+      from: [Entity],
+      to: [Entity],
+      cardinality: "many",
+    },
+  },
+  ontology: [],
+});
+
+describe("getOrCreateByConstraint with PostgreSQL", () => {
+  beforeEach(async () => {
+    if (!isPostgresAvailable) return;
+    await clearTestData();
+  });
+
+  it("creates a node when none exists", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const result = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.node.entityType).toBe("Person");
+    expect(result.node.name).toBe("Alice");
+    expect(result.node.role).toBe("eng");
+    expect(result.node.meta.version).toBe(1);
+  });
+
+  it("finds existing node with ifExists: return (default)", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
+
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "manager",
+      },
+    );
+
+    expect(second.action).toBe("found");
+    expect(second.node.id).toBe(first.node.id);
+    expect(second.node.role).toBe("eng");
+    expect(second.node.meta.version).toBe(1);
+  });
+
+  it("updates existing node with ifExists: update", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
+
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      { entityType: "Person", name: "Alice", role: "manager" },
+      { ifExists: "update" },
+    );
+
+    expect(second.action).toBe("updated");
+    expect(second.node.id).toBe(first.node.id);
+    expect(second.node.role).toBe("manager");
+    expect(second.node.meta.version).toBe(2);
+  });
+
+  it("resurrects a soft-deleted node", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "eng",
+      },
+    );
+    await store.nodes.Entity.delete(first.node.id);
+
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      {
+        entityType: "Person",
+        name: "Alice",
+        role: "resurrected",
+      },
+    );
+
+    expect(second.action).toBe("resurrected");
+    expect(second.node.id).toBe(first.node.id);
+    expect(second.node.role).toBe("resurrected");
+    expect(second.node.meta.deletedAt).toBeUndefined();
+  });
+
+  it("throws NodeConstraintNotFoundError for invalid constraint name", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    await expect(
+      store.nodes.Entity.getOrCreateByConstraint("nonexistent_constraint", {
+        entityType: "Person",
+        name: "Alice",
+      }),
+    ).rejects.toThrow(NodeConstraintNotFoundError);
+  });
+});
+
+describe("bulkGetOrCreateByConstraint with PostgreSQL", () => {
+  beforeEach(async () => {
+    if (!isPostgresAvailable) return;
+    await clearTestData();
+  });
+
+  it("returns empty array for empty input", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [],
+    );
+    expect(results).toEqual([]);
+  });
+
+  it("creates all new nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Alice" } },
+        { props: { entityType: "Person", name: "Bob" } },
+        { props: { entityType: "Company", name: "Acme" } },
+      ],
+    );
+
+    expect(results).toHaveLength(3);
+    expect(results[0]!.action).toBe("created");
+    expect(results[0]!.node.name).toBe("Alice");
+    expect(results[1]!.action).toBe("created");
+    expect(results[1]!.node.name).toBe("Bob");
+    expect(results[2]!.action).toBe("created");
+    expect(results[2]!.node.name).toBe("Acme");
+  });
+
+  it("handles mixed creates and finds with correct ordering", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const alice = await store.nodes.Entity.create({
+      entityType: "Person",
+      name: "Alice",
+      role: "eng",
+    });
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Bob" } },
+        { props: { entityType: "Person", name: "Alice" } },
+        { props: { entityType: "Company", name: "Acme" } },
+      ],
+    );
+
+    expect(results).toHaveLength(3);
+    expect(results[0]!.action).toBe("created");
+    expect(results[0]!.node.name).toBe("Bob");
+    expect(results[1]!.action).toBe("found");
+    expect(results[1]!.node.id).toBe(alice.id);
+    expect(results[1]!.node.role).toBe("eng");
+    expect(results[2]!.action).toBe("created");
+    expect(results[2]!.node.name).toBe("Acme");
+  });
+
+  it("bulk with ifExists: update updates existing nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    await store.nodes.Entity.create({
+      entityType: "Person",
+      name: "Alice",
+      role: "eng",
+    });
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [
+        { props: { entityType: "Person", name: "Alice", role: "manager" } },
+        { props: { entityType: "Person", name: "Bob", role: "intern" } },
+      ],
+      { ifExists: "update" },
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.action).toBe("updated");
+    expect(results[0]!.node.role).toBe("manager");
+    expect(results[1]!.action).toBe("created");
+    expect(results[1]!.node.role).toBe("intern");
+  });
+
+  it("bulk resurrects soft-deleted nodes", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    const alice = await store.nodes.Entity.create({
+      entityType: "Person",
+      name: "Alice",
+      role: "eng",
+    });
+    await store.nodes.Entity.delete(alice.id);
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      [{ props: { entityType: "Person", name: "Alice", role: "resurrected" } }],
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.action).toBe("resurrected");
+    expect(results[0]!.node.id).toBe(alice.id);
+    expect(results[0]!.node.role).toBe("resurrected");
+    expect(results[0]!.node.meta.deletedAt).toBeUndefined();
+  });
+
+  it("throws NodeConstraintNotFoundError for invalid constraint name", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(getOrCreateGraph, backend);
+
+    await expect(
+      store.nodes.Entity.bulkGetOrCreateByConstraint("nonexistent", [
+        { props: { entityType: "Person", name: "Alice" } },
+      ]),
+    ).rejects.toThrow(NodeConstraintNotFoundError);
+  });
+});
+
+// ============================================================
+// Edge getOrCreateByEndpoints / bulkGetOrCreateByEndpoints with PostgreSQL
+// ============================================================
+
+const PgPerson = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const PgCompany = defineNode("Company", {
+  schema: z.object({ name: z.string() }),
+});
+
+const pgWorksAt = defineEdge("worksAt", {
+  schema: z.object({
+    role: z.string(),
+    since: z.number().optional(),
+  }),
+});
+
+const edgeFocGraph = defineGraph({
+  id: "pg_edge_foc_test",
+  nodes: {
+    Person: { type: PgPerson },
+    Company: { type: PgCompany },
+  },
+  edges: {
+    worksAt: {
+      type: pgWorksAt,
+      from: [PgPerson],
+      to: [PgCompany],
+      cardinality: "many",
+    },
+  },
+  ontology: [],
+});
+
+describe("edge getOrCreateByEndpoints with PostgreSQL", () => {
+  beforeEach(async () => {
+    if (!isPostgresAvailable) return;
+    await clearTestData();
+  });
+
+  it("creates edge when none exists", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const result = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.edge.role).toBe("eng");
+    expect(result.edge.since).toBe(2020);
+  });
+
+  it("finds existing with ifExists: return", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "manager",
+        since: 2024,
+      },
+    );
+
+    expect(second.action).toBe("found");
+    expect(second.edge.id).toBe(first.edge.id);
+    expect(second.edge.role).toBe("eng");
+  });
+
+  it("updates existing with ifExists: update", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { role: "manager", since: 2024 },
+      { ifExists: "update" },
+    );
+
+    expect(second.action).toBe("updated");
+    expect(second.edge.id).toBe(first.edge.id);
+    expect(second.edge.role).toBe("manager");
+  });
+
+  it("resurrects soft-deleted edge", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+    );
+    await store.edges.worksAt.delete(first.edge.id);
+
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      {
+        role: "resurrected",
+        since: 2025,
+      },
+    );
+
+    expect(second.action).toBe("resurrected");
+    expect(second.edge.id).toBe(first.edge.id);
+    expect(second.edge.role).toBe("resurrected");
+    expect(second.edge.meta.deletedAt).toBeUndefined();
+  });
+
+  it("matchOn distinguishes edges between same pair", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const first = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { role: "eng" },
+      { matchOn: ["role"] },
+    );
+    const second = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { role: "manager" },
+      { matchOn: ["role"] },
+    );
+    const third = await store.edges.worksAt.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { role: "eng", since: 2025 },
+      { matchOn: ["role"] },
+    );
+
+    expect(first.action).toBe("created");
+    expect(second.action).toBe("created");
+    expect(second.edge.id).not.toBe(first.edge.id);
+    expect(third.action).toBe("found");
+    expect(third.edge.id).toBe(first.edge.id);
+  });
+});
+
+describe("edge bulkGetOrCreateByEndpoints with PostgreSQL", () => {
+  beforeEach(async () => {
+    if (!isPostgresAvailable) return;
+    await clearTestData();
+  });
+
+  it("returns empty array for empty input", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([]);
+    expect(results).toEqual([]);
+  });
+
+  it("creates all new edges", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+      { from: alice, to: acme, props: { role: "eng" } },
+      { from: bob, to: acme, props: { role: "manager" } },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.action).toBe("created");
+    expect(results[1]!.action).toBe("created");
+  });
+
+  it("mixed creates and finds with correct ordering", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const existing = await store.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+      { from: bob, to: acme, props: { role: "manager" } },
+      { from: alice, to: acme, props: { role: "cto" } },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.action).toBe("created");
+    expect(results[1]!.action).toBe("found");
+    expect(results[1]!.edge.id).toBe(existing.id);
+  });
+
+  it("within-batch duplicates", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+      [
+        { from: alice, to: acme, props: { role: "eng", since: 2020 } },
+        { from: alice, to: acme, props: { role: "eng", since: 2024 } },
+      ],
+      { matchOn: ["role"] },
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.action).toBe("created");
+    expect(results[1]!.action).toBe("found");
+    expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
+  });
+
+  it("resurrects soft-deleted edge", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+    const store = createStore(edgeFocGraph, backend);
+
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const first = await store.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+    await store.edges.worksAt.delete(first.id);
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+      { from: alice, to: acme, props: { role: "resurrected", since: 2025 } },
+    ]);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.action).toBe("resurrected");
+    expect(results[0]!.edge.id).toBe(first.id);
+    expect(results[0]!.edge.role).toBe("resurrected");
+    expect(results[0]!.edge.meta.deletedAt).toBeUndefined();
   });
 });
 

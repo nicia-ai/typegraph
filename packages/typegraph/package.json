@@ -204,7 +204,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
-    "eslint": "^9.39.2",
+    "eslint": "^9.39.3",
     "fast-check": "^4.5.3",
     "pg": "^8.18.0",
     "sqlite-vec": "0.1.7-alpha.2",

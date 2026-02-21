@@ -6,21 +6,25 @@
 
 export {
   type EdgeOperationContext,
+  executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturn,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
 } from "./edge-operations";
 export {
+  executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturn,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,

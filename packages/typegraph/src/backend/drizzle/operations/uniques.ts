@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type {
+  CheckUniqueBatchParams,
   CheckUniqueParams,
   DeleteUniqueParams,
   InsertUniqueParams,
@@ -194,12 +195,56 @@ export function buildCheckUnique(
 ): SQL {
   const { uniques } = tables;
 
+  if (params.includeDeleted) {
+    return sql`
+      SELECT * FROM ${uniques}
+      WHERE ${uniques.graphId} = ${params.graphId}
+        AND ${uniques.nodeKind} = ${params.nodeKind}
+        AND ${uniques.constraintName} = ${params.constraintName}
+        AND ${uniques.key} = ${params.key}
+    `;
+  }
+
   return sql`
     SELECT * FROM ${uniques}
     WHERE ${uniques.graphId} = ${params.graphId}
       AND ${uniques.nodeKind} = ${params.nodeKind}
       AND ${uniques.constraintName} = ${params.constraintName}
       AND ${uniques.key} = ${params.key}
+      AND ${uniques.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds a SELECT query to batch-check uniqueness entries by multiple keys.
+ */
+export function buildCheckUniqueBatch(
+  tables: Tables,
+  params: CheckUniqueBatchParams,
+): SQL {
+  const { uniques } = tables;
+
+  const keyPlaceholders = sql.join(
+    params.keys.map((key) => sql`${key}`),
+    sql`, `,
+  );
+
+  if (params.includeDeleted) {
+    return sql`
+      SELECT * FROM ${uniques}
+      WHERE ${uniques.graphId} = ${params.graphId}
+        AND ${uniques.nodeKind} = ${params.nodeKind}
+        AND ${uniques.constraintName} = ${params.constraintName}
+        AND ${uniques.key} IN (${keyPlaceholders})
+    `;
+  }
+
+  return sql`
+    SELECT * FROM ${uniques}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.nodeKind} = ${params.nodeKind}
+      AND ${uniques.constraintName} = ${params.constraintName}
+      AND ${uniques.key} IN (${keyPlaceholders})
       AND ${uniques.deletedAt} IS NULL
   `;
 }

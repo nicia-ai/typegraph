@@ -24,17 +24,21 @@ import {
 } from "./collection-factory";
 import {
   type EdgeOperationContext,
+  executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
+  executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
@@ -237,6 +241,36 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
+      executeGetOrCreateByConstraint: (
+        kind,
+        constraintName,
+        props,
+        backend,
+        options,
+      ) =>
+        executeNodeGetOrCreateByConstraint(
+          ctx,
+          kind,
+          constraintName,
+          props,
+          backend,
+          options,
+        ),
+      executeBulkGetOrCreateByConstraint: (
+        kind,
+        constraintName,
+        items,
+        backend,
+        options,
+      ) =>
+        executeNodeBulkGetOrCreateByConstraint(
+          ctx,
+          kind,
+          constraintName,
+          items,
+          backend,
+          options,
+        ),
     };
   }
 
@@ -262,6 +296,35 @@ export class Store<G extends GraphDef> {
       matchesTemporalMode: (row, options) =>
         this.#matchesTemporalMode(row, options),
       createQuery: () => this.query(),
+      executeGetOrCreateByEndpoints: (
+        kind,
+        fromKind,
+        fromId,
+        toKind,
+        toId,
+        props,
+        backend,
+        options,
+      ) =>
+        executeEdgeGetOrCreateByEndpoints(
+          ctx,
+          kind,
+          fromKind,
+          fromId,
+          toKind,
+          toId,
+          props,
+          backend,
+          options,
+        ),
+      executeBulkGetOrCreateByEndpoints: (kind, items, backend, options) =>
+        executeEdgeBulkGetOrCreateByEndpoints(
+          ctx,
+          kind,
+          items,
+          backend,
+          options,
+        ),
     };
   }
 

@@ -18,8 +18,11 @@ import { nowIso } from "../../utils/date";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
+  type GetOrCreateAction,
   type Node,
   type NodeCollection,
+  type NodeGetOrCreateByConstraintOptions,
+  type NodeGetOrCreateByConstraintResult,
   type QueryOptions,
   type UpdateNodeInput,
 } from "../types";
@@ -82,6 +85,20 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeGetOrCreateByConstraint: (
+    kind: string,
+    constraintName: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByConstraint: (
+    kind: string,
+    constraintName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeGetOrCreateByConstraintOptions,
+  ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
 }>;
 
 function mapBulkNodeInputs(
@@ -135,6 +152,8 @@ export function createNodeCollection<
     executeHardDelete: executeNodeHardDelete,
     matchesTemporalMode,
     createQuery,
+    executeGetOrCreateByConstraint,
+    executeBulkGetOrCreateByConstraint,
   } = config;
 
   return {
@@ -309,7 +328,7 @@ export function createNodeCollection<
       return backend.countNodesByKind(params);
     },
 
-    async upsert(
+    async upsertById(
       id: string,
       props: z.input<N["schema"]>,
       options?: Readonly<{ validFrom?: string; validTo?: string }>,
@@ -387,7 +406,7 @@ export function createNodeCollection<
       return narrowNodes<N>(results);
     },
 
-    async bulkUpsert(
+    async bulkUpsertById(
       items: readonly Readonly<{
         id: string;
         props: z.input<N["schema"]>;
@@ -546,6 +565,64 @@ export function createNodeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async getOrCreateByConstraint(
+      constraintName: string,
+      props: z.input<N["schema"]>,
+      options?: NodeGetOrCreateByConstraintOptions,
+    ): Promise<NodeGetOrCreateByConstraintResult<N>> {
+      const execute = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<NodeGetOrCreateByConstraintResult<N>> => {
+        const result = await executeGetOrCreateByConstraint(
+          kind,
+          constraintName,
+          props as Record<string, unknown>,
+          target,
+          options,
+        );
+        return result as NodeGetOrCreateByConstraintResult<N>;
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) => execute(txBackend));
+      }
+      return execute(backend);
+    },
+
+    async bulkGetOrCreateByConstraint(
+      constraintName: string,
+      items: readonly Readonly<{
+        props: z.input<N["schema"]>;
+      }>[],
+      options?: NodeGetOrCreateByConstraintOptions,
+    ): Promise<NodeGetOrCreateByConstraintResult<N>[]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        props: item.props as Record<string, unknown>,
+      }));
+
+      const getOrCreateAll = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<NodeGetOrCreateByConstraintResult<N>[]> => {
+        const results = await executeBulkGetOrCreateByConstraint(
+          kind,
+          constraintName,
+          mappedItems,
+          target,
+          options,
+        );
+        return results as NodeGetOrCreateByConstraintResult<N>[];
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) =>
+          getOrCreateAll(txBackend),
+        );
+      }
+      return getOrCreateAll(backend);
     },
   };
 }

@@ -1,6 +1,7 @@
 import { type SQL } from "drizzle-orm";
 
 import type {
+  CheckUniqueBatchParams,
   CheckUniqueParams,
   CountEdgesByKindParams,
   CountEdgesFromParams,
@@ -68,6 +69,7 @@ import {
 import type { Tables } from "./shared";
 import {
   buildCheckUnique,
+  buildCheckUniqueBatch,
   buildDeleteUnique,
   buildHardDeleteEmbeddingsByNode,
   buildHardDeleteUniquesByNode,
@@ -138,6 +140,7 @@ export type CommonOperationStrategy = Readonly<{
     nodeId: string,
   ) => SQL;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
+  buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
@@ -230,6 +233,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildHardDeleteUniquesByNode,
   buildHardDeleteEmbeddingsByNode,
   buildCheckUnique,
+  buildCheckUniqueBatch,
   buildGetSchemaVersion,
 } as const satisfies TableOperationBuilderMap;
 

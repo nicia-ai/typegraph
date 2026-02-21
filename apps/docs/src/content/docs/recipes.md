@@ -524,8 +524,8 @@ await store.nodes.Document.delete(documentId);
 ### Restore Deleted Nodes
 
 ```typescript
-// Upsert "un-deletes" soft-deleted nodes
-await store.nodes.Document.upsert(documentId, {
+// upsertById "un-deletes" soft-deleted nodes
+await store.nodes.Document.upsertById(documentId, {
   title: "Restored Document",
   content: "...",
 });
@@ -603,53 +603,40 @@ const graph = defineGraph({
 });
 ```
 
-### Check Before Create
+### Use `getOrCreateByConstraint`
 
 ```typescript
-async function createUserSafe(
+async function createOrUpdateUserByEmail(
   email: string,
   username: string
-): Promise<Node<typeof User>> {
-  const existing = await store
-    .query()
-    .from("User", "u")
-    .whereNode("u", (u) =>
-      u.email.eq(email).or(u.username.eq(username))
-    )
-    .first();
-
-  if (existing) {
-    throw new Error("User with this email or username already exists");
-  }
-
-  return store.nodes.User.create({ email, username });
+): Promise<{
+  user: Node<typeof User>;
+  action: "created" | "found" | "updated" | "resurrected";
+}> {
+  return store.nodes.User.getOrCreateByConstraint(
+    "user_email",
+    { email, username },
+    { ifExists: "update" }
+  );
 }
 ```
 
-### Unique Edges
+### Use `getOrCreateByEndpoints` for Edge Deduplication
 
 ```typescript
 async function followUser(followerId: string, followeeId: string): Promise<void> {
-  // Check if edge already exists
-  const existing = await store
-    .query()
-    .from("User", "follower")
-    .whereNode("follower", (u) => u.id.eq(followerId))
-    .traverse("follows", "e")
-    .to("User", "followee")
-    .whereNode("followee", (u) => u.id.eq(followeeId))
-    .first();
-
-  if (existing) {
-    return; // Already following
-  }
-
   const follower = await store.nodes.User.getById(followerId);
   const followee = await store.nodes.User.getById(followeeId);
   if (!follower || !followee) {
     throw new Error("User not found");
   }
-  await store.edges.follows.create(follower, followee, {});
+
+  await store.edges.follows.getOrCreateByEndpoints(
+    follower,
+    followee,
+    {},
+    { ifExists: "return" }
+  );
 }
 ```
 

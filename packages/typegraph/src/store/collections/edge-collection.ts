@@ -19,6 +19,10 @@ import {
   type CreateEdgeInput,
   type Edge,
   type EdgeCollection,
+  type EdgeGetOrCreateByEndpointsOptions,
+  type EdgeGetOrCreateByEndpointsResult,
+  type GetOrCreateAction,
+  type IfExistsMode,
   type NodeRef,
   type QueryOptions,
 } from "../types";
@@ -86,6 +90,34 @@ export type EdgeCollectionConfig = Readonly<{
   ) => Promise<void>;
   matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
+  executeGetOrCreateByEndpoints: (
+    kind: string,
+    fromKind: string,
+    fromId: string,
+    toKind: string,
+    toId: string,
+    props: Record<string, unknown>,
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      ifExists?: IfExistsMode;
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
+  executeBulkGetOrCreateByEndpoints: (
+    kind: string,
+    items: readonly Readonly<{
+      fromKind: string;
+      fromId: string;
+      toKind: string;
+      toId: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      matchOn?: readonly string[];
+      ifExists?: IfExistsMode;
+    }>,
+  ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]>;
 }>;
 
 function mapBulkEdgeInputs(
@@ -399,7 +431,7 @@ export function createEdgeCollection<
       return narrowEdges<E>(results);
     },
 
-    async bulkUpsert(
+    async bulkUpsertById(
       items: readonly Readonly<{
         id: string;
         from: NodeRef;
@@ -457,7 +489,7 @@ export function createEdgeCollection<
               validTo?: string;
             } = {
               id: item.id,
-              props: (item.props ?? {}) as Record<string, unknown>,
+              props: item.props as Record<string, unknown>,
             };
             if (item.validTo !== undefined) input.validTo = item.validTo;
 
@@ -484,7 +516,7 @@ export function createEdgeCollection<
               fromId: item.from.id,
               toKind: item.to.kind,
               toId: item.to.id,
-              props: (item.props ?? {}) as Record<string, unknown>,
+              props: item.props as Record<string, unknown>,
             };
             if (item.validFrom !== undefined) input.validFrom = item.validFrom;
             if (item.validTo !== undefined) input.validTo = item.validTo;
@@ -568,6 +600,84 @@ export function createEdgeCollection<
         return;
       }
       await deleteAll(backend);
+    },
+
+    async getOrCreateByEndpoints(
+      from: NodeRef,
+      to: NodeRef,
+      props: z.input<E["schema"]>,
+      options?: EdgeGetOrCreateByEndpointsOptions<E>,
+    ): Promise<EdgeGetOrCreateByEndpointsResult<E>> {
+      const getOrCreateOptions: {
+        matchOn?: readonly string[];
+        ifExists?: IfExistsMode;
+      } = {};
+      if (options?.matchOn !== undefined)
+        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
+      if (options?.ifExists !== undefined)
+        getOrCreateOptions.ifExists = options.ifExists;
+
+      const result = await config.executeGetOrCreateByEndpoints(
+        kind,
+        from.kind,
+        from.id,
+        to.kind,
+        to.id,
+        props as Record<string, unknown>,
+        backend,
+        getOrCreateOptions,
+      );
+      return { edge: narrowEdge<E>(result.edge), action: result.action };
+    },
+
+    async bulkGetOrCreateByEndpoints(
+      items: readonly Readonly<{
+        from: NodeRef;
+        to: NodeRef;
+        props: z.input<E["schema"]>;
+      }>[],
+      options?: EdgeGetOrCreateByEndpointsOptions<E>,
+    ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        fromKind: item.from.kind,
+        fromId: item.from.id,
+        toKind: item.to.kind,
+        toId: item.to.id,
+        props: item.props as Record<string, unknown>,
+      }));
+
+      const getOrCreateOptions: {
+        matchOn?: readonly string[];
+        ifExists?: IfExistsMode;
+      } = {};
+      if (options?.matchOn !== undefined)
+        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
+      if (options?.ifExists !== undefined)
+        getOrCreateOptions.ifExists = options.ifExists;
+
+      const getOrCreateAll = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> => {
+        const results = await config.executeBulkGetOrCreateByEndpoints(
+          kind,
+          mappedItems,
+          target,
+          getOrCreateOptions,
+        );
+        return results.map((result) => ({
+          edge: narrowEdge<E>(result.edge),
+          action: result.action,
+        }));
+      };
+
+      if (backend.capabilities.transactions && "transaction" in backend) {
+        return backend.transaction(async (txBackend) =>
+          getOrCreateAll(txBackend),
+        );
+      }
+      return getOrCreateAll(backend);
     },
   };
 }

@@ -343,6 +343,16 @@ The store provides typed node and edge collections via `store.nodes.*` and `stor
 
 Each node type has a collection with these methods:
 
+#### Naming Guidelines
+
+Mutation method names follow what identifier is used to match an existing record:
+
+| If you have... | Use... |
+|----------------|--------|
+| ID | `*ById` |
+| Unique constraint name + props | `*ByConstraint` |
+| Edge endpoints (`from`, `to`) + optional `matchOn` | `*ByEndpoints` |
+
 #### `create(props, options?)`
 
 Creates a new node.
@@ -407,6 +417,14 @@ Soft-deletes a node.
 store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
 ```
 
+#### `hardDelete(id)`
+
+Permanently deletes a node. This is irreversible and should be used carefully.
+
+```typescript
+store.nodes.Person.hardDelete(id: NodeId<Person>): Promise<void>;
+```
+
 #### `find(options?)`
 
 Finds nodes of this kind with optional filtering and pagination.
@@ -436,12 +454,12 @@ Counts nodes of this kind (excluding soft-deleted nodes).
 store.nodes.Person.count(): Promise<number>;
 ```
 
-#### `upsert(id, props, options?)`
+#### `upsertById(id, props, options?)`
 
-Creates or updates a node.
+Creates or updates a node by ID.
 
 ```typescript
-store.nodes.Person.upsert(
+store.nodes.Person.upsertById(
   id: string,
   props: { name: string; email?: string },
   options?: { validFrom?: string; validTo?: string }
@@ -454,7 +472,7 @@ store.nodes.Person.upsert(
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
 
-#### `bulkCreate(items, options?)`
+#### `bulkCreate(items)`
 
 Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
 
@@ -465,18 +483,14 @@ store.nodes.Person.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[],
-  options?: {
-    returnResults?: boolean; // Default: true
-  }
+  }[]
 ): Promise<Node<Person>[]>;
 ```
 
-Use `returnResults: false` for large ingestion jobs when you do not need created node payloads:
+Use `bulkInsert` when you don't need the created nodes back:
 
 ```typescript
-await store.nodes.Person.bulkCreate(batch, { returnResults: false });
-// Returns [] to avoid allocating result objects
+await store.nodes.Person.bulkInsert(batch);
 ```
 
 #### `bulkInsert(items)`
@@ -495,12 +509,12 @@ store.nodes.Person.bulkInsert(
 ): Promise<void>;
 ```
 
-#### `bulkUpsert(items)`
+#### `bulkUpsertById(items)`
 
-Creates or updates multiple nodes.
+Creates or updates multiple nodes by ID.
 
 ```typescript
-store.nodes.Person.bulkUpsert(
+store.nodes.Person.bulkUpsertById(
   items: readonly {
     id: string;
     props: { name: string; email?: string };
@@ -518,6 +532,40 @@ Soft-deletes multiple nodes.
 store.nodes.Person.bulkDelete(
   ids: readonly NodeId<Person>[]
 ): Promise<void>;
+```
+
+#### `getOrCreateByConstraint(constraintName, props, options?)`
+
+Looks up an existing node by a named uniqueness constraint. Returns the match if found, or creates a new node if not.
+
+```typescript
+store.nodes.Person.getOrCreateByConstraint(
+  constraintName: string,
+  props: { name: string; email?: string },
+  options?: { ifExists?: "return" | "update" } // Default: "return"
+): Promise<{
+  node: Node<Person>;
+  action: "created" | "found" | "updated" | "resurrected";
+}>;
+```
+
+#### `bulkGetOrCreateByConstraint(constraintName, items, options?)`
+
+Batch version of `getOrCreateByConstraint`. Returns results in input order.
+
+```typescript
+store.nodes.Person.bulkGetOrCreateByConstraint(
+  constraintName: string,
+  items: readonly {
+    props: { name: string; email?: string };
+  }[],
+  options?: { ifExists?: "return" | "update" }
+): Promise<
+  {
+    node: Node<Person>;
+    action: "created" | "found" | "updated" | "resurrected";
+  }[]
+>;
 ```
 
 ### Edge Collections
@@ -654,7 +702,15 @@ Soft-deletes an edge.
 store.edges.worksAt.delete(id: string): Promise<void>;
 ```
 
-#### `bulkCreate(items, options?)`
+#### `hardDelete(id)`
+
+Permanently deletes an edge. This is irreversible and should be used carefully.
+
+```typescript
+store.edges.worksAt.hardDelete(id: string): Promise<void>;
+```
+
+#### `bulkCreate(items)`
 
 Creates multiple edges efficiently. Uses a single multi-row INSERT when the backend supports it.
 
@@ -667,18 +723,14 @@ store.edges.worksAt.bulkCreate(
     id?: string;
     validFrom?: string;
     validTo?: string;
-  }[],
-  options?: {
-    returnResults?: boolean; // Default: true
-  }
+  }[]
 ): Promise<Edge<worksAt>[]>;
 ```
 
-For high-volume edge ingestion, disable returned payloads:
+Use `bulkInsert` for high-volume edge ingestion when you do not need returned payloads:
 
 ```typescript
-await store.edges.worksAt.bulkCreate(edgeBatch, { returnResults: false });
-// Returns [] to reduce memory pressure
+await store.edges.worksAt.bulkInsert(edgeBatch);
 ```
 
 #### `bulkInsert(items)`
@@ -707,6 +759,66 @@ Soft-deletes multiple edges.
 store.edges.worksAt.bulkDelete(
   ids: readonly string[]
 ): Promise<void>;
+```
+
+#### `bulkUpsertById(items)`
+
+Creates or updates multiple edges by ID.
+
+```typescript
+store.edges.worksAt.bulkUpsertById(
+  items: readonly {
+    id: string;
+    from: TypedNodeRef<Person>;
+    to: TypedNodeRef<Company>;
+    props?: { role: string };
+    validFrom?: string;
+    validTo?: string;
+  }[]
+): Promise<Edge<worksAt>[]>;
+```
+
+#### `getOrCreateByEndpoints(from, to, props, options?)`
+
+Looks up an existing edge by endpoints (and optionally by property fields via `matchOn`).
+Returns the match if found, or creates a new edge if not.
+
+```typescript
+store.edges.worksAt.getOrCreateByEndpoints(
+  from: TypedNodeRef<Person>,
+  to: TypedNodeRef<Company>,
+  props: { role: string },
+  options?: {
+    matchOn?: readonly ("role")[]; // Default: []
+    ifExists?: "return" | "update"; // Default: "return"
+  }
+): Promise<{
+  edge: Edge<worksAt>;
+  action: "created" | "found" | "updated" | "resurrected";
+}>;
+```
+
+#### `bulkGetOrCreateByEndpoints(items, options?)`
+
+Batch version of `getOrCreateByEndpoints`. Returns results in input order.
+
+```typescript
+store.edges.worksAt.bulkGetOrCreateByEndpoints(
+  items: readonly {
+    from: TypedNodeRef<Person>;
+    to: TypedNodeRef<Company>;
+    props: { role: string };
+  }[],
+  options?: {
+    matchOn?: readonly ("role")[];
+    ifExists?: "return" | "update";
+  }
+): Promise<
+  {
+    edge: Edge<worksAt>;
+    action: "created" | "found" | "updated" | "resurrected";
+  }[]
+>;
 ```
 
 ### Transactions
@@ -858,7 +970,7 @@ type OperationHookContext = HookContext &
   }>;
 ```
 
-> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsert`) skip per-item
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item
 operation hooks for throughput. Query hooks still fire normally.
 
 **Example:**

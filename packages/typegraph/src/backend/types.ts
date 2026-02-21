@@ -416,6 +416,9 @@ export type GraphBackend = Readonly<{
   insertUnique: (params: InsertUniqueParams) => Promise<void>;
   deleteUnique: (params: DeleteUniqueParams) => Promise<void>;
   checkUnique: (params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
+  checkUniqueBatch?: (
+    params: CheckUniqueBatchParams,
+  ) => Promise<readonly UniqueRow[]>;
 
   // === Schema Operations ===
   getActiveSchema: (graphId: string) => Promise<SchemaVersionRow | undefined>;
@@ -499,6 +502,20 @@ export type CheckUniqueParams = Readonly<{
   nodeKind: string;
   constraintName: string;
   key: string;
+  /** If true, also returns soft-deleted entries. Used by get-or-create operations. */
+  includeDeleted?: boolean;
+}>;
+
+/**
+ * Parameters for batch-checking unique constraints.
+ */
+export type CheckUniqueBatchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  constraintName: string;
+  keys: readonly string[];
+  /** If true, also returns soft-deleted entries. Used by get-or-create operations. */
+  includeDeleted?: boolean;
 }>;
 
 /**
