@@ -311,12 +311,12 @@ const pool = new Pool({
 
 ```typescript
 // PostgreSQL
-import { getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
-await pool.query(getPostgresMigrationSQL());
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+await pool.query(generatePostgresMigrationSQL());
 
 // SQLite
-import { getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
-sqlite.exec(getSqliteMigrationSQL());
+import { generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+sqlite.exec(generateSqliteMigrationSQL());
 ```
 
 ## Semantic Search Issues

@@ -67,7 +67,7 @@ Instantiates and exports the store:
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { graph } from "./graph";
 
 const { backend } = createLocalSqliteBackend({ path: "./data.db" });
@@ -197,7 +197,7 @@ export { store } from "./store";
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { graph } from "./index";
 
 const { backend } = createLocalSqliteBackend({ path: "./data.db" });
@@ -407,7 +407,7 @@ Use the Drizzle backend with edge-compatible drivers:
 ```typescript
 // graph/store.ts
 import { createStore } from "@nicia-ai/typegraph";
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 import { drizzle } from "drizzle-orm/d1";
 import { graph } from "./index";
 

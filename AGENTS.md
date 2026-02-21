@@ -251,17 +251,17 @@ function divide(a: number, b: number): Result<number, Error> {
 The `GraphBackend` interface abstracts database operations:
 
 ```typescript
-// SQLite (in-memory or file)
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+// SQLite (in-memory or file — requires better-sqlite3)
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 const { backend, db } = createLocalSqliteBackend();
+
+// SQLite (bring your own Drizzle connection — no native deps)
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+const backend = createSqliteBackend(drizzleDb);
 
 // PostgreSQL
 import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
 const backend = createPostgresBackend(pool);
-
-// Drizzle (bring your own connection)
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
-const backend = createSqliteBackend(drizzleDb);
 ```
 
 ## Graph Definition

@@ -116,13 +116,13 @@ const graph = defineGraph({
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Initialize database with vector extension
 const sqlite = new Database("documents.db");
 sqliteVec.load(sqlite);
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 
 const db = drizzle(sqlite);
 const backend = createSqliteBackend(db);

@@ -3,7 +3,7 @@
   "packageManager": "pnpm",
   "testRunner": "vitest",
   "plugins": ["@stryker-mutator/vitest-runner"],
-  "mutate": ["src/**/*.ts", "!src/backend/drizzle/test-helpers.ts"],
+  "mutate": ["src/**/*.ts", "!src/backend/drizzle/ddl.ts"],
   "ignorePatterns": ["dist", "node_modules"],
   "reporters": ["html", "clear-text", "progress"],
   "htmlReporter": {

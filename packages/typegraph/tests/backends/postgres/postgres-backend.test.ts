@@ -23,8 +23,8 @@ import {
 } from "../../../src";
 import {
   generatePostgresDDL,
-  getPostgresMigrationSQL,
-} from "../../../src/backend/drizzle/test-helpers";
+  generatePostgresMigrationSQL,
+} from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createStore } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
@@ -119,7 +119,7 @@ async function setupTestDatabase(): Promise<void> {
     DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
   `);
 
-  await sharedPool.query(getPostgresMigrationSQL());
+  await sharedPool.query(generatePostgresMigrationSQL());
 }
 
 /**

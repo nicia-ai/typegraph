@@ -145,12 +145,12 @@ services:
 **TypeGraph migration includes vector support:**
 
 ```typescript
-import { getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 // Generates DDL including:
 // - CREATE EXTENSION IF NOT EXISTS vector;
 // - typegraph_embeddings table with vector column
-const migrationSQL = getPostgresMigrationSQL();
+const migrationSQL = generatePostgresMigrationSQL();
 ```
 
 ### SQLite with sqlite-vec

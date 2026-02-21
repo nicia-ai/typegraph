@@ -8,10 +8,10 @@
  * @example
  * ```typescript
  * // Default table names
- * import { tables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+ * import { tables } from "@nicia-ai/typegraph/sqlite";
  *
  * // Custom table names
- * import { createSqliteTables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+ * import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
  * const tables = createSqliteTables({
  *   nodes: "myapp_nodes",
  *   edges: "myapp_edges",
@@ -260,28 +260,3 @@ export const { nodes, edges, uniques, schemaVersions, embeddings } = tables;
  * Type representing the tables object returned by createSqliteTables.
  */
 export type SqliteTables = ReturnType<typeof createSqliteTables>;
-
-/**
- * Type for nodes table.
- */
-export type NodesTable = SqliteTables["nodes"];
-
-/**
- * Type for edges table.
- */
-export type EdgesTable = SqliteTables["edges"];
-
-/**
- * Type for uniques table.
- */
-export type UniquesTable = SqliteTables["uniques"];
-
-/**
- * Type for schema versions table.
- */
-export type SchemaVersionsTable = SqliteTables["schemaVersions"];
-
-/**
- * Type for embeddings table.
- */
-export type EmbeddingsTable = SqliteTables["embeddings"];

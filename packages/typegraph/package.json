@@ -77,54 +77,14 @@
         "default": "./dist/backend/postgres/index.cjs"
       }
     },
-    "./drizzle": {
+    "./sqlite/local": {
       "import": {
-        "types": "./dist/backend/drizzle/index.d.ts",
-        "default": "./dist/backend/drizzle/index.js"
+        "types": "./dist/backend/sqlite/local.d.ts",
+        "default": "./dist/backend/sqlite/local.js"
       },
       "require": {
-        "types": "./dist/backend/drizzle/index.d.cts",
-        "default": "./dist/backend/drizzle/index.cjs"
-      }
-    },
-    "./drizzle/sqlite": {
-      "import": {
-        "types": "./dist/backend/drizzle/sqlite.d.ts",
-        "default": "./dist/backend/drizzle/sqlite.js"
-      },
-      "require": {
-        "types": "./dist/backend/drizzle/sqlite.d.cts",
-        "default": "./dist/backend/drizzle/sqlite.cjs"
-      }
-    },
-    "./drizzle/postgres": {
-      "import": {
-        "types": "./dist/backend/drizzle/postgres.d.ts",
-        "default": "./dist/backend/drizzle/postgres.js"
-      },
-      "require": {
-        "types": "./dist/backend/drizzle/postgres.d.cts",
-        "default": "./dist/backend/drizzle/postgres.cjs"
-      }
-    },
-    "./drizzle/schema/sqlite": {
-      "import": {
-        "types": "./dist/backend/drizzle/schema/sqlite.d.ts",
-        "default": "./dist/backend/drizzle/schema/sqlite.js"
-      },
-      "require": {
-        "types": "./dist/backend/drizzle/schema/sqlite.d.cts",
-        "default": "./dist/backend/drizzle/schema/sqlite.cjs"
-      }
-    },
-    "./drizzle/schema/postgres": {
-      "import": {
-        "types": "./dist/backend/drizzle/schema/postgres.d.ts",
-        "default": "./dist/backend/drizzle/schema/postgres.js"
-      },
-      "require": {
-        "types": "./dist/backend/drizzle/schema/postgres.d.cts",
-        "default": "./dist/backend/drizzle/schema/postgres.cjs"
+        "types": "./dist/backend/sqlite/local.d.cts",
+        "default": "./dist/backend/sqlite/local.cjs"
       }
     }
   },

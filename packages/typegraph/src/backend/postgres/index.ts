@@ -1,7 +1,9 @@
 /**
  * PostgreSQL backend for TypeGraph.
  *
- * Re-exports from the Drizzle implementation for backwards compatibility.
+ * Provides the Drizzle-based PostgreSQL backend and DDL generation utilities.
+ * Use `generatePostgresMigrationSQL()` to get the full DDL including
+ * `CREATE EXTENSION IF NOT EXISTS vector` for pgvector support.
  *
  * @example
  * ```typescript
@@ -15,7 +17,7 @@
  * ```
  */
 
-// Re-export everything from the Drizzle PostgreSQL implementation
+// Drizzle PostgreSQL backend
 export {
   createPostgresBackend,
   createPostgresTables,
@@ -25,8 +27,9 @@ export {
   tables,
 } from "../drizzle/postgres";
 
-// Re-export individual tables for schema usage
+// Schema: table definitions and factory options
 export {
+  type CreatePostgresTablesOptions,
   edges,
   embeddings,
   nodes,
@@ -34,8 +37,8 @@ export {
   uniques,
 } from "../drizzle/schema/postgres";
 
-// Re-export migration SQL generation
+// DDL generation
 export {
   generatePostgresDDL,
-  getPostgresMigrationSQL,
-} from "../drizzle/test-helpers";
+  generatePostgresMigrationSQL,
+} from "../drizzle/ddl";
