@@ -20,7 +20,7 @@ SQLite is ideal for development, testing, single-server deployments, and embedde
 For development and testing, use the convenience function that handles everything:
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 
 // In-memory database (resets on restart)
@@ -39,7 +39,7 @@ For full control over the database connection:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Create and configure the database
@@ -48,7 +48,7 @@ sqlite.pragma("journal_mode = WAL"); // Recommended for performance
 sqlite.pragma("foreign_keys = ON");
 
 // Run TypeGraph migrations
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 
 // Create Drizzle instance and backend
 const db = drizzle(sqlite);
@@ -66,7 +66,7 @@ For semantic search, use sqlite-vec:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 
 const sqlite = new Database("app.db");
 
@@ -74,7 +74,7 @@ const sqlite = new Database("app.db");
 sqlite.loadExtension("vec0");
 
 // Run migrations (includes vector index setup)
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 
 const db = drizzle(sqlite);
 const backend = createSqliteBackend(db);
@@ -106,12 +106,12 @@ function createSqliteBackend(
 ): GraphBackend;
 ```
 
-#### `getSqliteMigrationSQL()`
+#### `generateSqliteMigrationSQL()`
 
 Returns SQL for creating TypeGraph tables in SQLite.
 
 ```typescript
-function getSqliteMigrationSQL(): string;
+function generateSqliteMigrationSQL(): string;
 ```
 
 ## PostgreSQL
@@ -124,7 +124,7 @@ or when you need advanced features like pgvector.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Create connection pool
@@ -134,7 +134,7 @@ const pool = new Pool({
 });
 
 // Run TypeGraph migrations
-await pool.query(getPostgresMigrationSQL());
+await pool.query(generatePostgresMigrationSQL());
 
 // Create Drizzle instance and backend
 const db = drizzle(pool);
@@ -149,12 +149,12 @@ For semantic search, enable pgvector:
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // Migration SQL includes pgvector extension
-await pool.query(getPostgresMigrationSQL());
+await pool.query(generatePostgresMigrationSQL());
 // Runs: CREATE EXTENSION IF NOT EXISTS vector;
 
 const db = drizzle(pool);
@@ -202,12 +202,12 @@ function createPostgresBackend(
 ): GraphBackend;
 ```
 
-#### `getPostgresMigrationSQL()`
+#### `generatePostgresMigrationSQL()`
 
 Returns SQL for creating TypeGraph tables in PostgreSQL, including the pgvector extension.
 
 ```typescript
-function getPostgresMigrationSQL(): string;
+function generatePostgresMigrationSQL(): string;
 ```
 
 #### `generatePostgresDDL(tables?)`
@@ -222,27 +222,19 @@ function generatePostgresDDL(tables?: PostgresTables): string[];
 
 ## Drizzle Entrypoints
 
-TypeGraph exposes Drizzle adapters through three public entrypoints:
+TypeGraph exposes Drizzle adapters through two public entrypoints:
 
-- `@nicia-ai/typegraph/drizzle` - Combined SQLite + PostgreSQL exports
-- `@nicia-ai/typegraph/drizzle/sqlite` - SQLite-only adapter exports
-- `@nicia-ai/typegraph/drizzle/postgres` - PostgreSQL-only adapter exports
+- `@nicia-ai/typegraph/sqlite` - SQLite adapter exports
+- `@nicia-ai/typegraph/postgres` - PostgreSQL adapter exports
 
-Use the combined entrypoint when you want one import surface:
+Import from the entrypoint matching your database:
 
 ```typescript
-import {
-  createPostgresBackend,
-  createSqliteBackend,
-  postgresTables,
-  sqliteTables,
-} from "@nicia-ai/typegraph/drizzle";
+import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
 ```
 
-Use the PostgreSQL-only entrypoint when you only target Postgres:
-
 ```typescript
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/drizzle/postgres";
+import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
 ```
 
 ## Cloudflare D1
@@ -252,7 +244,7 @@ TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
 import { createStore } from "@nicia-ai/typegraph";
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 export default {
   async fetch(request: Request, env: Env) {
@@ -340,7 +332,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }, // For managed databases
 });
 
-await pool.query(getPostgresMigrationSQL());
+await pool.query(generatePostgresMigrationSQL());
 const db = drizzle(pool);
 const backend = createPostgresBackend(db);
 const [store] = await createStoreWithSchema(graph, backend);

@@ -19,7 +19,7 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const knows = defineEdge("knows");
@@ -32,7 +32,7 @@ const graph = defineGraph({
 
 const sqlite = new Database(":memory:");
 const db = drizzle(sqlite);
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 
 const backend = createSqliteBackend(db);
 const store = createStore(graph, backend);

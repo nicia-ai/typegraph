@@ -280,7 +280,7 @@ Each tenant gets their own PostgreSQL schema within the same database.
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -292,7 +292,7 @@ async function createTenantSchema(tenantId: string): Promise<void> {
 
   // Run TypeGraph migrations in the tenant schema
   await pool.query(`SET search_path TO ${schemaName}`);
-  await pool.query(getPostgresMigrationSQL());
+  await pool.query(generatePostgresMigrationSQL());
   await pool.query(`SET search_path TO public`);
 }
 
@@ -491,7 +491,7 @@ async function provisionTenantDatabase(
 
   // Initialize TypeGraph tables
   const tenantPool = new Pool({ connectionString: databaseUrl });
-  await tenantPool.query(getPostgresMigrationSQL());
+  await tenantPool.query(generatePostgresMigrationSQL());
 
   // Create initial data
   const db = drizzle(tenantPool);

@@ -14,10 +14,10 @@
  * @example
  * ```typescript
  * // Default table names
- * import { tables } from "@nicia-ai/typegraph/drizzle/schema/postgres";
+ * import { tables } from "@nicia-ai/typegraph/postgres";
  *
  * // Custom table names
- * import { createPostgresTables } from "@nicia-ai/typegraph/drizzle/schema/postgres";
+ * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
  * const tables = createPostgresTables({
  *   nodes: "myapp_nodes",
  *   edges: "myapp_edges",
@@ -272,28 +272,3 @@ export const { nodes, edges, uniques, schemaVersions, embeddings } = tables;
  * Type representing the tables object returned by createPostgresTables.
  */
 export type PostgresTables = ReturnType<typeof createPostgresTables>;
-
-/**
- * Type for nodes table.
- */
-export type NodesTable = PostgresTables["nodes"];
-
-/**
- * Type for edges table.
- */
-export type EdgesTable = PostgresTables["edges"];
-
-/**
- * Type for uniques table.
- */
-export type UniquesTable = PostgresTables["uniques"];
-
-/**
- * Type for schema versions table.
- */
-export type SchemaVersionsTable = PostgresTables["schemaVersions"];
-
-/**
- * Type for embeddings table.
- */
-export type EmbeddingsTable = PostgresTables["embeddings"];

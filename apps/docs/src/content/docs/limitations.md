@@ -94,11 +94,11 @@ TypeGraph does not manage database connections. You are responsible for:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 
 // You manage the connection
 const sqlite = new Database("app.db");
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 const db = drizzle(sqlite);
 
 const backend = createSqliteBackend(db);

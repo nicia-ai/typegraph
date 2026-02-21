@@ -27,7 +27,7 @@ import {
 } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
-  getPostgresMigrationSQL,
+  generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/postgres";
 
 // ============================================================
@@ -115,7 +115,7 @@ export async function main() {
 
     // Run TypeGraph migrations
     console.log("Running TypeGraph migrations...");
-    const migrationSQL = getPostgresMigrationSQL();
+    const migrationSQL = generatePostgresMigrationSQL();
     for (const statement of migrationSQL.split(";").filter((s) => s.trim())) {
       await pool.query(statement);
     }

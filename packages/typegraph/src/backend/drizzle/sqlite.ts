@@ -12,8 +12,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/better-sqlite3";
  * import Database from "better-sqlite3";
- * import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
- * import { tables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+ * import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
  *
  * const sqlite = new Database("app.db");
  * const db = drizzle(sqlite);

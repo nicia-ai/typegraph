@@ -54,7 +54,7 @@ For edge/serverless environments (D1, libsql, bun:sqlite), see the docs:
 ```typescript
 import { z } from "zod";
 import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 const { backend } = createLocalSqliteBackend();
 

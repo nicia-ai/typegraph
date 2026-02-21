@@ -190,7 +190,7 @@ Stryker is configured in `stryker.config.json`:
 ```json
 {
   "testRunner": "vitest",
-  "mutate": ["src/**/*.ts", "!src/backend/drizzle/test-helpers.ts"],
+  "mutate": ["src/**/*.ts", "!src/backend/drizzle/ddl.ts"],
   "incremental": true,
   "coverageAnalysis": "perTest"
 }

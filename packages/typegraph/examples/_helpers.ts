@@ -4,7 +4,7 @@
  * Provides an easy way to create an in-memory SQLite database
  * for running examples with full query support.
  */
-import { createLocalSqliteBackend } from "../src/backend/sqlite";
+import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 
 /**
  * Creates an in-memory SQLite backend for examples.

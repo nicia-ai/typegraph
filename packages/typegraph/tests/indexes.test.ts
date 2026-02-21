@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineNode, type JsonPointer } from "../src";
-import { createPostgresTables } from "../src/backend/drizzle/schema/postgres";
-import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import {
   generatePostgresDDL,
   generateSqliteDDL,
-} from "../src/backend/drizzle/test-helpers";
+} from "../src/backend/drizzle/ddl";
+import { createPostgresTables } from "../src/backend/drizzle/schema/postgres";
+import { createSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import {
   andWhere,
   defineEdgeIndex,

@@ -7,7 +7,7 @@
  * @example Drizzle schema integration
  * ```ts
  * import { defineNode } from "@nicia-ai/typegraph";
- * import { createPostgresTables } from "@nicia-ai/typegraph/drizzle/schema/postgres";
+ * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
  * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
  * import { z } from "zod";
  *

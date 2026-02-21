@@ -230,7 +230,7 @@ export function generateSqliteDDL(tables: SqliteTables = sqliteTables): string[]
  * Generates a single SQL string for SQLite migrations.
  * Convenience function that joins all DDL statements.
  */
-export function getSqliteMigrationSQL(tables: SqliteTables = sqliteTables): string {
+export function generateSqliteMigrationSQL(tables: SqliteTables = sqliteTables): string {
   return generateSqliteDDL(tables).join("\n\n");
 }
 
@@ -384,7 +384,7 @@ export function generatePostgresDDL(tables: PostgresTables = postgresTables): st
  * Includes CREATE EXTENSION for pgvector since the embeddings table
  * uses the native VECTOR type.
  */
-export function getPostgresMigrationSQL(tables: PostgresTables = postgresTables): string {
+export function generatePostgresMigrationSQL(tables: PostgresTables = postgresTables): string {
   // pgvector extension is required for the embeddings table
   const extensionSql = "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
   const ddlSql = generatePostgresDDL(tables).join("\n\n");

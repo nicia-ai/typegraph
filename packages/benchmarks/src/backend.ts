@@ -3,9 +3,9 @@ import { Pool } from "pg";
 import { createStore } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
-  getPostgresMigrationSQL,
+  generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/postgres";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 import { DEFAULT_POSTGRES_URL, type PerfBackend } from "./config";
 import { perfGraph, type PerfStore } from "./graph";
@@ -27,7 +27,7 @@ async function resetPostgresTables(pool: Pool): Promise<void> {
     DROP TABLE IF EXISTS typegraph_nodes CASCADE;
     DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
   `);
-  await pool.query(getPostgresMigrationSQL());
+  await pool.query(generatePostgresMigrationSQL());
 }
 
 export async function createBackendResources(

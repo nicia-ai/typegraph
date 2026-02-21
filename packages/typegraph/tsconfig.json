@@ -11,18 +11,8 @@
       "@nicia-ai/typegraph/profiler": ["./src/profiler/index.ts"],
       "@nicia-ai/typegraph/indexes": ["./src/indexes/index.ts"],
       "@nicia-ai/typegraph/sqlite": ["./src/backend/sqlite/index.ts"],
-      "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"],
-      "@nicia-ai/typegraph/drizzle": ["./src/backend/drizzle/index.ts"],
-      "@nicia-ai/typegraph/drizzle/sqlite": ["./src/backend/drizzle/sqlite.ts"],
-      "@nicia-ai/typegraph/drizzle/postgres": [
-        "./src/backend/drizzle/postgres.ts"
-      ],
-      "@nicia-ai/typegraph/drizzle/schema/sqlite": [
-        "./src/backend/drizzle/schema/sqlite.ts"
-      ],
-      "@nicia-ai/typegraph/drizzle/schema/postgres": [
-        "./src/backend/drizzle/schema/postgres.ts"
-      ]
+      "@nicia-ai/typegraph/sqlite/local": ["./src/backend/sqlite/local.ts"],
+      "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"]
     }
   },
   "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"]

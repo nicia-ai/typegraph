@@ -12,8 +12,7 @@
  * ```typescript
  * import { drizzle } from "drizzle-orm/node-postgres";
  * import { Pool } from "pg";
- * import { createPostgresBackend } from "@nicia-ai/typegraph/drizzle/postgres";
- * import { tables } from "@nicia-ai/typegraph/drizzle/schema/postgres";
+ * import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
  *
  * const pool = new Pool({ connectionString: process.env.DATABASE_URL });
  * const db = drizzle(pool);

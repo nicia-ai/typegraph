@@ -14,7 +14,7 @@ connection. TypeGraph tables coexist alongside your application tables.
 ```typescript
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Your existing Drizzle setup
@@ -22,7 +22,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const db = drizzle(pool);
 
 // Add TypeGraph tables to your existing database
-await pool.query(getPostgresMigrationSQL());
+await pool.query(generatePostgresMigrationSQL());
 
 // Create TypeGraph backend using the same connection
 const backend = createPostgresBackend(db);
@@ -82,9 +82,9 @@ migrations for all tables—both yours and TypeGraph's—in one place.
 import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 
 // Import TypeGraph tables (these are standard Drizzle table definitions)
-export * from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+export * from "@nicia-ai/typegraph/sqlite";
 // Or for PostgreSQL:
-// export * from "@nicia-ai/typegraph/drizzle/schema/postgres";
+// export * from "@nicia-ai/typegraph/postgres";
 
 // Your application tables
 export const users = sqliteTable("users", {
@@ -116,7 +116,7 @@ wrangler d1 migrations apply your-database
 ```typescript
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { createSqliteBackend, tables } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
 import { createStore } from "@nicia-ai/typegraph";
 
 const sqlite = new Database("app.db");
@@ -133,7 +133,7 @@ To avoid conflicts or match your naming conventions, use the factory function:
 
 ```typescript
 // schema.ts
-import { createSqliteTables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
 
 // Create tables with custom names
 export const typegraphTables = createSqliteTables({
@@ -157,7 +157,7 @@ export const {
 Then pass the same tables to the backend:
 
 ```typescript
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 import { typegraphTables } from "./schema";
 
 const backend = createSqliteBackend(db, { tables: typegraphTables });
@@ -169,7 +169,7 @@ The table factory functions also accept `indexes`, which drizzle-kit will includ
 
 ```ts
 // schema.ts
-import { createSqliteTables } from "@nicia-ai/typegraph/drizzle/schema/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 
 import { Person } from "./graph";
@@ -179,13 +179,13 @@ const personEmail = defineNodeIndex(Person, { fields: ["email"] });
 export const typegraphTables = createSqliteTables({}, { indexes: [personEmail] });
 ```
 
-For PostgreSQL, use `createPostgresTables` from `@nicia-ai/typegraph/drizzle/schema/postgres`.
+For PostgreSQL, use `createPostgresTables` from `@nicia-ai/typegraph/postgres`.
 See [Indexes](/performance/indexes) for covering fields, partial indexes, and profiler integration.
 
-If you only need PostgreSQL adapter exports, import from `@nicia-ai/typegraph/drizzle/postgres`:
+If you only need PostgreSQL adapter exports, import from `@nicia-ai/typegraph/postgres`:
 
 ```typescript
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/drizzle/postgres";
+import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
 ```
 
 ### PostgreSQL with pgvector
@@ -201,7 +201,7 @@ Then in your schema:
 
 ```typescript
 // schema.ts
-export * from "@nicia-ai/typegraph/drizzle/schema/postgres";
+export * from "@nicia-ai/typegraph/postgres";
 export const users = pgTable("users", { ... });
 ```
 
@@ -226,7 +226,7 @@ and graph data.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 // Application database (your existing setup)
 const appPool = new Pool({ connectionString: process.env.APP_DATABASE_URL });
@@ -236,7 +236,7 @@ const appDb = drizzle(appPool);
 const graphPool = new Pool({ connectionString: process.env.GRAPH_DATABASE_URL });
 const graphDb = drizzle(graphPool);
 
-await graphPool.query(getPostgresMigrationSQL());
+await graphPool.query(generatePostgresMigrationSQL());
 const backend = createPostgresBackend(graphDb);
 const store = createStore(graph, backend);
 ```
@@ -259,7 +259,7 @@ const store = createStore(graph, backend);
 Use in-memory SQLite for temporary graphs, caching, or computation.
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 function createEphemeralStore(graph: GraphDef) {
   const { backend } = createLocalSqliteBackend();
@@ -565,14 +565,14 @@ Deploy TypeGraph at the edge using SQLite-compatible runtimes.
 
 > **Note:** Edge environments cannot use `@nicia-ai/typegraph/sqlite` because it
 > depends on `better-sqlite3`, a native Node.js addon. Instead, use
-> `@nicia-ai/typegraph/drizzle/sqlite` which is driver-agnostic.
+> `@nicia-ai/typegraph/sqlite` which is driver-agnostic.
 
 **Cloudflare Workers with D1:**
 
 ```typescript
 // worker.ts
 import { drizzle } from "drizzle-orm/d1";
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -598,7 +598,7 @@ export default {
 ```typescript
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL!,
@@ -621,7 +621,7 @@ use bun:sqlite with drizzle-kit managed migrations:
 ```typescript
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 const sqlite = new Database("app.db");
 const db = drizzle(sqlite);
@@ -764,7 +764,7 @@ async function createTenantStore(tenantId: string) {
 
   // Run migrations in tenant schema
   await pool.query(`SET search_path TO ${schemaName}`);
-  await pool.query(getPostgresMigrationSQL());
+  await pool.query(generatePostgresMigrationSQL());
   await pool.query(`SET search_path TO public`);
 
   // Create Drizzle instance with schema
@@ -794,7 +794,7 @@ interface TenantConfig {
 
 async function createTenantStore(config: TenantConfig) {
   const pool = new Pool({ connectionString: config.databaseUrl });
-  await pool.query(getPostgresMigrationSQL());
+  await pool.query(generatePostgresMigrationSQL());
 
   const db = drizzle(pool);
   const backend = createPostgresBackend(db);

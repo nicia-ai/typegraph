@@ -13,7 +13,7 @@ npm install -D @types/better-sqlite3
 ```
 
 > **Edge environments (Cloudflare Workers, etc.):** Skip `better-sqlite3` and use
-> `@nicia-ai/typegraph/drizzle/sqlite` with your edge-compatible driver (D1, libsql).
+> `@nicia-ai/typegraph/sqlite` with your edge-compatible driver (D1, libsql).
 > See [Edge and Serverless](/integration#edge-and-serverless).
 
 ## 2. Create Your First Graph
@@ -21,7 +21,7 @@ npm install -D @types/better-sqlite3
 ```typescript
 import { z } from "zod";
 import { defineNode, defineEdge, defineGraph, createStore } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 // Create an in-memory SQLite backend
 const { backend } = createLocalSqliteBackend();
@@ -76,7 +76,7 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 npm install -D @types/better-sqlite3
 ```
 
-> `better-sqlite3` is optional. For edge environments, use `@nicia-ai/typegraph/drizzle/sqlite`
+> `better-sqlite3` is optional. For edge environments, use `@nicia-ai/typegraph/sqlite`
 > with D1, libsql, or bun:sqlite instead.
 
 ### SQLite Setup
@@ -88,10 +88,10 @@ TypeGraph provides two ways to set up SQLite:
 The simplest way to get started. Handles database creation and schema setup automatically.
 
 > **Note:** `createLocalSqliteBackend` requires `better-sqlite3` and only works in Node.js.
-> For edge environments, see [Manual Setup](#manual-setup-full-control) with `/drizzle/sqlite`.
+> For edge environments, see [Manual Setup](#manual-setup-full-control) with `/sqlite`.
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 // In-memory database (data lost on restart)
 const { backend } = createLocalSqliteBackend();
@@ -110,13 +110,13 @@ For production deployments or when you need full control over the database confi
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, getSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 
 // Create database connection
 const sqlite = new Database("my-app.db");
 
 // Run TypeGraph migrations (creates required tables)
-sqlite.exec(getSqliteMigrationSQL());
+sqlite.exec(generateSqliteMigrationSQL());
 
 // Create Drizzle instance
 const db = drizzle(sqlite);
@@ -131,7 +131,7 @@ For Cloudflare Workers, Turso, or other edge environments, use the driver-agnost
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1"; // or libsql, bun-sqlite
-import { createSqliteBackend } from "@nicia-ai/typegraph/drizzle/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 // D1 example
 const db = drizzle(env.DB);
@@ -448,7 +448,7 @@ npm install -D @types/pg
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 // Create connection pool
 const pool = new Pool({
@@ -457,7 +457,7 @@ const pool = new Pool({
 });
 
 // Run TypeGraph migrations
-await pool.query(getPostgresMigrationSQL());
+await pool.query(generatePostgresMigrationSQL());
 
 // Create Drizzle instance and backend
 const db = drizzle(pool);

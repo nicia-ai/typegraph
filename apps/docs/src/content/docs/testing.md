@@ -16,7 +16,7 @@ pre-configured. Each call returns a completely isolated database.
 
 ```typescript
 import { beforeEach, describe, expect, it } from "vitest";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 import { graph } from "../src/graph"; // your graph definition
 
@@ -49,7 +49,7 @@ If many test files use the same setup, extract a helper:
 
 ```typescript
 // tests/test-helpers.ts
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 import { graph } from "../src/graph";
 
@@ -254,7 +254,7 @@ writes), connect to a real database:
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, getPostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 describe("PostgreSQL integration", () => {
   let pool: Pool;
@@ -262,7 +262,7 @@ describe("PostgreSQL integration", () => {
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
-    await pool.query(getPostgresMigrationSQL());
+    await pool.query(generatePostgresMigrationSQL());
     const db = drizzle(pool);
     const backend = createPostgresBackend(db);
     store = createStore(graph, backend);

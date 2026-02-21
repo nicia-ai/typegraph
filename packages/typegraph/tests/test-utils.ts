@@ -6,10 +6,8 @@
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { afterEach } from "vitest";
 
-import {
-  createLocalSqliteBackend,
-  type SqliteTables,
-} from "../src/backend/sqlite";
+import type { SqliteTables } from "../src/backend/sqlite";
+import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 
 const backendsToClose: GraphBackend[] = [];
@@ -45,4 +43,4 @@ export function createTestDatabase(
   return db;
 }
 
-export { generateSqliteDDL } from "../src/backend/sqlite";
+export { generateSqliteDDL } from "../src/backend/drizzle/ddl";

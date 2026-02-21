@@ -5,26 +5,6 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
-      "@nicia-ai/typegraph/drizzle": resolve(
-        __dirname,
-        "src/backend/drizzle/index.ts",
-      ),
-      "@nicia-ai/typegraph/drizzle/postgres": resolve(
-        __dirname,
-        "src/backend/drizzle/postgres.ts",
-      ),
-      "@nicia-ai/typegraph/drizzle/schema/postgres": resolve(
-        __dirname,
-        "src/backend/drizzle/schema/postgres.ts",
-      ),
-      "@nicia-ai/typegraph/drizzle/schema/sqlite": resolve(
-        __dirname,
-        "src/backend/drizzle/schema/sqlite.ts",
-      ),
-      "@nicia-ai/typegraph/drizzle/sqlite": resolve(
-        __dirname,
-        "src/backend/drizzle/sqlite.ts",
-      ),
       "@nicia-ai/typegraph/indexes": resolve(__dirname, "src/indexes/index.ts"),
       "@nicia-ai/typegraph/interchange": resolve(
         __dirname,
@@ -37,6 +17,10 @@ export default defineConfig({
       "@nicia-ai/typegraph/profiler": resolve(
         __dirname,
         "src/profiler/index.ts",
+      ),
+      "@nicia-ai/typegraph/sqlite/local": resolve(
+        __dirname,
+        "src/backend/sqlite/local.ts",
       ),
       "@nicia-ai/typegraph/sqlite": resolve(
         __dirname,
@@ -58,7 +42,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "html", "json-summary"],
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.d.ts", "src/backend/drizzle/test-helpers.ts"],
+      exclude: ["src/**/*.d.ts", "src/backend/drizzle/ddl.ts"],
       thresholds: {
         branches: 64,
         functions: 74,
