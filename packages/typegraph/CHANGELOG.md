@@ -1,5 +1,23 @@
 # @nicia-ai/typegraph
 
+## 0.4.0
+
+### Minor Changes
+
+- [#10](https://github.com/nicia-ai/typegraph/pull/10) [`550eec6`](https://github.com/nicia-ai/typegraph/commit/550eec6bbe34427be9095fe59571b55f75c68792) Thanks [@pdlug](https://github.com/pdlug)! - Add node and edge get-or-create operations with explicit API naming.
+
+  **New APIs:**
+  - `getOrCreateByConstraint` / `bulkGetOrCreateByConstraint` — deduplicate nodes by a named uniqueness constraint
+  - `getOrCreateByEndpoints` / `bulkGetOrCreateByEndpoints` — deduplicate edges by `(from, to)` with optional `matchOn` property fields
+  - `hardDelete` for node and edge collections
+  - `action: "created" | "found" | "updated" | "resurrected"` result discriminant
+
+  **Breaking changes:**
+  - `upsert` → `upsertById`, `bulkUpsert` → `bulkUpsertById`
+  - `onConflict: "skip" | "update"` → `ifExists: "return" | "update"`
+  - `ConstraintNotFoundError` → `NodeConstraintNotFoundError`
+  - Removed generic `FindOrCreate*` type exports in favor of explicit `NodeGetOrCreateByConstraint*` and `EdgeGetOrCreateByEndpoints*` types
+
 ## 0.3.1
 
 ### Patch Changes
