@@ -1,5 +1,6 @@
 // Types
 export {
+  type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
@@ -22,7 +23,6 @@ export {
   type StoreOptions,
   type TransactionContext,
   type TypedEdgeCollection,
-  type TypedNodeRef,
   type UpdateEdgeInput,
   type UpdateNodeInput,
 } from "./types";

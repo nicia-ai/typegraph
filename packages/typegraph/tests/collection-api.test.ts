@@ -7,7 +7,7 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import { defineEdge, defineGraph, defineNode, type EdgeId } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { createStore } from "../src/store";
@@ -366,7 +366,7 @@ describe("Edge Collections (SQLite)", () => {
 
       const results = await store.edges.worksAt.getByIds([
         edge2.id,
-        "nonexistent",
+        "nonexistent" as EdgeId<typeof worksAt>,
         edge1.id,
       ]);
 
@@ -395,7 +395,7 @@ describe("Edge Collections (SQLite)", () => {
 
       const results = await localStore.edges.worksAt.getByIds([
         edge.id,
-        "missing",
+        "missing" as EdgeId<typeof worksAt>,
       ]);
 
       expect(results).toHaveLength(2);
@@ -1020,13 +1020,13 @@ describe("Bulk Operations (SQLite)", () => {
 
       const edges = await store.edges.worksAt.bulkUpsertById([
         {
-          id: "edge-1",
+          id: "edge-1" as EdgeId<typeof worksAt>,
           from: alice,
           to: acme,
           props: { role: "Engineer" },
         },
         {
-          id: "edge-2",
+          id: "edge-2" as EdgeId<typeof worksAt>,
           from: alice,
           to: techCorp,
           props: { role: "Consultant" },
@@ -1054,7 +1054,7 @@ describe("Bulk Operations (SQLite)", () => {
 
       const edges = await store.edges.worksAt.bulkUpsertById([
         {
-          id: "edge-1",
+          id: "edge-1" as EdgeId<typeof worksAt>,
           from: alice,
           to: acme,
           props: { role: "Senior Engineer" },
@@ -1079,13 +1079,13 @@ describe("Bulk Operations (SQLite)", () => {
 
       const edges = await store.edges.worksAt.bulkUpsertById([
         {
-          id: "edge-existing",
+          id: "edge-existing" as EdgeId<typeof worksAt>,
           from: alice,
           to: acme,
           props: { role: "Lead Engineer" },
         },
         {
-          id: "edge-new",
+          id: "edge-new" as EdgeId<typeof worksAt>,
           from: alice,
           to: techCorp,
           props: { role: "Advisor" },
@@ -1122,7 +1122,7 @@ describe("Bulk Operations (SQLite)", () => {
 
       const edges = await store.edges.worksAt.bulkUpsertById([
         {
-          id: "edge-del",
+          id: "edge-del" as EdgeId<typeof worksAt>,
           from: alice,
           to: acme,
           props: { role: "Engineer Reborn" },
@@ -1167,7 +1167,10 @@ describe("Bulk Operations (SQLite)", () => {
       });
 
       // Should not throw
-      await store.edges.worksAt.bulkDelete([edge.id, "non-existent"]);
+      await store.edges.worksAt.bulkDelete([
+        edge.id,
+        "non-existent" as EdgeId<typeof worksAt>,
+      ]);
 
       const count = await store.edges.worksAt.count();
       expect(count).toBe(0);

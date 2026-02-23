@@ -19,6 +19,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type Store,
   type TypedEdgeCollection,
 } from "../src";
 import { buildKindRegistry } from "../src/registry";
@@ -443,20 +444,20 @@ describe("Edge Collection Type Safety", () => {
   describe("Type-safe edge endpoints", () => {
     it("infers correct from/to types from edge registration", () => {
       // worksAt: from: [Person], to: [Company]
-      // The create method should accept TypedNodeRef<Person> for from
-      // and TypedNodeRef<Company> for to
+      // The create method should accept NodeRef<Person> for from
+      // and NodeRef<Company> for to
 
       // This is a compile-time test - if this compiles, types are correct
       type WorksAtCollection = StoreEdges["worksAt"];
 
-      // The create method's first param should be TypedNodeRef<Person>
-      // The create method's second param should be TypedNodeRef<Company>
+      // The create method's first param should be NodeRef<Person>
+      // The create method's second param should be NodeRef<Company>
       type CreateParams = Parameters<WorksAtCollection["create"]>;
       type FromParam = CreateParams[0];
       type ToParam = CreateParams[1];
 
-      // TypedNodeRef<Person> allows { kind: "Person", id: string } or Node<Person>
-      // TypedNodeRef<Company> allows { kind: "Company", id: string } or Node<Company>
+      // NodeRef<Person> allows { kind: "Person", id: string } or Node<Person>
+      // NodeRef<Company> allows { kind: "Company", id: string } or Node<Company>
       const validFrom: FromParam = { kind: "Person", id: "test-id" };
       const validTo: ToParam = { kind: "Company", id: "test-id" };
 
@@ -534,5 +535,25 @@ describe("Edge Collection Type Safety", () => {
       expect(validTo.kind).toBe("Company");
       void invalidTo;
     });
+  });
+});
+
+// ============================================================
+// Constraint Name Type Safety Tests
+// ============================================================
+
+describe("Constraint Name Type Safety", () => {
+  type GraphStore = Store<typeof graph>;
+
+  it("uses never for nodes without unique constraints", () => {
+    type ConstraintName = Parameters<
+      GraphStore["nodes"]["Person"]["findByConstraint"]
+    >[0];
+
+    // @ts-expect-error - Person has no uniqueness constraints in this graph
+    const invalidConstraint: ConstraintName = "email";
+
+    void invalidConstraint;
+    expect(true).toBe(true);
   });
 });

@@ -102,6 +102,7 @@ export type {
   DefineEdgeOptions,
   DefineNodeOptions,
   DeleteBehavior,
+  EdgeId,
   EdgeProps,
   EdgeRegistration,
   EdgeType,
@@ -194,6 +195,7 @@ export {
 export type { Store } from "./store";
 export { createStore, createStoreWithSchema } from "./store";
 export type {
+  ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
   Edge,
@@ -216,7 +218,6 @@ export type {
   StoreOptions,
   TransactionContext,
   TypedEdgeCollection,
-  TypedNodeRef,
   UpdateEdgeInput,
   UpdateNodeInput,
 } from "./store/types";

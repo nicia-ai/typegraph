@@ -9,6 +9,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:types": "pnpm --filter @nicia-ai/typegraph test:types",
     "test:unit": "turbo run test:unit",
     "test:property": "turbo run test:property",
     "test:postgres": "pnpm --filter @nicia-ai/typegraph test:postgres",

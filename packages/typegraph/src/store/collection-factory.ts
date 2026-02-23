@@ -13,6 +13,7 @@ import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
+  type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
@@ -191,7 +192,10 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   operations: NodeOperations,
 ): {
-  [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
+  [K in keyof G["nodes"] & string]-?: NodeCollection<
+    G["nodes"][K]["type"],
+    ConstraintNames<G["nodes"][K]>
+  >;
 } {
   const collectionCache = new Map<string, unknown>();
 
@@ -200,7 +204,10 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   // the relationship between keys and their specific node types at compile time.
   return new Proxy(
     {} as unknown as {
-      [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
+      [K in keyof G["nodes"] & string]-?: NodeCollection<
+        G["nodes"][K]["type"],
+        ConstraintNames<G["nodes"][K]>
+      >;
     },
     {
       get: (_, kind: string) => {

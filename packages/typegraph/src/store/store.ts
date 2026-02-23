@@ -49,6 +49,7 @@ import {
 } from "./operations";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
+  type ConstraintNames,
   type HookContext,
   type NodeCollection,
   type OperationHookContext,
@@ -106,7 +107,8 @@ export class Store<G extends GraphDef> {
   #nodeCollections:
     | {
         [K in keyof G["nodes"] & string]-?: NodeCollection<
-          G["nodes"][K]["type"]
+          G["nodes"][K]["type"],
+          ConstraintNames<G["nodes"][K]>
         >;
       }
     | undefined;
@@ -168,7 +170,10 @@ export class Store<G extends GraphDef> {
    * ```
    */
   get nodes(): {
-    [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
+    [K in keyof G["nodes"] & string]-?: NodeCollection<
+      G["nodes"][K]["type"],
+      ConstraintNames<G["nodes"][K]>
+    >;
   } {
     if (this.#nodeCollections === undefined) {
       this.#nodeCollections = createNodeCollectionsProxy(

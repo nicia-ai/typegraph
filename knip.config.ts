@@ -3,8 +3,19 @@ import type { KnipConfig } from "knip";
 const config: KnipConfig = {
   workspaces: {
     "packages/typegraph": {
-      entry: ["src/**/index.ts", "examples/*.ts"],
-      project: ["src/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"],
+      entry: [
+        "src/**/index.ts",
+        "examples/*.ts",
+        "test-d/**/*.test-d.ts",
+        "type-smoke/**/*.ts",
+      ],
+      project: [
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "examples/**/*.ts",
+        "test-d/**/*.ts",
+        "type-smoke/**/*.ts",
+      ],
       ignore: [
         "**/test-utils.ts",
         // Public API utilities for advanced users (schema introspection, vector operations)

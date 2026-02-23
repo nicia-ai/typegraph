@@ -13,6 +13,9 @@ export const EDGE_TYPE_BRAND = "__edgeType" as const;
 /** Brand symbol for NodeId */
 declare const __nodeId: unique symbol;
 
+/** Brand symbol for EdgeId */
+declare const __edgeId: unique symbol;
+
 // ============================================================
 // Node Type
 // ============================================================
@@ -95,6 +98,16 @@ export type EdgeTypeWithEndpoints = EdgeType<
   readonly NodeType[],
   readonly NodeType[]
 >;
+
+/**
+ * Branded edge ID type.
+ *
+ * Prevents mixing IDs from different edge types at compile time.
+ */
+export type EdgeId<E extends AnyEdgeType = AnyEdgeType> = string &
+  Readonly<{
+    [__edgeId]: E;
+  }>;
 
 /**
  * Infer the props type from an EdgeType.
