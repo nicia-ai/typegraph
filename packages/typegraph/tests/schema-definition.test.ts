@@ -159,7 +159,7 @@ describe("defineGraph()", () => {
     });
 
     expect(graph.ontology).toHaveLength(1);
-    expect(graph.ontology[0]?.metaEdge.name).toBe("subClassOf");
+    expect(graph.ontology[0].metaEdge.name).toBe("subClassOf");
   });
 
   it("supports edge cardinality constraints", () => {
@@ -206,7 +206,7 @@ describe("defineGraph()", () => {
     expect(registration).toBeDefined();
     expect(registration.unique).toHaveLength(1);
     const constraint = registration.unique[0];
-    expect(constraint?.name).toBe("person_name_unique");
-    expect(constraint?.fields).toEqual(["name"]);
+    expect(constraint.name).toBe("person_name_unique");
+    expect(constraint.fields).toEqual(["name"]);
   });
 });

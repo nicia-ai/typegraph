@@ -59,6 +59,18 @@ We use [Vitest](https://vitest.dev/) for testing.
   pnpm test:postgres
   ```
 
+- **Run layered TypeScript type tests (inline + declaration + consumer smoke):**
+
+  ```bash
+  pnpm test:types
+  ```
+
+- **Run TypeScript type tests against a specific compiler version (for compatibility checks):**
+
+  ```bash
+  TYPEGRAPH_TYPESCRIPT_VERSION=6.0.0-beta pnpm --filter @nicia-ai/typegraph test:types
+  ```
+
 ### Building
 
 To build the package for distribution:

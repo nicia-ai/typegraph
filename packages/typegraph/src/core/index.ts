@@ -47,6 +47,7 @@ export {
   type Cardinality,
   type Collation,
   type DeleteBehavior,
+  type EdgeId,
   type EdgeProps,
   type EdgeRegistration,
   type EdgeType,

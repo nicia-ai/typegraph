@@ -629,8 +629,8 @@ Creates an edge. TypeScript enforces valid endpoint types.
 // Given: worksAt: { type: worksAt, from: [Person], to: [Company] }
 
 store.edges.worksAt.create(
-  from: TypedNodeRef<Person>,
-  to: TypedNodeRef<Company>,
+  from: NodeRef<Person>,
+  to: NodeRef<Company>,
   props: { role: string }
 ): Promise<Edge<worksAt>>;
 
@@ -665,7 +665,7 @@ previous query or external input).
 Retrieves an edge by ID.
 
 ```typescript
-store.edges.worksAt.getById(id: string): Promise<Edge<worksAt> | undefined>;
+store.edges.worksAt.getById(id: EdgeId<worksAt>): Promise<Edge<worksAt> | undefined>;
 ```
 
 #### `getByIds(ids)`
@@ -675,7 +675,7 @@ with `undefined` for missing IDs.
 
 ```typescript
 store.edges.worksAt.getByIds(
-  ids: readonly string[],
+  ids: readonly EdgeId<worksAt>[],
   options?: QueryOptions
 ): Promise<readonly (Edge<worksAt> | undefined)[]>;
 ```
@@ -690,7 +690,7 @@ Updates edge properties.
 
 ```typescript
 store.edges.worksAt.update(
-  id: string,
+  id: EdgeId<worksAt>,
   props: Partial<{ role: string }>,
   options?: { validTo?: string }
 ): Promise<Edge<worksAt>>;
@@ -702,7 +702,7 @@ Finds edges from a node.
 
 ```typescript
 store.edges.worksAt.findFrom(
-  from: TypedNodeRef<Person>
+  from: NodeRef<Person>
 ): Promise<Edge<worksAt>[]>;
 ```
 
@@ -712,7 +712,7 @@ Finds edges to a node.
 
 ```typescript
 store.edges.worksAt.findTo(
-  to: TypedNodeRef<Company>
+  to: NodeRef<Company>
 ): Promise<Edge<worksAt>[]>;
 ```
 
@@ -722,8 +722,8 @@ Finds edges with endpoint filtering.
 
 ```typescript
 store.edges.worksAt.find(options?: {
-  from?: TypedNodeRef<Person>;
-  to?: TypedNodeRef<Company>;
+  from?: NodeRef<Person>;
+  to?: NodeRef<Company>;
   limit?: number;
   offset?: number;
 }): Promise<Edge<worksAt>[]>;
@@ -737,8 +737,8 @@ Counts edges matching filters.
 
 ```typescript
 store.edges.worksAt.count(options?: {
-  from?: TypedNodeRef<Person>;
-  to?: TypedNodeRef<Company>;
+  from?: NodeRef<Person>;
+  to?: NodeRef<Company>;
 }): Promise<number>;
 ```
 
@@ -747,7 +747,7 @@ store.edges.worksAt.count(options?: {
 Soft-deletes an edge.
 
 ```typescript
-store.edges.worksAt.delete(id: string): Promise<void>;
+store.edges.worksAt.delete(id: EdgeId<worksAt>): Promise<void>;
 ```
 
 #### `hardDelete(id)`
@@ -755,7 +755,7 @@ store.edges.worksAt.delete(id: string): Promise<void>;
 Permanently deletes an edge. This is irreversible and should be used carefully.
 
 ```typescript
-store.edges.worksAt.hardDelete(id: string): Promise<void>;
+store.edges.worksAt.hardDelete(id: EdgeId<worksAt>): Promise<void>;
 ```
 
 #### `bulkCreate(items)`
@@ -765,8 +765,8 @@ Creates multiple edges efficiently. Uses a single multi-row INSERT when the back
 ```typescript
 store.edges.worksAt.bulkCreate(
   items: readonly {
-    from: TypedNodeRef<Person>;
-    to: TypedNodeRef<Company>;
+    from: NodeRef<Person>;
+    to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
     validFrom?: string;
@@ -789,8 +789,8 @@ ingestion — wrapped in a transaction when the backend supports it.
 ```typescript
 store.edges.worksAt.bulkInsert(
   items: readonly {
-    from: TypedNodeRef<Person>;
-    to: TypedNodeRef<Company>;
+    from: NodeRef<Person>;
+    to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
     validFrom?: string;
@@ -805,7 +805,7 @@ Soft-deletes multiple edges.
 
 ```typescript
 store.edges.worksAt.bulkDelete(
-  ids: readonly string[]
+  ids: readonly EdgeId<worksAt>[]
 ): Promise<void>;
 ```
 
@@ -816,9 +816,9 @@ Creates or updates multiple edges by ID.
 ```typescript
 store.edges.worksAt.bulkUpsertById(
   items: readonly {
-    id: string;
-    from: TypedNodeRef<Person>;
-    to: TypedNodeRef<Company>;
+    id: EdgeId<worksAt>;
+    from: NodeRef<Person>;
+    to: NodeRef<Company>;
     props?: { role: string };
     validFrom?: string;
     validTo?: string;
@@ -833,8 +833,8 @@ Returns the match if found, or creates a new edge if not.
 
 ```typescript
 store.edges.worksAt.getOrCreateByEndpoints(
-  from: TypedNodeRef<Person>,
-  to: TypedNodeRef<Company>,
+  from: NodeRef<Person>,
+  to: NodeRef<Company>,
   props: { role: string },
   options?: {
     matchOn?: readonly ("role")[]; // Default: []
@@ -853,8 +853,8 @@ Batch version of `getOrCreateByEndpoints`. Returns results in input order.
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(
   items: readonly {
-    from: TypedNodeRef<Person>;
-    to: TypedNodeRef<Company>;
+    from: NodeRef<Person>;
+    to: NodeRef<Company>;
     props: { role: string };
   }[],
   options?: {
@@ -878,8 +878,8 @@ When `matchOn` is provided, filters by the specified property fields.
 
 ```typescript
 store.edges.knows.findByEndpoints(
-  from: TypedNodeRef<Person>,
-  to: TypedNodeRef<Person>,
+  from: NodeRef<Person>,
+  to: NodeRef<Person>,
   options?: {
     matchOn?: readonly ("relationship" | "since")[];
     props?: Partial<{ relationship: string; since: string }>;

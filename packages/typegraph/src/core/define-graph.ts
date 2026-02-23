@@ -266,9 +266,9 @@ export type AllEdgeTypes<G extends GraphDef> = {
  * ```
  */
 export function defineGraph<
-  TNodes extends Record<string, NodeRegistration<NodeType>>,
-  TEdges extends Record<string, EdgeEntry>,
-  TOntology extends readonly OntologyRelation[],
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[],
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology>,
 ): GraphDef<TNodes, NormalizedEdges<TEdges>, TOntology> {
@@ -308,13 +308,17 @@ export function isGraphDef(value: unknown): value is GraphDef {
 /**
  * Gets all node kind names from a GraphDef.
  */
-export function getNodeKinds<G extends GraphDef>(graph: G): readonly string[] {
-  return Object.keys(graph.nodes);
+export function getNodeKinds<G extends GraphDef>(
+  graph: G,
+): readonly (keyof G["nodes"] & string)[] {
+  return Object.keys(graph.nodes) as (keyof G["nodes"] & string)[];
 }
 
 /**
  * Gets all edge kind names from a GraphDef.
  */
-export function getEdgeKinds<G extends GraphDef>(graph: G): readonly string[] {
-  return Object.keys(graph.edges);
+export function getEdgeKinds<G extends GraphDef>(
+  graph: G,
+): readonly (keyof G["edges"] & string)[] {
+  return Object.keys(graph.edges) as (keyof G["edges"] & string)[];
 }

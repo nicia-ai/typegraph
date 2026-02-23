@@ -6,9 +6,11 @@ import { type z } from "zod";
 import { type GraphDef } from "../core/define-graph";
 import {
   type AnyEdgeType,
+  type EdgeId,
   type EdgeRegistration,
   type EdgeType,
   type NodeId,
+  type NodeRegistration,
   type NodeType,
   type TemporalMode,
 } from "../core/types";
@@ -90,13 +92,17 @@ export type EdgeMeta = Readonly<{
  * - `edge.role` instead of `edge.props.role`
  * - System metadata is under `edge.meta.*`
  */
-export type Edge<E extends AnyEdgeType = EdgeType> = Readonly<{
-  id: string;
+export type Edge<
+  E extends AnyEdgeType = EdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Readonly<{
+  id: EdgeId<E>;
   kind: E["kind"];
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
+  fromKind: From["kind"];
+  fromId: NodeId<From>;
+  toKind: To["kind"];
+  toId: NodeId<To>;
   meta: EdgeMeta;
 }> &
   Readonly<z.infer<E["schema"]>>;
@@ -120,7 +126,7 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
  * Input for updating an edge.
  */
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
-  id: string;
+  id: EdgeId<E>;
   props: Partial<z.infer<E["schema"]>>;
   validTo?: string;
 }>;
@@ -276,8 +282,12 @@ export type NodeGetOrCreateByConstraintOptions = Readonly<{
 /**
  * Result of an edge getOrCreateByEndpoints operation.
  */
-export type EdgeGetOrCreateByEndpointsResult<E extends AnyEdgeType> = Readonly<{
-  edge: Edge<E>;
+export type EdgeGetOrCreateByEndpointsResult<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Readonly<{
+  edge: Edge<E, From, To>;
   action: GetOrCreateAction;
 }>;
 
@@ -317,7 +327,10 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
  *
  * Provides ergonomic CRUD operations for a single node type.
  */
-export type NodeCollection<N extends NodeType> = Readonly<{
+export type NodeCollection<
+  N extends NodeType,
+  CN extends string = string,
+> = Readonly<{
   /** Create a new node */
   create: (
     props: z.input<N["schema"]>,
@@ -454,7 +467,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * @param props - Properties to compute the constraint key from
    */
   findByConstraint: (
-    constraintName: string,
+    constraintName: CN,
     props: z.input<N["schema"]>,
   ) => Promise<Node<N> | undefined>;
 
@@ -465,7 +478,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * Returns undefined for entries that don't match.
    */
   bulkFindByConstraint: (
-    constraintName: string,
+    constraintName: CN,
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
     }>[],
@@ -483,7 +496,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * @param options - Existing record behavior (default: "return")
    */
   getOrCreateByConstraint: (
-    constraintName: string,
+    constraintName: CN,
     props: z.input<N["schema"]>,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
@@ -495,7 +508,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByConstraint: (
-    constraintName: string,
+    constraintName: CN,
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
     }>[],
@@ -504,14 +517,7 @@ export type NodeCollection<N extends NodeType> = Readonly<{
 }>;
 
 /**
- * Reference to a node endpoint (kind and id).
- *
- * Can be either an explicit `{ kind, id }` object or a Node instance.
- */
-export type NodeRef = Readonly<{ kind: string; id: string }>;
-
-/**
- * Type-safe reference to a node of a specific kind.
+ * Reference to a node of a specific kind.
  *
  * Accepts either:
  * - A Node instance of the correct kind
@@ -520,7 +526,7 @@ export type NodeRef = Readonly<{ kind: string; id: string }>;
  * This provides compile-time checking that edge endpoints match the
  * allowed node kinds defined in the edge registration.
  */
-export type TypedNodeRef<N extends NodeType> =
+export type NodeRef<N extends NodeType = NodeType> =
   | Node<N>
   | Readonly<{ kind: N["kind"]; id: string }>;
 
@@ -580,35 +586,38 @@ export type EdgeCollection<
    * @param args - Edge properties (optional if schema is empty) and creation options
    */
   create: (
-    from: TypedNodeRef<From>,
-    to: TypedNodeRef<To>,
+    from: NodeRef<From>,
+    to: NodeRef<To>,
     ...args: EdgeCreateArguments<E>
-  ) => Promise<Edge<E>>;
+  ) => Promise<Edge<E, From, To>>;
 
   /** Get an edge by ID */
-  getById: (id: string, options?: QueryOptions) => Promise<Edge<E> | undefined>;
+  getById: (
+    id: EdgeId<E>,
+    options?: QueryOptions,
+  ) => Promise<Edge<E, From, To> | undefined>;
 
   /** Get multiple edges by ID, preserving input order (undefined for missing) */
   getByIds: (
-    ids: readonly string[],
+    ids: readonly EdgeId<E>[],
     options?: QueryOptions,
-  ) => Promise<readonly (Edge<E> | undefined)[]>;
+  ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
 
   /** Update an edge's properties */
   update: (
-    id: string,
+    id: EdgeId<E>,
     props: Partial<z.input<E["schema"]>>,
     options?: Readonly<{ validTo?: string }>,
-  ) => Promise<Edge<E>>;
+  ) => Promise<Edge<E, From, To>>;
 
   /** Find edges from a specific node */
-  findFrom: (from: TypedNodeRef<From>) => Promise<Edge<E>[]>;
+  findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
 
   /** Find edges to a specific node */
-  findTo: (to: TypedNodeRef<To>) => Promise<Edge<E>[]>;
+  findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
-  delete: (id: string) => Promise<void>;
+  delete: (id: EdgeId<E>) => Promise<void>;
 
   /**
    * Permanently delete an edge from the database.
@@ -619,25 +628,25 @@ export type EdgeCollection<
    * **Warning:** This operation is irreversible and should be used carefully.
    * Consider using soft delete (`delete()`) for most use cases.
    */
-  hardDelete: (id: string) => Promise<void>;
+  hardDelete: (id: EdgeId<E>) => Promise<void>;
 
   /** Find edges matching endpoint and pagination criteria */
   find: (
     options?: Readonly<{
-      from?: TypedNodeRef<From>;
-      to?: TypedNodeRef<To>;
+      from?: NodeRef<From>;
+      to?: NodeRef<To>;
       limit?: number;
       offset?: number;
       temporalMode?: TemporalMode;
       asOf?: string;
     }>,
-  ) => Promise<Edge<E>[]>;
+  ) => Promise<Edge<E, From, To>[]>;
 
   /** Count edges matching criteria */
   count: (
     options?: Readonly<{
-      from?: TypedNodeRef<From>;
-      to?: TypedNodeRef<To>;
+      from?: NodeRef<From>;
+      to?: NodeRef<To>;
       temporalMode?: TemporalMode;
       asOf?: string;
     }>,
@@ -651,14 +660,14 @@ export type EdgeCollection<
    */
   bulkCreate: (
     items: readonly Readonly<{
-      from: TypedNodeRef<From>;
-      to: TypedNodeRef<To>;
+      from: NodeRef<From>;
+      to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       id?: string;
       validFrom?: string;
       validTo?: string;
     }>[],
-  ) => Promise<Edge<E>[]>;
+  ) => Promise<Edge<E, From, To>[]>;
 
   /**
    * Create or update multiple edges in a batch.
@@ -668,14 +677,14 @@ export type EdgeCollection<
    */
   bulkUpsertById: (
     items: readonly Readonly<{
-      id: string;
-      from: TypedNodeRef<From>;
-      to: TypedNodeRef<To>;
+      id: EdgeId<E>;
+      from: NodeRef<From>;
+      to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       validFrom?: string;
       validTo?: string;
     }>[],
-  ) => Promise<Edge<E>[]>;
+  ) => Promise<Edge<E, From, To>[]>;
 
   /**
    * Insert multiple edges without returning results.
@@ -686,8 +695,8 @@ export type EdgeCollection<
    */
   bulkInsert: (
     items: readonly Readonly<{
-      from: TypedNodeRef<From>;
-      to: TypedNodeRef<To>;
+      from: NodeRef<From>;
+      to: NodeRef<To>;
       props?: z.input<E["schema"]>;
       id?: string;
       validFrom?: string;
@@ -701,7 +710,7 @@ export type EdgeCollection<
    * Atomic when the backend supports transactions. Silently ignores IDs
    * that don't exist.
    */
-  bulkDelete: (ids: readonly string[]) => Promise<void>;
+  bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
 
   /**
    * Find a live edge by endpoints and optional property fields.
@@ -714,10 +723,10 @@ export type EdgeCollection<
    * @param options - Match criteria (matchOn fields and property values)
    */
   findByEndpoints: (
-    from: TypedNodeRef<From>,
-    to: TypedNodeRef<To>,
+    from: NodeRef<From>,
+    to: NodeRef<To>,
     options?: EdgeFindByEndpointsOptions<E>,
-  ) => Promise<Edge<E> | undefined>;
+  ) => Promise<Edge<E, From, To> | undefined>;
 
   /**
    * Get an existing edge by endpoints and optional property fields, or create a new one.
@@ -732,11 +741,11 @@ export type EdgeCollection<
    * @param options - Match criteria and conflict resolution
    */
   getOrCreateByEndpoints: (
-    from: TypedNodeRef<From>,
-    to: TypedNodeRef<To>,
+    from: NodeRef<From>,
+    to: NodeRef<To>,
     props: z.input<E["schema"]>,
     options?: EdgeGetOrCreateByEndpointsOptions<E>,
-  ) => Promise<EdgeGetOrCreateByEndpointsResult<E>>;
+  ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>>;
 
   /**
    * Batch version of getOrCreateByEndpoints.
@@ -746,17 +755,31 @@ export type EdgeCollection<
    */
   bulkGetOrCreateByEndpoints: (
     items: readonly Readonly<{
-      from: TypedNodeRef<From>;
-      to: TypedNodeRef<To>;
+      from: NodeRef<From>;
+      to: NodeRef<To>;
       props: z.input<E["schema"]>;
     }>[],
     options?: EdgeGetOrCreateByEndpointsOptions<E>,
-  ) => Promise<EdgeGetOrCreateByEndpointsResult<E>[]>;
+  ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 
 // ============================================================
 // Type Helpers
 // ============================================================
+
+/**
+ * Extract uniqueness constraint names from a NodeRegistration.
+ *
+ * - Returns `never` when no uniqueness constraints are configured.
+ * - Returns a literal union when names are inferred via `defineGraph` const params.
+ * - Falls back to `string` when names are widened/dynamic.
+ */
+export type ConstraintNames<R extends NodeRegistration> =
+  "unique" extends keyof R ?
+    R["unique"] extends readonly { readonly name: infer N }[] ?
+      N & string
+    : string
+  : never;
 
 /**
  * Extract the union of 'from' node types from an EdgeRegistration.
@@ -803,7 +826,10 @@ export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 export type TransactionContext<G extends GraphDef> = Readonly<{
   /** Node collections for the transaction */
   nodes: {
-    [K in keyof G["nodes"] & string]-?: NodeCollection<G["nodes"][K]["type"]>;
+    [K in keyof G["nodes"] & string]-?: NodeCollection<
+      G["nodes"][K]["type"],
+      ConstraintNames<G["nodes"][K]>
+    >;
   };
 
   /** Edge collections for the transaction */

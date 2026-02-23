@@ -171,6 +171,7 @@ describe("store.nodes.*.getOrCreateByConstraint()", () => {
     const store = createStore(graph, backend);
 
     await expect(
+      // @ts-expect-error - testing runtime validation of nonexistent constraint
       store.nodes.Entity.getOrCreateByConstraint("nonexistent_constraint", {
         entityType: "Person",
         name: "Alice",
@@ -325,6 +326,7 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     const store = createStore(graph, backend);
 
     await expect(
+      // @ts-expect-error - testing runtime validation of nonexistent constraint
       store.nodes.Entity.bulkGetOrCreateByConstraint("nonexistent", [
         { props: { entityType: "Person", name: "Alice" } },
       ]),

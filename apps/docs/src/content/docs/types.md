@@ -71,21 +71,14 @@ function validatePersonData(data: PersonProps): boolean {
 }
 ```
 
-### `NodeRef`
+### `NodeRef<N>`
 
-Generic reference to a node endpoint.
-
-```typescript
-type NodeRef = Readonly<{ kind: string; id: string }>;
-```
-
-### `TypedNodeRef<N>`
-
-Type-safe reference to a node of a specific type. Used for edge collection
+Type-safe reference to a node of a specific kind. Used for edge collection
 methods to enforce that endpoints match the allowed node types.
+Defaults to `NodeType` when no type parameter is given.
 
 ```typescript
-type TypedNodeRef<N extends NodeType> = Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
+type NodeRef<N extends NodeType = NodeType> = Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
 ```
 
 Accepts either:
@@ -126,18 +119,23 @@ type SelectableNode<N extends NodeType> = Readonly<{
 
 ## Edge Types
 
-### `Edge<E>`
+### `Edge<E, From, To>`
 
-The full edge type returned from store operations.
+The full edge type returned from store operations. The `From` and `To` type
+parameters carry compile-time node type information for the edge endpoints.
 
 ```typescript
-type Edge<E extends EdgeType> = Readonly<{
-  id: string;
+type Edge<
+  E extends EdgeType = EdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Readonly<{
+  id: EdgeId<E>;           // Branded ID type
   kind: E["kind"];
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
+  fromKind: From["kind"];
+  fromId: NodeId<From>;
+  toKind: To["kind"];
+  toId: NodeId<To>;
   meta: {
     validFrom: string | undefined;   // Temporal validity start (ISO string)
     validTo: string | undefined;     // Temporal validity end (ISO string)
@@ -146,6 +144,26 @@ type Edge<E extends EdgeType> = Readonly<{
     deletedAt: string | undefined;   // Soft delete timestamp (ISO string)
   };
 }> & z.infer<E["schema"]>;            // Schema properties are flattened
+```
+
+### `EdgeId<E>`
+
+Branded string type for type-safe edge IDs. Prevents accidentally mixing IDs from different edge types.
+
+```typescript
+type EdgeId<E extends AnyEdgeType = AnyEdgeType> = string & { readonly [__edgeId]: E };
+```
+
+**Example:**
+
+```typescript
+import { type EdgeId } from "@nicia-ai/typegraph";
+
+type WorksAtId = EdgeId<typeof worksAt>;
+
+function getEdgeById(id: WorksAtId): Promise<Edge<typeof worksAt>> {
+  return store.edges.worksAt.getById(id);
+}
 ```
 
 ### `EdgeProps<E>`

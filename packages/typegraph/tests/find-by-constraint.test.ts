@@ -107,6 +107,7 @@ describe("store.nodes.*.findByConstraint()", () => {
   it("throws for unknown constraint name", async () => {
     const store = createStore(graph, backend);
     await expect(
+      // @ts-expect-error - testing runtime validation of nonexistent constraint
       store.nodes.Person.findByConstraint("nonexistent", {
         email: "a@b.com",
         name: "A",
