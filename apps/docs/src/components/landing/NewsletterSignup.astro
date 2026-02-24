@@ -1,0 +1,118 @@
+---
+---
+
+<section class="py-24 text-center">
+  <div class="max-w-[600px] mx-auto">
+    <h2 class="text-4xl font-extrabold mb-4">Stay in the loop</h2>
+    <p class="text-lg text-text-muted mb-8">
+      Occasional updates on new features, guides, and releases. No spam.
+    </p>
+    <form
+      id="newsletter-form"
+      class="flex flex-col sm:flex-row gap-3 max-w-[460px] mx-auto"
+    >
+      <input
+        type="email"
+        name="email"
+        required
+        placeholder="you@example.com"
+        autocomplete="email"
+        class="flex-1 px-4 py-3 rounded-lg border border-border bg-transparent text-text-main placeholder:text-text-muted focus:outline-none focus:border-primary transition-colors"
+      />
+      <!-- Honeypot: hidden from real users, filled by bots -->
+      <input
+        type="text"
+        name="website"
+        autocomplete="off"
+        tabindex="-1"
+        aria-hidden="true"
+        class="honeypot"
+      />
+      <input type="hidden" name="renderedAt" id="rendered-at" />
+      <button
+        type="submit"
+        class="px-6 py-3 rounded-lg bg-primary text-white font-semibold hover:bg-primary-dark hover:-translate-y-px transition-all duration-200 whitespace-nowrap disabled:opacity-60 disabled:pointer-events-none"
+      >
+        Subscribe
+      </button>
+    </form>
+    <p id="newsletter-message" class="mt-4 text-sm hidden"></p>
+  </div>
+</section>
+
+<script>
+  import { actions } from "astro:actions";
+
+  const form = document.getElementById("newsletter-form") as HTMLFormElement;
+  const messageEl = document.getElementById(
+    "newsletter-message",
+  ) as HTMLParagraphElement;
+  const button = form.querySelector("button") as HTMLButtonElement;
+  const emailInput = form.querySelector(
+    'input[name="email"]',
+  ) as HTMLInputElement;
+  const honeypotInput = form.querySelector(
+    'input[name="website"]',
+  ) as HTMLInputElement;
+  const renderedAtInput = document.getElementById(
+    "rendered-at",
+  ) as HTMLInputElement;
+
+  renderedAtInput.value = String(Date.now());
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const email = emailInput.value.trim();
+    if (!email) return;
+
+    button.disabled = true;
+    button.textContent = "Subscribing\u2026";
+    messageEl.classList.add("hidden");
+
+    const { data, error } = await actions.subscribe({
+      email,
+      website: honeypotInput.value,
+      renderedAt: Number(renderedAtInput.value),
+    });
+
+    if (error) {
+      messageEl.textContent =
+        error.message || "Something went wrong. Please try again.";
+      messageEl.className = "mt-4 text-sm newsletter-error";
+      button.disabled = false;
+      button.textContent = "Subscribe";
+      return;
+    }
+
+    messageEl.textContent = data.alreadySubscribed
+      ? "You\u2019re already subscribed!"
+      : "You\u2019re in. Thanks for subscribing!";
+    messageEl.className = "mt-4 text-sm text-primary";
+    emailInput.disabled = true;
+    button.textContent = "Subscribed";
+  });
+</script>
+
+<style>
+  @reference "tailwindcss";
+
+  .honeypot {
+    position: absolute;
+    left: -9999px;
+    opacity: 0;
+    height: 0;
+    width: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .newsletter-error {
+    color: #ef4444;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .newsletter-error {
+      color: #f87171;
+    }
+  }
+</style>
