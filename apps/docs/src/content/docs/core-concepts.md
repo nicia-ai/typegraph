@@ -184,6 +184,40 @@ const knows = defineEdge("knows");
 // Equivalent to: defineEdge("knows", { schema: z.object({}) })
 ```
 
+#### Unconstrained Edges
+
+Edges defined without `from` and `to` are **unconstrained** — they can connect any
+node type to any node type. When used directly in `defineGraph`, they are automatically
+allowed for all node types in the graph:
+
+```typescript
+const sameAs = defineEdge("sameAs");
+const related = defineEdge("related", {
+  schema: z.object({ reason: z.string() }),
+});
+
+const graph = defineGraph({
+  id: "my_graph",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    sameAs,     // any→any (Person↔Person, Person↔Company, Company↔Company)
+    related,    // any→any, with properties
+    worksAt: { type: worksAt, from: [Person], to: [Company] },  // constrained
+  },
+});
+
+// All of these work:
+await store.edges.sameAs.create(alice, bob, {});       // Person→Person
+await store.edges.sameAs.create(alice, acme, {});      // Person→Company
+await store.edges.sameAs.create(acme, alice, {});      // Company→Person
+```
+
+This is useful for semantic relationships like `sameAs`, `seeAlso`, `related`, or
+`tagged` that apply broadly across node types.
+
 #### Domain and Range Constraints
 
 Edges can include built-in domain (source types) and range (target types) constraints
@@ -207,13 +241,16 @@ const mentions = defineEdge("mentions", {
 });
 ```
 
-When an edge has `from` and `to` defined, you can use it directly in `defineGraph` without an `EdgeRegistration` wrapper:
+Any edge type can be used directly in `defineGraph` without an `EdgeRegistration`
+wrapper. Constrained edges use their built-in `from`/`to`; unconstrained edges
+allow all node types:
 
 ```typescript
 const graph = defineGraph({
   nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: {
-    worksAt,  // Direct use - constraints come from the edge definition
+    worksAt,  // Constrained - uses built-in from/to
+    sameAs,   // Unconstrained - connects any node to any node
   },
 });
 ```

@@ -1,10 +1,12 @@
 import { ConfigurationError } from "../errors/index";
 import { type OntologyRelation } from "../ontology/types";
 import {
+  type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
   type EdgeTypeWithEndpoints,
   type GraphDefaults,
+  isEdgeType,
   isEdgeTypeWithEndpoints,
   type NodeRegistration,
   type NodeType,
@@ -25,21 +27,28 @@ const GRAPH_DEF_BRAND = "__graphDef" as const;
 /**
  * An edge entry in the graph definition.
  * Can be:
- * - EdgeType directly (if it has from/to defined)
+ * - EdgeType directly (constrained or unconstrained)
  * - EdgeRegistration object (always works, can override/narrow defaults)
  */
-type EdgeEntry = EdgeRegistration | EdgeTypeWithEndpoints;
+type EdgeEntry = EdgeRegistration | AnyEdgeType;
 
 /**
  * Normalized edge map type - all entries become EdgeRegistration.
+ * For bare EdgeTypes, constrained endpoints are extracted from the type;
+ * unconstrained edges fall back to all node types in the graph.
  */
-type NormalizedEdges<TEdges extends Record<string, EdgeEntry>> = {
+type NormalizedEdges<
+  TNodes extends Record<string, NodeRegistration>,
+  TEdges extends Record<string, EdgeEntry>,
+> = {
   [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K]
-  : TEdges[K] extends EdgeTypeWithEndpoints ?
+  : TEdges[K] extends AnyEdgeType ?
     EdgeRegistration<
       TEdges[K],
-      TEdges[K]["from"][number],
-      TEdges[K]["to"][number]
+      TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N
+      : TNodes[keyof TNodes]["type"],
+      TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N
+      : TNodes[keyof TNodes]["type"]
     >
   : never;
 };
@@ -97,17 +106,21 @@ function validateConstraintNarrowing(
 /**
  * Normalizes a single edge entry to EdgeRegistration.
  */
-function normalizeEdgeEntry(name: string, entry: EdgeEntry): EdgeRegistration {
-  if (isEdgeTypeWithEndpoints(entry)) {
-    // EdgeType with from/to - convert to EdgeRegistration
-    return {
-      type: entry,
-      from: entry.from,
-      to: entry.to,
-    };
+function normalizeEdgeEntry(
+  name: string,
+  entry: EdgeEntry,
+  allNodeTypes: readonly NodeType[],
+): EdgeRegistration {
+  if (isEdgeType(entry)) {
+    if (isEdgeTypeWithEndpoints(entry)) {
+      // EdgeType with from/to — convert to EdgeRegistration
+      return { type: entry, from: entry.from, to: entry.to };
+    }
+    // Unconstrained EdgeType — allow any→any
+    return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
 
-  // Already EdgeRegistration - validate narrowing if edge has built-in constraints
+  // Already EdgeRegistration — validate narrowing if edge has built-in constraints
   if (isEdgeTypeWithEndpoints(entry.type)) {
     validateConstraintNarrowing(name, entry.type, entry);
   }
@@ -120,10 +133,11 @@ function normalizeEdgeEntry(name: string, entry: EdgeEntry): EdgeRegistration {
  */
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
+  allNodeTypes: readonly NodeType[],
 ): Record<string, EdgeRegistration> {
   const result: Record<string, EdgeRegistration> = {};
   for (const [name, entry] of Object.entries(edges)) {
-    result[name] = normalizeEdgeEntry(name, entry);
+    result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }
   return result;
 }
@@ -271,13 +285,14 @@ export function defineGraph<
   const TOntology extends readonly OntologyRelation[],
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology>,
-): GraphDef<TNodes, NormalizedEdges<TEdges>, TOntology> {
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology> {
   const defaults = {
     onNodeDelete: config.defaults?.onNodeDelete ?? "restrict",
     temporalMode: config.defaults?.temporalMode ?? "current",
   } as const;
 
-  const normalizedEdges = normalizeEdges(config.edges);
+  const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
+  const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
 
   return Object.freeze({
     [GRAPH_DEF_BRAND]: true as const,
@@ -286,7 +301,7 @@ export function defineGraph<
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),
     defaults,
-  }) as GraphDef<TNodes, NormalizedEdges<TEdges>, TOntology>;
+  }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
 }
 
 // ============================================================
