@@ -97,16 +97,35 @@ const worksAt = defineEdge("worksAt", {
   from: [Person],      // Domain: only Person can be the source
   to: [Company],       // Range: only Company can be the target
 });
+```
 
-// Edges with built-in constraints can be used directly in defineGraph
-const graph = defineGraph({
-  id: "my_graph",
-  nodes: { Person: { type: Person }, Company: { type: Company } },
-  edges: { worksAt },  // Direct use - no EdgeRegistration wrapper needed
+**Unconstrained Edges:**
+
+Edges without `from`/`to` are unconstrained — they can connect any node type to any node type:
+
+```typescript
+const sameAs = defineEdge("sameAs");
+const related = defineEdge("related", {
+  schema: z.object({ reason: z.string() }),
 });
 ```
 
-See [Schemas & Types](/core-concepts#domain-and-range-constraints) for detailed documentation on domain/range constraints.
+**Direct use in defineGraph:**
+
+Any edge type can be used directly in `defineGraph` without an `EdgeRegistration` wrapper:
+
+```typescript
+const graph = defineGraph({
+  id: "my_graph",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt,  // Constrained — uses built-in from/to
+    sameAs,   // Unconstrained — connects any node to any node
+  },
+});
+```
+
+See [Core Concepts](/core-concepts#domain-and-range-constraints) for detailed documentation on domain/range constraints.
 
 ### `embedding(dimensions)`
 
@@ -220,7 +239,7 @@ import { defineGraph } from "@nicia-ai/typegraph";
 function defineGraph<G extends GraphDef>(config: {
   id: string;
   nodes: Record<string, NodeRegistration>;
-  edges: Record<string, EdgeRegistration>;
+  edges: Record<string, EdgeRegistration | EdgeType>;
   ontology?: OntologyRelation[];
 }): G;
 ```
@@ -231,8 +250,14 @@ function defineGraph<G extends GraphDef>(config: {
 |-----------|------|-------------|
 | `id` | `string` | Unique identifier for this graph |
 | `nodes` | `Record<string, NodeRegistration>` | Node type registrations |
-| `edges` | `Record<string, EdgeRegistration>` | Edge type registrations with endpoint types |
+| `edges` | `Record<string, EdgeRegistration \| EdgeType>` | Edge registrations or edge types directly |
 | `ontology` | `OntologyRelation[]` | Optional semantic relationships |
+
+Edge entries can be:
+
+- **`EdgeRegistration`** — explicit `{ type, from, to }` with optional `cardinality`
+- **`EdgeType` with `from`/`to`** — uses built-in constraints
+- **`EdgeType` without `from`/`to`** — unconstrained, connects any node to any node
 
 **Example:**
 
@@ -250,6 +275,7 @@ const graph = defineGraph({
       to: [Company],
       cardinality: "many",
     },
+    sameAs,  // Unconstrained — any→any
   },
   ontology: [disjointWith(Person, Company)],
 });

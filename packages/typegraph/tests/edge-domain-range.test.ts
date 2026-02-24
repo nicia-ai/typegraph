@@ -7,6 +7,8 @@ import {
   defineNode,
   isEdgeTypeWithEndpoints,
 } from "../src";
+import { createStore } from "../src/store";
+import { createTestBackend } from "./test-utils";
 
 describe("defineEdge() with domain/range", () => {
   const Person = defineNode("Person", {
@@ -240,6 +242,108 @@ describe("defineEdge() with domain/range", () => {
       });
 
       expect(graph.edges.worksAt.cardinality).toBe("one");
+    });
+  });
+
+  describe("unconstrained edges", () => {
+    it("allows bare EdgeType without from/to directly in defineGraph", () => {
+      const sameAs = defineEdge("sameAs");
+
+      const graph = defineGraph({
+        id: "test",
+        nodes: {
+          Person: { type: Person },
+          Company: { type: Company },
+        },
+        edges: { sameAs },
+      });
+
+      expect(graph.edges.sameAs.type).toBe(sameAs);
+      expect(graph.edges.sameAs.from).toContain(Person);
+      expect(graph.edges.sameAs.from).toContain(Company);
+      expect(graph.edges.sameAs.to).toContain(Person);
+      expect(graph.edges.sameAs.to).toContain(Company);
+    });
+
+    it("allows unconstrained edge with schema", () => {
+      const related = defineEdge("related", {
+        schema: z.object({ reason: z.string() }),
+      });
+
+      const graph = defineGraph({
+        id: "test",
+        nodes: {
+          Person: { type: Person },
+          Company: { type: Company },
+        },
+        edges: { related },
+      });
+
+      expect(graph.edges.related.type.schema).toBe(related.schema);
+      expect(graph.edges.related.from).toHaveLength(2);
+      expect(graph.edges.related.to).toHaveLength(2);
+    });
+
+    it("mixes constrained and unconstrained edges", () => {
+      const worksAt = defineEdge("worksAt", {
+        from: [Person],
+        to: [Company],
+      });
+      const sameAs = defineEdge("sameAs");
+
+      const graph = defineGraph({
+        id: "test",
+        nodes: {
+          Person: { type: Person },
+          Company: { type: Company },
+        },
+        edges: {
+          worksAt,
+          sameAs,
+        },
+      });
+
+      // Constrained edge: only Person→Company
+      expect(graph.edges.worksAt.from).toEqual([Person]);
+      expect(graph.edges.worksAt.to).toEqual([Company]);
+
+      // Unconstrained edge: any→any
+      expect(graph.edges.sameAs.from).toContain(Person);
+      expect(graph.edges.sameAs.from).toContain(Company);
+      expect(graph.edges.sameAs.to).toContain(Person);
+      expect(graph.edges.sameAs.to).toContain(Company);
+    });
+
+    it("works with store for cross-type edges", async () => {
+      const sameAs = defineEdge("sameAs");
+
+      const graph = defineGraph({
+        id: "test_unconstrained",
+        nodes: {
+          Person: { type: Person },
+          Company: { type: Company },
+        },
+        edges: { sameAs },
+      });
+
+      const backend = createTestBackend();
+      const store = createStore(graph, backend);
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+
+      // Person→Company
+      const edge1 = await store.edges.sameAs.create(alice, acme, {});
+      expect(edge1.id).toBeDefined();
+
+      // Company→Person
+      const edge2 = await store.edges.sameAs.create(acme, alice, {});
+      expect(edge2.id).toBeDefined();
+
+      // Person→Person
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge3 = await store.edges.sameAs.create(alice, bob, {});
+      expect(edge3.id).toBeDefined();
     });
   });
 });

@@ -204,6 +204,9 @@ const assignedTo = defineEdge("assignedTo", {
     assignedAt: z.string().optional(),
   }),
 });
+
+// Unconstrained edge — connects any node to any node
+const related = defineEdge("related");
 ```
 
 ### Step 3: Create the Graph Definition
@@ -224,6 +227,7 @@ const graph = defineGraph({
     worksOn: { type: worksOn, from: [Person], to: [Project] },
     hasTask: { type: hasTask, from: [Project], to: [Task] },
     assignedTo: { type: assignedTo, from: [Task], to: [Person] },
+    related,  // any→any
   },
   ontology: [
     // A Person cannot be a Project or Task
