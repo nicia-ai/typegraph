@@ -1,7 +1,7 @@
 import cloudflare from "@astrojs/cloudflare";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig, passthroughImageService } from "astro/config";
+import { defineConfig, envField, passthroughImageService } from "astro/config";
 import starlightLlmsTxt from "starlight-llms-txt";
 
 // Pages to include in llms-small.txt (unlisted pages are excluded automatically)
@@ -231,6 +231,18 @@ export default defineConfig({
       ],
     }),
   ],
+  env: {
+    schema: {
+      NICIA_EMAIL_LIST_API_URL: envField.string({
+        context: "server",
+        access: "secret",
+      }),
+      NICIA_EMAIL_LIST_API_KEY: envField.string({
+        context: "server",
+        access: "secret",
+      }),
+    },
+  },
   output: "server",
   adapter: cloudflare({
     imageService: "passthrough",
