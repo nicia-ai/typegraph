@@ -1,0 +1,23 @@
+---
+import Layout from "../layouts/Landing.astro";
+---
+
+<Layout title="Page Not Found - TypeGraph">
+  <main class="max-w-[600px] mx-auto px-8 py-32 text-center">
+    <p class="text-8xl font-extrabold text-primary mb-4">404</p>
+    <h1 class="text-3xl font-bold mb-4">Page not found</h1>
+    <p class="text-lg text-text-muted mb-10">
+      The page you're looking for doesn't exist or has been moved.
+    </p>
+    <div class="flex justify-center gap-4">
+      <a
+        href="/"
+        class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-white bg-primary font-semibold hover:bg-primary-dark hover:-translate-y-px transition-all duration-200"
+      >Home</a>
+      <a
+        href="/overview"
+        class="inline-flex items-center justify-center px-6 py-3 rounded-lg text-text-main border border-border bg-transparent font-semibold hover:border-primary hover:text-primary transition-all duration-200"
+      >Documentation</a>
+    </div>
+  </main>
+</Layout>
