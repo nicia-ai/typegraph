@@ -25,7 +25,6 @@ import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
 import {
   type CreateVectorIndexParams,
-  D1_CAPABILITIES,
   type DropVectorIndexParams,
   type GraphBackend,
   SQLITE_CAPABILITIES,
@@ -38,6 +37,7 @@ import {
   type SqliteExecutionAdapter,
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
+export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import { createCommonOperationBackend } from "./operation-backend-core";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
@@ -70,7 +70,8 @@ export type SqliteBackendOptions = Readonly<{
   tables?: SqliteTables;
   /**
    * Optional execution profile hints used to avoid runtime driver reflection.
-   * Set `isD1: true` when using Cloudflare D1.
+   * Set `transactionMode: "none"` for drivers that do not support transactions
+   * (e.g. Cloudflare D1, Durable Objects).
    */
   executionProfile?: SqliteExecutionProfileHints;
 }>;
@@ -302,8 +303,11 @@ export function createSqliteBackend(
   const tables = options.tables ?? defaultTables;
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
-  const { isD1, isSync } = executionAdapter.profile;
-  const capabilities = isD1 ? D1_CAPABILITIES : SQLITE_CAPABILITIES;
+  const { isSync, transactionMode } = executionAdapter.profile;
+  const capabilities =
+    transactionMode === "none"
+      ? { ...SQLITE_CAPABILITIES, transactions: false }
+      : SQLITE_CAPABILITIES;
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -334,28 +338,28 @@ export function createSqliteBackend(
       fn: (tx: TransactionBackend) => Promise<T>,
       _options?: TransactionOptions,
     ): Promise<T> {
-      if (isD1) {
+      if (transactionMode === "none") {
         throw new ConfigurationError(
-          "Cloudflare D1 does not support atomic transactions. " +
+          "This SQLite backend does not support atomic transactions. " +
             "Operations within a transaction are not rolled back on failure. " +
             "Use backend.capabilities.transactions to check for transaction support, " +
             "or use individual operations with manual error handling.",
           {
-            backend: "D1",
+            backend: "sqlite",
             capability: "transactions",
             supportsTransactions: false,
           },
         );
       }
 
-      if (isSync) {
+      if (transactionMode === "sql") {
         return runWithSerializedQueue(serializedQueue, async () => {
           const txBackend = createTransactionBackend({
             capabilities,
             db,
             executionAdapter,
             operationStrategy,
-            profileHints: { isD1: false, isSync: true },
+            profileHints: { isSync: true },
             tableNames,
           });
           db.run(sql`BEGIN`);
@@ -371,16 +375,19 @@ export function createSqliteBackend(
         });
       }
 
-      return db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend({
-          capabilities,
-          db: tx as AnySqliteDatabase,
-          operationStrategy,
-          profileHints: { isD1: false, isSync: false },
-          tableNames,
-        });
-        return fn(txBackend);
-      }) as Promise<T>;
+      // transactionMode === "drizzle"
+      return runWithSerializedQueue(serializedQueue, async () =>
+        db.transaction(async (tx) => {
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db: tx as AnySqliteDatabase,
+            operationStrategy,
+            profileHints: { isSync },
+            tableNames,
+          });
+          return fn(txBackend);
+        }) as Promise<T>,
+      );
     },
 
     async close(): Promise<void> {

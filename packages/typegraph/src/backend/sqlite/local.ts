@@ -175,7 +175,6 @@ export function createLocalSqliteBackend(
 
   const backend = createSqliteBackend(db, {
     executionProfile: {
-      isD1: false,
       isSync: true,
     },
     tables,

@@ -35,9 +35,21 @@ type DatabaseWithSession = Readonly<{
   session?: SessionLike;
 }>;
 
+/**
+ * Controls how the backend manages SQLite transactions.
+ *
+ * - `"sql"`:     TypeGraph issues BEGIN / COMMIT / ROLLBACK SQL directly.
+ *                Default for sync drivers (better-sqlite3, bun:sqlite).
+ * - `"drizzle"`: Delegates to Drizzle's `db.transaction()` method.
+ *                Default for async drivers (libsql, sql.js).
+ * - `"none"`:    Transactions disabled.
+ *                Default for Cloudflare D1 and Durable Objects.
+ */
+export type SqliteTransactionMode = "sql" | "drizzle" | "none";
+
 export type SqliteExecutionProfileHints = Readonly<{
-  isD1?: boolean;
   isSync?: boolean;
+  transactionMode?: SqliteTransactionMode;
 }>;
 
 type SqliteExecutionAdapterOptions = Readonly<{
@@ -48,9 +60,9 @@ type SqliteExecutionAdapterOptions = Readonly<{
 export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 export type SqliteExecutionProfile = Readonly<{
-  isD1: boolean;
   isSync: boolean;
   supportsCompiledExecution: boolean;
+  transactionMode: SqliteTransactionMode;
 }>;
 
 export type SqliteExecutionAdapter = Readonly<
@@ -72,6 +84,11 @@ function getSessionName(db: AnySqliteDatabase): string | undefined {
 
 function isD1DatabaseBySessionName(db: AnySqliteDatabase): boolean {
   return getSessionName(db) === "SQLiteD1Session";
+}
+
+function isDurableObjectBySessionName(db: AnySqliteDatabase): boolean {
+  const sessionName = getSessionName(db);
+  return sessionName === "SQLiteDurableObjectSession";
 }
 
 function isSyncDatabaseBySessionName(db: AnySqliteDatabase): boolean {
@@ -105,15 +122,24 @@ function detectSyncProfile(
   }
 }
 
-function detectD1Profile(
+function detectTransactionMode(
   db: AnySqliteDatabase,
   profileHints: SqliteExecutionProfileHints,
-): boolean {
-  if (profileHints.isD1 !== undefined) {
-    return profileHints.isD1;
+  isSync: boolean,
+): SqliteTransactionMode {
+  if (profileHints.transactionMode !== undefined) {
+    return profileHints.transactionMode;
   }
-
-  return isD1DatabaseBySessionName(db);
+  // D1 and Durable Object SQLite do not support raw BEGIN/COMMIT SQL
+  // through Drizzle's db.run(). Default to "none" because async
+  // transaction callbacks are not reliably supported across sync
+  // Drizzle drivers. Users can opt in to "drizzle" mode explicitly if
+  // their runtime's db.transaction() handles async callbacks.
+  if (isD1DatabaseBySessionName(db) || isDurableObjectBySessionName(db)) {
+    return "none";
+  }
+  if (isSync) return "sql";
+  return "drizzle";
 }
 
 function resolveSqliteClient(
@@ -194,32 +220,21 @@ export function createSqliteExecutionAdapter(
     options.statementCacheMax ?? DEFAULT_PREPARED_STATEMENT_CACHE_MAX;
   const profileHints = options.profileHints ?? {};
 
-  const profileBase: Readonly<{
-    isD1: boolean;
-    isSync: boolean;
-    sqliteClient: SqliteClientWithPrepare | undefined;
-  }> = {
-    isD1: detectD1Profile(db, profileHints),
-    isSync: detectSyncProfile(db, profileHints),
-    sqliteClient: resolveSqliteClient(db),
-  };
-
-  const supportsCompiledExecution =
-    profileBase.isSync &&
-    !profileBase.isD1 &&
-    profileBase.sqliteClient !== undefined;
+  const isSync = detectSyncProfile(db, profileHints);
+  const sqliteClient = isSync ? resolveSqliteClient(db) : undefined;
+  const transactionMode = detectTransactionMode(db, profileHints, isSync);
 
   const profile: SqliteExecutionProfile = {
-    isD1: profileBase.isD1,
-    isSync: profileBase.isSync,
-    supportsCompiledExecution,
+    isSync,
+    supportsCompiledExecution: sqliteClient !== undefined,
+    transactionMode,
   };
 
   const compile = (query: SQL): CompiledSqlQuery =>
     compileQueryWithDialect(db, query, "SQLite");
 
-  if (supportsCompiledExecution) {
-    const sqliteClient = profileBase.sqliteClient;
+  if (sqliteClient !== undefined) {
+    const client = sqliteClient;
     const statementCache = new Map<string, PreparedAllStatement>();
 
     function executeCompiled<TRow>(
@@ -227,7 +242,7 @@ export function createSqliteExecutionAdapter(
     ): Promise<readonly TRow[]> {
       const preparedStatement = getOrCreatePreparedStatement(
         statementCache,
-        sqliteClient,
+        client,
         compiledQuery.sql,
         statementCacheMax,
       );
@@ -247,7 +262,7 @@ export function createSqliteExecutionAdapter(
       executeCompiled,
       prepare(sqlText: string): PreparedSqlStatement {
         return createPreparedStatementExecutor(
-          sqliteClient,
+          client,
           statementCache,
           sqlText,
           statementCacheMax,

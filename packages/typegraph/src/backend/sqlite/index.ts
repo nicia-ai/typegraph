@@ -28,6 +28,7 @@ export {
   type SqliteBackendOptions,
   type SqliteTableNames,
   type SqliteTables,
+  type SqliteTransactionMode,
   tables,
 } from "../drizzle/sqlite";
 
