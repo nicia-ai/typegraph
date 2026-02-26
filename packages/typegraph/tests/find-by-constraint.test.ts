@@ -174,6 +174,36 @@ describe("store.nodes.*.bulkFindByConstraint()", () => {
     expect(results[0]).toBeUndefined();
   });
 
+  it("handles batch larger than bind parameter limit", async () => {
+    const store = createStore(graph, backend);
+    const BATCH_SIZE = 1200;
+
+    const items = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+      props: { email: `user${index}@example.com`, name: `User ${index}` },
+    }));
+
+    // Pre-create a subset so we get mixed found/not-found
+    const preCreated = await store.nodes.Person.bulkGetOrCreateByConstraint(
+      "email",
+      items.slice(0, 100),
+    );
+    expect(preCreated).toHaveLength(100);
+
+    const results = await store.nodes.Person.bulkFindByConstraint(
+      "email",
+      items,
+    );
+
+    expect(results).toHaveLength(BATCH_SIZE);
+    for (let index = 0; index < 100; index++) {
+      expect(results[index]).toBeDefined();
+      expect(results[index]!.email).toBe(`user${index}@example.com`);
+    }
+    for (let index = 100; index < BATCH_SIZE; index++) {
+      expect(results[index]).toBeUndefined();
+    }
+  });
+
   it("deduplicates within-batch lookups", async () => {
     const store = createStore(graph, backend);
     await store.nodes.Person.create({

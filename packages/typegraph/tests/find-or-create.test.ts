@@ -322,6 +322,37 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     expect(results[0]!.node.meta.deletedAt).toBeUndefined();
   });
 
+  it("handles batch larger than bind parameter limit", async () => {
+    const store = createStore(graph, backend);
+    const BATCH_SIZE = 1200;
+
+    const items = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+      props: { entityType: "Person", name: `Entity ${index}` },
+    }));
+
+    const results = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      items,
+    );
+
+    expect(results).toHaveLength(BATCH_SIZE);
+    for (const result of results) {
+      expect(result.action).toBe("created");
+    }
+
+    // Verify idempotency across the chunk boundary
+    const again = await store.nodes.Entity.bulkGetOrCreateByConstraint(
+      "entity_key",
+      items,
+    );
+
+    expect(again).toHaveLength(BATCH_SIZE);
+    for (let index = 0; index < BATCH_SIZE; index++) {
+      expect(again[index]!.action).toBe("found");
+      expect(again[index]!.node.id).toBe(results[index]!.node.id);
+    }
+  });
+
   it("throws NodeConstraintNotFoundError for invalid constraint name", async () => {
     const store = createStore(graph, backend);
 

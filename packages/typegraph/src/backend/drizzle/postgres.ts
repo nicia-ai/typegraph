@@ -97,6 +97,11 @@ const POSTGRES_GET_EDGES_ID_CHUNK_SIZE = Math.max(
   1,
   POSTGRES_MAX_BIND_PARAMETERS - 1,
 );
+const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
+const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
+  1,
+  POSTGRES_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+);
 
 // ============================================================
 // Utilities
@@ -262,6 +267,7 @@ function createPostgresOperationBackend(
 
   const commonBackend = createCommonOperationBackend({
     batchConfig: {
+      checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
       edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
       getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
       getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,

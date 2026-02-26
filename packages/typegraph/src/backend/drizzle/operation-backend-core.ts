@@ -76,6 +76,7 @@ type OperationBackendExecution = Readonly<{
 }>;
 
 type OperationBackendBatchConfig = Readonly<{
+  checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
@@ -390,9 +391,13 @@ export function createCommonOperationBackend(
       params: CheckUniqueBatchParams,
     ): Promise<readonly UniqueRow[]> {
       if (params.keys.length === 0) return [];
-      const query = operationStrategy.buildCheckUniqueBatch(params);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      return rows.map((row) => rowMappers.toUniqueRow(row));
+      const allRows: UniqueRow[] = [];
+      for (const chunk of chunkArray(params.keys, batchConfig.checkUniqueBatchChunkSize)) {
+        const query = operationStrategy.buildCheckUniqueBatch({ ...params, keys: chunk });
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => rowMappers.toUniqueRow(row)));
+      }
+      return allRows;
     },
 
     async getActiveSchema(
