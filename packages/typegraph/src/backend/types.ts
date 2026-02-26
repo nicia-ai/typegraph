@@ -664,16 +664,3 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = {
   returning: true,
   transactions: true, // PostgreSQL supports transactions
 };
-
-/**
- * Capabilities for Cloudflare D1.
- * D1 does NOT support atomic transactions - operations are auto-committed.
- */
-export const D1_CAPABILITIES: BackendCapabilities = {
-  jsonb: false, // D1 uses TEXT with json functions
-  partialIndexes: true,
-  ginIndexes: false,
-  cte: true,
-  returning: true,
-  transactions: false, // D1 does NOT support atomic transactions
-};

@@ -432,6 +432,73 @@ describe("Store with SQLite Backend", () => {
 });
 
 // ============================================================
+// Transaction Mode Tests
+// ============================================================
+
+describe("SQLite Backend - Transaction Modes", () => {
+  let db: BetterSQLite3Database;
+
+  beforeEach(() => {
+    db = createTestDatabase();
+  });
+
+  it("defaults to 'raw' transaction mode for better-sqlite3", () => {
+    const backend = createSqliteBackend(db);
+    expect(backend.capabilities.transactions).toBe(true);
+  });
+
+  it("throws ConfigurationError when transactionMode is 'none'", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "none" },
+    });
+    expect(backend.capabilities.transactions).toBe(false);
+
+    await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
+      /does not support atomic transactions/,
+    );
+  });
+
+  it("includes backend label in 'none' mode error", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "none" },
+    });
+
+    await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
+      /This SQLite backend does not support/,
+    );
+  });
+
+  it("allows explicit transactionMode 'raw' to override auto-detection", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "sql" },
+    });
+    expect(backend.capabilities.transactions).toBe(true);
+
+    const store = createStore(testGraph, backend);
+    const person = await store.transaction(async (tx) => {
+      return tx.nodes.Person.create({ name: "Bob" });
+    });
+    expect(person.name).toBe("Bob");
+  });
+
+  // Note: transactionMode "drizzle" cannot be tested with better-sqlite3 because
+  // its native .transaction() rejects async callbacks. The "drizzle" path is
+  // intended for async drivers (libsql, sql.js) and potentially Durable Objects.
+  it("attempts Drizzle transaction when transactionMode is 'drizzle'", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "drizzle" },
+    });
+    expect(backend.capabilities.transactions).toBe(true);
+
+    // better-sqlite3 rejects async callbacks in db.transaction(), so this
+    // verifies the "drizzle" path is reached (not the "sql" BEGIN/COMMIT path).
+    await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
+      /cannot return a promise/i,
+    );
+  });
+});
+
+// ============================================================
 // Vector Search Integration Tests (sqlite-vec)
 // ============================================================
 

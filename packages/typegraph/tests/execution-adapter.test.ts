@@ -133,14 +133,47 @@ describe("sqlite execution adapter", () => {
     const db = createTestDatabase();
     const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
       profileHints: {
-        isD1: true,
         isSync: false,
+        transactionMode: "none",
       },
     });
 
-    expect(adapter.profile.isD1).toBe(true);
     expect(adapter.profile.isSync).toBe(false);
     expect(adapter.profile.supportsCompiledExecution).toBe(false);
+    expect(adapter.profile.transactionMode).toBe("none");
+  });
+
+  describe("transactionMode detection", () => {
+    it("defaults to 'raw' for better-sqlite3", () => {
+      const db = createTestDatabase();
+      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase);
+      expect(adapter.profile.transactionMode).toBe("sql");
+    });
+
+    it("respects explicit transactionMode hint", () => {
+      const db = createTestDatabase();
+      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+        profileHints: { transactionMode: "drizzle" },
+      });
+      expect(adapter.profile.transactionMode).toBe("drizzle");
+    });
+
+    it("explicit transactionMode overrides session-based auto-detection", () => {
+      const db = createTestDatabase();
+      // better-sqlite3 would normally auto-detect as "sql", but explicit hint wins
+      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+        profileHints: { transactionMode: "none" },
+      });
+      expect(adapter.profile.transactionMode).toBe("none");
+    });
+
+    it("defaults to 'drizzle' for async drivers", () => {
+      const db = createTestDatabase();
+      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+        profileHints: { isSync: false },
+      });
+      expect(adapter.profile.transactionMode).toBe("drizzle");
+    });
   });
 });
 
