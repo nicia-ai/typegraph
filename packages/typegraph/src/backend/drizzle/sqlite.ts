@@ -95,6 +95,11 @@ const SQLITE_GET_EDGES_ID_CHUNK_SIZE = Math.max(
   1,
   SQLITE_MAX_BIND_PARAMETERS - 1,
 );
+const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
+const SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
+  1,
+  SQLITE_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+);
 
 type SerializedExecutionQueue = Readonly<{
   runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
@@ -199,6 +204,7 @@ function createSqliteOperationBackend(
 
   const commonBackend = createCommonOperationBackend({
     batchConfig: {
+      checkUniqueBatchChunkSize: SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
       edgeInsertBatchSize: SQLITE_EDGE_INSERT_BATCH_SIZE,
       getEdgesChunkSize: SQLITE_GET_EDGES_ID_CHUNK_SIZE,
       getNodesChunkSize: SQLITE_GET_NODES_ID_CHUNK_SIZE,
