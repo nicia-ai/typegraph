@@ -617,20 +617,18 @@ function compileFieldValueForSetOp(
   if ("__type" in source && source.__type === "aggregate") {
     // Aggregate expressions
     const { field, function: fn } = source;
-    const cteName = `cte_${prefix}_${field.alias}`;
 
     switch (fn) {
-      case "count": {
-        return sql`COUNT(${sql.raw(cteName)}.${sql.raw(field.alias)}_id)`;
-      }
-      case "countDistinct": {
-        return sql`COUNT(DISTINCT ${sql.raw(cteName)}.${sql.raw(field.alias)}_id)`;
-      }
+      case "count":
+      case "countDistinct":
       case "sum":
       case "avg":
       case "min":
       case "max": {
         const column = compileFieldColumnForSetOp(field, prefix, dialect);
+        if (fn === "countDistinct") {
+          return sql`COUNT(DISTINCT ${column})`;
+        }
         return sql`${sql.raw(fn.toUpperCase())}(${column})`;
       }
       default: {
