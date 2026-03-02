@@ -39,6 +39,7 @@ npx tsx examples/<example-name>.ts
 |---------|-------------|
 | [07-delete-behaviors.ts](./07-delete-behaviors.ts) | Cascade, restrict, and disconnect on delete |
 | [09-pagination-streaming.ts](./09-pagination-streaming.ts) | Cursor pagination and result streaming |
+| [13-aggregates.ts](./13-aggregates.ts) | GROUP BY, COUNT, SUM, AVG, MIN, MAX, and HAVING |
 
 ### Backend Configuration
 
@@ -113,5 +114,6 @@ Each example follows a consistent pattern:
 3. Explore ontology features (03-06, 08) based on your needs
 4. Understand data lifecycle with **07-delete-behaviors**
 5. Learn efficient data access with **09-pagination-streaming**
-6. For production, see **10-postgresql** for backend configuration
-7. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+6. Learn aggregate queries with **13-aggregates**
+7. For production, see **10-postgresql** for backend configuration
+8. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**

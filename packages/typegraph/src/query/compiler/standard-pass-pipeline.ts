@@ -117,12 +117,7 @@ function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
         markFieldRefAsRequired(requiredColumnsByAlias, source);
       } else {
         addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
-        if (
-          source.function !== "count" &&
-          source.function !== "countDistinct"
-        ) {
-          markFieldRefAsRequired(requiredColumnsByAlias, source.field);
-        }
+        markFieldRefAsRequired(requiredColumnsByAlias, source.field);
       }
     }
   }

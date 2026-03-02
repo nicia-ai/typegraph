@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   avg,
   count,
+  countDistinct,
   createQueryBuilder,
   defineGraph,
   defineNode,
@@ -369,6 +370,96 @@ describe("ExecutableAggregateQuery with multiple aggregates", () => {
 // ============================================================
 // ExecutableAggregateQuery immutability
 // ============================================================
+
+// ============================================================
+// count(alias, field) and countDistinct(alias, field) SQL compilation
+// ============================================================
+
+describe("count/countDistinct with field argument", () => {
+  it("count(alias) compiles to COUNT(alias_id)", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        productCount: count("p"),
+      });
+
+    const sqlString = toSqlString(query.compile());
+
+    expect(sqlString).toContain("COUNT(");
+    // count("p") with no field arg should reference p_id
+    expect(sqlString).toMatch(/COUNT\([^)]*p_id/);
+  });
+
+  it("count(alias, field) compiles to COUNT(json_extract(...)) not COUNT(alias_id)", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        nameCount: count("p", "name"),
+      });
+
+    const sqlString = toSqlString(query.compile());
+
+    // Should reference the props column with json extraction, not _id
+    expect(sqlString).toContain("p_props");
+    expect(sqlString).toContain('"name"');
+    expect(sqlString).toMatch(/COUNT\(/);
+    // Should NOT fall back to counting by _id for this aggregate
+    expect(sqlString).not.toMatch(/COUNT\([^)]*p_id/);
+  });
+
+  it("countDistinct(alias) compiles to COUNT(DISTINCT alias_id)", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        distinctProducts: countDistinct("p"),
+      });
+
+    const sqlString = toSqlString(query.compile());
+
+    expect(sqlString).toContain("COUNT(DISTINCT");
+    expect(sqlString).toContain("p_id");
+  });
+
+  it("countDistinct(alias, field) compiles to COUNT(DISTINCT json_extract(...)) not COUNT(DISTINCT alias_id)", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        uniqueNames: countDistinct("p", "name"),
+      });
+
+    const sqlString = toSqlString(query.compile());
+
+    // Should reference the props column with json extraction
+    expect(sqlString).toContain("COUNT(DISTINCT");
+    expect(sqlString).toContain("p_props");
+    expect(sqlString).toContain('"name"');
+    // Should NOT fall back to counting distinct _id
+    expect(sqlString).not.toMatch(/COUNT\(DISTINCT[^)]*p_id/);
+  });
+
+  it("count(alias, field) includes props in CTE columns", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        nameCount: count("p", "name"),
+      });
+
+    const sqlString = toSqlString(query.compile());
+
+    // The CTE must include the _props column for json_extract to work
+    expect(sqlString).toContain("p_props");
+  });
+});
 
 describe("ExecutableAggregateQuery immutability", () => {
   it("limit returns new instance", () => {

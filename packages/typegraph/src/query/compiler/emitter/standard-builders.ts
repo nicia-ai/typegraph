@@ -348,14 +348,8 @@ function compileAggregateExprFromSource(
   const fn = expr.function;
 
   switch (fn) {
-    case "count": {
-      const cteAlias = `cte_${field.alias}`;
-      return sql`COUNT(${sql.raw(cteAlias)}.${sql.raw(field.alias)}_id)`;
-    }
-    case "countDistinct": {
-      const cteAlias = `cte_${field.alias}`;
-      return sql`COUNT(DISTINCT ${sql.raw(cteAlias)}.${sql.raw(field.alias)}_id)`;
-    }
+    case "count":
+    case "countDistinct":
     case "sum":
     case "avg":
     case "min":
@@ -367,6 +361,9 @@ function compileAggregateExprFromSource(
         field.valueType,
         cteAlias,
       );
+      if (fn === "countDistinct") {
+        return sql`COUNT(DISTINCT ${column})`;
+      }
       return sql`${sql.raw(fn.toUpperCase())}(${column})`;
     }
     default: {

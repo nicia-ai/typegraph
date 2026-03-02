@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { avg, count, field, havingGte, max, min, sum } from "../../../src";
+import {
+  avg,
+  count,
+  countDistinct,
+  field,
+  havingGte,
+  max,
+  min,
+  sum,
+} from "../../../src";
 import {
   seedAdvancedAggregateProducts,
   seedAggregateProducts,
@@ -130,6 +139,157 @@ export function registerAggregateIntegrationTests(
       expect(results).toHaveLength(1);
       expect(results[0]?.category).toBe("Electronics");
       expect(results[0]?.productCount).toBe(3);
+    });
+  });
+
+  describe("count/countDistinct with field argument", () => {
+    beforeEach(async () => {
+      const store = context.getStore();
+      await seedAggregateProducts(store);
+    });
+
+    it("count(alias, field) counts non-null field values, not node IDs", async () => {
+      const store = context.getStore();
+
+      // All 5 products have a category, so count("p", "category") should equal count("p")
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .aggregate({
+          totalById: count("p"),
+          totalByCategory: count("p", "category"),
+        })
+        .execute();
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.totalById).toBe(5);
+      expect(results[0]?.totalByCategory).toBe(5);
+    });
+
+    it("countDistinct(alias, field) counts distinct field values", async () => {
+      const store = context.getStore();
+
+      // 5 products across 2 categories: Electronics (3), Furniture (2)
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .aggregate({
+          totalProducts: count("p"),
+          uniqueCategories: countDistinct("p", "category"),
+        })
+        .execute();
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.totalProducts).toBe(5);
+      expect(results[0]?.uniqueCategories).toBe(2);
+    });
+
+    it("countDistinct(alias) counts distinct node IDs", async () => {
+      const store = context.getStore();
+
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .aggregate({
+          distinctProducts: countDistinct("p"),
+        })
+        .execute();
+
+      expect(results).toHaveLength(1);
+      // Each product has a unique ID, so countDistinct("p") === count("p")
+      expect(results[0]?.distinctProducts).toBe(5);
+    });
+
+    it("countDistinct(alias, field) with groupBy returns correct counts per group", async () => {
+      const store = context.getStore();
+
+      // Group by category, count distinct inStock values within each group
+      // Electronics: Laptop(true), Phone(true), Tablet(false) → 2 distinct inStock values
+      // Furniture: Desk(true), Chair(true) → 1 distinct inStock value
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .aggregate({
+          category: field("p", "category"),
+          productCount: count("p"),
+          uniqueStockStatuses: countDistinct("p", "inStock"),
+        })
+        .execute();
+
+      expect(results).toHaveLength(2);
+
+      const electronics = results.find((r) => r.category === "Electronics");
+      const furniture = results.find((r) => r.category === "Furniture");
+
+      expect(electronics?.productCount).toBe(3);
+      expect(electronics?.uniqueStockStatuses).toBe(2);
+
+      expect(furniture?.productCount).toBe(2);
+      expect(furniture?.uniqueStockStatuses).toBe(1);
+    });
+
+    it("count(alias, field) with traversal and groupByNode", async () => {
+      const store = context.getStore();
+
+      const acme = await store.nodes.Company.create({
+        name: "Acme Corp",
+        industry: "Tech",
+      });
+      const globex = await store.nodes.Company.create({
+        name: "Globex",
+        industry: "Finance",
+      });
+
+      const alice = await store.nodes.Person.create({
+        name: "Alice",
+        email: "alice@example.com",
+      });
+      const bob = await store.nodes.Person.create({ name: "Bob" }); // no email
+      const charlie = await store.nodes.Person.create({
+        name: "Charlie",
+        email: "charlie@example.com",
+      });
+
+      await store.edges.worksAt.create(alice, acme, {
+        role: "Engineer",
+        salary: 100_000,
+      });
+      await store.edges.worksAt.create(bob, acme, {
+        role: "Manager",
+        salary: 120_000,
+      });
+      await store.edges.worksAt.create(charlie, globex, {
+        role: "Developer",
+        salary: 90_000,
+      });
+
+      // count("p", "email") should count non-null email values per company
+      const results = await store
+        .query()
+        .from("Company", "c")
+        .traverse("worksAt", "e", { direction: "in" })
+        .to("Person", "p")
+        .groupByNode("c")
+        .aggregate({
+          companyName: field("c", "name"),
+          employeeCount: count("p"),
+          emailCount: count("p", "email"),
+        })
+        .execute();
+
+      expect(results).toHaveLength(2);
+
+      const acmeResult = results.find((r) => r.companyName === "Acme Corp");
+      const globexResult = results.find((r) => r.companyName === "Globex");
+
+      // Acme has Alice (with email) and Bob (no email)
+      expect(acmeResult?.employeeCount).toBe(2);
+      expect(acmeResult?.emailCount).toBe(1);
+
+      // Globex has Charlie (with email)
+      expect(globexResult?.employeeCount).toBe(1);
+      expect(globexResult?.emailCount).toBe(1);
     });
   });
 
