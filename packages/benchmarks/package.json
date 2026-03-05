@@ -19,7 +19,7 @@
     "@nicia-ai/typegraph": "workspace:*",
     "better-sqlite3": "^12.6.2",
     "drizzle-orm": "^0.45.1",
-    "pg": "^8.19.0",
+    "pg": "^8.20.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
