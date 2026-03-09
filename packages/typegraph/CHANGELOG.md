@@ -1,5 +1,30 @@
 # @nicia-ai/typegraph
 
+## 0.10.0
+
+### Minor Changes
+
+- [#33](https://github.com/nicia-ai/typegraph/pull/33) [`da14806`](https://github.com/nicia-ai/typegraph/commit/da14806b665418c7761b5db37641b23eb2914304) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.subgraph()` for typed BFS neighborhood extraction from a root node.
+
+  Given a root node ID, traverses specified edge kinds using a recursive CTE and returns all reachable nodes and connecting edges as fully typed discriminated unions.
+
+  **Options:**
+  - `edges` — edge kinds to traverse (required)
+  - `maxDepth` — maximum traversal depth (default: 10)
+  - `direction` — `"out"` (default) or `"both"` for undirected traversal
+  - `includeKinds` — filter returned nodes to specific kinds (traversal still follows all reachable nodes)
+  - `excludeRoot` — omit the root node from results
+  - `cyclePolicy` — cycle detection strategy (default: `"prevent"`)
+
+  **Type utilities exported:**
+  - `AnyNode<G>` / `AnyEdge<G>` — discriminated unions of all node/edge runtime types in a graph
+  - `SubsetNode<G, K>` / `SubsetEdge<G, K>` — narrowed unions for a subset of kinds
+  - `SubgraphOptions<G, EK, NK>` / `SubgraphResult<G, NK, EK>` — fully generic option and result types
+
+- [#35](https://github.com/nicia-ai/typegraph/pull/35) [`0ebc59c`](https://github.com/nicia-ai/typegraph/commit/0ebc59cf1f8d714b0d63c0759d08ed88face022c) Thanks [@pdlug](https://github.com/pdlug)! - Add runtime discriminated union types: `AnyNode<G>`, `AnyEdge<G>`, `SubsetNode<G, K>`, `SubsetEdge<G, K>`.
+
+  These pure type-level utilities produce discriminated unions of runtime node/edge instances from a graph definition. Unlike `AllNodeTypes<G>` (union of type _definitions_), `AnyNode<G>` gives the union of runtime `Node<T>` values — discriminated by `kind` for exhaustive `switch` narrowing. `SubsetNode<G, K>` narrows the union to a specific set of kinds.
+
 ## 0.9.2
 
 ### Patch Changes
