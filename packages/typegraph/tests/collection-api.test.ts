@@ -631,6 +631,91 @@ describe("Bulk Operations (SQLite)", () => {
     });
   });
 
+  describe("store.nodes.*.createFromRecord()", () => {
+    it("creates a node from untyped record data", async () => {
+      const data: Record<string, unknown> = { name: "Alice", age: 30 };
+      const person = await store.nodes.Person.createFromRecord(data);
+
+      expect(person.name).toBe("Alice");
+      expect(person.age).toBe(30);
+      expect(person.kind).toBe("Person");
+      expect(person.id).toBeDefined();
+    });
+
+    it("accepts options (custom id, temporal)", async () => {
+      const data: Record<string, unknown> = { name: "Bob" };
+      const person = await store.nodes.Person.createFromRecord(data, {
+        id: "custom-bob",
+      });
+
+      expect(person.id).toBe("custom-bob");
+      expect(person.name).toBe("Bob");
+    });
+
+    it("rejects invalid data at runtime via Zod validation", async () => {
+      const data: Record<string, unknown> = { age: 30 };
+      await expect(store.nodes.Person.createFromRecord(data)).rejects.toThrow();
+    });
+
+    it("rejects data with wrong types at runtime", async () => {
+      const data: Record<string, unknown> = { name: 42 };
+      await expect(store.nodes.Person.createFromRecord(data)).rejects.toThrow();
+    });
+  });
+
+  describe("store.nodes.*.upsertByIdFromRecord()", () => {
+    it("creates a node when id does not exist", async () => {
+      const data: Record<string, unknown> = { name: "Alice" };
+      const person = await store.nodes.Person.upsertByIdFromRecord(
+        "person-1",
+        data,
+      );
+
+      expect(person.id).toBe("person-1");
+      expect(person.name).toBe("Alice");
+    });
+
+    it("updates an existing node", async () => {
+      await store.nodes.Person.createFromRecord(
+        { name: "Alice" },
+        { id: "person-1" },
+      );
+
+      const updated = await store.nodes.Person.upsertByIdFromRecord(
+        "person-1",
+        { name: "Alice Updated", age: 31 },
+      );
+
+      expect(updated.id).toBe("person-1");
+      expect(updated.name).toBe("Alice Updated");
+      expect(updated.age).toBe(31);
+    });
+
+    it("resurrects a soft-deleted node", async () => {
+      const person = await store.nodes.Person.createFromRecord(
+        { name: "Alice" },
+        { id: "person-1" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const resurrected = await store.nodes.Person.upsertByIdFromRecord(
+        "person-1",
+        { name: "Alice Reborn" },
+      );
+
+      expect(resurrected.id).toBe("person-1");
+      expect(resurrected.name).toBe("Alice Reborn");
+      expect(resurrected.meta.deletedAt).toBeUndefined();
+    });
+
+    it("rejects invalid data at runtime via Zod validation", async () => {
+      const data: Record<string, unknown> = { wrongField: true };
+      await expect(
+        store.nodes.Person.upsertByIdFromRecord("person-1", data),
+      ).rejects.toThrow();
+    });
+  });
+
   describe("store.nodes.*.bulkCreate()", () => {
     it("creates multiple nodes in a batch", async () => {
       const nodes = await store.nodes.Person.bulkCreate([

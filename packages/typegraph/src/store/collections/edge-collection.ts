@@ -133,6 +133,57 @@ export type EdgeCollectionConfig = Readonly<{
   ) => Promise<Edge | undefined>;
 }>;
 
+function buildCreateEdgeInput(
+  kind: string,
+  from: NodeRef,
+  to: NodeRef,
+  props: Record<string, unknown>,
+  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+): CreateEdgeInput {
+  const input: {
+    kind: string;
+    id?: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    props: Record<string, unknown>;
+    validFrom?: string;
+    validTo?: string;
+  } = {
+    kind,
+    fromKind: from.kind,
+    fromId: from.id,
+    toKind: to.kind,
+    toId: to.id,
+    props,
+  };
+  if (options?.id !== undefined) input.id = options.id;
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input;
+}
+
+type EdgeUpdateInput = Readonly<{
+  id: string;
+  props: Partial<Record<string, unknown>>;
+  validTo?: string;
+}>;
+
+function buildUpdateEdgeInput(
+  id: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{ validTo?: string }>,
+): EdgeUpdateInput {
+  const input: {
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validTo?: string;
+  } = { id, props };
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input;
+}
+
 function mapBulkEdgeInputs(
   kind: string,
   items: readonly Readonly<{
@@ -144,30 +195,9 @@ function mapBulkEdgeInputs(
     validTo?: string;
   }>[],
 ): CreateEdgeInput[] {
-  return items.map((item) => {
-    const input: {
-      kind: string;
-      id?: string;
-      fromKind: string;
-      fromId: string;
-      toKind: string;
-      toId: string;
-      props: Record<string, unknown>;
-      validFrom?: string;
-      validTo?: string;
-    } = {
-      kind,
-      fromKind: item.from.kind,
-      fromId: item.from.id,
-      toKind: item.to.kind,
-      toId: item.to.id,
-      props: item.props ?? {},
-    };
-    if (item.id !== undefined) input.id = item.id;
-    if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-    if (item.validTo !== undefined) input.validTo = item.validTo;
-    return input;
-  });
+  return items.map((item) =>
+    buildCreateEdgeInput(kind, item.from, item.to, item.props ?? {}, item),
+  );
 }
 
 /**
@@ -202,29 +232,16 @@ export function createEdgeCollection<
       props?: z.input<E["schema"]>,
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Edge<E>> {
-      const input: {
-        kind: string;
-        id?: string;
-        fromKind: string;
-        fromId: string;
-        toKind: string;
-        toId: string;
-        props: Record<string, unknown>;
-        validFrom?: string;
-        validTo?: string;
-      } = {
-        kind: kind,
-        fromKind: from.kind,
-        fromId: from.id,
-        toKind: to.kind,
-        toId: to.id,
-        props: (props ?? {}) as Record<string, unknown>,
-      };
-      if (options?.id !== undefined) input.id = options.id;
-      if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
-      if (options?.validTo !== undefined) input.validTo = options.validTo;
-
-      const result = await executeEdgeCreate(input, backend);
+      const result = await executeEdgeCreate(
+        buildCreateEdgeInput(
+          kind,
+          from,
+          to,
+          (props ?? {}) as Record<string, unknown>,
+          options,
+        ),
+        backend,
+      );
       return narrowEdge<E>(result);
     },
 
@@ -276,17 +293,10 @@ export function createEdgeCollection<
       props: Partial<z.input<E["schema"]>>,
       options?: Readonly<{ validTo?: string }>,
     ): Promise<Edge<E>> {
-      const input: {
-        id: string;
-        props: Partial<Record<string, unknown>>;
-        validTo?: string;
-      } = {
-        id,
-        props: props as Partial<Record<string, unknown>>,
-      };
-      if (options?.validTo !== undefined) input.validTo = options.validTo;
-
-      const result = await executeEdgeUpdate(input, backend);
+      const result = await executeEdgeUpdate(
+        buildUpdateEdgeInput(id, props as Record<string, unknown>, options),
+        backend,
+      );
       return narrowEdge<E>(result);
     },
 
@@ -483,11 +493,7 @@ export function createEdgeCollection<
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];
         const toUpdate: {
           index: number;
-          input: {
-            id: string;
-            props: Partial<Record<string, unknown>>;
-            validTo?: string;
-          };
+          input: EdgeUpdateInput;
           clearDeleted: boolean;
         }[] = [];
 
@@ -496,45 +502,26 @@ export function createEdgeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            const input: {
-              id: string;
-              props: Partial<Record<string, unknown>>;
-              validTo?: string;
-            } = {
-              id: item.id,
-              props: item.props as Record<string, unknown>,
-            };
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-
             toUpdate.push({
               index: itemIndex,
-              input,
+              input: buildUpdateEdgeInput(
+                item.id,
+                (item.props ?? {}) as Record<string, unknown>,
+                item,
+              ),
               clearDeleted: existing.deleted_at !== undefined,
             });
           } else {
-            const input: {
-              kind: string;
-              id?: string;
-              fromKind: string;
-              fromId: string;
-              toKind: string;
-              toId: string;
-              props: Record<string, unknown>;
-              validFrom?: string;
-              validTo?: string;
-            } = {
-              kind,
-              id: item.id,
-              fromKind: item.from.kind,
-              fromId: item.from.id,
-              toKind: item.to.kind,
-              toId: item.to.id,
-              props: item.props as Record<string, unknown>,
-            };
-            if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-
-            toCreate.push({ index: itemIndex, input });
+            toCreate.push({
+              index: itemIndex,
+              input: buildCreateEdgeInput(
+                kind,
+                item.from,
+                item.to,
+                (item.props ?? {}) as Record<string, unknown>,
+                item,
+              ),
+            });
           }
           itemIndex++;
         }
