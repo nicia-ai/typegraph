@@ -228,6 +228,85 @@ type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 >;
 ```
 
+## Subgraph Types
+
+These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphrootid-options) for
+typed neighborhood extraction.
+
+### `AnyNode<G>`
+
+Discriminated union of all runtime node types in a graph. Each member carries its
+own `kind` literal, so `switch (node.kind)` narrows the type automatically.
+
+```typescript
+import type { AnyNode } from "@nicia-ai/typegraph";
+
+type MyNode = AnyNode<typeof graph>;
+// = Node<typeof Person> | Node<typeof Company> | ...
+```
+
+### `AnyEdge<G>`
+
+Discriminated union of all runtime edge types in a graph.
+
+```typescript
+import type { AnyEdge } from "@nicia-ai/typegraph";
+
+type MyEdge = AnyEdge<typeof graph>;
+// = Edge<typeof worksAt> | Edge<typeof knows> | ...
+```
+
+### `SubsetNode<G, K>`
+
+Narrows `AnyNode<G>` to a subset of node kinds. Useful when `store.subgraph()`
+is called with `includeKinds`.
+
+```typescript
+import type { SubsetNode } from "@nicia-ai/typegraph";
+
+type TaskOrAgent = SubsetNode<typeof graph, "Task" | "Agent">;
+// = Node<typeof Task> | Node<typeof Agent>
+```
+
+### `SubsetEdge<G, K>`
+
+Narrows `AnyEdge<G>` to a subset of edge kinds.
+
+```typescript
+import type { SubsetEdge } from "@nicia-ai/typegraph";
+
+type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
+```
+
+### `SubgraphOptions<G, EK, NK>`
+
+Options for `store.subgraph()`. See the
+[store reference](/schemas-stores#storesubgraphrootid-options) for the full
+parameter table.
+
+```typescript
+type SubgraphOptions<G, EK, NK> = Readonly<{
+  edges: readonly EK[];
+  maxDepth?: number;
+  includeKinds?: readonly NK[];
+  excludeRoot?: boolean;
+  direction?: "out" | "both";
+  cyclePolicy?: "prevent" | "allow";
+}>;
+```
+
+### `SubgraphResult<G, NK, EK>`
+
+The return type of `store.subgraph()`. Contains deduplicated nodes and the edges
+connecting them.
+
+```typescript
+type SubgraphResult<G, NK, EK> = Readonly<{
+  nodes: readonly SubsetNode<G, NK>[];
+  edges: readonly SubsetEdge<G, EK>[];
+}>;
+```
+
 ## Graph Configuration Types
 
 ### `DeleteBehavior`
