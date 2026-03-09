@@ -113,6 +113,40 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<(Node | undefined)[]>;
 }>;
 
+function buildCreateInput(
+  kind: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+): CreateNodeInput {
+  const input: {
+    kind: string;
+    id?: string;
+    props: Record<string, unknown>;
+    validFrom?: string;
+    validTo?: string;
+  } = { kind, props };
+  if (options?.id !== undefined) input.id = options.id;
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input;
+}
+
+function buildUpdateInput(
+  kind: string,
+  id: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{ validTo?: string }>,
+): UpdateNodeInput {
+  const input: {
+    kind: string;
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validTo?: string;
+  } = { kind, id, props };
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  return input as UpdateNodeInput;
+}
+
 function mapBulkNodeInputs(
   kind: string,
   items: readonly Readonly<{
@@ -122,22 +156,7 @@ function mapBulkNodeInputs(
     validTo?: string;
   }>[],
 ): CreateNodeInput[] {
-  return items.map((item) => {
-    const input: {
-      kind: string;
-      id?: string;
-      props: Record<string, unknown>;
-      validFrom?: string;
-      validTo?: string;
-    } = {
-      kind,
-      props: item.props,
-    };
-    if (item.id !== undefined) input.id = item.id;
-    if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-    if (item.validTo !== undefined) input.validTo = item.validTo;
-    return input;
-  });
+  return items.map((item) => buildCreateInput(kind, item.props, item));
 }
 
 /**
@@ -175,31 +194,17 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
-      return this.createFromRecord(
-        props as Record<string, unknown>,
-        options,
-      );
+      return this.createFromRecord(props as Record<string, unknown>, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
-      const input: {
-        kind: string;
-        id?: string;
-        props: Record<string, unknown>;
-        validFrom?: string;
-        validTo?: string;
-      } = {
-        kind: kind,
-        props: data,
-      };
-      if (options?.id !== undefined) input.id = options.id;
-      if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
-      if (options?.validTo !== undefined) input.validTo = options.validTo;
-
-      const result = await executeNodeCreate(input, backend);
+      const result = await executeNodeCreate(
+        buildCreateInput(kind, data, options),
+        backend,
+      );
       return narrowNode<N>(result);
     },
 
@@ -252,19 +257,10 @@ export function createNodeCollection<
       props: Partial<z.input<N["schema"]>>,
       options?: Readonly<{ validTo?: string }>,
     ): Promise<Node<N>> {
-      const input: {
-        kind: string;
-        id: NodeId<N>;
-        props: Partial<Record<string, unknown>>;
-        validTo?: string;
-      } = {
-        kind: kind,
-        id,
-        props: props as Partial<Record<string, unknown>>,
-      };
-      if (options?.validTo !== undefined) input.validTo = options.validTo;
-
-      const result = await executeNodeUpdate(input, backend);
+      const result = await executeNodeUpdate(
+        buildUpdateInput(kind, id, props as Record<string, unknown>, options),
+        backend,
+      );
       return narrowNode<N>(result);
     },
 
@@ -372,42 +368,20 @@ export function createNodeCollection<
       const existing = await backend.getNode(graphId, kind, id);
 
       if (existing) {
-        const input: {
-          kind: string;
-          id: NodeId<N>;
-          props: Partial<Record<string, unknown>>;
-          validTo?: string;
-        } = {
-          kind: kind,
-          id: id as NodeId<N>,
-          props: data,
-        };
-        if (options?.validTo !== undefined) input.validTo = options.validTo;
-
         const clearDeleted = existing.deleted_at !== undefined;
-        const result = await executeNodeUpdate(input, backend, {
-          clearDeleted,
-        });
-        return narrowNode<N>(result);
-      } else {
-        const input: {
-          kind: string;
-          id?: string;
-          props: Record<string, unknown>;
-          validFrom?: string;
-          validTo?: string;
-        } = {
-          kind: kind,
-          id,
-          props: data,
-        };
-        if (options?.validFrom !== undefined)
-          input.validFrom = options.validFrom;
-        if (options?.validTo !== undefined) input.validTo = options.validTo;
-
-        const result = await executeNodeCreate(input, backend);
+        const result = await executeNodeUpdate(
+          buildUpdateInput(kind, id, data, options),
+          backend,
+          { clearDeleted },
+        );
         return narrowNode<N>(result);
       }
+
+      const result = await executeNodeCreate(
+        buildCreateInput(kind, data, { ...options, id }),
+        backend,
+      );
+      return narrowNode<N>(result);
     },
 
     async bulkCreate(
@@ -490,39 +464,25 @@ export function createNodeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            const input: {
-              kind: string;
-              id: NodeId<N>;
-              props: Partial<Record<string, unknown>>;
-              validTo?: string;
-            } = {
-              kind,
-              id: item.id as NodeId<N>,
-              props: item.props as Record<string, unknown>,
-            };
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-
             toUpdate.push({
               index: itemIndex,
-              input,
+              input: buildUpdateInput(
+                kind,
+                item.id,
+                item.props as Record<string, unknown>,
+                item,
+              ),
               clearDeleted: existing.deleted_at !== undefined,
             });
           } else {
-            const input: {
-              kind: string;
-              id?: string;
-              props: Record<string, unknown>;
-              validFrom?: string;
-              validTo?: string;
-            } = {
-              kind,
-              id: item.id,
-              props: item.props as Record<string, unknown>,
-            };
-            if (item.validFrom !== undefined) input.validFrom = item.validFrom;
-            if (item.validTo !== undefined) input.validTo = item.validTo;
-
-            toCreate.push({ index: itemIndex, input });
+            toCreate.push({
+              index: itemIndex,
+              input: buildCreateInput(
+                kind,
+                item.props as Record<string, unknown>,
+                item,
+              ),
+            });
           }
           itemIndex++;
         }
