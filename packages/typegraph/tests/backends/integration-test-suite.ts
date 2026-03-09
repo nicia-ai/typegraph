@@ -33,6 +33,7 @@ import {
   registerPredicateIntegrationTests,
   registerRecursiveIntegrationTests,
   registerSetOperationIntegrationTests,
+  registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
   registerTraversalIntegrationTests,
 } from "./integration";
@@ -111,6 +112,7 @@ export function createIntegrationTestSuite(
     registerTraversalIntegrationTests(context);
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);
+    registerSubgraphIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
   });

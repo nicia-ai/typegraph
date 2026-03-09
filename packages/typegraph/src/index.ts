@@ -195,6 +195,14 @@ export {
 export type { Store } from "./store";
 export { createStore, createStoreWithSchema } from "./store";
 export type {
+  AnyEdge,
+  AnyNode,
+  SubgraphOptions,
+  SubgraphResult,
+  SubsetEdge,
+  SubsetNode,
+} from "./store/subgraph";
+export type {
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,

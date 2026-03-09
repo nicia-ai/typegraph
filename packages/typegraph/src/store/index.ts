@@ -27,6 +27,16 @@ export {
   type UpdateNodeInput,
 } from "./types";
 
+// Subgraph extraction
+export type {
+  AnyEdge,
+  AnyNode,
+  SubgraphOptions,
+  SubgraphResult,
+  SubsetEdge,
+  SubsetNode,
+} from "./subgraph";
+
 // Store
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
 export type { Store } from "./store";
