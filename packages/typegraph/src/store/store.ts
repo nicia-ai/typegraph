@@ -9,10 +9,17 @@
  * - Transaction handling
  */
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import {
+  type AllNodeTypes,
+  type EdgeKinds,
+  type GraphDef,
+  type NodeKinds,
+} from "../core/define-graph";
+import type { NodeId } from "../core/types";
 import type { TraversalExpansion } from "../query/ast";
 import { createQueryBuilder, type QueryBuilder } from "../query/builder";
 import { createSqlSchema } from "../query/compiler/schema";
+import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -48,6 +55,11 @@ import {
   type NodeOperationContext,
 } from "./operations";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import {
+  executeSubgraph,
+  type SubgraphOptions,
+  type SubgraphResult,
+} from "./subgraph";
 import {
   type ConstraintNames,
   type HookContext,
@@ -381,6 +393,47 @@ export class Store<G extends GraphDef> {
    */
   query(): QueryBuilder<G> {
     return this.#createQueryForBackend(this.#backend);
+  }
+
+  // === Subgraph Extraction ===
+
+  /**
+   * Extracts a typed subgraph by traversing from a root node.
+   *
+   * Performs a BFS traversal from `rootId` following the specified edge kinds,
+   * then returns all reachable nodes and the edges connecting them.
+   *
+   * @example
+   * ```typescript
+   * const result = await store.subgraph(run.id, {
+   *   edges: ["has_task", "runs_agent", "uses_skill"],
+   *   maxDepth: 4,
+   *   includeKinds: ["Run", "Task", "Agent", "Skill"],
+   * });
+   *
+   * for (const node of result.nodes) {
+   *   switch (node.kind) {
+   *     case "Task": console.log(node.name); break;
+   *     case "Agent": console.log(node.model); break;
+   *   }
+   * }
+   * ```
+   */
+  async subgraph<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: SubgraphOptions<G, EK, NK>,
+  ): Promise<SubgraphResult<G, NK, EK>> {
+    return executeSubgraph({
+      graphId: this.graphId,
+      rootId,
+      backend: this.#backend,
+      dialect: getDialect(this.#backend.dialect),
+      schema: this.#schema,
+      options,
+    });
   }
 
   // === Transactions ===
