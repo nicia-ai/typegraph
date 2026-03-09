@@ -1011,6 +1011,99 @@ await store.clear();
 const person = await store.nodes.Person.create({ name: "Alice" });
 ```
 
+### Subgraph Extraction
+
+#### `store.subgraph(rootId, options)`
+
+Extracts a typed subgraph by performing a BFS traversal from a root node, following
+the specified edge kinds. Returns all reachable nodes and the edges connecting them.
+
+Under the hood, this compiles to a single `WITH RECURSIVE` CTE — the traversal,
+filtering, and hydration all happen in the database.
+
+```typescript
+store.subgraph<EK, NK>(
+  rootId: NodeId<AllNodeTypes<G>>,
+  options: SubgraphOptions<G, EK, NK>,
+): Promise<SubgraphResult<G, NK, EK>>;
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
+| `maxDepth` | `number` | `10` | Maximum traversal depth from root (capped at `MAX_RECURSIVE_DEPTH`) |
+| `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output |
+| `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
+| `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
+| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
+
+**Result:**
+
+```typescript
+type SubgraphResult<G, NK, EK> = Readonly<{
+  nodes: readonly SubsetNode<G, NK>[];
+  edges: readonly SubsetEdge<G, EK>[];
+}>;
+```
+
+Edges are only included when **both** endpoints appear in the result set.
+Soft-deleted nodes and edges are automatically excluded. Duplicate nodes
+(reachable via multiple paths) are deduplicated.
+
+**Example:**
+
+```typescript
+import type { AnyNode, SubgraphResult } from "@nicia-ai/typegraph";
+
+// Extract the full neighborhood of a run
+const result = await store.subgraph(run.id, {
+  edges: ["has_task", "runs_agent", "uses_skill"],
+  maxDepth: 4,
+});
+
+// result.nodes — all reachable nodes (typed as a discriminated union)
+// result.edges — all connecting edges between those nodes
+
+// Narrow by kind with a switch
+for (const node of result.nodes) {
+  switch (node.kind) {
+    case "Task": {
+      console.log(node.title, node.status);
+      break;
+    }
+    case "Agent": {
+      console.log(node.model);
+      break;
+    }
+  }
+}
+```
+
+**Filtering to specific node kinds:**
+
+```typescript
+const tasksOnly = await store.subgraph(run.id, {
+  edges: ["has_task", "depends_on"],
+  includeKinds: ["Task"],
+  excludeRoot: true,
+});
+
+// tasksOnly.nodes is typed as readonly Node<typeof Task>[]
+```
+
+**Bidirectional traversal:**
+
+```typescript
+// Find all nodes connected to a skill, regardless of edge direction
+const neighborhood = await store.subgraph(skill.id, {
+  edges: ["uses_skill", "has_task"],
+  direction: "both",
+  maxDepth: 3,
+});
+```
+
 ### Query Builder
 
 #### `store.query()`
