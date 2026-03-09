@@ -1,5 +1,15 @@
 # @nicia-ai/typegraph
 
+## 0.11.0
+
+### Minor Changes
+
+- [#38](https://github.com/nicia-ai/typegraph/pull/38) [`e26e4a5`](https://github.com/nicia-ai/typegraph/commit/e26e4a5282d9e59ab517a68dede37c38bea2a1e9) Thanks [@pdlug](https://github.com/pdlug)! - Add `createFromRecord()` and `upsertByIdFromRecord()` to `NodeCollection`.
+
+  These methods accept `Record<string, unknown>` instead of `z.input<N["schema"]>`, providing an escape hatch for dynamic-data scenarios (changesets, migrations, imports) where the data shape is determined at runtime. Runtime Zod validation is unchanged — only the compile-time type gate is relaxed. The return type remains fully typed as `Node<N>`.
+
+  Closes [#37](https://github.com/nicia-ai/typegraph/issues/37).
+
 ## 0.10.0
 
 ### Minor Changes
