@@ -392,6 +392,18 @@ export type NodeCollection<
   count: (options?: QueryOptions) => Promise<number>;
 
   /**
+   * Create a node from untyped data, relying on runtime Zod validation.
+   *
+   * Use this for dynamic dispatch (changesets, migrations, imports) where
+   * the data shape is determined at runtime, not compile time.
+   * The return type is fully typed — only the input gate is relaxed.
+   */
+  createFromRecord: (
+    data: Record<string, unknown>,
+    options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+  ) => Promise<Node<N>>;
+
+  /**
    * Create or update a node.
    *
    * If a node with the given ID exists, updates it with the provided props.
@@ -400,6 +412,19 @@ export type NodeCollection<
   upsertById: (
     id: string,
     props: z.input<N["schema"]>,
+    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+  ) => Promise<Node<N>>;
+
+  /**
+   * Upsert a node from untyped data, relying on runtime Zod validation.
+   *
+   * Use this for dynamic dispatch (changesets, migrations, imports) where
+   * the data shape is determined at runtime, not compile time.
+   * The return type is fully typed — only the input gate is relaxed.
+   */
+  upsertByIdFromRecord: (
+    id: string,
+    data: Record<string, unknown>,
     options?: Readonly<{ validFrom?: string; validTo?: string }>,
   ) => Promise<Node<N>>;
 

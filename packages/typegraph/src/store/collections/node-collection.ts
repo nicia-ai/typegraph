@@ -175,6 +175,16 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
+      return this.createFromRecord(
+        props as Record<string, unknown>,
+        options,
+      );
+    },
+
+    async createFromRecord(
+      data: Record<string, unknown>,
+      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+    ): Promise<Node<N>> {
       const input: {
         kind: string;
         id?: string;
@@ -183,7 +193,7 @@ export function createNodeCollection<
         validTo?: string;
       } = {
         kind: kind,
-        props: props as Record<string, unknown>,
+        props: data,
       };
       if (options?.id !== undefined) input.id = options.id;
       if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
@@ -347,11 +357,21 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: Readonly<{ validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
-      // Check if node exists (including soft-deleted nodes)
+      return this.upsertByIdFromRecord(
+        id,
+        props as Record<string, unknown>,
+        options,
+      );
+    },
+
+    async upsertByIdFromRecord(
+      id: string,
+      data: Record<string, unknown>,
+      options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    ): Promise<Node<N>> {
       const existing = await backend.getNode(graphId, kind, id);
 
       if (existing) {
-        // Update existing node (this also un-deletes soft-deleted nodes)
         const input: {
           kind: string;
           id: NodeId<N>;
@@ -360,18 +380,16 @@ export function createNodeCollection<
         } = {
           kind: kind,
           id: id as NodeId<N>,
-          props: props as Record<string, unknown>,
+          props: data,
         };
         if (options?.validTo !== undefined) input.validTo = options.validTo;
 
-        // If the node is soft-deleted, clear the deletion
         const clearDeleted = existing.deleted_at !== undefined;
         const result = await executeNodeUpdate(input, backend, {
           clearDeleted,
         });
         return narrowNode<N>(result);
       } else {
-        // Create new node
         const input: {
           kind: string;
           id?: string;
@@ -381,7 +399,7 @@ export function createNodeCollection<
         } = {
           kind: kind,
           id,
-          props: props as Record<string, unknown>,
+          props: data,
         };
         if (options?.validFrom !== undefined)
           input.validFrom = options.validFrom;

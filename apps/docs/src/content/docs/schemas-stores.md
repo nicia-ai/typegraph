@@ -480,6 +480,26 @@ Counts nodes of this kind (excluding soft-deleted nodes).
 store.nodes.Person.count(): Promise<number>;
 ```
 
+#### `createFromRecord(data, options?)`
+
+Creates a node from untyped data, relying on runtime Zod validation. Use this for
+dynamic dispatch (changesets, migrations, imports) where the data shape is determined
+at runtime, not compile time. The return type is fully typed — only the input gate is relaxed.
+
+```typescript
+store.nodes.Person.createFromRecord(
+  data: Record<string, unknown>,
+  options?: { id?: string; validFrom?: string; validTo?: string }
+): Promise<Node<Person>>;
+```
+
+```typescript
+// Data arrives from an external source at runtime
+const importedRow: Record<string, unknown> = JSON.parse(line);
+const person = await store.nodes.Person.createFromRecord(importedRow);
+// person is fully typed as Node<Person>
+```
+
 #### `upsertById(id, props, options?)`
 
 Creates or updates a node by ID.
@@ -497,6 +517,27 @@ store.nodes.Person.upsertById(
 - Creates a new node if no node with the ID exists
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
+
+#### `upsertByIdFromRecord(id, data, options?)`
+
+Upserts a node from untyped data, relying on runtime Zod validation. Same behavior
+as `upsertById` but accepts `Record<string, unknown>` instead of the typed schema input.
+
+```typescript
+store.nodes.Person.upsertByIdFromRecord(
+  id: string,
+  data: Record<string, unknown>,
+  options?: { validFrom?: string; validTo?: string }
+): Promise<Node<Person>>;
+```
+
+```typescript
+// Pre-seeded ID with dynamic data from a changeset
+const run = await store.nodes.Run.upsertByIdFromRecord(
+  prepared.runId,
+  { status: "running", ...dynamicConfig },
+);
+```
 
 #### `bulkCreate(items)`
 
