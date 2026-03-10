@@ -169,6 +169,34 @@ describe("FieldAccessTracker", () => {
       isSystemField: false,
     });
   });
+
+  it("preserves isSystemField when re-recorded as non-system", () => {
+    const tracker = new FieldAccessTracker();
+    tracker.record("a", "id", true);
+    tracker.record("a", "id", false);
+
+    const fields = tracker.getAccessedFields();
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toEqual({
+      alias: "a",
+      field: "id",
+      isSystemField: true,
+    });
+  });
+
+  it("upgrades non-system field to system field", () => {
+    const tracker = new FieldAccessTracker();
+    tracker.record("a", "id", false);
+    tracker.record("a", "id", true);
+
+    const fields = tracker.getAccessedFields();
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toEqual({
+      alias: "a",
+      field: "id",
+      isSystemField: true,
+    });
+  });
 });
 
 describe("createTrackingContext", () => {
@@ -511,5 +539,124 @@ describe("Smart Select Integration", () => {
     // Full fetch projection includes the props blob.
     const { sql } = sqlToStrings(getLastQuery()!);
     expect(sql).toContain('AS "p_props"');
+  });
+
+  it("preserves id system field in selective paginate results", async () => {
+    const page = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "name", "asc")
+      .select((ctx) => ({
+        id: ctx.p.id,
+        name: ctx.p.name,
+      }))
+      .paginate({ first: 10 });
+
+    expect(page.data).toHaveLength(2);
+    expect(page.data[0]!.name).toBe("Alice");
+    expect(page.data[0]!.id).toBe(aliceId);
+    expect(page.data[1]!.id).toBeDefined();
+    expect(typeof page.data[1]!.id).toBe("string");
+
+    const { sql } = sqlToStrings(getLastQuery()!);
+    expect(sql).toContain('AS "p_id"');
+    expect(sql).not.toContain('AS "p_props"');
+  });
+
+  it("orders by system field id correctly in paginate", async () => {
+    const page = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "id", "asc")
+      .select((ctx) => ({
+        id: ctx.p.id,
+        name: ctx.p.name,
+      }))
+      .paginate({ first: 10 });
+
+    expect(page.data).toHaveLength(2);
+    expect(page.data[0]!.id).toBeDefined();
+    expect(page.data[1]!.id).toBeDefined();
+    expect(page.data[0]!.id).not.toBe(page.data[1]!.id);
+
+    const { sql } = sqlToStrings(getLastQuery()!);
+    expect(sql).not.toContain('AS "p_props"');
+  });
+
+  it("orders by system field id correctly in execute", async () => {
+    const results = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "id", "asc")
+      .select((ctx) => ({
+        id: ctx.p.id,
+        name: ctx.p.name,
+      }))
+      .execute();
+
+    expect(results).toHaveLength(2);
+    expect(results[0]!.id).toBeDefined();
+    expect(results[1]!.id).toBeDefined();
+    // Verify ordering is by actual id column, not props->'id'
+    expect(results[0]!.id < results[1]!.id).toBe(true);
+  });
+
+  it("supports string comparison operators on id field", async () => {
+    const allResults = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "id", "asc")
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+      .execute();
+
+    expect(allResults).toHaveLength(2);
+    const firstId = allResults[0]!.id;
+
+    const gtResults = await store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.gt(firstId))
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+      .execute();
+
+    expect(gtResults).toHaveLength(1);
+    expect(gtResults[0]!.id > firstId).toBe(true);
+
+    const lteResults = await store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.lte(firstId))
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+      .execute();
+
+    expect(lteResults).toHaveLength(1);
+    expect(lteResults[0]!.id).toBe(firstId);
+  });
+
+  it("supports cursor pagination with orderBy id", async () => {
+    await store.nodes.Person.create({ name: "Charlie", age: 35 });
+
+    const page1 = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "id", "asc")
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+      .paginate({ first: 2 });
+
+    expect(page1.data).toHaveLength(2);
+    expect(page1.hasNextPage).toBe(true);
+    expect(page1.nextCursor).toBeDefined();
+
+    const page2 = await store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "id", "asc")
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+      .paginate({ first: 2, after: page1.nextCursor! });
+
+    expect(page2.data).toHaveLength(1);
+    expect(page2.hasNextPage).toBe(false);
+    // Page 2 id must be greater than all page 1 ids
+    expect(page2.data[0]!.id > page1.data[1]!.id).toBe(true);
   });
 });

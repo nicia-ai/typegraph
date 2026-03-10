@@ -633,20 +633,23 @@ export class QueryBuilder<
     field: string,
     direction: SortDirection = "asc",
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
-    const kindNames = this.#getKindNamesForAlias(alias);
+    const isSystem = field === "id" || field === "kind";
     const typeInfo =
-      kindNames ?
-        this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
-      : undefined;
-
-    const orderSpec: OrderSpec = {
-      field: fieldRef(alias, ["props"], {
-        jsonPointer: jsonPointer([field]),
-        valueType: typeInfo?.valueType,
-        elementType: typeInfo?.elementType,
-      }),
-      direction,
-    };
+      isSystem ? undefined : this.#getOrderByTypeInfo(alias, field);
+    const orderSpec: OrderSpec =
+      isSystem ?
+        {
+          field: fieldRef(alias, [field], { valueType: "string" }),
+          direction,
+        }
+      : {
+          field: fieldRef(alias, ["props"], {
+            jsonPointer: jsonPointer([field]),
+            valueType: typeInfo?.valueType,
+            elementType: typeInfo?.elementType,
+          }),
+          direction,
+        };
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -654,6 +657,13 @@ export class QueryBuilder<
     };
 
     return new QueryBuilder(this.#config, newState);
+  }
+
+  #getOrderByTypeInfo(alias: string, field: string): FieldTypeInfo | undefined {
+    const kindNames = this.#getKindNamesForAlias(alias);
+    return kindNames ?
+        this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
+      : undefined;
   }
 
   /**

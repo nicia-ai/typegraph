@@ -152,6 +152,10 @@ type BaseFieldBuilder = Readonly<{
  */
 type StringFieldBuilder = BaseFieldBuilder &
   Readonly<{
+    gt: (value: string | ParameterRef) => Predicate;
+    gte: (value: string | ParameterRef) => Predicate;
+    lt: (value: string | ParameterRef) => Predicate;
+    lte: (value: string | ParameterRef) => Predicate;
     contains: (pattern: string | ParameterRef) => Predicate;
     startsWith: (pattern: string | ParameterRef) => Predicate;
     endsWith: (pattern: string | ParameterRef) => Predicate;
@@ -515,6 +519,10 @@ function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
 export function stringField(field: FieldRef): StringFieldBuilder {
   return {
     ...baseFieldBuilder(field),
+    gt: (value) => comparison("gt", field, value),
+    gte: (value) => comparison("gte", field, value),
+    lt: (value) => comparison("lt", field, value),
+    lte: (value) => comparison("lte", field, value),
     contains: (pattern) => stringOp("contains", field, pattern),
     startsWith: (pattern) => stringOp("startsWith", field, pattern),
     endsWith: (pattern) => stringOp("endsWith", field, pattern),
