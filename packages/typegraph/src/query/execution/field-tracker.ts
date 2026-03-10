@@ -60,6 +60,13 @@ export class FieldAccessTracker {
 
   record(alias: string, field: string, isSystemField: boolean): void {
     const key = `${alias}\u0000${field}`;
+    const existing = this.#fields.get(key);
+    // System fields (id, kind) are dedicated columns — not in the props JSON.
+    // Never downgrade a system field to a props field, as that would cause the
+    // compiler to emit props->>'id' (nonexistent) instead of the id column.
+    if (existing !== undefined && existing.isSystemField && !isSystemField) {
+      return;
+    }
     this.#fields.set(key, { alias, field, isSystemField });
   }
 

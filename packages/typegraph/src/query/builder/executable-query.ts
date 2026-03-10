@@ -32,6 +32,7 @@ import {
   mapResults,
   mapSelectiveResults,
   MissingSelectiveFieldError,
+  nullToUndefined,
   transformPathColumns,
 } from "../execution";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
@@ -777,6 +778,18 @@ export class ExecutableQuery<
   #recordOrderByFieldsForPagination(tracker: FieldAccessTracker): boolean {
     for (const spec of this.#state.orderBy) {
       const field = spec.field;
+
+      // System field (e.g., id, kind) — path is ["id"] or ["kind"]
+      if (
+        field.path.length === 1 &&
+        field.path[0] !== "props" &&
+        field.jsonPointer === undefined
+      ) {
+        tracker.record(field.alias, field.path[0]!, true);
+        continue;
+      }
+
+      // Props field — path is ["props"] with a JSON pointer
       if (field.path.length !== 1 || field.path[0] !== "props") {
         return false;
       }
@@ -832,8 +845,23 @@ export class ExecutableQuery<
     for (const spec of this.#state.orderBy) {
       const alias = spec.field.alias;
       const jsonPointer = spec.field.jsonPointer;
+
+      // System field order spec (e.g., path=["id"], no jsonPointer)
       if (jsonPointer === undefined) {
-        throw new MissingSelectiveFieldError(alias, "orderBy");
+        if (spec.field.path.length !== 1) {
+          throw new MissingSelectiveFieldError(alias, "orderBy");
+        }
+        const fieldName = spec.field.path[0]!;
+        const outputName = outputNameByAliasField.get(
+          `${alias}\u0000${fieldName}`,
+        );
+        if (outputName === undefined) {
+          throw new MissingSelectiveFieldError(alias, fieldName);
+        }
+
+        const aliasObject = this.#getOrCreateAliasObject(cursorContext, alias);
+        aliasObject[fieldName] = nullToUndefined(row[outputName]);
+        continue;
       }
 
       const segments = parseJsonPointer(jsonPointer);
@@ -860,14 +888,7 @@ export class ExecutableQuery<
         }
       }
 
-      let aliasObject: Record<string, unknown>;
-      const existing = cursorContext[alias];
-      if (typeof existing === "object" && existing !== null) {
-        aliasObject = existing as Record<string, unknown>;
-      } else {
-        aliasObject = {};
-        cursorContext[alias] = aliasObject;
-      }
+      const aliasObject = this.#getOrCreateAliasObject(cursorContext, alias);
 
       const kindNames = this.#getNodeKindNamesForAlias(alias);
       const typeInfo =
@@ -901,6 +922,19 @@ export class ExecutableQuery<
     }
 
     return cursorContext;
+  }
+
+  #getOrCreateAliasObject(
+    cursorContext: Record<string, unknown>,
+    alias: string,
+  ): Record<string, unknown> {
+    const existing = cursorContext[alias];
+    if (typeof existing === "object" && existing !== null) {
+      return existing as Record<string, unknown>;
+    }
+    const created: Record<string, unknown> = {};
+    cursorContext[alias] = created;
+    return created;
   }
 
   #getNodeKindNamesForAlias(alias: string): readonly string[] | undefined {

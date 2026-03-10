@@ -205,6 +205,10 @@ export type BaseFieldAccessor = Readonly<{
 
 export type StringFieldAccessor = BaseFieldAccessor &
   Readonly<{
+    gt: (value: string | ParameterRef) => Predicate;
+    gte: (value: string | ParameterRef) => Predicate;
+    lt: (value: string | ParameterRef) => Predicate;
+    lte: (value: string | ParameterRef) => Predicate;
     contains: (pattern: string | ParameterRef) => Predicate;
     startsWith: (pattern: string | ParameterRef) => Predicate;
     endsWith: (pattern: string | ParameterRef) => Predicate;
