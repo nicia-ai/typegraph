@@ -38,6 +38,9 @@ jobs:
 
       - name: Build docs
         run: pnpm --filter @nicia-ai/typegraph-docs build
+        env:
+          NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
+          NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
 
       - name: Deploy to Cloudflare Workers
         run: |
