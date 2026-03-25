@@ -24,7 +24,6 @@ const config: KnipConfig = {
         "src/core/embedding.ts",
         "src/core/external-ref.ts",
       ],
-      ignoreDependencies: ["better-sqlite3"],
     },
     "apps/docs": {
       entry: ["src/**/*.{astro,ts,tsx}"],
