@@ -309,6 +309,14 @@ Best for: API endpoints, hot loops, or any code path that runs the same query sh
 
 See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 
+### Subgraph extraction
+
+For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
+is the fastest strategy. It compiles to a single recursive CTE that fans out across all specified
+edge types in one round trip — no matter how many relationship kinds are involved. See
+[Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
+`subgraph()` vs the fluent query builder vs manual `findFrom` calls.
+
 ## Best Practices
 
 ### Filter early

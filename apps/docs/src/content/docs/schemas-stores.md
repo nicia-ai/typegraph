@@ -1145,6 +1145,27 @@ const neighborhood = await store.subgraph(skill.id, {
 });
 ```
 
+#### Choosing a query strategy
+
+TypeGraph offers several ways to load related data. The right choice depends on your access pattern:
+
+| Pattern | Best strategy | Why |
+|---------|--------------|-----|
+| Load entity with all relationships | `subgraph(maxDepth: 1)` | Single SQL round trip — fans out across all edge types in one recursive CTE |
+| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
+| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
+| Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed |
+| Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit |
+
+**Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
+traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
+additional queries for node resolution. The gap widens as relationship count grows.
+
+For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
+template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. Reserve the
+fluent query builder for cases where you need filtering, sorting, or pagination on the related
+nodes.
+
 ### Query Builder
 
 #### `store.query()`
