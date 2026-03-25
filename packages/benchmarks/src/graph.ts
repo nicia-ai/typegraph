@@ -11,12 +11,14 @@ const User = defineNode("User", {
   schema: z.object({
     name: z.string(),
     city: z.string(),
+    bio: z.string(),
   }),
 });
 
 const Post = defineNode("Post", {
   schema: z.object({
     title: z.string(),
+    body: z.string(),
   }),
 });
 

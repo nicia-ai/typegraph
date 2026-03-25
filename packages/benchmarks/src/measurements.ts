@@ -4,6 +4,61 @@ import { BENCHMARK_CONFIG, type QueryMetrics } from "./config";
 import { type PerfStore } from "./graph";
 import { formatMs, median, nowMs } from "./utils";
 
+type FullSubgraphResult = Readonly<{
+  nodes: readonly (
+    | Readonly<{
+        kind: "User";
+        id: string;
+        name: string;
+        city: string;
+        bio: string;
+      }>
+    | Readonly<{
+        kind: "Post";
+        id: string;
+        title: string;
+        body: string;
+      }>
+  )[];
+  edges: readonly Readonly<{
+    id: string;
+    kind: "follows" | "authored";
+    fromId: string;
+    toId: string;
+  }>[];
+}>;
+
+type ProjectedSubgraphResult = Readonly<{
+  nodes: readonly (
+    | Readonly<{ kind: "User"; id: string; name: string }>
+    | Readonly<{ kind: "Post"; id: string; title: string }>
+  )[];
+  edges: readonly Readonly<{
+    id: string;
+    kind: "follows" | "authored";
+    fromId: string;
+    toId: string;
+  }>[];
+}>;
+
+type BenchmarkSubgraphOptions = Readonly<{
+  edges: readonly ("follows" | "authored")[];
+  maxDepth: number;
+  includeKinds: readonly ("User" | "Post")[];
+}>;
+
+const SUBGRAPH_BASELINE_OPTIONS = {
+  edges: ["follows", "authored"],
+  maxDepth: 2,
+  includeKinds: ["User", "Post"],
+} as const satisfies BenchmarkSubgraphOptions;
+
+const SUBGRAPH_STRESS_OPTIONS = {
+  edges: ["follows", "authored"],
+  maxDepth: 3,
+  includeKinds: ["User", "Post"],
+} as const satisfies BenchmarkSubgraphOptions;
+
 async function benchmarkQuery(
   label: string,
   fn: () => Promise<void>,
@@ -30,6 +85,82 @@ async function benchmarkQuery(
   const result = median(samples);
   console.log(`${label}: ${formatMs(result)}`);
   return result;
+}
+
+function consumeSubgraphCounts(
+  result: Readonly<{
+    nodes: readonly Readonly<{ kind: string; id: string }>[];
+    edges: readonly Readonly<{ id: string; fromId: string; toId: string }>[];
+  }>,
+): number {
+  let checksum = 0;
+
+  for (const node of result.nodes) {
+    checksum += node.id.length + node.kind.length;
+  }
+
+  for (const edge of result.edges) {
+    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
+  }
+
+  return checksum;
+}
+
+function projectSubgraphInApplication(result: FullSubgraphResult): number {
+  let checksum = 0;
+
+  for (const node of result.nodes) {
+    if (node.kind === "User") {
+      checksum += node.id.length + node.name.length;
+      continue;
+    }
+
+    if (node.kind === "Post") {
+      checksum += node.id.length + node.title.length;
+    }
+  }
+
+  for (const edge of result.edges) {
+    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
+  }
+
+  return checksum;
+}
+
+function consumeProjectedSubgraph(result: ProjectedSubgraphResult): number {
+  let checksum = 0;
+
+  for (const node of result.nodes) {
+    if (node.kind === "User") {
+      checksum += node.id.length + node.name.length;
+      continue;
+    }
+
+    checksum += node.id.length + node.title.length;
+  }
+
+  for (const edge of result.edges) {
+    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
+  }
+
+  return checksum;
+}
+
+function assertNonEmptyChecksum(label: string, checksum: number): void {
+  if (checksum <= 0) {
+    throw new Error(`${label} produced an empty checksum`);
+  }
+}
+
+async function logSubgraphShape(
+  store: PerfStore,
+  label: string,
+  options: BenchmarkSubgraphOptions,
+): Promise<void> {
+  const result = await store.subgraph("user_0" as never, options);
+  console.log(
+    `${label}: ${result.nodes.length} nodes, ${result.edges.length} edges`,
+  );
 }
 
 export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
@@ -72,6 +203,126 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     "prepared execute",
     async () => {
       await preparedExecuteQuery.execute({ userId: "user_0" });
+    },
+  );
+
+  await logSubgraphShape(
+    store,
+    "subgraph baseline shape (wide payload, depth 2)",
+    SUBGRAPH_BASELINE_OPTIONS,
+  );
+
+  const subgraphFullMs = await benchmarkQuery(
+    "subgraph full hydration (wide payload, depth 2)",
+    async () => {
+      const result = await store.subgraph(
+        "user_0" as never,
+        SUBGRAPH_BASELINE_OPTIONS,
+      );
+
+      assertNonEmptyChecksum(
+        "subgraph full hydration",
+        consumeSubgraphCounts(result),
+      );
+    },
+  );
+
+  const subgraphApplicationProjectionMs = await benchmarkQuery(
+    "subgraph full hydration + app projection (wide payload, depth 2)",
+    async () => {
+      const result = await store.subgraph(
+        "user_0" as never,
+        SUBGRAPH_BASELINE_OPTIONS,
+      );
+
+      assertNonEmptyChecksum(
+        "subgraph app projection",
+        projectSubgraphInApplication(result),
+      );
+    },
+  );
+
+  const subgraphSqlProjectionMs = await benchmarkQuery(
+    "subgraph SQL projection (wide payload, depth 2)",
+    async () => {
+      const result = await store.subgraph("user_0" as never, {
+        ...SUBGRAPH_BASELINE_OPTIONS,
+        project: {
+          nodes: {
+            User: ["name"],
+            Post: ["title"],
+          },
+          edges: {
+            follows: [],
+            authored: [],
+          },
+        },
+      });
+
+      assertNonEmptyChecksum(
+        "subgraph SQL projection",
+        consumeProjectedSubgraph(result),
+      );
+    },
+  );
+
+  await logSubgraphShape(
+    store,
+    "subgraph stress shape (wide payload, depth 3)",
+    SUBGRAPH_STRESS_OPTIONS,
+  );
+
+  const subgraphStressFullMs = await benchmarkQuery(
+    "subgraph full hydration (wide payload, depth 3 stress)",
+    async () => {
+      const result = await store.subgraph(
+        "user_0" as never,
+        SUBGRAPH_STRESS_OPTIONS,
+      );
+
+      assertNonEmptyChecksum(
+        "subgraph stress full hydration",
+        consumeSubgraphCounts(result),
+      );
+    },
+  );
+
+  const subgraphStressApplicationProjectionMs = await benchmarkQuery(
+    "subgraph full hydration + app projection (wide payload, depth 3 stress)",
+    async () => {
+      const result = await store.subgraph(
+        "user_0" as never,
+        SUBGRAPH_STRESS_OPTIONS,
+      );
+
+      assertNonEmptyChecksum(
+        "subgraph stress app projection",
+        projectSubgraphInApplication(result),
+      );
+    },
+  );
+
+  const subgraphStressSqlProjectionMs = await benchmarkQuery(
+    "subgraph SQL projection (wide payload, depth 3 stress)",
+    async () => {
+      const result = await store.subgraph("user_0" as never, {
+        ...SUBGRAPH_STRESS_OPTIONS,
+        project: {
+          nodes: {
+            User: ["name"],
+            Post: ["title"],
+          },
+          edges: {
+            follows: [],
+            authored: [],
+          },
+        },
+      });
+
+      assertNonEmptyChecksum(
+        "subgraph stress SQL projection",
+        consumeProjectedSubgraph(result),
+      );
     },
   );
 
@@ -239,6 +490,12 @@ export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {
     aggregateDistinctMs,
     cachedExecuteMs,
     preparedExecuteMs,
+    subgraphFullMs,
+    subgraphApplicationProjectionMs,
+    subgraphSqlProjectionMs,
+    subgraphStressFullMs,
+    subgraphStressApplicationProjectionMs,
+    subgraphStressSqlProjectionMs,
     tenHopMs,
     recursiveHundredHopMs,
     recursiveThousandHopMs,

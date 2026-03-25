@@ -202,6 +202,7 @@ export type {
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";
+export { defineSubgraphProject } from "./store/subgraph";
 export type {
   ConstraintNames,
   CreateEdgeInput,

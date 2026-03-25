@@ -184,6 +184,30 @@ export function printSummary(metrics: QueryMetrics): void {
     metrics.preparedExecuteMs,
     metrics.cachedExecuteMs,
   );
+  const subgraphApplicationToFull = safeRatio(
+    metrics.subgraphApplicationProjectionMs,
+    metrics.subgraphFullMs,
+  );
+  const subgraphSqlToFull = safeRatio(
+    metrics.subgraphSqlProjectionMs,
+    metrics.subgraphFullMs,
+  );
+  const subgraphSqlToApplication = safeRatio(
+    metrics.subgraphSqlProjectionMs,
+    metrics.subgraphApplicationProjectionMs,
+  );
+  const subgraphStressApplicationToFull = safeRatio(
+    metrics.subgraphStressApplicationProjectionMs,
+    metrics.subgraphStressFullMs,
+  );
+  const subgraphStressSqlToFull = safeRatio(
+    metrics.subgraphStressSqlProjectionMs,
+    metrics.subgraphStressFullMs,
+  );
+  const subgraphStressSqlToApplication = safeRatio(
+    metrics.subgraphStressSqlProjectionMs,
+    metrics.subgraphStressApplicationProjectionMs,
+  );
   const recursiveHundredToTenHop = safeRatio(
     metrics.recursiveHundredHopMs,
     metrics.tenHopMs,
@@ -200,6 +224,22 @@ export function printSummary(metrics: QueryMetrics): void {
     `aggregateDistinct/aggregate: ${aggregateDistinctToAggregate.toFixed(2)}x`,
   );
   console.log(`prepared/cached: ${preparedToCached.toFixed(2)}x`);
+  console.log(
+    `subgraph-app-projection/full: ${subgraphApplicationToFull.toFixed(2)}x`,
+  );
+  console.log(`subgraph-sql/full: ${subgraphSqlToFull.toFixed(2)}x`);
+  console.log(
+    `subgraph-sql/app-projection: ${subgraphSqlToApplication.toFixed(2)}x`,
+  );
+  console.log(
+    `subgraph-stress-app-projection/full: ${subgraphStressApplicationToFull.toFixed(2)}x`,
+  );
+  console.log(
+    `subgraph-stress-sql/full: ${subgraphStressSqlToFull.toFixed(2)}x`,
+  );
+  console.log(
+    `subgraph-stress-sql/app-projection: ${subgraphStressSqlToApplication.toFixed(2)}x`,
+  );
   console.log(
     `100-hop-recursive/10-hop-recursive: ${recursiveHundredToTenHop.toFixed(2)}x`,
   );

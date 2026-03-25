@@ -18,11 +18,17 @@ function createRng(seed_: number): () => number {
   };
 }
 
+function buildPayload(prefix: string, bytes: number): string {
+  const chunk = `${prefix}|`;
+  return chunk.repeat(Math.ceil(bytes / chunk.length)).slice(0, bytes);
+}
+
 function buildUsers(): readonly UserSeed[] {
   return Array.from({ length: BENCHMARK_CONFIG.userCount }, (_, index) => ({
     id: `user_${index}`,
     name: `User ${index}`,
     city: index % 3 === 0 ? "San Francisco" : "New York",
+    bio: buildPayload(`bio_${index}`, BENCHMARK_CONFIG.userBioBytes),
   }));
 }
 
@@ -39,6 +45,10 @@ function buildPosts(users: readonly UserSeed[]): readonly PostSeed[] {
         id: `post_${user.id}_${postIndex}`,
         authorId: user.id,
         title: `Post ${user.id} ${postIndex}`,
+        body: buildPayload(
+          `body_${user.id}_${postIndex}`,
+          BENCHMARK_CONFIG.postBodyBytes,
+        ),
       });
     }
   }
@@ -113,6 +123,7 @@ async function ingestUsers(
         props: {
           name: user.name,
           city: user.city,
+          bio: user.bio,
         },
       })),
     );
@@ -135,6 +146,7 @@ async function ingestPosts(
         id: post.id,
         props: {
           title: post.title,
+          body: post.body,
         },
       })),
     );

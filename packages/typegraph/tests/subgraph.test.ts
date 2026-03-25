@@ -15,7 +15,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  defineSubgraphProject,
+} from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { createStore, type Store } from "../src/store";
@@ -55,7 +60,9 @@ const Orphan = defineNode("Orphan", {
 
 const hasTask = defineEdge("has_task", { schema: z.object({}) });
 const runsAgent = defineEdge("runs_agent", { schema: z.object({}) });
-const usesSkill = defineEdge("uses_skill", { schema: z.object({}) });
+const usesSkill = defineEdge("uses_skill", {
+  schema: z.object({ priority: z.number() }),
+});
 const hasAttempt = defineEdge("has_attempt", { schema: z.object({}) });
 const usedTool = defineEdge("used_tool", { schema: z.object({}) });
 const dependsOn = defineEdge("depends_on", { schema: z.object({}) });
@@ -124,8 +131,8 @@ async function seedTestGraph(store: Store<TestGraph>): Promise<TestIds> {
   await store.edges.has_task.create(run, task1);
   await store.edges.has_task.create(run, task2);
   await store.edges.runs_agent.create(run, agent1);
-  await store.edges.uses_skill.create(task1, skill1);
-  await store.edges.uses_skill.create(task2, skill1);
+  await store.edges.uses_skill.create(task1, skill1, { priority: 1 });
+  await store.edges.uses_skill.create(task2, skill1, { priority: 2 });
   await store.edges.has_attempt.create(task1, attempt1);
   await store.edges.used_tool.create(attempt1, tool1);
   await store.edges.depends_on.create(task1, task2);
@@ -650,6 +657,102 @@ describe("store.subgraph()", () => {
     });
   });
 
+  // ── Projection ─────────────────────────────────────────────
+
+  describe("projection", () => {
+    it("applies projection to the root node when its kind is projected", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 0,
+        project: {
+          nodes: {
+            Run: ["name"],
+          },
+        },
+      });
+
+      expect(result.nodes).toHaveLength(1);
+      expect(result.nodes[0]).toMatchObject({
+        kind: "Run",
+        id: ids.runId,
+        name: "run-1",
+      });
+      expect(result.nodes[0]).not.toHaveProperty("meta");
+    });
+
+    it("projects node props and full metadata while preserving identity", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        includeKinds: ["Task"],
+        project: {
+          nodes: {
+            Task: ["title", "meta"],
+          },
+        },
+      });
+
+      expect(result.nodes).toHaveLength(2);
+      for (const node of result.nodes) {
+        expect(node.kind).toBe("Task");
+        expect(node).toHaveProperty("id");
+        expect(node).toHaveProperty("title");
+        expect(node).not.toHaveProperty("status");
+        expect(node).toHaveProperty("meta.createdAt");
+        expect(node).toHaveProperty("meta.updatedAt");
+      }
+    });
+
+    it("keeps unprojected kinds fully hydrated", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task", "runs_agent"],
+        maxDepth: 1,
+        project: {
+          nodes: {
+            Task: ["title"],
+          },
+        },
+      });
+
+      const task = result.nodes.find((node) => node.kind === "Task");
+      const agent = result.nodes.find((node) => node.kind === "Agent");
+
+      expect(task).toBeDefined();
+      expect(task).toHaveProperty("title");
+      expect(task).not.toHaveProperty("status");
+      expect(task).not.toHaveProperty("meta");
+
+      expect(agent).toBeDefined();
+      expect(agent).toHaveProperty("model");
+      expect(agent).toHaveProperty("meta.createdAt");
+      expect(agent).toHaveProperty("meta.updatedAt");
+    });
+
+    it("projects edges while preserving structural endpoint fields", async () => {
+      const result = await store.subgraph(ids.task1Id as never, {
+        edges: ["uses_skill"],
+        maxDepth: 1,
+        project: {
+          edges: {
+            uses_skill: ["meta"],
+          },
+        },
+      });
+
+      expect(result.edges).toHaveLength(1);
+      const edge = result.edges[0]!;
+      expect(edge.kind).toBe("uses_skill");
+      expect(edge).toHaveProperty("id");
+      expect(edge).toHaveProperty("fromKind");
+      expect(edge).toHaveProperty("fromId");
+      expect(edge).toHaveProperty("toKind");
+      expect(edge).toHaveProperty("toId");
+      expect(edge).toHaveProperty("meta.createdAt");
+      expect(edge).toHaveProperty("meta.updatedAt");
+      expect(edge).not.toHaveProperty("priority");
+    });
+  });
+
   // ── Type-level tests ────────────────────────────────────────
 
   describe("compile-time type safety", () => {
@@ -676,6 +779,329 @@ describe("store.subgraph()", () => {
       expect(result.nodes.length).toBeGreaterThan(0);
       for (const node of result.nodes) {
         expect(["Task", "Agent"]).toContain(node.kind);
+      }
+    });
+
+    it("narrows projected node fields at compile time", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task", "runs_agent"],
+        maxDepth: 1,
+        includeKinds: ["Task", "Agent"],
+        project: {
+          nodes: {
+            Task: ["title"],
+            Agent: ["meta"],
+          },
+        },
+      });
+
+      for (const node of result.nodes) {
+        if (node.kind === "Task") {
+          const title: string = node.title;
+          void title;
+          // @ts-expect-error - projected Task omits status
+          const status = node.status;
+          void status;
+        }
+
+        if (node.kind === "Agent") {
+          const createdAt: string = node.meta.createdAt;
+          void createdAt;
+          // @ts-expect-error - projected Agent omits model
+          const model = node.model;
+          void model;
+        }
+      }
+    });
+
+    it("narrows projected edge fields at compile time", async () => {
+      const result = await store.subgraph(ids.task1Id as never, {
+        edges: ["uses_skill"],
+        maxDepth: 1,
+        project: {
+          edges: {
+            uses_skill: [],
+          },
+        },
+      });
+
+      const edge = result.edges[0]!;
+      const fromId: string = edge.fromId;
+      const toId: string = edge.toId;
+      void fromId;
+      void toId;
+      // @ts-expect-error - projected edge omits meta unless requested
+      const meta = edge.meta;
+      void meta;
+    });
+
+    it("rejects partial meta fields at compile time", async () => {
+      await store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        project: {
+          nodes: {
+            // @ts-expect-error - "meta.createdAt" is not a valid projection field; use "meta" for all-or-nothing
+            Task: ["title", "meta.createdAt"],
+          },
+        },
+      });
+
+      await store.subgraph(ids.task1Id as never, {
+        edges: ["uses_skill"],
+        maxDepth: 1,
+        project: {
+          edges: {
+            // @ts-expect-error - "meta.updatedAt" is not a valid edge projection field; use "meta" for all-or-nothing
+            uses_skill: ["meta.updatedAt"],
+          },
+        },
+      });
+    });
+
+    it("rejects projection keys for kinds outside includeKinds/edges", async () => {
+      await store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        includeKinds: ["Task"],
+        project: {
+          nodes: {
+            Task: ["title"],
+            // @ts-expect-error - Agent is not in includeKinds
+            Agent: ["model"],
+          },
+        },
+      });
+
+      await store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        project: {
+          edges: {
+            // @ts-expect-error - runs_agent is not in edges
+            runs_agent: [],
+          },
+        },
+      });
+    });
+
+    it("projects correctly with very long kind and field names", async () => {
+      // Alias must stay under PostgreSQL's 63-byte identifier limit.
+      // This test creates a node kind with a long schema field and verifies
+      // projection round-trips the value correctly (alias wasn't truncated).
+      const LongKind = defineNode(
+        "VeryLongNodeKindNameThatExceedsNormalLength",
+        {
+          schema: z.object({
+            a_field_name_that_is_also_unreasonably_long_for_testing_purposes:
+              z.string(),
+          }),
+        },
+      );
+
+      const longEdge = defineEdge("very_long_edge", {
+        schema: z.object({}),
+      });
+
+      const longGraph = defineGraph({
+        id: "long_test",
+        nodes: {
+          VeryLongNodeKindNameThatExceedsNormalLength: { type: LongKind },
+        },
+        edges: {
+          very_long_edge: {
+            type: longEdge,
+            from: [LongKind],
+            to: [LongKind],
+          },
+        },
+      });
+
+      const longBackend = createTestBackend();
+      const longStore = createStore(longGraph, longBackend);
+
+      const root =
+        await longStore.nodes.VeryLongNodeKindNameThatExceedsNormalLength.create(
+          {
+            a_field_name_that_is_also_unreasonably_long_for_testing_purposes:
+              "hello",
+          },
+        );
+
+      const child =
+        await longStore.nodes.VeryLongNodeKindNameThatExceedsNormalLength.create(
+          {
+            a_field_name_that_is_also_unreasonably_long_for_testing_purposes:
+              "world",
+          },
+        );
+
+      await longStore.edges.very_long_edge.create(root, child);
+
+      const result = await longStore.subgraph(root.id, {
+        edges: ["very_long_edge"],
+        maxDepth: 1,
+        project: {
+          nodes: {
+            VeryLongNodeKindNameThatExceedsNormalLength: [
+              "a_field_name_that_is_also_unreasonably_long_for_testing_purposes",
+            ],
+          },
+        },
+      });
+
+      expect(result.nodes).toHaveLength(2);
+      for (const node of result.nodes) {
+        expect(
+          node.a_field_name_that_is_also_unreasonably_long_for_testing_purposes,
+        ).toBeDefined();
+      }
+    });
+
+    it("projects correctly with multibyte kind names", async () => {
+      // PostgreSQL truncates identifiers at 63 bytes, not characters.
+      // Multibyte kind names (e.g. emoji, CJK) can exceed the byte limit
+      // even when string.length looks safe. This test verifies round-trip
+      // projection works with a multibyte kind name.
+      const multibyteKindName = "データノード_" + "あ".repeat(20);
+      const MultibyteKind = defineNode(multibyteKindName, {
+        schema: z.object({ value: z.string() }),
+      });
+
+      const mbEdge = defineEdge("mb_link", { schema: z.object({}) });
+
+      const mbGraph = defineGraph({
+        id: "mb_test",
+        nodes: { [multibyteKindName]: { type: MultibyteKind } },
+        edges: {
+          mb_link: {
+            type: mbEdge,
+            from: [MultibyteKind],
+            to: [MultibyteKind],
+          },
+        },
+      });
+
+      const mbBackend = createTestBackend();
+      const mbStore = createStore(mbGraph, mbBackend);
+
+      const collection = mbStore.nodes[multibyteKindName]!;
+      const root = await collection.create({ value: "root" });
+      const child = await collection.create({ value: "child" });
+      await mbStore.edges.mb_link.create(root, child);
+
+      const result = await mbStore.subgraph(root.id as never, {
+        edges: ["mb_link"] as never,
+        maxDepth: 1,
+        project: {
+          nodes: { [multibyteKindName]: ["value"] } as never,
+        },
+      });
+
+      expect(result.nodes).toHaveLength(2);
+      for (const node of result.nodes) {
+        expect((node as Record<string, unknown>).value).toBeDefined();
+      }
+    });
+
+    it("rejects reserved node keys in projection", async () => {
+      // "meta" is excluded — it's a valid projection field handled separately
+      const reservedNodeKeys = ["id", "kind"];
+      for (const key of reservedNodeKeys) {
+        await expect(
+          store.subgraph(ids.runId as never, {
+            edges: ["has_task"],
+            maxDepth: 1,
+            project: {
+              nodes: {
+                Task: [key] as never,
+              },
+            },
+          }),
+        ).rejects.toThrow(/reserved structural key/);
+      }
+    });
+
+    it("rejects reserved edge keys in projection", async () => {
+      // "meta" is excluded — it's a valid projection field handled separately
+      const reservedEdgeKeys = [
+        "id",
+        "kind",
+        "fromKind",
+        "fromId",
+        "toKind",
+        "toId",
+      ];
+      for (const key of reservedEdgeKeys) {
+        await expect(
+          store.subgraph(ids.runId as never, {
+            edges: ["has_task"],
+            maxDepth: 1,
+            project: {
+              edges: {
+                has_task: [key] as never,
+              },
+            },
+          }),
+        ).rejects.toThrow(/reserved structural key/);
+      }
+    });
+
+    it("rejects prototype-pollution keys in projection", async () => {
+      const dangerousKeys = ["__proto__", "constructor", "prototype"];
+      for (const key of dangerousKeys) {
+        await expect(
+          store.subgraph(ids.runId as never, {
+            edges: ["has_task"],
+            maxDepth: 1,
+            project: {
+              nodes: {
+                Task: [key] as never,
+              },
+            },
+          }),
+        ).rejects.toThrow(/not allowed/);
+      }
+    });
+
+    it("narrows reusable projection configs via defineSubgraphProject", async () => {
+      const project = defineSubgraphProject(testGraph)({
+        nodes: {
+          Task: ["title"],
+        },
+        edges: {
+          uses_skill: ["priority"],
+        },
+      });
+
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task", "uses_skill"],
+        maxDepth: 2,
+        includeKinds: ["Task", "Skill"],
+        project,
+      });
+
+      for (const node of result.nodes) {
+        if (node.kind === "Task") {
+          const title: string = node.title;
+          void title;
+          // @ts-expect-error - projected Task omits status even through reusable config
+          const status = node.status;
+          void status;
+          // @ts-expect-error - projected Task omits meta when not requested
+          const meta = node.meta;
+          void meta;
+        }
+      }
+
+      for (const edge of result.edges) {
+        if (edge.kind === "uses_skill") {
+          const priority: number = edge.priority;
+          void priority;
+          // @ts-expect-error - projected uses_skill omits meta when not requested
+          const meta = edge.meta;
+          void meta;
+        }
       }
     });
   });
