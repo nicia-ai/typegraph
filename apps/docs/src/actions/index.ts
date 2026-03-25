@@ -1,9 +1,9 @@
+import { z } from "astro/zod";
 import { ActionError, defineAction } from "astro:actions";
 import {
   NICIA_EMAIL_LIST_API_KEY,
   NICIA_EMAIL_LIST_API_URL,
 } from "astro:env/server";
-import { z } from "astro:schema";
 
 import {
   EmailListAPIError,
@@ -17,7 +17,7 @@ const MIN_SUBMISSION_TIME_MS = 2000;
 export const server = {
   subscribe: defineAction({
     input: z.object({
-      email: z.string().email("Please enter a valid email address."),
+      email: z.email("Please enter a valid email address."),
       website: z.string().optional(),
       renderedAt: z.number().optional(),
     }),

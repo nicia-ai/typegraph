@@ -256,6 +256,9 @@ jobs:
 
       - name: Build
         run: pnpm turbo run build
+        env:
+          NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
+          NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
 
   release-metadata-push:
     name: Release metadata push check

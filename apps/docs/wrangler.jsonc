@@ -1,8 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/wrangler",
   "name": "typegraph-docs",
-  "compatibility_date": "2026-01-01",
-  "main": "./dist/_worker.js",
+  "compatibility_date": "2026-03-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "@astrojs/cloudflare/entrypoints/server",
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
