@@ -3,7 +3,6 @@
 import eslint from "@eslint/js";
 import configPrettier from "eslint-config-prettier";
 import functional from "eslint-plugin-functional";
-import promise from "eslint-plugin-promise";
 import simpleImportSort from "eslint-plugin-simple-import-sort";
 import unicorn from "eslint-plugin-unicorn";
 import tseslint from "typescript-eslint";
@@ -68,6 +67,7 @@ export const baseTypeScriptRules = {
     },
   ],
   "@typescript-eslint/no-non-null-assertion": "off",
+  "@typescript-eslint/no-unnecessary-type-arguments": "off",
   "@typescript-eslint/no-unnecessary-type-parameters": "off",
   "@typescript-eslint/only-throw-error": "off",
 };
@@ -132,12 +132,10 @@ export function createBaseConfig(tsconfigRootDir) {
     {
       plugins: {
         "simple-import-sort": simpleImportSort,
-        promise,
       },
     },
     {
       rules: {
-        ...(promise.configs?.recommended?.rules ?? {}),
         ...baseTypeScriptRules,
         ...baseUnicornRules,
         "simple-import-sort/imports": "error",
