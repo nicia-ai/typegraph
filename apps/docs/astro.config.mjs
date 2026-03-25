@@ -141,6 +141,7 @@ export default defineConfig({
     starlight({
       components: {
         Head: "./src/components/starlight/Head.astro",
+        ThemeProvider: "./src/components/starlight/ThemeProvider.astro",
       },
       plugins: [
         starlightLlmsTxt({
@@ -184,6 +185,7 @@ export default defineConfig({
           ],
         }),
       ],
+      disable404Route: true,
       title: "TypeGraph",
       description:
         "TypeScript-first embedded knowledge graph library with reasoning",
@@ -246,6 +248,7 @@ export default defineConfig({
   output: "server",
   adapter: cloudflare({
     imageService: "passthrough",
+    prerenderEnvironment: "node",
     platformProxy: {
       enabled: true,
     },

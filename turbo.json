@@ -3,7 +3,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**"],
+      "passThroughEnv": ["NICIA_EMAIL_LIST_API_URL", "NICIA_EMAIL_LIST_API_KEY"]
     },
     "dev": {
       "cache": false,
