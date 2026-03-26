@@ -206,6 +206,31 @@ export type SerializedEdgeDef = Readonly<{
 // ============================================================
 
 /**
+ * Validates that each record key matches the identifier field inside its value.
+ * Catches corruption like `nodes.Person.kind = "Company"`.
+ */
+function checkRecordKeyMatchesField(
+  field: string,
+  section: string,
+): (
+  record: Record<string, Record<string, unknown>>,
+  ctx: z.RefinementCtx,
+) => void {
+  return (record, ctx) => {
+    for (const [key, value] of Object.entries(record)) {
+      const embedded = value[field];
+      if (typeof embedded === "string" && embedded !== key) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key, field],
+          message: `Record key "${key}" does not match ${field} "${embedded}" in ${section}`,
+        });
+      }
+    }
+  };
+}
+
+/**
  * Zod schema for validating serialized schema documents read from the database.
  *
  * Enum fields (temporalMode, cardinality, deleteBehavior, etc.) are validated
@@ -220,58 +245,64 @@ export const serializedSchemaZod = z.object({
   graphId: z.string(),
   version: z.number(),
   generatedAt: z.string(),
-  nodes: z.record(
-    z.string(),
-    z
-      .object({
-        kind: z.string(),
-        properties: z.record(z.string(), z.unknown()),
-        uniqueConstraints: z.array(
+  nodes: z
+    .record(
+      z.string(),
+      z
+        .object({
+          kind: z.string(),
+          properties: z.record(z.string(), z.unknown()),
+          uniqueConstraints: z.array(
+            z
+              .object({
+                name: z.string(),
+                fields: z.array(z.string()),
+                where: z.string().optional(),
+                scope: uniquenessScopeZod,
+                collation: collationZod,
+              })
+              .loose(),
+          ),
+          onDelete: deleteBehaviorZod,
+          description: z.string().optional(),
+        })
+        .loose(),
+    )
+    .superRefine(checkRecordKeyMatchesField("kind", "nodes")),
+  edges: z
+    .record(
+      z.string(),
+      z
+        .object({
+          kind: z.string(),
+          fromKinds: z.array(z.string()),
+          toKinds: z.array(z.string()),
+          properties: z.record(z.string(), z.unknown()),
+          cardinality: cardinalityZod,
+          endpointExistence: endpointExistenceZod,
+          description: z.string().optional(),
+        })
+        .loose(),
+    )
+    .superRefine(checkRecordKeyMatchesField("kind", "edges")),
+  ontology: z
+    .object({
+      metaEdges: z
+        .record(
+          z.string(),
           z
             .object({
               name: z.string(),
-              fields: z.array(z.string()),
-              where: z.string().optional(),
-              scope: uniquenessScopeZod,
-              collation: collationZod,
+              transitive: z.boolean(),
+              symmetric: z.boolean(),
+              reflexive: z.boolean(),
+              inference: inferenceTypeZod,
+              inverse: z.string().optional(),
+              description: z.string().optional(),
             })
             .loose(),
-        ),
-        onDelete: deleteBehaviorZod,
-        description: z.string().optional(),
-      })
-      .loose(),
-  ),
-  edges: z.record(
-    z.string(),
-    z
-      .object({
-        kind: z.string(),
-        fromKinds: z.array(z.string()),
-        toKinds: z.array(z.string()),
-        properties: z.record(z.string(), z.unknown()),
-        cardinality: cardinalityZod,
-        endpointExistence: endpointExistenceZod,
-        description: z.string().optional(),
-      })
-      .loose(),
-  ),
-  ontology: z
-    .object({
-      metaEdges: z.record(
-        z.string(),
-        z
-          .object({
-            name: z.string(),
-            transitive: z.boolean(),
-            symmetric: z.boolean(),
-            reflexive: z.boolean(),
-            inference: inferenceTypeZod,
-            inverse: z.string().optional(),
-            description: z.string().optional(),
-          })
-          .loose(),
-      ),
+        )
+        .superRefine(checkRecordKeyMatchesField("name", "ontology.metaEdges")),
       relations: z.array(
         z
           .object({

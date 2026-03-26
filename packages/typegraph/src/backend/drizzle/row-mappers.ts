@@ -84,8 +84,25 @@ type DialectRowMapperConfig = Readonly<{
  * Timestamps are stored as ISO strings; JSON is stored as TEXT.
  */
 export const SQLITE_ROW_MAPPER_CONFIG: DialectRowMapperConfig = {
-  formatTimestamp: (value) => nullToUndefined(value as string | null),
-  normalizeJson: (value) => value as string,
+  formatTimestamp: (value) => {
+    if (value === null || value === undefined) return;
+    if (typeof value !== "string") {
+      throw new DatabaseOperationError(
+        `Expected timestamp to be string, got ${typeof value}`,
+        { operation: "select", entity: "row" },
+      );
+    }
+    return value;
+  },
+  normalizeJson: (value) => {
+    if (typeof value !== "string") {
+      throw new DatabaseOperationError(
+        `Expected JSON column to be string, got ${typeof value}`,
+        { operation: "select", entity: "row" },
+      );
+    }
+    return value;
+  },
 };
 
 /**

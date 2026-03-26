@@ -399,4 +399,93 @@ describe("serializedSchemaZod", () => {
       expect(result.success).toBe(true);
     });
   });
+
+  describe("record key/value consistency", () => {
+    it("rejects node where record key does not match kind", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        nodes: {
+          Person: {
+            kind: "Company",
+            properties: {},
+            uniqueConstraints: [],
+            onDelete: "restrict",
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(document);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues[0]?.message).toContain("Person");
+      expect(result.error?.issues[0]?.message).toContain("Company");
+    });
+
+    it("rejects edge where record key does not match kind", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        edges: {
+          knows: {
+            kind: "worksAt",
+            fromKinds: ["Person"],
+            toKinds: ["Person"],
+            properties: {},
+            cardinality: "many",
+            endpointExistence: "notDeleted",
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(document);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues[0]?.message).toContain("knows");
+      expect(result.error?.issues[0]?.message).toContain("worksAt");
+    });
+
+    it("rejects metaEdge where record key does not match name", () => {
+      const document = createValidSchemaDocument();
+      const withMismatch = {
+        ...document,
+        ontology: {
+          ...document.ontology,
+          metaEdges: {
+            subClassOf: {
+              name: "broader",
+              transitive: true,
+              symmetric: false,
+              reflexive: false,
+              inference: "subsumption",
+            },
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(withMismatch);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues[0]?.message).toContain("subClassOf");
+      expect(result.error?.issues[0]?.message).toContain("broader");
+    });
+
+    it("accepts when record keys match embedded identifiers", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {},
+            uniqueConstraints: [],
+            onDelete: "restrict",
+          },
+        },
+        edges: {
+          knows: {
+            kind: "knows",
+            fromKinds: ["Person"],
+            toKinds: ["Person"],
+            properties: {},
+            cardinality: "many",
+            endpointExistence: "notDeleted",
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(document);
+      expect(result.success).toBe(true);
+    });
+  });
 });
