@@ -242,6 +242,37 @@ async function exportAllUsers(): Promise<void> {
 }
 ```
 
+## Batch Execution
+
+When you need multiple independent queries with different result types, use `store.batch()` to
+execute them over a single connection with snapshot consistency.
+
+```typescript
+const [people, companies] = await store.batch(
+  store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.status.eq("active"))
+    .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+  store
+    .query()
+    .from("Company", "c")
+    .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name }))
+    .orderBy("c", "name", "asc")
+    .limit(5),
+);
+// people:    readonly { id: string; name: string }[]
+// companies: readonly { id: string; name: string }[]
+```
+
+Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
+as a typed tuple matching the input order.
+
+**vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
+**vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
+
+See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
+
 ## Prepared Queries
 
 Prepared queries let you compile a query once and execute it many times with different parameter

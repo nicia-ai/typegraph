@@ -1052,6 +1052,118 @@ await store.clear();
 const person = await store.nodes.Person.create({ name: "Alice" });
 ```
 
+### Batch Query Execution
+
+#### `store.batch(...queries)`
+
+Executes multiple independent queries over a single connection with snapshot consistency.
+Accepts two or more queries (from `.select()` or set operations) and returns a typed tuple
+of results preserving input order.
+
+All queries run within an implicit transaction — they see the same database snapshot.
+This avoids connection pool pressure from `Promise.all` patterns (N connections → 1) while
+giving each query independent projection, filtering, sorting, and pagination.
+
+```typescript
+store.batch<R1, R2, ...Rn>(
+  q1: BatchableQuery<R1>,
+  q2: BatchableQuery<R2>,
+  ...qn: BatchableQuery<Rn>,
+): Promise<readonly [readonly R1[], readonly R2[], ...readonly Rn[]]>;
+```
+
+**Example:**
+
+```typescript
+const [people, companies] = await store.batch(
+  store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.status.eq("active"))
+    .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+  store
+    .query()
+    .from("Company", "c")
+    .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name }))
+    .orderBy("c", "name", "asc")
+    .limit(5),
+);
+// people:    readonly { id: string; name: string }[]
+// companies: readonly { id: string; name: string }[]
+```
+
+**With traversals and mixed projections:**
+
+```typescript
+const [skills, artifacts, recentGoals] = await store.batch(
+  store
+    .query()
+    .from("Agent", "a")
+    .whereNode("a", (a) => a.id.eq(agentId))
+    .traverse("has_skill", "e")
+    .to("Skill", "s")
+    .select((ctx) => ({ id: ctx.s.id, name: ctx.s.name })),
+  store
+    .query()
+    .from("Agent", "a")
+    .whereNode("a", (a) => a.id.eq(agentId))
+    .traverse("references", "ref")
+    .to("Artifact", "art")
+    .select((ctx) => ({
+      id: ctx.art.id,
+      title: ctx.art.title,
+      pin: ctx.ref.activeVersionId,
+    })),
+  store
+    .query()
+    .from("Agent", "a")
+    .whereNode("a", (a) => a.id.eq(agentId))
+    .traverse("has_goal", "e")
+    .to("Goal", "g")
+    .select((ctx) => ({ id: ctx.g.id, name: ctx.g.name }))
+    .orderBy("g", "name", "asc")
+    .limit(10),
+);
+```
+
+**Set operations work too:**
+
+```typescript
+const [combined, separate] = await store.batch(
+  store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.role.eq("admin"))
+    .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+    .union(
+      store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.role.eq("owner"))
+        .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+    ),
+  store
+    .query()
+    .from("Company", "c")
+    .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name })),
+);
+```
+
+#### When to use batch() vs alternatives
+
+| Pattern | Use |
+|---------|-----|
+| Multiple queries with different shapes/filters | `store.batch()` |
+| Load entity with all relationships (uniform) | `store.subgraph()` |
+| Single query | `.execute()` directly |
+| Writes interleaved with reads | `store.transaction()` |
+| Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
+
+:::note
+`batch()` is read-only. For bulk writes, use `bulkCreate`, `bulkInsert`, or wrap
+operations in a `store.transaction()`.
+:::
+
 ### Subgraph Extraction
 
 #### `store.subgraph(rootId, options)`
@@ -1079,6 +1191,7 @@ store.subgraph<EK, NK>(
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
+| `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
 
 **Result:**
 
@@ -1145,6 +1258,80 @@ const neighborhood = await store.subgraph(skill.id, {
 });
 ```
 
+#### Subgraph Projection
+
+By default, `subgraph()` returns fully hydrated nodes and edges. The `project` option lets you
+specify which properties to keep per kind, reducing payload size and enabling SQL-level field
+extraction via `json_extract()` / JSONB paths.
+
+```typescript
+const result = await store.subgraph(rootId, {
+  edges: ["has_task", "uses_skill"],
+  maxDepth: 2,
+  project: {
+    nodes: {
+      Task: ["title", "meta"],
+      Skill: ["name"],
+    },
+    edges: {
+      uses_skill: ["priority"],
+    },
+  },
+});
+// Task  → { kind, id, title, meta }       — status omitted, compile-time error to access
+// Skill → { kind, id, name }
+// uses_skill → { id, kind, fromKind, fromId, toKind, toId, priority }
+```
+
+**Projection rules:**
+
+- Projected nodes always retain `kind` and `id`; projected edges always retain structural fields
+  (`id`, `kind`, `fromKind`, `fromId`, `toKind`, `toId`).
+- Kinds omitted from `project` remain fully hydrated.
+- Include `"meta"` in the field list for the full metadata object, or omit it entirely. No partial
+  metadata selection — the struct is small enough that subsetting adds complexity without savings.
+- Node projection keys must exist in `includeKinds` (or be any node kind when `includeKinds` is
+  omitted). Edge projection keys must be in `edges`. Out-of-scope keys are a compile-time error.
+
+**Type narrowing:**
+
+Result types narrow per-kind based on the projection. Accessing an omitted field is a
+compile-time error:
+
+```typescript
+for (const node of result.nodes) {
+  if (node.kind === "Task") {
+    console.log(node.title);  // OK
+    console.log(node.status); // TypeScript error — status was not projected
+  }
+}
+```
+
+#### `defineSubgraphProject()`
+
+When storing a projection config in a variable, TypeScript widens field arrays to `string[]`,
+defeating compile-time narrowing. Use `defineSubgraphProject()` to preserve literal types:
+
+```typescript
+import { defineSubgraphProject } from "@nicia-ai/typegraph";
+
+const agentProjection = defineSubgraphProject<typeof graph>()({
+  nodes: {
+    Task: ["title", "status"],
+    Skill: ["name"],
+  },
+  edges: {
+    uses_skill: ["priority"],
+  },
+});
+
+// Reuse across calls — types are preserved
+const result = await store.subgraph(rootId, {
+  edges: ["has_task", "uses_skill"],
+  project: agentProjection,
+});
+```
+
 #### Choosing a query strategy
 
 TypeGraph offers several ways to load related data. The right choice depends on your access pattern:
@@ -1154,6 +1341,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Load entity with all relationships | `subgraph(maxDepth: 1)` | Single SQL round trip — fans out across all edge types in one recursive CTE |
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
+| Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit |
 
@@ -1162,9 +1350,10 @@ traverses. Parallel `findFrom` calls scale linearly in round trips — one per e
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
-template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. Reserve the
-fluent query builder for cases where you need filtering, sorting, or pagination on the related
-nodes.
+template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
+per-query filtering, sorting, or pagination across multiple independent queries, use
+[`store.batch()`](#batch-query-execution) to run them over a single connection with snapshot
+consistency. Reserve individual fluent queries for one-off operations.
 
 ### Query Builder
 
@@ -1192,6 +1381,10 @@ const results = await store
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Pre-compile query for repeated execution with parameters |
+
+#### `store.batch(...queries)`
+
+Execute multiple queries over a single connection. See [Batch Query Execution](#batch-query-execution).
 
 ### Registry Access
 
