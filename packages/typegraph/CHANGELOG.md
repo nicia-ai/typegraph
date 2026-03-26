@@ -1,5 +1,62 @@
 # @nicia-ai/typegraph
 
+## 0.12.0
+
+### Minor Changes
+
+- [#50](https://github.com/nicia-ai/typegraph/pull/50) [`a59416d`](https://github.com/nicia-ai/typegraph/commit/a59416d8cbc641fd7611ee5d5b0fb115aea59450) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.batch()` for executing multiple queries over a single connection with snapshot consistency.
+  - **Single connection**: Acquires one connection via an implicit transaction, eliminating pool pressure from parallel `Promise.all` patterns (N connections → 1).
+  - **Snapshot consistency**: All queries see the same database state — no interleaved writes between results.
+  - **Typed tuple results**: Returns a mapped tuple preserving each query's independent result type, projection, filtering, sorting, and pagination.
+  - **`BatchableQuery` interface**: Satisfied by both `ExecutableQuery` (from `.select()`) and `UnionableQuery` (from set operations like `.union()`, `.intersect()`). Exposes `executeOn()` for backend-delegated execution.
+  - **Minimum 2 queries**: Enforced at the type level — single queries should use `.execute()` directly.
+
+  ```typescript
+  const [people, companies] = await store.batch(
+    store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+    store
+      .query()
+      .from("Company", "c")
+      .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name }))
+      .orderBy("c", "name", "asc")
+      .limit(5),
+  );
+  // people:    readonly { id: string; name: string }[]
+  // companies: readonly { id: string; name: string }[]
+  ```
+
+  Closes [#47](https://github.com/nicia-ai/typegraph/issues/47).
+
+- [#48](https://github.com/nicia-ai/typegraph/pull/48) [`753d9eb`](https://github.com/nicia-ai/typegraph/commit/753d9ebc6aa02f0f01bc52abc1de255b2d1bbd91) Thanks [@pdlug](https://github.com/pdlug)! - Add field-level projection to `store.subgraph()` via a declarative `project` option.
+  - **Declarative field selection**: Specify which properties to keep per node/edge kind. Projected nodes always retain `kind` and `id`; projected edges always retain structural endpoint fields. Kinds omitted from `project` remain fully hydrated.
+  - **SQL-level extraction**: Projected property fields are extracted via `json_extract()` / JSONB path expressions directly in the query, avoiding full `props` blob transfer for projected kinds.
+  - **All-or-nothing metadata**: Include `"meta"` in the field list for the full metadata object, or omit it entirely. No partial metadata selection — the struct is small enough that subsetting adds complexity without meaningful savings.
+  - **`defineSubgraphProject()` helper**: Curried identity function that preserves literal types for reusable projection configs. Without it, storing a projection in a variable widens field arrays to `string[]`, defeating compile-time narrowing.
+  - **Type-safe results**: Result types narrow per-kind based on the projection — accessing omitted fields is a compile-time error. Works through both inline literals and `defineSubgraphProject()`.
+
+  ```typescript
+  const result = await store.subgraph(rootId, {
+    edges: ["has_task", "uses_skill"],
+    maxDepth: 2,
+    project: {
+      nodes: {
+        Task: ["title", "meta"],
+        Skill: ["name"],
+      },
+      edges: {
+        uses_skill: ["priority"],
+      },
+    },
+  });
+  // result.nodes — Task has { kind, id, title, meta }; Skill has { kind, id, name }
+  // result.edges — uses_skill has { id, kind, fromKind, fromId, toKind, toId, priority }
+  ```
+
+  Closes [#46](https://github.com/nicia-ai/typegraph/issues/46) (alternative implementation — declarative arrays instead of callbacks).
+
 ## 0.11.1
 
 ### Patch Changes
