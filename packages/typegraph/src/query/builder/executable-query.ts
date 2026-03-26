@@ -7,6 +7,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
+import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import {
@@ -1080,7 +1081,7 @@ export class ExecutableQuery<
     // Determine pagination direction and parameters
     const isBackward =
       options.last !== undefined || options.before !== undefined;
-    const limit = options.first ?? options.last ?? 20;
+    const limit = options.first ?? options.last ?? DEFAULT_PAGINATION_LIMIT;
     const cursor = options.after ?? options.before;
 
     // Decode and validate cursor if provided

@@ -5,6 +5,10 @@
  * building and result page construction.
  */
 import {
+  DEFAULT_PAGINATION_LIMIT,
+  DEFAULT_STREAM_BATCH_SIZE,
+} from "../../constants";
+import {
   type FieldRef,
   type NodePredicate,
   type OrderSpec,
@@ -36,7 +40,7 @@ export function parsePaginateOptions(options: PaginateOptions): {
   orderBy: readonly OrderSpec[];
 } {
   const isBackward = options.last !== undefined || options.before !== undefined;
-  const limit = options.first ?? options.last ?? 20;
+  const limit = options.first ?? options.last ?? DEFAULT_PAGINATION_LIMIT;
   const cursor = options.after ?? options.before;
 
   let cursorData: CursorData | undefined;
@@ -265,5 +269,5 @@ export async function* createStreamIterable<R>(
  * Gets default stream options.
  */
 export function getStreamBatchSize(options?: StreamOptions): number {
-  return options?.batchSize ?? 1000;
+  return options?.batchSize ?? DEFAULT_STREAM_BATCH_SIZE;
 }

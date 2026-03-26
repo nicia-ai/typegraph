@@ -6,6 +6,7 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import { type VectorIndexType, type VectorMetric } from "../types";
 import { type AnyPgDatabase } from "./execution/postgres-execution";
 
@@ -79,8 +80,6 @@ export type VectorIndexResult = Readonly<{
 // Index Name Generation
 // ============================================================
 
-const MAX_IDENTIFIER_LENGTH = 63;
-
 /**
  * Sanitizes a string to be a valid SQL identifier component.
  */
@@ -139,13 +138,13 @@ export function generateVectorIndexName(
 
   const name = parts.join("_");
 
-  if (name.length <= MAX_IDENTIFIER_LENGTH) {
+  if (name.length <= MAX_PG_IDENTIFIER_LENGTH) {
     return name;
   }
 
   const hash = shortHash(name);
   // Reserve space for _hash suffix
-  const truncated = name.slice(0, MAX_IDENTIFIER_LENGTH - 1 - hash.length);
+  const truncated = name.slice(0, MAX_PG_IDENTIFIER_LENGTH - 1 - hash.length);
   return `${truncated}_${hash}`;
 }
 

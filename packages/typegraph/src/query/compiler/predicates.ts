@@ -953,14 +953,14 @@ export function extractVectorSimilarityPredicates(
         break;
       }
       case "and": {
-        for (const p of expr.predicates) {
-          visit(p, inDisallowedBranch);
+        for (const predicate of expr.predicates) {
+          visit(predicate, inDisallowedBranch);
         }
         break;
       }
       case "or": {
-        for (const p of expr.predicates) {
-          visit(p, true);
+        for (const predicate of expr.predicates) {
+          visit(predicate, true);
         }
         break;
       }

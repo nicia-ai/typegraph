@@ -10,6 +10,7 @@ import {
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+import { EDGE_INDEX_TYPE_MARKER, NODE_INDEX_TYPE_MARKER } from "../constants";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -32,7 +33,7 @@ export function buildPostgresNodeIndexBuilders(
   indexes: readonly TypeGraphIndex[],
 ): readonly PgIndexBuilder[] {
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndex => index.__type === "typegraph_node_index",
+    (index): index is NodeIndex => index.__type === NODE_INDEX_TYPE_MARKER,
   );
 
   return nodeIndexes.map((index) => {
@@ -70,7 +71,7 @@ export function buildPostgresEdgeIndexBuilders(
   indexes: readonly TypeGraphIndex[],
 ): readonly PgIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndex => index.__type === "typegraph_edge_index",
+    (index): index is EdgeIndex => index.__type === EDGE_INDEX_TYPE_MARKER,
   );
 
   return edgeIndexes.map((index) => {
@@ -200,7 +201,7 @@ export function buildSqliteNodeIndexBuilders(
   indexes: readonly TypeGraphIndex[],
 ): readonly SqliteIndexBuilder[] {
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndex => index.__type === "typegraph_node_index",
+    (index): index is NodeIndex => index.__type === NODE_INDEX_TYPE_MARKER,
   );
 
   return nodeIndexes.map((index) => {
@@ -239,7 +240,7 @@ export function buildSqliteEdgeIndexBuilders(
   indexes: readonly TypeGraphIndex[],
 ): readonly SqliteIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndex => index.__type === "typegraph_edge_index",
+    (index): index is EdgeIndex => index.__type === EDGE_INDEX_TYPE_MARKER,
   );
 
   return edgeIndexes.map((index) => {

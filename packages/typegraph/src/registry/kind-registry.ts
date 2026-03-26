@@ -194,10 +194,10 @@ export class KindRegistry {
     const result: string[] = [];
     for (const pair of this.disjointPairs) {
       const parts = pair.split("|");
-      const a = parts[0]!;
-      const b = parts[1]!;
-      if (a === kind) result.push(b);
-      else if (b === kind) result.push(a);
+      const firstKind = parts[0]!;
+      const secondKind = parts[1]!;
+      if (firstKind === kind) result.push(secondKind);
+      else if (secondKind === kind) result.push(firstKind);
     }
     return result;
   }
@@ -490,9 +490,9 @@ function computeEquivalenceSets(
       return x;
     }
     // Safe: has() check above guarantees key exists
-    const p = parent.get(x)!;
-    if (p === x) return x;
-    const root = find(p);
+    const parentNode = parent.get(x)!;
+    if (parentNode === x) return x;
+    const root = find(parentNode);
     parent.set(x, root); // Path compression
     return root;
   }

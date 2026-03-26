@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 import { CasingCache } from "drizzle-orm/casing";
 
+import { NODE_INDEX_TYPE_MARKER } from "../constants";
 import { getDialect, type SqlDialect } from "../query/dialect";
 import {
   compileEdgeIndexKeys,
@@ -26,7 +27,7 @@ export function generateIndexDDL(
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
-  if (index.__type === "typegraph_node_index") {
+  if (index.__type === NODE_INDEX_TYPE_MARKER) {
     return generateNodeIndexDDL(index, dialect, options);
   }
   return generateEdgeIndexDDL(index, dialect, options);
@@ -62,7 +63,7 @@ function generateTableIndexDDL(
     sql.raw(quoteIdentifier(column));
 
   const keys =
-    index.__type === "typegraph_node_index" ?
+    index.__type === NODE_INDEX_TYPE_MARKER ?
       compileNodeIndexKeys(index, dialect, propsColumn, systemColumn).keys
     : compileEdgeIndexKeys(index, dialect, propsColumn, systemColumn).keys;
 

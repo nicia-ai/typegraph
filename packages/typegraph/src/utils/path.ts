@@ -4,6 +4,12 @@
  * SQLite doesn't support native arrays, so paths are stored as pipe-delimited
  * strings: "|id1|id2|id3|". PostgreSQL returns native arrays.
  */
+import {
+  PG_ARRAY_END,
+  PG_ARRAY_START,
+  PG_PATH_ELEMENT_SEPARATOR,
+  SQLITE_PATH_DELIMITER,
+} from "../constants";
 
 /**
  * Parses a SQLite path string into an array of node IDs.
@@ -17,13 +23,14 @@
  * parseSqlitePath("||") // []
  */
 export function parseSqlitePath(path: string): readonly string[] {
-  if (!path || path === "||") return [];
+  const emptyPath = `${SQLITE_PATH_DELIMITER}${SQLITE_PATH_DELIMITER}`;
+  if (!path || path === emptyPath) return [];
 
   // Remove leading and trailing pipes, then split
   const trimmed = path.slice(1, -1);
   if (trimmed === "") return [];
 
-  return trimmed.split("|");
+  return trimmed.split(SQLITE_PATH_DELIMITER);
 }
 
 /**
@@ -32,7 +39,9 @@ export function parseSqlitePath(path: string): readonly string[] {
  */
 export function isSqlitePath(value: unknown): value is string {
   return (
-    typeof value === "string" && value.startsWith("|") && value.endsWith("|")
+    typeof value === "string" &&
+    value.startsWith(SQLITE_PATH_DELIMITER) &&
+    value.endsWith(SQLITE_PATH_DELIMITER)
   );
 }
 
@@ -61,7 +70,9 @@ export function normalizePath(value: unknown): readonly string[] {
  */
 function isPostgresTextArray(value: unknown): value is string {
   return (
-    typeof value === "string" && value.startsWith("{") && value.endsWith("}")
+    typeof value === "string" &&
+    value.startsWith(PG_ARRAY_START) &&
+    value.endsWith(PG_ARRAY_END)
   );
 }
 
@@ -72,5 +83,5 @@ function isPostgresTextArray(value: unknown): value is string {
 function parsePostgresTextArray(value: string): readonly string[] {
   const inner = value.slice(1, -1);
   if (inner === "") return [];
-  return inner.split(",");
+  return inner.split(PG_PATH_ELEMENT_SEPARATOR);
 }
