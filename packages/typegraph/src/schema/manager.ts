@@ -9,7 +9,7 @@
  */
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { MigrationError } from "../errors";
+import { DatabaseOperationError, MigrationError } from "../errors";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -17,7 +17,42 @@ import {
   type SchemaDiff,
 } from "./migration";
 import { computeSchemaHash, serializeSchema } from "./serializer";
-import { type SerializedSchema } from "./types";
+import { type SerializedSchema, serializedSchemaZod } from "./types";
+
+/**
+ * Parses and validates a serialized schema document from the database.
+ *
+ * Uses the Zod schema to validate the full nested structure, catching
+ * corruption, incompatible schema versions, or truncated JSON at the
+ * parse boundary rather than letting invalid data propagate silently.
+ */
+function parseSerializedSchema(json: string): SerializedSchema {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new DatabaseOperationError(
+      "Stored schema document is not valid JSON",
+      { operation: "select", entity: "schema" },
+    );
+  }
+
+  const result = serializedSchemaZod.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
+    throw new DatabaseOperationError(
+      `Stored schema document is malformed: ${issues}`,
+      { operation: "select", entity: "schema" },
+    );
+  }
+
+  // The Zod schema validates enum fields (temporalMode, cardinality, etc.)
+  // against the real literal unions. The cast is sound — the only broadening
+  // is .loose() on objects (extra fields), not on enum values.
+  return result.data as SerializedSchema;
+}
 
 // ============================================================
 // Types
@@ -103,7 +138,7 @@ export async function ensureSchema<G extends GraphDef>(
   }
 
   // Parse the stored schema
-  const storedSchema = JSON.parse(activeSchema.schema_doc) as SerializedSchema;
+  const storedSchema = parseSerializedSchema(activeSchema.schema_doc);
 
   // Serialize the current graph for comparison
   const currentSchema = serializeSchema(graph, activeSchema.version + 1);
@@ -274,7 +309,7 @@ export async function getActiveSchema(
 ): Promise<SerializedSchema | undefined> {
   const row = await backend.getActiveSchema(graphId);
   if (!row) return undefined;
-  return JSON.parse(row.schema_doc) as SerializedSchema;
+  return parseSerializedSchema(row.schema_doc);
 }
 
 /**
@@ -306,7 +341,7 @@ export async function getSchemaChanges<G extends GraphDef>(
   const activeSchema = await backend.getActiveSchema(graph.id);
   if (!activeSchema) return undefined;
 
-  const storedSchema = JSON.parse(activeSchema.schema_doc) as SerializedSchema;
+  const storedSchema = parseSerializedSchema(activeSchema.schema_doc);
   const currentSchema = serializeSchema(graph, activeSchema.version + 1);
 
   return computeSchemaDiff(storedSchema, currentSchema);
