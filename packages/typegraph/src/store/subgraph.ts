@@ -18,7 +18,7 @@ import type {
 import type { AnyEdgeType, NodeId, NodeType } from "../core/types";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
-import { MAX_RECURSIVE_DEPTH } from "../query/compiler/recursive";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "../query/compiler/schema";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -425,7 +425,7 @@ export async function executeSubgraph<
 
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
-    MAX_RECURSIVE_DEPTH,
+    MAX_EXPLICIT_RECURSIVE_DEPTH,
   );
 
   const ctx: SubgraphContext = {

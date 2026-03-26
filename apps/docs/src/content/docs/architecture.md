@@ -403,7 +403,7 @@ WITH RECURSIVE path AS (
   JOIN typegraph_edges e ON e.from_id = p.id
   JOIN typegraph_nodes n ON n.id = e.to_id
   WHERE e.kind = 'reportsTo'
-    AND p.depth < 100           -- Implicit cap for unbounded traversal
+    AND p.depth < 10            -- Implicit cap for unbounded traversal
     AND NOT n.id = ANY(p.path)  -- Cycle detection
 )
 SELECT * FROM path;
