@@ -1,5 +1,29 @@
 # @nicia-ai/typegraph
 
+## 0.13.0
+
+### Minor Changes
+
+- [#52](https://github.com/nicia-ai/typegraph/pull/52) [`1e3da4a`](https://github.com/nicia-ai/typegraph/commit/1e3da4aa814f3baf67a0cb54c9c753508eecf0f0) Thanks [@pdlug](https://github.com/pdlug)! - Add `batchFindFrom`, `batchFindTo`, and `batchFindByEndpoints` to edge collections for use with `store.batch()`.
+
+  Edge collection lookup methods (`findFrom`, `findTo`, `findByEndpoints`) execute immediately and cannot participate in `store.batch()`. The new `batchFind*` variants return a `BatchableQuery` instead, enabling edge lookups to share a single transactional connection alongside fluent queries.
+
+  ```typescript
+  const [skills, employer, colleague] = await store.batch(
+    store.edges.hasSkill.batchFindFrom(alice),
+    store.edges.worksAt.batchFindFrom(alice),
+    store.edges.knows.batchFindByEndpoints(alice, bob),
+  );
+  ```
+
+  - **`batchFindFrom(from)`** — deferred variant of `findFrom`
+  - **`batchFindTo(to)`** — deferred variant of `findTo`
+  - **`batchFindByEndpoints(from, to, options?)`** — deferred variant of `findByEndpoints`, returns 0-or-1 element array
+
+  All three preserve the same endpoint type constraints as their immediate counterparts.
+
+  Closes [#51](https://github.com/nicia-ai/typegraph/issues/51).
+
 ## 0.12.0
 
 ### Minor Changes
