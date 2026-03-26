@@ -28,7 +28,7 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.6.0",
     "@changesets/cli": "^2.30.0",
-    "knip": "^6.0.5",
+    "knip": "^6.0.6",
     "markdownlint-cli2": "^0.22.0",
     "npm-run-all2": "^8.0.4",
     "prettier": "^3.8.1",

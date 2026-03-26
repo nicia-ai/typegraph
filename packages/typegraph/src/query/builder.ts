@@ -45,6 +45,8 @@ export {
 export type {
   AggregateResult,
   AliasMap,
+  BatchableQuery,
+  BatchResults,
   EdgeAccessor,
   FieldAccessor,
   NodeAccessor,

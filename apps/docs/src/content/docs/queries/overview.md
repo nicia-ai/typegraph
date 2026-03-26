@@ -22,7 +22,7 @@ Every query builder method falls into one of these categories:
 | [Temporal](/queries/temporal) | Time-based queries | `temporal()` |
 | [Compose](/queries/compose) | Reusable query parts | `pipe()`, `createFragment()` |
 | [Combine](/queries/combine) | Set operations | `union()`, `intersect()`, `except()` |
-| [Execute](/queries/execute) | Run and retrieve | `execute()`, `first()`, `count()`, `exists()`, `paginate()`, `stream()` |
+| [Execute](/queries/execute) | Run and retrieve | `execute()`, `first()`, `count()`, `exists()`, `paginate()`, `stream()`, `batch()` |
 
 ## Query Flow
 

@@ -239,6 +239,8 @@ export type {
 export type {
   AggregateResult,
   AliasMap,
+  BatchableQuery,
+  BatchResults,
   EdgeAccessor,
   FieldAccessor,
   FieldRef,

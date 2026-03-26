@@ -69,6 +69,8 @@ export {
   type AliasMap,
   type ArrayFieldAccessor,
   type BaseFieldAccessor,
+  type BatchableQuery,
+  type BatchResults,
   type BooleanFieldAccessor,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,

@@ -14,7 +14,8 @@ your knowledge graph scales with your application.
    single SQL statement. No N+1 queries by design.
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
-3. **Batching & Transactions**: Bulk collection APIs and transactions minimize round-trips for writes.
+3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes;
+   `store.batch()` does the same for reads.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
@@ -146,6 +147,21 @@ individual queries. Results are returned in input order with `undefined` for mis
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
+For multiple independent queries with different shapes and filters, use
+[`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection:
+
+```typescript
+const [activeUsers, recentOrders] = await store.batch(
+  store.query().from("User", "u")
+    .whereNode("u", (u) => u.status.eq("active"))
+    .select((ctx) => ({ id: ctx.u.id, name: ctx.u.name })),
+  store.query().from("Order", "o")
+    .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
+    .orderBy("o", "createdAt", "desc")
+    .limit(20),
+);
+```
+
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See [Schemas & Stores](/schemas-stores#hooks) for details.
@@ -179,6 +195,11 @@ pool.on("error", (err) => {
 **Sizing guidance:** Each concurrent query uses one connection for the duration of that single SQL
 statement. A pool of 10–20 connections handles most workloads. If you're running bulk imports in
 parallel, size up accordingly.
+
+**Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
+detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
+[`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
+within an implicit transaction, reducing N connections to 1 while guaranteeing snapshot consistency.
 
 ### SQLite concurrency
 
@@ -316,6 +337,10 @@ is the fastest strategy. It compiles to a single recursive CTE that fans out acr
 edge types in one round trip — no matter how many relationship kinds are involved. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
 `subgraph()` vs the fluent query builder vs manual `findFrom` calls.
+
+The [`project` option](/schemas-stores#subgraph-projection) further reduces overhead by extracting
+only the specified fields per kind at the SQL level via `json_extract()` / JSONB paths, skipping
+full `props` blob transfer and metadata columns for projected kinds.
 
 ## Best Practices
 

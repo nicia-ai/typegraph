@@ -296,6 +296,34 @@ const uniqueNodes = await store
   .execute();
 ```
 
+## Using Set Operations with batch()
+
+Set operation queries implement the `BatchableQuery` interface, so you can include them
+in `store.batch()` alongside regular queries:
+
+```typescript
+const [adminOrOwner, companies] = await store.batch(
+  store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.role.eq("admin"))
+    .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
+    .union(
+      store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.role.eq("owner"))
+        .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+    ),
+  store
+    .query()
+    .from("Company", "c")
+    .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name })),
+);
+```
+
+See [Batch Query Execution](/schemas-stores#batch-query-execution) for details.
+
 ## Next Steps
 
 - [Advanced](/queries/advanced) - Subqueries with `exists()` and `inSubquery()`
