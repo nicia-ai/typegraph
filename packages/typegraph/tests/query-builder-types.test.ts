@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type BatchableQuery,
   createQueryBuilder,
   defineEdge,
   defineGraph,
@@ -23,6 +24,7 @@ import {
   type TypedEdgeCollection,
 } from "../src";
 import { buildKindRegistry } from "../src/registry";
+import type { Edge } from "../src/store/types";
 
 // ============================================================
 // Test Graph Definition
@@ -534,6 +536,78 @@ describe("Edge Collection Type Safety", () => {
 
       expect(validTo.kind).toBe("Company");
       void invalidTo;
+    });
+
+    it("constrains batchFindFrom to accept only valid from types", () => {
+      type WorksAtCollection = StoreEdges["worksAt"];
+      type Param = Parameters<WorksAtCollection["batchFindFrom"]>[0];
+
+      const validFrom: Param = { kind: "Person", id: "test-id" };
+
+      // @ts-expect-error - Company is not a valid 'from' type for worksAt
+      const invalidFrom: Param = { kind: "Company", id: "test-id" };
+
+      expect(validFrom.kind).toBe("Person");
+      void invalidFrom;
+    });
+
+    it("constrains batchFindTo to accept only valid to types", () => {
+      type WorksAtCollection = StoreEdges["worksAt"];
+      type Param = Parameters<WorksAtCollection["batchFindTo"]>[0];
+
+      const validTo: Param = { kind: "Company", id: "test-id" };
+
+      // @ts-expect-error - Person is not a valid 'to' type for worksAt
+      const invalidTo: Param = { kind: "Person", id: "test-id" };
+
+      expect(validTo.kind).toBe("Company");
+      void invalidTo;
+    });
+
+    it("constrains batchFindByEndpoints to accept valid from/to types", () => {
+      type WorksAtCollection = StoreEdges["worksAt"];
+      type Params = Parameters<WorksAtCollection["batchFindByEndpoints"]>;
+      type FromParam = Params[0];
+      type ToParam = Params[1];
+
+      const validFrom: FromParam = { kind: "Person", id: "test-id" };
+      const validTo: ToParam = { kind: "Company", id: "test-id" };
+
+      // @ts-expect-error - Company is not a valid 'from' type for worksAt
+      const invalidFrom: FromParam = { kind: "Company", id: "test-id" };
+
+      // @ts-expect-error - Person is not a valid 'to' type for worksAt
+      const invalidTo: ToParam = { kind: "Person", id: "test-id" };
+
+      expect(validFrom.kind).toBe("Person");
+      expect(validTo.kind).toBe("Company");
+      void invalidFrom;
+      void invalidTo;
+    });
+
+    it("batchFind methods return BatchableQuery with correct edge type", () => {
+      type WorksAtCollection = StoreEdges["worksAt"];
+      type WorksAtEdge = Edge<typeof worksAt, typeof Person, typeof Company>;
+
+      // Verify return types satisfy BatchableQuery
+      type FromResult = ReturnType<WorksAtCollection["batchFindFrom"]>;
+      type ToResult = ReturnType<WorksAtCollection["batchFindTo"]>;
+      type ByEndpointsResult = ReturnType<
+        WorksAtCollection["batchFindByEndpoints"]
+      >;
+
+      // All three return BatchableQuery<WorksAtEdge>
+      const _checkFrom: BatchableQuery<WorksAtEdge> =
+        {} as unknown as FromResult;
+      const _checkTo: BatchableQuery<WorksAtEdge> = {} as unknown as ToResult;
+      const _checkByEndpoints: BatchableQuery<WorksAtEdge> =
+        {} as unknown as ByEndpointsResult;
+
+      void _checkFrom;
+      void _checkTo;
+      void _checkByEndpoints;
+
+      expect(true).toBe(true);
     });
   });
 });

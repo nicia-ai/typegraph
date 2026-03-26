@@ -268,6 +268,15 @@ const [people, companies] = await store.batch(
 Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
 as a typed tuple matching the input order.
 
+Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with fluent queries:
+
+```typescript
+const [skills, employer] = await store.batch(
+  store.edges.hasSkill.batchFindFrom(alice),
+  store.edges.worksAt.batchFindFrom(alice),
+);
+```
+
 **vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
 **vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
 

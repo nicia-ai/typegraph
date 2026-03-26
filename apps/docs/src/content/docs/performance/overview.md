@@ -162,6 +162,10 @@ const [activeUsers, recentOrders] = await store.batch(
 );
 ```
 
+Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
+participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
+transactional round-trip.
+
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
 throughput. Query hooks still fire normally. See [Schemas & Stores](/schemas-stores#hooks) for details.

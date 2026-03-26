@@ -16,6 +16,7 @@ import {
   type Store,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import type { Node } from "../src/store/types";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -75,23 +76,28 @@ type TestGraph = typeof graph;
 describe("store.batch()", () => {
   let backend: GraphBackend;
   let store: Store<TestGraph>;
+  let alice: Node<typeof Person>;
+  let bob: Node<typeof Person>;
+  let acme: Node<typeof Company>;
+  let globex: Node<typeof Company>;
+  let ts: Node<typeof Skill>;
 
   beforeEach(async () => {
     backend = createTestBackend();
     store = createStore(graph, backend);
 
     // Seed data
-    const alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
-    const bob = await store.nodes.Person.create({ name: "Bob", age: 25 });
-    const acme = await store.nodes.Company.create({
+    alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
+    bob = await store.nodes.Person.create({ name: "Bob", age: 25 });
+    acme = await store.nodes.Company.create({
       name: "Acme",
       industry: "Tech",
     });
-    const globex = await store.nodes.Company.create({
+    globex = await store.nodes.Company.create({
       name: "Globex",
       industry: "Manufacturing",
     });
-    const ts = await store.nodes.Skill.create({
+    ts = await store.nodes.Skill.create({
       name: "TypeScript",
       level: 9,
     });
@@ -305,5 +311,126 @@ describe("store.batch()", () => {
 
     expect(page).toHaveLength(1);
     expect(page[0]!.name).toBe("Bob"); // Second person alphabetically
+  });
+
+  // ============================================================
+  // Edge collection batchFind*
+  // ============================================================
+
+  it("batches edge batchFindFrom with fluent queries", async () => {
+    const [skills, companies] = await store.batch(
+      store.edges.hasSkill.batchFindFrom(alice),
+      store.edges.worksAt.batchFindFrom(alice),
+    );
+
+    expect(skills).toHaveLength(2);
+    expect(companies).toHaveLength(1);
+    expect(companies[0]!.kind).toBe("worksAt");
+  });
+
+  it("batches edge batchFindTo lookups", async () => {
+    const [hasSkillEdges] = await store.batch(
+      store.edges.hasSkill.batchFindTo(ts),
+      store
+        .query()
+        .from("Skill", "s")
+        .select((ctx) => ({ name: ctx.s.name })),
+    );
+
+    // Alice and Bob both have TypeScript
+    expect(hasSkillEdges).toHaveLength(2);
+  });
+
+  it("batchFind returns empty array when no edges match", async () => {
+    const [toAcme, toGlobex] = await store.batch(
+      store.edges.worksAt.batchFindTo(acme),
+      store.edges.worksAt.batchFindTo(globex),
+    );
+
+    expect(toAcme).toHaveLength(1); // Alice works at Acme
+    expect(toGlobex).toHaveLength(1); // Bob works at Globex
+
+    // Create a company with no edges
+    const orphan = await store.nodes.Company.create({ name: "Orphan" });
+    const [noEdges] = await store.batch(
+      store.edges.worksAt.batchFindTo(orphan),
+      store.edges.worksAt.batchFindTo(acme),
+    );
+
+    expect(noEdges).toHaveLength(0);
+  });
+
+  it("mixes edge queries with fluent queries in a single batch", async () => {
+    const [bobEdges, allPeople, bobSkillEdges] = await store.batch(
+      store.edges.worksAt.batchFindFrom(bob),
+      store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ({ name: ctx.p.name })),
+      store.edges.hasSkill.batchFindFrom(bob),
+    );
+
+    expect(bobEdges).toHaveLength(1);
+    expect(bobEdges[0]!.role).toBe("Manager");
+    expect(allPeople).toHaveLength(2);
+    expect(bobSkillEdges).toHaveLength(1);
+  });
+
+  it("batchFindFrom excludes soft-deleted edges", async () => {
+    const aliceSkills = await store.edges.hasSkill.findFrom(alice);
+    await store.edges.hasSkill.delete(aliceSkills[0]!.id);
+
+    const [remaining] = await store.batch(
+      store.edges.hasSkill.batchFindFrom(alice),
+      store
+        .query()
+        .from("Skill", "s")
+        .select((ctx) => ({ name: ctx.s.name })),
+    );
+
+    expect(remaining).toHaveLength(1);
+  });
+
+  it("batches batchFindByEndpoints lookups", async () => {
+    const [aliceAtAcme, bobAtAcme] = await store.batch(
+      store.edges.worksAt.batchFindByEndpoints(alice, acme),
+      store.edges.worksAt.batchFindByEndpoints(bob, acme),
+    );
+
+    // Alice works at Acme — 1 result
+    expect(aliceAtAcme).toHaveLength(1);
+    expect(aliceAtAcme[0]!.role).toBe("Engineer");
+
+    // Bob does not work at Acme — 0 results
+    expect(bobAtAcme).toHaveLength(0);
+  });
+
+  it("batchFindByEndpoints passes matchOn and props options", async () => {
+    const [matchingRole, wrongRole] = await store.batch(
+      store.edges.worksAt.batchFindByEndpoints(alice, acme, {
+        matchOn: ["role"],
+        props: { role: "Engineer" },
+      }),
+      store.edges.worksAt.batchFindByEndpoints(alice, acme, {
+        matchOn: ["role"],
+        props: { role: "CEO" },
+      }),
+    );
+
+    expect(matchingRole).toHaveLength(1);
+    expect(matchingRole[0]!.role).toBe("Engineer");
+    expect(wrongRole).toHaveLength(0);
+  });
+
+  it("batchFindByEndpoints excludes soft-deleted edges", async () => {
+    const aliceEdges = await store.edges.worksAt.findFrom(alice);
+    await store.edges.worksAt.delete(aliceEdges[0]!.id);
+
+    const [result] = await store.batch(
+      store.edges.worksAt.batchFindByEndpoints(alice, acme),
+      store.edges.worksAt.batchFindFrom(bob),
+    );
+
+    expect(result).toHaveLength(0);
   });
 });

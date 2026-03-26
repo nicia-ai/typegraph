@@ -13,6 +13,7 @@ import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
 import { UnsupportedPredicateError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
+import type { BatchableQuery } from "../../query/builder/types";
 import { nowIso } from "../../utils/date";
 import { type EdgeRow } from "../row-mappers";
 import {
@@ -225,6 +226,54 @@ export function createEdgeCollection<
     matchesTemporalMode,
   } = config;
 
+  const mapRows = (rows: readonly EdgeRow[]): Edge<E>[] =>
+    rows.map((row) => narrowEdge<E>(rowToEdge(row)));
+
+  async function findEdgesFrom(
+    from: NodeRef,
+    target: GraphBackend | TransactionBackend,
+  ): Promise<Edge<E>[]> {
+    const rows = await target.findEdgesByKind({
+      graphId,
+      kind,
+      fromKind: from.kind,
+      fromId: from.id,
+      excludeDeleted: true,
+    });
+    return mapRows(rows);
+  }
+
+  async function findEdgesTo(
+    to: NodeRef,
+    target: GraphBackend | TransactionBackend,
+  ): Promise<Edge<E>[]> {
+    const rows = await target.findEdgesByKind({
+      graphId,
+      kind,
+      toKind: to.kind,
+      toId: to.id,
+      excludeDeleted: true,
+    });
+    return mapRows(rows);
+  }
+
+  function buildFindByEndpointsOptions(
+    options?: EdgeFindByEndpointsOptions<E>,
+  ): Readonly<{
+    matchOn?: readonly string[];
+    props?: Record<string, unknown>;
+  }> {
+    const result: {
+      matchOn?: readonly string[];
+      props?: Record<string, unknown>;
+    } = {};
+    if (options?.matchOn !== undefined)
+      result.matchOn = options.matchOn as readonly string[];
+    if (options?.props !== undefined)
+      result.props = options.props as Record<string, unknown>;
+    return result;
+  }
+
   return {
     async create(
       from: NodeRef,
@@ -301,25 +350,40 @@ export function createEdgeCollection<
     },
 
     async findFrom(from: NodeRef): Promise<Edge<E>[]> {
-      const rows = await backend.findEdgesByKind({
-        graphId,
-        kind,
-        fromKind: from.kind,
-        fromId: from.id,
-        excludeDeleted: true,
-      });
-      return rows.map((row) => narrowEdge<E>(rowToEdge(row)));
+      return findEdgesFrom(from, backend);
     },
 
     async findTo(to: NodeRef): Promise<Edge<E>[]> {
-      const rows = await backend.findEdgesByKind({
-        graphId,
-        kind,
-        toKind: to.kind,
-        toId: to.id,
-        excludeDeleted: true,
-      });
-      return rows.map((row) => narrowEdge<E>(rowToEdge(row)));
+      return findEdgesTo(to, backend);
+    },
+
+    batchFindFrom(from: NodeRef): BatchableQuery<Edge<E>> {
+      return { executeOn: (target) => findEdgesFrom(from, target) };
+    },
+
+    batchFindTo(to: NodeRef): BatchableQuery<Edge<E>> {
+      return { executeOn: (target) => findEdgesTo(to, target) };
+    },
+
+    batchFindByEndpoints(
+      from: NodeRef,
+      to: NodeRef,
+      options?: EdgeFindByEndpointsOptions<E>,
+    ): BatchableQuery<Edge<E>> {
+      return {
+        executeOn: async (target) => {
+          const result = await config.executeFindByEndpoints(
+            kind,
+            from.kind,
+            from.id,
+            to.kind,
+            to.id,
+            target,
+            buildFindByEndpointsOptions(options),
+          );
+          return result === undefined ? [] : [narrowEdge<E>(result)];
+        },
+      };
     },
 
     async delete(id: string): Promise<void> {
@@ -382,7 +446,7 @@ export function createEdgeCollection<
       if (options?.offset !== undefined) params.offset = options.offset;
 
       const rows = await backend.findEdgesByKind(params);
-      return rows.map((row) => narrowEdge<E>(rowToEdge(row)));
+      return mapRows(rows);
     },
 
     async count(
@@ -607,15 +671,6 @@ export function createEdgeCollection<
       to: NodeRef,
       options?: EdgeFindByEndpointsOptions<E>,
     ): Promise<Edge<E> | undefined> {
-      const findOptions: {
-        matchOn?: readonly string[];
-        props?: Record<string, unknown>;
-      } = {};
-      if (options?.matchOn !== undefined)
-        findOptions.matchOn = options.matchOn as readonly string[];
-      if (options?.props !== undefined)
-        findOptions.props = options.props as Record<string, unknown>;
-
       const result = await config.executeFindByEndpoints(
         kind,
         from.kind,
@@ -623,7 +678,7 @@ export function createEdgeCollection<
         to.kind,
         to.id,
         backend,
-        findOptions,
+        buildFindByEndpointsOptions(options),
       );
       return result === undefined ? undefined : narrowEdge<E>(result);
     },
