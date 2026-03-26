@@ -155,7 +155,7 @@ export type InsertNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
-  props: Record<string, unknown>;
+  props: Readonly<Record<string, unknown>>;
   validFrom?: string;
   validTo?: string;
 }>;
@@ -167,7 +167,7 @@ export type UpdateNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
-  props: Record<string, unknown>;
+  props: Readonly<Record<string, unknown>>;
   validTo?: string;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
@@ -194,7 +194,7 @@ export type InsertEdgeParams = Readonly<{
   fromId: string;
   toKind: string;
   toId: string;
-  props: Record<string, unknown>;
+  props: Readonly<Record<string, unknown>>;
   validFrom?: string;
   validTo?: string;
 }>;
@@ -205,7 +205,7 @@ export type InsertEdgeParams = Readonly<{
 export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
-  props: Record<string, unknown>;
+  props: Readonly<Record<string, unknown>>;
   validTo?: string;
   clearDeleted?: boolean;
 }>;

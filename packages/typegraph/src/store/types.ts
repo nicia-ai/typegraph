@@ -3,6 +3,7 @@
  */
 import { type z } from "zod";
 
+import { type EdgeRow, type NodeRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
   type AnyEdgeType,
@@ -20,20 +21,54 @@ import { type SqlSchema } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
 
 // ============================================================
+// Row-to-Meta Field Mapping
+// ============================================================
+
+/**
+ * Canonical mapping from snake_case row fields to camelCase meta fields.
+ *
+ * This is the single source of truth for which row columns become metadata.
+ * Both the Meta types and the row-to-meta functions in row-mappers.ts must
+ * stay in sync with this mapping. If you add a temporal/audit column to a
+ * row type, add the mapping here — the compiler will then force you to
+ * update the row mapper functions as well (since their return type is
+ * NodeMeta/EdgeMeta, which is derived from this mapping).
+ */
+export type TemporalMetaFieldMap = Readonly<{
+  valid_from: "validFrom";
+  valid_to: "validTo";
+  created_at: "createdAt";
+  updated_at: "updatedAt";
+  deleted_at: "deletedAt";
+}>;
+
+/**
+ * Maps row fields to their camelCase meta counterparts, preserving types.
+ */
+type MapRowToMeta<
+  R extends Readonly<Record<string, unknown>>,
+  M extends Readonly<Record<string, string>>,
+> = Readonly<{
+  [SnakeKey in keyof M as M[SnakeKey] & string]: SnakeKey extends keyof R ?
+    R[SnakeKey]
+  : never;
+}>;
+
+// ============================================================
 // Node Instance Types
 // ============================================================
 
 /**
  * Metadata for a node instance.
+ * Derived from NodeRow via TemporalMetaFieldMap + version.
+ *
+ * Adding a new metadata column requires:
+ * 1. Add the column to NodeRow in backend/types.ts
+ * 2. Add the mapping to TemporalMetaFieldMap above
+ * 3. The compiler will error in rowToNodeMeta() until you add the field there
  */
-export type NodeMeta = Readonly<{
-  version: number;
-  validFrom: string | undefined;
-  validTo: string | undefined;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt: string | undefined;
-}>;
+export type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> &
+  Readonly<{ version: NodeRow["version"] }>;
 
 /**
  * A node instance in the graph.
@@ -76,14 +111,9 @@ export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
 
 /**
  * Metadata for an edge instance.
+ * Derived from EdgeRow via TemporalMetaFieldMap (edges have no version).
  */
-export type EdgeMeta = Readonly<{
-  validFrom: string | undefined;
-  validTo: string | undefined;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt: string | undefined;
-}>;
+export type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
 
 /**
  * An edge instance in the graph.

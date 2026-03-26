@@ -312,7 +312,10 @@ function buildOptionalAliasValue(
   row: Record<string, unknown>,
   plan: AliasPlan,
 ): unknown {
-  const idValue = row[plan.idOutputName!];
+  if (plan.idOutputName === undefined) {
+    return undefined;
+  }
+  const idValue = row[plan.idOutputName];
 
   if (idValue === null || idValue === undefined) {
     return undefined;

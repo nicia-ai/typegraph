@@ -64,8 +64,10 @@ export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
     }
 
     case "asOf": {
-      // asOf is guaranteed to be defined - validated in QueryBuilder.temporal()
-      const timestamp = asOf!;
+      if (asOf === undefined) {
+        throw new Error(`asOf timestamp is required for temporal mode "asOf"`);
+      }
+      const timestamp = asOf;
       return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${timestamp}) AND (${validTo} IS NULL OR ${validTo} > ${timestamp})`;
     }
 

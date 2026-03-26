@@ -1,17 +1,8 @@
 import { type z } from "zod";
 
 import { ConfigurationError } from "../errors/index";
+import { RESERVED_NODE_KEYS } from "../store/reserved-keys";
 import { NODE_TYPE_BRAND, type NodeType } from "./types";
-
-// ============================================================
-// Reserved Keys
-// ============================================================
-
-/**
- * Property names that are reserved for system use and cannot appear in node schemas.
- * These are used for flattened node instances where props are spread at the top level.
- */
-const RESERVED_NODE_KEYS = new Set(["id", "kind", "meta"]);
 
 // ============================================================
 // Node Factory Options
