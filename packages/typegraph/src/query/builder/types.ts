@@ -6,7 +6,10 @@
  */
 import { type z } from "zod";
 
-import { type GraphBackend } from "../../backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type EmbeddingValue } from "../../core/embedding";
 import {
@@ -35,6 +38,34 @@ import type { Predicate, SimilarToOptions } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 
 export type { TraversalExpansion } from "../ast";
+
+// ============================================================
+// Batch Query Interface
+// ============================================================
+
+/**
+ * A query that can be executed within a `store.batch()` call.
+ *
+ * Both `ExecutableQuery` and `UnionableQuery` satisfy this interface.
+ * The result type `R` is preserved per-query in the batch return tuple.
+ */
+export type BatchableQuery<R = unknown> = Readonly<{
+  executeOn: (
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly R[]>;
+}>;
+
+/**
+ * Maps a tuple of BatchableQuery types to their result types.
+ *
+ * Given `[BatchableQuery<A>, BatchableQuery<B>]`, produces
+ * `[readonly A[], readonly B[]]`.
+ */
+export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
+  -readonly [K in keyof Queries]: Queries[K] extends BatchableQuery<infer R> ?
+    readonly R[]
+  : never;
+};
 
 // ============================================================
 // Edge Target Type Helpers

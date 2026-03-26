@@ -25,6 +25,8 @@ export type {
 // Builder types users need
 export type {
   AliasMap,
+  BatchableQuery,
+  BatchResults,
   EdgeAccessor,
   FieldAccessor,
   NodeAccessor,

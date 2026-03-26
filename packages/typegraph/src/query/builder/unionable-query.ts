@@ -3,6 +3,10 @@
  */
 import { type SQL } from "drizzle-orm";
 
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
   type ComposableQuery,
@@ -243,6 +247,35 @@ export class UnionableQuery<G extends GraphDef, R> {
       await this.#config.backend.execute<Record<string, unknown>>(compiled);
 
     // Apply select function transformation if available
+    if (this.#state.selectFn && this.#state.startAlias) {
+      return mapResults(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals ?? [],
+        this.#state.selectFn,
+      ) as readonly R[];
+    }
+
+    return rows as readonly R[];
+  }
+
+  /**
+   * Executes the combined query against a provided backend.
+   *
+   * Used by `store.batch()` to run multiple queries over a single connection.
+   */
+  async executeOn(
+    backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly R[]> {
+    if (composableQueryHasParameterReferences(this.toAst())) {
+      throw new Error(
+        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+      );
+    }
+
+    const compiled = this.compile();
+    const rows = await backend.execute<Record<string, unknown>>(compiled);
+
     if (this.#state.selectFn && this.#state.startAlias) {
       return mapResults(
         rows,

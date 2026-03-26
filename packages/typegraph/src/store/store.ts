@@ -17,7 +17,12 @@ import {
 } from "../core/define-graph";
 import type { NodeId } from "../core/types";
 import type { TraversalExpansion } from "../query/ast";
-import { createQueryBuilder, type QueryBuilder } from "../query/builder";
+import {
+  type BatchableQuery,
+  type BatchResults,
+  createQueryBuilder,
+  type QueryBuilder,
+} from "../query/builder";
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
@@ -394,6 +399,54 @@ export class Store<G extends GraphDef> {
    */
   query(): QueryBuilder<G> {
     return this.#createQueryForBackend(this.#backend);
+  }
+
+  // === Batch Query Execution ===
+
+  /**
+   * Executes multiple queries over a single connection with snapshot consistency.
+   *
+   * Acquires one connection via an implicit transaction, executes each query
+   * sequentially on that connection, and returns a typed tuple of results.
+   * Each query preserves its own result type, projection, filtering,
+   * sorting, and pagination.
+   *
+   * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
+   *
+   * @example
+   * ```typescript
+   * const [people, companies] = await store.batch(
+   *   store.query()
+   *     .from("Person", "p")
+   *     .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name })),
+   *   store.query()
+   *     .from("Company", "c")
+   *     .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name }))
+   *     .orderBy("c", "name", "asc")
+   *     .limit(5),
+   * );
+   * // people:    readonly { id: string; name: string }[]
+   * // companies: readonly { id: string; name: string }[]
+   * ```
+   *
+   * @param queries - Two or more executable queries (from `.select()` or set operations)
+   * @returns A tuple with per-query typed results, preserving input order
+   */
+  async batch<
+    const Queries extends readonly [
+      BatchableQuery<unknown>,
+      BatchableQuery<unknown>,
+      ...BatchableQuery<unknown>[],
+    ],
+  >(...queries: Queries): Promise<BatchResults<Queries>> {
+    return this.#backend.transaction(async (txBackend) => {
+      const results: unknown[] = [];
+      for (const query of queries) {
+        const result = await query.executeOn(txBackend);
+        results.push(result);
+      }
+      return results as BatchResults<Queries>;
+    });
   }
 
   // === Subgraph Extraction ===

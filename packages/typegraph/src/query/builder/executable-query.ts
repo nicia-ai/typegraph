@@ -3,7 +3,10 @@
  */
 import { type SQL } from "drizzle-orm";
 
-import { type GraphBackend } from "../../backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import {
@@ -473,6 +476,43 @@ export class ExecutableQuery<
   }
 
   /**
+   * Executes the query against a provided backend.
+   *
+   * Used by `store.batch()` to run multiple queries over a single connection
+   * (e.g., within a transaction). The full compile → execute → transform
+   * pipeline runs identically to `execute()`, but against the given backend.
+   */
+  async executeOn(
+    backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly R[]> {
+    // Guard: reject queries with param() refs — must use .prepare().execute({...})
+    if (hasParameterReferences(this.toAst())) {
+      throw new Error(
+        "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+      );
+    }
+
+    // Try optimized execution with the provided backend
+    const optimizedResult = await this.#tryOptimizedExecutionOn(backend);
+    if (optimizedResult !== undefined) {
+      return optimizedResult;
+    }
+
+    // Fall back to full fetch
+    const compiled = this.compile();
+    const rawRows = await backend.execute<Record<string, unknown>>(compiled);
+    const dialect = this.#config.dialect ?? "sqlite";
+    const rows = transformPathColumns(rawRows, this.#state, dialect);
+
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+      rows,
+      this.#state.startAlias,
+      this.#state.traversals,
+      this.#selectFn,
+    );
+  }
+
+  /**
    * Attempts optimized execution by tracking which fields the select callback accesses.
    *
    * Returns undefined if optimization is not possible (callback uses method calls,
@@ -509,6 +549,63 @@ export class ExecutableQuery<
 
     try {
       // RecursiveAliases are populated at runtime but erased in mapSelectiveResults' signature
+      return mapSelectiveResults<Aliases, EdgeAliases, R>(
+        rows,
+        this.#state,
+        selectiveFields,
+        this.#config.schemaIntrospector,
+        this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+      );
+    } catch (error) {
+      if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
+        return undefined;
+      }
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForExecute = undefined;
+        this.#cachedOptimizedCompiled = NOT_COMPUTED;
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Attempts optimized execution against a provided backend.
+   * Mirror of #tryOptimizedExecution but delegates to the given backend.
+   */
+  async #tryOptimizedExecutionOn(
+    backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly R[] | undefined> {
+    const selectiveFields = this.#getSelectiveFieldsForExecute();
+    if (selectiveFields === undefined) {
+      return undefined;
+    }
+
+    let compiled: SQL;
+    if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
+      const baseAst = buildQueryAst(this.#config, this.#state);
+      const selectiveAst = {
+        ...baseAst,
+        selectiveFields,
+      };
+      compiled = compileQuery(
+        selectiveAst,
+        this.#config.graphId,
+        this.#compileOptions(),
+      );
+      this.#cachedOptimizedCompiled = compiled;
+    } else {
+      compiled = this.#cachedOptimizedCompiled;
+    }
+
+    const rawSelectiveRows =
+      await backend.execute<Record<string, unknown>>(compiled);
+    const dialect = this.#config.dialect ?? "sqlite";
+    const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
+
+    try {
       return mapSelectiveResults<Aliases, EdgeAliases, R>(
         rows,
         this.#state,
