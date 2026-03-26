@@ -2,9 +2,11 @@ import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
 import {
+  type BatchableQuery,
   defineEdge,
   defineGraph,
   defineNode,
+  type Edge,
   type EdgeId,
   getEdgeKinds,
   getNodeKinds,
@@ -126,3 +128,28 @@ expectError(
     title: "Roadmap",
   }),
 );
+
+// ============================================================
+// Edge batchFind* — published .d.ts surface
+// ============================================================
+
+declare const personRef: NodeRef<typeof Person>;
+declare const companyRef: NodeRef<typeof Company>;
+
+// batchFindFrom / batchFindTo return BatchableQuery with correct edge type
+type WorksAtEdge = Edge<typeof worksAt, typeof Person, typeof Company>;
+
+expectType<BatchableQuery<WorksAtEdge>>(
+  store.edges.worksAt.batchFindFrom(personRef),
+);
+expectType<BatchableQuery<WorksAtEdge>>(
+  store.edges.worksAt.batchFindTo(companyRef),
+);
+expectType<BatchableQuery<WorksAtEdge>>(
+  store.edges.worksAt.batchFindByEndpoints(personRef, companyRef),
+);
+
+// Endpoint constraints are enforced on batchFind* methods
+expectError(store.edges.worksAt.batchFindFrom(companyRef));
+expectError(store.edges.worksAt.batchFindTo(personRef));
+expectError(store.edges.worksAt.batchFindByEndpoints(companyRef, personRef));

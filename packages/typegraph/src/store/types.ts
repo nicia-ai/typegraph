@@ -15,7 +15,7 @@ import {
   type TemporalMode,
 } from "../core/types";
 import type { TraversalExpansion } from "../query/ast";
-import type { NodeAccessor } from "../query/builder/types";
+import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
 import { type SqlSchema } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
 
@@ -640,6 +640,32 @@ export type EdgeCollection<
 
   /** Find edges to a specific node */
   findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+
+  /**
+   * Deferred variant of `findFrom` for use with `store.batch()`.
+   *
+   * Returns a `BatchableQuery` instead of executing immediately.
+   */
+  batchFindFrom: (from: NodeRef<From>) => BatchableQuery<Edge<E, From, To>>;
+
+  /**
+   * Deferred variant of `findTo` for use with `store.batch()`.
+   *
+   * Returns a `BatchableQuery` instead of executing immediately.
+   */
+  batchFindTo: (to: NodeRef<To>) => BatchableQuery<Edge<E, From, To>>;
+
+  /**
+   * Deferred variant of `findByEndpoints` for use with `store.batch()`.
+   *
+   * Returns a `BatchableQuery` that yields a 0-or-1 element array
+   * (matching `findByEndpoints`' at-most-one semantics).
+   */
+  batchFindByEndpoints: (
+    from: NodeRef<From>,
+    to: NodeRef<To>,
+    options?: EdgeFindByEndpointsOptions<E>,
+  ) => BatchableQuery<Edge<E, From, To>>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
   delete: (id: EdgeId<E>) => Promise<void>;

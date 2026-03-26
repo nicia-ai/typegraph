@@ -783,6 +783,32 @@ store.edges.worksAt.findTo(
 ): Promise<Edge<worksAt>[]>;
 ```
 
+#### `batchFindFrom(from)` / `batchFindTo(to)` / `batchFindByEndpoints(from, to, options?)`
+
+Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
+[`store.batch()`](#batch-query-execution). These return a `BatchableQuery` instead of
+executing immediately.
+
+```typescript
+store.edges.worksAt.batchFindFrom(from: NodeRef<Person>): BatchableQuery<Edge<worksAt>>;
+store.edges.worksAt.batchFindTo(to: NodeRef<Company>): BatchableQuery<Edge<worksAt>>;
+store.edges.worksAt.batchFindByEndpoints(
+  from: NodeRef<Person>,
+  to: NodeRef<Company>,
+  options?: { matchOn?: readonly string[]; props?: Partial<{ role: string }> }
+): BatchableQuery<Edge<worksAt>>;
+```
+
+```typescript
+// Execute multiple edge lookups over a single connection
+const [skills, employer] = await store.batch(
+  store.edges.hasSkill.batchFindFrom(alice),
+  store.edges.worksAt.batchFindFrom(alice),
+);
+```
+
+`batchFindByEndpoints` returns a 0-or-1 element array (matching the at-most-one semantics of `findByEndpoints`).
+
 #### `find(options?)`
 
 Finds edges with endpoint filtering.
@@ -1057,8 +1083,8 @@ const person = await store.nodes.Person.create({ name: "Alice" });
 #### `store.batch(...queries)`
 
 Executes multiple independent queries over a single connection with snapshot consistency.
-Accepts two or more queries (from `.select()` or set operations) and returns a typed tuple
-of results preserving input order.
+Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
+and returns a typed tuple of results preserving input order.
 
 All queries run within an implicit transaction — they see the same database snapshot.
 This avoids connection pool pressure from `Promise.all` patterns (N connections → 1) while
@@ -1146,6 +1172,17 @@ const [combined, separate] = await store.batch(
     .query()
     .from("Company", "c")
     .select((ctx) => ({ id: ctx.c.id, name: ctx.c.name })),
+);
+```
+
+**Edge collection lookups:**
+
+```typescript
+// Edge batchFind* methods return BatchableQuery — mix freely with fluent queries
+const [skills, employer, colleague] = await store.batch(
+  store.edges.hasSkill.batchFindFrom(alice),
+  store.edges.worksAt.batchFindFrom(alice),
+  store.edges.knows.batchFindByEndpoints(alice, bob),
 );
 ```
 
