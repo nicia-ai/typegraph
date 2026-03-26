@@ -1043,12 +1043,22 @@ describe("predicates", () => {
 
 describe("MAX_RECURSIVE_DEPTH", () => {
   it("is a reasonable limit", () => {
-    expect(MAX_RECURSIVE_DEPTH).toBeGreaterThanOrEqual(50);
-    expect(MAX_RECURSIVE_DEPTH).toBeLessThanOrEqual(1000);
+    expect(MAX_RECURSIVE_DEPTH).toBeGreaterThanOrEqual(5);
+    expect(MAX_RECURSIVE_DEPTH).toBeLessThanOrEqual(100);
   });
 
   it("is exported and accessible", () => {
     expect(typeof MAX_RECURSIVE_DEPTH).toBe("number");
+  });
+
+  // BREAKING CHANGE (v0.14): Default depth for unbounded traversals lowered
+  // from 100 to 10. Graphs with branching factor B produce O(B^depth) rows
+  // before cycle detection prunes them. At depth 100, even a binary tree
+  // generates 2^100 potential paths. A default of 10 prevents exponential
+  // blowup while covering typical neighborhood/hierarchy queries.
+  // Users who need deeper traversals should call .maxHops(N) explicitly.
+  it("defaults to 10 to prevent exponential blowup on dense graphs", () => {
+    expect(MAX_RECURSIVE_DEPTH).toBe(10);
   });
 });
 

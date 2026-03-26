@@ -1,8 +1,9 @@
+import { NODE_INDEX_TYPE_MARKER } from "../constants";
 import { type DeclaredIndex } from "../profiler/types";
 import { type EdgeIndex, type NodeIndex, type TypeGraphIndex } from "./types";
 
 export function toDeclaredIndex(index: TypeGraphIndex): DeclaredIndex {
-  if (index.__type === "typegraph_node_index") {
+  if (index.__type === NODE_INDEX_TYPE_MARKER) {
     return toDeclaredNodeIndex(index);
   }
   return toDeclaredEdgeIndex(index);

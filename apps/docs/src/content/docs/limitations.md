@@ -43,7 +43,7 @@ if (backend.capabilities.transactions) {
 
 Variable-length traversals use two caps:
 
-1. Unbounded traversals (no `maxHops` option) are capped at 100 hops.
+1. Unbounded traversals (no `maxHops` option) are capped at 10 hops.
 2. Explicit `maxHops` values are validated up to 1000 hops (`maxHops: >1000` throws).
 3. Cycle prevention is on by default. To skip cycle checks for speed, opt into
    `cyclePolicy: "allow"` (which may revisit nodes across hops).
@@ -51,7 +51,7 @@ Variable-length traversals use two caps:
 This prevents runaway queries while still supporting deep, intentionally bounded traversals.
 
 ```typescript
-// Implicitly limited to 100 hops
+// Implicitly limited to 10 hops
 store
   .query()
   .from("Person", "p")
@@ -80,7 +80,7 @@ The unbounded-traversal limit is defined as `MAX_RECURSIVE_DEPTH`:
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
-// MAX_RECURSIVE_DEPTH = 100
+// MAX_RECURSIVE_DEPTH = 10
 ```
 
 ## Connection Management

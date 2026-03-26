@@ -8,6 +8,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphBackend } from "../backend/types";
+import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
 import type {
   AllNodeTypes,
   EdgeKinds,
@@ -17,7 +18,7 @@ import type {
 import type { AnyEdgeType, NodeId, NodeType } from "../core/types";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
-import { MAX_RECURSIVE_DEPTH } from "../query/compiler/recursive";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "../query/compiler/schema";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -29,6 +30,7 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../query/schema-introspector";
+import { fnv1aBase36 } from "../utils/hash";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -45,27 +47,6 @@ import type { Edge, EdgeMeta, Node, NodeMeta } from "./types";
 // ============================================================
 
 const DEFAULT_SUBGRAPH_MAX_DEPTH = 10;
-
-/**
- * PostgreSQL truncates identifiers longer than 63 bytes.
- * Column aliases must stay under this limit to avoid silent mismatches.
- */
-const MAX_PG_IDENTIFIER_LENGTH = 63;
-
-/**
- * FNV-1a hash, base-36 encoded. Deterministic and fast.
- * Used to generate short, collision-resistant column aliases.
- */
-function fnv1aBase36(input: string): string {
-  let hash = 0x81_1c_9d_c5;
-  for (const character of input) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint === undefined) continue;
-    hash ^= codePoint;
-    hash = Math.imul(hash, 0x01_00_01_93);
-  }
-  return (hash >>> 0).toString(36);
-}
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -444,7 +425,7 @@ export async function executeSubgraph<
 
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
-    MAX_RECURSIVE_DEPTH,
+    MAX_EXPLICIT_RECURSIVE_DEPTH,
   );
 
   const ctx: SubgraphContext = {

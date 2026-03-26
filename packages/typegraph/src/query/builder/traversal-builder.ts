@@ -178,7 +178,8 @@ export class TraversalBuilder<
 
   /**
    * Enables variable-length (recursive) traversal.
-   * By default, traverses unlimited depth with cycle prevention.
+   * Defaults to MAX_RECURSIVE_DEPTH (10) hops with cycle prevention.
+   * Use `maxHops` to override (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
    */
   recursive<const O extends RecursiveTraversalOptions = Record<string, never>>(
     options?: O,

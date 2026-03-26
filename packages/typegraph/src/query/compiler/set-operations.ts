@@ -674,7 +674,8 @@ function compileFieldColumnForSetOp(
       updated_at: "_updated_at",
       deleted_at: "_deleted_at",
     };
-    const suffix = columnMap[columnName!];
+    if (columnName === undefined) return sql.raw(`${cteName}.${alias}_props`);
+    const suffix = columnMap[columnName];
     if (suffix) {
       return sql.raw(`${cteName}.${alias}${suffix}`);
     }
@@ -847,15 +848,15 @@ function buildSetOperationSuffixClauses(
 
     const orderParts: SQL[] = [];
 
-    for (const o of op.orderBy) {
-      const projected = matchFieldToProjection(o.field, projection);
+    for (const orderSpec of op.orderBy) {
+      const projected = matchFieldToProjection(orderSpec.field, projection);
 
       if (!projected) {
         // Build a descriptive error message
         const fieldDesc =
-          o.field.jsonPointer ?
-            `${o.field.alias}.props${o.field.jsonPointer}`
-          : `${o.field.alias}.${o.field.path.join(".")}`;
+          orderSpec.field.jsonPointer ?
+            `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
+          : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
         const availableFields = projection.fields
           .map((f) => f.outputName)
           .join(", ");
@@ -868,11 +869,12 @@ function buildSetOperationSuffixClauses(
 
       // Use output column name with proper quoting
       const columnRef = sql.raw(dialect.quoteIdentifier(projected.outputName));
-      const dir = sql.raw(o.direction.toUpperCase());
+      const dir = sql.raw(orderSpec.direction.toUpperCase());
 
       // Handle nulls with IS NULL emulation for cross-dialect consistency
       // Default: ASC → NULLS LAST, DESC → NULLS FIRST
-      const nulls = o.nulls ?? (o.direction === "asc" ? "last" : "first");
+      const nulls =
+        orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
       const nullsDir = sql.raw(nulls === "first" ? "DESC" : "ASC");
 
       // Emulate NULLS FIRST/LAST: (col IS NULL) ASC/DESC, col DIR

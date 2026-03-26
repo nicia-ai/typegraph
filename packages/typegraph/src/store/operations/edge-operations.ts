@@ -993,8 +993,10 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
 
   // Deleted match only → check cardinality before resurrect
   const cardinality = registration.cardinality ?? "many";
-  // deletedRow is guaranteed defined here because we checked both undefined above
-  const matchedDeletedRow = deletedRow!;
+  if (deletedRow === undefined) {
+    throw new Error("Expected deletedRow to be defined");
+  }
+  const matchedDeletedRow = deletedRow;
   const effectiveValidTo = matchedDeletedRow.valid_to;
   const constraintContext: ConstraintContext = {
     graphId: ctx.graphId,
@@ -1177,7 +1179,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         },
       });
     } else {
-      const bestRow = liveRow ?? deletedRow!;
+      // At least one of liveRow/deletedRow is defined (both-undefined handled above)
+      const bestRow = liveRow ?? deletedRow;
+      if (bestRow === undefined) {
+        throw new Error("Expected at least one of liveRow or deletedRow");
+      }
       toFetch.push({
         index,
         row: bestRow,

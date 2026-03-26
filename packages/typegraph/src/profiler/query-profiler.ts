@@ -402,7 +402,7 @@ function createProfiledStore<G extends GraphDef>(
   store: Store<G>,
   profiler: QueryProfiler,
 ): ProfiledStore<G> {
-  const handler: ProxyHandler<Store<G>> = {
+  const storeProxyHandler: ProxyHandler<Store<G>> = {
     get(target, property, _receiver) {
       // Add profiler property
       if (property === "profiler") {
@@ -430,7 +430,7 @@ function createProfiledStore<G extends GraphDef>(
     },
   };
 
-  return new Proxy(store, handler) as ProfiledStore<G>;
+  return new Proxy(store, storeProxyHandler) as ProfiledStore<G>;
 }
 
 /**
@@ -444,7 +444,7 @@ function wrapQueryBuilder<T extends object>(
   builder: T,
   profiler: QueryProfiler,
 ): T {
-  const handler: ProxyHandler<T> = {
+  const builderProxyHandler: ProxyHandler<T> = {
     get(target, property, receiver) {
       const value: unknown = Reflect.get(target, property, receiver);
 
@@ -480,7 +480,7 @@ function wrapQueryBuilder<T extends object>(
     },
   };
 
-  return new Proxy(builder, handler);
+  return new Proxy(builder, builderProxyHandler);
 }
 
 /**
@@ -490,7 +490,7 @@ function wrapExecutableQuery<T extends object>(
   query: T,
   profiler: QueryProfiler,
 ): T {
-  const handler: ProxyHandler<T> = {
+  const executableQueryProxyHandler: ProxyHandler<T> = {
     get(target, property, receiver) {
       const value: unknown = Reflect.get(target, property, receiver);
 
@@ -536,7 +536,7 @@ function wrapExecutableQuery<T extends object>(
     },
   };
 
-  return new Proxy(query, handler);
+  return new Proxy(query, executableQueryProxyHandler);
 }
 
 // ============================================================

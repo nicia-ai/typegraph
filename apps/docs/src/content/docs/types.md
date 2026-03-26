@@ -432,12 +432,12 @@ const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 
 ### `MAX_RECURSIVE_DEPTH`
 
-Maximum depth for unbounded recursive traversals (100).
+Maximum depth for unbounded recursive traversals (10).
 
 ```typescript
 import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
 
-// MAX_RECURSIVE_DEPTH = 100
+// MAX_RECURSIVE_DEPTH = 10
 ```
 
 Recursive traversals are capped at this depth when no `maxHops` is specified in

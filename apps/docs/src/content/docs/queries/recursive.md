@@ -298,8 +298,13 @@ Two safety caps prevent runaway recursion:
 
 | Constant | Value | When it applies |
 |----------|-------|-----------------|
-| `MAX_RECURSIVE_DEPTH` | 100 | `maxHops` is omitted |
+| `MAX_RECURSIVE_DEPTH` | 10 | `maxHops` is omitted |
 | `MAX_EXPLICIT_RECURSIVE_DEPTH` | 1000 | Upper bound for explicit `maxHops` |
+
+Graphs with branching factor *B* produce O(*B*^depth) rows before cycle detection
+can prune them. The default of 10 covers typical neighborhood, shortest-path, and
+hierarchy queries without risking exponential blowup on dense graphs. Use `.maxHops(N)`
+to opt in to deeper traversals when you know the graph structure.
 
 ```typescript
 import {
@@ -307,10 +312,15 @@ import {
   MAX_RECURSIVE_DEPTH,
 } from "@nicia-ai/typegraph";
 
-.recursive()                  // Implicitly capped at 100
-.recursive({ maxHops: 500 })  // Honored (≤ 1000)
+.recursive()                  // Implicitly capped at 10
+.recursive({ maxHops: 50 })   // Honored (≤ 1000)
 .recursive({ maxHops: 2000 }) // Throws UnsupportedPredicateError
 ```
+
+:::note[Breaking change in v0.14]
+The default depth was lowered from 100 to 10. If your traversals relied on the
+implicit 100-hop cap, add an explicit `.maxHops(100)` call.
+:::
 
 ## Limitations
 

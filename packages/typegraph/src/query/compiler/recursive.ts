@@ -51,10 +51,13 @@ import {
 /**
  * Maximum depth for recursive CTE queries when maxDepth is unlimited (-1).
  *
- * This default limit prevents runaway recursion for unbounded traversals while
- * still supporting typical neighborhood/path use-cases.
+ * Graphs with branching factor B produce O(B^depth) rows before cycle
+ * detection can prune them. A default of 10 covers typical neighborhood,
+ * shortest-path, and hierarchy use-cases without risking exponential blowup
+ * on dense graphs. Users who need deeper traversals should call .maxHops(N)
+ * explicitly (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
  */
-export const MAX_RECURSIVE_DEPTH = 100;
+export const MAX_RECURSIVE_DEPTH = 10;
 
 /**
  * Maximum depth for explicit maxDepth traversals.

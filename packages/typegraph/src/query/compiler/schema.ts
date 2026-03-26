@@ -7,6 +7,7 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import { ConfigurationError } from "../../errors";
 
 /**
@@ -46,13 +47,6 @@ const DEFAULT_TABLE_NAMES: SqlTableNames = {
 };
 
 /**
- * Maximum identifier length.
- * PostgreSQL uses NAMEDATALEN (64) - 1 = 63 as the max identifier length.
- * SQLite has no practical limit but we use PostgreSQL's for cross-database safety.
- */
-const MAX_IDENTIFIER_LENGTH = 63;
-
-/**
  * Regex for valid SQL identifiers.
  * Must start with a letter or underscore.
  * Can contain letters, digits, underscores, and dollar signs.
@@ -69,9 +63,9 @@ function validateTableName(name: string, label: string): void {
   if (!name || name.length === 0) {
     throw new ConfigurationError(`${label} table name cannot be empty`);
   }
-  if (name.length > MAX_IDENTIFIER_LENGTH) {
+  if (name.length > MAX_PG_IDENTIFIER_LENGTH) {
     throw new ConfigurationError(
-      `${label} table name exceeds maximum length of ${MAX_IDENTIFIER_LENGTH} characters`,
+      `${label} table name exceeds maximum length of ${MAX_PG_IDENTIFIER_LENGTH} characters`,
     );
   }
   if (!VALID_IDENTIFIER_PATTERN.test(name)) {

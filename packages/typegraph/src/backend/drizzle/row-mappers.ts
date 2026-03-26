@@ -15,6 +15,26 @@ function requireTimestamp(value: string | undefined, field: string): string {
   return value;
 }
 
+function asString(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new DatabaseOperationError(
+      `Expected ${field} to be string, got ${typeof value}`,
+      { operation: "select", entity: "row" },
+    );
+  }
+  return value;
+}
+
+function asNumber(value: unknown, field: string): number {
+  if (typeof value !== "number") {
+    throw new DatabaseOperationError(
+      `Expected ${field} to be number, got ${typeof value}`,
+      { operation: "select", entity: "row" },
+    );
+  }
+  return value;
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }
@@ -64,8 +84,25 @@ type DialectRowMapperConfig = Readonly<{
  * Timestamps are stored as ISO strings; JSON is stored as TEXT.
  */
 export const SQLITE_ROW_MAPPER_CONFIG: DialectRowMapperConfig = {
-  formatTimestamp: (value) => nullToUndefined(value as string | null),
-  normalizeJson: (value) => value as string,
+  formatTimestamp: (value) => {
+    if (value === null || value === undefined) return;
+    if (typeof value !== "string") {
+      throw new DatabaseOperationError(
+        `Expected timestamp to be string, got ${typeof value}`,
+        { operation: "select", entity: "row" },
+      );
+    }
+    return value;
+  },
+  normalizeJson: (value) => {
+    if (typeof value !== "string") {
+      throw new DatabaseOperationError(
+        `Expected JSON column to be string, got ${typeof value}`,
+        { operation: "select", entity: "row" },
+      );
+    }
+    return value;
+  },
 };
 
 /**
@@ -85,11 +122,11 @@ export function createNodeRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => NodeRow {
   return (row) => ({
-    graph_id: row.graph_id as string,
-    kind: row.kind as string,
-    id: row.id as string,
+    graph_id: asString(row.graph_id, "graph_id"),
+    kind: asString(row.kind, "kind"),
+    id: asString(row.id, "id"),
     props: config.normalizeJson(row.props),
-    version: row.version as number,
+    version: asNumber(row.version, "version"),
     valid_from: nullToUndefined(config.formatTimestamp(row.valid_from)),
     valid_to: nullToUndefined(config.formatTimestamp(row.valid_to)),
     created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
@@ -102,13 +139,13 @@ export function createEdgeRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => EdgeRow {
   return (row) => ({
-    graph_id: row.graph_id as string,
-    id: row.id as string,
-    kind: row.kind as string,
-    from_kind: row.from_kind as string,
-    from_id: row.from_id as string,
-    to_kind: row.to_kind as string,
-    to_id: row.to_id as string,
+    graph_id: asString(row.graph_id, "graph_id"),
+    id: asString(row.id, "id"),
+    kind: asString(row.kind, "kind"),
+    from_kind: asString(row.from_kind, "from_kind"),
+    from_id: asString(row.from_id, "from_id"),
+    to_kind: asString(row.to_kind, "to_kind"),
+    to_id: asString(row.to_id, "to_id"),
     props: config.normalizeJson(row.props),
     valid_from: nullToUndefined(config.formatTimestamp(row.valid_from)),
     valid_to: nullToUndefined(config.formatTimestamp(row.valid_to)),
@@ -122,12 +159,12 @@ export function createUniqueRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => UniqueRow {
   return (row) => ({
-    graph_id: row.graph_id as string,
-    node_kind: row.node_kind as string,
-    constraint_name: row.constraint_name as string,
-    key: row.key as string,
-    node_id: row.node_id as string,
-    concrete_kind: row.concrete_kind as string,
+    graph_id: asString(row.graph_id, "graph_id"),
+    node_kind: asString(row.node_kind, "node_kind"),
+    constraint_name: asString(row.constraint_name, "constraint_name"),
+    key: asString(row.key, "key"),
+    node_id: asString(row.node_id, "node_id"),
+    concrete_kind: asString(row.concrete_kind, "concrete_kind"),
     deleted_at: nullToUndefined(config.formatTimestamp(row.deleted_at)),
   });
 }
@@ -141,9 +178,9 @@ export function createSchemaVersionRowMapper(
       isActiveValue === true || isActiveValue === 1 || isActiveValue === "1";
 
     return {
-      graph_id: row.graph_id as string,
-      version: row.version as number,
-      schema_hash: row.schema_hash as string,
+      graph_id: asString(row.graph_id, "graph_id"),
+      version: asNumber(row.version, "version"),
+      schema_hash: asString(row.schema_hash, "schema_hash"),
       schema_doc: config.normalizeJson(row.schema_doc),
       created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
       is_active: isActive,

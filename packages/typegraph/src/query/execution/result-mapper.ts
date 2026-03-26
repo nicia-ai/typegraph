@@ -28,9 +28,9 @@ export function transformPathColumns(
 ): readonly Record<string, unknown>[] {
   // Find path columns from variable-length traversals
   const pathAliases: string[] = [];
-  for (const t of state.traversals) {
-    if (t.variableLength?.pathAlias !== undefined) {
-      pathAliases.push(t.variableLength.pathAlias);
+  for (const traversal of state.traversals) {
+    if (traversal.variableLength?.pathAlias !== undefined) {
+      pathAliases.push(traversal.variableLength.pathAlias);
     }
   }
 

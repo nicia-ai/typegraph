@@ -1,25 +1,8 @@
 import { z } from "zod";
 
 import { ConfigurationError } from "../errors/index";
+import { RESERVED_EDGE_KEYS } from "../store/reserved-keys";
 import { EDGE_TYPE_BRAND, type EdgeType, type NodeType } from "./types";
-
-// ============================================================
-// Reserved Keys
-// ============================================================
-
-/**
- * Property names that are reserved for system use and cannot appear in edge schemas.
- * These are used for flattened edge instances where props are spread at the top level.
- */
-const RESERVED_EDGE_KEYS = new Set([
-  "id",
-  "kind",
-  "meta",
-  "fromKind",
-  "fromId",
-  "toKind",
-  "toId",
-]);
 
 // ============================================================
 // Edge Factory Options

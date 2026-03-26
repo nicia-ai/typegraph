@@ -1,5 +1,12 @@
 import { type z } from "zod";
 
+import {
+  EDGE_INDEX_TYPE_MARKER,
+  IDENTIFIER_COMPONENT_MAX_LENGTH,
+  MAX_PG_IDENTIFIER_LENGTH,
+  NODE_INDEX_TYPE_MARKER,
+  TRUNCATED_IDENTIFIER_MAX_LENGTH,
+} from "../constants";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type ValueType } from "../query/ast";
 import { resolveFieldTypeInfoAtJsonPointer } from "../query/field-type-info";
@@ -16,6 +23,7 @@ import {
   type FieldTypeInfo,
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
+import { fnv1aBase36 } from "../utils/hash";
 import {
   type EdgeIndex,
   type EdgeIndexConfig,
@@ -85,7 +93,7 @@ export function defineNodeIndex<N extends NodeType>(
     });
 
   return {
-    __type: "typegraph_node_index",
+    __type: NODE_INDEX_TYPE_MARKER,
     node,
     nodeKind: node.kind,
     fields,
@@ -148,7 +156,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     });
 
   return {
-    __type: "typegraph_edge_index",
+    __type: EDGE_INDEX_TYPE_MARKER,
     edge,
     edgeKind: edge.kind,
     fields,
@@ -683,7 +691,7 @@ type DefaultNameParts = Readonly<{
 }>;
 
 function generateDefaultIndexName(parts: DefaultNameParts): string {
-  const hash = fnv1aBase36Hash(
+  const hash = fnv1aBase36(
     JSON.stringify({
       kind: parts.kind,
       kindName: parts.kindName,
@@ -713,7 +721,9 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
   ].filter((part) => part !== undefined);
 
   const joined = nameParts.join("_");
-  return joined.length <= 63 ? joined : `${joined.slice(0, 54)}_${hash}`;
+  return joined.length <= MAX_PG_IDENTIFIER_LENGTH ?
+      joined
+    : `${joined.slice(0, TRUNCATED_IDENTIFIER_MAX_LENGTH)}_${hash}`;
 }
 
 function sanitizeIdentifierComponent(value: string): string {
@@ -721,19 +731,5 @@ function sanitizeIdentifierComponent(value: string): string {
     .toLowerCase()
     .replaceAll(/[^a-z0-9_]+/g, "_")
     .replaceAll(/^_+|_+$/g, "")
-    .slice(0, 20);
-}
-
-function fnv1aBase36Hash(input: string): string {
-  let hash = 0x81_1c_9d_c5;
-  for (const character of input) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint === undefined) {
-      continue;
-    }
-    hash ^= codePoint;
-    hash = Math.imul(hash, 0x01_00_01_93);
-  }
-  // Convert to an unsigned 32-bit integer and encode compactly.
-  return (hash >>> 0).toString(36);
+    .slice(0, IDENTIFIER_COMPONENT_MAX_LENGTH);
 }

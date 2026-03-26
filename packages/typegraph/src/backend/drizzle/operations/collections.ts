@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { type TemporalMode } from "../../../core/types";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
@@ -19,7 +20,7 @@ import type { Tables } from "./shared";
 function buildTemporalConditions(
   table: Pick<Tables["nodes"], "deletedAt" | "validFrom" | "validTo">,
   params: Readonly<{
-    temporalMode?: string;
+    temporalMode?: TemporalMode;
     asOf?: string;
     excludeDeleted?: boolean;
   }>,
@@ -34,10 +35,14 @@ function buildTemporalConditions(
   }
 
   if (mode === "current" || mode === "asOf") {
-    const asOf = params.asOf!;
+    if (params.asOf === undefined) {
+      throw new Error(
+        `asOf timestamp is required for temporal mode "${mode}"`,
+      );
+    }
     conditions.push(
-      sql`(${table.validFrom} IS NULL OR ${table.validFrom} <= ${asOf})`,
-      sql`(${table.validTo} IS NULL OR ${table.validTo} > ${asOf})`,
+      sql`(${table.validFrom} IS NULL OR ${table.validFrom} <= ${params.asOf})`,
+      sql`(${table.validTo} IS NULL OR ${table.validTo} > ${params.asOf})`,
     );
   }
 

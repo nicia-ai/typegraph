@@ -10,8 +10,11 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
-import { type NodeId, type TemporalMode } from "../../core/types";
-import { type NodeType } from "../../core/types";
+import {
+  type NodeId,
+  type NodeType,
+  type TemporalMode,
+} from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import { nowIso } from "../../utils/date";
