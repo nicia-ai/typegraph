@@ -7,7 +7,12 @@ import {
   type EdgeRow as BackendEdgeRow,
   type NodeRow as BackendNodeRow,
 } from "../backend/types";
-import { type Edge, type Node } from "./types";
+import {
+  filterReservedKeys,
+  RESERVED_EDGE_KEYS,
+  RESERVED_NODE_KEYS,
+} from "./reserved-keys";
+import { type Edge, type EdgeMeta, type Node, type NodeMeta } from "./types";
 
 /**
  * Raw node row from database (without graph_id).
@@ -21,31 +26,12 @@ export type NodeRow = Omit<BackendNodeRow, "graph_id">;
  */
 export type EdgeRow = Omit<BackendEdgeRow, "graph_id">;
 
-// Reserved keys that cannot be overwritten by user props
-const RESERVED_NODE_KEYS = new Set(["id", "kind", "meta"]);
-
 /**
  * Converts null to undefined for consistent typing.
  * Database backends return null for missing values, but our types use undefined.
  */
 function nullToUndefined<T>(value: T | null | undefined): T | undefined {
   return value === null ? undefined : value;
-}
-
-/**
- * Filters out reserved keys from props to prevent runtime collisions.
- */
-function filterReservedKeys(
-  props: Record<string, unknown>,
-  reservedKeys: Set<string>,
-): Record<string, unknown> {
-  const filtered: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(props)) {
-    if (!reservedKeys.has(key)) {
-      filtered[key] = value;
-    }
-  }
-  return filtered;
 }
 
 /**
@@ -61,28 +47,31 @@ export function rowToNode(row: NodeRow): Node {
   return {
     kind: row.kind,
     id: row.id as Node["id"],
-    meta: {
-      version: row.version,
-      validFrom: nullToUndefined(row.valid_from),
-      validTo: nullToUndefined(row.valid_to),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      deletedAt: nullToUndefined(row.deleted_at),
-    },
+    meta: rowToNodeMeta(row),
     ...props,
   } as Node;
 }
 
-// Reserved keys that cannot be overwritten by user props on edges
-const RESERVED_EDGE_KEYS = new Set([
-  "id",
-  "kind",
-  "meta",
-  "fromKind",
-  "fromId",
-  "toKind",
-  "toId",
-]);
+export function rowToNodeMeta(
+  row: Pick<
+    NodeRow,
+    | "version"
+    | "valid_from"
+    | "valid_to"
+    | "created_at"
+    | "updated_at"
+    | "deleted_at"
+  >,
+): NodeMeta {
+  return {
+    version: row.version,
+    validFrom: nullToUndefined(row.valid_from),
+    validTo: nullToUndefined(row.valid_to),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: nullToUndefined(row.deleted_at),
+  };
+}
 
 /**
  * Transforms a database row into a typed Edge object.
@@ -101,13 +90,22 @@ export function rowToEdge(row: EdgeRow): Edge {
     fromId: row.from_id,
     toKind: row.to_kind,
     toId: row.to_id,
-    meta: {
-      validFrom: nullToUndefined(row.valid_from),
-      validTo: nullToUndefined(row.valid_to),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      deletedAt: nullToUndefined(row.deleted_at),
-    },
+    meta: rowToEdgeMeta(row),
     ...props,
   } as Edge;
+}
+
+export function rowToEdgeMeta(
+  row: Pick<
+    EdgeRow,
+    "valid_from" | "valid_to" | "created_at" | "updated_at" | "deleted_at"
+  >,
+): EdgeMeta {
+  return {
+    validFrom: nullToUndefined(row.valid_from),
+    validTo: nullToUndefined(row.valid_to),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: nullToUndefined(row.deleted_at),
+  };
 }

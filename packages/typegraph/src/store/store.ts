@@ -58,6 +58,7 @@ import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   executeSubgraph,
   type SubgraphOptions,
+  type SubgraphProject,
   type SubgraphResult,
 } from "./subgraph";
 import {
@@ -422,11 +423,13 @@ export class Store<G extends GraphDef> {
   async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
   >(
     rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK>,
-  ): Promise<SubgraphResult<G, NK, EK>> {
+    options: SubgraphOptions<G, EK, NK, P>,
+  ): Promise<SubgraphResult<G, NK, EK, P>> {
     return executeSubgraph({
+      graph: this.#graph,
       graphId: this.graphId,
       rootId,
       backend: this.#backend,

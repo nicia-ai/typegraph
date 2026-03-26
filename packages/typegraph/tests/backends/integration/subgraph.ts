@@ -258,5 +258,70 @@ export function registerSubgraphIntegrationTests(
       expect(result.nodes).toHaveLength(0);
       expect(result.edges).toHaveLength(0);
     });
+
+    it("projects node and edge fields across backends", async () => {
+      const store = context.getStore();
+      const result = await store.subgraph(ids.aliceId as never, {
+        edges: ["knows", "worksAt"],
+        maxDepth: 1,
+        project: {
+          nodes: {
+            Person: ["name"],
+            Company: ["name", "meta"],
+          },
+          edges: {
+            knows: [],
+            worksAt: ["role"],
+          },
+        },
+      });
+
+      const people = result.nodes.filter((node) => node.kind === "Person");
+      const companies = result.nodes.filter((node) => node.kind === "Company");
+
+      expect(people.length).toBeGreaterThan(0);
+      for (const person of people) {
+        expect(person).toHaveProperty("id");
+        expect(person).toHaveProperty("name");
+        expect(person).not.toHaveProperty("age");
+        expect(person).not.toHaveProperty("meta");
+      }
+
+      expect(companies).toHaveLength(1);
+      expect(companies[0]).toHaveProperty("name", "Acme");
+      expect(companies[0]).toHaveProperty("meta.createdAt");
+      expect(companies[0]).toHaveProperty("meta.updatedAt");
+      expect(companies[0]).not.toHaveProperty("industry");
+
+      const worksAtEdges = result.edges.filter(
+        (
+          edge,
+        ): edge is Extract<
+          (typeof result.edges)[number],
+          { kind: "worksAt" }
+        > => edge.kind === "worksAt",
+      );
+      const knowsEdges = result.edges.filter(
+        (
+          edge,
+        ): edge is Extract<(typeof result.edges)[number], { kind: "knows" }> =>
+          edge.kind === "knows",
+      );
+
+      expect(worksAtEdges).toHaveLength(2);
+      expect(worksAtEdges.map((edge) => edge.role).toSorted()).toEqual([
+        "Engineer",
+        "Manager",
+      ]);
+      for (const edge of worksAtEdges) {
+        expect(edge).toHaveProperty("toId", ids.acmeId);
+        expect(edge).not.toHaveProperty("meta");
+      }
+
+      expect(knowsEdges).toHaveLength(1);
+      expect(knowsEdges[0]).toHaveProperty("fromId", ids.aliceId);
+      expect(knowsEdges[0]).toHaveProperty("toId", ids.bobId);
+      expect(knowsEdges[0]).not.toHaveProperty("meta");
+    });
   });
 }

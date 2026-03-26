@@ -2,6 +2,8 @@ export const BENCHMARK_CONFIG = {
   userCount: 1200,
   followsPerUser: 10,
   postsPerUser: 5,
+  userBioBytes: 1024,
+  postBodyBytes: 4096,
   batchSize: 250,
   warmupIterations: 2,
   sampleIterations: 15,
@@ -93,6 +95,12 @@ export type QueryMetrics = Readonly<{
   aggregateDistinctMs: number;
   cachedExecuteMs: number;
   preparedExecuteMs: number;
+  subgraphFullMs: number;
+  subgraphApplicationProjectionMs: number;
+  subgraphSqlProjectionMs: number;
+  subgraphStressFullMs: number;
+  subgraphStressApplicationProjectionMs: number;
+  subgraphStressSqlProjectionMs: number;
   tenHopMs: number;
   recursiveHundredHopMs: number;
   recursiveThousandHopMs: number;
@@ -102,12 +110,14 @@ export type UserSeed = Readonly<{
   id: string;
   name: string;
   city: string;
+  bio: string;
 }>;
 
 export type PostSeed = Readonly<{
   id: string;
   authorId: string;
   title: string;
+  body: string;
 }>;
 
 export type FollowSeed = Readonly<{

@@ -36,6 +36,7 @@ export type {
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";
+export { defineSubgraphProject } from "./subgraph";
 
 // Store
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
