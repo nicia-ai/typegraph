@@ -6,8 +6,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type DynamicEdgeCollection,
-  type DynamicNodeCollection,
   getEdgeKinds,
   getNodeKinds,
   type Store,
@@ -208,17 +206,33 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
   });
 
-  describe("type assignability", () => {
-    it("getNodeCollection return type is assignable to DynamicNodeCollection", () => {
-      const collection: DynamicNodeCollection | undefined =
-        store.getNodeCollection("Person");
-      expect(collection).toBeDefined();
+  describe("dynamic collection round-trip", () => {
+    it("getNodeCollection resolves a node by plain string ID", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const collection = store.getNodeCollection("Person")!;
+
+      const plainId: string = alice.id;
+      const resolved = await collection.getById(plainId);
+      expect(resolved?.id).toBe(alice.id);
+
+      const batch = await collection.getByIds([plainId]);
+      expect(batch).toHaveLength(1);
     });
 
-    it("getEdgeCollection return type is assignable to DynamicEdgeCollection", () => {
-      const collection: DynamicEdgeCollection | undefined =
-        store.getEdgeCollection("worksAt");
-      expect(collection).toBeDefined();
+    it("getEdgeCollection resolves an edge by plain string ID", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(alice, bob, {
+        since: "2024",
+      });
+      const collection = store.getEdgeCollection("knows")!;
+
+      const plainId: string = edge.id;
+      const resolved = await collection.getById(plainId);
+      expect(resolved?.id).toBe(edge.id);
+
+      const batch = await collection.getByIds([plainId]);
+      expect(batch).toHaveLength(1);
     });
   });
 });

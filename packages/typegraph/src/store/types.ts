@@ -934,14 +934,52 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
 // ============================================================
 
 /**
+ * Replace branded `NodeId` / `EdgeId` with plain `string` in each
+ * method's parameter list. Return types are preserved unchanged.
+ *
+ * Handles three shapes:
+ * 1. Direct branded ID parameter → `string`
+ * 2. `readonly NodeId[]` / `readonly EdgeId[]` → `readonly string[]`
+ * 3. Branded IDs nested one level inside bulk-item object arrays
+ */
+type WidenBrandedIds<T> = {
+  readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R ?
+    (...args: { [P in keyof A]: UnbrandParam<A[P]> }) => R
+  : T[K];
+};
+
+/** Replace a branded ID with `string`, recursing one level into arrays. */
+type UnbrandParam<T> =
+  T extends NodeId<NodeType> ? string
+  : T extends EdgeId<AnyEdgeType> ? string
+  : T extends readonly NodeId<NodeType>[] ? readonly string[]
+  : T extends readonly EdgeId<AnyEdgeType>[] ? readonly string[]
+  : T extends readonly (infer Item extends Record<string, unknown>)[] ?
+    readonly UnbrandRecord<Item>[]
+  : T;
+
+/** Replace branded ID values in object properties (does not recurse into nested structures). */
+type UnbrandRecord<T extends Record<string, unknown>> = {
+  readonly [K in keyof T]: T[K] extends NodeId<NodeType> ? string
+  : T[K] extends EdgeId<AnyEdgeType> ? string
+  : T[K];
+};
+
+/**
  * A node collection with widened generics for runtime string-keyed access.
  *
  * This is the return type of `store.getNodeCollection(kind)`. It exposes
  * the full `NodeCollection` API but with `NodeType` and `string` constraint
  * names instead of the specific generic parameters, since the concrete type
  * is not known at compile time.
+ *
+ * ID parameters accept plain `string` instead of branded `NodeId<N>`, since
+ * the dynamic path typically receives IDs from edge metadata, snapshots,
+ * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = NodeCollection<NodeType, string>;
+export type DynamicNodeCollection = WidenBrandedIds<
+  NodeCollection<NodeType, string>
+>;
 
 /**
  * An edge collection with widened generics for runtime string-keyed access.
@@ -949,11 +987,13 @@ export type DynamicNodeCollection = NodeCollection<NodeType, string>;
  * This is the return type of `store.getEdgeCollection(kind)`. It exposes
  * the full `EdgeCollection` API but with `NodeType` endpoint types, since
  * the concrete from/to types are not known at compile time.
+ *
+ * ID parameters accept plain `string` instead of branded `EdgeId<E>`, since
+ * the dynamic path typically receives IDs from edge metadata, snapshots,
+ * or external input where the brand is not available.
  */
-export type DynamicEdgeCollection = EdgeCollection<
-  AnyEdgeType,
-  NodeType,
-  NodeType
+export type DynamicEdgeCollection = WidenBrandedIds<
+  EdgeCollection<AnyEdgeType, NodeType, NodeType>
 >;
 
 // ============================================================

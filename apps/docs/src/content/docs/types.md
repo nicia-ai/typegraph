@@ -236,11 +236,15 @@ Exposes the full `NodeCollection` API (`create`, `getById`, `find`, `count`,
 `createFromRecord`, etc.) but accepts `Record<string, unknown>` for schema-typed
 parameters since the concrete node type is not known at compile time.
 
+ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
+`bulkDelete`) accept plain `string` instead of branded `NodeId<N>`, since the
+dynamic path typically receives IDs from edge metadata, snapshots, or external
+input where the brand is not available.
+
 ```typescript
 import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
 
-// Equivalent to:
-type DynamicNodeCollection = NodeCollection<NodeType, string>;
+// Derived from NodeCollection<NodeType, string> with branded ID parameters widened to string
 ```
 
 ### `DynamicEdgeCollection`
@@ -250,11 +254,15 @@ An edge collection with widened generics for runtime string-keyed access via
 Exposes the full `EdgeCollection` API (`create`, `getById`, `find`, `count`,
 `findFrom`, `findTo`, etc.) with widened endpoint types.
 
+ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
+`bulkDelete`, `bulkUpsertById`) accept plain `string` instead of branded
+`EdgeId<E>`, since the dynamic path typically receives IDs from edge metadata,
+snapshots, or external input where the brand is not available.
+
 ```typescript
 import type { DynamicEdgeCollection } from "@nicia-ai/typegraph";
 
-// Equivalent to:
-type DynamicEdgeCollection = EdgeCollection<AnyEdgeType, NodeType, NodeType>;
+// Derived from EdgeCollection<AnyEdgeType, NodeType, NodeType> with branded ID parameters widened to string
 ```
 
 ## Subgraph Types

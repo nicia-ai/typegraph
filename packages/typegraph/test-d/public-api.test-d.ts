@@ -6,6 +6,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type DynamicEdgeCollection,
+  type DynamicNodeCollection,
   type Edge,
   type EdgeId,
   getEdgeKinds,
@@ -153,3 +155,38 @@ expectType<BatchableQuery<WorksAtEdge>>(
 expectError(store.edges.worksAt.batchFindFrom(companyRef));
 expectError(store.edges.worksAt.batchFindTo(personRef));
 expectError(store.edges.worksAt.batchFindByEndpoints(companyRef, personRef));
+
+// ============================================================
+// Dynamic collection — ID parameters accept plain string
+// ============================================================
+
+declare const dynamicNode: DynamicNodeCollection;
+declare const dynamicEdge: DynamicEdgeCollection;
+declare const plainId: string;
+
+// DynamicNodeCollection accepts plain string for all ID methods
+void dynamicNode.getById(plainId);
+void dynamicNode.getByIds([plainId]);
+void dynamicNode.update(plainId, {});
+void dynamicNode.delete(plainId);
+void dynamicNode.hardDelete(plainId);
+void dynamicNode.bulkDelete([plainId]);
+
+// DynamicEdgeCollection accepts plain string for all ID methods
+void dynamicEdge.getById(plainId);
+void dynamicEdge.getByIds([plainId]);
+void dynamicEdge.update(plainId, {});
+void dynamicEdge.delete(plainId);
+void dynamicEdge.hardDelete(plainId);
+void dynamicEdge.bulkDelete([plainId]);
+void dynamicEdge.bulkUpsertById([
+  { id: plainId, from: { kind: "X", id: "1" }, to: { kind: "Y", id: "2" } },
+]);
+
+// getNodeCollection / getEdgeCollection return the dynamic types
+expectAssignable<DynamicNodeCollection | undefined>(
+  store.getNodeCollection("Person"),
+);
+expectAssignable<DynamicEdgeCollection | undefined>(
+  store.getEdgeCollection("worksAt"),
+);
