@@ -888,6 +888,27 @@ export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 // Transaction Types
 // ============================================================
 
+// ============================================================
+// Graph Collection Maps
+// ============================================================
+
+/** Mapped type of all node collections for a graph. */
+export type GraphNodeCollections<G extends GraphDef> = {
+  [K in keyof G["nodes"] & string]-?: NodeCollection<
+    G["nodes"][K]["type"],
+    ConstraintNames<G["nodes"][K]>
+  >;
+};
+
+/** Mapped type of all edge collections for a graph. */
+export type GraphEdgeCollections<G extends GraphDef> = {
+  [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
+};
+
+// ============================================================
+// Transaction Context
+// ============================================================
+
 /**
  * A typed transaction context with collection API.
  *
@@ -899,22 +920,55 @@ export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
  * await store.transaction(async (tx) => {
  *   const person = await tx.nodes.Person.create({ name: "Alice" });
  *   const company = await tx.nodes.Company.create({ name: "Acme" });
- *   // Pass nodes directly - their kind and id properties are used
  *   await tx.edges.worksAt.create(person, company, { role: "Engineer" });
  * });
  * ```
  */
 export type TransactionContext<G extends GraphDef> = Readonly<{
-  /** Node collections for the transaction */
-  nodes: {
-    [K in keyof G["nodes"] & string]-?: NodeCollection<
-      G["nodes"][K]["type"],
-      ConstraintNames<G["nodes"][K]>
-    >;
-  };
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+}>;
 
-  /** Edge collections for the transaction */
-  edges: {
-    [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
-  };
+// ============================================================
+// Store Projection
+// ============================================================
+
+/**
+ * A type-level projection of a store's surface onto a subset of its
+ * node and edge collections.
+ *
+ * Node collections are projected with constraint names erased (`never`),
+ * so constraint-based methods like `findByConstraint` become uncallable.
+ * This is intentional: unique constraints are graph-registration-level
+ * details that differ between graphs sharing the same node types.
+ *
+ * @example
+ * ```typescript
+ * type CoreStore = StoreProjection<
+ *   typeof myGraph,
+ *   "Document" | "Chunk",
+ *   "hasChunk"
+ * >;
+ *
+ * async function ingestChunk(
+ *   store: CoreStore,
+ *   document: Node<typeof Document>,
+ *   text: string,
+ * ) {
+ *   const chunk = await store.nodes.Chunk.create({ text });
+ *   await store.edges.hasChunk.create(document, chunk);
+ *   return chunk;
+ * }
+ * ```
+ *
+ * Both `Store<G>` and `TransactionContext<G>` are structurally assignable
+ * to a `StoreProjection` whose keys are a subset of `G`.
+ */
+export type StoreProjection<
+  G extends GraphDef,
+  N extends keyof G["nodes"] & string = never,
+  E extends keyof G["edges"] & string = never,
+> = Readonly<{
+  nodes: { [K in N]-?: NodeCollection<G["nodes"][K]["type"], never> };
+  edges: Pick<GraphEdgeCollections<G>, E>;
 }>;
