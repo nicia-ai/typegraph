@@ -67,15 +67,14 @@ import {
   type SubgraphResult,
 } from "./subgraph";
 import {
-  type ConstraintNames,
+  type GraphEdgeCollections,
+  type GraphNodeCollections,
   type HookContext,
-  type NodeCollection,
   type OperationHookContext,
   type QueryOptions,
   type StoreHooks,
   type StoreOptions,
   type TransactionContext,
-  type TypedEdgeCollection,
 } from "./types";
 
 // ============================================================
@@ -122,19 +121,8 @@ export class Store<G extends GraphDef> {
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
   readonly #defaultTraversalExpansion: TraversalExpansion;
-  #nodeCollections:
-    | {
-        [K in keyof G["nodes"] & string]-?: NodeCollection<
-          G["nodes"][K]["type"],
-          ConstraintNames<G["nodes"][K]>
-        >;
-      }
-    | undefined;
-  #edgeCollections:
-    | {
-        [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
-      }
-    | undefined;
+  #nodeCollections: GraphNodeCollections<G> | undefined;
+  #edgeCollections: GraphEdgeCollections<G> | undefined;
 
   constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
     this.#graph = graph;
@@ -187,12 +175,7 @@ export class Store<G extends GraphDef> {
    * const people = await store.nodes.Person.find({ limit: 10 });
    * ```
    */
-  get nodes(): {
-    [K in keyof G["nodes"] & string]-?: NodeCollection<
-      G["nodes"][K]["type"],
-      ConstraintNames<G["nodes"][K]>
-    >;
-  } {
+  get nodes(): GraphNodeCollections<G> {
     if (this.#nodeCollections === undefined) {
       this.#nodeCollections = createNodeCollectionsProxy(
         this.#graph,
@@ -222,9 +205,7 @@ export class Store<G extends GraphDef> {
    * const edges = await store.edges.worksAt.findFrom({ kind: "Person", id: person.id });
    * ```
    */
-  get edges(): {
-    [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
-  } {
+  get edges(): GraphEdgeCollections<G> {
     if (this.#edgeCollections === undefined) {
       this.#edgeCollections = createEdgeCollectionsProxy(
         this.#graph,

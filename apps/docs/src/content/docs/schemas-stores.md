@@ -361,6 +361,38 @@ if (result.status === "initialized") {
 **Throws:** `MigrationError` if breaking changes are detected and
 `throwOnBreaking` is `true` (the default).
 
+## Store Projection
+
+### `StoreProjection<G, N, E>`
+
+A type-level utility that projects a store's collection surface onto a subset of node and
+edge keys. Use this to type reusable helpers that work with any store containing a shared
+subgraph.
+
+```typescript
+import type { StoreProjection } from "@nicia-ai/typegraph";
+
+type CoreStore = StoreProjection<
+  typeof myGraph,
+  "Document" | "Chunk",
+  "hasChunk"
+>;
+
+async function ingestChunk(store: CoreStore, document: Node<typeof Document>, text: string) {
+  const chunk = await store.nodes.Chunk.create({ text });
+  await store.edges.hasChunk.create(document, chunk);
+  return chunk;
+}
+```
+
+Both `Store<G>` and `TransactionContext<G>` are structurally assignable to a
+`StoreProjection` whose keys are a subset of `G`. Node constraint names are erased so the
+projection works across graphs that register the same node types with different unique
+constraints.
+
+See [Shared Subgraph Helpers](./multiple-graphs#shared-subgraph-helpers) for a full
+example with multiple graphs.
+
 ## Store API
 
 The store provides typed node and edge collections via `store.nodes.*` and `store.edges.*`.

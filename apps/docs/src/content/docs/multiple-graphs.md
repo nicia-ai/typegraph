@@ -347,6 +347,123 @@ if (orgSchemaResult.status === "migrated") {
 }
 ```
 
+## Shared Subgraph Helpers
+
+When multiple graphs share a common set of node and edge types, you can write reusable
+helpers that accept any store containing that shared subgraph. The `StoreProjection` utility
+type makes this type-safe without coupling to a specific graph definition.
+
+### Defining shared types and graphs
+
+Start with the shared node and edge types, then define the graphs that use them:
+
+```typescript
+import {
+  createStore,
+  defineNode,
+  defineEdge,
+  defineGraph,
+  type Node,
+  type StoreProjection,
+} from "@nicia-ai/typegraph";
+
+const Document = defineNode("Document", {
+  schema: z.object({ title: z.string() }),
+});
+
+const Chunk = defineNode("Chunk", {
+  schema: z.object({ text: z.string() }),
+});
+
+const Comment = defineNode("Comment", {
+  schema: z.object({ text: z.string() }),
+});
+
+const hasChunk = defineEdge("hasChunk", { from: [Document], to: [Chunk] });
+const aboutChunk = defineEdge("aboutChunk", { from: [Comment], to: [Chunk] });
+
+const reviewGraph = defineGraph({
+  id: "review",
+  nodes: {
+    Document: { type: Document },
+    Chunk: { type: Chunk },
+    Comment: { type: Comment },
+    Label: { type: Label },
+  },
+  edges: { hasChunk, aboutChunk, hasLabel },
+});
+
+const catalogGraph = defineGraph({
+  id: "catalog",
+  nodes: {
+    Document: {
+      type: Document,
+      unique: [{ name: "title_unique", fields: ["title"], scope: "kind", collation: "binary" }],
+    },
+    Chunk: { type: Chunk },
+    Comment: { type: Comment },
+    Category: { type: Category },
+  },
+  edges: { hasChunk, aboutChunk, inCategory },
+});
+```
+
+### Projecting a shared subgraph
+
+Define a projection against either graph — it picks only the shared keys:
+
+```typescript
+type CoreStore = StoreProjection<
+  typeof reviewGraph,
+  "Document" | "Chunk" | "Comment",
+  "hasChunk" | "aboutChunk"
+>;
+```
+
+### Writing a reusable helper
+
+```typescript
+async function addComment(
+  store: CoreStore,
+  chunk: Node<typeof Chunk>,
+  text: string,
+) {
+  const comment = await store.nodes.Comment.create({ text });
+  await store.edges.aboutChunk.create(comment, chunk);
+  return comment;
+}
+```
+
+### Using across different graphs
+
+The same `addComment` function works with any store whose graph includes the projected
+nodes and edges — even if the graphs diverge on other types or unique constraints:
+
+```typescript
+const reviewStore = createStore(reviewGraph, backend);
+const catalogStore = createStore(catalogGraph, backend);
+
+await addComment(reviewStore, chunk, "needs revision");
+await addComment(catalogStore, chunk, "good categorization");
+```
+
+The projection also works inside transactions — `TransactionContext<G>` is structurally
+assignable to `StoreProjection` for the same keys:
+
+```typescript
+await reviewStore.transaction(async (tx) => {
+  await addComment(tx, chunk, "transactional comment");
+});
+```
+
+### What the projection strips
+
+`StoreProjection` erases node constraint names, making constraint-based methods like
+`findByConstraint` uncallable through the projection. This is intentional: unique
+constraints are graph-registration-level details that typically differ between graphs
+sharing the same node types. If you need constraint access, type the helper against a
+specific `Store<G>` instead.
+
 ## Caveats
 
 **No cross-graph queries**: You cannot traverse from a node in one graph to a node in another. If you need this, consider:

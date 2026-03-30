@@ -13,17 +13,16 @@ import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
-  type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
   type Edge,
   type GetOrCreateAction,
+  type GraphEdgeCollections,
+  type GraphNodeCollections,
   type IfExistsMode,
   type Node,
-  type NodeCollection,
   type NodeGetOrCreateByConstraintOptions,
   type QueryOptions,
-  type TypedEdgeCollection,
   type UpdateNodeInput,
 } from "./types";
 
@@ -191,46 +190,33 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
   operations: NodeOperations,
-): {
-  [K in keyof G["nodes"] & string]-?: NodeCollection<
-    G["nodes"][K]["type"],
-    ConstraintNames<G["nodes"][K]>
-  >;
-} {
+): GraphNodeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific node types at compile time.
-  return new Proxy(
-    {} as unknown as {
-      [K in keyof G["nodes"] & string]-?: NodeCollection<
-        G["nodes"][K]["type"],
-        ConstraintNames<G["nodes"][K]>
-      >;
-    },
-    {
-      get: (_, kind: string) => {
-        if (!(kind in graph.nodes)) {
-          throw new KindNotFoundError(kind, "node");
-        }
+  return new Proxy({} as unknown as GraphNodeCollections<G>, {
+    get: (_, kind: string) => {
+      if (!(kind in graph.nodes)) {
+        throw new KindNotFoundError(kind, "node");
+      }
 
-        const cached = collectionCache.get(kind);
-        if (cached !== undefined) {
-          return cached;
-        }
+      const cached = collectionCache.get(kind);
+      if (cached !== undefined) {
+        return cached;
+      }
 
-        const collection = createNodeCollection({
-          graphId,
-          kind,
-          backend,
-          ...operations,
-        });
-        collectionCache.set(kind, collection);
-        return collection;
-      },
+      const collection = createNodeCollection({
+        graphId,
+        kind,
+        backend,
+        ...operations,
+      });
+      collectionCache.set(kind, collection);
+      return collection;
     },
-  );
+  });
 }
 
 /**
@@ -245,36 +231,31 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
   operations: EdgeOperations,
-): { [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]> } {
+): GraphEdgeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
   // The proxy dynamically returns typed collections for each key.
   // Type assertions are necessary because the proxy pattern doesn't preserve
   // the relationship between keys and their specific edge types at compile time.
-  return new Proxy(
-    {} as unknown as {
-      [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
-    },
-    {
-      get: (_, kind: string) => {
-        if (!(kind in graph.edges)) {
-          throw new KindNotFoundError(kind, "edge");
-        }
+  return new Proxy({} as unknown as GraphEdgeCollections<G>, {
+    get: (_, kind: string) => {
+      if (!(kind in graph.edges)) {
+        throw new KindNotFoundError(kind, "edge");
+      }
 
-        const cached = collectionCache.get(kind);
-        if (cached !== undefined) {
-          return cached;
-        }
+      const cached = collectionCache.get(kind);
+      if (cached !== undefined) {
+        return cached;
+      }
 
-        const collection = createEdgeCollection({
-          graphId,
-          kind,
-          backend,
-          ...operations,
-        });
-        collectionCache.set(kind, collection);
-        return collection;
-      },
+      const collection = createEdgeCollection({
+        graphId,
+        kind,
+        backend,
+        ...operations,
+      });
+      collectionCache.set(kind, collection);
+      return collection;
     },
-  );
+  });
 }
