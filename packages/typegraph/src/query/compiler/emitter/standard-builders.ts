@@ -629,10 +629,10 @@ export function buildStandardEmbeddingsCte(
   const { field, metric, minScore, queryEmbedding } = vectorPredicate;
 
   const fieldPath =
-    field.jsonPointer ? (field.jsonPointer as string)
-    : field.path.length > 1 && field.path[0] === "props" ?
+    field.jsonPointer ??
+    (field.path.length > 1 && field.path[0] === "props" ?
       `/${field.path.slice(1).join("/")}`
-    : `/${field.path.join("/")}`;
+    : `/${field.path.join("/")}`);
 
   const distanceExpr = dialect.vectorDistance(
     sql.raw("embedding"),

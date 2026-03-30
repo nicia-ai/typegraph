@@ -67,6 +67,8 @@ import {
   type SubgraphResult,
 } from "./subgraph";
 import {
+  type DynamicEdgeCollection,
+  type DynamicNodeCollection,
   type GraphEdgeCollections,
   type GraphNodeCollections,
   type HookContext,
@@ -217,6 +219,37 @@ export class Store<G extends GraphDef> {
     }
 
     return this.#edgeCollections;
+  }
+
+  // === Dynamic Collection Access ===
+
+  /**
+   * Returns the node collection for the given kind, or undefined if the kind
+   * is not registered in this graph.
+   *
+   * Use this for runtime string-keyed access when the kind is not known at
+   * compile time (e.g., iterating all kinds, resolving from edge metadata,
+   * dynamic admin UIs).
+   */
+  getNodeCollection(kind: string): DynamicNodeCollection | undefined {
+    if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
+    return this.nodes[
+      kind as keyof G["nodes"] & string
+    ] as unknown as DynamicNodeCollection;
+  }
+
+  /**
+   * Returns the edge collection for the given kind, or undefined if the kind
+   * is not registered in this graph.
+   *
+   * Use this for runtime string-keyed access when the kind is not known at
+   * compile time.
+   */
+  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
+    if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
+    return this.edges[
+      kind as keyof G["edges"] & string
+    ] as unknown as DynamicEdgeCollection;
   }
 
   /**
