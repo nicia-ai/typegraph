@@ -232,7 +232,7 @@ export class Store<G extends GraphDef> {
    * dynamic admin UIs).
    */
   getNodeCollection(kind: string): DynamicNodeCollection | undefined {
-    if (!(kind in this.#graph.nodes)) return undefined;
+    if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
     return this.nodes[
       kind as keyof G["nodes"] & string
     ] as unknown as DynamicNodeCollection;
@@ -246,7 +246,7 @@ export class Store<G extends GraphDef> {
    * compile time.
    */
   getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
-    if (!(kind in this.#graph.edges)) return undefined;
+    if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
     return this.edges[
       kind as keyof G["edges"] & string
     ] as unknown as DynamicEdgeCollection;

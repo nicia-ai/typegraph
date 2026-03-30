@@ -66,6 +66,12 @@ describe("getNodeCollection / getEdgeCollection", () => {
       expect(collection).toBeUndefined();
     });
 
+    it("returns undefined for inherited prototype keys", () => {
+      expect(store.getNodeCollection("toString")).toBeUndefined();
+      expect(store.getNodeCollection("constructor")).toBeUndefined();
+      expect(store.getNodeCollection("hasOwnProperty")).toBeUndefined();
+    });
+
     it("returned collection supports create and getById", async () => {
       const collection = store.getNodeCollection("Person")!;
       const node = await collection.create({ name: "Alice" });
@@ -125,6 +131,12 @@ describe("getNodeCollection / getEdgeCollection", () => {
       const collection = store.getEdgeCollection("hasPet");
 
       expect(collection).toBeUndefined();
+    });
+
+    it("returns undefined for inherited prototype keys", () => {
+      expect(store.getEdgeCollection("toString")).toBeUndefined();
+      expect(store.getEdgeCollection("constructor")).toBeUndefined();
+      expect(store.getEdgeCollection("hasOwnProperty")).toBeUndefined();
     });
 
     it("returned collection supports create and find", async () => {

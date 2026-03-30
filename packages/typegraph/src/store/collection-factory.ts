@@ -198,7 +198,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   // the relationship between keys and their specific node types at compile time.
   return new Proxy({} as unknown as GraphNodeCollections<G>, {
     get: (_, kind: string) => {
-      if (!(kind in graph.nodes)) {
+      if (!Object.hasOwn(graph.nodes, kind)) {
         throw new KindNotFoundError(kind, "node");
       }
 
@@ -239,7 +239,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   // the relationship between keys and their specific edge types at compile time.
   return new Proxy({} as unknown as GraphEdgeCollections<G>, {
     get: (_, kind: string) => {
-      if (!(kind in graph.edges)) {
+      if (!Object.hasOwn(graph.edges, kind)) {
         throw new KindNotFoundError(kind, "edge");
       }
 
