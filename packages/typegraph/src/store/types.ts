@@ -934,7 +934,7 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
 // ============================================================
 
 /**
- * Replace branded `NodeId<any>` / `EdgeId<any>` with plain `string` in each
+ * Replace branded `NodeId` / `EdgeId` with plain `string` in each
  * method's parameter list. Return types are preserved unchanged.
  *
  * Handles three shapes:
