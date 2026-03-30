@@ -958,7 +958,7 @@ type UnbrandParam<T> =
     ? readonly UnbrandRecord<Item>[]
   : T;
 
-/** Replace branded ID values in an object type (one level, no recursion). */
+/** Replace branded ID values in object properties (does not recurse into nested structures). */
 type UnbrandRecord<T extends Record<string, unknown>> = {
   readonly [K in keyof T]: T[K] extends NodeId<any> ? string
     : T[K] extends EdgeId<any> ? string
