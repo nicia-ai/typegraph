@@ -21,7 +21,7 @@
  */
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
-import { ConfigurationError } from "../../errors";
+import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
 import {
   type CreateVectorIndexParams,
@@ -103,6 +103,7 @@ const SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
 );
 
 type SerializedExecutionQueue = Readonly<{
+  dispose: () => void;
   runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
 }>;
 
@@ -115,12 +116,54 @@ const toEdgeRow = createEdgeRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toUniqueRow = createUniqueRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toSchemaVersionRow = createSchemaVersionRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 
+/** A shared promise that never settles — used to absorb post-dispose work. */
+const PENDING_FOREVER: Promise<never> = new Promise<never>(noop);
+
+function pendingForever<T>(): Promise<T> {
+  return PENDING_FOREVER as Promise<T>;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+function noop(): void {}
+
 function createSerializedExecutionQueue(): SerializedExecutionQueue {
   let tail: Promise<unknown> = Promise.resolve();
+  let disposed = false;
+
+  function isDisposed(): boolean {
+    return disposed;
+  }
 
   return {
-    async runExclusive<T>(task: () => Promise<T>): Promise<T> {
-      const runTask = async (): Promise<T> => task();
+    dispose() {
+      disposed = true;
+    },
+
+    runExclusive<T>(task: () => Promise<T>): Promise<T> {
+      if (isDisposed()) return Promise.reject(new BackendDisposedError());
+
+      // When disposed, runTask returns a never-settling promise so that no
+      // rejection propagates through the 7+ async wrappers between this
+      // queue and the store-level caller. A rejection here would become an
+      // unhandled rejection if the caller abandoned the promise during
+      // teardown — and JavaScript offers no way to `.catch()` a rejection
+      // at the bottom of a chain without every async wrapper above it also
+      // creating an independently-unhandled rejected promise.
+      //
+      // The tradeoff: an active caller whose operation was queued before
+      // dispose() will see a permanently-pending promise rather than a
+      // BackendDisposedError. Post-dispose submissions (the check above)
+      // still reject immediately since the caller actively holds that
+      // promise.
+      const runTask = async (): Promise<T> => {
+        if (isDisposed()) return pendingForever<T>();
+        try {
+          return await task();
+        } catch (error) {
+          if (isDisposed()) return pendingForever<T>();
+          throw error;
+        }
+      };
       const result = tail.then(runTask, runTask);
       tail = result.then(
         () => 0,
@@ -131,7 +174,7 @@ function createSerializedExecutionQueue(): SerializedExecutionQueue {
   };
 }
 
-async function runWithSerializedQueue<T>(
+function runWithSerializedQueue<T>(
   queue: SerializedExecutionQueue | undefined,
   task: () => Promise<T>,
 ): Promise<T> {
@@ -182,22 +225,22 @@ function createSqliteOperationBackend(
     tableNames,
   } = options;
 
-  async function execGet<T>(query: SQL): Promise<T | undefined> {
+  function execGet<T>(query: SQL): Promise<T | undefined> {
     return runWithSerializedQueue(serializedQueue, async () => {
       const result = db.get(query);
       return (result instanceof Promise ? await result : result) as T | undefined;
     });
   }
 
-  async function execAll<T>(query: SQL): Promise<T[]> {
+  function execAll<T>(query: SQL): Promise<T[]> {
     return runWithSerializedQueue(serializedQueue, async () => {
       const result = db.all(query);
       return (result instanceof Promise ? await result : result) as T[];
     });
   }
 
-  async function execRun(query: SQL): Promise<void> {
-    await runWithSerializedQueue(serializedQueue, async () => {
+  function execRun(query: SQL): Promise<void> {
+    return runWithSerializedQueue(serializedQueue, async () => {
       const result = db.run(query);
       if (result instanceof Promise) await result;
     });
@@ -405,9 +448,9 @@ export function createSqliteBackend(
       );
     },
 
-    async close(): Promise<void> {
-      // Drizzle doesn't expose a close method
-      // Users manage connection lifecycle themselves
+    close(): Promise<void> {
+      serializedQueue?.dispose();
+      return Promise.resolve();
     },
   };
 

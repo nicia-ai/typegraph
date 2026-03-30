@@ -161,6 +161,7 @@ export type {
 } from "./errors";
 export {
   // Error classes
+  BackendDisposedError,
   CardinalityError,
   CompilerInvariantError,
   ConfigurationError,
