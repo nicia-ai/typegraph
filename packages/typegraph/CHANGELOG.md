@@ -1,5 +1,15 @@
 # @nicia-ai/typegraph
 
+## 0.16.2
+
+### Patch Changes
+
+- [#73](https://github.com/nicia-ai/typegraph/pull/73) [`1c95d8e`](https://github.com/nicia-ai/typegraph/commit/1c95d8ec641442cecb38e00fab4c6d10eb162c2c) Thanks [@pdlug](https://github.com/pdlug)! - fix: dispose serialized execution queue on backend close to prevent unhandled rejections
+
+  When the SQLite backend's underlying database is destroyed while operations are still queued (e.g., during Cloudflare Workers test teardown), the serialized execution queue now properly disposes pending promises. Calling `backend.close()` signals the queue to suppress errors from in-flight tasks and reject new operations with `BackendDisposedError`.
+
+  Fixes [#72](https://github.com/nicia-ai/typegraph/issues/72)
+
 ## 0.16.1
 
 ### Patch Changes
