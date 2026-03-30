@@ -244,7 +244,7 @@ input where the brand is not available.
 ```typescript
 import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
 
-// Based on NodeCollection<NodeType, string> with ID parameters widened to string
+// Derived from NodeCollection<NodeType, string> with branded ID parameters widened to string
 ```
 
 ### `DynamicEdgeCollection`
@@ -262,7 +262,7 @@ snapshots, or external input where the brand is not available.
 ```typescript
 import type { DynamicEdgeCollection } from "@nicia-ai/typegraph";
 
-// Based on EdgeCollection<AnyEdgeType, NodeType, NodeType> with ID parameters widened to string
+// Derived from EdgeCollection<AnyEdgeType, NodeType, NodeType> with branded ID parameters widened to string
 ```
 
 ## Subgraph Types

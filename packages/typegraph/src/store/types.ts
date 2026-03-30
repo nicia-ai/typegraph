@@ -934,6 +934,38 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
 // ============================================================
 
 /**
+ * Replace branded `NodeId<any>` / `EdgeId<any>` with plain `string` in each
+ * method's parameter list. Return types are preserved unchanged.
+ *
+ * Handles three shapes:
+ * 1. Direct branded ID parameter → `string`
+ * 2. `readonly NodeId[]` / `readonly EdgeId[]` → `readonly string[]`
+ * 3. Branded IDs nested one level inside bulk-item object arrays
+ */
+type WidenBrandedIds<T> = {
+  readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? (...args: { [P in keyof A]: UnbrandParam<A[P]> }) => R
+    : T[K];
+};
+
+/** Replace a branded ID with `string`, recursing one level into arrays. */
+type UnbrandParam<T> =
+  T extends NodeId<any> ? string
+  : T extends EdgeId<any> ? string
+  : T extends readonly (NodeId<any>)[] ? readonly string[]
+  : T extends readonly (EdgeId<any>)[] ? readonly string[]
+  : T extends readonly (infer Item extends Record<string, unknown>)[]
+    ? readonly UnbrandRecord<Item>[]
+  : T;
+
+/** Replace branded ID values in an object type (one level, no recursion). */
+type UnbrandRecord<T extends Record<string, unknown>> = {
+  readonly [K in keyof T]: T[K] extends NodeId<any> ? string
+    : T[K] extends EdgeId<any> ? string
+    : T[K];
+};
+
+/**
  * A node collection with widened generics for runtime string-keyed access.
  *
  * This is the return type of `store.getNodeCollection(kind)`. It exposes
@@ -945,28 +977,9 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = Omit<
-  NodeCollection<NodeType, string>,
-  "getById" | "getByIds" | "update" | "delete" | "hardDelete" | "bulkDelete"
-> &
-  Readonly<{
-    getById: (
-      id: string,
-      options?: QueryOptions,
-    ) => Promise<Node<NodeType> | undefined>;
-    getByIds: (
-      ids: readonly string[],
-      options?: QueryOptions,
-    ) => Promise<readonly (Node<NodeType> | undefined)[]>;
-    update: (
-      id: string,
-      props: Partial<z.input<NodeType["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
-    ) => Promise<Node<NodeType>>;
-    delete: (id: string) => Promise<void>;
-    hardDelete: (id: string) => Promise<void>;
-    bulkDelete: (ids: readonly string[]) => Promise<void>;
-  }>;
+export type DynamicNodeCollection = WidenBrandedIds<
+  NodeCollection<NodeType, string>
+>;
 
 /**
  * An edge collection with widened generics for runtime string-keyed access.
@@ -979,46 +992,9 @@ export type DynamicNodeCollection = Omit<
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicEdgeCollection = Omit<
-  EdgeCollection<AnyEdgeType, NodeType, NodeType>,
-  | "getById"
-  | "getByIds"
-  | "update"
-  | "delete"
-  | "hardDelete"
-  | "bulkDelete"
-  | "bulkUpsertById"
-> &
-  Readonly<{
-    getById: (
-      id: string,
-      options?: QueryOptions,
-    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType> | undefined>;
-    getByIds: (
-      ids: readonly string[],
-      options?: QueryOptions,
-    ) => Promise<
-      readonly (Edge<AnyEdgeType, NodeType, NodeType> | undefined)[]
-    >;
-    update: (
-      id: string,
-      props: Partial<z.input<AnyEdgeType["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
-    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType>>;
-    delete: (id: string) => Promise<void>;
-    hardDelete: (id: string) => Promise<void>;
-    bulkDelete: (ids: readonly string[]) => Promise<void>;
-    bulkUpsertById: (
-      items: readonly Readonly<{
-        id: string;
-        from: NodeRef<NodeType>;
-        to: NodeRef<NodeType>;
-        props?: z.input<AnyEdgeType["schema"]>;
-        validFrom?: string;
-        validTo?: string;
-      }>[],
-    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType>[]>;
-  }>;
+export type DynamicEdgeCollection = WidenBrandedIds<
+  EdgeCollection<AnyEdgeType, NodeType, NodeType>
+>;
 
 // ============================================================
 // Store Projection
