@@ -940,8 +940,33 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
  * the full `NodeCollection` API but with `NodeType` and `string` constraint
  * names instead of the specific generic parameters, since the concrete type
  * is not known at compile time.
+ *
+ * ID parameters accept plain `string` instead of branded `NodeId<N>`, since
+ * the dynamic path typically receives IDs from edge metadata, snapshots,
+ * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = NodeCollection<NodeType, string>;
+export type DynamicNodeCollection = Omit<
+  NodeCollection<NodeType, string>,
+  "getById" | "getByIds" | "update" | "delete" | "hardDelete" | "bulkDelete"
+> &
+  Readonly<{
+    getById: (
+      id: string,
+      options?: QueryOptions,
+    ) => Promise<Node<NodeType> | undefined>;
+    getByIds: (
+      ids: readonly string[],
+      options?: QueryOptions,
+    ) => Promise<readonly (Node<NodeType> | undefined)[]>;
+    update: (
+      id: string,
+      props: Partial<z.input<NodeType["schema"]>>,
+      options?: Readonly<{ validTo?: string }>,
+    ) => Promise<Node<NodeType>>;
+    delete: (id: string) => Promise<void>;
+    hardDelete: (id: string) => Promise<void>;
+    bulkDelete: (ids: readonly string[]) => Promise<void>;
+  }>;
 
 /**
  * An edge collection with widened generics for runtime string-keyed access.
@@ -949,12 +974,51 @@ export type DynamicNodeCollection = NodeCollection<NodeType, string>;
  * This is the return type of `store.getEdgeCollection(kind)`. It exposes
  * the full `EdgeCollection` API but with `NodeType` endpoint types, since
  * the concrete from/to types are not known at compile time.
+ *
+ * ID parameters accept plain `string` instead of branded `EdgeId<E>`, since
+ * the dynamic path typically receives IDs from edge metadata, snapshots,
+ * or external input where the brand is not available.
  */
-export type DynamicEdgeCollection = EdgeCollection<
-  AnyEdgeType,
-  NodeType,
-  NodeType
->;
+export type DynamicEdgeCollection = Omit<
+  EdgeCollection<AnyEdgeType, NodeType, NodeType>,
+  | "getById"
+  | "getByIds"
+  | "update"
+  | "delete"
+  | "hardDelete"
+  | "bulkDelete"
+  | "bulkUpsertById"
+> &
+  Readonly<{
+    getById: (
+      id: string,
+      options?: QueryOptions,
+    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType> | undefined>;
+    getByIds: (
+      ids: readonly string[],
+      options?: QueryOptions,
+    ) => Promise<
+      readonly (Edge<AnyEdgeType, NodeType, NodeType> | undefined)[]
+    >;
+    update: (
+      id: string,
+      props: Partial<z.input<AnyEdgeType["schema"]>>,
+      options?: Readonly<{ validTo?: string }>,
+    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType>>;
+    delete: (id: string) => Promise<void>;
+    hardDelete: (id: string) => Promise<void>;
+    bulkDelete: (ids: readonly string[]) => Promise<void>;
+    bulkUpsertById: (
+      items: readonly Readonly<{
+        id: string;
+        from: NodeRef<NodeType>;
+        to: NodeRef<NodeType>;
+        props?: z.input<AnyEdgeType["schema"]>;
+        validFrom?: string;
+        validTo?: string;
+      }>[],
+    ) => Promise<Edge<AnyEdgeType, NodeType, NodeType>[]>;
+  }>;
 
 // ============================================================
 // Store Projection

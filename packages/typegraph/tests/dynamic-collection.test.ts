@@ -220,5 +220,33 @@ describe("getNodeCollection / getEdgeCollection", () => {
         store.getEdgeCollection("worksAt");
       expect(collection).toBeDefined();
     });
+
+    it("DynamicNodeCollection accepts plain string IDs", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const collection = store.getNodeCollection("Person")!;
+
+      const plainId: string = alice.id;
+      const resolved = await collection.getById(plainId);
+      expect(resolved?.id).toBe(alice.id);
+
+      const batch = await collection.getByIds([plainId]);
+      expect(batch).toHaveLength(1);
+    });
+
+    it("DynamicEdgeCollection accepts plain string IDs", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(alice, bob, {
+        since: "2024",
+      });
+      const collection = store.getEdgeCollection("knows")!;
+
+      const plainId: string = edge.id;
+      const resolved = await collection.getById(plainId);
+      expect(resolved?.id).toBe(edge.id);
+
+      const batch = await collection.getByIds([plainId]);
+      expect(batch).toHaveLength(1);
+    });
   });
 });
