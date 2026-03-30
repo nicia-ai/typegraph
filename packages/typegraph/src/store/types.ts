@@ -943,26 +943,26 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
  * 3. Branded IDs nested one level inside bulk-item object arrays
  */
 type WidenBrandedIds<T> = {
-  readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R
-    ? (...args: { [P in keyof A]: UnbrandParam<A[P]> }) => R
-    : T[K];
+  readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R ?
+    (...args: { [P in keyof A]: UnbrandParam<A[P]> }) => R
+  : T[K];
 };
 
 /** Replace a branded ID with `string`, recursing one level into arrays. */
 type UnbrandParam<T> =
-  T extends NodeId<any> ? string
-  : T extends EdgeId<any> ? string
-  : T extends readonly (NodeId<any>)[] ? readonly string[]
-  : T extends readonly (EdgeId<any>)[] ? readonly string[]
-  : T extends readonly (infer Item extends Record<string, unknown>)[]
-    ? readonly UnbrandRecord<Item>[]
+  T extends NodeId<NodeType> ? string
+  : T extends EdgeId<AnyEdgeType> ? string
+  : T extends readonly NodeId<NodeType>[] ? readonly string[]
+  : T extends readonly EdgeId<AnyEdgeType>[] ? readonly string[]
+  : T extends readonly (infer Item extends Record<string, unknown>)[] ?
+    readonly UnbrandRecord<Item>[]
   : T;
 
 /** Replace branded ID values in object properties (does not recurse into nested structures). */
 type UnbrandRecord<T extends Record<string, unknown>> = {
-  readonly [K in keyof T]: T[K] extends NodeId<any> ? string
-    : T[K] extends EdgeId<any> ? string
-    : T[K];
+  readonly [K in keyof T]: T[K] extends NodeId<NodeType> ? string
+  : T[K] extends EdgeId<AnyEdgeType> ? string
+  : T[K];
 };
 
 /**
