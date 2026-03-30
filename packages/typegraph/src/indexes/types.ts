@@ -169,7 +169,10 @@ export type IndexFieldInput<T> =
   | JsonPointer;
 
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
-  fields: readonly IndexFieldInput<z.infer<N["schema"]>>[];
+  fields: readonly [
+    IndexFieldInput<z.infer<N["schema"]>>,
+    ...IndexFieldInput<z.infer<N["schema"]>>[],
+  ];
   coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
   unique?: boolean | undefined;
   name?: string | undefined;
@@ -180,7 +183,10 @@ export type NodeIndexConfig<N extends NodeType> = Readonly<{
 export type EdgeIndexDirection = "out" | "in" | "none";
 
 export type EdgeIndexConfig<E extends AnyEdgeType> = Readonly<{
-  fields: readonly IndexFieldInput<z.infer<E["schema"]>>[];
+  fields: readonly [
+    IndexFieldInput<z.infer<E["schema"]>>,
+    ...IndexFieldInput<z.infer<E["schema"]>>[],
+  ];
   coveringFields?: readonly IndexFieldInput<z.infer<E["schema"]>>[] | undefined;
   unique?: boolean | undefined;
   name?: string | undefined;

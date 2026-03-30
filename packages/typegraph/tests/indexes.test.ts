@@ -182,6 +182,7 @@ describe("indexes", () => {
   it("throws when fields array is empty", () => {
     expect(() => {
       defineNodeIndex(Person, {
+        // @ts-expect-error Empty fields should be a type error
         fields: [],
       });
     }).toThrow(/must not be empty/);
