@@ -192,7 +192,11 @@ export {
 // Store
 // ============================================================
 
-export type { Store } from "./store";
+export type {
+  SchemaManagerOptions,
+  SchemaValidationResult,
+  Store,
+} from "./store";
 export { createStore, createStoreWithSchema } from "./store";
 export type {
   AnyEdge,
