@@ -211,6 +211,8 @@ export type {
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
+  DynamicEdgeCollection,
+  DynamicNodeCollection,
   Edge,
   EdgeCollection,
   EdgeFindByEndpointsOptions,

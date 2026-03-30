@@ -930,6 +930,33 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
 }>;
 
 // ============================================================
+// Dynamic Collection Types (widened for runtime dispatch)
+// ============================================================
+
+/**
+ * A node collection with widened generics for runtime string-keyed access.
+ *
+ * This is the return type of `store.getNodeCollection(kind)`. It exposes
+ * the full `NodeCollection` API but with `NodeType` and `string` constraint
+ * names instead of the specific generic parameters, since the concrete type
+ * is not known at compile time.
+ */
+export type DynamicNodeCollection = NodeCollection<NodeType, string>;
+
+/**
+ * An edge collection with widened generics for runtime string-keyed access.
+ *
+ * This is the return type of `store.getEdgeCollection(kind)`. It exposes
+ * the full `EdgeCollection` API but with `NodeType` endpoint types, since
+ * the concrete from/to types are not known at compile time.
+ */
+export type DynamicEdgeCollection = EdgeCollection<
+  AnyEdgeType,
+  NodeType,
+  NodeType
+>;
+
+// ============================================================
 // Store Projection
 // ============================================================
 

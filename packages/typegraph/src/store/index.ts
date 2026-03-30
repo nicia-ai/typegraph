@@ -3,6 +3,8 @@ export {
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
+  type DynamicEdgeCollection,
+  type DynamicNodeCollection,
   type Edge,
   type EdgeCollection,
   type EdgeFindByEndpointsOptions,
