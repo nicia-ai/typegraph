@@ -681,6 +681,34 @@ export class CompilerInvariantError extends TypeGraphError {
 }
 
 // ============================================================
+// Lifecycle Errors (category: "system")
+// ============================================================
+
+/**
+ * Thrown when an operation is attempted on a backend that has been disposed.
+ *
+ * This typically occurs during runtime teardown — for example, when a
+ * Cloudflare Workers test runner resets Durable Object storage while
+ * the TypeGraph backend still has queued operations.
+ */
+export class BackendDisposedError extends TypeGraphError {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "Backend has been disposed — the underlying database connection is no longer available",
+      "BACKEND_DISPOSED",
+      {
+        category: "system",
+        suggestion:
+          "Ensure all store operations complete before calling backend.close(). " +
+          "In test environments, await store teardown before resetting the database.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "BackendDisposedError";
+  }
+}
+
+// ============================================================
 // Utility Functions
 // ============================================================
 

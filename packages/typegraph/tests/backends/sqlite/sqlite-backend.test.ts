@@ -11,12 +11,19 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, subClassOf } from "../../../src";
+import {
+  BackendDisposedError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  subClassOf,
+} from "../../../src";
 import { tables } from "../../../src/backend/drizzle/schema/sqlite";
 import {
   createSqliteBackend,
   generateSqliteDDL,
 } from "../../../src/backend/sqlite";
+import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
@@ -495,6 +502,51 @@ describe("SQLite Backend - Transaction Modes", () => {
     await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
       /cannot return a promise/i,
     );
+  });
+});
+
+// ============================================================
+// Backend Dispose / Close Tests
+// ============================================================
+
+describe("SQLite Backend - close() disposes serialized queue", () => {
+  it("throws BackendDisposedError for operations after close()", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const store = createStore(testGraph, backend);
+
+    await store.nodes.Person.create({ name: "Alice" });
+    await backend.close();
+
+    await expect(store.nodes.Person.create({ name: "Bob" })).rejects.toThrow(
+      BackendDisposedError,
+    );
+  });
+
+  it("does not produce unhandled rejections for in-flight operations on close()", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const store = createStore(testGraph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+
+    // Queue operations and abandon the returned promises — simulates a
+    // caller that is gone during teardown (e.g. Cloudflare DO reset).
+    // If post-dispose errors propagate, Vitest treats the unhandled
+    // rejections as test failures.
+    void store.nodes.Person.create({ name: "Bob" });
+    void store.nodes.Person.create({ name: "Charlie" });
+
+    await backend.close();
+
+    // Flush microtasks so queued tasks execute against the closed backend
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50);
+    });
+  });
+
+  it("close() is idempotent", async () => {
+    const { backend } = createLocalSqliteBackend();
+
+    await backend.close();
+    await backend.close();
   });
 });
 

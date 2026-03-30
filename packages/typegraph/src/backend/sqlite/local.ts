@@ -181,11 +181,11 @@ export function createLocalSqliteBackend(
   });
   let isClosed = false;
 
-  function close(): Promise<void> {
-    if (isClosed) return Promise.resolve();
+  async function close(): Promise<void> {
+    if (isClosed) return;
     isClosed = true;
+    await backend.close();
     sqlite.close();
-    return Promise.resolve();
   }
 
   const managedBackend: GraphBackend = { ...backend, close };
