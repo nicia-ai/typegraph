@@ -451,6 +451,15 @@ export type GraphBackend = Readonly<{
    */
   clearGraph: (graphId: string) => Promise<void>;
 
+  /**
+   * Creates the base TypeGraph tables if they don't already exist.
+   *
+   * Called automatically by `createStoreWithSchema()` when a fresh database
+   * is detected. Users who manage DDL themselves via `createStore()` never
+   * hit this path.
+   */
+  bootstrapTables?: () => Promise<void>;
+
   // === Query Execution ===
   execute: <T>(query: SQL) => Promise<readonly T[]>;
 

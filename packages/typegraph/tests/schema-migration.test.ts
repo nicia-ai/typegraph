@@ -7,7 +7,9 @@
  * - Auto-migration for safe changes
  * - Error reporting for breaking changes
  */
-import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -17,6 +19,8 @@ import {
   defineNode,
   MigrationError,
 } from "../src";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import type { GraphBackend } from "../src/backend/types";
 import type { MigrationHookContext } from "../src/schema";
 import {
   ensureSchema,
@@ -547,5 +551,75 @@ describe("Migration Hooks", () => {
     });
 
     expect(order).toEqual(["before", "after"]);
+  });
+});
+
+// ============================================================
+// Auto-Bootstrap Tests
+// ============================================================
+
+describe("Auto-Bootstrap Tables", () => {
+  const backendsToClose: GraphBackend[] = [];
+
+  afterEach(async () => {
+    const current = backendsToClose.splice(0);
+    await Promise.all(current.map((backend) => backend.close()));
+  });
+
+  function createBackendWithoutTables(): {
+    backend: GraphBackend;
+    sqlite: Database.Database;
+  } {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+    });
+    const managed: GraphBackend = {
+      ...backend,
+      close() {
+        sqlite.close();
+        return Promise.resolve();
+      },
+    };
+    backendsToClose.push(managed);
+    return { backend: managed, sqlite };
+  }
+
+  it("createStoreWithSchema auto-creates tables on a fresh database", async () => {
+    const { backend } = createBackendWithoutTables();
+    const graph = createGraphV1();
+
+    const [store, result] = await createStoreWithSchema(graph, backend);
+
+    expect(result.status).toBe("initialized");
+    expect((result as { version: number }).version).toBe(1);
+
+    // Store should be fully functional after bootstrap
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    expect(alice).toBeDefined();
+    expect(alice.id).toBeDefined();
+  });
+
+  it("ensureSchema auto-creates tables on a fresh database", async () => {
+    const { backend } = createBackendWithoutTables();
+    const graph = createGraphV1();
+
+    const result = await ensureSchema(backend, graph);
+
+    expect(result.status).toBe("initialized");
+  });
+
+  it("does not re-bootstrap when tables already exist", async () => {
+    const { backend } = createBackendWithoutTables();
+    const graph = createGraphV1();
+
+    // First call bootstraps
+    const [, first] = await createStoreWithSchema(graph, backend);
+    expect(first.status).toBe("initialized");
+
+    // Second call finds existing schema
+    const [, second] = await createStoreWithSchema(graph, backend);
+    expect(second.status).toBe("unchanged");
   });
 });

@@ -55,6 +55,21 @@ function parseSerializedSchema(json: string): SerializedSchema {
 }
 
 // ============================================================
+// Helpers
+// ============================================================
+
+const MISSING_TABLE_PATTERNS = [
+  "no such table", // SQLite
+  "does not exist", // PostgreSQL ("relation ... does not exist")
+  "SQLITE_ERROR", // D1 / Durable Objects error code
+];
+
+function isMissingTableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return MISSING_TABLE_PATTERNS.some((pattern) => message.includes(pattern));
+}
+
+// ============================================================
 // Types
 // ============================================================
 
@@ -128,8 +143,20 @@ export async function ensureSchema<G extends GraphDef>(
   const autoMigrate = options?.autoMigrate ?? true;
   const throwOnBreaking = options?.throwOnBreaking ?? true;
 
-  // Get the active schema from the database
-  const activeSchema = await backend.getActiveSchema(graph.id);
+  // Get the active schema from the database.
+  // On a fresh database the base tables may not exist yet. If
+  // bootstrapTables is available, create them and retry.
+  let activeSchema: SchemaVersionRow | undefined;
+  try {
+    activeSchema = await backend.getActiveSchema(graph.id);
+  } catch (error) {
+    if (backend.bootstrapTables && isMissingTableError(error)) {
+      await backend.bootstrapTables();
+      activeSchema = await backend.getActiveSchema(graph.id);
+    } else {
+      throw error;
+    }
+  }
 
   if (!activeSchema) {
     // No schema exists - initialize with version 1

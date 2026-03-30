@@ -19,7 +19,7 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import { getTableName, type SQL } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { SqlTableNames } from "../../query/compiler/schema";
 import {
@@ -36,6 +36,7 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
+import { generatePostgresDDL } from "./ddl";
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
@@ -188,6 +189,13 @@ export function createPostgresBackend(
 
   const backend: GraphBackend = {
     ...operations,
+
+    async bootstrapTables(): Promise<void> {
+      const statements = generatePostgresDDL(tables);
+      for (const statement of statements) {
+        await db.execute(sql.raw(statement));
+      }
+    },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {
       await backend.transaction(async (txBackend) => {
