@@ -254,7 +254,7 @@ const store = createStore(graph, backend);
 |----------|-----------------|----------|
 | `createLocalSqliteBackend` | Automatic | Quick start, development, tests |
 | `createStore` + manual migration | None | When you manage migrations externally |
-| `createStoreWithSchema` | Validates & auto-migrates | **Recommended for production** |
+| `createStoreWithSchema` | Auto-creates tables, validates & auto-migrates | **Recommended for production** |
 
 For production, use `createStoreWithSchema` to validate and auto-apply safe schema changes:
 

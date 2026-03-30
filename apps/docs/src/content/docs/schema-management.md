@@ -34,9 +34,10 @@ safe migrations, and runtime introspection.
 
 When you create a store with `createStoreWithSchema()`, TypeGraph:
 
-1. Serializes your graph definition to JSON
-2. Compares it with the stored schema (if any)
-3. Returns the result so you can act on it
+1. Creates the base tables if the database is fresh (auto-bootstrap)
+2. Serializes your graph definition to JSON
+3. Compares it with the stored schema (if any)
+4. Returns the result so you can act on it
 
 ## Schema Lifecycle
 

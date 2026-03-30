@@ -40,23 +40,30 @@ For full control over the database connection:
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
-import { createStore } from "@nicia-ai/typegraph";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 // Create and configure the database
 const sqlite = new Database("app.db");
 sqlite.pragma("journal_mode = WAL"); // Recommended for performance
 sqlite.pragma("foreign_keys = ON");
 
-// Run TypeGraph migrations
-sqlite.exec(generateSqliteMigrationSQL());
-
 // Create Drizzle instance and backend
 const db = drizzle(sqlite);
 const backend = createSqliteBackend(db);
-const store = createStore(graph, backend);
+
+// createStoreWithSchema auto-creates tables on first run
+const [store] = await createStoreWithSchema(graph, backend);
 
 // Clean up when done
 process.on("exit", () => sqlite.close());
+```
+
+If you need to run DDL yourself (e.g. via a migration tool), use
+`generateSqliteMigrationSQL()` with `createStore()` instead:
+
+```typescript
+sqlite.exec(generateSqliteMigrationSQL());
+const store = createStore(graph, backend);
 ```
 
 ### SQLite with Vector Search
@@ -124,8 +131,8 @@ or when you need advanced features like pgvector.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
-import { createStore } from "@nicia-ai/typegraph";
+import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 // Create connection pool
 const pool = new Pool({
@@ -133,12 +140,20 @@ const pool = new Pool({
   max: 20, // Maximum connections
 });
 
-// Run TypeGraph migrations
-await pool.query(generatePostgresMigrationSQL());
-
 // Create Drizzle instance and backend
 const db = drizzle(pool);
 const backend = createPostgresBackend(db);
+
+// createStoreWithSchema auto-creates tables on first run
+const [store] = await createStoreWithSchema(graph, backend);
+```
+
+If you manage DDL externally, use `generatePostgresMigrationSQL()` with `createStore()`:
+
+```typescript
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+
+await pool.query(generatePostgresMigrationSQL());
 const store = createStore(graph, backend);
 ```
 
@@ -241,21 +256,27 @@ import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
 
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 
+Use `createStoreWithSchema()` to automatically create tables on a fresh D1
+database and manage schema versions across deployments:
+
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
-import { createStore } from "@nicia-ai/typegraph";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 export default {
   async fetch(request: Request, env: Env) {
     const db = drizzle(env.DB);
     const backend = createSqliteBackend(db);
-    const store = createStore(graph, backend);
+    const [store] = await createStoreWithSchema(graph, backend);
 
     // Use store...
   },
 };
 ```
+
+If you prefer to manage DDL yourself, use `createStore()` with manual migrations
+instead.
 
 **Important:** D1 does not support transactions. See [Limitations](/limitations) for details.
 

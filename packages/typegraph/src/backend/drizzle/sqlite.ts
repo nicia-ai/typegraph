@@ -38,6 +38,7 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
+import { generateSqliteDDL } from "./ddl";
 import { createCommonOperationBackend } from "./operation-backend-core";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
@@ -333,6 +334,14 @@ export function createSqliteBackend(
 
   const backend: GraphBackend = {
     ...operations,
+
+    bootstrapTables(): Promise<void> {
+      const statements = generateSqliteDDL(tables);
+      for (const statement of statements) {
+        db.run(sql.raw(statement));
+      }
+      return Promise.resolve();
+    },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {
       await backend.transaction(async (txBackend) => {
