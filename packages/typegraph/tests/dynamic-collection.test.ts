@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -10,6 +10,7 @@ import {
   type DynamicNodeCollection,
   getEdgeKinds,
   getNodeKinds,
+  type Store,
 } from "../src";
 import { createTestBackend } from "./test-utils";
 
@@ -45,29 +46,27 @@ const graph = defineGraph({
 });
 
 describe("getNodeCollection / getEdgeCollection", () => {
+  let store: Store<typeof graph>;
+
+  beforeEach(() => {
+    const backend = createTestBackend();
+    store = createStore(graph, backend);
+  });
+
   describe("getNodeCollection", () => {
     it("returns a collection for a registered node kind", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getNodeCollection("Person");
 
       expect(collection).toBeDefined();
     });
 
     it("returns undefined for an unregistered node kind", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getNodeCollection("Ghost");
 
       expect(collection).toBeUndefined();
     });
 
     it("returned collection supports create and getById", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getNodeCollection("Person")!;
       const node = await collection.create({ name: "Alice" });
 
@@ -80,9 +79,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports find and count", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getNodeCollection("Company")!;
       await collection.create({ name: "Acme", industry: "Tech" });
       await collection.create({ name: "Globex", industry: "Manufacturing" });
@@ -95,9 +91,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("works when iterating all node kinds", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       await store.nodes.Person.create({ name: "Alice" });
       await store.nodes.Person.create({ name: "Bob" });
       await store.nodes.Company.create({ name: "Acme", industry: "Tech" });
@@ -114,9 +107,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports createFromRecord", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getNodeCollection("Person")!;
       const node = await collection.createFromRecord({ name: "Runtime Data" });
 
@@ -126,27 +116,18 @@ describe("getNodeCollection / getEdgeCollection", () => {
 
   describe("getEdgeCollection", () => {
     it("returns a collection for a registered edge kind", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getEdgeCollection("worksAt");
 
       expect(collection).toBeDefined();
     });
 
     it("returns undefined for an unregistered edge kind", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection = store.getEdgeCollection("hasPet");
 
       expect(collection).toBeUndefined();
     });
 
     it("returned collection supports create and find", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const acme = await store.nodes.Company.create({
         name: "Acme",
@@ -165,9 +146,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("returned collection supports count", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
 
@@ -179,9 +157,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("works when iterating all edge kinds", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
       const acme = await store.nodes.Company.create({
@@ -205,9 +180,6 @@ describe("getNodeCollection / getEdgeCollection", () => {
     });
 
     it("resolves a node from edge metadata via getNodeCollection", async () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const acme = await store.nodes.Company.create({
         name: "Acme",
@@ -226,18 +198,12 @@ describe("getNodeCollection / getEdgeCollection", () => {
 
   describe("type assignability", () => {
     it("getNodeCollection return type is assignable to DynamicNodeCollection", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection: DynamicNodeCollection | undefined =
         store.getNodeCollection("Person");
       expect(collection).toBeDefined();
     });
 
     it("getEdgeCollection return type is assignable to DynamicEdgeCollection", () => {
-      const backend = createTestBackend();
-      const store = createStore(graph, backend);
-
       const collection: DynamicEdgeCollection | undefined =
         store.getEdgeCollection("worksAt");
       expect(collection).toBeDefined();

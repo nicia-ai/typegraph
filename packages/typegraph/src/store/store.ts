@@ -230,26 +230,9 @@ export class Store<G extends GraphDef> {
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time (e.g., iterating all kinds, resolving from edge metadata,
    * dynamic admin UIs).
-   *
-   * @example
-   * ```typescript
-   * // Count all node kinds
-   * for (const kind of getNodeKinds(graph)) {
-   *   const collection = store.getNodeCollection(kind);
-   *   if (collection) console.log(kind, await collection.count());
-   * }
-   *
-   * // Resolve a node from edge metadata
-   * const collection = store.getNodeCollection(edge.fromKind);
-   * const node = await collection?.getById(edge.fromId);
-   * ```
    */
   getNodeCollection(kind: string): DynamicNodeCollection | undefined {
     if (!(kind in this.#graph.nodes)) return undefined;
-    // The proxy returns a fully functional NodeCollection<N, CN> — we widen
-    // the generic parameters to their base types for runtime dispatch.
-    // The `unknown` intermediate cast is required because NodeCollection is
-    // contravariant on the schema input type (create/update accept props).
     return this.nodes[
       kind as keyof G["nodes"] & string
     ] as unknown as DynamicNodeCollection;
@@ -261,18 +244,6 @@ export class Store<G extends GraphDef> {
    *
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time.
-   *
-   * @example
-   * ```typescript
-   * // Snapshot all edges
-   * for (const kind of getEdgeKinds(graph)) {
-   *   const collection = store.getEdgeCollection(kind);
-   *   if (collection) {
-   *     const edges = await collection.find({ limit: 10_000 });
-   *     snapshot.push(...edges);
-   *   }
-   * }
-   * ```
    */
   getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
     if (!(kind in this.#graph.edges)) return undefined;
