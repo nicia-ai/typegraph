@@ -771,6 +771,7 @@ import {
  *
  * This is the recommended way to create a store in production.
  * It automatically:
+ * - Creates base tables on a fresh database (if the backend supports bootstrapTables)
  * - Initializes the schema on first run (version 1)
  * - Auto-migrates safe changes (additive changes)
  * - Throws MigrationError for breaking changes
