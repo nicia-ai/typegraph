@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.8",
-    "@astrojs/cloudflare": "^13.1.4",
+    "@astrojs/cloudflare": "^13.1.5",
     "@astrojs/starlight": "^0.38.2",
     "@astrojs/starlight-tailwind": "^5.0.0",
-    "astro": "^6.1.0",
+    "astro": "^6.1.2",
     "starlight-llms-txt": "^0.8.0"
   },
   "devDependencies": {
@@ -29,6 +29,6 @@
     "eslint-plugin-astro": "^1.6.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
-    "wrangler": "^4.77.0"
+    "wrangler": "^4.78.0"
   }
 }
