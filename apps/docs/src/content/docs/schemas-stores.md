@@ -1455,6 +1455,58 @@ const results = await store
 
 Execute multiple queries over a single connection. See [Batch Query Execution](#batch-query-execution).
 
+### Dynamic Collection Access
+
+The typed `store.nodes.*` and `store.edges.*` accessors require the kind name at compile
+time. When the kind is determined at runtime — iterating all kinds, resolving a node from
+edge metadata, building admin UIs or snapshot tools — use `getNodeCollection` and
+`getEdgeCollection` instead.
+
+#### `store.getNodeCollection(kind)`
+
+Returns the [`DynamicNodeCollection`](/types#dynamicnodecollection) for the given kind, or
+`undefined` if the kind is not registered in this graph.
+
+```typescript
+import { getNodeKinds } from "@nicia-ai/typegraph";
+
+// Count every node kind
+const counts: Record<string, number> = {};
+for (const kind of getNodeKinds(graph)) {
+  const collection = store.getNodeCollection(kind);
+  if (collection) {
+    counts[kind] = await collection.count();
+  }
+}
+
+// Resolve a node from edge metadata
+const collection = store.getNodeCollection(edge.fromKind);
+const node = await collection?.getById(edge.fromId);
+```
+
+#### `store.getEdgeCollection(kind)`
+
+Returns the [`DynamicEdgeCollection`](/types#dynamicedgecollection) for the given kind, or
+`undefined` if the kind is not registered in this graph.
+
+```typescript
+import { getEdgeKinds } from "@nicia-ai/typegraph";
+
+// Snapshot all edges
+for (const kind of getEdgeKinds(graph)) {
+  const collection = store.getEdgeCollection(kind);
+  if (collection) {
+    const edges = await collection.find({ limit: 10_000 });
+    snapshot.push(...edges);
+  }
+}
+```
+
+The returned collections expose the full API (`create`, `getById`, `find`, `count`,
+`createFromRecord`, etc.) with widened generics — see
+[`DynamicNodeCollection`](/types#dynamicnodecollection) and
+[`DynamicEdgeCollection`](/types#dynamicedgecollection).
+
 ### Registry Access
 
 #### `store.registry`

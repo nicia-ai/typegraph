@@ -228,6 +228,35 @@ type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 >;
 ```
 
+### `DynamicNodeCollection`
+
+A node collection with widened generics for runtime string-keyed access via
+[`store.getNodeCollection(kind)`](/schemas-stores#storegetnodecollectionkind).
+Exposes the full `NodeCollection` API (`create`, `getById`, `find`, `count`,
+`createFromRecord`, etc.) but accepts `Record<string, unknown>` for schema-typed
+parameters since the concrete node type is not known at compile time.
+
+```typescript
+import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
+
+// Equivalent to:
+type DynamicNodeCollection = NodeCollection<NodeType, string>;
+```
+
+### `DynamicEdgeCollection`
+
+An edge collection with widened generics for runtime string-keyed access via
+[`store.getEdgeCollection(kind)`](/schemas-stores#storegetedgecollectionkind).
+Exposes the full `EdgeCollection` API (`create`, `getById`, `find`, `count`,
+`findFrom`, `findTo`, etc.) with widened endpoint types.
+
+```typescript
+import type { DynamicEdgeCollection } from "@nicia-ai/typegraph";
+
+// Equivalent to:
+type DynamicEdgeCollection = EdgeCollection<AnyEdgeType, NodeType, NodeType>;
+```
+
 ## Subgraph Types
 
 These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphrootid-options) for
