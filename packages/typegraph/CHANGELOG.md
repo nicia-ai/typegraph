@@ -1,5 +1,28 @@
 # @nicia-ai/typegraph
 
+## 0.17.0
+
+### Minor Changes
+
+- [#77](https://github.com/nicia-ai/typegraph/pull/77) [`b9fc057`](https://github.com/nicia-ai/typegraph/commit/b9fc057e0dd62bd0f059bb78a20d18d91b1b87be) Thanks [@pdlug](https://github.com/pdlug)! - feat: support orderBy on edge properties in query builder
+
+  The `orderBy` method now accepts edge aliases in addition to node aliases, allowing results to be ordered by properties on traversed edges. This eliminates the need to denormalize ordering fields onto nodes or sort in memory.
+
+  ```typescript
+  store
+    .query()
+    .from("Person", "p")
+    .traverse("worksAt", "e")
+    .to("Company", "c")
+    .orderBy("e", "salary", "asc") // order by edge property
+    .select((ctx) => ({ name: ctx.p.name, salary: ctx.e.salary }))
+    .execute();
+  ```
+
+  Also fixes CTE alias resolution for edge aliases in `groupBy` and vector order-by compilation paths.
+
+  Closes [#76](https://github.com/nicia-ai/typegraph/issues/76)
+
 ## 0.16.2
 
 ### Patch Changes
