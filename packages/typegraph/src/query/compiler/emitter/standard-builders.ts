@@ -424,20 +424,28 @@ export function buildStandardProjection(
   return sql.join(projectedFields, sql`, `);
 }
 
+/**
+ * Builds a map from query aliases (node and edge) to their CTE table names.
+ * Edge aliases map to the CTE of the traversal node they are co-projected with.
+ */
+function buildAliasToCteMap(ast: QueryAst): Map<string, string> {
+  const map = new Map<string, string>([
+    [ast.start.alias, `cte_${ast.start.alias}`],
+  ]);
+  for (const traversal of ast.traversals) {
+    map.set(traversal.nodeAlias, `cte_${traversal.nodeAlias}`);
+    map.set(traversal.edgeAlias, `cte_${traversal.nodeAlias}`);
+  }
+  return map;
+}
+
 function compileSelectiveProjection(
   fields: readonly SelectiveField[],
   dialect: DialectAdapter,
   ast: QueryAst,
   collapsedTraversalCteAlias?: string,
 ): SQL {
-  const aliasToCte = new Map<string, string>([
-    [ast.start.alias, `cte_${ast.start.alias}`],
-  ]);
-
-  for (const traversal of ast.traversals) {
-    aliasToCte.set(traversal.nodeAlias, `cte_${traversal.nodeAlias}`);
-    aliasToCte.set(traversal.edgeAlias, `cte_${traversal.nodeAlias}`);
-  }
+  const aliasToCte = buildAliasToCteMap(ast);
 
   const columns = fields.map((field) => {
     const cteAlias =
@@ -519,6 +527,7 @@ export function buildStandardOrderBy(
     return undefined;
   }
 
+  const aliasToCte = buildAliasToCteMap(ast);
   const parts: SQL[] = [];
   for (const orderSpec of ast.orderBy) {
     const valueType = orderSpec.field.valueType;
@@ -528,7 +537,9 @@ export function buildStandardOrderBy(
       );
     }
     const cteAlias =
-      collapsedTraversalCteAlias ?? `cte_${orderSpec.field.alias}`;
+      collapsedTraversalCteAlias ??
+      aliasToCte.get(orderSpec.field.alias) ??
+      `cte_${orderSpec.field.alias}`;
     const field = compileFieldValue(
       orderSpec.field,
       dialect,
@@ -591,8 +602,14 @@ export function buildStandardGroupBy(
     return undefined;
   }
 
+  const aliasToCte = buildAliasToCteMap(ast);
   const parts = allFields.map((field) =>
-    compileFieldValue(field, dialect, field.valueType, `cte_${field.alias}`),
+    compileFieldValue(
+      field,
+      dialect,
+      field.valueType,
+      aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
+    ),
   );
 
   return sql`GROUP BY ${sql.join(parts, sql`, `)}`;
@@ -717,6 +734,7 @@ export function buildStandardVectorOrderBy(
   const additionalOrders: SQL[] = [];
 
   if (ast.orderBy && ast.orderBy.length > 0) {
+    const aliasToCte = buildAliasToCteMap(ast);
     for (const orderSpec of ast.orderBy) {
       const valueType = orderSpec.field.valueType;
       if (valueType === "array" || valueType === "object") {
@@ -724,7 +742,8 @@ export function buildStandardVectorOrderBy(
           "Ordering by JSON arrays or objects is not supported",
         );
       }
-      const cteAlias = `cte_${orderSpec.field.alias}`;
+      const cteAlias =
+        aliasToCte.get(orderSpec.field.alias) ?? `cte_${orderSpec.field.alias}`;
       const field = compileFieldValue(
         orderSpec.field,
         dialect,
