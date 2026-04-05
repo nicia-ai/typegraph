@@ -11,6 +11,7 @@ import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
 import {
+  mergeEdgeKinds,
   type OrderSpec,
   type QueryAst,
   type SelectiveField,
@@ -41,6 +42,7 @@ import {
 } from "../execution";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
+import { type FieldTypeInfo } from "../schema-introspector";
 import { buildQueryAst } from "./ast-builder";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
@@ -133,30 +135,59 @@ export class ExecutableQuery<
   /**
    * Orders results.
    */
-  orderBy<A extends keyof Aliases & string>(
+  orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
     field: string,
     direction: SortDirection = "asc",
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
-    const kindNames =
-      alias === this.#state.startAlias ?
-        this.#state.startKinds
-      : this.#state.traversals.find(
-          (traversal) => traversal.nodeAlias === alias,
-        )?.nodeKinds;
-    const typeInfo =
-      kindNames ?
-        this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
-      : undefined;
+    const edgeTraversal = this.#state.traversals.find(
+      (traversal) => traversal.edgeAlias === alias,
+    );
+    const isEdge = edgeTraversal !== undefined;
+    const isSystem =
+      field === "id" ||
+      field === "kind" ||
+      (isEdge && (field === "from_id" || field === "to_id"));
 
-    const orderSpec: OrderSpec = {
-      field: fieldRef(alias, ["props"], {
-        jsonPointer: jsonPointer([field]),
-        valueType: typeInfo?.valueType,
-        elementType: typeInfo?.elementType,
-      }),
-      direction,
-    };
+    let typeInfo: FieldTypeInfo | undefined;
+    if (!isSystem) {
+      if (isEdge) {
+        const edgeKindNames = mergeEdgeKinds(edgeTraversal);
+        typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
+          edgeKindNames,
+          field,
+        );
+      } else {
+        const kindNames =
+          alias === this.#state.startAlias ?
+            this.#state.startKinds
+          : this.#state.traversals.find(
+              (traversal) => traversal.nodeAlias === alias,
+            )?.nodeKinds;
+        typeInfo =
+          kindNames ?
+            this.#config.schemaIntrospector.getSharedFieldTypeInfo(
+              kindNames,
+              field,
+            )
+          : undefined;
+      }
+    }
+
+    const orderSpec: OrderSpec =
+      isSystem ?
+        {
+          field: fieldRef(alias, [field], { valueType: "string" }),
+          direction,
+        }
+      : {
+          field: fieldRef(alias, ["props"], {
+            jsonPointer: jsonPointer([field]),
+            valueType: typeInfo?.valueType,
+            elementType: typeInfo?.elementType,
+          }),
+          direction,
+        };
 
     const newState: QueryBuilderState = {
       ...this.#state,

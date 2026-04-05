@@ -628,14 +628,25 @@ export class QueryBuilder<
   /**
    * Orders results.
    */
-  orderBy<A extends keyof Aliases & string>(
+  orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
     field: string,
     direction: SortDirection = "asc",
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
-    const isSystem = field === "id" || field === "kind";
+    const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
+    const isEdge = edgeKindNames !== undefined;
+    const isSystem =
+      field === "id" ||
+      field === "kind" ||
+      (isEdge && (field === "from_id" || field === "to_id"));
     const typeInfo =
-      isSystem ? undefined : this.#getOrderByTypeInfo(alias, field);
+      isSystem ? undefined
+      : isEdge ?
+        this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
+          edgeKindNames,
+          field,
+        )
+      : this.#getOrderByTypeInfo(alias, field);
     const orderSpec: OrderSpec =
       isSystem ?
         {

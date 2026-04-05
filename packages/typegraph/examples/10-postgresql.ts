@@ -217,15 +217,13 @@ export async function main() {
       .from("Organization", "o")
       .traverse("worksAt", "e", { direction: "in" })
       .to("Person", "p")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- traverse edge typing limitation
-      .select((ctx: any) => ({
+      .select((ctx) => ({
         org: ctx.o.name,
         person: ctx.p.name,
         role: ctx.e.role,
         startDate: ctx.e.startDate,
       }))
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- traverse edge typing limitation
-      .orderBy("e" as any, "startDate", "asc")
+      .orderBy("e", "startDate", "asc")
       .execute();
 
     console.log(`${org.name} employees:`);
