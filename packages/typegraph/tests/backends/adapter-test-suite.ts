@@ -24,8 +24,9 @@ import type { SerializedSchema } from "../../src/schema/types";
 
 /**
  * Factory function that creates a fresh adapter for each test.
+ * May be async (e.g. for libsql which requires async DDL setup).
  */
-type AdapterFactory = () => GraphBackend;
+type AdapterFactory = () => GraphBackend | Promise<GraphBackend>;
 
 function createTestSchemaDocument(
   overrides?: Partial<SerializedSchema>,
@@ -88,8 +89,8 @@ export function createAdapterTestSuite(
   describe(`${name} Adapter`, () => {
     let backend: GraphBackend;
 
-    beforeEach(() => {
-      backend = createAdapter();
+    beforeEach(async () => {
+      backend = await createAdapter();
     });
 
     afterEach(async () => {

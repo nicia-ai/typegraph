@@ -89,6 +89,43 @@ const backend = createSqliteBackend(db);
 
 See [Semantic Search](/semantic-search) for query examples.
 
+### libsql / Turso
+
+For edge deployments, shared-driver setups, or Turso cloud databases, use the first-class
+libsql backend:
+
+```bash
+npm install @libsql/client
+```
+
+```typescript
+import { createClient } from "@libsql/client";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+import { createStore } from "@nicia-ai/typegraph";
+
+// Local file
+const client = createClient({ url: "file:app.db" });
+
+// Or remote Turso database
+// const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
+
+const { backend, db } = await createLibsqlBackend(client);
+const store = createStore(graph, backend);
+```
+
+`createLibsqlBackend` handles DDL execution and configures the correct async
+execution profile automatically. It returns both the `backend` and the underlying
+Drizzle `db` instance for direct SQL access. The caller retains ownership of the
+client and is responsible for closing it when done — this allows sharing a single
+client across TypeGraph and other libraries.
+
+:::caution[In-memory databases and transactions]
+libsql's `file::memory:` creates a separate database per connection. Since transactions
+open a new connection, the original database is destroyed after a transaction completes
+([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)).
+Use a file-based database (`file:path.db`) or remote URL when transactions are needed.
+:::
+
 ### API Reference
 
 #### `createLocalSqliteBackend(options?)`
@@ -119,6 +156,18 @@ Returns SQL for creating TypeGraph tables in SQLite.
 
 ```typescript
 function generateSqliteMigrationSQL(): string;
+```
+
+#### `createLibsqlBackend(client, options?)`
+
+Creates a SQLite backend from a `@libsql/client` instance. Runs DDL automatically.
+The caller retains ownership of the client and is responsible for closing it.
+
+```typescript
+async function createLibsqlBackend(
+  client: Client,
+  options?: { tables?: SqliteTables }
+): Promise<{ backend: GraphBackend; db: LibSQLDatabase }>;
 ```
 
 ## PostgreSQL
@@ -237,18 +286,19 @@ function generatePostgresDDL(tables?: PostgresTables): string[];
 
 ## Drizzle Entrypoints
 
-TypeGraph exposes Drizzle adapters through two public entrypoints:
+TypeGraph exposes Drizzle adapters through public entrypoints:
 
-- `@nicia-ai/typegraph/sqlite` - SQLite adapter exports
-- `@nicia-ai/typegraph/postgres` - PostgreSQL adapter exports
+- `@nicia-ai/typegraph/sqlite` — Generic SQLite adapter (any Drizzle SQLite driver)
+- `@nicia-ai/typegraph/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
+- `@nicia-ai/typegraph/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
+- `@nicia-ai/typegraph/postgres` — PostgreSQL adapter
 
 Import from the entrypoint matching your database:
 
 ```typescript
 import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
-```
-
-```typescript
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
 import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
 ```
 

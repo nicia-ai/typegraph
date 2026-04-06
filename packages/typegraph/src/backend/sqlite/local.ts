@@ -34,7 +34,7 @@ import {
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
-import type { GraphBackend } from "../types";
+import { type GraphBackend, wrapWithManagedClose } from "../types";
 
 // ============================================================
 // Native Addon Helpers
@@ -179,16 +179,9 @@ export function createLocalSqliteBackend(
     },
     tables,
   });
-  let isClosed = false;
-
-  async function close(): Promise<void> {
-    if (isClosed) return;
-    isClosed = true;
-    await backend.close();
+  const managedBackend = wrapWithManagedClose(backend, () => {
     sqlite.close();
-  }
-
-  const managedBackend: GraphBackend = { ...backend, close };
+  });
 
   return { backend: managedBackend, db };
 }

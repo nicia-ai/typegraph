@@ -12,9 +12,10 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 npm install -D @types/better-sqlite3
 ```
 
-> **Edge environments (Cloudflare Workers, etc.):** Skip `better-sqlite3` and use
-> `@nicia-ai/typegraph/sqlite` with your edge-compatible driver (D1, libsql).
-> See [Edge and Serverless](/integration#edge-and-serverless).
+> **Edge environments or libsql:** Skip `better-sqlite3` and use
+> `@nicia-ai/typegraph/sqlite/libsql` with `@libsql/client`, or
+> `@nicia-ai/typegraph/sqlite` with your edge-compatible driver (D1, bun:sqlite).
+> See [Backend Setup](/backend-setup#libsql--turso) and [Edge and Serverless](/integration#edge-and-serverless).
 
 ## 2. Create Your First Graph
 
@@ -76,8 +77,8 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 npm install -D @types/better-sqlite3
 ```
 
-> `better-sqlite3` is optional. For edge environments, use `@nicia-ai/typegraph/sqlite`
-> with D1, libsql, or bun:sqlite instead.
+> `better-sqlite3` is optional. For libsql/Turso, use `@nicia-ai/typegraph/sqlite/libsql`.
+> For D1 or bun:sqlite, use `@nicia-ai/typegraph/sqlite` with the matching Drizzle driver.
 
 ### SQLite Setup
 
@@ -125,12 +126,28 @@ const db = drizzle(sqlite);
 const backend = createSqliteBackend(db);
 ```
 
-#### Edge-Compatible Setup (D1, libsql, bun:sqlite)
+#### libsql / Turso Setup
 
-For Cloudflare Workers, Turso, or other edge environments, use the driver-agnostic backend:
+For Turso, embedded replicas, or sharing a libsql connection with other libraries:
 
 ```typescript
-import { drizzle } from "drizzle-orm/d1"; // or libsql, bun-sqlite
+import { createClient } from "@libsql/client";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+
+const client = createClient({ url: "file:app.db" });
+const { backend } = await createLibsqlBackend(client);
+```
+
+`createLibsqlBackend` handles DDL automatically. The caller owns the client and
+is responsible for closing it. See [Backend Setup](/backend-setup#libsql--turso) for
+remote Turso URLs and caveats.
+
+#### Edge-Compatible Setup (D1, bun:sqlite)
+
+For Cloudflare Workers or Bun, use the driver-agnostic backend:
+
+```typescript
+import { drizzle } from "drizzle-orm/d1"; // or bun-sqlite
 import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
 
 // D1 example
@@ -252,7 +269,8 @@ const store = createStore(graph, backend);
 
 | Function | Schema Handling | Use Case |
 |----------|-----------------|----------|
-| `createLocalSqliteBackend` | Automatic | Quick start, development, tests |
+| `createLocalSqliteBackend` | Automatic | Quick start, development, tests (Node.js) |
+| `createLibsqlBackend` | Automatic | libsql/Turso (Node.js, Workers, browser) |
 | `createStore` + manual migration | None | When you manage migrations externally |
 | `createStoreWithSchema` | Auto-creates tables, validates & auto-migrates | **Recommended for production** |
 

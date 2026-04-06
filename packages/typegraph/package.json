@@ -86,6 +86,16 @@
         "types": "./dist/backend/sqlite/local.d.cts",
         "default": "./dist/backend/sqlite/local.cjs"
       }
+    },
+    "./sqlite/libsql": {
+      "import": {
+        "types": "./dist/backend/sqlite/libsql.d.ts",
+        "default": "./dist/backend/sqlite/libsql.js"
+      },
+      "require": {
+        "types": "./dist/backend/sqlite/libsql.d.cts",
+        "default": "./dist/backend/sqlite/libsql.cjs"
+      }
     }
   },
   "files": [
@@ -146,11 +156,15 @@
     "node": ">=22"
   },
   "peerDependencies": {
+    "@libsql/client": ">=0.6.0",
     "better-sqlite3": ">=9.0.0 <13.0.0",
     "drizzle-orm": ">=0.35.0 <1.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@libsql/client": {
+      "optional": true
+    },
     "better-sqlite3": {
       "optional": true
     }
@@ -159,6 +173,7 @@
     "nanoid": "^5.1.7"
   },
   "devDependencies": {
+    "@libsql/client": "^0.17.2",
     "@stryker-mutator/core": "^9.6.0",
     "@stryker-mutator/vitest-runner": "^9.6.0",
     "@typegraph/eslint-config": "workspace:*",

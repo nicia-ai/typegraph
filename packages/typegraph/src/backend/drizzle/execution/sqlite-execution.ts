@@ -180,12 +180,13 @@ function getOrCreatePreparedStatement(
   return preparedStatement;
 }
 
+// Uses unconditional `await` because Drizzle returns SQLiteRaw thenables
+// that fail `instanceof Promise` checks (drizzle-team/drizzle-orm#2275).
 async function executeDrizzleQuery<TRow>(
   db: AnySqliteDatabase,
   query: SQL,
 ): Promise<readonly TRow[]> {
-  const rows = db.all(query);
-  return (rows instanceof Promise ? await rows : rows) as readonly TRow[];
+  return (await db.all(query)) as readonly TRow[];
 }
 
 function createPreparedStatementExecutor(

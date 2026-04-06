@@ -50,8 +50,11 @@ type BackendFactoryResult = Readonly<{
 /**
  * Factory function that creates a fresh backend for each test.
  * Returns the backend and an optional cleanup function for resource management.
+ * May be async (e.g. for libsql which requires async DDL setup).
  */
-type BackendFactory = () => BackendFactoryResult;
+type BackendFactory = () =>
+  | BackendFactoryResult
+  | Promise<BackendFactoryResult>;
 
 /**
  * Options for the integration test suite.
@@ -88,8 +91,8 @@ export function createIntegrationTestSuite(
       },
     } as const satisfies IntegrationTestContext;
 
-    beforeEach(() => {
-      const result = createBackend();
+    beforeEach(async () => {
+      const result = await createBackend();
       store = createStore(integrationTestGraph, result.backend);
       cleanup = result.cleanup;
     });

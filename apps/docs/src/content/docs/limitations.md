@@ -39,6 +39,27 @@ if (backend.capabilities.transactions) {
 }
 ```
 
+## libsql In-Memory Transactions
+
+When using `@libsql/client` with `file::memory:`, transactions destroy the in-memory
+database. This happens because libsql opens a new connection for each transaction, and
+each connection to `:memory:` gets its own database
+([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)).
+
+**Workaround:** Use a file-based database (`file:path.db`) or a remote Turso URL when
+transactions are needed. In-memory databases work fine for all non-transactional operations.
+
+```typescript
+// ❌ Transactions break with in-memory
+const client = createClient({ url: "file::memory:" });
+
+// ✅ Use a file path instead
+const client = createClient({ url: "file:app.db" });
+
+// ✅ Or a remote Turso URL
+const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
+```
+
 ## Recursive Traversal Depth
 
 Variable-length traversals use two caps:
