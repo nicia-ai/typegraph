@@ -485,6 +485,30 @@ export type GraphBackend = Readonly<{
 }>;
 
 // ============================================================
+// Managed Backend Helper
+// ============================================================
+
+/**
+ * Wraps a GraphBackend with idempotent close that also runs a teardown
+ * callback (e.g. closing the underlying database connection).
+ */
+export function wrapWithManagedClose(
+  backend: GraphBackend,
+  teardown: () => void | Promise<void>,
+): GraphBackend {
+  let isClosed = false;
+  return {
+    ...backend,
+    async close(): Promise<void> {
+      if (isClosed) return;
+      isClosed = true;
+      await backend.close();
+      await teardown();
+    },
+  };
+}
+
+// ============================================================
 // Additional Parameter Types
 // ============================================================
 

@@ -226,23 +226,28 @@ function createSqliteOperationBackend(
   } = options;
 
   function execGet<T>(query: SQL): Promise<T | undefined> {
+    // Workaround: drizzle-team/drizzle-orm#1049 — db.get() crashes with
+    // the libsql driver when no rows match (normalizeRow receives undefined).
+    // Using db.all()[0] avoids the crash for all drivers.
+    //
+    // All three exec helpers use `await` unconditionally rather than
+    // `instanceof Promise` because Drizzle returns SQLiteRaw thenables
+    // that are NOT Promise instances (drizzle-team/drizzle-orm#2275).
     return runWithSerializedQueue(serializedQueue, async () => {
-      const result = db.get(query);
-      return (result instanceof Promise ? await result : result) as T | undefined;
+      const rows = await db.all(query);
+      return (rows as T[])[0];
     });
   }
 
   function execAll<T>(query: SQL): Promise<T[]> {
     return runWithSerializedQueue(serializedQueue, async () => {
-      const result = db.all(query);
-      return (result instanceof Promise ? await result : result) as T[];
+      return await db.all(query);
     });
   }
 
   function execRun(query: SQL): Promise<void> {
     return runWithSerializedQueue(serializedQueue, async () => {
-      const result = db.run(query);
-      if (result instanceof Promise) await result;
+      await db.run(query);
     });
   }
 
@@ -378,12 +383,11 @@ export function createSqliteBackend(
   const backend: GraphBackend = {
     ...operations,
 
-    bootstrapTables(): Promise<void> {
+    async bootstrapTables(): Promise<void> {
       const statements = generateSqliteDDL(tables);
       for (const statement of statements) {
-        db.run(sql.raw(statement));
+        await db.run(sql.raw(statement));
       }
-      return Promise.resolve();
     },
 
     async setActiveSchema(graphId: string, version: number): Promise<void> {

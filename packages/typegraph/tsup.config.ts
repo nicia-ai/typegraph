@@ -9,6 +9,7 @@ export default defineConfig({
     "indexes/index": "src/indexes/index.ts",
     "backend/sqlite/index": "src/backend/sqlite/index.ts",
     "backend/sqlite/local": "src/backend/sqlite/local.ts",
+    "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",
     "backend/postgres/index": "src/backend/postgres/index.ts",
   },
   format: ["esm", "cjs"],
