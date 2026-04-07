@@ -334,13 +334,15 @@ type SubgraphOptions<G, EK, NK> = Readonly<{
 
 ### `SubgraphResult<G, NK, EK>`
 
-The return type of `store.subgraph()`. Contains deduplicated nodes and the edges
-connecting them.
+The return type of `store.subgraph()`. Contains the root node, a node index, and
+forward/reverse adjacency maps for immediate traversal.
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
-  nodes: readonly SubsetNode<G, NK>[];
-  edges: readonly SubsetEdge<G, EK>[];
+  root: SubgraphNodeResult<G, NK> | undefined;
+  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
+  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
 }>;
 ```
 

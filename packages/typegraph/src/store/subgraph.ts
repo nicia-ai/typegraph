@@ -343,18 +343,47 @@ export type SubgraphOptions<
   project?: P;
 }>;
 
+/**
+ * Union of all node result types in a subgraph, respecting projection.
+ */
+export type SubgraphNodeResult<
+  G extends GraphDef,
+  NK extends NodeKinds<G> = NodeKinds<G>,
+  P = undefined,
+> = {
+  [Kind in NK]: SubgraphNodeResultForKind<G, Kind, P>;
+}[NK];
+
+/**
+ * Union of all edge result types in a subgraph, respecting projection.
+ */
+export type SubgraphEdgeResult<
+  G extends GraphDef,
+  EK extends EdgeKinds<G> = EdgeKinds<G>,
+  P = undefined,
+> = {
+  [Kind in EK]: SubgraphEdgeResultForKind<G, Kind, P>;
+}[EK];
+
 export type SubgraphResult<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
   EK extends EdgeKinds<G> = EdgeKinds<G>,
   P extends SubgraphProject<G, NK, EK> | undefined = undefined,
 > = Readonly<{
-  nodes: readonly {
-    [Kind in NK]: SubgraphNodeResultForKind<G, Kind, P>;
-  }[NK][];
-  edges: readonly {
-    [Kind in EK]: SubgraphEdgeResultForKind<G, Kind, P>;
-  }[EK][];
+  /** The root node, or undefined if the root was not found or excluded. */
+  root: SubgraphNodeResult<G, NK, P> | undefined;
+  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK, P>>;
+  /** Forward adjacency: fromId → edgeKind → edges to targets. */
+  adjacency: ReadonlyMap<
+    string,
+    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
+  >;
+  /** Reverse adjacency: toId → edgeKind → edges from sources. */
+  reverseAdjacency: ReadonlyMap<
+    string,
+    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
+  >;
 }>;
 
 // ============================================================
@@ -419,10 +448,6 @@ export async function executeSubgraph<
 }): Promise<SubgraphResult<G, NK, EK, P>> {
   const { options } = params;
 
-  if (options.edges.length === 0) {
-    return { nodes: [], edges: [] } as SubgraphResult<G, NK, EK, P>;
-  }
-
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
     MAX_EXPLICIT_RECURSIVE_DEPTH,
@@ -464,17 +489,33 @@ export async function executeSubgraph<
     fetchSubgraphEdges(ctx, reachableCte, includedIdsCte, edgeProjectionPlan),
   ]);
 
-  const nodes = nodeRows.map((row) =>
-    mapSubgraphNodeRow(row, nodeProjectionPlan),
-  );
-  const edges = edgeRows.map((row) =>
-    mapSubgraphEdgeRow(row, edgeProjectionPlan),
-  );
+  const nodesMap = new Map<string, Node>();
+  for (const row of nodeRows) {
+    const node = mapSubgraphNodeRow(row, nodeProjectionPlan);
+    nodesMap.set(node.id as string, node);
+  }
+
+  const adjacency = new Map<string, Map<string, Edge[]>>();
+  const reverseAdjacency = new Map<string, Map<string, Edge[]>>();
+  for (const row of edgeRows) {
+    const edge = mapSubgraphEdgeRow(row, edgeProjectionPlan);
+    insertAdjacencyEntry(adjacency, edge.fromId as string, edge.kind, edge);
+    insertAdjacencyEntry(
+      reverseAdjacency,
+      edge.toId as string,
+      edge.kind,
+      edge,
+    );
+  }
+
+  const root = nodesMap.get(ctx.rootId);
 
   return {
-    nodes: nodes as unknown as SubgraphResult<G, NK, EK, P>["nodes"],
-    edges: edges as unknown as SubgraphResult<G, NK, EK, P>["edges"],
-  };
+    root,
+    nodes: nodesMap,
+    adjacency,
+    reverseAdjacency,
+  } as unknown as SubgraphResult<G, NK, EK, P>;
 }
 
 // ============================================================
@@ -859,6 +900,29 @@ function buildProjectedPropertyColumns(
   }
 
   return columns;
+}
+
+// ============================================================
+// Adjacency Index Builder
+// ============================================================
+
+function insertAdjacencyEntry(
+  index: Map<string, Map<string, Edge[]>>,
+  nodeId: string,
+  edgeKind: string,
+  edge: Edge,
+): void {
+  let kindMap = index.get(nodeId);
+  if (kindMap === undefined) {
+    kindMap = new Map();
+    index.set(nodeId, kindMap);
+  }
+  const edges = kindMap.get(edgeKind);
+  if (edges === undefined) {
+    kindMap.set(edgeKind, [edge]);
+  } else {
+    edges.push(edge);
+  }
 }
 
 // ============================================================

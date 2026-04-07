@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { collectAllEdges } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -81,7 +82,7 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 1,
       });
 
-      const names = result.nodes
+      const names = [...result.nodes.values()]
         .map((n) => (n as { name: string }).name)
         .toSorted();
       expect(names).toContain("Alice");
@@ -96,10 +97,9 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 2,
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.aliceId)).toBe(true);
-      expect(nodeIds.has(ids.bobId)).toBe(true);
-      expect(nodeIds.has(ids.charlieId)).toBe(true);
+      expect(result.nodes.has(ids.aliceId)).toBe(true);
+      expect(result.nodes.has(ids.bobId)).toBe(true);
+      expect(result.nodes.has(ids.charlieId)).toBe(true);
     });
 
     it("follows multiple edge kinds", async () => {
@@ -109,7 +109,7 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 2,
       });
 
-      const kinds = new Set(result.nodes.map((n) => n.kind));
+      const kinds = new Set([...result.nodes.values()].map((n) => n.kind));
       expect(kinds.has("Person")).toBe(true);
       expect(kinds.has("Company")).toBe(true);
     });
@@ -122,7 +122,9 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 3,
       });
 
-      const companyNodes = result.nodes.filter((n) => n.kind === "Company");
+      const companyNodes = [...result.nodes.values()].filter(
+        (n) => n.kind === "Company",
+      );
       expect(companyNodes).toHaveLength(1);
     });
 
@@ -134,10 +136,10 @@ export function registerSubgraphIntegrationTests(
         includeKinds: ["Company"],
       });
 
-      for (const node of result.nodes) {
+      for (const node of result.nodes.values()) {
         expect(node.kind).toBe("Company");
       }
-      expect(result.nodes).toHaveLength(1);
+      expect(result.nodes.size).toBe(1);
     });
 
     it("excludes root", async () => {
@@ -148,8 +150,8 @@ export function registerSubgraphIntegrationTests(
         excludeRoot: true,
       });
 
-      expect(result.nodes.every((n) => n.id !== ids.aliceId)).toBe(true);
-      expect(result.nodes).toHaveLength(1);
+      expect(result.nodes.has(ids.aliceId)).toBe(false);
+      expect(result.nodes.size).toBe(1);
     });
 
     it("handles bidirectional traversal", async () => {
@@ -161,11 +163,10 @@ export function registerSubgraphIntegrationTests(
         direction: "both",
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
       // Outbound: bob → charlie
-      expect(nodeIds.has(ids.charlieId)).toBe(true);
+      expect(result.nodes.has(ids.charlieId)).toBe(true);
       // Inbound: alice → bob (reversed)
-      expect(nodeIds.has(ids.aliceId)).toBe(true);
+      expect(result.nodes.has(ids.aliceId)).toBe(true);
     });
 
     it("returns edges only when both endpoints are in result", async () => {
@@ -176,16 +177,17 @@ export function registerSubgraphIntegrationTests(
         includeKinds: ["Person"],
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      for (const edge of result.edges) {
-        expect(nodeIds.has(edge.fromId as string)).toBe(true);
-        expect(nodeIds.has(edge.toId as string)).toBe(true);
+      const allEdges = collectAllEdges(result.adjacency);
+      for (const edge of allEdges) {
+        expect(result.nodes.has(edge.fromId as string)).toBe(true);
+        expect(result.nodes.has(edge.toId as string)).toBe(true);
       }
 
       // worksAt edges connect Person→Company, but Company is excluded
-      expect(result.edges.some((edge) => edge.kind === "worksAt")).toBe(false);
+      const edgeKinds = new Set(allEdges.map((edge) => edge.kind));
+      expect(edgeKinds.has("worksAt")).toBe(false);
       // knows edges connect Person→Person, both in result
-      expect(result.edges.some((edge) => edge.kind === "knows")).toBe(true);
+      expect(edgeKinds.has("knows")).toBe(true);
     });
 
     it("excludes soft-deleted nodes", async () => {
@@ -216,10 +218,9 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 2,
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.bobId)).toBe(false);
+      expect(result.nodes.has(ids.bobId)).toBe(false);
       // charlie is unreachable since bob (the intermediate node) is deleted
-      expect(nodeIds.has(ids.charlieId)).toBe(false);
+      expect(result.nodes.has(ids.charlieId)).toBe(false);
     });
 
     it("returns empty for non-existent root", async () => {
@@ -229,8 +230,8 @@ export function registerSubgraphIntegrationTests(
         maxDepth: 1,
       });
 
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeUndefined();
+      expect(result.nodes.size).toBe(0);
     });
 
     it("handles cycles without infinite loops", async () => {
@@ -246,17 +247,19 @@ export function registerSubgraphIntegrationTests(
       });
 
       // All three people reachable, each visited once
-      expect(result.nodes).toHaveLength(3);
+      expect(result.nodes.size).toBe(3);
     });
 
-    it("returns empty edges when empty edges option", async () => {
+    it("returns only root when empty edges option", async () => {
       const store = context.getStore();
       const result = await store.subgraph(ids.aliceId as never, {
         edges: [],
       });
 
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeDefined();
+      expect(result.root!.id).toBe(ids.aliceId);
+      expect(result.nodes.size).toBe(1);
+      expect(result.adjacency.size).toBe(0);
     });
 
     it("projects node and edge fields across backends", async () => {
@@ -276,8 +279,9 @@ export function registerSubgraphIntegrationTests(
         },
       });
 
-      const people = result.nodes.filter((node) => node.kind === "Person");
-      const companies = result.nodes.filter((node) => node.kind === "Company");
+      const nodes = [...result.nodes.values()];
+      const people = nodes.filter((node) => node.kind === "Person");
+      const companies = nodes.filter((node) => node.kind === "Company");
 
       expect(people.length).toBeGreaterThan(0);
       for (const person of people) {
@@ -293,18 +297,13 @@ export function registerSubgraphIntegrationTests(
       expect(companies[0]).toHaveProperty("meta.updatedAt");
       expect(companies[0]).not.toHaveProperty("industry");
 
-      const worksAtEdges = result.edges.filter(
-        (
-          edge,
-        ): edge is Extract<
-          (typeof result.edges)[number],
-          { kind: "worksAt" }
-        > => edge.kind === "worksAt",
+      const allEdges = collectAllEdges(result.adjacency);
+      const worksAtEdges = allEdges.filter(
+        (edge): edge is Extract<typeof edge, { kind: "worksAt" }> =>
+          edge.kind === "worksAt",
       );
-      const knowsEdges = result.edges.filter(
-        (
-          edge,
-        ): edge is Extract<(typeof result.edges)[number], { kind: "knows" }> =>
+      const knowsEdges = allEdges.filter(
+        (edge): edge is Extract<typeof edge, { kind: "knows" }> =>
           edge.kind === "knows",
       );
 

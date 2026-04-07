@@ -44,3 +44,18 @@ export function createTestDatabase(
 }
 
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";
+
+/**
+ * Flattens all edges from a subgraph adjacency map into a single array.
+ */
+export function collectAllEdges<E>(
+  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly E[]>>,
+): E[] {
+  const edges: E[] = [];
+  for (const kindMap of adjacency.values()) {
+    for (const edgeList of kindMap.values()) {
+      edges.push(...edgeList);
+    }
+  }
+  return edges;
+}
