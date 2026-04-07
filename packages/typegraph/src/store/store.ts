@@ -469,22 +469,26 @@ export class Store<G extends GraphDef> {
    * Extracts a typed subgraph by traversing from a root node.
    *
    * Performs a BFS traversal from `rootId` following the specified edge kinds,
-   * then returns all reachable nodes and the edges connecting them.
+   * returning an indexed result with adjacency maps for immediate traversal.
    *
    * @example
    * ```typescript
-   * const result = await store.subgraph(run.id, {
+   * const sg = await store.subgraph(run.id, {
    *   edges: ["has_task", "runs_agent", "uses_skill"],
    *   maxDepth: 4,
-   *   includeKinds: ["Run", "Task", "Agent", "Skill"],
    * });
    *
-   * for (const node of result.nodes) {
-   *   switch (node.kind) {
-   *     case "Task": console.log(node.name); break;
-   *     case "Agent": console.log(node.model); break;
-   *   }
-   * }
+   * // Root node (the traversal starting point)
+   * console.log(sg.root?.kind);
+   *
+   * // Lookup by ID
+   * const task = sg.nodes.get(taskId);
+   *
+   * // Forward adjacency: edges of a kind from a node
+   * const taskEdges = sg.adjacency.get(run.id)?.get("has_task") ?? [];
+   *
+   * // Reverse adjacency: edges of a kind pointing to a node
+   * const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
    * ```
    */
   async subgraph<

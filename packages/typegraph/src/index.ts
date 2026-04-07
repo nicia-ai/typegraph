@@ -202,6 +202,8 @@ export { createStore, createStoreWithSchema } from "./store";
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphEdgeResult,
+  SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
   SubsetEdge,

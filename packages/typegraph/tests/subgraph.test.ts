@@ -24,7 +24,7 @@ import {
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { createStore, type Store } from "../src/store";
-import { createTestBackend } from "./test-utils";
+import { collectAllEdges, createTestBackend } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -166,13 +166,16 @@ describe("store.subgraph()", () => {
   // ── Empty / boundary cases ──────────────────────────────────
 
   describe("boundary conditions", () => {
-    it("returns empty result when edges array is empty", async () => {
+    it("returns only root when edges array is empty", async () => {
       const result = await store.subgraph(ids.runId as never, {
         edges: [],
       });
 
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeDefined();
+      expect(result.root!.id).toBe(ids.runId);
+      expect(result.nodes.size).toBe(1);
+      expect(result.adjacency.size).toBe(0);
+      expect(result.reverseAdjacency.size).toBe(0);
     });
 
     it("returns empty result for non-existent root", async () => {
@@ -181,8 +184,8 @@ describe("store.subgraph()", () => {
         maxDepth: 1,
       });
 
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeUndefined();
+      expect(result.nodes.size).toBe(0);
     });
 
     it("returns only the root when maxDepth is 0", async () => {
@@ -191,19 +194,21 @@ describe("store.subgraph()", () => {
         maxDepth: 0,
       });
 
-      expect(result.nodes).toHaveLength(1);
-      expect(result.nodes[0]!.id).toBe(ids.runId);
+      expect(result.nodes.size).toBe(1);
+      expect(result.root).toBeDefined();
+      expect(result.root!.id).toBe(ids.runId);
     });
 
-    it("returns empty nodes and edges when maxDepth 0 and excludeRoot", async () => {
+    it("returns empty result when maxDepth 0 and excludeRoot", async () => {
       const result = await store.subgraph(ids.runId as never, {
         edges: ["has_task"],
         maxDepth: 0,
         excludeRoot: true,
       });
 
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeUndefined();
+      expect(result.nodes.size).toBe(0);
+      expect(result.adjacency.size).toBe(0);
     });
 
     it("returns root even when no outgoing edges of the specified kind exist", async () => {
@@ -213,9 +218,10 @@ describe("store.subgraph()", () => {
         maxDepth: 5,
       });
 
-      expect(result.nodes).toHaveLength(1);
-      expect(result.nodes[0]!.id).toBe(ids.agent1Id);
-      expect(result.edges).toHaveLength(0);
+      expect(result.nodes.size).toBe(1);
+      expect(result.root).toBeDefined();
+      expect(result.root!.id).toBe(ids.agent1Id);
+      expect(result.adjacency.size).toBe(0);
     });
   });
 
@@ -228,9 +234,11 @@ describe("store.subgraph()", () => {
         maxDepth: 1,
       });
 
-      const nodeKinds = result.nodes.map((n) => n.kind).toSorted();
+      const nodeKinds = [...result.nodes.values()]
+        .map((n) => n.kind)
+        .toSorted();
       expect(nodeKinds).toEqual(["Agent", "Run", "Task", "Task"]);
-      expect(result.nodes.some((n) => n.id === ids.runId)).toBe(true);
+      expect(result.nodes.has(ids.runId as string)).toBe(true);
     });
 
     it("follows multi-hop paths", async () => {
@@ -239,12 +247,11 @@ describe("store.subgraph()", () => {
         maxDepth: 4,
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.runId as string)).toBe(true);
-      expect(nodeIds.has(ids.task1Id as string)).toBe(true);
-      expect(nodeIds.has(ids.attempt1Id as string)).toBe(true);
-      expect(nodeIds.has(ids.tool1Id as string)).toBe(true);
-      expect(nodeIds.has(ids.task2Id as string)).toBe(true);
+      expect(result.nodes.has(ids.runId as string)).toBe(true);
+      expect(result.nodes.has(ids.task1Id as string)).toBe(true);
+      expect(result.nodes.has(ids.attempt1Id as string)).toBe(true);
+      expect(result.nodes.has(ids.tool1Id as string)).toBe(true);
+      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
     });
 
     it("only follows specified edge kinds", async () => {
@@ -253,7 +260,7 @@ describe("store.subgraph()", () => {
         maxDepth: 3,
       });
 
-      const kinds = new Set(result.nodes.map((n) => n.kind));
+      const kinds = new Set([...result.nodes.values()].map((n) => n.kind));
       expect(kinds.has("Run")).toBe(true);
       expect(kinds.has("Task")).toBe(true);
       expect(kinds.has("Agent")).toBe(false);
@@ -268,7 +275,7 @@ describe("store.subgraph()", () => {
       });
 
       // Still works, just capped internally
-      expect(result.nodes.length).toBeGreaterThan(0);
+      expect(result.nodes.size).toBeGreaterThan(0);
     });
   });
 
@@ -283,8 +290,8 @@ describe("store.subgraph()", () => {
       });
 
       // Only task1 itself — has_task edges go FROM Run, not from Task
-      expect(result.nodes).toHaveLength(1);
-      expect(result.nodes[0]!.id).toBe(ids.task1Id);
+      expect(result.nodes.size).toBe(1);
+      expect(result.root!.id).toBe(ids.task1Id);
     });
 
     it("follows both directions with direction: both", async () => {
@@ -294,11 +301,10 @@ describe("store.subgraph()", () => {
         direction: "both",
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
       // Inbound: task1 ← has_task ← run
-      expect(nodeIds.has(ids.runId as string)).toBe(true);
+      expect(result.nodes.has(ids.runId as string)).toBe(true);
       // Then outbound from run: run → has_task → task2
-      expect(nodeIds.has(ids.task2Id as string)).toBe(true);
+      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
     });
   });
 
@@ -312,11 +318,11 @@ describe("store.subgraph()", () => {
         includeKinds: ["Task", "ToolDef"],
       });
 
-      for (const node of result.nodes) {
+      for (const node of result.nodes.values()) {
         expect(["Task", "ToolDef"]).toContain(node.kind);
       }
 
-      const kinds = result.nodes.map((n) => n.kind as string);
+      const kinds = [...result.nodes.values()].map((n) => n.kind as string);
       expect(kinds).not.toContain("Attempt");
       expect(kinds).not.toContain("Run");
     });
@@ -330,8 +336,8 @@ describe("store.subgraph()", () => {
         includeKinds: ["ToolDef"],
       });
 
-      expect(result.nodes.length).toBeGreaterThan(0);
-      const kinds = result.nodes.map((n) => n.kind as string);
+      expect(result.nodes.size).toBeGreaterThan(0);
+      const kinds = [...result.nodes.values()].map((n) => n.kind as string);
       expect(kinds).toContain("ToolDef");
       expect(kinds).not.toContain("Attempt");
     });
@@ -347,10 +353,9 @@ describe("store.subgraph()", () => {
         excludeRoot: true,
       });
 
-      expect(result.nodes.every((n) => n.id !== (ids.runId as string))).toBe(
-        true,
-      );
-      expect(result.nodes).toHaveLength(2);
+      expect(result.root).toBeUndefined();
+      expect(result.nodes.has(ids.runId as string)).toBe(false);
+      expect(result.nodes.size).toBe(2);
     });
 
     it("excludes root but keeps edges that connect remaining nodes", async () => {
@@ -361,13 +366,11 @@ describe("store.subgraph()", () => {
         excludeRoot: true,
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.runId as string)).toBe(false);
+      expect(result.nodes.has(ids.runId as string)).toBe(false);
 
       // depends_on edge should still appear since both task1 and task2 are in the set
-      const depEdges = result.edges.filter(
-        (edge) => edge.kind === "depends_on",
-      );
+      const depEdges =
+        result.adjacency.get(ids.task1Id as string)?.get("depends_on") ?? [];
       expect(depEdges).toHaveLength(1);
     });
 
@@ -380,7 +383,7 @@ describe("store.subgraph()", () => {
 
       // has_task edges go from Run to Task — but Run is excluded,
       // so no has_task edges should appear (from endpoint missing)
-      expect(result.edges).toHaveLength(0);
+      expect(result.adjacency.size).toBe(0);
     });
   });
 
@@ -394,14 +397,14 @@ describe("store.subgraph()", () => {
         includeKinds: ["Task", "ToolDef"],
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      for (const edge of result.edges) {
-        expect(nodeIds.has(edge.fromId as string)).toBe(true);
-        expect(nodeIds.has(edge.toId as string)).toBe(true);
+      const allEdges = collectAllEdges(result.adjacency);
+      for (const edge of allEdges) {
+        expect(result.nodes.has(edge.fromId as string)).toBe(true);
+        expect(result.nodes.has(edge.toId as string)).toBe(true);
       }
 
       // has_attempt: Task→Attempt — Attempt excluded, so edge excluded
-      const edgeKinds = result.edges.map((edge) => edge.kind as string);
+      const edgeKinds = allEdges.map((edge) => edge.kind as string);
       expect(edgeKinds).not.toContain("has_attempt");
       // used_tool: Attempt→ToolDef — Attempt excluded, so edge excluded
       expect(edgeKinds).not.toContain("used_tool");
@@ -413,12 +416,13 @@ describe("store.subgraph()", () => {
         maxDepth: 2,
       });
 
-      for (const edge of result.edges) {
+      const allEdges = collectAllEdges(result.adjacency);
+      for (const edge of allEdges) {
         expect(edge.kind).toBe("has_task");
       }
 
       // runs_agent, uses_skill edges exist but are not in the edge filter
-      const edgeKinds = result.edges.map((edge) => edge.kind as string);
+      const edgeKinds = allEdges.map((edge) => edge.kind as string);
       expect(edgeKinds).not.toContain("runs_agent");
     });
   });
@@ -437,8 +441,7 @@ describe("store.subgraph()", () => {
         maxDepth: 10,
       });
 
-      const taskIds = result.nodes.map((n) => n.id);
-      expect(taskIds).toHaveLength(2); // task1, task2 — each visited once
+      expect(result.nodes.size).toBe(2); // task1, task2 — each visited once
     });
 
     it("allows revisiting with cyclePolicy: allow", async () => {
@@ -455,8 +458,7 @@ describe("store.subgraph()", () => {
       });
 
       // Nodes are still deduplicated in the result (DISTINCT in SQL)
-      const uniqueIds = new Set(result.nodes.map((n) => n.id));
-      expect(uniqueIds.size).toBe(2);
+      expect(result.nodes.size).toBe(2);
     });
   });
 
@@ -472,7 +474,9 @@ describe("store.subgraph()", () => {
         maxDepth: 3,
       });
 
-      const skillNodes = result.nodes.filter((n) => n.kind === "Skill");
+      const skillNodes = [...result.nodes.values()].filter(
+        (n) => n.kind === "Skill",
+      );
       expect(skillNodes).toHaveLength(1);
       expect(skillNodes[0]!.id).toBe(ids.skill1Id);
     });
@@ -514,12 +518,9 @@ describe("store.subgraph()", () => {
         maxDepth: 1,
       });
 
-      const taskIds = result.nodes
-        .filter((n) => n.kind === "Task")
-        .map((n) => n.id);
-      expect(taskIds).not.toContain(ids.task1Id);
+      expect(result.nodes.has(ids.task1Id as string)).toBe(false);
       // task2 is still alive
-      expect(taskIds).toContain(ids.task2Id as string);
+      expect(result.nodes.has(ids.task2Id as string)).toBe(true);
     });
 
     it("excludes soft-deleted edges from traversal", async () => {
@@ -538,8 +539,7 @@ describe("store.subgraph()", () => {
       });
 
       // task1 should not be reachable since the edge to it is deleted
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.task1Id as string)).toBe(false);
+      expect(result.nodes.has(ids.task1Id as string)).toBe(false);
     });
 
     it("does not traverse through soft-deleted intermediate nodes", async () => {
@@ -563,8 +563,7 @@ describe("store.subgraph()", () => {
         maxDepth: 4,
       });
 
-      const nodeIds = new Set(result.nodes.map((n) => n.id as string));
-      expect(nodeIds.has(ids.tool1Id as string)).toBe(false);
+      expect(result.nodes.has(ids.tool1Id as string)).toBe(false);
     });
 
     it("excludes soft-deleted edges from result set", async () => {
@@ -586,7 +585,8 @@ describe("store.subgraph()", () => {
       });
 
       // The deleted edge should not appear in results
-      const edgeToIds = result.edges.map((edge) => edge.toId);
+      const allEdges = collectAllEdges(result.adjacency);
+      const edgeToIds = allEdges.map((edge) => edge.toId);
       expect(edgeToIds).not.toContain(ids.task1Id);
     });
 
@@ -612,8 +612,9 @@ describe("store.subgraph()", () => {
       });
 
       // Root doesn't match base case (deleted_at IS NULL), so empty
-      expect(result.nodes).toHaveLength(0);
-      expect(result.edges).toHaveLength(0);
+      expect(result.root).toBeUndefined();
+      expect(result.nodes.size).toBe(0);
+      expect(result.adjacency.size).toBe(0);
     });
   });
 
@@ -627,8 +628,8 @@ describe("store.subgraph()", () => {
         includeKinds: ["Task"],
       });
 
-      expect(result.nodes).toHaveLength(2);
-      for (const node of result.nodes) {
+      expect(result.nodes.size).toBe(2);
+      for (const node of result.nodes.values()) {
         expect(node.kind).toBe("Task");
         expect(node).toHaveProperty("title");
         expect(node).toHaveProperty("status");
@@ -644,8 +645,9 @@ describe("store.subgraph()", () => {
         maxDepth: 1,
       });
 
-      expect(result.edges.length).toBeGreaterThan(0);
-      for (const edge of result.edges) {
+      const allEdges = collectAllEdges(result.adjacency);
+      expect(allEdges.length).toBeGreaterThan(0);
+      for (const edge of allEdges) {
         expect(edge).toHaveProperty("id");
         expect(edge).toHaveProperty("kind");
         expect(edge).toHaveProperty("fromKind");
@@ -671,13 +673,13 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes).toHaveLength(1);
-      expect(result.nodes[0]).toMatchObject({
+      expect(result.nodes.size).toBe(1);
+      expect(result.root).toMatchObject({
         kind: "Run",
         id: ids.runId,
         name: "run-1",
       });
-      expect(result.nodes[0]).not.toHaveProperty("meta");
+      expect(result.root).not.toHaveProperty("meta");
     });
 
     it("projects node props and full metadata while preserving identity", async () => {
@@ -692,8 +694,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes).toHaveLength(2);
-      for (const node of result.nodes) {
+      expect(result.nodes.size).toBe(2);
+      for (const node of result.nodes.values()) {
         expect(node.kind).toBe("Task");
         expect(node).toHaveProperty("id");
         expect(node).toHaveProperty("title");
@@ -714,8 +716,9 @@ describe("store.subgraph()", () => {
         },
       });
 
-      const task = result.nodes.find((node) => node.kind === "Task");
-      const agent = result.nodes.find((node) => node.kind === "Agent");
+      const nodes = [...result.nodes.values()];
+      const task = nodes.find((node) => node.kind === "Task");
+      const agent = nodes.find((node) => node.kind === "Agent");
 
       expect(task).toBeDefined();
       expect(task).toHaveProperty("title");
@@ -739,8 +742,9 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.edges).toHaveLength(1);
-      const edge = result.edges[0]!;
+      const allEdges = collectAllEdges(result.adjacency);
+      expect(allEdges).toHaveLength(1);
+      const edge = allEdges[0]!;
       expect(edge.kind).toBe("uses_skill");
       expect(edge).toHaveProperty("id");
       expect(edge).toHaveProperty("fromKind");
@@ -776,8 +780,8 @@ describe("store.subgraph()", () => {
       });
 
       // Type narrowing should work — these are Task | Agent nodes
-      expect(result.nodes.length).toBeGreaterThan(0);
-      for (const node of result.nodes) {
+      expect(result.nodes.size).toBeGreaterThan(0);
+      for (const node of result.nodes.values()) {
         expect(["Task", "Agent"]).toContain(node.kind);
       }
     });
@@ -795,7 +799,7 @@ describe("store.subgraph()", () => {
         },
       });
 
-      for (const node of result.nodes) {
+      for (const node of result.nodes.values()) {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
@@ -825,7 +829,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      const edge = result.edges[0]!;
+      const allEdges = collectAllEdges(result.adjacency);
+      const edge = allEdges[0]!;
       const fromId: string = edge.fromId;
       const toId: string = edge.toId;
       void fromId;
@@ -833,6 +838,64 @@ describe("store.subgraph()", () => {
       // @ts-expect-error - projected edge omits meta unless requested
       const meta = edge.meta;
       void meta;
+    });
+
+    it("narrows root type with kind discrimination", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task", "runs_agent"],
+        maxDepth: 1,
+        includeKinds: ["Run", "Task"],
+      });
+
+      // root is Run | Task | undefined — narrows via kind check
+      if (result.root?.kind === "Run") {
+        const name: string = result.root.name;
+        void name;
+      }
+
+      // nodes.get returns Run | Task | undefined
+      const node = result.nodes.get(ids.runId as string);
+      if (node?.kind === "Task") {
+        const title: string = node.title;
+        void title;
+      }
+    });
+
+    it("narrows edge types via adjacency map access", async () => {
+      const result = await store.subgraph(ids.runId as never, {
+        edges: ["has_task", "uses_skill"],
+        maxDepth: 2,
+        project: {
+          edges: {
+            uses_skill: ["priority"],
+          },
+        },
+      });
+
+      const edges =
+        result.adjacency.get(ids.task1Id as string)?.get("uses_skill") ?? [];
+      for (const edge of edges) {
+        // Structural fields are always present
+        const fromId: string = edge.fromId;
+        void fromId;
+        if (edge.kind === "uses_skill") {
+          const priority: number = edge.priority;
+          void priority;
+          // @ts-expect-error - projected uses_skill omits meta
+          const meta = edge.meta;
+          void meta;
+        }
+      }
+
+      // reverseAdjacency has the same type
+      const reverseEdges =
+        result.reverseAdjacency
+          .get(ids.skill1Id as string)
+          ?.get("uses_skill") ?? [];
+      for (const edge of reverseEdges) {
+        const toId: string = edge.toId;
+        void toId;
+      }
     });
 
     it("rejects partial meta fields at compile time", async () => {
@@ -950,8 +1013,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes).toHaveLength(2);
-      for (const node of result.nodes) {
+      expect(result.nodes.size).toBe(2);
+      for (const node of result.nodes.values()) {
         expect(
           node.a_field_name_that_is_also_unreasonably_long_for_testing_purposes,
         ).toBeDefined();
@@ -998,8 +1061,8 @@ describe("store.subgraph()", () => {
         },
       });
 
-      expect(result.nodes).toHaveLength(2);
-      for (const node of result.nodes) {
+      expect(result.nodes.size).toBe(2);
+      for (const node of result.nodes.values()) {
         expect((node as Record<string, unknown>).value).toBeDefined();
       }
     });
@@ -1081,7 +1144,7 @@ describe("store.subgraph()", () => {
         project,
       });
 
-      for (const node of result.nodes) {
+      for (const node of result.nodes.values()) {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
@@ -1094,7 +1157,8 @@ describe("store.subgraph()", () => {
         }
       }
 
-      for (const edge of result.edges) {
+      const allEdges = collectAllEdges(result.adjacency);
+      for (const edge of allEdges) {
         if (edge.kind === "uses_skill") {
           const priority: number = edge.priority;
           void priority;

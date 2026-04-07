@@ -4,8 +4,12 @@ import { BENCHMARK_CONFIG, type QueryMetrics } from "./config";
 import { type PerfStore } from "./graph";
 import { formatMs, median, nowMs } from "./utils";
 
+type SubgraphNode = Readonly<{ kind: string; id: string }>;
+type SubgraphEdge = Readonly<{ id: string; fromId: string; toId: string }>;
+
 type FullSubgraphResult = Readonly<{
-  nodes: readonly (
+  nodes: ReadonlyMap<
+    string,
     | Readonly<{
         kind: "User";
         id: string;
@@ -19,26 +23,17 @@ type FullSubgraphResult = Readonly<{
         title: string;
         body: string;
       }>
-  )[];
-  edges: readonly Readonly<{
-    id: string;
-    kind: "follows" | "authored";
-    fromId: string;
-    toId: string;
-  }>[];
+  >;
+  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>;
 }>;
 
 type ProjectedSubgraphResult = Readonly<{
-  nodes: readonly (
+  nodes: ReadonlyMap<
+    string,
     | Readonly<{ kind: "User"; id: string; name: string }>
     | Readonly<{ kind: "Post"; id: string; title: string }>
-  )[];
-  edges: readonly Readonly<{
-    id: string;
-    kind: "follows" | "authored";
-    fromId: string;
-    toId: string;
-  }>[];
+  >;
+  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>;
 }>;
 
 type BenchmarkSubgraphOptions = Readonly<{
@@ -87,29 +82,43 @@ async function benchmarkQuery(
   return result;
 }
 
+function sumEdgeChecksum(
+  adjacency: ReadonlyMap<string, ReadonlyMap<string, readonly SubgraphEdge[]>>,
+): number {
+  let checksum = 0;
+  for (const kindMap of adjacency.values()) {
+    for (const edges of kindMap.values()) {
+      for (const edge of edges) {
+        checksum += edge.id.length + edge.fromId.length + edge.toId.length;
+      }
+    }
+  }
+  return checksum;
+}
+
 function consumeSubgraphCounts(
   result: Readonly<{
-    nodes: readonly Readonly<{ kind: string; id: string }>[];
-    edges: readonly Readonly<{ id: string; fromId: string; toId: string }>[];
+    nodes: ReadonlyMap<string, SubgraphNode>;
+    adjacency: ReadonlyMap<
+      string,
+      ReadonlyMap<string, readonly SubgraphEdge[]>
+    >;
   }>,
 ): number {
   let checksum = 0;
 
-  for (const node of result.nodes) {
+  for (const node of result.nodes.values()) {
     checksum += node.id.length + node.kind.length;
   }
 
-  for (const edge of result.edges) {
-    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
-  }
-
+  checksum += sumEdgeChecksum(result.adjacency);
   return checksum;
 }
 
 function projectSubgraphInApplication(result: FullSubgraphResult): number {
   let checksum = 0;
 
-  for (const node of result.nodes) {
+  for (const node of result.nodes.values()) {
     if (node.kind === "User") {
       checksum += node.id.length + node.name.length;
       continue;
@@ -120,17 +129,14 @@ function projectSubgraphInApplication(result: FullSubgraphResult): number {
     }
   }
 
-  for (const edge of result.edges) {
-    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
-  }
-
+  checksum += sumEdgeChecksum(result.adjacency);
   return checksum;
 }
 
 function consumeProjectedSubgraph(result: ProjectedSubgraphResult): number {
   let checksum = 0;
 
-  for (const node of result.nodes) {
+  for (const node of result.nodes.values()) {
     if (node.kind === "User") {
       checksum += node.id.length + node.name.length;
       continue;
@@ -139,10 +145,7 @@ function consumeProjectedSubgraph(result: ProjectedSubgraphResult): number {
     checksum += node.id.length + node.title.length;
   }
 
-  for (const edge of result.edges) {
-    checksum += edge.id.length + edge.fromId.length + edge.toId.length;
-  }
-
+  checksum += sumEdgeChecksum(result.adjacency);
   return checksum;
 }
 
@@ -158,9 +161,13 @@ async function logSubgraphShape(
   options: BenchmarkSubgraphOptions,
 ): Promise<void> {
   const result = await store.subgraph("user_0" as never, options);
-  console.log(
-    `${label}: ${result.nodes.length} nodes, ${result.edges.length} edges`,
-  );
+  let edgeCount = 0;
+  for (const kindMap of result.adjacency.values()) {
+    for (const edges of kindMap.values()) {
+      edgeCount += edges.length;
+    }
+  }
+  console.log(`${label}: ${result.nodes.size} nodes, ${edgeCount} edges`);
 }
 
 export async function measureQueries(store: PerfStore): Promise<QueryMetrics> {

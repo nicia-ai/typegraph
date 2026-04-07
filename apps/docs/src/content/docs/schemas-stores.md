@@ -1238,7 +1238,8 @@ operations in a `store.transaction()`.
 #### `store.subgraph(rootId, options)`
 
 Extracts a typed subgraph by performing a BFS traversal from a root node, following
-the specified edge kinds. Returns all reachable nodes and the edges connecting them.
+the specified edge kinds. Returns an indexed result with adjacency maps for immediate
+traversal.
 
 Under the hood, this compiles to a single `WITH RECURSIVE` CTE — the traversal,
 filtering, and hydration all happen in the database.
@@ -1266,10 +1267,19 @@ store.subgraph<EK, NK>(
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
-  nodes: readonly SubsetNode<G, NK>[];
-  edges: readonly SubsetEdge<G, EK>[];
+  root: SubgraphNodeResult<G, NK> | undefined;
+  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
+  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
 }>;
 ```
+
+| Field | Description |
+|-------|-------------|
+| `root` | The root node, or `undefined` if it was not found or `excludeRoot` is set |
+| `nodes` | All reachable nodes keyed by string ID |
+| `adjacency` | Forward adjacency: `fromId → edgeKind → edges[]` |
+| `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
 
 Edges are only included when **both** endpoints appear in the result set.
 Soft-deleted nodes and edges are automatically excluded. Duplicate nodes
@@ -1278,19 +1288,26 @@ Soft-deleted nodes and edges are automatically excluded. Duplicate nodes
 **Example:**
 
 ```typescript
-import type { AnyNode, SubgraphResult } from "@nicia-ai/typegraph";
-
-// Extract the full neighborhood of a run
-const result = await store.subgraph(run.id, {
+const sg = await store.subgraph(run.id, {
   edges: ["has_task", "runs_agent", "uses_skill"],
   maxDepth: 4,
 });
 
-// result.nodes — all reachable nodes (typed as a discriminated union)
-// result.edges — all connecting edges between those nodes
+// Root node (the traversal starting point)
+console.log(sg.root?.kind);
+
+// Lookup by ID
+const task = sg.nodes.get(taskId);
+
+// Forward adjacency: edges of a kind from a node
+const taskEdges = sg.adjacency.get(String(run.id))?.get("has_task") ?? [];
+const tasks = taskEdges.map((edge) => sg.nodes.get(String(edge.toId)));
+
+// Reverse adjacency: edges of a kind pointing to a node
+const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
 
 // Narrow by kind with a switch
-for (const node of result.nodes) {
+for (const node of sg.nodes.values()) {
   switch (node.kind) {
     case "Task": {
       console.log(node.title, node.status);
@@ -1313,7 +1330,7 @@ const tasksOnly = await store.subgraph(run.id, {
   excludeRoot: true,
 });
 
-// tasksOnly.nodes is typed as readonly Node<typeof Task>[]
+// tasksOnly.nodes values are typed as Node<typeof Task>
 ```
 
 **Bidirectional traversal:**
@@ -1368,7 +1385,7 @@ Result types narrow per-kind based on the projection. Accessing an omitted field
 compile-time error:
 
 ```typescript
-for (const node of result.nodes) {
+for (const node of result.nodes.values()) {
   if (node.kind === "Task") {
     console.log(node.title);  // OK
     console.log(node.status); // TypeScript error — status was not projected
