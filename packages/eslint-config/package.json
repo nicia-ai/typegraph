@@ -13,12 +13,12 @@
   ],
   "dependencies": {
     "@eslint/js": "^10.0.1",
-    "@vitest/eslint-plugin": "^1.6.13",
+    "@vitest/eslint-plugin": "^1.6.14",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-functional": "^9.0.4",
-    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "eslint-plugin-simple-import-sort": "^13.0.0",
     "eslint-plugin-unicorn": "^64.0.0",
-    "typescript-eslint": "^8.57.2"
+    "typescript-eslint": "^8.58.1"
   },
   "peerDependencies": {
     "eslint": "^10.0.0",

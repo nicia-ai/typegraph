@@ -180,17 +180,17 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.12.0",
     "@types/pg": "^8.20.0",
-    "@vitest/coverage-v8": "^4.1.2",
+    "@vitest/coverage-v8": "^4.1.3",
     "better-sqlite3": "^12.8.0",
     "drizzle-orm": "^0.45.2",
-    "eslint": "^10.1.0",
+    "eslint": "^10.2.0",
     "fast-check": "^4.6.0",
     "pg": "^8.20.0",
-    "sqlite-vec": "^0.1.8",
+    "sqlite-vec": "^0.1.9",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.2",
+    "vitest": "^4.1.3",
     "zod": "^4.3.6"
   }
 }
