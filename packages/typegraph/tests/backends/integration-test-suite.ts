@@ -24,6 +24,7 @@ import {
   integrationTestGraph,
   registerAdvancedEdgePropertyIntegrationTests,
   registerAggregateIntegrationTests,
+  registerAlgorithmIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -116,6 +117,7 @@ export function createIntegrationTestSuite(
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);
     registerSubgraphIntegrationTests(context);
+    registerAlgorithmIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
   });

@@ -18,6 +18,7 @@ import { main as deleteBehaviors } from "../examples/07-delete-behaviors";
 import { main as customOntology } from "../examples/08-custom-ontology";
 import { main as paginationStreaming } from "../examples/09-pagination-streaming";
 import { main as semanticSearch } from "../examples/11-semantic-search";
+import { main as researchCopilot } from "../examples/14-research-copilot";
 
 // Note: 10-postgresql.ts is excluded - it requires an external PostgreSQL database
 
@@ -32,6 +33,7 @@ const EXAMPLES = [
   { name: "08-custom-ontology", main: customOntology },
   { name: "09-pagination-streaming", main: paginationStreaming },
   { name: "11-semantic-search", main: semanticSearch },
+  { name: "14-research-copilot", main: researchCopilot },
 ] as const;
 
 describe("examples", () => {

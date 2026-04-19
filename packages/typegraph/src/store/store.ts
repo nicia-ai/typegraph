@@ -28,6 +28,7 @@ import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
+import { createGraphAlgorithms, type GraphAlgorithms } from "./algorithms";
 import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
@@ -125,6 +126,7 @@ export class Store<G extends GraphDef> {
   readonly #defaultTraversalExpansion: TraversalExpansion;
   #nodeCollections: GraphNodeCollections<G> | undefined;
   #edgeCollections: GraphEdgeCollections<G> | undefined;
+  #algorithms: GraphAlgorithms<G> | undefined;
 
   constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
     this.#graph = graph;
@@ -219,6 +221,40 @@ export class Store<G extends GraphDef> {
     }
 
     return this.#edgeCollections;
+  }
+
+  // === Graph Algorithms ===
+
+  /**
+   * Tier 1 graph algorithms: shortest path, reachability, neighborhoods, and
+   * degree centrality.
+   *
+   * Each call compiles to a single recursive-CTE query against the backend.
+   * The facade is built lazily on first access and cached for the lifetime
+   * of the store.
+   *
+   * @example
+   * ```typescript
+   * const path = await store.algorithms.shortestPath(alice, bob, {
+   *   edges: ["knows"],
+   * });
+   *
+   * const friends = await store.algorithms.neighbors(alice, {
+   *   edges: ["knows"],
+   *   depth: 2,
+   * });
+   * ```
+   */
+  get algorithms(): GraphAlgorithms<G> {
+    if (this.#algorithms === undefined) {
+      this.#algorithms = createGraphAlgorithms<G>({
+        graphId: this.graphId,
+        backend: this.#backend,
+        schema: this.#schema,
+        defaultTemporalMode: this.#graph.defaults.temporalMode,
+      });
+    }
+    return this.#algorithms;
   }
 
   // === Dynamic Collection Access ===
@@ -591,6 +627,7 @@ export class Store<G extends GraphDef> {
     // Reset lazy-initialized collection caches
     this.#nodeCollections = undefined;
     this.#edgeCollections = undefined;
+    this.#algorithms = undefined;
   }
 
   // === Lifecycle ===

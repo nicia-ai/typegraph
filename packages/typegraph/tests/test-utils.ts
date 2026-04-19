@@ -59,3 +59,17 @@ export function collectAllEdges<E>(
   }
   return edges;
 }
+
+/**
+ * Shared time anchors for temporal-behavior tests.
+ *
+ * Use these to build fixtures that exercise `temporalMode` / `asOf` across
+ * the store. Spacing between anchors is intentional so individual tests can
+ * assert snapshot boundaries without coordinating timestamps.
+ */
+export const TEMPORAL_ANCHORS = {
+  PAST: "2020-01-01T00:00:00.000Z",
+  BEFORE: "2021-01-01T00:00:00.000Z",
+  EDGE_ENDED: "2022-01-01T00:00:00.000Z",
+  FUTURE: "2030-01-01T00:00:00.000Z",
+} as const;

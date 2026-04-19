@@ -230,17 +230,26 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 }
 ```
 
-## No Built-in Graph Algorithms
+## No Built-in Graph Analytics
 
-TypeGraph deliberately excludes graph algorithms. The following are **not** provided:
+TypeGraph ships a small set of Tier 1 connectivity algorithms on
+`store.algorithms.*` — shortest path, reachability, k-hop neighborhoods,
+and degree. See [Graph Algorithms](/graph-algorithms) for the full API.
 
-- Shortest path (Dijkstra, A*)
+The following heavier analytics are **not** provided:
+
+- Weighted shortest path (Dijkstra, A*)
 - PageRank
 - Community detection
-- Centrality measures
+- Centrality measures beyond degree (betweenness, closeness, eigenvector)
+- Connected components / strongly connected components
+- Topological sort
 - Graph partitioning
 
-For these use cases, export your data to a specialized graph processing library or database.
+For these use cases, export your data via `.query().traverse()` or
+`store.subgraph()` and use a specialized library such as
+[graphology](https://graphology.github.io/) in memory, or move to a
+dedicated graph database.
 
 ## Single Database Deployment
 

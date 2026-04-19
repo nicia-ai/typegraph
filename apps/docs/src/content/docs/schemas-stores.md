@@ -1261,6 +1261,8 @@ store.subgraph<EK, NK>(
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
+| `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
 
 **Result:**
@@ -1282,8 +1284,9 @@ type SubgraphResult<G, NK, EK> = Readonly<{
 | `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
 
 Edges are only included when **both** endpoints appear in the result set.
-Soft-deleted nodes and edges are automatically excluded. Duplicate nodes
-(reachable via multiple paths) are deduplicated.
+Nodes and edges are filtered by the resolved `temporalMode` — by default,
+only currently valid rows participate. Duplicate nodes (reachable via
+multiple paths) are deduplicated.
 
 **Example:**
 
@@ -1430,6 +1433,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit |
+| Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Single recursive CTE or `COUNT` per call — see [Graph Algorithms](/graph-algorithms) |
 
 **Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
 traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
@@ -1440,6 +1444,51 @@ template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach
 per-query filtering, sorting, or pagination across multiple independent queries, use
 [`store.batch()`](#batch-query-execution) to run them over a single connection with snapshot
 consistency. Reserve individual fluent queries for one-off operations.
+
+### Graph Algorithms
+
+#### `store.algorithms`
+
+Lazy-initialized facade exposing the Tier 1 graph algorithms —
+`shortestPath`, `reachable`, `canReach`, `neighbors`, and `degree`.
+See [Graph Algorithms](/graph-algorithms) for the full API; this section
+is a quick reference.
+
+```typescript
+// Shortest path between two nodes
+const path = await store.algorithms.shortestPath(alice, bob, {
+  edges: ["knows"],
+});
+
+// Every reachable node with its discovery depth
+const reachable = await store.algorithms.reachable(alice, {
+  edges: ["knows"],
+  maxHops: 5,
+});
+
+// Fast boolean reachability check
+const connected = await store.algorithms.canReach(alice, bob, {
+  edges: ["knows"],
+});
+
+// k-hop neighborhood (source excluded)
+const twoHop = await store.algorithms.neighbors(alice, {
+  edges: ["knows"],
+  depth: 2,
+});
+
+// Count incident edges
+const total = await store.algorithms.degree(alice, { edges: ["knows"] });
+```
+
+Every traversal algorithm accepts `edges`, `maxHops` (default 10),
+`direction` (`"out" | "in" | "both"`, default `"out"`), and `cyclePolicy`
+(`"prevent" | "allow"`, default `"prevent"`), plus `temporalMode` / `asOf`
+for temporal filtering — see [Temporal Behavior](/graph-algorithms#temporal-behavior).
+Each call compiles to a single recursive CTE; `degree` compiles to a
+single `COUNT`. Node arguments accept either raw IDs or any object with
+an `id` field — `Node`, `NodeRef`, and the lightweight records returned
+by these algorithms all work.
 
 ### Query Builder
 

@@ -15,11 +15,17 @@ import type {
   GraphDef,
   NodeKinds,
 } from "../core/define-graph";
-import type { AnyEdgeType, NodeId, NodeType } from "../core/types";
+import type {
+  AnyEdgeType,
+  NodeId,
+  NodeType,
+  TemporalMode,
+} from "../core/types";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "../query/compiler/schema";
+import { compileTemporalFilter } from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
 import type { DialectAdapter } from "../query/dialect/types";
@@ -31,6 +37,7 @@ import {
   type SchemaIntrospector,
 } from "../query/schema-introspector";
 import { fnv1aBase36 } from "../utils/hash";
+import { buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -331,6 +338,13 @@ export type SubgraphOptions<
   /** Cycle policy — reuse RecursiveCyclePolicy (default: "prevent"). */
   cyclePolicy?: RecursiveCyclePolicy;
   /**
+   * Temporal mode applied to both nodes and edges along the traversal and in
+   * the hydrated result. Defaults to `graph.defaults.temporalMode`.
+   */
+  temporalMode?: TemporalMode;
+  /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
+  asOf?: string;
+  /**
    * Optional field-level projection per node/edge kind.
    *
    * Projected nodes keep `kind` and `id`; projected edges keep their structural
@@ -399,6 +413,8 @@ type SubgraphContext = Readonly<{
   excludeRoot: boolean;
   direction: "out" | "both";
   cyclePolicy: RecursiveCyclePolicy;
+  temporalMode: TemporalMode;
+  asOf: string | undefined;
   dialect: DialectAdapter;
   schema: SqlSchema;
   backend: GraphBackend;
@@ -462,6 +478,8 @@ export async function executeSubgraph<
     excludeRoot: options.excludeRoot ?? false,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
+    temporalMode: options.temporalMode ?? params.graph.defaults.temporalMode,
+    asOf: options.asOf,
     dialect: params.dialect,
     schema: params.schema ?? DEFAULT_SQL_SCHEMA,
     backend: params.backend,
@@ -481,7 +499,19 @@ export async function executeSubgraph<
     "edge",
   );
 
-  const reachableCte = buildReachableCte(ctx);
+  const reachableCte = buildReachableCte({
+    graphId: ctx.graphId,
+    sourceId: ctx.rootId,
+    edgeKinds: ctx.edgeKinds,
+    maxHops: ctx.maxDepth,
+    direction: ctx.direction,
+    cyclePolicy: ctx.cyclePolicy,
+    includePath: false,
+    temporalMode: ctx.temporalMode,
+    ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
+    dialect: ctx.dialect,
+    schema: ctx.schema,
+  });
   const includedIdsCte = buildIncludedIdsCte(ctx);
 
   const [nodeRows, edgeRows] = await Promise.all([
@@ -631,132 +661,6 @@ function dedupeStrings(values: readonly string[]): readonly string[] {
 // SQL Generation
 // ============================================================
 
-function buildReachableCte(ctx: SubgraphContext): SQL {
-  const shouldTrackPath = ctx.cyclePolicy === "prevent";
-  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
-
-  // Path operations for cycle detection
-  const initialPath =
-    shouldTrackPath ? ctx.dialect.initializePath(sql.raw("n.id")) : undefined;
-  const pathExtension =
-    shouldTrackPath ?
-      ctx.dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
-    : undefined;
-  const cycleCheck =
-    shouldTrackPath ?
-      ctx.dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
-    : undefined;
-
-  // Base case: the root node
-  const baseColumns: SQL[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
-  if (initialPath !== undefined) {
-    baseColumns.push(sql`${initialPath} AS path`);
-  }
-
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND n.id = ${ctx.rootId} AND n.deleted_at IS NULL`;
-
-  // Recursive case columns
-  const recursiveColumns: SQL[] = [
-    sql`n.id`,
-    sql`n.kind`,
-    sql`r.depth + 1 AS depth`,
-  ];
-  if (pathExtension !== undefined) {
-    recursiveColumns.push(sql`${pathExtension} AS path`);
-  }
-
-  // Common WHERE clauses for recursive branches
-  const recursiveWhereClauses: SQL[] = [
-    sql`e.graph_id = ${ctx.graphId}`,
-    edgeKindFilter,
-    sql`e.deleted_at IS NULL`,
-    sql`n.deleted_at IS NULL`,
-    sql`r.depth < ${ctx.maxDepth}`,
-  ];
-  if (cycleCheck !== undefined) {
-    recursiveWhereClauses.push(cycleCheck);
-  }
-
-  const forceWorktableOuterJoinOrder =
-    ctx.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
-
-  const recursiveCase =
-    ctx.direction === "both" ?
-      compileBidirectionalBranch({
-        recursiveColumns,
-        whereClauses: recursiveWhereClauses,
-        forceWorktableOuterJoinOrder,
-        schema: ctx.schema,
-      })
-    : compileRecursiveBranch({
-        recursiveColumns,
-        whereClauses: recursiveWhereClauses,
-        joinField: "from_id",
-        targetField: "to_id",
-        targetKindField: "to_kind",
-        forceWorktableOuterJoinOrder,
-        schema: ctx.schema,
-      });
-
-  return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;
-}
-
-function compileRecursiveBranch(params: {
-  recursiveColumns: readonly SQL[];
-  whereClauses: readonly SQL[];
-  joinField: "from_id" | "to_id";
-  targetField: "from_id" | "to_id";
-  targetKindField: "from_kind" | "to_kind";
-  forceWorktableOuterJoinOrder: boolean;
-  schema: SqlSchema;
-}): SQL {
-  const columns = [...params.recursiveColumns];
-  const selectClause = sql`SELECT ${sql.join(columns, sql`, `)}`;
-  const nodeJoin = sql`JOIN ${params.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(params.targetField)} AND n.kind = e.${sql.raw(params.targetKindField)}`;
-
-  if (params.forceWorktableOuterJoinOrder) {
-    // SQLite: worktable must be outer in the join — use CROSS JOIN + WHERE
-    const allWhere = [
-      ...params.whereClauses,
-      sql`e.${sql.raw(params.joinField)} = r.id`,
-    ];
-    return sql`${selectClause} FROM reachable r CROSS JOIN ${params.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  // PostgreSQL: standard JOIN ON
-  const where = [...params.whereClauses];
-  return sql`${selectClause} FROM reachable r JOIN ${params.schema.edgesTable} e ON e.${sql.raw(params.joinField)} = r.id ${nodeJoin} WHERE ${sql.join(where, sql` AND `)}`;
-}
-
-/**
- * Combines outbound and inbound traversal into a single recursive SELECT
- * using OR on the join condition. This avoids a second UNION ALL branch,
- * which PostgreSQL rejects because it treats the left side of a multi-part
- * UNION ALL as the non-recursive term.
- */
-function compileBidirectionalBranch(params: {
-  recursiveColumns: readonly SQL[];
-  whereClauses: readonly SQL[];
-  forceWorktableOuterJoinOrder: boolean;
-  schema: SqlSchema;
-}): SQL {
-  const columns = [...params.recursiveColumns];
-  const selectClause = sql`SELECT ${sql.join(columns, sql`, `)}`;
-
-  // Match node via either direction of the edge
-  const nodeJoin = sql`JOIN ${params.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
-
-  if (params.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...params.whereClauses,
-      sql`(e.from_id = r.id OR e.to_id = r.id)`,
-    ];
-    return sql`${selectClause} FROM reachable r CROSS JOIN ${params.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${selectClause} FROM reachable r JOIN ${params.schema.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...params.whereClauses], sql` AND `)}`;
-}
-
 function buildIncludedIdsCte(ctx: SubgraphContext): SQL {
   const filters: SQL[] = [];
 
@@ -809,6 +713,11 @@ async function fetchSubgraphEdges(
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphEdgeFetchRow[]> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
+  const edgeTemporalFilter = compileTemporalFilter({
+    mode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    tableAlias: "e",
+  });
   const columns: SQL[] = [
     sql`e.id`,
     sql`e.kind`,
@@ -827,7 +736,7 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND e.deleted_at IS NULL AND e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
+  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(query) as Promise<
     SubgraphEdgeFetchRow[]

@@ -24,7 +24,11 @@ import {
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { createStore, type Store } from "../src/store";
-import { collectAllEdges, createTestBackend } from "./test-utils";
+import {
+  collectAllEdges,
+  createTestBackend,
+  TEMPORAL_ANCHORS,
+} from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -1168,5 +1172,207 @@ describe("store.subgraph()", () => {
         }
       }
     });
+  });
+});
+
+// ============================================================
+// Temporal Behavior
+// ============================================================
+//
+// subgraph() honors graph.defaults.temporalMode with per-call overrides.
+
+describe("store.subgraph temporal behavior", () => {
+  const { PAST, BEFORE, EDGE_ENDED, FUTURE } = TEMPORAL_ANCHORS;
+
+  type TemporalFixture = Readonly<{
+    runId: string;
+    activeTaskId: string;
+    endedTaskId: string;
+    futureTaskId: string;
+    tombstoneTaskId: string;
+    futureEdgeTargetId: string;
+  }>;
+
+  let backend: GraphBackend;
+  let store: Store<TestGraph>;
+  let ids: TemporalFixture;
+
+  beforeEach(async () => {
+    backend = createTestBackend();
+    store = createStore(testGraph, backend);
+
+    const [run, active, ended, future, tombstone, futureEdgeTarget] =
+      await Promise.all([
+        store.nodes.Run.create({ name: "r" }, { validFrom: PAST }),
+        store.nodes.Task.create(
+          { title: "active", status: "ok" },
+          { validFrom: PAST },
+        ),
+        store.nodes.Task.create(
+          { title: "ended", status: "done" },
+          { validFrom: PAST, validTo: EDGE_ENDED },
+        ),
+        store.nodes.Task.create(
+          { title: "future", status: "pending" },
+          { validFrom: FUTURE },
+        ),
+        store.nodes.Task.create(
+          { title: "tombstone", status: "done" },
+          { validFrom: PAST },
+        ),
+        // Currently-valid target node; we'll attach a future-only edge to it
+        // below to exercise the edge-validity path independent of node validity.
+        store.nodes.Task.create(
+          { title: "futureEdgeTarget", status: "ok" },
+          { validFrom: PAST },
+        ),
+      ]);
+
+    // Always-valid, ended, and node-future-only edges.
+    await Promise.all([
+      store.edges.has_task.create(run, active, {}, { validFrom: PAST }),
+      store.edges.has_task.create(
+        run,
+        ended,
+        {},
+        { validFrom: PAST, validTo: EDGE_ENDED },
+      ),
+      store.edges.has_task.create(run, future, {}),
+      // Edge has validFrom = FUTURE but target node is currently valid.
+      // Distinguishes edge-level validity from node-level validity.
+      store.edges.has_task.create(
+        run,
+        futureEdgeTarget,
+        {},
+        { validFrom: FUTURE },
+      ),
+    ]);
+
+    // Tombstone setup: create edge → delete edge → delete node so both
+    // the edge and the target surface only under includeTombstones.
+    const tombstoneEdge = await store.edges.has_task.create(
+      run,
+      tombstone,
+      {},
+      { validFrom: PAST },
+    );
+    await store.edges.has_task.delete(tombstoneEdge.id);
+    await store.nodes.Task.delete(tombstone.id);
+
+    ids = {
+      runId: run.id,
+      activeTaskId: active.id,
+      endedTaskId: ended.id,
+      futureTaskId: future.id,
+      tombstoneTaskId: tombstone.id,
+      futureEdgeTargetId: futureEdgeTarget.id,
+    };
+  });
+
+  it("defaults to current mode — excludes ended and future entities", async () => {
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+    });
+
+    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
+    expect(result.nodes.has(ids.endedTaskId)).toBe(false);
+    expect(result.nodes.has(ids.futureTaskId)).toBe(false);
+  });
+
+  it("asOf = BEFORE surfaces the historically-valid task and edge", async () => {
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+      temporalMode: "asOf",
+      asOf: BEFORE,
+    });
+
+    // Active and ended were both valid at BEFORE; future was not.
+    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
+    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
+    expect(result.nodes.has(ids.futureTaskId)).toBe(false);
+  });
+
+  it("includeEnded traverses through validity-ended rows", async () => {
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+      temporalMode: "includeEnded",
+    });
+
+    // Ended rows surface; deleted tombstone does not.
+    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
+    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
+    expect(result.nodes.has(ids.futureTaskId)).toBe(true);
+    expect(result.nodes.has(ids.tombstoneTaskId)).toBe(false);
+  });
+
+  it("includeTombstones surfaces soft-deleted nodes and edges", async () => {
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+      temporalMode: "includeTombstones",
+    });
+
+    // Everything shows up under includeTombstones.
+    expect(result.nodes.has(ids.activeTaskId)).toBe(true);
+    expect(result.nodes.has(ids.endedTaskId)).toBe(true);
+    expect(result.nodes.has(ids.futureTaskId)).toBe(true);
+    expect(result.nodes.has(ids.tombstoneTaskId)).toBe(true);
+    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(true);
+  });
+
+  it("excludes edges with future validFrom under current mode", async () => {
+    // The edge run→futureEdgeTarget has validFrom: FUTURE even though the
+    // target node is currently valid. Under current mode, neither the edge
+    // nor (therefore) the target should appear in the traversal result.
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+    });
+    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(false);
+  });
+
+  it("surfaces edges with future validFrom under includeEnded", async () => {
+    // `includeEnded` only filters `deleted_at IS NULL` — it ignores both
+    // ends of the validity window, so future-valid edges participate too.
+    const result = await store.subgraph(ids.runId as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+      temporalMode: "includeEnded",
+    });
+    expect(result.nodes.has(ids.futureEdgeTargetId)).toBe(true);
+  });
+
+  it("respects graph.defaults.temporalMode when no per-call override", async () => {
+    const endedDefaultsGraph = defineGraph({
+      id: "subgraph_temporal_ended_defaults",
+      nodes: { Run: { type: Run }, Task: { type: Task } },
+      edges: { has_task: { type: hasTask, from: [Run], to: [Task] } },
+      defaults: { temporalMode: "includeEnded" },
+    });
+    const altStore = createStore(endedDefaultsGraph, createTestBackend());
+
+    const [run, ended] = await Promise.all([
+      altStore.nodes.Run.create({ name: "r" }, { validFrom: PAST }),
+      altStore.nodes.Task.create(
+        { title: "ended", status: "done" },
+        { validFrom: PAST, validTo: EDGE_ENDED },
+      ),
+    ]);
+    await altStore.edges.has_task.create(
+      run,
+      ended,
+      {},
+      { validFrom: PAST, validTo: EDGE_ENDED },
+    );
+
+    // No per-call override — graph's includeEnded default applies.
+    const result = await altStore.subgraph(run.id as never, {
+      edges: ["has_task"],
+      maxDepth: 1,
+    });
+    expect(result.nodes.has(ended.id as string)).toBe(true);
   });
 });
