@@ -717,6 +717,7 @@ async function fetchSubgraphEdges(
     mode: ctx.temporalMode,
     asOf: ctx.asOf,
     tableAlias: "e",
+    currentTimestamp: ctx.dialect.currentTimestamp(),
   });
   const columns: SQL[] = [
     sql`e.id`,

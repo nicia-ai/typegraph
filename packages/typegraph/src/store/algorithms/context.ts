@@ -64,6 +64,7 @@ export function resolveTemporalFilter(
     mode: resolved.temporalMode,
     asOf: resolved.asOf,
     tableAlias,
+    currentTimestamp: ctx.dialect.currentTimestamp(),
   };
   return compileTemporalFilter(filterOptions);
 }

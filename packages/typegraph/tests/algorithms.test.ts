@@ -13,7 +13,11 @@ import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { ConfigurationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
-import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
+import {
+  collectAllEdges,
+  createTestBackend,
+  TEMPORAL_ANCHORS,
+} from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -938,6 +942,95 @@ describe("store.algorithms temporal behavior", () => {
           temporalMode: "asOf",
         }),
       ).rejects.toThrow(/asOf/);
+    });
+  });
+
+  // Regression: SQLite's raw `CURRENT_TIMESTAMP` returns `YYYY-MM-DD HH:MM:SS`,
+  // while `valid_from` / `valid_to` are stored as ISO-8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`).
+  // Because `T` > space lexicographically, same-day ISO timestamps sort *above*
+  // raw `CURRENT_TIMESTAMP`, so `valid_from <= CURRENT_TIMESTAMP` is spuriously
+  // false for rows that started earlier today. Every current-mode path must
+  // use the dialect's ISO-aligned timestamp instead.
+  describe("same-day current-mode boundary (SQLite format regression)", () => {
+    it("includes rows whose valid_from is earlier today across all algorithms", async () => {
+      const freshBackend = createTestBackend();
+      const freshStore = createStore(testGraph, freshBackend);
+
+      const recentValidFrom = new Date(Date.now() - 60_000).toISOString();
+      const [alice, bob] = await Promise.all([
+        freshStore.nodes.Person.create(
+          { name: "Alice" },
+          { validFrom: recentValidFrom },
+        ),
+        freshStore.nodes.Person.create(
+          { name: "Bob" },
+          { validFrom: recentValidFrom },
+        ),
+      ]);
+      await freshStore.edges.knows.create(
+        alice,
+        bob,
+        {},
+        { validFrom: recentValidFrom },
+      );
+
+      // buildReachableCte: reachable/canReach/neighbors/shortestPath all share
+      // the same CTE — one assertion exercises the recursive path.
+      const reached = await freshStore.algorithms.reachable(alice.id, {
+        edges: ["knows"],
+        excludeSource: true,
+      });
+      expect(reached.map((row) => row.id)).toContain(bob.id);
+
+      // resolveTemporalFilter: shortestPath(a, a) fast path.
+      const selfPath = await freshStore.algorithms.shortestPath(
+        alice.id,
+        alice.id,
+        { edges: ["knows"] },
+      );
+      expect(selfPath?.nodes[0]?.id).toBe(alice.id);
+
+      // resolveTemporalFilter: degree scans the edges table directly.
+      const outDegree = await freshStore.algorithms.degree(alice.id, {
+        edges: ["knows"],
+        direction: "out",
+      });
+      expect(outDegree).toBe(1);
+
+      // fetchSubgraphEdges: subgraph hydrates edges via compileTemporalFilter.
+      const sub = await freshStore.subgraph(alice.id, { edges: ["knows"] });
+      expect(collectAllEdges(sub.adjacency)).toHaveLength(1);
+    });
+
+    it("excludes rows whose valid_to was earlier today", async () => {
+      const freshBackend = createTestBackend();
+      const freshStore = createStore(testGraph, freshBackend);
+
+      const now = Date.now();
+      const earlierToday = new Date(now - 60_000).toISOString();
+      const muchEarlierToday = new Date(now - 120_000).toISOString();
+      const [alice, bob] = await Promise.all([
+        freshStore.nodes.Person.create({ name: "Alice" }),
+        freshStore.nodes.Person.create({ name: "Bob" }),
+      ]);
+      await freshStore.edges.knows.create(
+        alice,
+        bob,
+        {},
+        { validFrom: muchEarlierToday, validTo: earlierToday },
+      );
+
+      const reached = await freshStore.algorithms.reachable(alice.id, {
+        edges: ["knows"],
+        excludeSource: true,
+      });
+      expect(reached.map((row) => row.id)).not.toContain(bob.id);
+
+      const outDegree = await freshStore.algorithms.degree(alice.id, {
+        edges: ["knows"],
+        direction: "out",
+      });
+      expect(outDegree).toBe(0);
     });
   });
 
