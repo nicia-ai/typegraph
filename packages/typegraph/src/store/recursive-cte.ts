@@ -34,15 +34,18 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     sql.raw("e.kind"),
     options.edgeKinds,
   );
+  const currentTimestamp = options.dialect.currentTimestamp();
   const nodeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
     tableAlias: "n",
+    currentTimestamp,
   });
   const edgeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
     tableAlias: "e",
+    currentTimestamp,
   });
 
   const initialPath =
