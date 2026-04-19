@@ -53,6 +53,7 @@ npx tsx examples/<example-name>.ts
 |---------|-------------|
 | [11-semantic-search.ts](./11-semantic-search.ts) | Vector embeddings and similarity search |
 | [12-knowledge-graph-rag.ts](./12-knowledge-graph-rag.ts) | Knowledge graph patterns for RAG applications |
+| [14-research-copilot.ts](./14-research-copilot.ts) | End-to-end showcase: semantic search + ontology-expanded topics + all five Tier 1 graph algorithms over a citation graph |
 
 ## Prerequisites
 

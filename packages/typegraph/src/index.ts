@@ -200,6 +200,20 @@ export type {
 } from "./store";
 export { createStore, createStoreWithSchema } from "./store";
 export type {
+  AlgorithmCyclePolicy,
+  BaseTraversalOptions,
+  DegreeOptions,
+  GraphAlgorithms,
+  NeighborsOptions,
+  NodeIdentifier,
+  PathNode,
+  ReachableNode,
+  ReachableOptions,
+  ShortestPathOptions,
+  ShortestPathResult,
+  TraversalDirection,
+} from "./store/algorithms";
+export type {
   AnyEdge,
   AnyNode,
   SubgraphEdgeResult,

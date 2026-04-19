@@ -92,7 +92,8 @@ The same query code works with SQLite and PostgreSQL.
 
 TypeGraph deliberately excludes:
 
-- **Graph algorithms**: No built-in shortest path, PageRank, or community detection
+- **Advanced graph analytics**: No PageRank, community detection, weighted
+  shortest path, or centrality measures beyond degree
 - **Distributed storage**: Single-database deployment only
 
 These exclusions keep TypeGraph focused and maintainable.
@@ -104,6 +105,10 @@ Note: TypeGraph does support **variable-length paths** via `.recursive()` with
 configurable depth limits, optional path/depth projection, and explicit cycle
 policy. Cycle prevention is the default.
 See [Recursive Traversals](/queries/recursive) for details.
+
+Note: TypeGraph ships **Tier 1 graph algorithms** (shortest path, reachability,
+neighborhoods, and degree) on `store.algorithms.*`. Each call compiles to a
+single recursive CTE. See [Graph Algorithms](/graph-algorithms) for details.
 
 ## Why TypeGraph?
 
@@ -117,7 +122,7 @@ Graph databases are powerful but come with operational overhead:
 | **Network** | Additional latency for every query | In-process, no network hop |
 | **Transactions** | Separate transaction scope from your SQL data | Same ACID transaction as your other data |
 | **Learning curve** | New query language (Cypher, Gremlin) | TypeScript you already know |
-| **Graph algorithms** | Built-in (PageRank, shortest path) | Not included |
+| **Graph algorithms** | Built-in (PageRank, shortest path, community detection) | Tier 1 only (shortest path, reachability, neighborhoods, degree) |
 | **Scale** | Optimized for billions of nodes | Best for thousands to millions |
 
 **Choose TypeGraph** when your graph is part of your application domain (knowledge bases, org
@@ -178,4 +183,6 @@ TypeGraph is not ideal for:
 - Large-scale graph analytics requiring distributed processing
 - Social networks with billions of edges
 - Real-time streaming graph data
-- Applications requiring graph algorithms (use Neo4j or a graph library)
+- Applications requiring advanced graph algorithms such as PageRank,
+  community detection, or weighted shortest path (use Neo4j or a graph
+  library; Tier 1 connectivity algorithms ship on `store.algorithms.*`)

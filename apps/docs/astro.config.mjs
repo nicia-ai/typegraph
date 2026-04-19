@@ -39,6 +39,7 @@ const sidebar = [
       { label: "Schemas & Types", slug: "core-concepts" },
       { label: "Ontology & Reasoning", slug: "ontology" },
       { label: "Semantic Search", slug: "semantic-search" },
+      { label: "Graph Algorithms", slug: "graph-algorithms" },
       { label: "Backend Setup", slug: "backend-setup" },
       { label: "Schema Migrations", slug: "schema-management" },
       { label: "Evolving Schemas", slug: "schema-evolution" },
