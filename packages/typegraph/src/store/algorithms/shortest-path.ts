@@ -1,23 +1,16 @@
-/**
- * Shortest-path algorithm.
- *
- * Runs the shared recursive CTE with path tracking, filters the frontier to
- * the target row with the smallest depth, and decodes the dialect-encoded
- * path column into an ordered list of node IDs. Node kinds for every hop
- * are produced by the same CTE, so the full path is hydrated in a single
- * round-trip by joining the hit row against the `reachable` CTE using the
- * dialect's path-containment predicate.
- */
 import { type SQL, sql } from "drizzle-orm";
 
+import { normalizePath } from "../../utils";
+import { buildReachableCte } from "../recursive-cte";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   DEFAULT_ALGORITHM_MAX_HOPS,
   type InternalTraversalOptions,
   resolveMaxHops,
+  resolveTemporalFilter,
+  resolveTemporalOptions,
 } from "./context";
-import { buildReachableCte, decodePathColumn } from "./recursive-cte";
 import type { PathNode, ShortestPathResult } from "./types";
 
 type ShortestPathRow = Readonly<{
@@ -45,9 +38,9 @@ export async function executeShortestPath(
   );
 
   // Self-path short-circuit: avoids the recursive CTE entirely while still
-  // honouring soft-delete semantics via a lightweight existence check.
+  // honouring the configured temporal mode via a lightweight existence check.
   if (sourceId === targetId) {
-    const source = await fetchNodeKind(ctx, sourceId);
+    const source = await fetchNodeKind(ctx, sourceId, options);
     if (source === undefined) return undefined;
     return { nodes: [source], depth: 0 };
   }
@@ -60,12 +53,21 @@ export async function executeShortestPath(
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
     includePath: true,
+    ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
   });
 
-  // `cycleCheck` returns TRUE when id is NOT in path, so its negation is the
-  // "id is in path" predicate we need to join every hop's kind in one query.
+  // `cycleCheck` returns TRUE when id is NOT in path; negating it yields the
+  // "id is in path" predicate needed to hydrate every hop's kind in one query.
+  //
+  // Cost model: the LEFT JOIN scans `reachable` with an O(path length) check
+  // per row. Under cyclePolicy: "prevent" (default), |reachable| ≤ V, so this
+  // is bounded by V × p. Under "allow" + high maxHops, |reachable| grows with
+  // the CTE itself (O(V × maxHops)) — but that cost is proportional to the
+  // CTE materialization the user already opted into, not a new asymptotic
+  // class. If this ever dominates in a real workload, the path-unpack +
+  // nodes-PK join variant is the likely next step.
   const pathContainsCheck = sql`NOT (${ctx.dialect.cycleCheck(sql.raw("r.id"), sql.raw("h.path"))})`;
 
   const query = sql`${cte}, hit AS (SELECT id, kind, depth, path FROM reachable WHERE id = ${targetId} ORDER BY depth ASC LIMIT 1) SELECT h.id AS hit_id, h.kind AS hit_kind, h.depth AS hit_depth, h.path AS hit_path, r.id AS node_id, r.kind AS node_kind FROM hit h LEFT JOIN reachable r ON ${pathContainsCheck}`;
@@ -74,7 +76,7 @@ export async function executeShortestPath(
   const first = rows[0];
   if (first === undefined) return undefined;
 
-  const pathIds = decodePathColumn(first.hit_path);
+  const pathIds = normalizePath(first.hit_path);
   const kindById = buildKindIndex(rows);
 
   const pathNodes: PathNode[] = pathIds.map((id) => ({
@@ -100,8 +102,10 @@ function buildKindIndex(
 async function fetchNodeKind(
   ctx: AlgorithmContext,
   nodeId: string,
+  options: InternalTraversalOptions,
 ): Promise<PathNode | undefined> {
-  const query: SQL = sql`SELECT id, kind FROM ${ctx.schema.nodesTable} WHERE graph_id = ${ctx.graphId} AND id = ${nodeId} AND deleted_at IS NULL LIMIT 1`;
+  const temporalFilter = resolveTemporalFilter(ctx, options);
+  const query: SQL = sql`SELECT id, kind FROM ${ctx.schema.nodesTable} WHERE graph_id = ${ctx.graphId} AND id = ${nodeId} AND ${temporalFilter} LIMIT 1`;
   const rows = await ctx.backend.execute<NodeKindRow>(query);
   const row = rows[0];
   if (row === undefined) return undefined;

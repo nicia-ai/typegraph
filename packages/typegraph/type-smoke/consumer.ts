@@ -5,8 +5,13 @@ import {
   type EdgeId,
   getEdgeKinds,
   getNodeKinds,
+  type NodeId,
+  type NodeIdentifier,
   type NodeRef,
+  type PathNode,
+  type ReachableNode,
   type Store,
+  type TemporalAlgorithmOptions,
 } from "@nicia-ai/typegraph";
 import type { SqliteTables } from "@nicia-ai/typegraph/sqlite";
 import { z } from "zod";
@@ -96,3 +101,71 @@ void store.edges.knows.getById(worksAtId);
 void store.nodes.Project.findByConstraint("title_unique", {
   title: "Launch Plan",
 });
+
+// --- Graph algorithms: public surface shape checks ---
+
+declare const aliceId: string;
+declare const bobId: string;
+declare const aliceNodeId: NodeId<typeof Person>;
+declare const aliceNode: Awaited<ReturnType<typeof store.nodes.Person.getById>>;
+declare const reachableRow: ReachableNode;
+declare const pathNode: PathNode;
+
+// NodeIdentifier accepts bare strings, Node instances, and any {id} shape.
+const stringIdent: NodeIdentifier = aliceId;
+const objectIdent: NodeIdentifier = { id: aliceId };
+const reachableIdent: NodeIdentifier = reachableRow;
+const pathIdent: NodeIdentifier = pathNode;
+void stringIdent;
+void objectIdent;
+void reachableIdent;
+void pathIdent;
+
+// Every algorithm compiles with bare IDs, object identifiers, and Node values.
+void store.algorithms.shortestPath(aliceId, bobId, { edges: ["knows"] });
+void store.algorithms.shortestPath(
+  aliceNode ?? aliceId,
+  { id: bobId },
+  { edges: ["knows"], maxHops: 10, direction: "both", cyclePolicy: "allow" },
+);
+void store.algorithms.reachable(aliceId, { edges: ["knows"] });
+void store.algorithms.canReach(aliceId, bobId, { edges: ["knows"] });
+void store.algorithms.neighbors(aliceId, { edges: ["knows"], depth: 2 });
+
+// Degree accepts an options-less call and a specific edge-kind selection.
+void store.algorithms.degree(aliceId);
+void store.algorithms.degree(aliceId, { edges: ["knows"] });
+void store.algorithms.degree(aliceId, {});
+
+// TemporalAlgorithmOptions composes into every algorithm's option type.
+const temporal: TemporalAlgorithmOptions = {
+  temporalMode: "asOf",
+  asOf: "2024-01-01T00:00:00Z",
+};
+void store.algorithms.shortestPath(aliceId, bobId, {
+  edges: ["knows"],
+  ...temporal,
+});
+void store.algorithms.reachable(aliceId, { edges: ["knows"], ...temporal });
+void store.algorithms.neighbors(aliceId, { edges: ["knows"], ...temporal });
+void store.algorithms.degree(aliceId, { ...temporal });
+
+// Subgraph also accepts the temporal options (requires a branded NodeId).
+void store.subgraph(aliceNodeId, {
+  edges: ["knows"],
+  temporalMode: "includeEnded",
+});
+
+// --- Negative cases (must fail compile) ---
+
+// @ts-expect-error - "not_a_kind" isn't a registered edge kind
+void store.algorithms.reachable(aliceId, { edges: ["not_a_kind"] });
+
+void store.algorithms.reachable(aliceId, {
+  edges: ["knows"],
+  // @ts-expect-error - temporalMode literal must be a known TemporalMode
+  temporalMode: "bogus_mode",
+});
+
+// @ts-expect-error - subgraph edge kind must be registered on the graph
+void store.subgraph(aliceNodeId, { edges: ["not_a_kind"] });

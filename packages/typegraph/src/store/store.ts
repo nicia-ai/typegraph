@@ -251,6 +251,7 @@ export class Store<G extends GraphDef> {
         graphId: this.graphId,
         backend: this.#backend,
         schema: this.#schema,
+        defaultTemporalMode: this.#graph.defaults.temporalMode,
       });
     }
     return this.#algorithms;

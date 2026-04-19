@@ -13,7 +13,7 @@ import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { ConfigurationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -542,6 +542,428 @@ describe("store.algorithms", () => {
       });
       const reached = reachable.map((row) => row.id).toSorted();
       expect(reached).toEqual([ids.t2, ids.t3, ids.t4].toSorted());
+    });
+  });
+});
+
+// ============================================================
+// Temporal Behavior
+// ============================================================
+//
+// Algorithms honor the same temporal model as the rest of the store.
+// Default is graph.defaults.temporalMode ("current"), with per-call
+// overrides via `temporalMode` / `asOf`.
+//
+// Fixture (all nodes are Person, edges are "knows"):
+//
+//   alice  -- current edge -->  bob    (both always valid)
+//   bob    -- expired edge -->  david  (edge validTo = PAST)
+//   alice  -- current edge -->  eve    (eve validFrom = FUTURE)
+//   alice  -- current edge -->  ghost  (ghost soft-deleted)
+//
+// Time anchors:
+//   PAST   = 2020-01-01
+//   BEFORE = 2021-01-01   (before expired-edge ended)
+//   NOW    = 2025-06-01
+//   FUTURE = 2030-01-01
+
+describe("store.algorithms temporal behavior", () => {
+  const { PAST, BEFORE, EDGE_ENDED, FUTURE } = TEMPORAL_ANCHORS;
+
+  type TemporalFixture = Readonly<{
+    alice: string;
+    bob: string;
+    david: string;
+    eve: string;
+    ghost: string;
+  }>;
+
+  let backend: GraphBackend;
+  let store: Store<TestGraph>;
+  let temporalIds: TemporalFixture;
+
+  beforeEach(async () => {
+    backend = createTestBackend();
+    store = createStore(testGraph, backend);
+
+    // Alice/Bob/David valid from PAST so asOf: BEFORE sees them.
+    const [alice, bob, david, eve, ghost] = await Promise.all([
+      store.nodes.Person.create({ name: "Alice" }, { validFrom: PAST }),
+      store.nodes.Person.create({ name: "Bob" }, { validFrom: PAST }),
+      store.nodes.Person.create({ name: "David" }, { validFrom: PAST }),
+      store.nodes.Person.create({ name: "Eve" }, { validFrom: FUTURE }),
+      store.nodes.Person.create({ name: "Ghost" }),
+    ]);
+
+    // Edges: alice→bob (always valid), bob→david (ended), alice→eve (current),
+    // alice→ghost (soft-deleted along with ghost below, to exercise tombstone
+    // traversal). Edge must be deleted before ghost — node delete is restricted
+    // while live connected edges exist.
+    const edgeToGhostPromise = store.edges.knows.create(alice, ghost, {});
+    await Promise.all([
+      store.edges.knows.create(alice, bob, {}, { validFrom: PAST }),
+      store.edges.knows.create(
+        bob,
+        david,
+        {},
+        { validFrom: PAST, validTo: EDGE_ENDED },
+      ),
+      store.edges.knows.create(alice, eve, {}),
+      edgeToGhostPromise,
+    ]);
+    const edgeToGhost = await edgeToGhostPromise;
+    await store.edges.knows.delete(edgeToGhost.id);
+    await store.nodes.Person.delete(ghost.id);
+
+    temporalIds = {
+      alice: alice.id,
+      bob: bob.id,
+      david: david.id,
+      eve: eve.id,
+      ghost: ghost.id,
+    };
+  });
+
+  describe("reachable", () => {
+    it("defaults to current mode — excludes future and deleted nodes", async () => {
+      const reached = await store.algorithms.reachable(temporalIds.alice, {
+        edges: ["knows"],
+        excludeSource: true,
+      });
+      const reachedIds = reached.map((row) => row.id).toSorted();
+
+      expect(reachedIds).toEqual([temporalIds.bob].toSorted());
+    });
+
+    it("asOf = BEFORE sees the expired edge to david", async () => {
+      const reached = await store.algorithms.reachable(temporalIds.alice, {
+        edges: ["knows"],
+        excludeSource: true,
+        temporalMode: "asOf",
+        asOf: BEFORE,
+      });
+      const reachedIds = reached.map((row) => row.id).toSorted();
+
+      // Eve not yet valid (validFrom = FUTURE), Ghost not yet deleted but also
+      // its edge is current and asOf BEFORE is prior to the edge's implicit
+      // validFrom (ULID-based createdAt). Bob and David are reachable via the
+      // historical edge.
+      expect(reachedIds).toContain(temporalIds.bob);
+      expect(reachedIds).toContain(temporalIds.david);
+      expect(reachedIds).not.toContain(temporalIds.eve);
+    });
+
+    it("includeEnded traverses through the expired edge", async () => {
+      const reached = await store.algorithms.reachable(temporalIds.alice, {
+        edges: ["knows"],
+        excludeSource: true,
+        temporalMode: "includeEnded",
+      });
+      const reachedIds = reached.map((row) => row.id).toSorted();
+
+      // Ended edges included; deleted ghost excluded.
+      expect(reachedIds).toContain(temporalIds.bob);
+      expect(reachedIds).toContain(temporalIds.david);
+      expect(reachedIds).toContain(temporalIds.eve);
+      expect(reachedIds).not.toContain(temporalIds.ghost);
+    });
+
+    it("includeTombstones surfaces the deleted ghost node", async () => {
+      const reached = await store.algorithms.reachable(temporalIds.alice, {
+        edges: ["knows"],
+        excludeSource: true,
+        temporalMode: "includeTombstones",
+      });
+      const reachedIds = reached.map((row) => row.id).toSorted();
+
+      expect(reachedIds).toContain(temporalIds.ghost);
+    });
+  });
+
+  describe("canReach", () => {
+    it("self-path returns false when the node is not visible under current mode", async () => {
+      // Eve has validFrom = FUTURE — not current. The self-path short-circuit
+      // was removed so this honors the temporal filter like shortestPath does.
+      const reaches = await store.algorithms.canReach(
+        temporalIds.eve,
+        temporalIds.eve,
+        { edges: ["knows"] },
+      );
+      expect(reaches).toBe(false);
+    });
+
+    it("self-path returns true under includeEnded (ignores validity periods)", async () => {
+      const reaches = await store.algorithms.canReach(
+        temporalIds.eve,
+        temporalIds.eve,
+        { edges: ["knows"], temporalMode: "includeEnded" },
+      );
+      expect(reaches).toBe(true);
+    });
+
+    it("self-path returns true for ghost only under includeTombstones", async () => {
+      const currentReach = await store.algorithms.canReach(
+        temporalIds.ghost,
+        temporalIds.ghost,
+        { edges: ["knows"] },
+      );
+      expect(currentReach).toBe(false);
+
+      const tombstoneReach = await store.algorithms.canReach(
+        temporalIds.ghost,
+        temporalIds.ghost,
+        { edges: ["knows"], temporalMode: "includeTombstones" },
+      );
+      expect(tombstoneReach).toBe(true);
+    });
+
+    it("asOf finds a target through a historically-valid edge", async () => {
+      const reaches = await store.algorithms.canReach(
+        temporalIds.alice,
+        temporalIds.david,
+        { edges: ["knows"], temporalMode: "asOf", asOf: BEFORE },
+      );
+      expect(reaches).toBe(true);
+
+      // Default current mode: the bob→david edge is expired, so no path.
+      const currentReaches = await store.algorithms.canReach(
+        temporalIds.alice,
+        temporalIds.david,
+        { edges: ["knows"] },
+      );
+      expect(currentReaches).toBe(false);
+    });
+  });
+
+  describe("neighbors", () => {
+    it("forwards temporalMode through to the underlying reachable query", async () => {
+      // Alice's 1-hop current-mode neighbors: only bob (eve-future, ghost-deleted).
+      const current = await store.algorithms.neighbors(temporalIds.alice, {
+        edges: ["knows"],
+      });
+      expect(current.map((row) => row.id).toSorted()).toEqual(
+        [temporalIds.bob].toSorted(),
+      );
+
+      // Under includeEnded, eve becomes reachable too.
+      const ended = await store.algorithms.neighbors(temporalIds.alice, {
+        edges: ["knows"],
+        temporalMode: "includeEnded",
+      });
+      expect(ended.map((row) => row.id)).toContain(temporalIds.eve);
+
+      // Under includeTombstones, the deleted ghost surfaces.
+      const tombstones = await store.algorithms.neighbors(temporalIds.alice, {
+        edges: ["knows"],
+        temporalMode: "includeTombstones",
+      });
+      expect(tombstones.map((row) => row.id)).toContain(temporalIds.ghost);
+    });
+
+    it("forwards asOf through to the underlying reachable query", async () => {
+      // 2-hop at BEFORE: alice → bob → david via the historical edge.
+      const historical = await store.algorithms.neighbors(temporalIds.alice, {
+        edges: ["knows"],
+        depth: 2,
+        temporalMode: "asOf",
+        asOf: BEFORE,
+      });
+      expect(historical.map((row) => row.id)).toContain(temporalIds.david);
+    });
+  });
+
+  describe("shortestPath", () => {
+    it("defaults to current mode — no path to david through expired edge", async () => {
+      const path = await store.algorithms.shortestPath(
+        temporalIds.alice,
+        temporalIds.david,
+        { edges: ["knows"] },
+      );
+
+      expect(path).toBeUndefined();
+    });
+
+    it("asOf = BEFORE traverses the historical edge to david", async () => {
+      const path = await store.algorithms.shortestPath(
+        temporalIds.alice,
+        temporalIds.david,
+        { edges: ["knows"], temporalMode: "asOf", asOf: BEFORE },
+      );
+
+      expect(path?.depth).toBe(2);
+      expect(path?.nodes.map((node) => node.id)).toEqual([
+        temporalIds.alice,
+        temporalIds.bob,
+        temporalIds.david,
+      ]);
+    });
+
+    it("self-path short-circuit respects temporal mode", async () => {
+      // Eve is not yet valid under "current", so self-path returns undefined.
+      const currentSelf = await store.algorithms.shortestPath(
+        temporalIds.eve,
+        temporalIds.eve,
+        { edges: ["knows"] },
+      );
+      expect(currentSelf).toBeUndefined();
+
+      // Under "includeEnded", Eve exists regardless of validFrom — self-path succeeds.
+      const endedSelf = await store.algorithms.shortestPath(
+        temporalIds.eve,
+        temporalIds.eve,
+        { edges: ["knows"], temporalMode: "includeEnded" },
+      );
+      expect(endedSelf?.depth).toBe(0);
+      expect(endedSelf?.nodes[0]?.id).toBe(temporalIds.eve);
+    });
+
+    it("self-path under asOf honors the snapshot's validity window", async () => {
+      // Eve's validFrom is FUTURE — even at asOf BEFORE she isn't yet valid.
+      const beforeSelf = await store.algorithms.shortestPath(
+        temporalIds.eve,
+        temporalIds.eve,
+        { edges: ["knows"], temporalMode: "asOf", asOf: BEFORE },
+      );
+      expect(beforeSelf).toBeUndefined();
+
+      // Alice was valid from PAST, so asOf BEFORE sees her.
+      const aliceAtBefore = await store.algorithms.shortestPath(
+        temporalIds.alice,
+        temporalIds.alice,
+        { edges: ["knows"], temporalMode: "asOf", asOf: BEFORE },
+      );
+      expect(aliceAtBefore?.depth).toBe(0);
+      expect(aliceAtBefore?.nodes[0]?.id).toBe(temporalIds.alice);
+    });
+
+    it("self-path under includeTombstones resolves the deleted ghost", async () => {
+      // Ghost is soft-deleted. Under default current, self-path is undefined.
+      const currentSelf = await store.algorithms.shortestPath(
+        temporalIds.ghost,
+        temporalIds.ghost,
+        { edges: ["knows"] },
+      );
+      expect(currentSelf).toBeUndefined();
+
+      // includeTombstones surfaces the deleted node.
+      const tombstoneSelf = await store.algorithms.shortestPath(
+        temporalIds.ghost,
+        temporalIds.ghost,
+        { edges: ["knows"], temporalMode: "includeTombstones" },
+      );
+      expect(tombstoneSelf?.depth).toBe(0);
+      expect(tombstoneSelf?.nodes[0]?.id).toBe(temporalIds.ghost);
+    });
+  });
+
+  describe("degree", () => {
+    it("defaults to current mode — excludes expired edge", async () => {
+      // Bob has one outgoing edge (bob → david) but it's expired.
+      const currentDegree = await store.algorithms.degree(temporalIds.bob, {
+        edges: ["knows"],
+        direction: "out",
+      });
+      expect(currentDegree).toBe(0);
+    });
+
+    it("includeEnded counts the expired edge", async () => {
+      const degree = await store.algorithms.degree(temporalIds.bob, {
+        edges: ["knows"],
+        direction: "out",
+        temporalMode: "includeEnded",
+      });
+      expect(degree).toBe(1);
+    });
+
+    it("asOf counts edges that were valid at the snapshot", async () => {
+      // At BEFORE, the bob→david edge is still valid (ends at EDGE_ENDED).
+      const historical = await store.algorithms.degree(temporalIds.bob, {
+        edges: ["knows"],
+        direction: "out",
+        temporalMode: "asOf",
+        asOf: BEFORE,
+      });
+      expect(historical).toBe(1);
+    });
+
+    it("includeTombstones counts soft-deleted edges", async () => {
+      // Alice has one deleted edge (alice→ghost). Under default current,
+      // direction: "out" reports 2 (alice→bob, alice→eve — the alice→ghost
+      // edge is soft-deleted; eve's future validity doesn't matter for degree
+      // since degree only scans the edges table, not endpoint validity).
+      const current = await store.algorithms.degree(temporalIds.alice, {
+        edges: ["knows"],
+        direction: "out",
+      });
+      expect(current).toBe(2);
+
+      // With tombstones included, the alice→ghost edge surfaces too.
+      const tombstones = await store.algorithms.degree(temporalIds.alice, {
+        edges: ["knows"],
+        direction: "out",
+        temporalMode: "includeTombstones",
+      });
+      expect(tombstones).toBe(3);
+    });
+  });
+
+  describe("validation", () => {
+    it("throws when temporalMode is 'asOf' but asOf is not supplied", async () => {
+      // compileTemporalFilter enforces this at query compile time. Algorithms
+      // and subgraph should all surface the same error uniformly.
+      await expect(
+        store.algorithms.reachable(temporalIds.alice, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+        }),
+      ).rejects.toThrow(/asOf/);
+
+      await expect(
+        store.algorithms.shortestPath(temporalIds.alice, temporalIds.bob, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+        }),
+      ).rejects.toThrow(/asOf/);
+
+      await expect(
+        store.algorithms.canReach(temporalIds.alice, temporalIds.bob, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+        }),
+      ).rejects.toThrow(/asOf/);
+
+      await expect(
+        store.algorithms.degree(temporalIds.alice, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+        }),
+      ).rejects.toThrow(/asOf/);
+    });
+  });
+
+  describe("per-graph default temporal mode", () => {
+    it("respects graph.defaults.temporalMode when no per-call override", async () => {
+      // Build a separate graph with default "includeEnded" and verify algorithms
+      // pick it up without any per-call option.
+      const endedGraph = defineGraph({
+        id: "algorithms_temporal_ended",
+        nodes: { Person: { type: Person } },
+        edges: { knows: { type: knows, from: [Person], to: [Person] } },
+        defaults: { temporalMode: "includeEnded" },
+      });
+      const endedBackend = createTestBackend();
+      const endedStore = createStore(endedGraph, endedBackend);
+
+      const a = await endedStore.nodes.Person.create({ name: "A" });
+      const b = await endedStore.nodes.Person.create({ name: "B" });
+      await endedStore.edges.knows.create(a, b, {}, { validTo: EDGE_ENDED });
+
+      // Edge is ended, but graph default is "includeEnded" → b is reachable.
+      const reached = await endedStore.algorithms.reachable(a.id, {
+        edges: ["knows"],
+        excludeSource: true,
+      });
+      expect(reached.map((row) => row.id)).toContain(b.id);
     });
   });
 });

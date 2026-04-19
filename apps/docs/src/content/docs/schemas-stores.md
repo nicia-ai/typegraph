@@ -1261,6 +1261,8 @@ store.subgraph<EK, NK>(
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
+| `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
 
 **Result:**
@@ -1282,8 +1284,9 @@ type SubgraphResult<G, NK, EK> = Readonly<{
 | `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
 
 Edges are only included when **both** endpoints appear in the result set.
-Soft-deleted nodes and edges are automatically excluded. Duplicate nodes
-(reachable via multiple paths) are deduplicated.
+Nodes and edges are filtered by the resolved `temporalMode` — by default,
+only currently valid rows participate. Duplicate nodes (reachable via
+multiple paths) are deduplicated.
 
 **Example:**
 
@@ -1480,11 +1483,12 @@ const total = await store.algorithms.degree(alice, { edges: ["knows"] });
 
 Every traversal algorithm accepts `edges`, `maxHops` (default 10),
 `direction` (`"out" | "in" | "both"`, default `"out"`), and `cyclePolicy`
-(`"prevent" | "allow"`, default `"prevent"`). Each call compiles to a
-single recursive CTE; `degree` compiles to a single `COUNT`. Node
-arguments accept either raw IDs or any object with an `id` field — `Node`,
-`NodeRef`, and the lightweight records returned by these algorithms all
-work.
+(`"prevent" | "allow"`, default `"prevent"`), plus `temporalMode` / `asOf`
+for temporal filtering — see [Temporal Behavior](/graph-algorithms#temporal-behavior).
+Each call compiles to a single recursive CTE; `degree` compiles to a
+single `COUNT`. Node arguments accept either raw IDs or any object with
+an `id` field — `Node`, `NodeRef`, and the lightweight records returned
+by these algorithms all work.
 
 ### Query Builder
 

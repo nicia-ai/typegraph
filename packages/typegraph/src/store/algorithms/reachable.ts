@@ -1,11 +1,6 @@
-/**
- * Reachability algorithms: `reachable`, `canReach`, and `neighbors`.
- *
- * All three share the same recursive-CTE skeleton; they differ only in how
- * they aggregate the resulting rows.
- */
 import { sql } from "drizzle-orm";
 
+import { buildReachableCte } from "../recursive-cte";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
@@ -13,8 +8,8 @@ import {
   DEFAULT_NEIGHBOR_DEPTH,
   type InternalTraversalOptions,
   resolveMaxHops,
+  resolveTemporalOptions,
 } from "./context";
-import { buildReachableCte } from "./recursive-cte";
 import type { ReachableNode } from "./types";
 
 type InternalReachableOptions = InternalTraversalOptions &
@@ -29,11 +24,6 @@ type ReachableRow = Readonly<{
   depth: number | string;
 }>;
 
-/**
- * Returns every node reachable from `sourceId` within `maxHops` edges of the
- * allowed kinds. Each node carries the shortest depth at which it was
- * discovered.
- */
 export async function executeReachable(
   ctx: AlgorithmContext,
   sourceId: string,
@@ -54,6 +44,7 @@ export async function executeReachable(
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
     includePath: false,
+    ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
   });
@@ -61,9 +52,6 @@ export async function executeReachable(
   const sourceFilter =
     options.excludeSource === true ? sql` WHERE id != ${sourceId}` : sql``;
 
-  // GROUP BY id + kind to keep the shortest depth per distinct node. The
-  // recursive CTE may reach the same node via multiple paths, so MIN(depth)
-  // is required for stable output regardless of cycle policy.
   const query = sql`${cte} SELECT id, kind, MIN(depth) AS depth FROM reachable${sourceFilter} GROUP BY id, kind ORDER BY depth ASC, id ASC`;
 
   const rows = await ctx.backend.execute<ReachableRow>(query);
@@ -74,11 +62,6 @@ export async function executeReachable(
   }));
 }
 
-/**
- * Returns `true` iff `targetId` is reachable from `sourceId` within
- * `maxHops` edges. Short-circuits the query with `LIMIT 1` so the database
- * can stop traversing as soon as the first hit is found.
- */
 export async function executeCanReach(
   ctx: AlgorithmContext,
   sourceId: string,
@@ -87,14 +70,16 @@ export async function executeCanReach(
 ): Promise<boolean> {
   assertEdgeKinds(options.edges);
 
-  if (sourceId === targetId) return true;
-
   const maxHops = resolveMaxHops(
     options.maxHops,
     DEFAULT_ALGORITHM_MAX_HOPS,
     "maxHops",
   );
 
+  // Self-case (sourceId === targetId) is not short-circuited: the CTE base
+  // case emits the source row only if it passes the temporal filter, so
+  // `canReach(a, a)` correctly returns false when `a` is not visible under
+  // the resolved mode — consistent with `shortestPath(a, a)`.
   const cte = buildReachableCte({
     graphId: ctx.graphId,
     sourceId,
@@ -103,6 +88,7 @@ export async function executeCanReach(
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
     includePath: false,
+    ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
   });
@@ -113,16 +99,11 @@ export async function executeCanReach(
   return rows.length > 0;
 }
 
-/**
- * Returns every node within `depth` hops of `sourceId`, excluding the
- * source itself.
- */
 export async function executeNeighbors(
   ctx: AlgorithmContext,
   sourceId: string,
   options: InternalNeighborsOptions,
 ): Promise<readonly ReachableNode[]> {
-  assertEdgeKinds(options.edges);
   const depth = resolveMaxHops(options.depth, DEFAULT_NEIGHBOR_DEPTH, "depth");
 
   return executeReachable(ctx, sourceId, {
@@ -130,6 +111,10 @@ export async function executeNeighbors(
     maxHops: depth,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
+    ...(options.temporalMode !== undefined && {
+      temporalMode: options.temporalMode,
+    }),
+    ...(options.asOf !== undefined && { asOf: options.asOf }),
     excludeSource: true,
   });
 }

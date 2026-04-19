@@ -470,6 +470,10 @@ export async function main(): Promise<void> {
   // In production you'd use `d.embedding.similarTo(queryEmbedding, k)` for
   // hardware-accelerated vector search via pgvector or sqlite-vec.
   const allPapers = await store.nodes.Paper.find();
+  type PaperNode = (typeof allPapers)[number];
+  const paperById = new Map<string, PaperNode>(
+    allPapers.map((paper) => [paper.id, paper]),
+  );
   const ranked = allPapers
     .map((paper) => ({
       paper,
@@ -504,9 +508,12 @@ export async function main(): Promise<void> {
   });
   for (const topic of topicAncestors) expandedTopicIds.add(topic.id);
 
-  const expandedTopics = [...expandedTopicIds]
-    .map((id) => [...topicByName.values()].find((topic) => topic.id === id)!)
-    .map((topic) => (topic as { name: string }).name);
+  const topicById = new Map<string, TopicNode>(
+    [...topicByName.values()].map((topic) => [topic.id, topic]),
+  );
+  const expandedTopics = [...expandedTopicIds].map(
+    (id) => topicById.get(id)!.name,
+  );
   console.log(`  Expanded to: ${expandedTopics.join(" → ")}\n`);
 
   // Papers covering ANY topic in the expanded set (one query via IN predicate)
@@ -532,7 +539,7 @@ export async function main(): Promise<void> {
 
   console.log(" Papers matching expanded topic set:");
   for (const [paperId, topics] of matchByPaper) {
-    const paper = allPapers.find((p) => p.id === paperId)!;
+    const paper = paperById.get(paperId)!;
     console.log(`   • ${paper.title}`);
     console.log(`       covers: [${[...topics].join(", ")}]`);
   }
@@ -552,14 +559,13 @@ export async function main(): Promise<void> {
 
   const hybridScored = await Promise.all(
     [...candidateIds].map(async (paperId) => {
-      const paper = allPapers.find((p) => p.id === paperId)!;
+      const paper = paperById.get(paperId)!;
       const citationCount = await store.algorithms.degree(paperId, {
         edges: ["cites"],
         direction: "in",
       });
       const similarity = cosine(queryEmbedding, paper.embedding);
       const topicBonus = (matchByPaper.get(paperId)?.size ?? 0) * 0.05;
-      // Blend: semantic similarity + topic coverage + log(citations + 1) / 10
       const authorityBoost = Math.log(citationCount + 1) / 10;
       const score = similarity + topicBonus + authorityBoost;
       return { paper, similarity, citationCount, score };
@@ -650,20 +656,32 @@ export async function main(): Promise<void> {
   });
 
   // For each CLIP author: 1-hop in along authored_by = all their papers,
-  // then 1-hop out = all collaborators. We do this via a single fan-out
-  // query to demonstrate how algorithms and the query builder compose.
+  // then 1-hop out = all collaborators. Issue each level in parallel so the
+  // full fan-out finishes in O(depth) round-trips instead of O(authors × papers).
   const collaboratorCounts = new Map<string, number>();
-  for (const clipAuthor of clipAuthors) {
-    const otherPapers = await store.algorithms.neighbors(clipAuthor.id, {
-      edges: ["authored_by"],
-      direction: "in",
-      depth: 1,
-    });
-    for (const other of otherPapers) {
-      const collaborators = await store.algorithms.neighbors(other.id, {
+  const perAuthorPapers = await Promise.all(
+    clipAuthors.map((author) =>
+      store.algorithms.neighbors(author.id, {
         edges: ["authored_by"],
+        direction: "in",
         depth: 1,
-      });
+      }),
+    ),
+  );
+  const perAuthorCollaborators = await Promise.all(
+    perAuthorPapers.map((papers) =>
+      Promise.all(
+        papers.map((paper) =>
+          store.algorithms.neighbors(paper.id, {
+            edges: ["authored_by"],
+            depth: 1,
+          }),
+        ),
+      ),
+    ),
+  );
+  for (const [authorIndex, clipAuthor] of clipAuthors.entries()) {
+    for (const collaborators of perAuthorCollaborators[authorIndex]!) {
       for (const collab of collaborators) {
         if (collab.id === clipAuthor.id) continue;
         collaboratorCounts.set(
@@ -702,25 +720,31 @@ export async function main(): Promise<void> {
     .slice(0, 5)
     .sort((a, b) => a.paper.year - b.paper.year);
 
-  for (const pick of topPicks) {
-    const paperAuthors = await store
-      .query()
-      .from("Paper", "p")
-      .whereNode("p", (p) => p.id.eq(pick.paper.id))
-      .traverse("authored_by", "e")
-      .to("Author", "a")
-      .select((ctx) => ctx.a.name)
-      .execute();
+  const picksWithMeta = await Promise.all(
+    topPicks.map(async (pick) => {
+      const [paperAuthors, paperTopics] = await Promise.all([
+        store
+          .query()
+          .from("Paper", "p")
+          .whereNode("p", (p) => p.id.eq(pick.paper.id))
+          .traverse("authored_by", "e")
+          .to("Author", "a")
+          .select((ctx) => ctx.a.name)
+          .execute(),
+        store
+          .query()
+          .from("Paper", "p")
+          .whereNode("p", (p) => p.id.eq(pick.paper.id))
+          .traverse("covers_topic", "e")
+          .to("Topic", "t")
+          .select((ctx) => ctx.t.name)
+          .execute(),
+      ]);
+      return { pick, paperAuthors, paperTopics };
+    }),
+  );
 
-    const paperTopics = await store
-      .query()
-      .from("Paper", "p")
-      .whereNode("p", (p) => p.id.eq(pick.paper.id))
-      .traverse("covers_topic", "e")
-      .to("Topic", "t")
-      .select((ctx) => ctx.t.name)
-      .execute();
-
+  for (const { pick, paperAuthors, paperTopics } of picksWithMeta) {
     const citationLabel = pick.citationCount === 1 ? "citation" : "citations";
     console.log(
       `  ${pick.paper.year}  ${pick.paper.title}  [${pick.citationCount} ${citationLabel}]`,

@@ -47,6 +47,8 @@ Every traversal algorithm takes the same base options:
 | `maxHops` | `number` | `10` | Maximum traversal depth (1 – 1000) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Skip visited nodes per path |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes and edges along the traversal — see [Temporal Behavior](#temporal-behavior) |
+| `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 
 `direction: "both"` treats edges as undirected. `cyclePolicy: "allow"` skips
 cycle tracking and relies solely on `maxHops` to terminate — use it only
@@ -79,7 +81,8 @@ type ShortestPathResult = Readonly<{
 ```
 
 Source equal to target returns a zero-length path containing just that
-node. Missing or soft-deleted endpoints return `undefined`.
+node. Endpoints that don't pass the resolved temporal filter return
+`undefined` — see [Temporal Behavior](#temporal-behavior).
 
 ## reachable
 
@@ -134,8 +137,8 @@ but the name reads more naturally for neighborhood queries.
 
 ## degree
 
-Counts active edges incident to a node. Self-loops contribute once when
-`direction` is `"both"`.
+Counts edges incident to a node under the resolved temporal filter.
+Self-loops contribute once when `direction` is `"both"`.
 
 ```typescript
 const friends = await store.algorithms.degree(alice, {
@@ -156,6 +159,8 @@ const everything = await store.algorithms.degree(alice);
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | all kinds | Edge kinds to count (empty array returns 0) |
 | `direction` | `"out" \| "in" \| "both"` | `"both"` | Count outgoing, incoming, or either |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to the counted edges |
+| `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 
 `degree` runs a single `COUNT` query, not a recursive CTE, so it's
 efficient even for hub nodes with thousands of edges.
@@ -202,6 +207,54 @@ terminates via `maxHops` alone.
 runaway queries. The default of 10 covers typical connectivity questions on
 most graphs. Graphs with branching factor *B* produce O(*B*^depth) rows
 before cycle detection can prune them, so raise `maxHops` deliberately.
+
+## Temporal Behavior
+
+Algorithms honor the same temporal model as the rest of the store. The
+default temporal mode is `graph.defaults.temporalMode` (typically
+`"current"`), and every algorithm accepts per-call `temporalMode` and
+`asOf` options.
+
+```typescript
+// Default: uses graph.defaults.temporalMode — typically "current".
+await store.algorithms.shortestPath(alice, bob, { edges: ["knows"] });
+
+// Snapshot at a specific point in time. Both nodes and edges must have
+// been valid at that timestamp to participate in the traversal.
+await store.algorithms.shortestPath(alice, bob, {
+  edges: ["knows"],
+  temporalMode: "asOf",
+  asOf: "2023-01-15T00:00:00Z",
+});
+
+// Include validity-ended (but not soft-deleted) rows — useful for
+// historical traversal without needing a specific timestamp.
+await store.algorithms.reachable(alice, {
+  edges: ["knows"],
+  temporalMode: "includeEnded",
+});
+
+// Include soft-deleted rows too. Traversal can cross through tombstones.
+await store.algorithms.canReach(alice, ghost, {
+  edges: ["knows"],
+  temporalMode: "includeTombstones",
+});
+```
+
+**Semantic rules:**
+
+- The temporal filter applies to **both nodes and edges** along the
+  traversal. An edge can only be traversed if it passes the filter *and*
+  its endpoint node passes too.
+- `asOf` is required when `temporalMode: "asOf"` and ignored in every
+  other mode.
+- Temporal filtering is orthogonal to `cyclePolicy` — cycle detection
+  operates on path membership, not on time. A node that was valid → ended
+  → re-valid is not treated as "visited" just because it appears in two
+  validity periods.
+- The shortest-path self-path short-circuit also respects the resolved
+  mode: calling `shortestPath(a, a, ...)` returns `undefined` if node `a`
+  does not pass the temporal filter, and a zero-hop result otherwise.
 
 ## End-to-End Example
 

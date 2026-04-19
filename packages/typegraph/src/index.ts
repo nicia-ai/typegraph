@@ -211,6 +211,7 @@ export type {
   ReachableOptions,
   ShortestPathOptions,
   ShortestPathResult,
+  TemporalAlgorithmOptions,
   TraversalDirection,
 } from "./store/algorithms";
 export type {

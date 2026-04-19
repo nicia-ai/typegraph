@@ -1,4 +1,5 @@
 export { registerAggregateIntegrationTests } from "./aggregates";
+export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";

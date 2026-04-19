@@ -1,15 +1,12 @@
-/**
- * Resolved execution context shared by algorithm implementations.
- *
- * Algorithms are exposed as `store.algorithms.*` and share the same
- * graph-id, backend, dialect, and schema as the hosting store. Bundling
- * these into one value keeps the per-algorithm files focused on SQL
- * generation and result decoding.
- */
 import { type GraphBackend } from "../../backend/types";
+import { type TemporalMode } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  compileTemporalFilter,
+  type TemporalFilterOptions,
+} from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
@@ -21,26 +18,56 @@ export type AlgorithmContext = Readonly<{
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema;
+  defaultTemporalMode: TemporalMode;
 }>;
 
-/**
- * Graph-agnostic shape of traversal options used by every recursive-CTE
- * algorithm. Public wrappers in `./index.ts` narrow `edges` to
- * `EdgeKinds<G>[]` for type safety; the runtime only sees raw kind strings.
- */
-export type InternalTraversalOptions = Readonly<{
-  edges: readonly string[];
-  maxHops?: number;
-  direction?: TraversalDirection;
-  cyclePolicy?: AlgorithmCyclePolicy;
+export type InternalTemporalOptions = Readonly<{
+  temporalMode?: TemporalMode;
+  asOf?: string;
 }>;
 
+export type InternalTraversalOptions = InternalTemporalOptions &
+  Readonly<{
+    edges: readonly string[];
+    maxHops?: number;
+    direction?: TraversalDirection;
+    cyclePolicy?: AlgorithmCyclePolicy;
+  }>;
+
 /**
- * Normalizes and validates a `maxHops` option.
- *
- * Rejects zero, negative, non-finite, and over-limit values up-front so the
- * compiled SQL always carries a sensible `r.depth < N` bound.
+ * Resolves per-call temporal overrides against the graph's default mode into
+ * a plain `{ temporalMode, asOf? }` object. Shared by callers that forward
+ * the pair to `buildReachableCte`.
  */
+export function resolveTemporalOptions(
+  ctx: AlgorithmContext,
+  options: InternalTemporalOptions,
+): Readonly<{ temporalMode: TemporalMode; asOf?: string }> {
+  return {
+    temporalMode: options.temporalMode ?? ctx.defaultTemporalMode,
+    ...(options.asOf !== undefined && { asOf: options.asOf }),
+  };
+}
+
+/**
+ * Compiles the resolved temporal filter to SQL. `asOf` is only meaningful
+ * when the resolved mode is `"asOf"`; `compileTemporalFilter` ignores it in
+ * every other mode.
+ */
+export function resolveTemporalFilter(
+  ctx: AlgorithmContext,
+  options: InternalTemporalOptions,
+  tableAlias?: string,
+): ReturnType<typeof compileTemporalFilter> {
+  const resolved = resolveTemporalOptions(ctx, options);
+  const filterOptions: TemporalFilterOptions = {
+    mode: resolved.temporalMode,
+    asOf: resolved.asOf,
+    tableAlias,
+  };
+  return compileTemporalFilter(filterOptions);
+}
+
 export function resolveMaxHops(
   rawMaxHops: number | undefined,
   fallback: number,
@@ -72,11 +99,6 @@ export function resolveMaxHops(
   return value;
 }
 
-/**
- * Validates that the caller supplied at least one edge kind. Zero-kind
- * traversals always produce empty results, which almost always indicates a
- * programming mistake (forgotten kind list, typo in a variable).
- */
 export function assertEdgeKinds(edges: readonly string[]): void {
   if (edges.length === 0) {
     throw new ConfigurationError(

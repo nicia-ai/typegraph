@@ -1,49 +1,49 @@
-/**
- * Shared recursive-CTE builder used by `reachable`, `shortestPath`,
- * `neighbors`, and `canReach`.
- *
- * Produces a `reachable(id, kind, depth [, path])` CTE whose rows are every
- * node discovered from `sourceId` in at most `maxHops` hops, following the
- * configured edge kinds in the requested direction. Cycle prevention is
- * delegated to the dialect's existing path-tracking primitives so the
- * algorithms reuse the same semantics as subgraph extraction and the
- * recursive query builder.
- */
 import { type SQL, sql } from "drizzle-orm";
 
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
-import { type SqlSchema } from "../../query/compiler/schema";
-import { type DialectAdapter } from "../../query/dialect/types";
-import { type AlgorithmCyclePolicy, type TraversalDirection } from "./types";
+import { type TemporalMode } from "../core/types";
+import { type RecursiveCyclePolicy } from "../query/ast";
+import { compileKindFilter } from "../query/compiler/predicate-utils";
+import { type SqlSchema } from "../query/compiler/schema";
+import { compileTemporalFilter } from "../query/compiler/temporal";
+import { type DialectAdapter } from "../query/dialect/types";
+import { type TraversalDirection } from "./algorithms/types";
 
-export type BuildReachableCteOptions = Readonly<{
+type BuildReachableCteOptions = Readonly<{
   graphId: string;
   sourceId: string;
   edgeKinds: readonly string[];
   maxHops: number;
   direction: TraversalDirection;
-  cyclePolicy: AlgorithmCyclePolicy;
-  /**
-   * When `true`, the CTE selects a dialect-specific `path` column used for
-   * later decoding into an ordered list of node IDs.
-   */
+  cyclePolicy: RecursiveCyclePolicy;
   includePath: boolean;
+  /**
+   * Temporal mode applied to both nodes and edges along the traversal.
+   * Callers that want the pre-temporal behavior (soft-delete only) should
+   * pass `"includeEnded"`.
+   */
+  temporalMode: TemporalMode;
+  /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
+  asOf?: string;
   dialect: DialectAdapter;
   schema: SqlSchema;
 }>;
 
-/**
- * Compiles a `WITH RECURSIVE reachable(...) AS (...)` CTE.
- *
- * The caller concatenates this SQL fragment with a subsequent SELECT from
- * the `reachable` CTE to project whatever columns they need.
- */
 export function buildReachableCte(options: BuildReachableCteOptions): SQL {
   const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),
     options.edgeKinds,
   );
+  const nodeTemporalFilter = compileTemporalFilter({
+    mode: options.temporalMode,
+    asOf: options.asOf,
+    tableAlias: "n",
+  });
+  const edgeTemporalFilter = compileTemporalFilter({
+    mode: options.temporalMode,
+    asOf: options.asOf,
+    tableAlias: "e",
+  });
 
   const initialPath =
     trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
@@ -61,7 +61,7 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${options.schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND n.deleted_at IS NULL`;
+  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${options.schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
 
   const recursiveColumns: SQL[] = [
     sql`n.id`,
@@ -75,8 +75,8 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
   const recursiveWhere: SQL[] = [
     sql`e.graph_id = ${options.graphId}`,
     edgeKindFilter,
-    sql`e.deleted_at IS NULL`,
-    sql`n.deleted_at IS NULL`,
+    edgeTemporalFilter,
+    nodeTemporalFilter,
     sql`r.depth < ${options.maxHops}`,
   ];
   if (cycleCheck !== undefined) recursiveWhere.push(cycleCheck);
@@ -172,9 +172,8 @@ type BidirectionalBranchOptions = Readonly<{
 }>;
 
 function buildBidirectionalBranch(options: BidirectionalBranchOptions): SQL {
-  // Match the node via either direction of the edge in a single UNION ALL
-  // branch, mirroring the approach used by subgraph extraction so PostgreSQL
-  // accepts the recursive CTE (it rejects multiple non-recursive terms).
+  // PostgreSQL rejects multiple non-recursive terms, so both directions are
+  // folded into a single UNION ALL branch via an OR on the join condition.
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
 
   if (options.forceWorktableOuterJoinOrder) {
@@ -186,28 +185,4 @@ function buildBidirectionalBranch(options: BidirectionalBranchOptions): SQL {
   }
 
   return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
-}
-
-/**
- * Decodes a dialect-specific `path` column value into an ordered list of
- * node IDs.
- *
- * PostgreSQL returns `text[]` arrays (already JavaScript arrays); SQLite
- * returns a `'|id1|id2|...|id_n|'` delimited string. Empty or unknown values
- * fall back to an empty list.
- */
-export function decodePathColumn(value: unknown): readonly string[] {
-  if (Array.isArray(value)) {
-    return value.map(String);
-  }
-
-  if (typeof value === "string") {
-    if (value.length === 0) return [];
-    const trimmed = value.startsWith("|") ? value.slice(1) : value;
-    const withoutTail = trimmed.endsWith("|") ? trimmed.slice(0, -1) : trimmed;
-    if (withoutTail.length === 0) return [];
-    return withoutTail.split("|");
-  }
-
-  return [];
 }

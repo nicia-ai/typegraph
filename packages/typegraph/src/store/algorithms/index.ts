@@ -1,19 +1,6 @@
-/**
- * Tier 1 graph algorithms exposed as `store.algorithms.*`.
- *
- * Covers the high-utility primitives that the recursive-CTE machinery makes
- * cheap to implement:
- * - {@link GraphAlgorithms.shortestPath | shortestPath} — fewest-hop path
- * - {@link GraphAlgorithms.reachable | reachable} — all reachable nodes
- * - {@link GraphAlgorithms.canReach | canReach} — boolean reachability
- * - {@link GraphAlgorithms.neighbors | neighbors} — k-hop neighborhood
- * - {@link GraphAlgorithms.degree | degree} — edge-count centrality
- *
- * Heavier algorithms (connected components, topological sort, centrality)
- * live in Tier 2/3 and should follow once concrete user demand appears.
- */
 import { type GraphBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
+import { type TemporalMode } from "../../core/types";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
 import { getDialect } from "../../query/dialect";
 import { type AlgorithmContext } from "./context";
@@ -35,9 +22,17 @@ import type {
 } from "./types";
 
 /**
- * Accepts either a raw node id or any object with an `id: string` field,
- * which covers `Node`, `NodeRef`, and the lightweight `ReachableNode` /
- * `PathNode` shapes returned by the algorithms themselves.
+ * Raw node id or any object with an `id: string` field. Covers `Node`,
+ * `NodeRef`, and the lightweight `ReachableNode` / `PathNode` shapes
+ * returned by the algorithms themselves.
+ *
+ * Deliberately kind-agnostic: graph algorithms don't constrain the source
+ * node's kind — you can start a traversal from any node reachable via the
+ * given edge kinds. `NodeRef<N>` exists for the edge-endpoint case where
+ * kind *is* load-bearing; using it here would paint a constraint onto a
+ * contract that doesn't need one and would reject common patterns like
+ * passing `ReachableNode` / cache entries / `{ id }` records straight
+ * through.
  */
 export type NodeIdentifier = string | Readonly<{ id: string }>;
 
@@ -45,9 +40,6 @@ function resolveNodeId(value: NodeIdentifier): string {
   return typeof value === "string" ? value : value.id;
 }
 
-/**
- * Public surface for Tier 1 graph algorithms.
- */
 export type GraphAlgorithms<G extends GraphDef> = Readonly<{
   /**
    * Finds the shortest directed path from `from` to `to` using the given
@@ -107,15 +99,11 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
   degree: (node: NodeIdentifier, options?: DegreeOptions<G>) => Promise<number>;
 }>;
 
-/**
- * Parameters supplied by the Store to construct an algorithms facade.
- * Using a factory keeps the Store constructor simple and lets us reuse the
- * same context for every algorithm call.
- */
 export type CreateGraphAlgorithmsParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   schema: SqlSchema | undefined;
+  defaultTemporalMode: TemporalMode;
 }>;
 
 export function createGraphAlgorithms<G extends GraphDef>(
@@ -130,12 +118,9 @@ export function createGraphAlgorithms<G extends GraphDef>(
       (params.backend.tableNames ?
         createSqlSchema(params.backend.tableNames)
       : createSqlSchema()),
+    defaultTemporalMode: params.defaultTemporalMode,
   };
 
-  // Public option shapes match the internal shapes by field name and
-  // optionality, so they forward unchanged. The cast drops `EdgeKinds<G>`
-  // branding to plain `string[]` for the SQL layer — public types exist
-  // purely for compile-time safety.
   return {
     shortestPath(from, to, options) {
       return executeShortestPath(
@@ -175,5 +160,6 @@ export type {
   ReachableOptions,
   ShortestPathOptions,
   ShortestPathResult,
+  TemporalAlgorithmOptions,
   TraversalDirection,
 } from "./types";

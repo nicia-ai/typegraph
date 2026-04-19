@@ -5,6 +5,8 @@
  * in the forward direction ("out"), reverse ("in"), or undirected ("both").
  */
 import type { EdgeKinds, GraphDef } from "../../core/define-graph";
+import type { TemporalMode } from "../../core/types";
+import type { RecursiveCyclePolicy } from "../../query/ast";
 
 /**
  * Direction of edge traversal.
@@ -21,25 +23,48 @@ export type TraversalDirection = "out" | "in" | "both";
  * - `"prevent"` — skip any node already on the current path (default).
  *   Guarantees termination even in cyclic graphs.
  * - `"allow"` — permit revisiting nodes. Only safe with a bounded `maxHops`.
+ *
+ * Aliased to `RecursiveCyclePolicy` so algorithms and query-builder traversals
+ * share a single canonical union.
  */
-export type AlgorithmCyclePolicy = "prevent" | "allow";
+export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
+
+/**
+ * Temporal filter options shared by every algorithm.
+ *
+ * Algorithms honor the same temporal model as the rest of the store: both
+ * nodes and edges are filtered according to the resolved mode. `asOf` is
+ * only consulted when the resolved mode is `"asOf"`. If neither option is
+ * supplied, the algorithm falls back to `graph.defaults.temporalMode`.
+ */
+export type TemporalAlgorithmOptions = Readonly<{
+  /** Temporal mode. Defaults to the graph's configured default. */
+  temporalMode?: TemporalMode;
+  /**
+   * ISO-8601 timestamp used when `temporalMode` is `"asOf"`. Required in that
+   * mode; ignored in all others.
+   */
+  asOf?: string;
+}>;
 
 /**
  * Base options for traversal-style algorithms.
  */
-export type BaseTraversalOptions<G extends GraphDef> = Readonly<{
-  /** Edge kinds to follow. At least one kind is required. */
-  edges: readonly EdgeKinds<G>[];
-  /**
-   * Maximum number of hops to traverse. Defaults to 10.
-   * Must be between 1 and 1000.
-   */
-  maxHops?: number;
-  /** Direction of traversal (default: `"out"`). */
-  direction?: TraversalDirection;
-  /** Cycle policy (default: `"prevent"`). */
-  cyclePolicy?: AlgorithmCyclePolicy;
-}>;
+export type BaseTraversalOptions<G extends GraphDef> =
+  TemporalAlgorithmOptions &
+    Readonly<{
+      /** Edge kinds to follow. At least one kind is required. */
+      edges: readonly EdgeKinds<G>[];
+      /**
+       * Maximum number of hops to traverse. Defaults to 10.
+       * Must be between 1 and 1000.
+       */
+      maxHops?: number;
+      /** Direction of traversal (default: `"out"`). */
+      direction?: TraversalDirection;
+      /** Cycle policy (default: `"prevent"`). */
+      cyclePolicy?: AlgorithmCyclePolicy;
+    }>;
 
 /**
  * A node reached during traversal, annotated with the shortest depth at which
@@ -97,16 +122,17 @@ export type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> &
  * "2-hop neighbors" reads more naturally than "reachable with maxHops=2".
  * The source is always excluded.
  */
-export type NeighborsOptions<G extends GraphDef> = Readonly<{
-  /** Edge kinds to follow. At least one kind is required. */
-  edges: readonly EdgeKinds<G>[];
-  /** Maximum neighborhood depth (default: 1). Must be between 1 and 1000. */
-  depth?: number;
-  /** Direction of traversal (default: `"out"`). */
-  direction?: TraversalDirection;
-  /** Cycle policy (default: `"prevent"`). */
-  cyclePolicy?: AlgorithmCyclePolicy;
-}>;
+export type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions &
+  Readonly<{
+    /** Edge kinds to follow. At least one kind is required. */
+    edges: readonly EdgeKinds<G>[];
+    /** Maximum neighborhood depth (default: 1). Must be between 1 and 1000. */
+    depth?: number;
+    /** Direction of traversal (default: `"out"`). */
+    direction?: TraversalDirection;
+    /** Cycle policy (default: `"prevent"`). */
+    cyclePolicy?: AlgorithmCyclePolicy;
+  }>;
 
 /**
  * Options for `degree`.
@@ -114,12 +140,13 @@ export type NeighborsOptions<G extends GraphDef> = Readonly<{
  * Counts active edges incident to a node. With `direction: "both"`, an edge
  * that happens to be a self-loop (from === to) is counted once, not twice.
  */
-export type DegreeOptions<G extends GraphDef> = Readonly<{
-  /**
-   * Edge kinds to count. If omitted, counts across all edge kinds in the
-   * graph.
-   */
-  edges?: readonly EdgeKinds<G>[];
-  /** Direction (default: `"both"`). */
-  direction?: TraversalDirection;
-}>;
+export type DegreeOptions<G extends GraphDef> = TemporalAlgorithmOptions &
+  Readonly<{
+    /**
+     * Edge kinds to count. If omitted, counts across all edge kinds in the
+     * graph.
+     */
+    edges?: readonly EdgeKinds<G>[];
+    /** Direction (default: `"both"`). */
+    direction?: TraversalDirection;
+  }>;

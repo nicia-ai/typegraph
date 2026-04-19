@@ -1,21 +1,18 @@
-/**
- * Degree algorithm.
- *
- * Counts the number of active edges incident to a node. Direction selects
- * whether we count outgoing, incoming, or both. For `"both"` we count
- * distinct edge IDs so that a self-loop (from === to === node) contributes
- * exactly once rather than twice.
- */
-import { sql } from "drizzle-orm";
+import { type SQL, sql } from "drizzle-orm";
 
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
-import { type AlgorithmContext } from "./context";
+import {
+  type AlgorithmContext,
+  type InternalTemporalOptions,
+  resolveTemporalFilter,
+} from "./context";
 import type { TraversalDirection } from "./types";
 
-type InternalDegreeOptions = Readonly<{
-  edges?: readonly string[];
-  direction?: TraversalDirection;
-}>;
+type InternalDegreeOptions = InternalTemporalOptions &
+  Readonly<{
+    edges?: readonly string[];
+    direction?: TraversalDirection;
+  }>;
 
 export async function executeDegree(
   ctx: AlgorithmContext,
@@ -24,19 +21,21 @@ export async function executeDegree(
 ): Promise<number> {
   const direction = options.direction ?? "both";
 
-  // An empty `edges: []` array is treated literally as "no kinds" — the
-  // caller explicitly asked to count nothing. Omitting the option entirely
-  // (`edges === undefined`) counts across every kind.
-  const kindFilter =
-    options.edges === undefined ?
-      sql`1 = 1`
-    : compileKindFilter(sql.raw("kind"), options.edges);
+  const whereClauses: SQL[] = [
+    sql`graph_id = ${ctx.graphId}`,
+    resolveTemporalFilter(ctx, options),
+    compileDirectionFilter(direction, nodeId),
+  ];
+  if (options.edges !== undefined) {
+    whereClauses.push(compileKindFilter(sql.raw("kind"), options.edges));
+  }
 
-  const directionFilter = compileDirectionFilter(direction, nodeId);
+  // COUNT(DISTINCT id) collapses self-loops (from === to === nodeId) to a
+  // single edge so they don't double-count under `"both"`.
   const countExpr =
     direction === "both" ? sql`COUNT(DISTINCT id)` : sql`COUNT(*)`;
 
-  const query = sql`SELECT ${countExpr} AS count FROM ${ctx.schema.edgesTable} WHERE graph_id = ${ctx.graphId} AND deleted_at IS NULL AND ${kindFilter} AND ${directionFilter}`;
+  const query = sql`SELECT ${countExpr} AS count FROM ${ctx.schema.edgesTable} WHERE ${sql.join(whereClauses, sql` AND `)}`;
 
   const rows =
     await ctx.backend.execute<Readonly<{ count: number | string }>>(query);
