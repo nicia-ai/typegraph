@@ -1,5 +1,81 @@
 # @nicia-ai/typegraph
 
+## 0.20.0
+
+### Minor Changes
+
+- [#85](https://github.com/nicia-ai/typegraph/pull/85) [`12055d0`](https://github.com/nicia-ai/typegraph/commit/12055d053b22cfadd1439c9a667307fae77af6a2) Thanks [@pdlug](https://github.com/pdlug)! - Add Tier 1 graph algorithms on `store.algorithms.*`: `shortestPath`, `reachable`, `canReach`, `neighbors`, and `degree`.
+
+  ```typescript
+  // Find the shortest path through a set of edge kinds
+  const path = await store.algorithms.shortestPath(alice, bob, {
+    edges: ["knows"],
+    maxHops: 6,
+  });
+
+  // Enumerate reachable nodes within a depth bound
+  const reachable = await store.algorithms.reachable(alice, {
+    edges: ["knows"],
+    maxHops: 3,
+  });
+
+  // Fast existence check
+  const connected = await store.algorithms.canReach(alice, bob, {
+    edges: ["knows"],
+  });
+
+  // k-hop neighborhood (source always excluded)
+  const twoHop = await store.algorithms.neighbors(alice, {
+    edges: ["knows"],
+    depth: 2,
+  });
+
+  // Count incident edges
+  const total = await store.algorithms.degree(alice, { edges: ["knows"] });
+  ```
+
+  All traversal algorithms compile to a single recursive-CTE query and share the dialect primitives used by `.recursive()` and `store.subgraph()`, so SQLite and PostgreSQL yield identical semantics. Node arguments accept either a raw ID string or any object with an `id` field — `Node`, `NodeRef`, and the lightweight records returned by the algorithms themselves all work. See `/graph-algorithms` for the full reference.
+
+- [#85](https://github.com/nicia-ai/typegraph/pull/85) [`12055d0`](https://github.com/nicia-ai/typegraph/commit/12055d053b22cfadd1439c9a667307fae77af6a2) Thanks [@pdlug](https://github.com/pdlug)! - Graph algorithms (`store.algorithms.*`) and `store.subgraph()` now honor the store's temporal model.
+
+  **New:** Every algorithm and `store.subgraph()` accept `temporalMode` and `asOf` options, matching the shape already used by `store.query()` and collection reads. When neither is supplied, the resolved mode falls back to `graph.defaults.temporalMode` (typically `"current"`).
+
+  ```typescript
+  // Snapshot at a point in time
+  await store.algorithms.shortestPath(alice, bob, {
+    edges: ["knows"],
+    temporalMode: "asOf",
+    asOf: "2023-01-15T00:00:00Z",
+  });
+
+  await store.subgraph(rootId, {
+    edges: ["has_task"],
+    temporalMode: "includeEnded",
+  });
+  ```
+
+  The filter applies to both nodes and edges along the traversal, is orthogonal to `cyclePolicy`, and is honored by the shortest-path self-path short-circuit.
+
+  **BREAKING:** `store.subgraph()` previously ignored graph temporal settings and filtered only by `deleted_at IS NULL` (equivalent to `"includeEnded"`). It now defaults to `graph.defaults.temporalMode`. Callers that relied on walking through validity-ended rows must pass `temporalMode: "includeEnded"` explicitly. Soft-delete filtering is unchanged under the default `"current"` mode, so most callers see no difference.
+
+### Patch Changes
+
+- [#87](https://github.com/nicia-ai/typegraph/pull/87) [`f52bba6`](https://github.com/nicia-ai/typegraph/commit/f52bba63befe8111d13d04cfb9659371f7061625) Thanks [@pdlug](https://github.com/pdlug)! - Fix SQLite temporal filter timestamp format in graph algorithms and subgraph.
+
+  `buildReachableCte`, `resolveTemporalFilter`, and `fetchSubgraphEdges` compiled
+  temporal filters without passing `dialect.currentTimestamp()`, so on SQLite they
+  fell back to raw `CURRENT_TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`). Stored
+  `valid_from` / `valid_to` use ISO-8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`), and because
+  `T` sorts above space, same-day ISO timestamps compare incorrectly against raw
+  `CURRENT_TIMESTAMP`. Under `temporalMode: "current"` this caused
+  `reachable` / `canReach` / `neighbors` / `shortestPath` / `degree` and the
+  `subgraph` edge hydration to misclassify rows whose `valid_from` or `valid_to`
+  fell on today's date, disagreeing with `store.query()` and collection reads.
+
+  All three call sites now inject the dialect-specific current timestamp
+  (`strftime('%Y-%m-%dT%H:%M:%fZ','now')` on SQLite, `NOW()` on PostgreSQL),
+  matching the query compiler.
+
 ## 0.19.0
 
 ### Minor Changes
