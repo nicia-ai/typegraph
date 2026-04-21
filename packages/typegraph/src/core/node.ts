@@ -69,5 +69,5 @@ export function defineNode<
     kind: name,
     schema: options.schema,
     description: options.description,
-  }) as NodeType<K, S>;
+  });
 }

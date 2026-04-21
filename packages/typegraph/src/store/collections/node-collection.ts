@@ -197,7 +197,7 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
-      return this.createFromRecord(props as Record<string, unknown>, options);
+      return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
@@ -228,17 +228,13 @@ export function createNodeCollection<
       if (ids.length === 0) return [];
 
       if (backend.getNodes !== undefined) {
-        const rows = await backend.getNodes(
-          graphId,
-          kind,
-          ids as readonly string[],
-        );
+        const rows = await backend.getNodes(graphId, kind, ids);
         const rowMap = new Map<string, (typeof rows)[number]>();
         for (const row of rows) {
           rowMap.set(row.id, row);
         }
         return ids.map((id) => {
-          const row = rowMap.get(id as string);
+          const row = rowMap.get(id);
           if (!row) return;
           if (!matchesTemporalMode(row, options)) return;
           return narrowNode<N>(rowToNode(row));
@@ -247,7 +243,7 @@ export function createNodeCollection<
 
       return Promise.all(
         ids.map(async (id) => {
-          const row = await backend.getNode(graphId, kind, id as string);
+          const row = await backend.getNode(graphId, kind, id);
           if (!row) return;
           if (!matchesTemporalMode(row, options)) return;
           return narrowNode<N>(rowToNode(row));
@@ -261,18 +257,18 @@ export function createNodeCollection<
       options?: Readonly<{ validTo?: string }>,
     ): Promise<Node<N>> {
       const result = await executeNodeUpdate(
-        buildUpdateInput(kind, id, props as Record<string, unknown>, options),
+        buildUpdateInput(kind, id, props, options),
         backend,
       );
       return narrowNode<N>(result);
     },
 
     async delete(id: NodeId<N>): Promise<void> {
-      await executeNodeDelete(kind, id as string, backend);
+      await executeNodeDelete(kind, id, backend);
     },
 
     async hardDelete(id: NodeId<N>): Promise<void> {
-      await executeNodeHardDelete(kind, id as string, backend);
+      await executeNodeHardDelete(kind, id, backend);
     },
 
     async find(
@@ -356,11 +352,7 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: Readonly<{ validFrom?: string; validTo?: string }>,
     ): Promise<Node<N>> {
-      return this.upsertByIdFromRecord(
-        id,
-        props as Record<string, unknown>,
-        options,
-      );
+      return this.upsertByIdFromRecord(id, props, options);
     },
 
     async upsertByIdFromRecord(
@@ -395,15 +387,7 @@ export function createNodeCollection<
         validTo?: string;
       }>[],
     ): Promise<Node<N>[]> {
-      const batchInputs = mapBulkNodeInputs(
-        kind,
-        items as readonly Readonly<{
-          props: Record<string, unknown>;
-          id?: string;
-          validFrom?: string;
-          validTo?: string;
-        }>[],
-      );
+      const batchInputs = mapBulkNodeInputs(kind, items);
 
       if (backend.capabilities.transactions && "transaction" in backend) {
         const results = await backend.transaction(async (txBackend) =>
@@ -444,11 +428,7 @@ export function createNodeCollection<
             if (row !== undefined) existingMap.set(row.id, row);
           }
         } else {
-          const rows = await target.getNodes(
-            graphId,
-            kind,
-            ids as readonly string[],
-          );
+          const rows = await target.getNodes(graphId, kind, ids);
           for (const row of rows) {
             existingMap.set(row.id, row);
           }
@@ -469,22 +449,13 @@ export function createNodeCollection<
           if (existing) {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateInput(
-                kind,
-                item.id,
-                item.props as Record<string, unknown>,
-                item,
-              ),
+              input: buildUpdateInput(kind, item.id, item.props, item),
               clearDeleted: existing.deleted_at !== undefined,
             });
           } else {
             toCreate.push({
               index: itemIndex,
-              input: buildCreateInput(
-                kind,
-                item.props as Record<string, unknown>,
-                item,
-              ),
+              input: buildCreateInput(kind, item.props, item),
             });
           }
           itemIndex++;
@@ -526,15 +497,7 @@ export function createNodeCollection<
         validTo?: string;
       }>[],
     ): Promise<void> {
-      const batchInputs = mapBulkNodeInputs(
-        kind,
-        items as readonly Readonly<{
-          props: Record<string, unknown>;
-          id?: string;
-          validFrom?: string;
-          validTo?: string;
-        }>[],
-      );
+      const batchInputs = mapBulkNodeInputs(kind, items);
 
       if (backend.capabilities.transactions && "transaction" in backend) {
         await backend.transaction(async (txBackend) => {
@@ -552,7 +515,7 @@ export function createNodeCollection<
         target: GraphBackend | TransactionBackend,
       ): Promise<void> => {
         for (const id of ids) {
-          await executeNodeDelete(kind, id as string, target);
+          await executeNodeDelete(kind, id, target);
         }
       };
       if (backend.capabilities.transactions && "transaction" in backend) {
@@ -569,7 +532,7 @@ export function createNodeCollection<
       const result = await executeFindByConstraint(
         kind,
         constraintName,
-        props as Record<string, unknown>,
+        props,
         backend,
       );
       return result === undefined ? undefined : narrowNode<N>(result);
@@ -584,7 +547,7 @@ export function createNodeCollection<
       if (items.length === 0) return [];
 
       const mappedItems = items.map((item) => ({
-        props: item.props as Record<string, unknown>,
+        props: item.props,
       }));
 
       const results = await executeBulkFindByConstraint(
@@ -609,7 +572,7 @@ export function createNodeCollection<
         const result = await executeGetOrCreateByConstraint(
           kind,
           constraintName,
-          props as Record<string, unknown>,
+          props,
           target,
           options,
         );
@@ -632,7 +595,7 @@ export function createNodeCollection<
       if (items.length === 0) return [];
 
       const mappedItems = items.map((item) => ({
-        props: item.props as Record<string, unknown>,
+        props: item.props,
       }));
 
       const getOrCreateAll = async (

@@ -5,16 +5,13 @@ import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
 } from "../src/backend/drizzle/execution/postgres-execution";
-import {
-  type AnySqliteDatabase,
-  createSqliteExecutionAdapter,
-} from "../src/backend/drizzle/execution/sqlite-execution";
+import { createSqliteExecutionAdapter } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createTestDatabase } from "./test-utils";
 
 describe("sqlite execution adapter", () => {
   it("enables compiled execution for sync sqlite clients", async () => {
     const db = createTestDatabase();
-    const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase);
+    const adapter = createSqliteExecutionAdapter(db);
 
     expect(adapter.profile.isSync).toBe(true);
     expect(adapter.profile.supportsCompiledExecution).toBe(true);
@@ -67,7 +64,7 @@ describe("sqlite execution adapter", () => {
         return originalPrepare.call(sqliteClient, sqlText);
       };
 
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase);
+      const adapter = createSqliteExecutionAdapter(db);
       const query = sql`SELECT ${"Alice"} AS name`;
 
       await adapter.execute<{ name: string }>(query);
@@ -104,7 +101,7 @@ describe("sqlite execution adapter", () => {
         return originalPrepare.call(sqliteClient, sqlText);
       };
 
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+      const adapter = createSqliteExecutionAdapter(db, {
         statementCacheMax: 2,
       });
 
@@ -131,7 +128,7 @@ describe("sqlite execution adapter", () => {
 
   it("respects explicit execution profile hints", () => {
     const db = createTestDatabase();
-    const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+    const adapter = createSqliteExecutionAdapter(db, {
       profileHints: {
         isSync: false,
         transactionMode: "none",
@@ -146,13 +143,13 @@ describe("sqlite execution adapter", () => {
   describe("transactionMode detection", () => {
     it("defaults to 'raw' for better-sqlite3", () => {
       const db = createTestDatabase();
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase);
+      const adapter = createSqliteExecutionAdapter(db);
       expect(adapter.profile.transactionMode).toBe("sql");
     });
 
     it("respects explicit transactionMode hint", () => {
       const db = createTestDatabase();
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+      const adapter = createSqliteExecutionAdapter(db, {
         profileHints: { transactionMode: "drizzle" },
       });
       expect(adapter.profile.transactionMode).toBe("drizzle");
@@ -161,7 +158,7 @@ describe("sqlite execution adapter", () => {
     it("explicit transactionMode overrides session-based auto-detection", () => {
       const db = createTestDatabase();
       // better-sqlite3 would normally auto-detect as "sql", but explicit hint wins
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+      const adapter = createSqliteExecutionAdapter(db, {
         profileHints: { transactionMode: "none" },
       });
       expect(adapter.profile.transactionMode).toBe("none");
@@ -169,7 +166,7 @@ describe("sqlite execution adapter", () => {
 
     it("defaults to 'drizzle' for async drivers", () => {
       const db = createTestDatabase();
-      const adapter = createSqliteExecutionAdapter(db as AnySqliteDatabase, {
+      const adapter = createSqliteExecutionAdapter(db, {
         profileHints: { isSync: false },
       });
       expect(adapter.profile.transactionMode).toBe("drizzle");

@@ -48,7 +48,7 @@ function createMetaEdge<K extends string>(
       inference: properties.inference,
       description: properties.description,
     },
-  }) as MetaEdge<K>;
+  });
 }
 
 // ============================================================

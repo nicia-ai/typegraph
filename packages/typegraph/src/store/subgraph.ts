@@ -471,7 +471,7 @@ export async function executeSubgraph<
 
   const ctx: SubgraphContext = {
     graphId: params.graphId,
-    rootId: params.rootId as string,
+    rootId: params.rootId,
     edgeKinds: options.edges,
     maxDepth,
     includeKinds: options.includeKinds,
@@ -522,20 +522,15 @@ export async function executeSubgraph<
   const nodesMap = new Map<string, Node>();
   for (const row of nodeRows) {
     const node = mapSubgraphNodeRow(row, nodeProjectionPlan);
-    nodesMap.set(node.id as string, node);
+    nodesMap.set(node.id, node);
   }
 
   const adjacency = new Map<string, Map<string, Edge[]>>();
   const reverseAdjacency = new Map<string, Map<string, Edge[]>>();
   for (const row of edgeRows) {
     const edge = mapSubgraphEdgeRow(row, edgeProjectionPlan);
-    insertAdjacencyEntry(adjacency, edge.fromId as string, edge.kind, edge);
-    insertAdjacencyEntry(
-      reverseAdjacency,
-      edge.toId as string,
-      edge.kind,
-      edge,
-    );
+    insertAdjacencyEntry(adjacency, edge.fromId, edge.kind, edge);
+    insertAdjacencyEntry(reverseAdjacency, edge.toId, edge.kind, edge);
   }
 
   const root = nodesMap.get(ctx.rootId);

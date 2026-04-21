@@ -798,7 +798,7 @@ describe("literal value handling", () => {
 
   it("throws for unsupported value types", () => {
     expect(() => {
-      baseField(field).eq({ nested: "object" } as unknown as string);
+      baseField(field).eq({ nested: "object" });
     }).toThrow("Unsupported literal value type");
   });
 });

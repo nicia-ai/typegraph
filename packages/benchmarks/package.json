@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@nicia-ai/typegraph": "workspace:*",
-    "better-sqlite3": "^12.8.0",
+    "better-sqlite3": "^12.9.0",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.20.0",
     "zod": "^4.3.6"

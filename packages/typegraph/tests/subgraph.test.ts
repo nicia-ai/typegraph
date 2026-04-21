@@ -171,7 +171,7 @@ describe("store.subgraph()", () => {
 
   describe("boundary conditions", () => {
     it("returns only root when edges array is empty", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: [],
       });
 
@@ -193,7 +193,7 @@ describe("store.subgraph()", () => {
     });
 
     it("returns only the root when maxDepth is 0", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "uses_skill"],
         maxDepth: 0,
       });
@@ -204,7 +204,7 @@ describe("store.subgraph()", () => {
     });
 
     it("returns empty result when maxDepth 0 and excludeRoot", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 0,
         excludeRoot: true,
@@ -217,7 +217,7 @@ describe("store.subgraph()", () => {
 
     it("returns root even when no outgoing edges of the specified kind exist", async () => {
       // agent1 has no outgoing has_task edges
-      const result = await store.subgraph(ids.agent1Id as never, {
+      const result = await store.subgraph(ids.agent1Id, {
         edges: ["has_task"],
         maxDepth: 5,
       });
@@ -233,7 +233,7 @@ describe("store.subgraph()", () => {
 
   describe("traversal", () => {
     it("extracts immediate neighbors with depth 1", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "runs_agent"],
         maxDepth: 1,
       });
@@ -246,7 +246,7 @@ describe("store.subgraph()", () => {
     });
 
     it("follows multi-hop paths", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "has_attempt", "used_tool"],
         maxDepth: 4,
       });
@@ -259,7 +259,7 @@ describe("store.subgraph()", () => {
     });
 
     it("only follows specified edge kinds", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 3,
       });
@@ -273,7 +273,7 @@ describe("store.subgraph()", () => {
 
     it("caps maxDepth at MAX_RECURSIVE_DEPTH", async () => {
       // Should not throw even with very large maxDepth
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 999_999,
       });
@@ -288,7 +288,7 @@ describe("store.subgraph()", () => {
   describe("direction", () => {
     it("follows outbound edges by default", async () => {
       // Starting from task1, has_task points Run→Task, so outbound from task1 yields nothing for has_task
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["has_task"],
         maxDepth: 2,
       });
@@ -299,7 +299,7 @@ describe("store.subgraph()", () => {
     });
 
     it("follows both directions with direction: both", async () => {
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["has_task"],
         maxDepth: 2,
         direction: "both",
@@ -316,7 +316,7 @@ describe("store.subgraph()", () => {
 
   describe("includeKinds", () => {
     it("filters result nodes by kind", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "has_attempt", "used_tool"],
         maxDepth: 4,
         includeKinds: ["Task", "ToolDef"],
@@ -334,7 +334,7 @@ describe("store.subgraph()", () => {
     it("traverses through excluded kinds to reach included kinds", async () => {
       // Path: Run → has_task → Task → has_attempt → Attempt → used_tool → ToolDef
       // Exclude Attempt from results but ToolDef should still be reachable
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "has_attempt", "used_tool"],
         maxDepth: 4,
         includeKinds: ["ToolDef"],
@@ -351,7 +351,7 @@ describe("store.subgraph()", () => {
 
   describe("excludeRoot", () => {
     it("excludes root node from results", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         excludeRoot: true,
@@ -364,7 +364,7 @@ describe("store.subgraph()", () => {
 
     it("excludes root but keeps edges that connect remaining nodes", async () => {
       // depends_on connects task1→task2, both are non-root
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "depends_on"],
         maxDepth: 2,
         excludeRoot: true,
@@ -374,12 +374,12 @@ describe("store.subgraph()", () => {
 
       // depends_on edge should still appear since both task1 and task2 are in the set
       const depEdges =
-        result.adjacency.get(ids.task1Id as string)?.get("depends_on") ?? [];
+        result.adjacency.get(ids.task1Id)?.get("depends_on") ?? [];
       expect(depEdges).toHaveLength(1);
     });
 
     it("excludes edges connected to root when root is excluded", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         excludeRoot: true,
@@ -395,7 +395,7 @@ describe("store.subgraph()", () => {
 
   describe("edge result semantics", () => {
     it("only returns edges where both endpoints are in the result set", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "has_attempt", "used_tool"],
         maxDepth: 4,
         includeKinds: ["Task", "ToolDef"],
@@ -415,7 +415,7 @@ describe("store.subgraph()", () => {
     });
 
     it("returns only edges of the specified kinds", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 2,
       });
@@ -440,7 +440,7 @@ describe("store.subgraph()", () => {
       const task1Ref = { kind: "Task" as const, id: ids.task1Id };
       await store.edges.depends_on.create(task2Ref, task1Ref);
 
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["depends_on"],
         maxDepth: 10,
       });
@@ -455,7 +455,7 @@ describe("store.subgraph()", () => {
       const task1Ref = { kind: "Task" as const, id: ids.task1Id };
       await store.edges.depends_on.create(task2Ref, task1Ref);
 
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["depends_on"],
         maxDepth: 3,
         cyclePolicy: "allow",
@@ -473,7 +473,7 @@ describe("store.subgraph()", () => {
       // skill1 is reachable via:
       //   run → has_task → task1 → uses_skill → skill1
       //   run → has_task → task2 → uses_skill → skill1
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "uses_skill"],
         maxDepth: 3,
       });
@@ -517,7 +517,7 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Task.delete(ids.task1Id);
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
       });
@@ -537,7 +537,7 @@ describe("store.subgraph()", () => {
         await store.edges.has_task.delete(edge.id);
       }
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "uses_skill"],
         maxDepth: 3,
       });
@@ -562,7 +562,7 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Attempt.delete(ids.attempt1Id);
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "has_attempt", "used_tool"],
         maxDepth: 4,
       });
@@ -583,7 +583,7 @@ describe("store.subgraph()", () => {
         await store.edges.has_task.delete(edgeToTask1.id);
       }
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
       });
@@ -610,7 +610,7 @@ describe("store.subgraph()", () => {
 
       await store.nodes.Run.delete(ids.runId);
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
       });
@@ -626,7 +626,7 @@ describe("store.subgraph()", () => {
 
   describe("result hydration", () => {
     it("returns fully hydrated nodes with props and metadata", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         includeKinds: ["Task"],
@@ -644,7 +644,7 @@ describe("store.subgraph()", () => {
     });
 
     it("returns fully hydrated edges with props and metadata", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
       });
@@ -667,7 +667,7 @@ describe("store.subgraph()", () => {
 
   describe("projection", () => {
     it("applies projection to the root node when its kind is projected", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 0,
         project: {
@@ -687,7 +687,7 @@ describe("store.subgraph()", () => {
     });
 
     it("projects node props and full metadata while preserving identity", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         includeKinds: ["Task"],
@@ -710,7 +710,7 @@ describe("store.subgraph()", () => {
     });
 
     it("keeps unprojected kinds fully hydrated", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "runs_agent"],
         maxDepth: 1,
         project: {
@@ -736,7 +736,7 @@ describe("store.subgraph()", () => {
     });
 
     it("projects edges while preserving structural endpoint fields", async () => {
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["uses_skill"],
         maxDepth: 1,
         project: {
@@ -766,11 +766,11 @@ describe("store.subgraph()", () => {
   describe("compile-time type safety", () => {
     it("rejects invalid edge kinds at compile time", async () => {
       // @ts-expect-error - "nonexistent_edge" is not a valid edge kind
-      await store.subgraph(ids.runId as never, { edges: ["nonexistent_edge"] });
+      await store.subgraph(ids.runId, { edges: ["nonexistent_edge"] });
     });
 
     it("rejects invalid includeKinds at compile time", async () => {
-      await store.subgraph(ids.runId as never, {
+      await store.subgraph(ids.runId, {
         edges: ["has_task"],
         // @ts-expect-error - "NonExistent" is not a valid node kind
         includeKinds: ["NonExistent"],
@@ -778,7 +778,7 @@ describe("store.subgraph()", () => {
     });
 
     it("accepts valid edge and node kinds", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "runs_agent"],
         includeKinds: ["Task", "Agent"],
       });
@@ -791,7 +791,7 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows projected node fields at compile time", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "runs_agent"],
         maxDepth: 1,
         includeKinds: ["Task", "Agent"],
@@ -823,7 +823,7 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows projected edge fields at compile time", async () => {
-      const result = await store.subgraph(ids.task1Id as never, {
+      const result = await store.subgraph(ids.task1Id, {
         edges: ["uses_skill"],
         maxDepth: 1,
         project: {
@@ -845,7 +845,7 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows root type with kind discrimination", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "runs_agent"],
         maxDepth: 1,
         includeKinds: ["Run", "Task"],
@@ -858,7 +858,7 @@ describe("store.subgraph()", () => {
       }
 
       // nodes.get returns Run | Task | undefined
-      const node = result.nodes.get(ids.runId as string);
+      const node = result.nodes.get(ids.runId);
       if (node?.kind === "Task") {
         const title: string = node.title;
         void title;
@@ -866,7 +866,7 @@ describe("store.subgraph()", () => {
     });
 
     it("narrows edge types via adjacency map access", async () => {
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "uses_skill"],
         maxDepth: 2,
         project: {
@@ -876,8 +876,7 @@ describe("store.subgraph()", () => {
         },
       });
 
-      const edges =
-        result.adjacency.get(ids.task1Id as string)?.get("uses_skill") ?? [];
+      const edges = result.adjacency.get(ids.task1Id)?.get("uses_skill") ?? [];
       for (const edge of edges) {
         // Structural fields are always present
         const fromId: string = edge.fromId;
@@ -893,9 +892,7 @@ describe("store.subgraph()", () => {
 
       // reverseAdjacency has the same type
       const reverseEdges =
-        result.reverseAdjacency
-          .get(ids.skill1Id as string)
-          ?.get("uses_skill") ?? [];
+        result.reverseAdjacency.get(ids.skill1Id)?.get("uses_skill") ?? [];
       for (const edge of reverseEdges) {
         const toId: string = edge.toId;
         void toId;
@@ -903,7 +900,7 @@ describe("store.subgraph()", () => {
     });
 
     it("rejects partial meta fields at compile time", async () => {
-      await store.subgraph(ids.runId as never, {
+      await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         project: {
@@ -914,7 +911,7 @@ describe("store.subgraph()", () => {
         },
       });
 
-      await store.subgraph(ids.task1Id as never, {
+      await store.subgraph(ids.task1Id, {
         edges: ["uses_skill"],
         maxDepth: 1,
         project: {
@@ -927,7 +924,7 @@ describe("store.subgraph()", () => {
     });
 
     it("rejects projection keys for kinds outside includeKinds/edges", async () => {
-      await store.subgraph(ids.runId as never, {
+      await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         includeKinds: ["Task"],
@@ -940,7 +937,7 @@ describe("store.subgraph()", () => {
         },
       });
 
-      await store.subgraph(ids.runId as never, {
+      await store.subgraph(ids.runId, {
         edges: ["has_task"],
         maxDepth: 1,
         project: {
@@ -1057,7 +1054,7 @@ describe("store.subgraph()", () => {
       const child = await collection.create({ value: "child" });
       await mbStore.edges.mb_link.create(root, child);
 
-      const result = await mbStore.subgraph(root.id as never, {
+      const result = await mbStore.subgraph(root.id, {
         edges: ["mb_link"] as never,
         maxDepth: 1,
         project: {
@@ -1141,7 +1138,7 @@ describe("store.subgraph()", () => {
         },
       });
 
-      const result = await store.subgraph(ids.runId as never, {
+      const result = await store.subgraph(ids.runId, {
         edges: ["has_task", "uses_skill"],
         maxDepth: 2,
         includeKinds: ["Task", "Skill"],
@@ -1369,7 +1366,7 @@ describe("store.subgraph temporal behavior", () => {
     );
 
     // No per-call override — graph's includeEnded default applies.
-    const result = await altStore.subgraph(run.id as never, {
+    const result = await altStore.subgraph(run.id, {
       edges: ["has_task"],
       maxDepth: 1,
     });

@@ -107,7 +107,7 @@ export function externalRef<T extends string>(table: T): ExternalRefSchema<T> {
   // Attach table metadata for introspection
   return Object.assign(schema, {
     [EXTERNAL_REF_TABLE_KEY]: table,
-  }) as unknown as ExternalRefSchema<T>;
+  });
 }
 
 // ============================================================

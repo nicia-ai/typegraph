@@ -28,7 +28,7 @@ async function resolveAlgorithmFixture(
   const byName = new Map<string, string>();
   const people = await store.nodes.Person.find();
   for (const person of people) {
-    byName.set(person.name, person.id as string);
+    byName.set(person.name, person.id);
   }
   return {
     aliceId: byName.get("Alice")!,
@@ -73,10 +73,10 @@ async function seedTemporalGraph(
   ]);
 
   return {
-    rootId: root.id as string,
-    activeId: active.id as string,
-    endedId: ended.id as string,
-    futureId: future.id as string,
+    rootId: root.id,
+    activeId: active.id,
+    endedId: ended.id,
+    futureId: future.id,
   };
 }
 

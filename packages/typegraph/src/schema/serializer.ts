@@ -153,22 +153,25 @@ function serializeWherePredicate(
   whereFunction: (builder: PredicateBuilder) => SerializedPredicate,
 ): string {
   // Create a proxy builder that captures the predicate structure
-  const builder = new Proxy({} as PredicateBuilder, {
-    get(_target, field: string): FieldPredicateBuilder {
-      return {
-        isNull: (): SerializedPredicate => ({
-          __type: "unique_predicate",
-          field,
-          op: "isNull" as const,
-        }),
-        isNotNull: (): SerializedPredicate => ({
-          __type: "unique_predicate",
-          field,
-          op: "isNotNull" as const,
-        }),
-      };
+  const builder = new Proxy(
+    {},
+    {
+      get(_target, field: string): FieldPredicateBuilder {
+        return {
+          isNull: (): SerializedPredicate => ({
+            __type: "unique_predicate",
+            field,
+            op: "isNull" as const,
+          }),
+          isNotNull: (): SerializedPredicate => ({
+            __type: "unique_predicate",
+            field,
+            op: "isNotNull" as const,
+          }),
+        };
+      },
     },
-  });
+  );
 
   // Call the where function to get the predicate
   const predicate = whereFunction(builder);

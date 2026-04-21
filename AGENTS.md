@@ -68,7 +68,7 @@ pnpm test:coverage        # Run tests with coverage
 pnpm test:mutation        # Run mutation testing
 ```
 
-**Important:** `pnpm test` runs only SQLite-backed tests. The 214 PostgreSQL
+**Important:** `pnpm test` runs only SQLite-backed tests. The PostgreSQL
 backend tests are **skipped** unless `POSTGRES_URL` is set. Always run
 `pnpm test:postgres` (from the repo root or `packages/typegraph`) to verify
 changes that touch backend, store, or collection code. The script handles

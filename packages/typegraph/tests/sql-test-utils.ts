@@ -22,7 +22,7 @@ export function toSqlString(sqlTemplate: SqlTemplateLike): string {
 
     if (chunk && typeof chunk === "object") {
       if ("value" in chunk) {
-        const value = (chunk as { value: unknown }).value;
+        const value = chunk.value;
         if (Array.isArray(value)) {
           parts.push(value.map(String).join(""));
         } else {
@@ -61,7 +61,7 @@ export function toSqlWithParams(
       typeof object === "object" &&
       object !== null &&
       "value" in object &&
-      Array.isArray((object as { value: unknown }).value)
+      Array.isArray(object.value)
     ) {
       return (object as { value: string[] }).value.join("");
     }

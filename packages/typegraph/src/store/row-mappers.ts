@@ -49,7 +49,7 @@ export function rowToNode(row: NodeRow): Node {
     id: row.id as Node["id"],
     meta: rowToNodeMeta(row),
     ...props,
-  } as Node;
+  };
 }
 
 export function rowToNodeMeta(

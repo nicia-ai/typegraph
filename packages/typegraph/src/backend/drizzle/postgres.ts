@@ -219,7 +219,7 @@ export function createPostgresBackend(
 
       return db.transaction(async (tx) => {
         const txBackend = createTransactionBackend({
-          db: tx as AnyPgDatabase,
+          db: tx,
           operationStrategy,
           tableNames,
         });

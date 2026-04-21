@@ -109,7 +109,7 @@ function sqlToStrings(sqlObject: SQL): { sql: string; params: unknown[] } {
       typeof object === "object" &&
       object !== null &&
       "value" in object &&
-      Array.isArray((object as { value: unknown }).value)
+      Array.isArray(object.value)
     ) {
       return (object as { value: string[] }).value.join("");
     }
