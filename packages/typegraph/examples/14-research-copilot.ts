@@ -1,14 +1,14 @@
 /**
- * Example 14: Research Copilot (RAG + Citation Graph + Tier 1 Algorithms)
+ * Example 14: Research Copilot (RAG + citation graph + graph algorithms)
  *
- * A "fuck yeah" showcase that combines everything TypeGraph does:
+ * A showcase that combines everything TypeGraph does:
  *
- *   • Typed schema with Zod            → compile-time guarantees
- *   • Ontology (topic hierarchy)        → query expansion
- *   • Vector embeddings                 → semantic retrieval
- *   • Recursive CTE traversals          → subgraph extraction
- *   • Tier 1 graph algorithms           → shortestPath / reachable /
- *                                          canReach / neighbors / degree
+ *   • Typed schema with Zod        → compile-time guarantees
+ *   • Ontology (topic hierarchy)   → query expansion
+ *   • Vector embeddings            → semantic retrieval
+ *   • Recursive CTE traversals     → subgraph extraction
+ *   • Graph algorithms             → shortestPath / reachable /
+ *                                      canReach / neighbors / degree
  *
  * The scenario: a researcher asks natural-language questions over a corpus
  * of landmark ML papers. The copilot combines semantic search, ontology-
@@ -384,8 +384,14 @@ export async function main(): Promise<void> {
   const store = createStore(graph, createExampleBackend());
 
   console.log("━".repeat(68));
-  console.log(" Research Copilot — RAG + citation graph + Tier 1 algorithms");
+  console.log(" Research Copilot — RAG + citation graph + graph algorithms");
   console.log("━".repeat(68));
+  console.log("\n Tour:");
+  console.log("  [1] Vector similarity + ontology expansion via reachable()");
+  console.log("  [2] Citation-aware re-ranking via degree()");
+  console.log("  [3] Explainable lineage via shortestPath() + canReach()");
+  console.log("  [4] Collaborator expansion via neighbors()");
+  console.log("  [5] Final reading list that combines the signals above");
 
   // ----------------------------------------------------------
   // Seed the graph
@@ -453,9 +459,12 @@ export async function main(): Promise<void> {
   console.log(
     `\nIngested ${PAPERS.length} papers, ${authorByName.size} authors, ${topicByName.size} topics.\n`,
   );
+  const authorById = new Map<string, string>(
+    [...authorByName.values()].map((author) => [author.id, author.name]),
+  );
 
   // ----------------------------------------------------------
-  // Scene 1: Semantic retrieval with ontology-expanded topics
+  // [1] Semantic retrieval with ontology-expanded topics
   // ----------------------------------------------------------
 
   const query =
@@ -490,7 +499,7 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // Scene 2: Ontology-expanded topic retrieval
+  // Ontology-expanded topic retrieval (sub-step of [1])
   // ----------------------------------------------------------
 
   console.log("\n─── Ontology-expanded topic match ───");
@@ -514,7 +523,7 @@ export async function main(): Promise<void> {
   const expandedTopics = [...expandedTopicIds].map(
     (id) => topicById.get(id)!.name,
   );
-  console.log(`  Expanded to: ${expandedTopics.join(" → ")}\n`);
+  console.log(`  Expanded set: {${expandedTopics.join(", ")}}\n`);
 
   // Papers covering ANY topic in the expanded set (one query via IN predicate)
   const topicMatches = await store
@@ -545,12 +554,15 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // Scene 3: Re-rank hybrid results by citation authority
+  // [2] Re-rank hybrid results by citation authority
   // ----------------------------------------------------------
 
   console.log("\n" + "━".repeat(68));
   console.log(" [2] Citation-authority re-ranking (degree)");
   console.log("━".repeat(68) + "\n");
+  console.log(
+    " score = similarity + 0.05 * topicMatches + log(1 + citations) / 10\n",
+  );
 
   const candidateIds = new Set<string>([
     ...ranked.slice(0, 8).map((hit) => hit.paper.id),
@@ -565,27 +577,36 @@ export async function main(): Promise<void> {
         direction: "in",
       });
       const similarity = cosine(queryEmbedding, paper.embedding);
-      const topicBonus = (matchByPaper.get(paperId)?.size ?? 0) * 0.05;
+      const topicMatchCount = matchByPaper.get(paperId)?.size ?? 0;
+      const topicBonus = topicMatchCount * 0.05;
       const authorityBoost = Math.log(citationCount + 1) / 10;
       const score = similarity + topicBonus + authorityBoost;
-      return { paper, similarity, citationCount, score };
+      return {
+        paper,
+        similarity,
+        citationCount,
+        topicMatchCount,
+        score,
+      };
     }),
   );
 
   hybridScored.sort((a, b) => b.score - a.score);
 
   console.log(
-    " rank  score  sim    cites  title".padEnd(68) + "\n " + "─".repeat(67),
+    " rank  score  sim    topic  cites  title".padEnd(68) +
+      "\n " +
+      "─".repeat(67),
   );
   for (const [index, entry] of hybridScored.slice(0, 6).entries()) {
     const rank = `  ${index + 1}`.padStart(4);
     console.log(
-      `${rank}   ${entry.score.toFixed(3)}  ${entry.similarity.toFixed(3)}  ${String(entry.citationCount).padStart(5)}  ${entry.paper.title}`,
+      `${rank}   ${entry.score.toFixed(3)}  ${entry.similarity.toFixed(3)}  ${String(entry.topicMatchCount).padStart(5)}  ${String(entry.citationCount).padStart(5)}  ${entry.paper.title}`,
     );
   }
 
   // ----------------------------------------------------------
-  // Scene 4: Explainable recommendations via shortestPath
+  // [3] Explainable recommendations via shortestPath
   // ----------------------------------------------------------
 
   console.log("\n" + "━".repeat(68));
@@ -594,6 +615,10 @@ export async function main(): Promise<void> {
   console.log(
     '\n "You\'ve read AlexNet — how does SimCLR trace back to it?"\n',
   );
+  console.log(
+    " Citations point from newer papers to older papers, so each hop is an",
+  );
+  console.log(" explicit influence claim.\n");
 
   const alex = paperByKey.get("alexnet")!;
   const simclr = paperByKey.get("simclr")!;
@@ -619,7 +644,7 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // Scene 5: "Is this work grounded in backprop?"
+  // Heritage check via canReach (sub-step of [3])
   // ----------------------------------------------------------
 
   console.log("\n─── Heritage check (canReach) ───\n");
@@ -637,7 +662,7 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // Scene 6: Co-author discovery via 2-hop neighborhood
+  // [4] Co-author discovery via 2-hop neighborhood
   // ----------------------------------------------------------
 
   console.log("\n" + "━".repeat(68));
@@ -654,11 +679,21 @@ export async function main(): Promise<void> {
     edges: ["authored_by"],
     depth: 1,
   });
+  const clipAuthorIds = new Set<string>(
+    clipAuthors.map((author) => author.id),
+  );
+  console.log(
+    ` Seed paper authors: ${clipAuthors.map((author) => authorById.get(author.id) ?? author.id).join(", ")}\n`,
+  );
 
   // For each CLIP author: 1-hop in along authored_by = all their papers,
   // then 1-hop out = all collaborators. Issue each level in parallel so the
   // full fan-out finishes in O(depth) round-trips instead of O(authors × papers).
-  const collaboratorCounts = new Map<string, number>();
+  //
+  // Parallel arrays indexed by the same `i` as clipAuthors:
+  //   clipAuthors[i]                    → one CLIP author
+  //   perAuthorPapers[i]                → that author's papers
+  //   perAuthorCollaborators[i][j]      → co-authors on paper j of author i
   const perAuthorPapers = await Promise.all(
     clipAuthors.map((author) =>
       store.algorithms.neighbors(author.id, {
@@ -680,6 +715,9 @@ export async function main(): Promise<void> {
       ),
     ),
   );
+
+  // Tally how often each person co-authored with any CLIP author.
+  const collaboratorCounts = new Map<string, number>();
   for (const [authorIndex, clipAuthor] of clipAuthors.entries()) {
     for (const collaborators of perAuthorCollaborators[authorIndex]!) {
       for (const collab of collaborators) {
@@ -693,20 +731,19 @@ export async function main(): Promise<void> {
   }
 
   const topCollaborators = [...collaboratorCounts.entries()]
+    .filter(([id]) => !clipAuthorIds.has(id))
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8);
 
-  const authorById = new Map<string, string>(
-    [...authorByName.values()].map((author) => [author.id, author.name]),
-  );
+  console.log(" Nearby collaborators beyond the original CLIP paper:");
   for (const [id, count] of topCollaborators) {
     console.log(
-      `   ${count}× shared papers  ${authorById.get(id) ?? id}`,
+      `   ${count}× shared papers with CLIP authors  ${authorById.get(id) ?? id}`,
     );
   }
 
   // ----------------------------------------------------------
-  // Scene 7: Literature review digest
+  // [5] Literature review digest
   // ----------------------------------------------------------
 
   console.log("\n" + "━".repeat(68));
@@ -740,17 +777,24 @@ export async function main(): Promise<void> {
           .select((ctx) => ctx.t.name)
           .execute(),
       ]);
-      return { pick, paperAuthors, paperTopics };
+      const matchedTopics = [
+        ...(matchByPaper.get(pick.paper.id) ?? new Set<string>()),
+      ];
+      return { pick, paperAuthors, paperTopics, matchedTopics };
     }),
   );
 
-  for (const { pick, paperAuthors, paperTopics } of picksWithMeta) {
+  for (const { pick, paperAuthors, paperTopics, matchedTopics } of picksWithMeta) {
     const citationLabel = pick.citationCount === 1 ? "citation" : "citations";
+    const why: string[] = [`semantic ${pick.similarity.toFixed(3)}`];
+    if (matchedTopics.length > 0) why.push(`topic match: ${matchedTopics.join(", ")}`);
+    if (pick.citationCount > 0) why.push(`${pick.citationCount} incoming ${citationLabel}`);
     console.log(
       `  ${pick.paper.year}  ${pick.paper.title}  [${pick.citationCount} ${citationLabel}]`,
     );
     console.log(`        ${paperAuthors.slice(0, 3).join(", ")}${paperAuthors.length > 3 ? ", et al." : ""}`);
     console.log(`        topics: ${paperTopics.join(", ")}`);
+    console.log(`        why: ${why.join(" · ")}`);
   }
 
   console.log("\n" + "━".repeat(68));
