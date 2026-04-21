@@ -2,7 +2,20 @@
 import Default from "@astrojs/starlight/components/Head.astro";
 
 import Analytics from "../Analytics.astro";
+
+const ogImageUrl = new URL("/og-image.png", Astro.site).href;
+const ogImageAlt =
+  "TypeGraph — The Knowledge Graph for TypeScript. Define with Zod, query with a fluent builder, embedded on SQLite or Postgres.";
 ---
 
-<Default {...Astro.props}><slot /></Default>
+<Default {...Astro.props} />
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={ogImageAlt} />
+<meta name="twitter:image" content={ogImageUrl} />
+<meta name="twitter:image:alt" content={ogImageAlt} />
+<meta name="twitter:site" content="@pdlug" />
+<meta name="twitter:creator" content="@pdlug" />
 <Analytics />
