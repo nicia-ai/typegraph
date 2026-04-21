@@ -87,9 +87,29 @@ const graph = defineGraph({
   id: "document_management",
   nodes: {
     Content: { type: Content },
-    Folder: { type: Folder },
+    Folder: {
+      type: Folder,
+      unique: [
+        {
+          name: "folder_path",
+          fields: ["path"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
     Document: { type: Document },
-    User: { type: User },
+    User: {
+      type: User,
+      unique: [
+        {
+          name: "user_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
     Permission: { type: Permission },
   },
   edges: {
@@ -142,28 +162,23 @@ async function createFolderPath(path: string, userId: string): Promise<Node<type
   for (const part of parts) {
     currentPath += `/${part}`;
 
-    // Check if folder exists
-    let folder = await store
-      .query()
-      .from("Folder", "f")
-      .whereNode("f", (f) => f.path.eq(currentPath))
-      .select((ctx) => ctx.f)
-      .first();
-
-    if (!folder) {
-      folder = await store.nodes.Folder.create({
+    // The `folder_path` unique constraint makes this atomic: concurrent
+    // callers converge on one folder instead of racing to create duplicates.
+    const result = await store.nodes.Folder.getOrCreateByConstraint(
+      "folder_path",
+      {
         title: part,
         path: currentPath,
         createdBy: userId,
         status: "published",
-      });
+      },
+    );
 
-      if (parentFolder) {
-        await store.edges.contains.create(parentFolder, folder, {});
-      }
+    if (result.action === "created" && parentFolder) {
+      await store.edges.contains.create(parentFolder, result.node, {});
     }
 
-    parentFolder = folder;
+    parentFolder = result.node;
   }
 
   return parentFolder!;
@@ -535,25 +550,40 @@ async function getFolderContents(folderId: string): Promise<FolderContents> {
 
 ### Get Breadcrumb Path
 
+`store.algorithms.reachable` walks `contains` edges in reverse to collect
+every ancestor folder, tagged with its depth from the starting content:
+
 ```typescript
 async function getBreadcrumb(
   contentId: string
 ): Promise<Array<{ id: string; title: string; path: string }>> {
-  return store
-    .query()
-    .from("Content", "c", { includeSubClasses: true })
-    .whereNode("c", (c) => c.id.eq(contentId))
-    .traverse("contains", "e", { direction: "in" })
-    .recursive()
-    .to("Folder", "ancestor")
-    .select((ctx) => ({
-      id: ctx.ancestor.id,
-      title: ctx.ancestor.title,
-      path: ctx.ancestor.path,
-    }))
-    .execute();
+  const ancestors = await store.algorithms.reachable(contentId, {
+    edges: ["contains"],
+    direction: "in",
+    excludeSource: true,
+  });
+
+  if (ancestors.length === 0) return [];
+
+  const folderIds = ancestors
+    .filter((node) => node.kind === "Folder")
+    .toSorted((a, b) => b.depth - a.depth) // root first
+    .map((node) => node.id);
+
+  const folders = await store.nodes.Folder.getByIds(folderIds);
+  return folders
+    .filter((folder): folder is NonNullable<typeof folder> => folder !== undefined)
+    .map((folder) => ({
+      id: folder.id,
+      title: folder.title,
+      path: folder.path,
+    }));
 }
 ```
+
+`reachable` returns `{ id, kind, depth }` — one recursive-CTE query returns
+the full ancestor chain, then a single batched `getByIds` hydrates the folder
+properties.
 
 ## Bulk Operations
 

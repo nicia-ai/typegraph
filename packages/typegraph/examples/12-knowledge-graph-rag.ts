@@ -62,7 +62,17 @@ const graph = defineGraph({
   nodes: {
     Document: { type: Document },
     Chunk: { type: Chunk },
-    Entity: { type: Entity },
+    Entity: {
+      type: Entity,
+      unique: [
+        {
+          name: "entity_name_type",
+          fields: ["name", "type"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
   },
   edges: {
     containsChunk: { type: containsChunk, from: [Document], to: [Chunk] },
@@ -167,32 +177,24 @@ export async function main() {
     prevChunkNode = chunk;
   }
 
-  // Create entities
-  const samAltman = await store.nodes.Entity.create({
-    name: "Sam Altman",
-    type: "person",
-    embedding: mockEmbedding("Sam Altman"),
-  });
-  const elonMusk = await store.nodes.Entity.create({
-    name: "Elon Musk",
-    type: "person",
-    embedding: mockEmbedding("Elon Musk"),
-  });
-  const openai = await store.nodes.Entity.create({
-    name: "OpenAI",
-    type: "organization",
-    embedding: mockEmbedding("OpenAI"),
-  });
-  const tesla = await store.nodes.Entity.create({
-    name: "Tesla",
-    type: "organization",
-    embedding: mockEmbedding("Tesla"),
-  });
-  const gpt4 = await store.nodes.Entity.create({
-    name: "GPT-4",
-    type: "concept",
-    embedding: mockEmbedding("GPT-4"),
-  });
+  // Use getOrCreateByConstraint so re-running ingestion on overlapping
+  // corpora dedupes entities via the `entity_name_type` unique constraint.
+  async function ensureEntity(
+    name: string,
+    type: "person" | "organization" | "location" | "concept",
+  ) {
+    const result = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_name_type",
+      { name, type, embedding: mockEmbedding(name) },
+    );
+    return result.node;
+  }
+
+  const samAltman = await ensureEntity("Sam Altman", "person");
+  const elonMusk = await ensureEntity("Elon Musk", "person");
+  const openai = await ensureEntity("OpenAI", "organization");
+  const tesla = await ensureEntity("Tesla", "organization");
+  const gpt4 = await ensureEntity("GPT-4", "concept");
 
   // Link chunks to entities (mentions)
   await store.edges.mentions.create(doc1Chunks[0]!, samAltman, {});

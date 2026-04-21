@@ -1449,7 +1449,7 @@ consistency. Reserve individual fluent queries for one-off operations.
 
 #### `store.algorithms`
 
-Lazy-initialized facade exposing the Tier 1 graph algorithms —
+Lazy-initialized facade exposing the graph algorithms —
 `shortestPath`, `reachable`, `canReach`, `neighbors`, and `degree`.
 See [Graph Algorithms](/graph-algorithms) for the full API; this section
 is a quick reference.

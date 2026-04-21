@@ -38,7 +38,17 @@ const authored = defineEdge("authored");
 const graph = defineGraph({
   id: "pagination_example",
   nodes: {
-    User: { type: User },
+    User: {
+      type: User,
+      unique: [
+        {
+          name: "user_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
     Post: { type: Post },
   },
   edges: {

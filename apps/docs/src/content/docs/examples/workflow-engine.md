@@ -106,12 +106,32 @@ const reportsTo = defineEdge("reportsTo"); // For escalation chain
 const graph = defineGraph({
   id: "workflow_engine",
   nodes: {
-    WorkflowDefinition: { type: WorkflowDefinition },
+    WorkflowDefinition: {
+      type: WorkflowDefinition,
+      unique: [
+        {
+          name: "workflow_name_version",
+          fields: ["name", "version"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
     State: { type: State },
     Transition: { type: Transition },
     WorkflowInstance: { type: WorkflowInstance },
     Task: { type: Task },
-    User: { type: User },
+    User: {
+      type: User,
+      unique: [
+        {
+          name: "user_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
     Comment: { type: Comment },
   },
   edges: {
@@ -475,18 +495,22 @@ async function createApprovalTask(
     .select((ctx) => ctx.u)
     .first();
 
-  // If no direct match, find in reporting chain
+  // If no direct match, walk the reporting chain upward until we hit someone
+  // with the approver role. The recursive traversal tags each hop with its
+  // depth so we can pick the nearest matching manager.
   if (!approver) {
-    approver = await tx
+    const candidates = await tx
       .query()
       .from("User", "requester")
       .whereNode("requester", (u) => u.id.eq(requesterId))
       .traverse("reportsTo", "e")
-      .recursive()
+      .recursive({ depth: "depth" })
       .to("User", "manager")
       .whereNode("manager", (u) => u.role.eq(config.approverRole))
+      .orderBy("depth", "asc")
       .select((ctx) => ctx.manager)
-      .first();
+      .execute();
+    approver = candidates[0];
   }
 
   if (!approver) {
@@ -699,7 +723,7 @@ async function escalateTask(taskId: string): Promise<void> {
       throw new Error("Task has no assignee");
     }
 
-    // Find manager in reporting chain
+    // Single-hop traversal to the direct manager
     const manager = await tx
       .query()
       .from("User", "u")
@@ -770,20 +794,37 @@ interface TimelineEvent {
 async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]> {
   const events: TimelineEvent[] = [];
 
-  // Get state change history using temporal queries
-  const stateHistory = await store
-    .query()
-    .from("WorkflowInstance", "i")
-    .temporal("includeEnded")
-    .whereNode("i", (i) => i.id.eq(instanceId))
-    .traverse("currentState", "e")
-    .to("State", "s")
-    .orderBy((ctx) => ctx.e.validFrom, "asc")
-    .select((ctx) => ({
-      stateName: ctx.s.name,
-      timestamp: ctx.e.validFrom,
-    }))
-    .execute();
+  // Run both history reads snapshot-consistent on a single connection so the
+  // state-change and task views can't observe interleaved writes.
+  const [stateHistory, tasks] = await store.batch(
+    store
+      .query()
+      .from("WorkflowInstance", "i")
+      .temporal("includeEnded")
+      .whereNode("i", (i) => i.id.eq(instanceId))
+      .traverse("currentState", "e")
+      .to("State", "s")
+      .orderBy("e", "validFrom", "asc")
+      .select((ctx) => ({
+        stateName: ctx.s.name,
+        timestamp: ctx.e.validFrom,
+      })),
+    store
+      .query()
+      .from("WorkflowInstance", "i")
+      .whereNode("i", (i) => i.id.eq(instanceId))
+      .traverse("hasTask", "e")
+      .to("Task", "t")
+      .optionalTraverse("assignedTo", "a")
+      .to("User", "u")
+      .select((ctx) => ({
+        title: ctx.t.title,
+        status: ctx.t.status,
+        createdAt: ctx.t.createdAt,
+        completedAt: ctx.t.completedAt,
+        assignee: ctx.u?.name,
+      })),
+  );
 
   for (const state of stateHistory) {
     events.push({
@@ -792,24 +833,6 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       description: `Entered state: ${state.stateName}`,
     });
   }
-
-  // Get task events
-  const tasks = await store
-    .query()
-    .from("WorkflowInstance", "i")
-    .whereNode("i", (i) => i.id.eq(instanceId))
-    .traverse("hasTask", "e")
-    .to("Task", "t")
-    .optionalTraverse("assignedTo", "a")
-    .to("User", "u")
-    .select((ctx) => ({
-      title: ctx.t.title,
-      status: ctx.t.status,
-      createdAt: ctx.t.createdAt,
-      completedAt: ctx.t.completedAt,
-      assignee: ctx.u?.name,
-    }))
-    .execute();
 
   for (const task of tasks) {
     events.push({

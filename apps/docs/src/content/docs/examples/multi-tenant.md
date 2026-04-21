@@ -78,10 +78,33 @@ const memberOf = defineEdge("memberOf");
 const graph = defineGraph({
   id: "multi_tenant",
   nodes: {
-    Tenant: { type: Tenant },
+    Tenant: {
+      type: Tenant,
+      unique: [
+        {
+          name: "tenant_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
     Project: { type: Project },
     Task: { type: Task },
-    User: { type: User },
+    User: {
+      type: User,
+      unique: [
+        // Emails are scoped per tenant in the shared-tables strategy: the
+        // same address can be a member of more than one tenant, but not
+        // twice in the same one.
+        {
+          name: "user_tenant_email",
+          fields: ["tenantId", "email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
   },
   edges: {
     hasProject: { type: hasProject, from: [Tenant], to: [Project] },
@@ -235,37 +258,33 @@ async function provisionTenant(
   plan: "free" | "starter" | "pro" | "enterprise" = "free"
 ): Promise<{ tenant: Node<typeof Tenant>; owner: Node<typeof User> }> {
   return store.transaction(async (tx) => {
-    // Check slug uniqueness
-    const existing = await tx
-      .query()
-      .from("Tenant", "t")
-      .whereNode("t", (t) => t.slug.eq(slug))
-      .first();
+    // Atomic uniqueness check — the `tenant_slug` constraint guarantees
+    // concurrent callers can't both succeed.
+    const tenantResult = await tx.nodes.Tenant.getOrCreateByConstraint(
+      "tenant_slug",
+      {
+        slug,
+        name,
+        plan,
+        status: "active",
+        createdAt: new Date().toISOString(),
+      },
+    );
 
-    if (existing) {
+    if (tenantResult.action !== "created") {
       throw new Error("Tenant slug already exists");
     }
 
-    // Create tenant
-    const tenant = await tx.nodes.Tenant.create({
-      slug,
-      name,
-      plan,
-      status: "active",
-      createdAt: new Date().toISOString(),
-    });
-
-    // Create owner user
     const owner = await tx.nodes.User.create({
-      tenantId: tenant.id,
+      tenantId: tenantResult.node.id,
       email: ownerEmail,
       name: ownerName,
       role: "owner",
     });
 
-    await tx.edges.memberOf.create(owner, tenant, {});
+    await tx.edges.memberOf.create(owner, tenantResult.node, {});
 
-    return { tenant, owner };
+    return { tenant: tenantResult.node, owner };
   });
 }
 ```

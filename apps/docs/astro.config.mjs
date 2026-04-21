@@ -79,6 +79,10 @@ const sidebar = [
     label: "Examples",
     items: [
       {
+        label: "Research Copilot",
+        slug: "examples/research-copilot",
+      },
+      {
         label: "Knowledge Graph for RAG",
         slug: "examples/knowledge-graph-rag",
       },
