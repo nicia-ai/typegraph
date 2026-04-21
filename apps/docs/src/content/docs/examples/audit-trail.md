@@ -85,8 +85,28 @@ const hasSession = defineEdge("hasSession");
 const graph = defineGraph({
   id: "audit_trail",
   nodes: {
-    Setting: { type: Setting },
-    User: { type: User },
+    Setting: {
+      type: Setting,
+      unique: [
+        {
+          name: "setting_key",
+          fields: ["key"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    User: {
+      type: User,
+      unique: [
+        {
+          name: "user_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "caseInsensitive",
+        },
+      ],
+    },
     AuditEntry: { type: AuditEntry },
     Session: { type: Session },
   },

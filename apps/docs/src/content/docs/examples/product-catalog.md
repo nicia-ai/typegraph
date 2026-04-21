@@ -96,10 +96,50 @@ const relatedProduct = defineEdge("relatedProduct", {
 const graph = defineGraph({
   id: "product_catalog",
   nodes: {
-    Category: { type: Category },
-    Product: { type: Product },
-    Variant: { type: Variant },
-    Warehouse: { type: Warehouse },
+    Category: {
+      type: Category,
+      unique: [
+        {
+          name: "category_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    Product: {
+      type: Product,
+      unique: [
+        {
+          name: "product_sku",
+          fields: ["sku"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    Variant: {
+      type: Variant,
+      unique: [
+        {
+          name: "variant_sku",
+          fields: ["sku"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    Warehouse: {
+      type: Warehouse,
+      unique: [
+        {
+          name: "warehouse_code",
+          fields: ["code"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
     Inventory: { type: Inventory },
   },
   edges: {
@@ -128,26 +168,22 @@ async function createCategory(
   slug: string,
   parentSlug?: string
 ): Promise<Node<typeof Category>> {
-  const category = await store.nodes.Category.create({
-    name,
-    slug,
-    isActive: true,
-  });
+  const result = await store.nodes.Category.getOrCreateByConstraint(
+    "category_slug",
+    { name, slug, isActive: true },
+  );
 
-  if (parentSlug) {
-    const parent = await store
-      .query()
-      .from("Category", "c")
-      .whereNode("c", (c) => c.slug.eq(parentSlug))
-      .select((ctx) => ctx.c)
-      .first();
-
+  if (result.action === "created" && parentSlug) {
+    const parent = await store.nodes.Category.findByConstraint(
+      "category_slug",
+      { slug: parentSlug },
+    );
     if (parent) {
-      await store.edges.parentCategory.create(category, parent, {});
+      await store.edges.parentCategory.create(result.node, parent, {});
     }
   }
 
-  return category;
+  return result.node;
 }
 
 // Build initial category structure
@@ -169,35 +205,33 @@ interface CategoryWithPath {
 }
 
 async function getCategoryWithPath(slug: string): Promise<CategoryWithPath | undefined> {
-  const category = await store
-    .query()
-    .from("Category", "c")
-    .whereNode("c", (c) => c.slug.eq(slug))
-    .select((ctx) => ({
-      id: ctx.c.id,
-      name: ctx.c.name,
-      slug: ctx.c.slug,
-    }))
-    .first();
-
+  const category = await store.nodes.Category.findByConstraint(
+    "category_slug",
+    { slug },
+  );
   if (!category) return undefined;
 
-  const ancestors = await store
-    .query()
-    .from("Category", "c")
-    .whereNode("c", (c) => c.slug.eq(slug))
-    .traverse("parentCategory", "e")
-    .recursive()
-    .to("Category", "ancestor")
-    .select((ctx) => ({
-      name: ctx.ancestor.name,
-      slug: ctx.ancestor.slug,
-    }))
-    .execute();
+  // Walk `parentCategory` edges up to the root. `reachable` returns each
+  // ancestor with its depth from the starting node — sort by depth desc
+  // so the root comes first.
+  const ancestorIds = (
+    await store.algorithms.reachable(category.id, {
+      edges: ["parentCategory"],
+      excludeSource: true,
+    })
+  )
+    .toSorted((a, b) => b.depth - a.depth)
+    .map((node) => node.id);
+
+  const ancestors = await store.nodes.Category.getByIds(ancestorIds);
 
   return {
-    ...category,
-    path: ancestors.reverse(), // Root first
+    id: category.id,
+    name: category.name,
+    slug: category.slug,
+    path: ancestors
+      .filter((c): c is NonNullable<typeof c> => c !== undefined)
+      .map((c) => ({ name: c.name, slug: c.slug })),
   };
 }
 ```
@@ -209,27 +243,38 @@ async function getSubcategories(
   parentSlug: string,
   includeNested = false
 ): Promise<Array<{ id: string; name: string; slug: string; depth: number }>> {
-  let query = store
-    .query()
-    .from("Category", "parent")
-    .whereNode("parent", (c) => c.slug.eq(parentSlug))
-    .traverse("parentCategory", "e", { direction: "in" });
+  const parent = await store.nodes.Category.findByConstraint(
+    "category_slug",
+    { slug: parentSlug },
+  );
+  if (!parent) return [];
 
-  if (includeNested) {
-    query = query.recursive({ depth: "depth" });
-  }
+  // `reachable` returns descendants tagged with their depth. Cap at 1 for
+  // immediate children only, or let it run to the configured default
+  // (10 hops) for the full subtree.
+  const descendants = await store.algorithms.reachable(parent.id, {
+    edges: ["parentCategory"],
+    direction: "in",
+    excludeSource: true,
+    maxHops: includeNested ? undefined : 1,
+  });
 
-  return query
-    .to("Category", "child")
-    .whereNode("child", (c) => c.isActive.eq(true))
-    .select((ctx) => ({
-      id: ctx.child.id,
-      name: ctx.child.name,
-      slug: ctx.child.slug,
-      depth: ctx.depth ?? 1,
+  const children = (await store.nodes.Category.getByIds(
+    descendants.map((node) => node.id),
+  )).filter(
+    (category): category is NonNullable<typeof category> =>
+      category !== undefined && category.isActive,
+  );
+
+  const depthById = new Map(descendants.map((row) => [row.id, row.depth]));
+  return children
+    .map((category) => ({
+      id: category.id,
+      name: category.name,
+      slug: category.slug,
+      depth: depthById.get(category.id) ?? 1,
     }))
-    .orderBy((ctx) => ctx.child.displayOrder, "asc")
-    .execute();
+    .toSorted((a, b) => a.depth - b.depth);
 }
 ```
 
@@ -321,63 +366,57 @@ interface ProductDetails {
 }
 
 async function getProductDetails(sku: string): Promise<ProductDetails | undefined> {
-  const product = await store
-    .query()
-    .from("Product", "p")
-    .whereNode("p", (p) => p.sku.eq(sku))
-    .select((ctx) => ctx.p)
-    .first();
-
+  const product = await store.nodes.Product.findByConstraint(
+    "product_sku",
+    { sku },
+  );
   if (!product) return undefined;
 
-  // Get categories
-  const categories = await store
-    .query()
-    .from("Product", "p")
-    .whereNode("p", (p) => p.id.eq(product.id))
-    .traverse("inCategory", "e")
-    .to("Category", "c")
-    .select((ctx) => ({
-      name: ctx.c.name,
-      slug: ctx.c.slug,
-      isPrimary: ctx.e.isPrimary,
-    }))
-    .execute();
-
-  // Get variants with inventory
-  const variants = await store
-    .query()
-    .from("Product", "p")
-    .whereNode("p", (p) => p.id.eq(product.id))
-    .traverse("hasVariant", "e")
-    .to("Variant", "v")
-    .optionalTraverse("inventoryFor", "inv", { direction: "in" })
-    .to("Inventory", "i")
-    .select((ctx) => ({
-      id: ctx.v.id,
-      sku: ctx.v.sku,
-      name: ctx.v.name,
-      priceModifier: ctx.v.priceModifier,
-      attributes: ctx.v.attributes,
-      quantity: ctx.i?.quantity ?? 0,
-      reservedQuantity: ctx.i?.reservedQuantity ?? 0,
-    }))
-    .execute();
-
-  // Get related products
-  const related = await store
-    .query()
-    .from("Product", "p")
-    .whereNode("p", (p) => p.id.eq(product.id))
-    .traverse("relatedProduct", "e")
-    .to("Product", "r")
-    .select((ctx) => ({
-      id: ctx.r.id,
-      name: ctx.r.name,
-      type: ctx.e.type,
-    }))
-    .orderBy((ctx) => ctx.e.sortOrder, "asc")
-    .execute();
+  // `store.batch()` runs all three queries over a single connection with
+  // snapshot consistency — no interleaved writes between the category,
+  // variant, and related reads.
+  const [categories, variants, related] = await store.batch(
+    store
+      .query()
+      .from("Product", "p")
+      .whereNode("p", (p) => p.id.eq(product.id))
+      .traverse("inCategory", "e")
+      .to("Category", "c")
+      .select((ctx) => ({
+        name: ctx.c.name,
+        slug: ctx.c.slug,
+        isPrimary: ctx.e.isPrimary,
+      })),
+    store
+      .query()
+      .from("Product", "p")
+      .whereNode("p", (p) => p.id.eq(product.id))
+      .traverse("hasVariant", "e")
+      .to("Variant", "v")
+      .optionalTraverse("inventoryFor", "inv", { direction: "in" })
+      .to("Inventory", "i")
+      .select((ctx) => ({
+        id: ctx.v.id,
+        sku: ctx.v.sku,
+        name: ctx.v.name,
+        priceModifier: ctx.v.priceModifier,
+        attributes: ctx.v.attributes,
+        quantity: ctx.i?.quantity ?? 0,
+        reservedQuantity: ctx.i?.reservedQuantity ?? 0,
+      })),
+    store
+      .query()
+      .from("Product", "p")
+      .whereNode("p", (p) => p.id.eq(product.id))
+      .traverse("relatedProduct", "e")
+      .to("Product", "r")
+      .orderBy("e", "sortOrder", "asc")
+      .select((ctx) => ({
+        id: ctx.r.id,
+        name: ctx.r.name,
+        type: ctx.e.type,
+      })),
+  );
 
   return {
     id: product.id,
@@ -567,21 +606,22 @@ async function searchProducts(
 
   // Filter by category if specified
   if (categorySlug) {
-    // Get category and all subcategories
-    const categoryIds = await store
-      .query()
-      .from("Category", "c")
-      .whereNode("c", (c) => c.slug.eq(categorySlug))
-      .traverse("parentCategory", "e", { direction: "in" })
-      .recursive()
-      .to("Category", "sub")
-      .select((ctx) => ctx.sub.id)
-      .execute();
+    const root = await store.nodes.Category.findByConstraint(
+      "category_slug",
+      { slug: categorySlug },
+    );
+    if (!root) return [];
+
+    // Root + every descendant category (inbound traversal of parentCategory)
+    const subtree = await store.algorithms.reachable(root.id, {
+      edges: ["parentCategory"],
+      direction: "in",
+    });
 
     queryBuilder = queryBuilder
       .traverse("inCategory", "e")
       .to("Category", "c")
-      .whereNode("c", (c) => c.id.in([...categoryIds, categorySlug]));
+      .whereNode("c", (c) => c.id.in(subtree.map((node) => node.id)));
   }
 
   return queryBuilder
@@ -607,33 +647,20 @@ async function getProductsInCategory(
 ): Promise<{ products: ProductProps[]; total: number }> {
   const { includeSubcategories = true, page = 1, pageSize = 20, sortBy = "name" } = options;
 
-  // Build category ID list
-  let categoryIds: string[] = [];
+  const root = await store.nodes.Category.findByConstraint(
+    "category_slug",
+    { slug: categorySlug },
+  );
+  if (!root) return { products: [], total: 0 };
 
-  const rootCategory = await store
-    .query()
-    .from("Category", "c")
-    .whereNode("c", (c) => c.slug.eq(categorySlug))
-    .select((ctx) => ctx.c.id)
-    .first();
-
-  if (!rootCategory) return { products: [], total: 0 };
-
-  categoryIds.push(rootCategory);
-
-  if (includeSubcategories) {
-    const subIds = await store
-      .query()
-      .from("Category", "c")
-      .whereNode("c", (c) => c.slug.eq(categorySlug))
-      .traverse("parentCategory", "e", { direction: "in" })
-      .recursive()
-      .to("Category", "sub")
-      .select((ctx) => ctx.sub.id)
-      .execute();
-
-    categoryIds = [...categoryIds, ...subIds];
-  }
+  const categoryIds = includeSubcategories
+    ? (
+        await store.algorithms.reachable(root.id, {
+          edges: ["parentCategory"],
+          direction: "in",
+        })
+      ).map((node) => node.id)
+    : [root.id];
 
   const query = store
     .query()
