@@ -51,6 +51,7 @@ export type PostgresTableNames = Readonly<{
   uniques: string;
   schemaVersions: string;
   embeddings: string;
+  fulltext: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -69,6 +70,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   embeddings: "typegraph_node_embeddings",
+  fulltext: "typegraph_node_fulltext",
 };
 
 /**
@@ -255,7 +257,23 @@ export function createPostgresTables(
     ],
   );
 
-  return { nodes, edges, uniques, schemaVersions, embeddings } as const;
+  return {
+    nodes,
+    edges,
+    uniques,
+    schemaVersions,
+    embeddings,
+    /**
+     * The fulltext storage table is owned by the active `FulltextStrategy`,
+     * not Drizzle. Shapes vary across strategies — the default `tsvectorStrategy`
+     * uses a `regconfig` language column, a GENERATED STORED `tsv` column,
+     * and a GIN index; alternate strategies (ParadeDB, pg_trgm, pgroonga)
+     * pick their own column types and index methods. DDL is emitted as
+     * raw SQL via `strategy.generateDdl()`; reads and writes are composed
+     * from the strategy's fragment helpers.
+     */
+    fulltextTableName: n.fulltext,
+  } as const;
 }
 
 /**

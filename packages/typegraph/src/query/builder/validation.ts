@@ -4,7 +4,7 @@
  * Validates aliases and identifiers to prevent SQL injection.
  */
 import { ValidationError } from "../../errors";
-import { type PredicateExpression } from "../ast";
+import { type HybridFusionOptions, type PredicateExpression } from "../ast";
 
 /**
  * Pattern for valid SQL identifiers (aliases).
@@ -129,6 +129,75 @@ export function validateSqlIdentifier(alias: string): void {
   }
 }
 
+/**
+ * Walks a predicate expression and rejects placement under OR/NOT for
+ * structural predicates (vector / fulltext) — those rewrite the query
+ * shape and are incompatible with disjunction or negation. Both
+ * predicate kinds use this same machinery; the `match` callback selects
+ * which one is being validated.
+ */
+function validateStructuralPredicatePlacement(
+  expression: PredicateExpression,
+  matchType: "vector_similarity" | "fulltext_match",
+  buildError: (path: string) => never,
+  inDisallowedBranch: boolean,
+  path: string,
+): void {
+  if (expression.__type === matchType) {
+    if (inDisallowedBranch) buildError(path);
+    return;
+  }
+  switch (expression.__type) {
+    case "and": {
+      for (const [index, child] of expression.predicates.entries()) {
+        validateStructuralPredicatePlacement(
+          child,
+          matchType,
+          buildError,
+          inDisallowedBranch,
+          `${path}.predicates[${index}]`,
+        );
+      }
+      return;
+    }
+    case "or": {
+      for (const [index, child] of expression.predicates.entries()) {
+        validateStructuralPredicatePlacement(
+          child,
+          matchType,
+          buildError,
+          true,
+          `${path}.predicates[${index}]`,
+        );
+      }
+      return;
+    }
+    case "not": {
+      validateStructuralPredicatePlacement(
+        expression.predicate,
+        matchType,
+        buildError,
+        true,
+        `${path}.predicate`,
+      );
+      return;
+    }
+    case "comparison":
+    case "string_op":
+    case "null_check":
+    case "between":
+    case "array_op":
+    case "object_op":
+    case "aggregate_comparison":
+    case "exists":
+    case "in_subquery":
+    case "vector_similarity":
+    case "fulltext_match": {
+      return;
+    }
+  }
+}
+
 function throwInvalidVectorPredicatePlacement(path: string): never {
   throw new ValidationError(
     "Vector similarity predicates cannot be nested under OR or NOT. " +
@@ -151,74 +220,98 @@ function throwInvalidVectorPredicatePlacement(path: string): never {
   );
 }
 
-function validateVectorPredicateExpression(
-  expression: PredicateExpression,
-  inDisallowedBranch: boolean,
-  path: string,
-): void {
-  switch (expression.__type) {
-    case "vector_similarity": {
-      if (inDisallowedBranch) {
-        throwInvalidVectorPredicatePlacement(path);
-      }
-      return;
-    }
-    case "and": {
-      for (const [
-        predicateIndex,
-        predicate,
-      ] of expression.predicates.entries()) {
-        validateVectorPredicateExpression(
-          predicate,
-          inDisallowedBranch,
-          `${path}.predicates[${predicateIndex}]`,
-        );
-      }
-      return;
-    }
-    case "or": {
-      for (const [
-        predicateIndex,
-        predicate,
-      ] of expression.predicates.entries()) {
-        validateVectorPredicateExpression(
-          predicate,
-          true,
-          `${path}.predicates[${predicateIndex}]`,
-        );
-      }
-      return;
-    }
-    case "not": {
-      validateVectorPredicateExpression(
-        expression.predicate,
-        true,
-        `${path}.predicate`,
-      );
-      return;
-    }
-    case "comparison":
-    case "string_op":
-    case "null_check":
-    case "between":
-    case "array_op":
-    case "object_op":
-    case "aggregate_comparison":
-    case "exists":
-    case "in_subquery": {
-      return;
-    }
-  }
+function throwInvalidFulltextPredicatePlacement(path: string): never {
+  throw new ValidationError(
+    "Fulltext match predicates (.matches()) cannot be nested under OR or NOT. " +
+      "Use top-level AND combinations instead.",
+    {
+      issues: [
+        {
+          path,
+          message:
+            "Fulltext match predicates are only supported at top-level " +
+            "or inside AND groups.",
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Restructure your query so the fulltext match appears at the top level " +
+        "of a whereNode() or inside an .and() combination.",
+    },
+  );
 }
 
 export function validateVectorPredicatePlacement(
   predicates: readonly { expression: PredicateExpression }[],
 ): void {
-  for (const [predicateIndex, predicate] of predicates.entries()) {
-    validateVectorPredicateExpression(
+  for (const [index, predicate] of predicates.entries()) {
+    validateStructuralPredicatePlacement(
       predicate.expression,
+      "vector_similarity",
+      throwInvalidVectorPredicatePlacement,
       false,
-      `predicates[${predicateIndex}].expression`,
+      `predicates[${index}].expression`,
     );
+  }
+}
+
+export function validateFulltextPredicatePlacement(
+  predicates: readonly { expression: PredicateExpression }[],
+): void {
+  for (const [index, predicate] of predicates.entries()) {
+    validateStructuralPredicatePlacement(
+      predicate.expression,
+      "fulltext_match",
+      throwInvalidFulltextPredicatePlacement,
+      false,
+      `predicates[${index}].expression`,
+    );
+  }
+}
+
+/**
+ * Validates fusion options shared by `QueryBuilder.fuseWith()` and
+ * `store.search.hybrid({ fusion })`. Rejects unsupported methods, and
+ * non-finite / non-positive k, and negative / non-finite weights.
+ */
+export function validateHybridFusionOptions(
+  options: HybridFusionOptions,
+): void {
+  // Cast through string to survive callers that bypass the TS type
+  // (e.g. user-supplied JSON on the store.search.hybrid path).
+  const method = options.method as string | undefined;
+  if (method !== undefined && method !== "rrf") {
+    throw new ValidationError(`Unsupported fusion method: ${method}`, {
+      issues: [{ path: "fusion.method", message: `Only "rrf" is supported.` }],
+    });
+  }
+  const { k } = options;
+  if (k !== undefined && (!Number.isFinite(k) || k <= 0)) {
+    throw new ValidationError(
+      `Fusion k must be a positive finite number, got: ${String(k)}`,
+      {
+        issues: [{ path: "fusion.k", message: "Must be a positive number." }],
+      },
+    );
+  }
+  const weights = options.weights;
+  if (weights !== undefined) {
+    for (const key of ["vector", "fulltext"] as const) {
+      const weight = weights[key];
+      if (weight !== undefined && (!Number.isFinite(weight) || weight < 0)) {
+        throw new ValidationError(
+          `Fusion weight for "${key}" must be a non-negative finite number, got: ${String(weight)}`,
+          {
+            issues: [
+              {
+                path: `fusion.weights.${key}`,
+                message: "Must be a non-negative number.",
+              },
+            ],
+          },
+        );
+      }
+    }
   }
 }

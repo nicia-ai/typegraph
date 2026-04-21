@@ -28,6 +28,7 @@ appropriate for that field's type. Edge fields work the same way:
 |------|------------|---------|
 | All types | `eq`, `neq`, `in`, `notIn`, `isNull`, `isNotNull` | [Common](#common-predicates) |
 | String | `contains`, `startsWith`, `endsWith`, `like`, `ilike` | [String](#string) |
+| Searchable string | `matches` | [Searchable](#searchable) |
 | Number | `gt`, `gte`, `lt`, `lte`, `between` | [Number](#number) |
 | Boolean | *(common only)* | [Boolean](#boolean) |
 | Date | `gt`, `gte`, `lt`, `lte`, `between` | [Date](#date) |
@@ -461,8 +462,105 @@ const similar = await store
 ```
 
 > **Limitations:** Results are automatically ordered by similarity (most similar first).
-> `similarTo` cannot be nested under `OR` or `NOT`. SQLite does not support embeddings —
-> vector search requires PostgreSQL with pgvector.
+> `similarTo` cannot be nested under `OR` or `NOT`. Requires pgvector (Postgres) or
+> sqlite-vec (SQLite) to be loaded at runtime.
+
+---
+
+## Searchable
+
+Node-level fulltext match predicate, exposed via `n.$fulltext.matches()`.
+Only available on nodes whose schema has at least one `searchable()`
+field. See the [Fulltext Search guide](/fulltext-search) for the full
+story.
+
+### $fulltext.matches()
+
+Find the top-k most relevant matches against the combined content of all
+`searchable()` fields on the node:
+
+```typescript
+d.$fulltext.matches("climate change", 10)  // Top 10 websearch matches
+```
+
+Only exposed on nodes with at least one `searchable()` field:
+
+```typescript
+const Document = defineNode("Document", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    body: searchable({ language: "english" }),
+    authorId: z.string(),  // Plain string — indexed content comes from title + body
+  }),
+});
+```
+
+### With Options
+
+```typescript
+d.$fulltext.matches("machine learning", 20, {
+  mode: "websearch",  // "websearch" | "phrase" | "plain" | "raw"
+  language: "english",
+  minScore: 0.01,
+})
+```
+
+### Reference
+
+| Predicate | Accepts | Description |
+|-----------|---------|-------------|
+| `$fulltext.matches(query, k)` | `string, number` | Top k websearch matches |
+| `$fulltext.matches(query, k, opts)` | `string, number, MatchesOptions` | Top k with parse mode and filters |
+
+### Query Modes
+
+| Mode | Description | Example |
+|------|-------------|---------|
+| `websearch` (default) | Google-style: quoted phrases, `-excluded`, `OR` | `"New York" -Times` |
+| `phrase` | Treats the whole query as an exact phrase | `climate change` |
+| `plain` | ANDs all whitespace-separated terms (no special syntax) | `climate change` |
+| `raw` | Dialect-native syntax passed through unchanged | Postgres tsquery / FTS5 MATCH |
+
+### Example: Multi-Tenant RAG Filter
+
+```typescript
+const results = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) =>
+    d.$fulltext
+      .matches("quarterly earnings", 20)
+      .and(d.tenantId.eq(tenant.id))
+      .and(d.published.eq(true))
+  )
+  .select((ctx) => ctx.d)
+  .execute();
+```
+
+### Example: Hybrid Search ($fulltext + similarTo)
+
+Combine fulltext and vector in one query — TypeGraph fuses the two
+ranked lists with Reciprocal Rank Fusion at the SQL layer:
+
+```typescript
+const results = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) =>
+    d.$fulltext
+      .matches("renewable energy", 50)
+      .and(d.embedding.similarTo(queryVec, 50))
+      .and(d.tenantId.eq(tenant))
+  )
+  .fuseWith({ k: 60, weights: { vector: 1.0, fulltext: 1.5 } })
+  .select((ctx) => ctx.d)
+  .limit(10)
+  .execute();
+```
+
+> **Limitations:** Results are ordered by relevance rank (highest first).
+> At most one `$fulltext.matches()` per query. Cannot be nested under
+> `OR` or `NOT`.
 
 ---
 

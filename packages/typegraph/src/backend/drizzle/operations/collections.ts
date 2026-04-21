@@ -51,6 +51,14 @@ function buildTemporalConditions(
 
 /**
  * Builds a query to find nodes by kind.
+ *
+ * Two pagination shapes are supported:
+ * - Offset pagination (`limit` + `offset`): keeps the historical
+ *   `ORDER BY created_at DESC` ordering and adds `id DESC` as a
+ *   deterministic tiebreaker so shared timestamps don't shuffle rows.
+ * - Keyset pagination (`orderBy: "id"` + optional `after`): iterates
+ *   by `id ASC` for stability under concurrent writes and shared
+ *   timestamps. Required by `rebuildFulltextIndex`.
  */
 export function buildFindNodesByKind(
   tables: Tables,
@@ -64,13 +72,22 @@ export function buildFindNodesByKind(
     ...buildTemporalConditions(nodes, params),
   ];
 
+  if (params.orderBy === "id" && params.after !== undefined) {
+    conditions.push(sql`${nodes.id} > ${params.after}`);
+  }
+
   const whereClause = sql.join(conditions, sql` AND `);
+
+  const orderByClause =
+    params.orderBy === "id"
+      ? sql`${nodes.id} ASC`
+      : sql`${nodes.createdAt} DESC, ${nodes.id} DESC`;
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`
       SELECT * FROM ${nodes}
       WHERE ${whereClause}
-      ORDER BY ${nodes.createdAt} DESC
+      ORDER BY ${orderByClause}
       LIMIT ${params.limit} OFFSET ${params.offset}
     `;
   }
@@ -79,7 +96,7 @@ export function buildFindNodesByKind(
     return sql`
       SELECT * FROM ${nodes}
       WHERE ${whereClause}
-      ORDER BY ${nodes.createdAt} DESC
+      ORDER BY ${orderByClause}
       LIMIT ${params.limit}
     `;
   }
@@ -87,7 +104,7 @@ export function buildFindNodesByKind(
   return sql`
     SELECT * FROM ${nodes}
     WHERE ${whereClause}
-    ORDER BY ${nodes.createdAt} DESC
+    ORDER BY ${orderByClause}
   `;
 }
 

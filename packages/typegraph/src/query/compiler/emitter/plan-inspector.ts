@@ -9,6 +9,7 @@ import {
 
 export type ProjectPlanShape = Readonly<{
   hasAggregate: boolean;
+  hasFulltextMatch: boolean;
   hasLimitOffset: boolean;
   hasRecursiveExpand: boolean;
   hasSetOperation: boolean;
@@ -33,6 +34,7 @@ function collectPlanOperations(node: LogicalPlanNode, ops: Set<string>): void {
   switch (node.op) {
     case "aggregate":
     case "filter":
+    case "fulltext_match":
     case "join":
     case "limit_offset":
     case "project":
@@ -67,6 +69,7 @@ function findUnaryNodeInProjectChain<TNode extends LogicalPlanNode>(
     switch (currentNode.op) {
       case "aggregate":
       case "filter":
+      case "fulltext_match":
       case "join":
       case "limit_offset":
       case "recursive_expand":
@@ -106,6 +109,7 @@ function inspectProjectPlan(logicalPlan: LogicalPlan): ProjectPlanShape {
 
   return {
     hasAggregate: operations.has("aggregate"),
+    hasFulltextMatch: operations.has("fulltext_match"),
     hasLimitOffset: operations.has("limit_offset"),
     hasRecursiveExpand: operations.has("recursive_expand"),
     hasSetOperation: operations.has("set_op"),
@@ -168,6 +172,7 @@ function findTopLevelLimitOffsetNode(
     switch (currentNode.op) {
       case "aggregate":
       case "filter":
+      case "fulltext_match":
       case "join":
       case "project":
       case "recursive_expand":
@@ -197,6 +202,7 @@ function findTopLevelSortNode(
     switch (currentNode.op) {
       case "aggregate":
       case "filter":
+      case "fulltext_match":
       case "join":
       case "limit_offset":
       case "project":

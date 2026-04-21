@@ -20,14 +20,15 @@ import {
   defineEdge,
   defineGraph,
   embedding,
+  searchable,
 } from "@nicia-ai/typegraph";
 
 // Category hierarchy
 const Category = defineNode("Category", {
   schema: z.object({
-    name: z.string(),
+    name: searchable({ language: "english" }),
     slug: z.string(),
-    description: z.string().optional(),
+    description: searchable({ language: "english" }).optional(),
     imageUrl: z.string().url().optional(),
     displayOrder: z.number().default(0),
     isActive: z.boolean().default(true),
@@ -38,8 +39,12 @@ const Category = defineNode("Category", {
 const Product = defineNode("Product", {
   schema: z.object({
     sku: z.string(),
-    name: z.string(),
-    description: z.string(),
+    // `searchable()` enables BM25 fulltext matching on name + description.
+    // Combined with the `embedding` field below this supports hybrid
+    // retrieval — SKU-style exact matches that embeddings miss, plus
+    // conceptual matches that keyword search alone miss.
+    name: searchable({ language: "english" }),
+    description: searchable({ language: "english" }),
     basePrice: z.number().positive(),
     currency: z.string().default("USD"),
     status: z.enum(["draft", "active", "discontinued"]).default("draft"),
@@ -51,7 +56,10 @@ const Product = defineNode("Product", {
 const Variant = defineNode("Variant", {
   schema: z.object({
     sku: z.string(),
-    name: z.string(), // "Large / Blue"
+    // "Large / Blue" — variant names contain the exact tokens shoppers
+    // type ("blue", "xl"), so indexing them enables keyword retrieval
+    // that complements the product-level embedding.
+    name: searchable({ language: "english" }),
     priceModifier: z.number().default(0), // Added to base price
     attributes: z.record(z.string()), // { size: "L", color: "blue" }
     isDefault: z.boolean().default(false),
@@ -570,7 +578,35 @@ async function getLowStockItems(): Promise<LowStockItem[]> {
 
 ## Search and Discovery
 
-### Semantic Product Search
+Product search is a textbook hybrid-search problem: users type SKUs,
+brand names, and category jargon that embeddings blur together, and
+conceptual queries ("warm winter jacket") that exact keyword matching
+misses. TypeGraph supports both in one query.
+
+### Fulltext-only search (SKU / keyword hits)
+
+`store.search.fulltext()` runs a ranked BM25 query across every
+`searchable()` field on the node. Good for search-box autocomplete and
+SKU lookups where the query is a bag of keywords rather than a
+description:
+
+```typescript
+const hits = await store.search.fulltext("Product", {
+  query: "waterproof jacket",
+  limit: 20,
+  includeSnippets: true,
+});
+
+for (const hit of hits) {
+  console.log(hit.node.sku, hit.node.name, hit.score, hit.snippet);
+}
+```
+
+### Hybrid product search (fulltext + semantic, fused)
+
+For a production product-search feature, fuse fulltext and vector
+retrieval with Reciprocal Rank Fusion. RRF is rank-based, so it handles
+the score-scale mismatch between BM25 and cosine automatically:
 
 ```typescript
 async function searchProducts(
@@ -581,57 +617,123 @@ async function searchProducts(
     maxPrice?: number;
     limit?: number;
   } = {}
-): Promise<Array<{ product: ProductProps; score: number }>> {
+): Promise<Array<{ product: ProductProps; score: number; snippet?: string }>> {
   const { categorySlug, minPrice, maxPrice, limit = 20 } = options;
-
   const queryEmbedding = await generateEmbedding(query);
 
-  let queryBuilder = store
-    .query()
-    .from("Product", "p")
-    .whereNode("p", (p) => {
-      let pred = p.embedding
-        .similarTo(queryEmbedding, limit, { metric: "cosine", minScore: 0.6 })
-        .and(p.status.eq("active"));
-
-      if (minPrice !== undefined) {
-        pred = pred.and(p.basePrice.gte(minPrice));
-      }
-      if (maxPrice !== undefined) {
-        pred = pred.and(p.basePrice.lte(maxPrice));
-      }
-
-      return pred;
-    });
-
-  // Filter by category if specified
+  // Limit category scope (if requested) to a set of IDs we can pass in
+  // as an equality filter. Applying this ahead of RRF shrinks the
+  // candidate pool before fusion — better latency and ranking quality.
+  let categoryIds: readonly string[] | undefined;
   if (categorySlug) {
     const root = await store.nodes.Category.findByConstraint(
       "category_slug",
       { slug: categorySlug },
     );
     if (!root) return [];
-
-    // Root + every descendant category (inbound traversal of parentCategory)
     const subtree = await store.algorithms.reachable(root.id, {
       edges: ["parentCategory"],
       direction: "in",
     });
-
-    queryBuilder = queryBuilder
-      .traverse("inCategory", "e")
-      .to("Category", "c")
-      .whereNode("c", (c) => c.id.in(subtree.map((node) => node.id)));
+    categoryIds = subtree.map((node) => node.id);
   }
 
-  return queryBuilder
-    .select((ctx) => ({
-      product: ctx.p,
-      score: ctx.p.embedding.similarity(queryEmbedding),
-    }))
+  const hits = await store.search.hybrid("Product", {
+    limit,
+    vector: {
+      fieldPath: "embedding",
+      queryEmbedding,
+      metric: "cosine",
+      k: limit * 4,
+    },
+    fulltext: {
+      query,
+      k: limit * 4,
+      includeSnippets: true,
+    },
+    // Exact-name matches matter in commerce search — boost fulltext.
+    fusion: { method: "rrf", k: 60, weights: { vector: 1, fulltext: 1.5 } },
+  });
+
+  // Post-filter by status / price / category. The hybrid API does not
+  // compose with the query builder's predicates, so apply these after
+  // fusion. For heavier filtering, switch to the query-builder path
+  // below and filter inside the same SQL statement.
+  const filtered = hits.filter((hit) => {
+    if (hit.node.status !== "active") return false;
+    if (minPrice !== undefined && hit.node.basePrice < minPrice) return false;
+    if (maxPrice !== undefined && hit.node.basePrice > maxPrice) return false;
+    return true;
+  });
+
+  if (categoryIds === undefined) {
+    return filtered.map((hit) => ({
+      product: hit.node,
+      score: hit.score,
+      snippet: hit.fulltext?.snippet,
+    }));
+  }
+
+  // Category membership is a graph edge — check with a single batch query.
+  const categoryIdSet = new Set(categoryIds);
+  const productToCategories = new Map<string, Set<string>>();
+  const memberships = await store
+    .query()
+    .from("Product", "p")
+    .whereNode("p", (p) => p.id.in(filtered.map((hit) => hit.node.id)))
+    .traverse("inCategory", "e")
+    .to("Category", "c")
+    .select((ctx) => ({ productId: ctx.p.id, categoryId: ctx.c.id }))
     .execute();
+  for (const row of memberships) {
+    const cats = productToCategories.get(row.productId) ?? new Set();
+    cats.add(row.categoryId);
+    productToCategories.set(row.productId, cats);
+  }
+
+  return filtered
+    .filter((hit) => {
+      const cats = productToCategories.get(hit.node.id) ?? new Set();
+      return [...cats].some((id) => categoryIdSet.has(id));
+    })
+    .map((hit) => ({
+      product: hit.node,
+      score: hit.score,
+      snippet: hit.fulltext?.snippet,
+    }));
 }
 ```
+
+### Hybrid search composed with graph traversal (query builder)
+
+When you need tighter composition with predicates and traversals — for
+example, "only products in these categories, active, in stock" — use the
+query builder. `$fulltext.matches()` and `.similarTo()` in the same
+`whereNode()` compile to a two-CTE SQL statement with RRF at the
+ORDER BY:
+
+```typescript
+const hits = await store
+  .query()
+  .from("Product", "p")
+  .whereNode("p", (p) =>
+    p.$fulltext
+      .matches(query, limit * 4)
+      .and(p.embedding.similarTo(queryEmbedding, limit * 4))
+      .and(p.status.eq("active")),
+  )
+  .traverse("inCategory", "e")
+  .to("Category", "c")
+  .whereNode("c", (c) => c.id.in([...categoryIdSet]))
+  .fuseWith({ k: 60, weights: { vector: 1, fulltext: 1.5 } })
+  .select((ctx) => ctx.p)
+  .limit(limit)
+  .execute();
+```
+
+Results come back already ranked by the fused RRF score. The traversal
+filter is applied inside the same SQL statement, before the final
+`LIMIT`, so recall is not sacrificed for composition.
 
 ### Get Products in Category
 

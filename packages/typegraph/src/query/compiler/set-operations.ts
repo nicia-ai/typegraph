@@ -371,6 +371,11 @@ function validateSqliteSetOpLeaf(ast: QueryAst): void {
     unsupported.push("vector similarity predicates");
   }
 
+  // Fulltext match requires the fulltext table join
+  if (hasFulltextMatchPredicates(ast)) {
+    unsupported.push("fulltext match predicates");
+  }
+
   // GROUP BY/HAVING would need to be applied to the individual leaf, not the compound result
   if (ast.groupBy !== undefined) {
     unsupported.push("GROUP BY");
@@ -436,7 +441,46 @@ function hasVectorSimilarityInExpression(
       case "between":
       case "array_op":
       case "object_op":
-      case "aggregate_comparison": {
+      case "aggregate_comparison":
+      case "fulltext_match": {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function hasFulltextMatchPredicates(ast: QueryAst): boolean {
+  return ast.predicates.some((predicate) =>
+    hasFulltextMatchInExpression(predicate.expression),
+  );
+}
+
+function hasFulltextMatchInExpression(
+  expr: QueryAst["predicates"][0]["expression"],
+): boolean {
+  if ("__type" in expr) {
+    switch (expr.__type) {
+      case "and":
+      case "or": {
+        return expr.predicates.some((p) => hasFulltextMatchInExpression(p));
+      }
+      case "not": {
+        return hasFulltextMatchInExpression(expr.predicate);
+      }
+      case "fulltext_match": {
+        return true;
+      }
+      case "exists":
+      case "in_subquery":
+      case "comparison":
+      case "string_op":
+      case "null_check":
+      case "between":
+      case "array_op":
+      case "object_op":
+      case "aggregate_comparison":
+      case "vector_similarity": {
         return false;
       }
     }
@@ -482,7 +526,8 @@ function hasSubqueryInExpression(
       case "array_op":
       case "object_op":
       case "aggregate_comparison":
-      case "vector_similarity": {
+      case "vector_similarity":
+      case "fulltext_match": {
         return false;
       }
     }

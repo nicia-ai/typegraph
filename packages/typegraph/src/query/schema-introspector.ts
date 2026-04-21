@@ -1,6 +1,10 @@
 import { type z } from "zod";
 
 import { getEmbeddingDimensions } from "../core/embedding";
+import {
+  getSearchableMetadata,
+  type SearchableMetadata,
+} from "../core/searchable";
 import { type ValueType } from "./ast";
 
 const SUPPORTED_SCHEMA_TYPES = [
@@ -40,6 +44,8 @@ export type FieldTypeInfo = Readonly<{
   recordValueType?: FieldTypeInfo | undefined;
   /** For embedding types: the number of dimensions */
   dimensions?: number | undefined;
+  /** For fulltext-searchable string types: field-level metadata */
+  searchable?: SearchableMetadata | undefined;
 }>;
 
 export type SchemaIntrospector = Readonly<{
@@ -59,7 +65,21 @@ export type SchemaIntrospector = Readonly<{
     edgeKindNames: readonly string[],
     fieldName: string,
   ) => FieldTypeInfo | undefined;
+  /**
+   * True iff every kind in `kindNames` has at least one `searchable()`
+   * field. For polymorphic aliases, `$fulltext` is available only when
+   * every resolved kind has searchable content — otherwise `.matches()`
+   * would silently miss some kinds.
+   */
+  hasSearchableField: (kindNames: readonly string[]) => boolean;
 }>;
+
+function sharedCacheKey(
+  kindNames: readonly string[],
+  fieldName: string,
+): string {
+  return `${[...kindNames].toSorted().join("|")}|${fieldName}`;
+}
 
 export function createSchemaIntrospector(
   nodeKinds: ReadonlyMap<string, { schema: z.ZodType }>,
@@ -73,6 +93,16 @@ export function createSchemaIntrospector(
     string,
     Readonly<Record<string, FieldTypeInfo>>
   >();
+  // Proxy-based field accessors trigger a fresh merge on every property
+  // read during a `whereNode(n => ...)` callback. For polymorphic
+  // aliases with N kinds and M field accesses, that is O(N*M) per
+  // compile; caching collapses it to O(1) after the first access.
+  const sharedFieldTypeInfoCache = new Map<string, FieldTypeInfo | undefined>();
+  const sharedEdgeFieldTypeInfoCache = new Map<
+    string,
+    FieldTypeInfo | undefined
+  >();
+  const searchableCache = new Map<string, boolean>();
 
   function getFieldTypeInfo(
     kindName: string,
@@ -86,15 +116,21 @@ export function createSchemaIntrospector(
     kindNames: readonly string[],
     fieldName: string,
   ): FieldTypeInfo | undefined {
+    const cacheKey = sharedCacheKey(kindNames, fieldName);
+    if (sharedFieldTypeInfoCache.has(cacheKey)) {
+      return sharedFieldTypeInfoCache.get(cacheKey);
+    }
+
     const infos = kindNames
       .map((kindName) => getFieldTypeInfo(kindName, fieldName))
       .filter((info): info is FieldTypeInfo => info !== undefined);
 
-    if (infos.length !== kindNames.length || infos.length === 0) {
-      return undefined;
-    }
-
-    return mergeFieldTypeInfos(infos);
+    const merged =
+      infos.length !== kindNames.length || infos.length === 0 ?
+        undefined
+      : mergeFieldTypeInfos(infos);
+    sharedFieldTypeInfoCache.set(cacheKey, merged);
+    return merged;
   }
 
   function getEdgeFieldTypeInfo(
@@ -109,15 +145,21 @@ export function createSchemaIntrospector(
     edgeKindNames: readonly string[],
     fieldName: string,
   ): FieldTypeInfo | undefined {
+    const cacheKey = sharedCacheKey(edgeKindNames, fieldName);
+    if (sharedEdgeFieldTypeInfoCache.has(cacheKey)) {
+      return sharedEdgeFieldTypeInfoCache.get(cacheKey);
+    }
+
     const infos = edgeKindNames
       .map((kindName) => getEdgeFieldTypeInfo(kindName, fieldName))
       .filter((info): info is FieldTypeInfo => info !== undefined);
 
-    if (infos.length !== edgeKindNames.length || infos.length === 0) {
-      return undefined;
-    }
-
-    return mergeFieldTypeInfos(infos);
+    const merged =
+      infos.length !== edgeKindNames.length || infos.length === 0 ?
+        undefined
+      : mergeFieldTypeInfos(infos);
+    sharedEdgeFieldTypeInfoCache.set(cacheKey, merged);
+    return merged;
   }
 
   function getShapeForKind(
@@ -186,11 +228,30 @@ export function createSchemaIntrospector(
     return resolved;
   }
 
+  function hasSearchableField(kindNames: readonly string[]): boolean {
+    const cacheKey = [...kindNames].toSorted().join("|");
+    const cached = searchableCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const result =
+      kindNames.length > 0 &&
+      kindNames.every((kindName) => {
+        const shape = getShapeForKind(kindName);
+        if (!shape) return false;
+        return Object.values(shape).some(
+          (info) => info.searchable !== undefined,
+        );
+      });
+    searchableCache.set(cacheKey, result);
+    return result;
+  }
+
   return {
     getFieldTypeInfo,
     getSharedFieldTypeInfo,
     getEdgeFieldTypeInfo,
     getSharedEdgeFieldTypeInfo,
+    hasSearchableField,
   };
 }
 
@@ -200,6 +261,18 @@ function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
   const embeddingDimensions = getEmbeddingDimensions(schema);
   if (embeddingDimensions !== undefined) {
     return { valueType: "embedding", dimensions: embeddingDimensions };
+  }
+
+  const searchableMetadata = getSearchableMetadata(schema);
+  const searchableStringSchema =
+    searchableMetadata === undefined ? undefined : (
+      unwrapSearchableStringSchema(schema)
+    );
+  if (
+    searchableMetadata !== undefined &&
+    searchableStringSchema !== undefined
+  ) {
+    return { valueType: "string", searchable: searchableMetadata };
   }
 
   const unwrapped = unwrapSchema(schema);
@@ -412,6 +485,19 @@ function mergeFieldTypeInfos(
     };
   }
 
+  // Strings: only mark the merged result as searchable if every kind
+  // in the polymorphic alias declares the field as searchable. A field
+  // that isn't uniformly searchable would silently search only some
+  // kinds via `.matches()`.
+  if (first.valueType === "string") {
+    const allSearchable =
+      first.searchable !== undefined &&
+      rest.every((info) => info.searchable !== undefined);
+    return allSearchable ?
+        { valueType: "string", searchable: first.searchable }
+      : { valueType: "string" };
+  }
+
   return first;
 }
 
@@ -441,6 +527,45 @@ function intersectShapes(
     );
 
   return Object.freeze(Object.fromEntries(entries));
+}
+
+function unwrapSearchableStringSchema(
+  schema: z.ZodType,
+): z.ZodType | undefined {
+  const type = schema.type;
+  const def = schema.def as {
+    innerType?: z.ZodType;
+    in?: z.ZodType;
+    out?: z.ZodType;
+  };
+
+  if (
+    (type === "optional" ||
+      type === "nullable" ||
+      type === "default" ||
+      type === "prefault" ||
+      type === "catch" ||
+      type === "readonly" ||
+      type === "nonoptional" ||
+      type === "success") &&
+    def.innerType
+  ) {
+    return unwrapSearchableStringSchema(def.innerType);
+  }
+
+  if (type === "pipe") {
+    return (
+      (def.in === undefined ?
+        undefined
+      : unwrapSearchableStringSchema(def.in)) ??
+      (def.out === undefined ?
+        undefined
+      : unwrapSearchableStringSchema(def.out))
+    );
+  }
+
+  const unwrapped = unwrapSchema(schema);
+  return unwrapped.type === "string" ? unwrapped : undefined;
 }
 
 function unwrapSchema(schema: z.ZodType): z.ZodType {

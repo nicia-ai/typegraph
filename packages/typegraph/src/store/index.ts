@@ -44,3 +44,22 @@ export { defineSubgraphProject } from "./subgraph";
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
 export type { Store } from "./store";
 export { createStore, createStoreWithSchema } from "./store";
+
+// Search facade and option / result types
+export type {
+  FulltextSearchHit,
+  FulltextSearchOptions,
+  HybridFulltextOptions,
+  HybridFusionOptions,
+  HybridSearchHit,
+  HybridSearchOptions,
+  HybridVectorOptions,
+  VectorSearchHit,
+} from "./search";
+export { StoreSearch } from "./search-facade";
+
+// Fulltext rebuild
+export type {
+  RebuildFulltextOptions,
+  RebuildFulltextResult,
+} from "./fulltext-rebuild";

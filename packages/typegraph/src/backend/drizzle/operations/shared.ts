@@ -17,6 +17,15 @@ export function quotedColumn(column: { name: string }): SQL {
   return sql.raw(`"${column.name.replaceAll('"', '""')}"`);
 }
 
+/**
+ * Returns a quoted SQL identifier for a bare table name string.
+ * Use when the operation targets a table that isn't represented as a
+ * Drizzle table object (e.g. the FTS5 virtual table).
+ */
+export function quotedTableName(tableName: string): SQL {
+  return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
+}
+
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {
   return sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
 }

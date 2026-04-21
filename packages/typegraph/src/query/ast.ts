@@ -270,6 +270,74 @@ export type VectorSimilarityPredicate = Readonly<{
   minScore?: number;
 }>;
 
+// ============================================================
+// Fulltext Predicates
+// ============================================================
+
+import type { FulltextQueryMode } from "../backend/types";
+
+/**
+ * A fulltext MATCH predicate.
+ *
+ * Finds nodes whose combined searchable content matches the query. Affects
+ * query execution by joining with the fulltext table, adding an ORDER BY
+ * on relevance rank (descending), and applying a LIMIT (top k).
+ */
+export type FulltextMatchPredicate = Readonly<{
+  __type: "fulltext_match";
+  /**
+   * Reserved for forward compatibility with per-field fulltext dispatch.
+   * Today only `field.alias` is consumed: the MATCH always targets the
+   * combined `content` column, so `field.path` is a synthetic
+   * `["$fulltext"]` marker rather than a real props path. Future
+   * strategies (per-field indexes, `setweight()`-style boosts) can use
+   * the full `FieldRef` without breaking the AST shape.
+   */
+  field: FieldRef;
+  /** The user-supplied query string. */
+  query: string;
+  /** Parse mode for the query string. Default: "websearch". */
+  mode: FulltextQueryMode;
+  /** Language override for query parsing. */
+  language?: string;
+  /** Maximum number of results to return. */
+  limit: number;
+  /** Minimum relevance to include (backend-native units). */
+  minScore?: number;
+}>;
+
+/**
+ * Fusion options for hybrid (vector + fulltext) queries.
+ *
+ * Shared between:
+ * - Query-builder path: `QueryBuilder.fuseWith()` stores this on `QueryAst`.
+ * - Store path: `store.search.hybrid(kind, { fusion })` accepts the same shape.
+ *
+ * Only applied when the query contains both a vector and a fulltext
+ * predicate. Defaults (when omitted): RRF with k=60 and equal weights.
+ */
+export type HybridFusionOptions = Readonly<{
+  /** RRF is the only currently supported fusion method. */
+  method?: "rrf";
+  /** RRF constant. The classic value is 60. */
+  k?: number;
+  /** Per-source weights. Default: { vector: 1, fulltext: 1 }. */
+  weights?: Readonly<{
+    vector?: number;
+    fulltext?: number;
+  }>;
+}>;
+
+/**
+ * Classic RRF constant. Shared by the store-level JS fusion in
+ * `store.search.hybrid` and the SQL emitter — keep both paths reading
+ * the same number so their top-k never drifts on ties.
+ */
+export const DEFAULT_RRF_K = 60;
+
+/** Default per-source RRF weight when none is supplied. */
+export const DEFAULT_RRF_WEIGHT = 1;
+
 /**
  * All predicate expression types.
  */
@@ -286,7 +354,8 @@ export type PredicateExpression =
   | AggregateComparisonPredicate
   | ExistsSubquery
   | InSubquery
-  | VectorSimilarityPredicate;
+  | VectorSimilarityPredicate
+  | FulltextMatchPredicate;
 
 // ============================================================
 // Query Start
@@ -539,6 +608,8 @@ export type QueryAst = Readonly<{
    * fields instead of the full props blob, enabling covered index usage.
    */
   selectiveFields?: readonly SelectiveField[];
+  /** Fusion options for hybrid queries. Ignored unless both predicates present. */
+  fusion?: HybridFusionOptions;
 }>;
 
 // ============================================================

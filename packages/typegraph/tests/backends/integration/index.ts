@@ -7,6 +7,7 @@ export { registerEdgePropertyIntegrationTests } from "./edge-properties";
 export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-advanced";
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
+export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";

@@ -16,6 +16,17 @@ export {
   isEmbeddingSchema,
 } from "./embedding";
 
+// Searchable type for fulltext search
+export {
+  DEFAULT_SEARCHABLE_LANGUAGE,
+  getSearchableMetadata,
+  isSearchableSchema,
+  searchable,
+  type SearchableMetadata,
+  type SearchableOptions,
+  type SearchableSchema,
+} from "./searchable";
+
 // External reference type for hybrid overlay patterns
 export {
   createExternalRef,

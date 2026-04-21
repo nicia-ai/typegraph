@@ -218,6 +218,16 @@ export function createCommonOperationBackend(
         );
       await execution.execRun(deleteEmbeddingsQuery);
 
+      const deleteFulltextStatements =
+        operationStrategy.buildDeleteFulltextByNode(
+          params.graphId,
+          params.kind,
+          params.id,
+        );
+      for (const stmt of deleteFulltextStatements) {
+        await execution.execRun(stmt);
+      }
+
       const deleteEdgesQuery = operationStrategy.buildHardDeleteEdgesByNode(
         params.graphId,
         params.kind,

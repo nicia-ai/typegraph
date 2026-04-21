@@ -9,6 +9,7 @@ import { type SQL } from "drizzle-orm";
 
 import { type VectorMetric } from "../../backend/types";
 import { type JsonPointer } from "../json-pointer";
+import { type FulltextStrategy } from "./fulltext-strategy";
 
 /**
  * Supported SQL dialects.
@@ -75,6 +76,11 @@ export type DialectCapabilities = Readonly<{
    * Metrics supported by vector predicates for this dialect.
    */
   vectorMetrics: readonly VectorMetric[];
+
+  /**
+   * Whether the dialect supports fulltext MATCH predicates.
+   */
+  supportsFulltext: boolean;
 }>;
 
 /**
@@ -363,4 +369,16 @@ export interface DialectAdapter {
    * SQLite: vec_f32('[1.0,2.0,3.0]')
    */
   formatEmbedding(embedding: readonly number[]): SQL;
+
+  // ============================================================
+  // Fulltext Operations
+  // ============================================================
+
+  /**
+   * Pluggable fulltext implementation for this dialect. `undefined` when
+   * the dialect does not support fulltext. The query compiler checks
+   * `capabilities.supportsFulltext` before reaching for this and throws
+   * if a fulltext predicate runs against a dialect without a strategy.
+   */
+  readonly fulltext: FulltextStrategy | undefined;
 }

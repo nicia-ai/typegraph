@@ -23,6 +23,7 @@ const config: KnipConfig = {
         "src/backend/drizzle/vector-index.ts",
         "src/core/embedding.ts",
         "src/core/external-ref.ts",
+        "src/core/searchable.ts",
       ],
     },
     "apps/docs": {

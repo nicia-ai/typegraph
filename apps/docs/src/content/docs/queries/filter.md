@@ -180,6 +180,29 @@ p.email.like("%@example.com")  // SQL LIKE pattern
 p.name.ilike("alice")    // case-insensitive LIKE
 ```
 
+### Fulltext Search
+
+For nodes with at least one field declared with `searchable()`, use the
+node-level `$fulltext.matches()` for BM25-style ranked fulltext search.
+See [Fulltext Search](/fulltext-search) for the full guide.
+
+```typescript
+d.$fulltext.matches("climate change", 20)  // Top 20 by relevance
+
+d.$fulltext.matches("quarterly earnings", 10, {
+  mode: "websearch",  // Google-style syntax
+})
+```
+
+Combine with any other predicate — fulltext composes with metadata
+filters, graph traversal, and vector search:
+
+```typescript
+d.$fulltext.matches("climate", 20)
+  .and(d.tenantId.eq(tenant))
+  .and(d.published.eq(true))
+```
+
 ### Null Checks
 
 ```typescript
@@ -211,6 +234,7 @@ The available predicates depend on the field type:
 | Field Type | Key Predicates |
 |------------|----------------|
 | String | `eq`, `contains`, `startsWith`, `like`, `ilike` |
+| Nodes with `searchable()` fields | `$fulltext.matches()` (node-level, not per-field) |
 | Number | `eq`, `gt`, `gte`, `lt`, `lte`, `between` |
 | Date | `eq`, `gt`, `gte`, `lt`, `lte`, `between` |
 | Array | `contains`, `containsAll`, `containsAny`, `isEmpty` |

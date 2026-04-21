@@ -8,6 +8,7 @@ import { type SQL } from "drizzle-orm";
 
 import { type TemporalMode } from "../core/types";
 import { type SqlTableNames } from "../query/compiler/schema";
+import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { type SerializedSchema } from "../schema/types";
 
 // ============================================================
@@ -39,6 +40,43 @@ export type VectorCapabilities = Readonly<{
 }>;
 
 // ============================================================
+// Fulltext Search Types
+// ============================================================
+
+/**
+ * Query modes for fulltext search.
+ *
+ * - "websearch": Google-style syntax (quoted phrases, +required, -excluded).
+ *    Postgres: `websearch_to_tsquery`. SQLite: translated to FTS5 MATCH.
+ * - "phrase": treats the whole query as a phrase.
+ *    Postgres: `phraseto_tsquery`. SQLite: FTS5 `"..."` phrase.
+ * - "plain": splits on whitespace and ANDs terms.
+ *    Postgres: `plainto_tsquery`. SQLite: default FTS5 AND.
+ * - "raw": dialect-native syntax passed through unchanged.
+ */
+export type FulltextQueryMode = "websearch" | "phrase" | "plain" | "raw";
+
+/**
+ * Fulltext search capabilities declared by a backend.
+ */
+export type FulltextCapabilities = Readonly<{
+  /** Whether the backend supports fulltext operations */
+  supported: boolean;
+  /**
+   * Language / tokenizer names understood by this backend.
+   * Postgres: installed regconfigs (english, simple, ...).
+   * SQLite FTS5: tokenizer names (unicode61, porter, trigram).
+   */
+  languages: readonly string[];
+  /** Whether phrase queries are supported. */
+  phraseQueries: boolean;
+  /** Whether prefix (`foo*`) queries are supported. */
+  prefixQueries: boolean;
+  /** Whether highlighting / snippets are supported. */
+  highlighting: boolean;
+}>;
+
+// ============================================================
 // SQL Dialect & Capabilities
 // ============================================================
 
@@ -64,6 +102,8 @@ export type BackendCapabilities = Readonly<{
   transactions: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
+  /** Fulltext search capabilities (undefined if not configured) */
+  fulltext?: FulltextCapabilities | undefined;
 }>;
 
 // ============================================================
@@ -317,6 +357,131 @@ export type DropVectorIndexParams = Readonly<{
 }>;
 
 // ============================================================
+// Fulltext Parameters
+// ============================================================
+
+/**
+ * Parameters for inserting or updating a fulltext entry.
+ *
+ * One row per node. Callers concatenate the searchable fields into
+ * `content` so a single MATCH query can find terms spread across fields.
+ */
+export type UpsertFulltextParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  nodeId: string;
+  content: string;
+  language: string;
+}>;
+
+/**
+ * Parameters for deleting a single fulltext entry.
+ */
+export type DeleteFulltextParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  nodeId: string;
+}>;
+
+/**
+ * A single row in a fulltext batch upsert.
+ */
+export type FulltextBatchRow = Readonly<{
+  nodeId: string;
+  content: string;
+  language: string;
+}>;
+
+/**
+ * Parameters for a batched fulltext upsert.
+ *
+ * Homogeneous: one graph, one node kind, many nodes. Duplicate `nodeId`
+ * values within a single batch are deduplicated last-write-wins by the
+ * builders before SQL generation — Postgres `ON CONFLICT` errors on
+ * repeated conflict keys in one statement, and SQLite `DELETE + INSERT`
+ * would create duplicate virtual-table rows otherwise.
+ */
+export type UpsertFulltextBatchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  rows: readonly FulltextBatchRow[];
+}>;
+
+/**
+ * Parameters for a batched fulltext delete.
+ */
+export type DeleteFulltextBatchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  nodeIds: readonly string[];
+}>;
+
+/**
+ * Parameters for fulltext search.
+ */
+export type FulltextSearchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  /** The user-supplied query string. */
+  query: string;
+  /** How to parse `query`. Default: "websearch". */
+  mode?: FulltextQueryMode;
+  /**
+   * Language override. Default: per-row language (as stored at insert time).
+   * Postgres: passed as the regconfig to `to_tsquery` / `websearch_to_tsquery`.
+   * SQLite: informational only (FTS5 tokenizer is fixed at table-create time).
+   */
+  language?: string;
+  /** Max rows to return. */
+  limit: number;
+  /** Minimum rank to include (backend-dependent units). */
+  minScore?: number;
+  /** Whether to return a highlighted snippet per match. */
+  includeSnippets?: boolean;
+}>;
+
+/**
+ * Result from a fulltext search.
+ *
+ * Score semantics differ by backend; prefer `rank` (1-based) when fusing
+ * with another source via RRF.
+ */
+export type FulltextSearchResult = Readonly<{
+  nodeId: string;
+  /**
+   * Backend-native relevance score.
+   * Postgres: `ts_rank_cd` (higher is better).
+   * SQLite FTS5: negated `bm25()` (higher is better; FTS5 returns lower-is-better).
+   */
+  score: number;
+  /** 1-based rank within the result set, suitable for RRF. */
+  rank: number;
+  /** Highlighted snippet of the content (if `includeSnippets` was set). */
+  snippet?: string;
+}>;
+
+/**
+ * Parameters for creating a fulltext index.
+ *
+ * The canonical index (Postgres GIN on `tsv`, SQLite FTS5 virtual table)
+ * is created when the fulltext table itself is created. This is reserved
+ * for advanced per-kind specializations.
+ */
+export type CreateFulltextIndexParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  language: string;
+}>;
+
+/**
+ * Parameters for dropping a fulltext index created via createFulltextIndex.
+ */
+export type DropFulltextIndexParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+}>;
+
+// ============================================================
 // Query Types
 // ============================================================
 
@@ -355,6 +520,14 @@ export type GraphBackend = Readonly<{
   capabilities: BackendCapabilities;
   /** Table names used by this backend (for query schema auto-derivation) */
   tableNames?: SqlTableNames | undefined;
+  /**
+   * Optional fulltext strategy override. When present, both the compiler
+   * (for `$fulltext.matches()` in query builder) and backend-direct
+   * search paths use this instead of the dialect's default strategy —
+   * allowing a Postgres backend to ship pg_trgm, ParadeDB, pgroonga etc.
+   * When absent, the dialect's default strategy is used.
+   */
+  fulltextStrategy?: FulltextStrategy | undefined;
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
@@ -443,6 +616,25 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly VectorSearchResult[]>;
   createVectorIndex?: (params: CreateVectorIndexParams) => Promise<void>;
   dropVectorIndex?: (params: DropVectorIndexParams) => Promise<void>;
+
+  // === Fulltext Operations (optional - depends on fulltext capabilities) ===
+  upsertFulltext?: (params: UpsertFulltextParams) => Promise<void>;
+  deleteFulltext?: (params: DeleteFulltextParams) => Promise<void>;
+  /**
+   * Batched variant of `upsertFulltext`. Optional — callers fall back to
+   * per-row `upsertFulltext` when unset.
+   */
+  upsertFulltextBatch?: (params: UpsertFulltextBatchParams) => Promise<void>;
+  /**
+   * Batched variant of `deleteFulltext`. Optional — callers fall back to
+   * per-row `deleteFulltext` when unset.
+   */
+  deleteFulltextBatch?: (params: DeleteFulltextBatchParams) => Promise<void>;
+  fulltextSearch?: (
+    params: FulltextSearchParams,
+  ) => Promise<readonly FulltextSearchResult[]>;
+  createFulltextIndex?: (params: CreateFulltextIndexParams) => Promise<void>;
+  dropFulltextIndex?: (params: DropFulltextIndexParams) => Promise<void>;
 
   // === Graph Lifecycle ===
   /**
@@ -608,7 +800,9 @@ export type FindEdgesConnectedToParams = Readonly<{
 export type FindNodesByKindParams = Readonly<{
   graphId: string;
   kind: string;
+  /** Max rows to return. */
   limit?: number;
+  /** Offset. Present for backward compat; rebuild uses `after` instead. */
   offset?: number;
   /** If true, exclude deleted nodes. Default true. */
   excludeDeleted?: boolean;
@@ -616,6 +810,18 @@ export type FindNodesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Stable ordering for keyset pagination. Default: "created_at" (existing
+   * behavior). Rebuild should use "id" for iteration that is stable under
+   * concurrent writes and shared timestamps.
+   */
+  orderBy?: "id" | "created_at";
+  /**
+   * Keyset cursor. Returns rows strictly greater (by `orderBy`) than this
+   * value. When `orderBy: "id"`, compared lexicographically. Mutually
+   * exclusive with `offset` — callers pick one.
+   */
+  after?: string;
 }>;
 
 /**

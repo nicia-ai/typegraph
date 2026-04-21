@@ -32,16 +32,17 @@ function assertStandardEmitterClauseAlignment(
       { component: "standard-emitter" },
     );
   }
-  const expectsOrderBy = planShape.hasSort || planShape.hasVectorKnn;
+  const expectsOrderBy =
+    planShape.hasSort || planShape.hasVectorKnn || planShape.hasFulltextMatch;
   if (expectsOrderBy && input.orderBy === undefined) {
     throw new CompilerInvariantError(
-      "Standard SQL emitter expected ORDER BY clause for plan containing a sort or vector_knn node",
+      "Standard SQL emitter expected ORDER BY clause for plan containing a sort, vector_knn, or fulltext_match node",
       { component: "standard-emitter" },
     );
   }
   if (!expectsOrderBy && input.orderBy !== undefined) {
     throw new CompilerInvariantError(
-      "Standard SQL emitter received ORDER BY clause for a plan without sort or vector_knn nodes",
+      "Standard SQL emitter received ORDER BY clause for a plan without sort, vector_knn, or fulltext_match nodes",
       { component: "standard-emitter" },
     );
   }

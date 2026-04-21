@@ -7,6 +7,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import { tsvectorStrategy } from "./fulltext-strategy";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -61,6 +62,7 @@ export const postgresDialect: DialectAdapter = {
     forceRecursiveWorktableOuterJoinOrder: false,
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,
+    supportsFulltext: true,
   },
 
   // ============================================================
@@ -265,4 +267,10 @@ export const postgresDialect: DialectAdapter = {
     const asString = `[${embedding.join(",")}]`;
     return sql`${asString}::vector`;
   },
+
+  // ============================================================
+  // Fulltext Operations
+  // ============================================================
+
+  fulltext: tsvectorStrategy,
 };

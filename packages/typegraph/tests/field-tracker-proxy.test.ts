@@ -58,6 +58,7 @@ function createTestState(): QueryBuilderState {
     asOf: undefined,
     groupBy: undefined,
     having: undefined,
+    fusion: undefined,
   };
 }
 

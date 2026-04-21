@@ -1582,6 +1582,81 @@ use `store.registry` directly without importing its type.
 
 See [Ontology](/ontology) for registry methods.
 
+### Search (`store.search`)
+
+Search operations are grouped under the `store.search` facade. The full
+guide lives in [Fulltext Search](/fulltext-search); this section is the
+signature reference.
+
+```typescript
+store.search.fulltext(nodeKind, options): Promise<readonly FulltextSearchHit<Node<K>>[]>;
+store.search.hybrid(nodeKind, options): Promise<readonly HybridSearchHit<Node<K>>[]>;
+store.search.rebuildFulltext(nodeKind?, options?): Promise<RebuildFulltextResult>;
+```
+
+#### `store.search.fulltext(nodeKind, options)`
+
+Runs a ranked fulltext query against nodes of the given kind. Requires
+at least one `searchable()` field on the node schema. `hit.node` is
+narrowed to the typed node for `nodeKind` — no cast required.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `query` | `string` | — *(required)* | Query string. Parsed according to `mode`. |
+| `limit` | `number` | — *(required)* | Max rows. Positive integer. |
+| `mode` | `"websearch" \| "phrase" \| "plain" \| "raw"` | `"websearch"` | Parser for `query`. |
+| `language` | `string` | per-row | Language override (Postgres only; throws on FTS5). |
+| `minScore` | `number` | — | Drop hits below this backend-native score. |
+| `includeSnippets` | `boolean` | `false` | Return a `<mark>…</mark>` snippet per hit. |
+
+#### `store.search.hybrid(nodeKind, options)`
+
+Runs a vector + fulltext hybrid query and fuses the two ranked lists
+with Reciprocal Rank Fusion. Requires both `vectorSearch` and
+`fulltextSearch` capabilities on the backend.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `limit` | `number` | — *(required)* | Final fused result count. |
+| `vector.fieldPath` | `string` | — *(required)* | Embedding field on the node. |
+| `vector.queryEmbedding` | `readonly number[]` | — *(required)* | Query vector. |
+| `vector.metric` | `"cosine" \| "l2" \| "inner_product"` | `"cosine"` | Distance metric. |
+| `vector.k` | `number` | `4 × limit` | Vector-side candidates to fuse. |
+| `vector.minScore` | `number` | — | Vector-side score floor. |
+| `fulltext.query` | `string` | — *(required)* | Fulltext query string. |
+| `fulltext.k` | `number` | `4 × limit` | Fulltext-side candidates to fuse. |
+| `fulltext.mode` | `FulltextQueryMode` | `"websearch"` | Parser mode. |
+| `fulltext.language` | `string` | per-row | Language override. |
+| `fulltext.minScore` | `number` | — | Fulltext-side score floor. |
+| `fulltext.includeSnippets` | `boolean` | `false` | Return snippets per fulltext sub-hit. |
+| `fusion.method` | `"rrf"` | `"rrf"` | Fusion method. |
+| `fusion.k` | `number` | `60` | RRF constant. |
+| `fusion.weights.vector` | `number` | `1` | Bias toward the vector retriever. |
+| `fusion.weights.fulltext` | `number` | `1` | Bias toward the fulltext retriever. |
+
+Each `HybridSearchHit` exposes `vector` and `fulltext` sub-results
+(each with its own `rank` and `score`) for ranking debugging.
+
+#### `store.search.rebuildFulltext(nodeKind?, options?)`
+
+Rebuilds the fulltext index from existing node data. Use after a
+schema change, a `DROP TABLE` / `TRUNCATE` of the fulltext table, or
+bulk inserts that bypassed the store. Run during a maintenance
+window for full consistency — concurrent hard-deletes between page
+fetches can be missed by a single pass.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `nodeKind` | `string \| undefined` | all kinds | Scope to a single kind. |
+| `options.pageSize` | `number` | `500` | Keyset page size. Positive integer. |
+| `options.maxSkippedIds` | `number` | `10_000` | Cap on returned `skippedIds`. Raise for forensic runs. |
+
+Returns `{ kinds, processed, upserted, cleared, skipped, skippedIds,
+skippedTruncated }`.
+
+See [Fulltext Search](/fulltext-search) for query modes, RRF tuning,
+`FulltextStrategy` customization, and troubleshooting.
+
 ## Observability Hooks
 
 TypeGraph supports observability hooks for monitoring and logging store operations.

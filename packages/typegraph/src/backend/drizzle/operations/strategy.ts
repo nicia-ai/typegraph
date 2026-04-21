@@ -1,5 +1,6 @@
 import { type SQL } from "drizzle-orm";
 
+import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -8,12 +9,15 @@ import type {
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEmbeddingParams,
+  DeleteFulltextBatchParams,
+  DeleteFulltextParams,
   DeleteNodeParams,
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
   FindEdgesByKindParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
   InsertEdgeParams,
@@ -24,6 +28,8 @@ import type {
   UpdateEdgeParams,
   UpdateNodeParams,
   UpsertEmbeddingParams,
+  UpsertFulltextBatchParams,
+  UpsertFulltextParams,
   VectorSearchParams,
 } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
@@ -50,6 +56,7 @@ import {
   buildInsertEdgesBatchReturning,
   buildUpdateEdge,
 } from "./edges";
+import { buildFulltextSearch } from "./fulltext";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -84,6 +91,24 @@ import {
 } from "./vectors";
 
 export type CommonOperationStrategy = Readonly<{
+  buildUpsertFulltext: (
+    params: UpsertFulltextParams,
+    timestamp: string,
+  ) => readonly SQL[];
+  buildDeleteFulltext: (params: DeleteFulltextParams) => readonly SQL[];
+  buildDeleteFulltextByNode: (
+    graphId: string,
+    nodeKind: string,
+    nodeId: string,
+  ) => readonly SQL[];
+  buildUpsertFulltextBatch: (
+    params: UpsertFulltextBatchParams,
+    timestamp: string,
+  ) => readonly SQL[];
+  buildDeleteFulltextBatch: (
+    params: DeleteFulltextBatchParams,
+  ) => readonly SQL[];
+  buildFulltextSearch: (params: FulltextSearchParams) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodeNoReturn: (
     params: InsertNodeParams,
@@ -242,14 +267,51 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
+  fulltextStrategy: FulltextStrategy,
 ): CommonOperationStrategy {
   const tableOperations = bindTableOperationBuilders(
     tables,
     COMMON_TABLE_OPERATION_BUILDERS,
   );
+  const fulltextTable = tables.fulltextTableName;
+
+  // All fulltext write SQL is owned by the active strategy — so swapping
+  // to pg_trgm / ParadeDB / pgroonga swaps the full CRUD pipeline, not
+  // just the read-side fragments.
+  const fulltextBuilders = {
+    buildUpsertFulltext: (
+      params: UpsertFulltextParams,
+      timestamp: string,
+    ): readonly SQL[] =>
+      fulltextStrategy.buildUpsert(fulltextTable, params, timestamp),
+    buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
+      fulltextStrategy.buildDelete(fulltextTable, params),
+    buildDeleteFulltextByNode: (
+      graphId: string,
+      nodeKind: string,
+      nodeId: string,
+    ): readonly SQL[] =>
+      fulltextStrategy.buildDelete(fulltextTable, {
+        graphId,
+        nodeKind,
+        nodeId,
+      }),
+    buildUpsertFulltextBatch: (
+      params: UpsertFulltextBatchParams,
+      timestamp: string,
+    ): readonly SQL[] =>
+      fulltextStrategy.buildBatchUpsert(fulltextTable, params, timestamp),
+    buildDeleteFulltextBatch: (
+      params: DeleteFulltextBatchParams,
+    ): readonly SQL[] =>
+      fulltextStrategy.buildBatchDelete(fulltextTable, params),
+    buildFulltextSearch: (params: FulltextSearchParams): SQL =>
+      buildFulltextSearch(fulltextTable, params, fulltextStrategy),
+  };
 
   return {
     ...tableOperations,
+    ...fulltextBuilders,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
     },
@@ -273,14 +335,20 @@ function createCommonOperationStrategy(
 
 export function createSqliteOperationStrategy(
   tables: SqliteTables,
+  fulltextStrategy: FulltextStrategy,
 ): SqliteOperationStrategy {
-  return createCommonOperationStrategy(tables, "sqlite");
+  return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
 }
 
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
+  fulltextStrategy: FulltextStrategy,
 ): PostgresOperationStrategy {
-  const common = createCommonOperationStrategy(tables, "postgres");
+  const common = createCommonOperationStrategy(
+    tables,
+    "postgres",
+    fulltextStrategy,
+  );
 
   return {
     ...common,

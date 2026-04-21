@@ -24,12 +24,24 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
 import {
+  buildFulltextCapabilities,
+  fts5Strategy,
+  type FulltextStrategy,
+} from "../../query/dialect/fulltext-strategy";
+import {
+  type BackendCapabilities,
   type CreateVectorIndexParams,
+  type DeleteFulltextBatchParams,
+  type DeleteFulltextParams,
   type DropVectorIndexParams,
+  type FulltextSearchParams,
+  type FulltextSearchResult,
   type GraphBackend,
   SQLITE_CAPABILITIES,
   type TransactionBackend,
   type TransactionOptions,
+  type UpsertFulltextBatchParams,
+  type UpsertFulltextParams,
 } from "../types";
 import {
   type AnySqliteDatabase,
@@ -75,6 +87,11 @@ export type SqliteBackendOptions = Readonly<{
    * (e.g. Cloudflare D1, Durable Objects).
    */
   executionProfile?: SqliteExecutionProfileHints;
+  /**
+   * Fulltext strategy override. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Most users should leave this alone.
+   */
+  fulltext?: FulltextStrategy;
 }>;
 
 const SQLITE_MAX_BIND_PARAMETERS = 999;
@@ -202,6 +219,7 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   serializedQueue?: SerializedExecutionQueue;
   tableNames: SqlTableNames;
+  fulltextStrategy: FulltextStrategy;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -211,6 +229,7 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   profileHints: SqliteExecutionProfileHints;
   tableNames: SqlTableNames;
+  fulltextStrategy: FulltextStrategy;
 }>;
 
 function createSqliteOperationBackend(
@@ -223,6 +242,7 @@ function createSqliteOperationBackend(
     operationStrategy,
     serializedQueue,
     tableNames,
+    fulltextStrategy,
   } = options;
 
   function execGet<T>(query: SQL): Promise<T | undefined> {
@@ -295,6 +315,7 @@ function createSqliteOperationBackend(
     capabilities,
     dialect: "sqlite",
     tableNames,
+    fulltextStrategy,
 
     createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       const indexOptions: VectorIndexOptions = {
@@ -335,6 +356,67 @@ function createSqliteOperationBackend(
       return Promise.resolve();
     },
 
+    // === Fulltext Operations ===
+
+    async upsertFulltext(params: UpsertFulltextParams): Promise<void> {
+      const timestamp = nowIso();
+      const statements = operationStrategy.buildUpsertFulltext(
+        params,
+        timestamp,
+      );
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async deleteFulltext(params: DeleteFulltextParams): Promise<void> {
+      const statements = operationStrategy.buildDeleteFulltext(params);
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async upsertFulltextBatch(
+      params: UpsertFulltextBatchParams,
+    ): Promise<void> {
+      if (params.rows.length === 0) return;
+      const timestamp = nowIso();
+      const statements = operationStrategy.buildUpsertFulltextBatch(
+        params,
+        timestamp,
+      );
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async deleteFulltextBatch(
+      params: DeleteFulltextBatchParams,
+    ): Promise<void> {
+      if (params.nodeIds.length === 0) return;
+      const statements = operationStrategy.buildDeleteFulltextBatch(params);
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async fulltextSearch(
+      params: FulltextSearchParams,
+    ): Promise<readonly FulltextSearchResult[]> {
+      const query = operationStrategy.buildFulltextSearch(params);
+      const rows = await execAll<{
+        node_id: string;
+        score: number;
+        snippet: string | null;
+      }>(query);
+      return rows.map((row, index) => ({
+        nodeId: row.node_id,
+        score: row.score,
+        rank: index + 1,
+        ...(row.snippet === null ? {} : { snippet: row.snippet }),
+      }));
+    },
+
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
@@ -356,20 +438,29 @@ export function createSqliteBackend(
   options: SqliteBackendOptions = {},
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
+  const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
   const { isSync, transactionMode } = executionAdapter.profile;
-  const capabilities =
+  const baseCapabilities: BackendCapabilities =
     transactionMode === "none"
       ? { ...SQLITE_CAPABILITIES, transactions: false }
       : SQLITE_CAPABILITIES;
+  const capabilities: BackendCapabilities = {
+    ...baseCapabilities,
+    fulltext: buildFulltextCapabilities(fulltextStrategy),
+  };
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
+    fulltext: tables.fulltextTableName,
   };
-  const operationStrategy = createSqliteOperationStrategy(tables);
+  const operationStrategy = createSqliteOperationStrategy(
+    tables,
+    fulltextStrategy,
+  );
   const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
   const operations = createSqliteOperationBackend({
     capabilities,
@@ -377,6 +468,7 @@ export function createSqliteBackend(
     executionAdapter,
     operationStrategy,
     tableNames,
+    fulltextStrategy,
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -384,7 +476,7 @@ export function createSqliteBackend(
     ...operations,
 
     async bootstrapTables(): Promise<void> {
-      const statements = generateSqliteDDL(tables);
+      const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
@@ -423,6 +515,7 @@ export function createSqliteBackend(
             operationStrategy,
             profileHints: { isSync: true },
             tableNames,
+            fulltextStrategy,
           });
           db.run(sql`BEGIN`);
 
@@ -446,6 +539,7 @@ export function createSqliteBackend(
             operationStrategy,
             profileHints: { isSync },
             tableNames,
+            fulltextStrategy,
           });
           return fn(txBackend);
         }) as Promise<T>,
@@ -476,6 +570,7 @@ function createTransactionBackend(
     executionAdapter: txExecutionAdapter,
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
+    fulltextStrategy: options.fulltextStrategy,
   });
 }
 

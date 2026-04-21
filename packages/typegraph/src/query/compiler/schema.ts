@@ -20,6 +20,8 @@ export type SqlTableNames = Readonly<{
   edges: string;
   /** Node embeddings table name (default: "typegraph_node_embeddings") */
   embeddings: string;
+  /** Node fulltext table name (default: "typegraph_node_fulltext") */
+  fulltext: string;
 }>;
 
 /**
@@ -35,6 +37,8 @@ export type SqlSchema = Readonly<{
   edgesTable: SQL;
   /** Get a SQL reference to the embeddings table */
   embeddingsTable: SQL;
+  /** Get a SQL reference to the fulltext table */
+  fulltextTable: SQL;
 }>;
 
 /**
@@ -44,6 +48,7 @@ const DEFAULT_TABLE_NAMES: SqlTableNames = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
   embeddings: "typegraph_node_embeddings",
+  fulltext: "typegraph_node_fulltext",
 };
 
 /**
@@ -116,12 +121,14 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.nodes, "nodes");
   validateTableName(tables.edges, "edges");
   validateTableName(tables.embeddings, "embeddings");
+  validateTableName(tables.fulltext, "fulltext");
 
   return {
     tables,
     nodesTable: sql.raw(quoteIdentifier(tables.nodes)),
     edgesTable: sql.raw(quoteIdentifier(tables.edges)),
     embeddingsTable: sql.raw(quoteIdentifier(tables.embeddings)),
+    fulltextTable: sql.raw(quoteIdentifier(tables.fulltext)),
   };
 }
 
@@ -129,3 +136,13 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
  * Default SqlSchema using standard TypeGraph table names.
  */
 export const DEFAULT_SQL_SCHEMA: SqlSchema = createSqlSchema();
+
+/**
+ * CTE aliases used by the standard query emitter. Joining on these names
+ * across multiple builder files is fragile when typed as raw strings —
+ * import these constants instead.
+ */
+export const ALIAS_CTE_PREFIX = "cte_" as const;
+export const EMBEDDINGS_CTE_ALIAS = "cte_embeddings" as const;
+export const FULLTEXT_CTE_ALIAS = "cte_fulltext" as const;
+export const HYBRID_CANDIDATES_CTE_ALIAS = "cte_relevance_candidates" as const;

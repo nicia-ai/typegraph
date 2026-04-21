@@ -39,33 +39,44 @@ export type EmbeddingSyncContext = Readonly<{
 // ============================================================
 
 /**
+ * Cache keyed by the Zod schema instance. Schemas are immutable at
+ * runtime; the same reference recurs across every CRUD call.
+ */
+const embeddingFieldsCache = new WeakMap<
+  z.ZodType,
+  readonly EmbeddingFieldInfo[]
+>();
+
+/**
  * Extracts embedding field information from a Zod schema.
  * Returns all embedding fields found at the top level of an object schema.
  */
 export function getEmbeddingFields(
   schema: z.ZodType,
 ): readonly EmbeddingFieldInfo[] {
-  // Check if schema is an object type
-  if (schema.type !== "object") {
-    return [];
-  }
+  const cached = embeddingFieldsCache.get(schema);
+  if (cached) return cached;
+  const fields = computeEmbeddingFields(schema);
+  embeddingFieldsCache.set(schema, fields);
+  return fields;
+}
+
+function computeEmbeddingFields(
+  schema: z.ZodType,
+): readonly EmbeddingFieldInfo[] {
+  if (schema.type !== "object") return [];
 
   const def = schema.def as { shape?: Record<string, z.ZodType> };
   const shape = def.shape;
-  if (!shape) {
-    return [];
-  }
+  if (!shape) return [];
 
   const fields: EmbeddingFieldInfo[] = [];
-
   for (const [fieldPath, fieldSchema] of Object.entries(shape)) {
-    // Check if this field is an embedding (possibly wrapped in optional/nullable)
     const dimensions = getEmbeddingDimensionsFromField(fieldSchema);
     if (dimensions !== undefined) {
       fields.push({ fieldPath, dimensions });
     }
   }
-
   return fields;
 }
 

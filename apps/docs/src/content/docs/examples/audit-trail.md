@@ -29,7 +29,7 @@ This example extends the built-in capabilities with:
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph } from "@nicia-ai/typegraph";
+import { defineNode, defineEdge, defineGraph, searchable } from "@nicia-ai/typegraph";
 
 // Audited entity (example: Settings)
 const Setting = defineNode("Setting", {
@@ -40,6 +40,11 @@ const Setting = defineNode("Setting", {
     description: z.string().optional(),
   }),
 });
+
+// Audit queries frequently include free-text predicates: "find all
+// changes mentioning GDPR" or "find changes where the reason contains
+// 'security patch'". Marking `reason` as `searchable()` enables BM25
+// ranked fulltext over that column without an external search service.
 
 // Users making changes
 const User = defineNode("User", {
@@ -61,7 +66,7 @@ const AuditEntry = defineNode("AuditEntry", {
       before: z.unknown().optional(),
       after: z.unknown().optional(),
     })).optional(),
-    reason: z.string().optional(),
+    reason: searchable({ language: "english" }).optional(),
     ipAddress: z.string().optional(),
     userAgent: z.string().optional(),
   }),
@@ -661,6 +666,71 @@ async function whenWasValueSet(
   );
 
   return entry ? { timestamp: entry.timestamp, user: entry.user } : undefined;
+}
+```
+
+### Search Audit Trail by Reason
+
+Compliance questions rarely come with exact match criteria — "find
+everything related to the data-retention incident in Q3" is more
+common than "find entries with reason = 'X'". Fulltext over the
+`reason` field gives reviewers a BM25-ranked list instead of a brittle
+substring match:
+
+```typescript
+async function searchAuditByReason(
+  query: string,
+  options: { since?: Date; limit?: number } = {},
+) {
+  const { since, limit = 25 } = options;
+
+  const hits = await store.search.fulltext("AuditEntry", {
+    query,
+    limit: since ? limit * 4 : limit,
+    includeSnippets: true,
+  });
+
+  if (since === undefined) {
+    return hits.map((hit) => ({
+      entry: hit.node,
+      score: hit.score,
+      snippet: hit.snippet,
+    }));
+  }
+
+  const cutoff = since.toISOString();
+  return hits
+    .filter((hit) => hit.node.timestamp >= cutoff)
+    .slice(0, limit)
+    .map((hit) => ({
+      entry: hit.node,
+      score: hit.score,
+      snippet: hit.snippet,
+    }));
+}
+```
+
+For stricter date-range composition (the fulltext candidate pool is
+bounded by the `limit` above), use the query-builder path:
+
+```typescript
+async function searchAuditInRange(
+  query: string,
+  startDate: Date,
+  endDate: Date,
+  limit = 25,
+) {
+  return store
+    .query()
+    .from("AuditEntry", "a")
+    .whereNode("a", (a) =>
+      a.$fulltext
+        .matches(query, limit * 2)
+        .and(a.timestamp.gte(startDate.toISOString()))
+        .and(a.timestamp.lte(endDate.toISOString())),
+    )
+    .select((ctx) => ctx.a)
+    .execute();
 }
 ```
 

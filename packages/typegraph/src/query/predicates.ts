@@ -3,6 +3,7 @@
  *
  * Provides a fluent API for building type-safe predicates.
  */
+import { type FulltextQueryMode } from "../backend/types";
 import { UnsupportedPredicateError } from "../errors";
 import {
   type ArrayOp,
@@ -12,6 +13,7 @@ import {
   type ComparisonPredicate,
   type ExistsSubquery,
   type FieldRef,
+  type FulltextMatchPredicate,
   type InSubquery,
   type LiteralValue,
   type NullPredicate,
@@ -148,7 +150,40 @@ type BaseFieldBuilder = Readonly<{
 }>;
 
 /**
+ * Options for the `$fulltext.matches()` predicate.
+ *
+ * Note the term glossary used throughout TypeGraph search:
+ * - **`k`** (the positional argument on `.matches(query, k)`) is the
+ *   per-predicate top-k cap applied inside the fulltext CTE.
+ * - **`limit`** (on store-level `search.fulltext` / `search.hybrid` and
+ *   on the query builder) is the final result count returned to the
+ *   caller after any fusion.
+ */
+export type MatchesOptions = Readonly<{
+  /**
+   * Parse mode for the query string. Default: "websearch".
+   *
+   * - "websearch": Google-style syntax (quoted phrases, `-excluded`, `OR`).
+   *   Postgres: `websearch_to_tsquery`. SQLite: translated to FTS5 MATCH.
+   * - "phrase": treats the whole query as a phrase.
+   * - "plain": splits on whitespace and ANDs terms.
+   * - "raw": dialect-native syntax passed through unchanged.
+   */
+  mode?: FulltextQueryMode;
+  /**
+   * Language override. Default: per-row language as stored at insert time.
+   */
+  language?: string;
+  /** Minimum relevance score to include. */
+  minScore?: number;
+}>;
+
+/**
  * String-specific field operations.
+ *
+ * Fulltext match is exposed on `n.$fulltext.matches(...)` at the node
+ * level (gated by `searchable()` declarations in the schema), not on
+ * individual string fields.
  */
 type StringFieldBuilder = BaseFieldBuilder &
   Readonly<{
@@ -515,6 +550,10 @@ function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
 
 /**
  * Creates a string field builder.
+ *
+ * Fulltext match is not a string-field operation — use
+ * `n.$fulltext.matches(...)` at the node level. `searchable()`
+ * declarations determine which node kinds expose `$fulltext`.
  */
 export function stringField(field: FieldRef): StringFieldBuilder {
   return {
@@ -529,6 +568,80 @@ export function stringField(field: FieldRef): StringFieldBuilder {
     like: (pattern) => stringOp("like", field, pattern),
     ilike: (pattern) => stringOp("ilike", field, pattern),
   };
+}
+
+/**
+ * Default top-k for `$fulltext.matches()` when the caller does not pass
+ * one. Large enough to leave headroom for downstream `.and()` filters,
+ * small enough to keep latency reasonable on any dialect.
+ */
+const DEFAULT_FULLTEXT_MATCH_K = 50;
+
+/**
+ * Node-level fulltext accessor. Always present on the `NodeAccessor`
+ * type — a runtime check throws a clear error if the node kind has no
+ * `searchable()` fields. `k` is the top-k cap applied inside the
+ * fulltext CTE; defaults to `DEFAULT_FULLTEXT_MATCH_K`. Use a larger
+ * value when feeding the result into RRF (`.fuseWith()` /
+ * `store.search.hybrid()`).
+ */
+export type FulltextAccessor = Readonly<{
+  matches: (query: string, k?: number, options?: MatchesOptions) => Predicate;
+}>;
+
+/**
+ * Creates a node-level fulltext accessor. The runtime check throws for
+ * aliases whose node kind has no `searchable()` content, catching the
+ * case where the field tag was dropped (e.g. by a schema refactor)
+ * after the query was written.
+ */
+export function createFulltextAccessor(
+  alias: string,
+  hasSearchableField: () => boolean,
+): FulltextAccessor {
+  return {
+    matches: (query, k, options) => {
+      if (!hasSearchableField()) {
+        throw new UnsupportedPredicateError(
+          `Cannot call .$fulltext.matches() on alias "${alias}" — its ` +
+            `node kind has no fields declared with searchable(). Add at ` +
+            `least one: \`title: searchable({ language: "english" })\`.`,
+        );
+      }
+      return fulltextMatch(
+        fieldRef(alias, ["$fulltext"]),
+        query,
+        k ?? DEFAULT_FULLTEXT_MATCH_K,
+        options,
+      );
+    },
+  };
+}
+
+/**
+ * Creates a fulltext match predicate.
+ */
+function fulltextMatch(
+  field: FieldRef,
+  query: string,
+  limit: number,
+  options?: MatchesOptions,
+): Predicate {
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new UnsupportedPredicateError(
+      `matches() limit must be a positive finite number, got ${String(limit)}`,
+    );
+  }
+  const expr: FulltextMatchPredicate = {
+    __type: "fulltext_match",
+    field,
+    query,
+    mode: options?.mode ?? "websearch",
+    limit,
+    ...(options?.language === undefined ? {} : { language: options.language }),
+    ...(options?.minScore === undefined ? {} : { minScore: options.minScore }),
+  };
+  return predicate(expr);
 }
 
 /**
@@ -645,7 +758,7 @@ export function embeddingField(field: FieldRef): EmbeddingFieldBuilder {
   };
 }
 
-function buildFieldBuilderForTypeInfo(
+export function buildFieldBuilderForTypeInfo(
   field: FieldRef,
   typeInfo: FieldTypeInfo | undefined,
 ): BaseFieldBuilder {

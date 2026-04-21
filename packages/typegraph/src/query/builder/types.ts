@@ -22,6 +22,7 @@ import {
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type GroupBySpec,
+  type HybridFusionOptions,
   type NodePredicate,
   type OrderSpec,
   type ParameterRef,
@@ -34,7 +35,11 @@ import {
 } from "../ast";
 import { type SqlDialect, type SqlSchema } from "../compiler/index";
 import { type JsonPointerInput } from "../json-pointer";
-import type { Predicate, SimilarToOptions } from "../predicates";
+import type {
+  FulltextAccessor,
+  Predicate,
+  SimilarToOptions,
+} from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 
 export type { TraversalExpansion } from "../ast";
@@ -330,10 +335,15 @@ export type ObjectFieldAccessor<T> = BaseFieldAccessor &
  * Properties are available at the top level for ergonomic access:
  * - `n.name` instead of `n.props.name`
  * - System fields: `n.id`, `n.kind`
+ * - Fulltext: `n.$fulltext.matches(...)` — throws at query build time if
+ *   the node kind has no `searchable()` fields. Exposed at the type
+ *   level on every accessor so refinements like
+ *   `searchable().min(1)` do not make it disappear.
  */
 export type NodeAccessor<N extends NodeType> = Readonly<{
   id: StringFieldAccessor;
   kind: StringFieldAccessor;
+  $fulltext: FulltextAccessor;
 }> &
   PropsAccessor<N>;
 
@@ -541,6 +551,7 @@ export type QueryBuilderState = Readonly<{
   asOf: string | undefined;
   groupBy: GroupBySpec | undefined;
   having: PredicateExpression | undefined;
+  fusion: HybridFusionOptions | undefined;
 }>;
 
 /**
