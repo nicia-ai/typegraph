@@ -48,7 +48,7 @@ async function buildChain(
   const nodeIds: string[] = [];
   for (let index = 0; index < length; index++) {
     const node = await store.nodes.Item.create({ label: `item-${index}` });
-    nodeIds.push(node.id as string);
+    nodeIds.push(node.id);
   }
   for (let index = 0; index < length - 1; index++) {
     await store.edges.link.create(
@@ -71,10 +71,10 @@ async function buildStar(
   const spokeIds: string[] = [];
   for (let index = 0; index < spokeCount; index++) {
     const spoke = await store.nodes.Item.create({ label: `spoke-${index}` });
-    spokeIds.push(spoke.id as string);
+    spokeIds.push(spoke.id);
     await store.edges.link.create(center, spoke);
   }
-  return [center.id as string, ...spokeIds];
+  return [center.id, ...spokeIds];
 }
 
 // ============================================================

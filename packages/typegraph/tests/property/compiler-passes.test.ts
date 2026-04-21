@@ -121,9 +121,7 @@ describe("Vector-Aware Limit Resolution Properties", () => {
           maxLength: 3,
         },
       ),
-      metric: fc.constantFrom("cosine", "l2", "inner_product") as fc.Arbitrary<
-        VectorSimilarityPredicate["metric"]
-      >,
+      metric: fc.constantFrom("cosine", "l2", "inner_product"),
       limit: fc.integer({ min: 1, max: 10_000 }),
     },
   );

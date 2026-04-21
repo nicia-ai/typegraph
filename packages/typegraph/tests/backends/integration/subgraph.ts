@@ -57,10 +57,10 @@ async function seedSubgraphData(
   await store.edges.worksAt.create(bob, acme, { role: "Manager" });
 
   return {
-    aliceId: alice.id as string,
-    bobId: bob.id as string,
-    charlieId: charlie.id as string,
-    acmeId: acme.id as string,
+    aliceId: alice.id,
+    bobId: bob.id,
+    charlieId: charlie.id,
+    acmeId: acme.id,
   };
 }
 

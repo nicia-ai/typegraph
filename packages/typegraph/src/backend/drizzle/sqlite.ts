@@ -120,7 +120,7 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(SQLITE_ROW_MAPPER_CONFIG
 const PENDING_FOREVER: Promise<never> = new Promise<never>(noop);
 
 function pendingForever<T>(): Promise<T> {
-  return PENDING_FOREVER as Promise<T>;
+  return PENDING_FOREVER;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -442,7 +442,7 @@ export function createSqliteBackend(
         db.transaction(async (tx) => {
           const txBackend = createTransactionBackend({
             capabilities,
-            db: tx as AnySqliteDatabase,
+            db: tx,
             operationStrategy,
             profileHints: { isSync },
             tableNames,

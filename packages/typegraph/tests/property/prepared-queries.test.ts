@@ -72,22 +72,14 @@ const comparisonRightArb = fc.oneof(literalValueArb, parameterRefArb);
 
 const comparisonPredicateArb: fc.Arbitrary<ComparisonPredicate> = fc.record({
   __type: fc.constant("comparison" as const),
-  op: fc.constantFrom("eq", "neq", "gt", "gte", "lt", "lte") as fc.Arbitrary<
-    ComparisonPredicate["op"]
-  >,
+  op: fc.constantFrom("eq", "neq", "gt", "gte", "lt", "lte"),
   left: fieldRefArb,
   right: comparisonRightArb,
 });
 
 const stringPredicateArb: fc.Arbitrary<StringPredicate> = fc.record({
   __type: fc.constant("string_op" as const),
-  op: fc.constantFrom(
-    "contains",
-    "startsWith",
-    "endsWith",
-    "like",
-    "ilike",
-  ) as fc.Arbitrary<StringPredicate["op"]>,
+  op: fc.constantFrom("contains", "startsWith", "endsWith", "like", "ilike"),
   field: fieldRefArb,
   pattern: fc.oneof(
     fc.string({ minLength: 0, maxLength: 10 }),
@@ -298,14 +290,7 @@ describe("Parameter Name Collection Consistency", () => {
     // Generate only literal-value predicates (no parameters)
     const literalOnlyComparison: fc.Arbitrary<ComparisonPredicate> = fc.record({
       __type: fc.constant("comparison" as const),
-      op: fc.constantFrom(
-        "eq",
-        "neq",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-      ) as fc.Arbitrary<ComparisonPredicate["op"]>,
+      op: fc.constantFrom("eq", "neq", "gt", "gte", "lt", "lte"),
       left: fieldRefArb,
       right: literalValueArb,
     });

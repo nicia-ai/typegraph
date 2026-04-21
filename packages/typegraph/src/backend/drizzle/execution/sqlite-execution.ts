@@ -186,7 +186,7 @@ async function executeDrizzleQuery<TRow>(
   db: AnySqliteDatabase,
   query: SQL,
 ): Promise<readonly TRow[]> {
-  return (await db.all(query)) as readonly TRow[];
+  return (await db.all(query));
 }
 
 function createPreparedStatementExecutor(

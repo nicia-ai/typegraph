@@ -137,7 +137,7 @@ function flattenSqlChunk(chunk: unknown): string {
   }
 
   if (typeof chunk === "object" && chunk !== null) {
-    if ("value" in chunk && Array.isArray((chunk as { value: unknown }).value)) {
+    if ("value" in chunk && Array.isArray((chunk).value)) {
       return (chunk as { value: readonly unknown[] }).value
         .map((part) => flattenSqlChunk(part))
         .join("");
@@ -145,7 +145,7 @@ function flattenSqlChunk(chunk: unknown): string {
 
     if (
       "queryChunks" in chunk &&
-      Array.isArray((chunk as { queryChunks: unknown }).queryChunks)
+      Array.isArray((chunk).queryChunks)
     ) {
       return (chunk as { queryChunks: readonly unknown[] }).queryChunks
         .map((part) => flattenSqlChunk(part))

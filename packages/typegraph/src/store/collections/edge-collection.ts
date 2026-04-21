@@ -269,8 +269,7 @@ export function createEdgeCollection<
     } = {};
     if (options?.matchOn !== undefined)
       result.matchOn = options.matchOn as readonly string[];
-    if (options?.props !== undefined)
-      result.props = options.props as Record<string, unknown>;
+    if (options?.props !== undefined) result.props = options.props;
     return result;
   }
 
@@ -282,13 +281,7 @@ export function createEdgeCollection<
       options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
     ): Promise<Edge<E>> {
       const result = await executeEdgeCreate(
-        buildCreateEdgeInput(
-          kind,
-          from,
-          to,
-          (props ?? {}) as Record<string, unknown>,
-          options,
-        ),
+        buildCreateEdgeInput(kind, from, to, props ?? {}, options),
         backend,
       );
       return narrowEdge<E>(result);
@@ -343,7 +336,7 @@ export function createEdgeCollection<
       options?: Readonly<{ validTo?: string }>,
     ): Promise<Edge<E>> {
       const result = await executeEdgeUpdate(
-        buildUpdateEdgeInput(id, props as Record<string, unknown>, options),
+        buildUpdateEdgeInput(id, props, options),
         backend,
       );
       return narrowEdge<E>(result);
@@ -496,17 +489,7 @@ export function createEdgeCollection<
         validTo?: string;
       }>[],
     ): Promise<Edge<E>[]> {
-      const batchInputs = mapBulkEdgeInputs(
-        kind,
-        items as readonly Readonly<{
-          from: NodeRef;
-          to: NodeRef;
-          props?: Record<string, unknown>;
-          id?: string;
-          validFrom?: string;
-          validTo?: string;
-        }>[],
-      );
+      const batchInputs = mapBulkEdgeInputs(kind, items);
 
       if (backend.capabilities.transactions && "transaction" in backend) {
         const results = await backend.transaction(async (txBackend) =>
@@ -568,11 +551,7 @@ export function createEdgeCollection<
           if (existing) {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateEdgeInput(
-                item.id,
-                (item.props ?? {}) as Record<string, unknown>,
-                item,
-              ),
+              input: buildUpdateEdgeInput(item.id, item.props ?? {}, item),
               clearDeleted: existing.deleted_at !== undefined,
             });
           } else {
@@ -582,7 +561,7 @@ export function createEdgeCollection<
                 kind,
                 item.from,
                 item.to,
-                (item.props ?? {}) as Record<string, unknown>,
+                item.props ?? {},
                 item,
               ),
             });
@@ -628,17 +607,7 @@ export function createEdgeCollection<
         validTo?: string;
       }>[],
     ): Promise<void> {
-      const batchInputs = mapBulkEdgeInputs(
-        kind,
-        items as readonly Readonly<{
-          from: NodeRef;
-          to: NodeRef;
-          props?: Record<string, unknown>;
-          id?: string;
-          validFrom?: string;
-          validTo?: string;
-        }>[],
-      );
+      const batchInputs = mapBulkEdgeInputs(kind, items);
 
       if (backend.capabilities.transactions && "transaction" in backend) {
         await backend.transaction(async (txBackend) => {
@@ -704,7 +673,7 @@ export function createEdgeCollection<
         from.id,
         to.kind,
         to.id,
-        props as Record<string, unknown>,
+        props,
         backend,
         getOrCreateOptions,
       );
@@ -726,7 +695,7 @@ export function createEdgeCollection<
         fromId: item.from.id,
         toKind: item.to.kind,
         toId: item.to.id,
-        props: item.props as Record<string, unknown>,
+        props: item.props,
       }));
 
       const getOrCreateOptions: {

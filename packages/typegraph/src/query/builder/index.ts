@@ -14,12 +14,8 @@ import { UnionableQuery } from "./unionable-query";
 // Wire up circular dependencies.
 // Type assertions are needed because the circular dependency resolution
 // requires passing classes that TypeScript can't verify at module init time.
-setQueryBuilderClass(
-  QueryBuilder as unknown as Parameters<typeof setQueryBuilderClass>[0],
-);
-setUnionableQueryClass(
-  UnionableQuery as unknown as Parameters<typeof setUnionableQueryClass>[0],
-);
+setQueryBuilderClass(QueryBuilder);
+setUnionableQueryClass(UnionableQuery);
 
 // Classes
 export {

@@ -123,7 +123,7 @@ async function getPackageJson(
     );
   }
 
-  return parsed as TypegraphPackageJson;
+  return parsed;
 }
 
 async function ensureBuildArtifacts(packageDir: string): Promise<void> {

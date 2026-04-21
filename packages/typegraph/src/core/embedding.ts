@@ -118,7 +118,7 @@ export function embedding<D extends number>(dimensions: D): EmbeddingSchema<D> {
   // Attach dimensions metadata for introspection
   return Object.assign(schema, {
     [EMBEDDING_DIMENSIONS_KEY]: dimensions,
-  }) as EmbeddingSchema<D>;
+  });
 }
 
 // ============================================================

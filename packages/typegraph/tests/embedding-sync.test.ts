@@ -237,7 +237,7 @@ describe("syncEmbeddings", () => {
 
     await syncEmbeddings(ctx, schema, {
       name: "Test",
-      embedding: { invalid: true } as unknown,
+      embedding: { invalid: true },
     });
 
     expect(backend.upsertEmbedding).not.toHaveBeenCalled();

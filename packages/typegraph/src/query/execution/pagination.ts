@@ -187,11 +187,7 @@ export function buildCursorFromContext<
   orderBy: readonly OrderSpec[],
   direction: "f" | "b",
 ): string {
-  return buildCursorFromRow(
-    context as unknown as Record<string, unknown>,
-    orderBy,
-    direction,
-  );
+  return buildCursorFromRow(context, orderBy, direction);
 }
 
 /**

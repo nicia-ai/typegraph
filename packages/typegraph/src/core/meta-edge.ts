@@ -61,5 +61,5 @@ export function metaEdge<K extends string>(
     [META_EDGE_BRAND]: true as const,
     name,
     properties,
-  }) as MetaEdge<K>;
+  });
 }
