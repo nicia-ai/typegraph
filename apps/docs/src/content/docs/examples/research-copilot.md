@@ -68,9 +68,13 @@ hierarchy that supports query expansion:
 ```typescript
 const Paper = defineNode("Paper", {
   schema: z.object({
-    title: z.string(),
+    // Title + abstract are `searchable()` so BM25 ranks papers by
+    // keyword hits (rare technical terms, author surnames, dataset
+    // names) — exactly the queries where embeddings are least
+    // discriminative.
+    title: searchable({ language: "english" }),
     year: z.number().int(),
-    abstract: z.string(),
+    abstract: searchable({ language: "english" }),
     embedding: embedding(128),
   }),
 });
@@ -128,6 +132,46 @@ const ranked = allPapers
 In production, swap the in-JS ranking for `p.embedding.similarTo(queryEmbedding, k)`
 in a [query builder](/queries/overview) predicate — backed by pgvector or
 sqlite-vec — to do the scoring in SQL. See [Semantic Search](/semantic-search).
+
+`title` and `abstract` are declared `searchable()`, so the same corpus
+is also indexed for BM25 via SQLite's FTS5. The example runs a
+rare-token query against the fulltext index to show where BM25 wins —
+dataset names, method acronyms, proper nouns — exactly the queries
+embeddings smooth out:
+
+```typescript
+const fulltextHits = await store.search.fulltext("Paper", {
+  query: "Dropout",
+  limit: 3,
+  includeSnippets: true,
+});
+```
+
+```text
+─── Fulltext retrieval (BM25 via FTS5) for: "Dropout" ───
+  2.619  Dropout: A Simple Way to Prevent Neural Networks from Overfitting
+        <mark>Dropout</mark>: A Simple Way to Prevent Neural Networks from Overfitting
+        Randomly zeroing unit activations during training prevents co-adaptation and…
+```
+
+In production you'd fuse the two via `store.search.hybrid()`, which
+runs both retrievers and blends them with Reciprocal Rank Fusion at
+the SQL layer:
+
+```typescript
+const hits = await store.search.hybrid("Paper", {
+  limit: 10,
+  vector: { fieldPath: "embedding", queryEmbedding, metric: "cosine" },
+  fulltext: { query, includeSnippets: true },
+  // Weight fulltext slightly higher for the entity-heavy queries
+  // typical of literature search.
+  fusion: { method: "rrf", k: 60, weights: { vector: 1, fulltext: 1.25 } },
+});
+```
+
+See the [Fulltext Search guide](/fulltext-search) for tuning and
+[Example 15](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/15-fulltext-hybrid-search.ts)
+for an end-to-end hybrid walkthrough.
 
 ### 2. Ontology-expanded topic matching
 

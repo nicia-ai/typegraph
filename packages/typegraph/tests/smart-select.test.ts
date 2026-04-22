@@ -215,6 +215,7 @@ describe("createTrackingContext", () => {
     asOf: undefined,
     groupBy: undefined,
     having: undefined,
+    fusion: undefined,
   };
 
   it("records node props, system fields, and meta access", () => {

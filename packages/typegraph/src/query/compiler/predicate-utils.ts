@@ -1,7 +1,12 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../errors";
-import { type NodePredicate, type QueryAst } from "../ast";
+import {
+  type FulltextMatchPredicate,
+  type NodePredicate,
+  type QueryAst,
+  type VectorSimilarityPredicate,
+} from "../ast";
 import {
   compilePredicateExpression,
   type PredicateCompilerContext,
@@ -90,4 +95,21 @@ export function getNodeKindsForAlias(
   }
 
   throw new CompilerInvariantError(`Unknown traversal source alias: ${alias}`);
+}
+
+/**
+ * Returns the shared alias when a hybrid (vector + fulltext) query has
+ * both predicates targeting the same alias — that's the case where the
+ * emitter can fuse ranks via `HYBRID_CANDIDATES_CTE_ALIAS` / RRF.
+ * Returns `undefined` when either predicate is missing or the two
+ * predicates target different aliases.
+ */
+export function getHybridTargetAlias(
+  vectorPredicate: VectorSimilarityPredicate | undefined,
+  fulltextPredicate: FulltextMatchPredicate | undefined,
+): string | undefined {
+  if (!vectorPredicate || !fulltextPredicate) return undefined;
+  return vectorPredicate.field.alias === fulltextPredicate.field.alias ?
+      vectorPredicate.field.alias
+    : undefined;
 }

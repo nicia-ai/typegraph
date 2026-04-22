@@ -128,10 +128,18 @@ async function setupTestDatabase(): Promise<void> {
 async function clearTestData(): Promise<void> {
   if (!sharedPool) return;
 
-  await sharedPool.query("TRUNCATE typegraph_nodes CASCADE");
-  await sharedPool.query("TRUNCATE typegraph_edges CASCADE");
-  await sharedPool.query("TRUNCATE typegraph_node_uniques CASCADE");
-  await sharedPool.query("TRUNCATE typegraph_schema_versions CASCADE");
+  // Fulltext and embedding tables have no FKs to typegraph_nodes, so
+  // truncating the parent tables alone leaves orphaned rows that leak
+  // into subsequent integration tests (particularly fulltext search,
+  // where orphan rows can outrank fresh ones and cause missing hits).
+  await sharedPool.query(
+    `TRUNCATE typegraph_node_fulltext,
+              typegraph_node_embeddings,
+              typegraph_nodes,
+              typegraph_edges,
+              typegraph_node_uniques,
+              typegraph_schema_versions CASCADE`,
+  );
 }
 
 // ============================================================

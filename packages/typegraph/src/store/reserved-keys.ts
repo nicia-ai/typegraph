@@ -29,6 +29,71 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Properties starting with `$` are reserved for TypeGraph-owned accessors
+ * on the query-builder node/edge proxies (today: `$fulltext`). Reserving
+ * the whole prefix — not just the currently-used names — keeps future
+ * accessors (e.g. `$vector`, `$json`) from colliding with user fields.
+ */
+const RESERVED_PROPERTY_PREFIX = "$";
+
+/**
+ * True if a user-defined field name is reserved by TypeGraph's accessor
+ * namespace. `defineNode` / `defineEdge` call this against schema keys so
+ * the collision fails fast at graph-definition time rather than silently
+ * at query time.
+ */
+function isReservedPropertyName(name: string): boolean {
+  return name.startsWith(RESERVED_PROPERTY_PREFIX);
+}
+
+/**
+ * Validates that a node or edge schema does not use any reserved property
+ * name. Covers both the structural keys (`id`, `kind`, etc.) and the
+ * `$`-prefix accessor namespace. Throws a single `ConfigurationError`
+ * per conflict class so the user sees all collisions in one pass.
+ */
+export function assertSchemaKeysAreFree(
+  entityKind: "Node" | "Edge",
+  name: string,
+  keys: readonly string[],
+  reservedStructuralKeys: ReadonlySet<string>,
+): void {
+  const structuralConflicts = keys.filter((key) =>
+    reservedStructuralKeys.has(key),
+  );
+  if (structuralConflicts.length > 0) {
+    const label = entityKind.toLowerCase();
+    throw new ConfigurationError(
+      `${entityKind} "${name}" schema contains reserved property names: ${structuralConflicts.join(", ")}`,
+      {
+        [`${label}Type`]: name,
+        conflicts: structuralConflicts,
+        reservedKeys: [...reservedStructuralKeys],
+      },
+      {
+        suggestion: `Rename the conflicting properties. Reserved names (${[...reservedStructuralKeys].join(", ")}) are added automatically to all ${label}s.`,
+      },
+    );
+  }
+
+  const prefixConflicts = keys.filter((key) => isReservedPropertyName(key));
+  if (prefixConflicts.length > 0) {
+    const label = entityKind.toLowerCase();
+    throw new ConfigurationError(
+      `${entityKind} "${name}" schema uses the reserved "${RESERVED_PROPERTY_PREFIX}" prefix on: ${prefixConflicts.join(", ")}`,
+      {
+        [`${label}Type`]: name,
+        conflicts: prefixConflicts,
+        reservedPrefix: RESERVED_PROPERTY_PREFIX,
+      },
+      {
+        suggestion: `Property names starting with "${RESERVED_PROPERTY_PREFIX}" are reserved for TypeGraph accessors (e.g. $fulltext). Rename each field.`,
+      },
+    );
+  }
+}
+
+/**
  * Validates that a projection field name is safe to assign onto a result object.
  * Rejects reserved structural keys and prototype-pollution vectors.
  *

@@ -61,6 +61,7 @@ import {
   type NodeOperationContext,
 } from "./operations";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import { StoreSearch } from "./search-facade";
 import {
   executeSubgraph,
   type SubgraphOptions,
@@ -127,6 +128,7 @@ export class Store<G extends GraphDef> {
   #nodeCollections: GraphNodeCollections<G> | undefined;
   #edgeCollections: GraphEdgeCollections<G> | undefined;
   #algorithms: GraphAlgorithms<G> | undefined;
+  #search: StoreSearch<G> | undefined;
 
   constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
     this.#graph = graph;
@@ -451,6 +453,46 @@ export class Store<G extends GraphDef> {
     return this.#createQueryForBackend(this.#backend);
   }
 
+  // === Search ===
+
+  /**
+   * Search-related operations (fulltext, hybrid, and rebuild).
+   *
+   * All search methods live under this facade to keep the top-level
+   * Store API focused on CRUD + graph traversal. The facade is
+   * lazy-initialized and cached for the lifetime of the store.
+   *
+   * @example
+   * ```typescript
+   * // Fulltext
+   * const hits = await store.search.fulltext("Document", {
+   *   query: "climate warming",
+   *   limit: 10,
+   *   includeSnippets: true,
+   * });
+   *
+   * // Hybrid (vector + fulltext fused with RRF)
+   * const ranked = await store.search.hybrid("Document", {
+   *   limit: 10,
+   *   vector: { fieldPath: "embedding", queryEmbedding: vec },
+   *   fulltext: { query: "climate warming" },
+   * });
+   *
+   * // Rebuild index after schema change
+   * const stats = await store.search.rebuildFulltext();
+   * ```
+   */
+  get search(): StoreSearch<G> {
+    if (this.#search === undefined) {
+      this.#search = new StoreSearch<G>({
+        graphId: this.graphId,
+        backend: this.#backend,
+        registry: this.#registry,
+      });
+    }
+    return this.#search;
+  }
+
   // === Batch Query Execution ===
 
   /**
@@ -628,6 +670,7 @@ export class Store<G extends GraphDef> {
     this.#nodeCollections = undefined;
     this.#edgeCollections = undefined;
     this.#algorithms = undefined;
+    this.#search = undefined;
   }
 
   // === Lifecycle ===

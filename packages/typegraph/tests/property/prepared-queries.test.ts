@@ -197,6 +197,7 @@ function collectFromExpr(
     case "object_op":
     case "aggregate_comparison":
     case "vector_similarity":
+    case "fulltext_match":
     case "exists":
     case "in_subquery": {
       return;

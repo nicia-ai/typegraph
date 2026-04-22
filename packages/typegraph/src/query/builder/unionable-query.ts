@@ -20,6 +20,7 @@ import {
   compileSetOperation,
 } from "../compiler/index";
 import { mapResults } from "../execution";
+import { buildCompileOptions } from "./compile-options";
 import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
   type AliasMap,
@@ -215,14 +216,8 @@ export class UnionableQuery<G extends GraphDef, R> {
     return compiled;
   }
 
-  /**
-   * Builds compile options from the config.
-   */
   #compileOptions(): CompileQueryOptions {
-    return {
-      dialect: this.#config.dialect ?? "sqlite",
-      schema: this.#config.schema,
-    };
+    return buildCompileOptions(this.#config);
   }
 
   /**

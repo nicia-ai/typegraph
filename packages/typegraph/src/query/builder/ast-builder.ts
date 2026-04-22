@@ -5,7 +5,10 @@
  */
 import { type QueryAst } from "../ast";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
-import { validateVectorPredicatePlacement } from "./validation";
+import {
+  validateFulltextPredicatePlacement,
+  validateVectorPredicatePlacement,
+} from "./validation";
 
 /**
  * Builds a QueryAst from builder config and state.
@@ -18,6 +21,7 @@ export function buildQueryAst(
   state: QueryBuilderState,
 ): QueryAst {
   validateVectorPredicatePlacement(state.predicates);
+  validateFulltextPredicatePlacement(state.predicates);
 
   const temporalMode: { mode: typeof state.temporalMode; asOf?: string } = {
     mode: state.temporalMode,
@@ -44,5 +48,6 @@ export function buildQueryAst(
     ...(state.offset !== undefined && { offset: state.offset }),
     ...(state.groupBy !== undefined && { groupBy: state.groupBy }),
     ...(state.having !== undefined && { having: state.having }),
+    ...(state.fusion !== undefined && { fusion: state.fusion }),
   };
 }

@@ -12,6 +12,7 @@ import {
   type ArrayPredicate,
   type ExistsSubquery,
   type FieldRef,
+  type FulltextMatchPredicate,
   type InSubquery,
   type LiteralValue,
   type ObjectPredicate,
@@ -542,11 +543,17 @@ export function compilePredicateExpression(
       return compileInSubquery(expr, ctx);
     }
 
-    case "vector_similarity": {
-      return compileVectorSimilarityPredicate(expr, ctx);
+    case "vector_similarity":
+    case "fulltext_match": {
+      // Structural predicates — handled by the main compiler via JOINs,
+      // ORDER BY, and LIMIT. Compile to 1=1 so they compose safely with
+      // surrounding AND branches.
+      return STRUCTURAL_PREDICATE_NOOP;
     }
   }
 }
+
+const STRUCTURAL_PREDICATE_NOOP = sql.raw("1=1");
 
 /**
  * Compiles a comparison predicate.
@@ -913,60 +920,46 @@ function compileInSubquery(
  * must detect vector_similarity predicates and set up the appropriate JOINs
  * and ordering.
  */
-function compileVectorSimilarityPredicate(
-  _expr: VectorSimilarityPredicate,
-  _ctx: PredicateCompilerContext,
-): SQL {
-  // No-op: vector similarity is handled structurally (JOINs, ORDER BY, LIMIT)
-  // by the main query compiler, not as a WHERE predicate. Returns 1=1 so it
-  // composes safely with AND.
-  return sql.raw("1=1");
-}
 
 // ============================================================
-// Vector Similarity Helpers
+// Structural Predicate Extraction
 // ============================================================
 
 /**
- * Extracts all vector similarity predicates from a query's predicates.
- * Used by the main query compiler to set up JOINs, ORDER BY, and LIMIT.
- *
- * Vector predicates must appear at top level or under AND groups only.
- * Nesting under OR/NOT is rejected because vector search rewrites query
- * structure rather than behaving like a pure boolean predicate.
+ * Extracts all instances of a "structural" predicate (one that rewrites
+ * the query into JOIN + ORDER BY + LIMIT, rather than acting as a
+ * boolean WHERE clause). Both `vector_similarity` and `fulltext_match`
+ * have the same placement rules: top-level or under AND only — nesting
+ * under OR/NOT is rejected because the rewrite is incompatible with
+ * disjunction and negation.
  */
-export function extractVectorSimilarityPredicates(
+function extractStructuralPredicates<T extends PredicateExpression>(
   predicates: readonly { expression: PredicateExpression }[],
-): VectorSimilarityPredicate[] {
-  const results: VectorSimilarityPredicate[] = [];
+  isMatch: (expr: PredicateExpression) => expr is T,
+  rejectionMessage: string,
+): T[] {
+  const results: T[] = [];
 
   function visit(expr: PredicateExpression, inDisallowedBranch: boolean): void {
-    switch (expr.__type) {
-      case "vector_similarity": {
-        if (inDisallowedBranch) {
-          throw new UnsupportedPredicateError(
-            "Vector similarity predicates cannot be nested under OR or NOT. " +
-              "Use top-level AND combinations instead.",
-          );
-        }
-        results.push(expr);
-        break;
+    if (isMatch(expr)) {
+      if (inDisallowedBranch) {
+        throw new UnsupportedPredicateError(rejectionMessage);
       }
+      results.push(expr);
+      return;
+    }
+    switch (expr.__type) {
       case "and": {
-        for (const predicate of expr.predicates) {
-          visit(predicate, inDisallowedBranch);
-        }
-        break;
+        for (const child of expr.predicates) visit(child, inDisallowedBranch);
+        return;
       }
       case "or": {
-        for (const predicate of expr.predicates) {
-          visit(predicate, true);
-        }
-        break;
+        for (const child of expr.predicates) visit(child, true);
+        return;
       }
       case "not": {
         visit(expr.predicate, true);
-        break;
+        return;
       }
       case "comparison":
       case "string_op":
@@ -976,18 +969,39 @@ export function extractVectorSimilarityPredicates(
       case "object_op":
       case "aggregate_comparison":
       case "exists":
-      case "in_subquery": {
-        // These predicate types don't contain nested vector_similarity
-        break;
+      case "in_subquery":
+      case "vector_similarity":
+      case "fulltext_match": {
+        return;
       }
     }
   }
 
-  for (const pred of predicates) {
-    visit(pred.expression, false);
-  }
-
+  for (const pred of predicates) visit(pred.expression, false);
   return results;
+}
+
+export function extractVectorSimilarityPredicates(
+  predicates: readonly { expression: PredicateExpression }[],
+): VectorSimilarityPredicate[] {
+  return extractStructuralPredicates(
+    predicates,
+    (expr): expr is VectorSimilarityPredicate =>
+      expr.__type === "vector_similarity",
+    "Vector similarity predicates cannot be nested under OR or NOT. " +
+      "Use top-level AND combinations instead.",
+  );
+}
+
+export function extractFulltextMatchPredicates(
+  predicates: readonly { expression: PredicateExpression }[],
+): FulltextMatchPredicate[] {
+  return extractStructuralPredicates(
+    predicates,
+    (expr): expr is FulltextMatchPredicate => expr.__type === "fulltext_match",
+    "Fulltext match predicates cannot be nested under OR or NOT. " +
+      "Use top-level AND combinations instead.",
+  );
 }
 
 // ============================================================

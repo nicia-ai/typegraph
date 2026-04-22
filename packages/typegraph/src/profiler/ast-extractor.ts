@@ -240,6 +240,16 @@ function extractFromExpression(
       }
       break;
     }
+
+    case "fulltext_match": {
+      // Fulltext match targets a searchable string field. Track as an
+      // index hint so the profiler reports its usage.
+      const extracted = extractFromFieldRef(expr.field, "filter", ast);
+      if (extracted) {
+        accesses.push({ ...extracted, predicateType: "fulltext_match" });
+      }
+      break;
+    }
   }
 
   return accesses;

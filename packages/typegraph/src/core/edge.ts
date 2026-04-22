@@ -1,7 +1,9 @@
 import { z } from "zod";
 
-import { ConfigurationError } from "../errors/index";
-import { RESERVED_EDGE_KEYS } from "../store/reserved-keys";
+import {
+  assertSchemaKeysAreFree,
+  RESERVED_EDGE_KEYS,
+} from "../store/reserved-keys";
 import { EDGE_TYPE_BRAND, type EdgeType, type NodeType } from "./types";
 
 // ============================================================
@@ -37,26 +39,16 @@ type EmptySchema = typeof EMPTY_SCHEMA;
 // Edge Factory
 // ============================================================
 
-/**
- * Validates that a schema does not contain reserved property names.
- */
 function validateSchemaKeys(
   schema: z.ZodObject<z.ZodRawShape>,
   name: string,
 ): void {
-  const shape = schema.shape;
-  const conflicts = Object.keys(shape).filter((key) =>
-    RESERVED_EDGE_KEYS.has(key),
+  assertSchemaKeysAreFree(
+    "Edge",
+    name,
+    Object.keys(schema.shape),
+    RESERVED_EDGE_KEYS,
   );
-  if (conflicts.length > 0) {
-    throw new ConfigurationError(
-      `Edge "${name}" schema contains reserved property names: ${conflicts.join(", ")}`,
-      { edgeType: name, conflicts, reservedKeys: [...RESERVED_EDGE_KEYS] },
-      {
-        suggestion: `Rename the conflicting properties. Reserved names are added automatically to all edges.`,
-      },
-    );
-  }
 }
 
 /**

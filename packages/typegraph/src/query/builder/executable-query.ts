@@ -44,6 +44,7 @@ import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
 import { type FieldTypeInfo } from "../schema-introspector";
 import { buildQueryAst } from "./ast-builder";
+import { buildCompileOptions } from "./compile-options";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   type AliasMap,
@@ -441,10 +442,7 @@ export class ExecutableQuery<
    * Builds compile options from the config.
    */
   #compileOptions(): CompileQueryOptions {
-    return {
-      dialect: this.#config.dialect ?? "sqlite",
-      schema: this.#config.schema,
-    };
+    return buildCompileOptions(this.#config);
   }
 
   #requireBackend(): GraphBackend {

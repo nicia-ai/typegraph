@@ -42,6 +42,7 @@ export type SqliteTableNames = Readonly<{
   uniques: string;
   schemaVersions: string;
   embeddings: string;
+  fulltext: string;
 }>;
 
 export type CreateSqliteTablesOptions = Readonly<{
@@ -60,6 +61,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   embeddings: "typegraph_node_embeddings",
+  fulltext: "typegraph_node_fulltext",
 };
 
 /**
@@ -243,7 +245,19 @@ export function createSqliteTables(
     ],
   );
 
-  return { nodes, edges, uniques, schemaVersions, embeddings } as const;
+  return {
+    nodes,
+    edges,
+    uniques,
+    schemaVersions,
+    embeddings,
+    /**
+     * The fulltext storage is a FTS5 virtual table which Drizzle cannot
+     * represent. DDL is emitted as raw SQL and operations query it via
+     * `sql.raw()`.
+     */
+    fulltextTableName: n.fulltext,
+  } as const;
 }
 
 /**

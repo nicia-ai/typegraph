@@ -101,6 +101,12 @@ These exclusions keep TypeGraph focused and maintainable.
 Note: TypeGraph **does support** semantic search via database vector extensions
 (pgvector for PostgreSQL, sqlite-vec for SQLite). See [Semantic Search](/semantic-search) for details.
 
+Note: TypeGraph **does support** fulltext search — native BM25 on SQLite (FTS5)
+and `tsvector` + GIN on PostgreSQL, with a query-builder
+`n.$fulltext.matches()` predicate that composes with any other predicate.
+Combine with semantic search for hybrid RAG retrieval. See
+[Fulltext Search](/fulltext-search) for details.
+
 Note: TypeGraph does support **variable-length paths** via `.recursive()` with
 configurable depth limits, optional path/depth projection, and explicit cycle
 policy. Cycle prevention is the default.

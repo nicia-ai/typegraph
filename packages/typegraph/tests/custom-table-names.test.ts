@@ -48,6 +48,7 @@ describe("custom table names", () => {
     nodes: "app_nodes",
     edges: "app_edges",
     embeddings: "app_embeddings",
+    fulltext: "app_fulltext",
   } as const;
 
   let backend: GraphBackend;
@@ -57,6 +58,7 @@ describe("custom table names", () => {
       nodes: CUSTOM_NAMES.nodes,
       edges: CUSTOM_NAMES.edges,
       embeddings: CUSTOM_NAMES.embeddings,
+      fulltext: CUSTOM_NAMES.fulltext,
     });
     backend = createTestBackend(tables);
   });
@@ -149,6 +151,7 @@ describe("custom table names", () => {
       nodes: "typegraph_nodes",
       edges: "typegraph_edges",
       embeddings: "typegraph_node_embeddings",
+      fulltext: "typegraph_node_fulltext",
     });
   });
 });

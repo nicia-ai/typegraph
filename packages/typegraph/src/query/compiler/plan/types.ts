@@ -1,6 +1,7 @@
 import type {
   AggregateExpr,
   FieldRef,
+  FulltextMatchPredicate,
   OrderSpec,
   PredicateExpression,
   ProjectedField,
@@ -19,6 +20,7 @@ export type LogicalPlanNode =
   | SortPlanNode
   | LimitOffsetPlanNode
   | VectorKnnPlanNode
+  | FulltextMatchPlanNode
   | RecursiveExpandPlanNode
   | SetOpPlanNode
   | ProjectPlanNode;
@@ -94,6 +96,13 @@ export type VectorKnnPlanNode = Readonly<{
   input: LogicalPlanNode;
   op: "vector_knn";
   predicate: VectorSimilarityPredicate;
+}>;
+
+export type FulltextMatchPlanNode = Readonly<{
+  id: string;
+  input: LogicalPlanNode;
+  op: "fulltext_match";
+  predicate: FulltextMatchPredicate;
 }>;
 
 export type RecursiveExpandPlanNode = Readonly<{

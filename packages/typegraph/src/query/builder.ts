@@ -122,6 +122,7 @@ export function createQueryBuilder<G extends GraphDef>(
     asOf: undefined,
     groupBy: undefined,
     having: undefined,
+    fusion: undefined,
   };
 
   return new QueryBuilder(config, initialState);

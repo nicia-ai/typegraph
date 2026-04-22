@@ -1,4 +1,6 @@
 import type {
+  FulltextMatchPredicate,
+  HybridFusionOptions,
   PredicateExpression,
   QueryAst,
   VectorSimilarityPredicate,
@@ -6,8 +8,11 @@ import type {
 import { type DialectAdapter } from "../dialect";
 import {
   createTemporalFilterPass,
+  resolveFulltextAwareLimit,
   resolveVectorAwareLimit,
   runCompilerPass,
+  runFulltextPredicatePass,
+  runFusionConfigPass,
   runVectorPredicatePass,
   type TemporalFilterPass,
 } from "./passes";
@@ -92,6 +97,10 @@ function markPredicateFieldsAsRequired(
       markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
       return;
     }
+    case "fulltext_match": {
+      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+      return;
+    }
     case "exists": {
       return;
     }
@@ -172,7 +181,8 @@ function hasIdEqualityPredicate(
     case "aggregate_comparison":
     case "exists":
     case "in_subquery":
-    case "vector_similarity": {
+    case "vector_similarity":
+    case "fulltext_match": {
       return false;
     }
   }
@@ -235,8 +245,13 @@ function resolveTraversalCteLimit(
 function canCollapseSelectiveTraversalRowset(
   ast: QueryAst,
   vectorPredicate: VectorSimilarityPredicate | undefined,
+  fulltextPredicate: FulltextMatchPredicate | undefined,
 ): boolean {
   if (vectorPredicate !== undefined) {
+    return false;
+  }
+
+  if (fulltextPredicate !== undefined) {
     return false;
   }
 
@@ -294,6 +309,8 @@ type StandardQueryPassState = Readonly<{
   collapsedTraversalCteAlias: string | undefined;
   ctx: PredicateCompilerContext;
   effectiveLimit: number | undefined;
+  fulltextPredicate: FulltextMatchPredicate | undefined;
+  fusion: HybridFusionOptions | undefined;
   logicalPlan: LogicalPlan | undefined;
   predicateIndex: PredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
@@ -313,6 +330,8 @@ export function runStandardQueryPassPipeline(
     collapsedTraversalCteAlias: undefined,
     ctx,
     effectiveLimit: undefined,
+    fulltextPredicate: undefined,
+    fusion: undefined,
     logicalPlan: undefined,
     predicateIndex: buildPredicateIndex(ast),
     requiredColumnsByAlias: undefined,
@@ -336,6 +355,41 @@ export function runStandardQueryPassPipeline(
     },
   });
   state = vectorPass.state;
+
+  const fulltextPass = runCompilerPass(state, {
+    name: "fulltext_predicate",
+    execute(currentState): FulltextMatchPredicate | undefined {
+      return runFulltextPredicatePass(
+        currentState.ast,
+        currentState.ctx.dialect,
+      ).fulltextPredicate;
+    },
+    update(currentState, fulltextPredicate): StandardQueryPassState {
+      return {
+        ...currentState,
+        fulltextPredicate,
+      };
+    },
+  });
+  state = fulltextPass.state;
+
+  const fusionPass = runCompilerPass(state, {
+    name: "fusion_config",
+    execute(currentState): HybridFusionOptions | undefined {
+      return runFusionConfigPass(
+        currentState.ast,
+        currentState.vectorPredicate,
+        currentState.fulltextPredicate,
+      ).fusion;
+    },
+    update(currentState, fusion): StandardQueryPassState {
+      return {
+        ...currentState,
+        fusion,
+      };
+    },
+  });
+  state = fusionPass.state;
 
   const temporalPass = runCompilerPass(state, {
     name: "temporal_filters",
@@ -380,6 +434,7 @@ export function runStandardQueryPassPipeline(
         canCollapseSelectiveTraversalRowset(
           currentState.ast,
           currentState.vectorPredicate,
+          currentState.fulltextPredicate,
         );
       const lastTraversal = currentState.ast.traversals.at(-1);
       const collapsedTraversalCteAlias =
@@ -423,11 +478,12 @@ export function runStandardQueryPassPipeline(
   state = traversalLimitPass.state;
 
   // Compute effectiveLimit once — used by both logical plan lowering and SQL LIMIT/OFFSET.
+  // Both vector and fulltext predicates carry their own LIMITs; the tightest wins.
   state = {
     ...state,
-    effectiveLimit: resolveVectorAwareLimit(
-      state.ast.limit,
-      state.vectorPredicate,
+    effectiveLimit: resolveFulltextAwareLimit(
+      resolveVectorAwareLimit(state.ast.limit, state.vectorPredicate),
+      state.fulltextPredicate,
     ),
   };
 
@@ -453,6 +509,9 @@ export function runStandardQueryPassPipeline(
         ...(currentState.vectorPredicate === undefined ?
           {}
         : { vectorPredicate: currentState.vectorPredicate }),
+        ...(currentState.fulltextPredicate === undefined ?
+          {}
+        : { fulltextPredicate: currentState.fulltextPredicate }),
       });
     },
     update(currentState, logicalPlan): StandardQueryPassState {

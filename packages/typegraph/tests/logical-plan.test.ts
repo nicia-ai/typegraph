@@ -47,6 +47,7 @@ function collectPlanOperations(node: LogicalPlanNode): readonly string[] {
     }
     case "aggregate":
     case "filter":
+    case "fulltext_match":
     case "join":
     case "limit_offset":
     case "project":

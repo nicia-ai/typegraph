@@ -1,7 +1,13 @@
 import { z } from "zod";
 
 import type { createStore } from "../../../src";
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+} from "../../../src";
 
 /**
  * Test graph definition used across all backend integration tests.
@@ -55,6 +61,21 @@ const Document = defineNode("Document", {
   }),
 });
 
+/**
+ * Article node for testing fulltext and hybrid search. Carries
+ * `searchable()` fields plus an optional embedding so the same fixture
+ * exercises both relevance paths on backends that support them.
+ */
+const Article = defineNode("Article", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    body: searchable({ language: "english" }),
+    category: z.string(),
+    published: z.boolean(),
+    embedding: embedding(4).optional(),
+  }),
+});
+
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
@@ -75,6 +96,7 @@ export const integrationTestGraph = defineGraph({
     Person: { type: Person },
     Company: { type: Company },
     Document: { type: Document },
+    Article: { type: Article },
   },
   edges: {
     worksAt: {

@@ -3,7 +3,11 @@ import { type SQL, sql } from "drizzle-orm";
 import { UnsupportedPredicateError } from "../../../errors";
 import {
   type AggregateExpr,
+  DEFAULT_RRF_K,
+  DEFAULT_RRF_WEIGHT,
   type FieldRef,
+  type FulltextMatchPredicate,
+  type HybridFusionOptions,
   type QueryAst,
   type SelectiveField,
   type VectorSimilarityPredicate,
@@ -14,6 +18,7 @@ import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
   compilePredicateClauses,
+  getHybridTargetAlias,
   getNodeKindsForAlias,
   getPredicatesForAlias,
   type PredicateIndex,
@@ -23,6 +28,12 @@ import {
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "../predicates";
+import {
+  ALIAS_CTE_PREFIX,
+  EMBEDDINGS_CTE_ALIAS,
+  FULLTEXT_CTE_ALIAS,
+  HYBRID_CANDIDATES_CTE_ALIAS,
+} from "../schema";
 import { compileTypedJsonExtract } from "../typed-json-extract";
 import {
   EDGE_COLUMNS,
@@ -45,6 +56,24 @@ function compileColumnReference(
     return sql.raw(column);
   }
   return sql`${sql.raw(tableAlias)}.${sql.raw(column)}`;
+}
+
+function qualifyColumn(owner: string, name: string): SQL {
+  return sql`${quoteIdentifier(owner)}.${quoteIdentifier(name)}`;
+}
+
+const SCOPED_RELEVANCE_NODES_ALIAS = "scoped_relevance_nodes";
+
+function buildScopedNodeIdsSubquery(nodeAlias: string): SQL {
+  const cteAlias = `${ALIAS_CTE_PREFIX}${nodeAlias}`;
+  return sql`
+    (
+        SELECT DISTINCT
+          ${qualifyColumn(cteAlias, `${nodeAlias}_id`)} AS node_id,
+          ${qualifyColumn(cteAlias, `${nodeAlias}_kind`)} AS node_kind
+        FROM ${quoteIdentifier(cteAlias)}
+      ) AS ${sql.raw(SCOPED_RELEVANCE_NODES_ALIAS)}
+  `;
 }
 
 function compileNodeSelectColumns(
@@ -474,16 +503,72 @@ function compileSelectiveProjection(
   return sql.join(columns, sql`, `);
 }
 
+function buildRelevanceJoins(
+  vectorPredicate: VectorSimilarityPredicate | undefined,
+  fulltextPredicate: FulltextMatchPredicate | undefined,
+): SQL[] {
+  const hybridTargetAlias = getHybridTargetAlias(
+    vectorPredicate,
+    fulltextPredicate,
+  );
+  if (hybridTargetAlias !== undefined) {
+    return [
+      buildHybridCandidateJoin(hybridTargetAlias),
+      buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, hybridTargetAlias, "LEFT JOIN"),
+      buildRelevanceJoin(FULLTEXT_CTE_ALIAS, hybridTargetAlias, "LEFT JOIN"),
+    ];
+  }
+
+  const joins: SQL[] = [];
+  if (vectorPredicate) {
+    joins.push(
+      buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, vectorPredicate.field.alias),
+    );
+  }
+  if (fulltextPredicate) {
+    joins.push(
+      buildRelevanceJoin(FULLTEXT_CTE_ALIAS, fulltextPredicate.field.alias),
+    );
+  }
+  return joins;
+}
+
+function buildHybridCandidateJoin(nodeAlias: string): SQL {
+  const candidateCte = sql.raw(HYBRID_CANDIDATES_CTE_ALIAS);
+  const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
+  const idColumn = sql.raw(`${nodeAlias}_id`);
+  const kindColumn = sql.raw(`${nodeAlias}_kind`);
+  return sql`INNER JOIN ${candidateCte} ON ${candidateCte}.node_id = ${node}.${idColumn} AND ${candidateCte}.node_kind = ${node}.${kindColumn}`;
+}
+
+function buildRelevanceJoin(
+  cteAlias: string,
+  nodeAlias: string,
+  joinType = "INNER JOIN",
+): SQL {
+  const cte = sql.raw(cteAlias);
+  const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
+  const idColumn = sql.raw(`${nodeAlias}_id`);
+  const kindColumn = sql.raw(`${nodeAlias}_kind`);
+  return sql`${sql.raw(joinType)} ${cte} ON ${cte}.node_id = ${node}.${idColumn} AND ${cte}.node_kind = ${node}.${kindColumn}`;
+}
+
 type BuildStandardFromClauseInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
+  fulltextPredicate?: FulltextMatchPredicate;
   vectorPredicate?: VectorSimilarityPredicate;
 }>;
 
 export function buildStandardFromClause(
   input: BuildStandardFromClauseInput,
 ): SQL {
-  const { ast, collapsedTraversalCteAlias, vectorPredicate } = input;
+  const {
+    ast,
+    collapsedTraversalCteAlias,
+    fulltextPredicate,
+    vectorPredicate,
+  } = input;
   if (collapsedTraversalCteAlias !== undefined) {
     return sql`FROM ${sql.raw(collapsedTraversalCteAlias)}`;
   }
@@ -501,11 +586,12 @@ export function buildStandardFromClause(
     );
   }
 
-  if (vectorPredicate) {
-    const nodeAlias = vectorPredicate.field.alias;
-    joins.push(
-      sql`INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_${sql.raw(nodeAlias)}.${sql.raw(nodeAlias)}_id`,
-    );
+  // Node IDs are unique only within a kind (PK is graph_id, kind, id),
+  // so the relevance-CTE joins must include node_kind. Without it,
+  // polymorphic queries would cross-join on user-supplied ids shared
+  // across kinds.
+  for (const join of buildRelevanceJoins(vectorPredicate, fulltextPredicate)) {
+    joins.push(join);
   }
 
   return joins.length === 0 ?
@@ -562,6 +648,22 @@ export function buildStandardOrderBy(
 function fieldRefKey(field: FieldRef): string {
   const pointer = field.jsonPointer ?? "";
   return `${field.alias}:${field.path.join(".")}:${pointer}`;
+}
+
+function resolveEmbeddingFieldPath(field: FieldRef): string {
+  if (
+    field.jsonPointer !== undefined &&
+    field.jsonPointer !== "" &&
+    field.jsonPointer !== "/"
+  ) {
+    return field.jsonPointer.replace(/^\//u, "").replaceAll("/", ".");
+  }
+
+  if (field.path[0] === "props") {
+    return field.path.slice(1).join(".");
+  }
+
+  return field.path.join(".");
 }
 
 type BuildStandardGroupByInput = Readonly<{
@@ -635,31 +737,42 @@ export function buildStandardHaving(
 type BuildStandardEmbeddingsCteInput = Readonly<{
   ctx: PredicateCompilerContext;
   graphId: string;
+  nodeKinds: readonly string[];
   vectorPredicate: VectorSimilarityPredicate;
 }>;
 
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
 ): SQL {
-  const { ctx, graphId, vectorPredicate } = input;
+  const { ctx, graphId, nodeKinds, vectorPredicate } = input;
   const { dialect } = ctx;
   const { field, metric, minScore, queryEmbedding } = vectorPredicate;
+  const embeddingsTableName = ctx.schema.tables.embeddings;
 
-  const fieldPath =
-    field.jsonPointer ??
-    (field.path.length > 1 && field.path[0] === "props" ?
-      `/${field.path.slice(1).join("/")}`
-    : `/${field.path.join("/")}`);
+  if (nodeKinds.length === 0) {
+    throw new UnsupportedPredicateError(
+      "Vector predicate must resolve to at least one node kind",
+    );
+  }
+
+  const fieldPath = resolveEmbeddingFieldPath(field);
 
   const distanceExpr = dialect.vectorDistance(
-    sql.raw("embedding"),
+    qualifyColumn(embeddingsTableName, "embedding"),
     queryEmbedding,
     metric,
   );
+  const scopedNodes = buildScopedNodeIdsSubquery(field.alias);
 
+  // Filter by the alias's resolved kinds so similarTo() doesn't leak
+  // rank weight from other kinds that happen to embed the same field_path.
   const conditions: SQL[] = [
-    sql`graph_id = ${graphId}`,
-    sql`field_path = ${fieldPath}`,
+    sql`${qualifyColumn(embeddingsTableName, "graph_id")} = ${graphId}`,
+    compileKindFilter(
+      qualifyColumn(embeddingsTableName, "node_kind"),
+      nodeKinds,
+    ),
+    sql`${qualifyColumn(embeddingsTableName, "field_path")} = ${fieldPath}`,
   ];
 
   if (minScore !== undefined) {
@@ -672,15 +785,35 @@ export function buildStandardEmbeddingsCte(
 
   const scoreExpr = compileVectorScoreExpression(distanceExpr, metric);
 
+  // Inner SELECT applies the predicate's k-cutoff, then ROW_NUMBER ranks
+  // over that bounded set. Without the inner LIMIT, a hybrid query
+  // would assign vector ordinals to every row in the embeddings table,
+  // letting documents far outside the requested top-k contribute to the
+  // RRF fused score and reorder final results.
   return sql`
-    cte_embeddings AS (
+    ${sql.raw(EMBEDDINGS_CTE_ALIAS)} AS (
       SELECT
         node_id,
-        ${distanceExpr} AS distance,
-        ${scoreExpr} AS score
-      FROM ${ctx.schema.embeddingsTable}
-      WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${distanceExpr} ASC
+        node_kind,
+        distance,
+        score,
+        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+      FROM (
+        SELECT
+          ${qualifyColumn(embeddingsTableName, "node_id")} AS node_id,
+          ${qualifyColumn(embeddingsTableName, "node_kind")} AS node_kind,
+          ${distanceExpr} AS distance,
+          ${scoreExpr} AS score
+        FROM ${ctx.schema.embeddingsTable}
+        INNER JOIN ${scopedNodes}
+          ON ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_id`)} =
+             ${qualifyColumn(embeddingsTableName, "node_id")}
+         AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
+             ${qualifyColumn(embeddingsTableName, "node_kind")}
+        WHERE ${sql.join(conditions, sql` AND `)}
+        ORDER BY distance ASC
+        LIMIT ${vectorPredicate.limit}
+      ) AS vec_inner
     )
   `;
 }
@@ -720,6 +853,210 @@ function compileVectorMinScoreCondition(
   }
 }
 
+// ============================================================
+// Fulltext Search CTE
+// ============================================================
+
+type BuildStandardFulltextCteInput = Readonly<{
+  ctx: PredicateCompilerContext;
+  fulltextPredicate: FulltextMatchPredicate;
+  graphId: string;
+  nodeKinds: readonly string[];
+}>;
+
+export function buildStandardFulltextCte(
+  input: BuildStandardFulltextCteInput,
+): SQL {
+  const { ctx, fulltextPredicate, graphId, nodeKinds } = input;
+  const { dialect, schema } = ctx;
+  const { query, mode, language, limit, minScore } = fulltextPredicate;
+
+  if (nodeKinds.length === 0) {
+    throw new UnsupportedPredicateError(
+      "Fulltext predicate must resolve to at least one node kind",
+    );
+  }
+
+  const tableName = schema.tables.fulltext;
+  const scopedNodes = buildScopedNodeIdsSubquery(fulltextPredicate.field.alias);
+  const fulltextStrategy = dialect.fulltext;
+  if (fulltextStrategy === undefined) {
+    throw new UnsupportedPredicateError(
+      `Fulltext match predicates are not supported for dialect "${dialect.name}"`,
+    );
+  }
+  const matchCondition = fulltextStrategy.matchCondition(
+    tableName,
+    query,
+    mode,
+    language,
+  );
+  const rankExpression = fulltextStrategy.rankExpression(
+    tableName,
+    query,
+    mode,
+    language,
+  );
+
+  const conditions: SQL[] = [
+    sql`${qualifyColumn(tableName, "graph_id")} = ${graphId}`,
+    compileKindFilter(qualifyColumn(tableName, "node_kind"), nodeKinds),
+    matchCondition,
+  ];
+  if (minScore !== undefined) {
+    conditions.push(sql`${rankExpression} >= ${minScore}`);
+  }
+
+  // Inner SELECT computes the rank once into an alias, outer SELECT
+  // adds the ordinal via ROW_NUMBER. Two reasons to nest:
+  // (1) Postgres re-evaluates `ts_rank_cd(...)` if it's repeated across
+  // SELECT/ORDER BY, so referencing the alias avoids duplicate work.
+  // (2) SQLite FTS5's bm25() cannot appear inside a window function's
+  // OVER clause — the auxiliary-function context is restricted.
+  return sql`
+    ${sql.raw(FULLTEXT_CTE_ALIAS)} AS (
+      SELECT
+        node_id,
+        node_kind,
+        rank,
+        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+      FROM (
+        SELECT
+          ${qualifyColumn(tableName, "node_id")} AS node_id,
+          ${qualifyColumn(tableName, "node_kind")} AS node_kind,
+          ${rankExpression} AS rank
+        FROM ${schema.fulltextTable}
+        INNER JOIN ${scopedNodes}
+          ON ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_id`)} =
+             ${qualifyColumn(tableName, "node_id")}
+         AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
+             ${qualifyColumn(tableName, "node_kind")}
+        WHERE ${sql.join(conditions, sql` AND `)}
+        ORDER BY rank DESC, ${qualifyColumn(tableName, "node_id")} ASC
+        LIMIT ${limit}
+      ) AS fts_inner
+    )
+  `;
+}
+
+export function buildStandardHybridCandidateCte(): SQL {
+  return sql`
+    ${sql.raw(HYBRID_CANDIDATES_CTE_ALIAS)} AS (
+      SELECT node_id, node_kind FROM ${sql.raw(EMBEDDINGS_CTE_ALIAS)}
+      UNION
+      SELECT node_id, node_kind FROM ${sql.raw(FULLTEXT_CTE_ALIAS)}
+    )
+  `;
+}
+
+/**
+ * Compiles user-supplied `orderBy` clauses into SQL fragments suitable
+ * for appending after a relevance-driven primary ORDER BY (vector,
+ * fulltext, or hybrid RRF).
+ */
+function compileUserOrderBy(
+  ast: QueryAst,
+  dialect: DialectAdapter,
+): readonly SQL[] {
+  if (!ast.orderBy || ast.orderBy.length === 0) return [];
+
+  const aliasToCte = buildAliasToCteMap(ast);
+  const fragments: SQL[] = [];
+  for (const orderSpec of ast.orderBy) {
+    const valueType = orderSpec.field.valueType;
+    if (valueType === "array" || valueType === "object") {
+      throw new UnsupportedPredicateError(
+        "Ordering by JSON arrays or objects is not supported",
+      );
+    }
+    const cteAlias =
+      aliasToCte.get(orderSpec.field.alias) ??
+      `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`;
+    const field = compileFieldValue(
+      orderSpec.field,
+      dialect,
+      valueType,
+      cteAlias,
+    );
+    const direction = sql.raw(orderSpec.direction.toUpperCase());
+    const nulls =
+      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
+    fragments.push(
+      sql`(${field} IS NULL) ${nullsDirection}`,
+      sql`${field} ${direction}`,
+    );
+  }
+  return fragments;
+}
+
+type BuildStandardFulltextOrderByInput = Readonly<{
+  ast: QueryAst;
+  dialect: DialectAdapter;
+}>;
+
+/**
+ * ORDER BY clause when only a fulltext predicate is present.
+ * Orders by rank DESC then any user-supplied ORDER BY as tiebreakers.
+ */
+export function buildStandardFulltextOrderBy(
+  input: BuildStandardFulltextOrderByInput,
+): SQL {
+  const { ast, dialect } = input;
+  const rankOrder = sql.raw(`${FULLTEXT_CTE_ALIAS}.rank DESC`);
+  const userOrders = compileUserOrderBy(ast, dialect);
+  return sql`ORDER BY ${sql.join([rankOrder, ...userOrders], sql`, `)}`;
+}
+
+/**
+ * ORDER BY clause when BOTH vector and fulltext predicates are present.
+ *
+ * Reciprocal Rank Fusion at SQL level. Each CTE emits an `ord` ordinal
+ * via ROW_NUMBER; the outer ORDER BY blends them as
+ * `w_vec / (k + ord_vec) + w_ft / (k + ord_ft)`. NULL `ord` (a node
+ * matched by only one source) makes that source's term NULL → COALESCE-to-0
+ * absorbs it. User-supplied `orderBy` clauses follow as tiebreakers,
+ * matching the single-source paths so pagination stays stable across
+ * RRF score ties.
+ *
+ * Defaults: k=60, vector weight = fulltext weight = 1. Override via
+ * `.fuseWith({ k, weights })` on the query builder.
+ */
+
+type BuildStandardHybridRrfOrderByInput = Readonly<{
+  ast: QueryAst;
+  dialect: DialectAdapter;
+  fusion: HybridFusionOptions | undefined;
+}>;
+
+export function buildStandardHybridRrfOrderBy(
+  input: BuildStandardHybridRrfOrderByInput,
+): SQL {
+  const { ast, dialect, fusion } = input;
+  const k = fusion?.k ?? DEFAULT_RRF_K;
+  const vectorWeight = fusion?.weights?.vector ?? DEFAULT_RRF_WEIGHT;
+  const fulltextWeight = fusion?.weights?.fulltext ?? DEFAULT_RRF_WEIGHT;
+
+  // Invariant: validateHybridFusionOptions has already rejected
+  // non-finite / negative values before we reach here. sql.raw on these
+  // numeric constants is deliberate — they're schema-level config, not
+  // user-bindable.
+  const rrfOrder = sql.raw(
+    `(COALESCE(${vectorWeight} / (${k} + ${EMBEDDINGS_CTE_ALIAS}.ord), 0) + ` +
+      `COALESCE(${fulltextWeight} / (${k} + ${FULLTEXT_CTE_ALIAS}.ord), 0)) DESC`,
+  );
+  // Deterministic tiebreak on the CTE-projected node_id. At least one of
+  // the two CTEs always has a non-NULL node_id for any row returned by
+  // the LEFT JOIN-union shape, so COALESCE always resolves. This matches
+  // `store.search.hybrid`'s JS-side `localeCompare(nodeId)` tiebreak so
+  // the two paths produce identical top-k under ties.
+  const idTiebreak = sql.raw(
+    `COALESCE(${FULLTEXT_CTE_ALIAS}.node_id, ${EMBEDDINGS_CTE_ALIAS}.node_id) ASC`,
+  );
+  const userOrders = compileUserOrderBy(ast, dialect);
+  return sql`ORDER BY ${sql.join([rrfOrder, ...userOrders, idTiebreak], sql`, `)}`;
+}
+
 type BuildStandardVectorOrderByInput = Readonly<{
   ast: QueryAst;
   dialect: DialectAdapter;
@@ -729,40 +1066,9 @@ export function buildStandardVectorOrderBy(
   input: BuildStandardVectorOrderByInput,
 ): SQL {
   const { ast, dialect } = input;
-
-  const distanceOrder = sql`cte_embeddings.distance ASC`;
-  const additionalOrders: SQL[] = [];
-
-  if (ast.orderBy && ast.orderBy.length > 0) {
-    const aliasToCte = buildAliasToCteMap(ast);
-    for (const orderSpec of ast.orderBy) {
-      const valueType = orderSpec.field.valueType;
-      if (valueType === "array" || valueType === "object") {
-        throw new UnsupportedPredicateError(
-          "Ordering by JSON arrays or objects is not supported",
-        );
-      }
-      const cteAlias =
-        aliasToCte.get(orderSpec.field.alias) ?? `cte_${orderSpec.field.alias}`;
-      const field = compileFieldValue(
-        orderSpec.field,
-        dialect,
-        valueType,
-        cteAlias,
-      );
-      const direction = sql.raw(orderSpec.direction.toUpperCase());
-      const nulls =
-        orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-      const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-      additionalOrders.push(
-        sql`(${field} IS NULL) ${nullsDirection}`,
-        sql`${field} ${direction}`,
-      );
-    }
-  }
-
-  const allOrders = [distanceOrder, ...additionalOrders];
-  return sql`ORDER BY ${sql.join(allOrders, sql`, `)}`;
+  const distanceOrder = sql.raw(`${EMBEDDINGS_CTE_ALIAS}.distance ASC`);
+  const userOrders = compileUserOrderBy(ast, dialect);
+  return sql`ORDER BY ${sql.join([distanceOrder, ...userOrders], sql`, `)}`;
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{

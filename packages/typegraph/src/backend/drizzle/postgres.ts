@@ -23,16 +23,27 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { SqlTableNames } from "../../query/compiler/schema";
 import {
+  buildFulltextCapabilities,
+  type FulltextStrategy,
+  tsvectorStrategy,
+} from "../../query/dialect/fulltext-strategy";
+import {
   type BackendCapabilities,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
+  type DeleteFulltextBatchParams,
+  type DeleteFulltextParams,
   type DropVectorIndexParams,
   type EmbeddingRow,
+  type FulltextSearchParams,
+  type FulltextSearchResult,
   type GraphBackend,
   POSTGRES_CAPABILITIES,
   type TransactionBackend,
   type TransactionOptions,
   type UpsertEmbeddingParams,
+  type UpsertFulltextBatchParams,
+  type UpsertFulltextParams,
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
@@ -77,6 +88,15 @@ export type PostgresBackendOptions = Readonly<{
    * Defaults to standard TypeGraph table names.
    */
   tables?: PostgresTables;
+  /**
+   * Fulltext strategy override. Defaults to `tsvectorStrategy`
+   * (Postgres built-in `tsvector` + GIN). Pass a custom strategy here to
+   * swap the entire fulltext stack — DDL, MATCH condition, rank
+   * expression, and snippet generation — for alternate Postgres
+   * backends like ParadeDB (`pg_search`), pg_trgm similarity, or
+   * pgroonga without forking TypeGraph.
+   */
+  fulltext?: FulltextStrategy;
 }>;
 
 const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
@@ -141,19 +161,31 @@ function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {
   };
 }
 
-/**
- * PostgreSQL capabilities with vector search support.
- * Extends base POSTGRES_CAPABILITIES with vector operations.
- */
-const POSTGRES_VECTOR_CAPABILITIES: BackendCapabilities = {
-  ...POSTGRES_CAPABILITIES,
-  vector: {
-    supported: true,
-    metrics: ["cosine", "l2", "inner_product"] as const,
-    indexTypes: ["hnsw", "ivfflat", "none"] as const,
-    maxDimensions: 16_000, // pgvector limit
-  },
-};
+function coerceNumericScore(value: number | string): number {
+  if (typeof value === "number") return value;
+  const parsed = Number.parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    throw new TypeError(
+      `Backend returned non-numeric fulltext score: ${JSON.stringify(value)}`,
+    );
+  }
+  return parsed;
+}
+
+function buildPostgresCapabilities(
+  strategy: FulltextStrategy,
+): BackendCapabilities {
+  return {
+    ...POSTGRES_CAPABILITIES,
+    vector: {
+      supported: true,
+      metrics: ["cosine", "l2", "inner_product"] as const,
+      indexTypes: ["hnsw", "ivfflat", "none"] as const,
+      maxDimensions: 16_000, // pgvector limit
+    },
+    fulltext: buildFulltextCapabilities(strategy),
+  };
+}
 
 // ============================================================
 // Backend Factory
@@ -173,25 +205,33 @@ export function createPostgresBackend(
   options: PostgresBackendOptions = {},
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
+  const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
+  const capabilities = buildPostgresCapabilities(fulltextStrategy);
   const executionAdapter = createPostgresExecutionAdapter(db);
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
+    fulltext: tables.fulltextTableName,
   };
-  const operationStrategy = createPostgresOperationStrategy(tables);
+  const operationStrategy = createPostgresOperationStrategy(
+    tables,
+    fulltextStrategy,
+  );
   const operations = createPostgresOperationBackend({
     db,
     executionAdapter,
     operationStrategy,
     tableNames,
+    capabilities,
+    fulltextStrategy,
   });
 
   const backend: GraphBackend = {
     ...operations,
 
     async bootstrapTables(): Promise<void> {
-      const statements = generatePostgresDDL(tables);
+      const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.execute(sql.raw(statement));
       }
@@ -222,6 +262,8 @@ export function createPostgresBackend(
           db: tx,
           operationStrategy,
           tableNames,
+          capabilities,
+          fulltextStrategy,
         });
         return fn(txBackend);
       }, txConfig);
@@ -241,6 +283,8 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   executionAdapter: PostgresExecutionAdapter;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: SqlTableNames;
+  capabilities: BackendCapabilities;
+  fulltextStrategy: FulltextStrategy;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -248,12 +292,21 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   executionAdapter?: PostgresExecutionAdapter;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: SqlTableNames;
+  capabilities: BackendCapabilities;
+  fulltextStrategy: FulltextStrategy;
 }>;
 
 function createPostgresOperationBackend(
   options: CreatePostgresOperationBackendOptions,
 ): TransactionBackend {
-  const { db, executionAdapter, operationStrategy, tableNames } = options;
+  const {
+    db,
+    executionAdapter,
+    operationStrategy,
+    tableNames,
+    capabilities,
+    fulltextStrategy,
+  } = options;
 
   async function execAll<T>(query: SQL): Promise<T[]> {
     const result = (await db.execute(query)) as Readonly<{
@@ -312,7 +365,8 @@ function createPostgresOperationBackend(
   const operationBackend: TransactionBackend = {
     ...commonBackend,
     ...executeRawMethod,
-    capabilities: POSTGRES_VECTOR_CAPABILITIES,
+    capabilities,
+    fulltextStrategy,
     dialect: "postgres",
     tableNames,
 
@@ -385,9 +439,71 @@ function createPostgresOperationBackend(
       }
     },
 
+    // === Fulltext Operations ===
+
+    async upsertFulltext(params: UpsertFulltextParams): Promise<void> {
+      const timestamp = nowIso();
+      const statements = operationStrategy.buildUpsertFulltext(
+        params,
+        timestamp,
+      );
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async deleteFulltext(params: DeleteFulltextParams): Promise<void> {
+      const statements = operationStrategy.buildDeleteFulltext(params);
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async upsertFulltextBatch(
+      params: UpsertFulltextBatchParams,
+    ): Promise<void> {
+      if (params.rows.length === 0) return;
+      const timestamp = nowIso();
+      const statements = operationStrategy.buildUpsertFulltextBatch(
+        params,
+        timestamp,
+      );
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async deleteFulltextBatch(
+      params: DeleteFulltextBatchParams,
+    ): Promise<void> {
+      if (params.nodeIds.length === 0) return;
+      const statements = operationStrategy.buildDeleteFulltextBatch(params);
+      for (const stmt of statements) {
+        await execRun(stmt);
+      }
+    },
+
+    async fulltextSearch(
+      params: FulltextSearchParams,
+    ): Promise<readonly FulltextSearchResult[]> {
+      const query = operationStrategy.buildFulltextSearch(params);
+      // pg returns `numeric` as a string to preserve precision; coerce at the
+      // backend boundary so FulltextSearchResult.score is always `number`.
+      const rows = await execAll<{
+        node_id: string;
+        score: number | string;
+        snippet: string | null;
+      }>(query);
+      return rows.map((row, index) => ({
+        nodeId: row.node_id,
+        score: coerceNumericScore(row.score),
+        rank: index + 1,
+        ...(row.snippet === null ? {} : { snippet: row.snippet }),
+      }));
+    },
+
     async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      const metrics =
-        POSTGRES_VECTOR_CAPABILITIES.vector?.metrics ?? (["cosine"] as const);
+      const metrics = capabilities.vector?.metrics ?? (["cosine"] as const);
 
       for (const metric of metrics) {
         const indexName = generateVectorIndexName(
@@ -430,6 +546,8 @@ function createTransactionBackend(
     executionAdapter: txExecutionAdapter,
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
+    capabilities: options.capabilities,
+    fulltextStrategy: options.fulltextStrategy,
   });
 }
 

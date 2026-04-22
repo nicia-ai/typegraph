@@ -166,7 +166,8 @@ function substitutePredicateExpression(
     case "array_op":
     case "object_op":
     case "aggregate_comparison":
-    case "vector_similarity": {
+    case "vector_similarity":
+    case "fulltext_match": {
       return expr;
     }
 
@@ -545,7 +546,8 @@ function collectParameterMetadataFromExpression(
     case "array_op":
     case "object_op":
     case "aggregate_comparison":
-    case "vector_similarity": {
+    case "vector_similarity":
+    case "fulltext_match": {
       return;
     }
     case "exists": {

@@ -579,7 +579,36 @@ const queryEmbedding = await embed(text); // Verify this returns 1536-dim vector
 3. **Add filters**: Pre-filter with standard predicates before similarity search
 4. **Consider approximate search**: HNSW indexes sacrifice some accuracy for speed
 
+## Hybrid Search: Combining with Fulltext
+
+Vector search excels at semantic similarity but misses exact matches —
+proper nouns, SKUs, code identifiers, rare technical terms. **Hybrid
+search** fuses vector and fulltext results with Reciprocal Rank Fusion
+and typically beats either approach alone.
+
+```typescript
+// One query, both signals — fused with RRF at the SQL layer
+const results = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) =>
+    d.$fulltext
+      .matches("renewable energy", 50)
+      .and(d.embedding.similarTo(queryVec, 50))
+  )
+  .select((ctx) => ctx.d)
+  .limit(10)
+  .execute();
+```
+
+For tunable per-source weights and RRF parameters, use the store-level
+`store.search.hybrid()` API. See the [Fulltext Search guide](/fulltext-search)
+for the complete hybrid workflow.
+
 ## API Reference
 
 See the [Predicates documentation](/queries/predicates#embedding) for
 complete API reference of the `similarTo()` predicate and related options.
+
+See [Fulltext Search](/fulltext-search) for the `n.$fulltext.matches()`
+predicate and `searchable()` schema brand.

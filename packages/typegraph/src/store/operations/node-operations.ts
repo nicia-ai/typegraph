@@ -38,6 +38,11 @@ import {
   type EmbeddingSyncContext,
   syncEmbeddings,
 } from "../embedding-sync";
+import {
+  deleteNodeFulltext,
+  type FulltextSyncContext,
+  syncFulltext,
+} from "../fulltext-sync";
 import { rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
@@ -205,6 +210,15 @@ function createEmbeddingSyncContext(
   nodeId: string,
   backend: GraphBackend | TransactionBackend,
 ): EmbeddingSyncContext {
+  return { graphId, nodeKind, nodeId, backend };
+}
+
+function createFulltextSyncContext(
+  graphId: string,
+  nodeKind: string,
+  nodeId: string,
+  backend: GraphBackend | TransactionBackend,
+): FulltextSyncContext {
   return { graphId, nodeKind, nodeId, backend };
 }
 
@@ -430,6 +444,12 @@ async function finalizeNodeCreate<G extends GraphDef>(
     prepared.nodeKind.schema,
     prepared.validatedProps,
   );
+
+  await syncFulltext(
+    createFulltextSyncContext(ctx.graphId, prepared.kind, prepared.id, backend),
+    prepared.nodeKind.schema,
+    prepared.validatedProps,
+  );
 }
 
 // ============================================================
@@ -497,6 +517,12 @@ async function performNodeUpdate<G extends GraphDef>(
 
   await syncEmbeddings(
     createEmbeddingSyncContext(ctx.graphId, kind, id, backend),
+    nodeKind.schema,
+    validatedProps,
+  );
+
+  await syncFulltext(
+    createFulltextSyncContext(ctx.graphId, kind, id, backend),
     nodeKind.schema,
     validatedProps,
   );
@@ -896,6 +922,10 @@ export async function executeNodeDelete<G extends GraphDef>(
     const nodeKind = registration.type;
     await deleteNodeEmbeddings(
       createEmbeddingSyncContext(ctx.graphId, kind, id, backend),
+      nodeKind.schema,
+    );
+    await deleteNodeFulltext(
+      createFulltextSyncContext(ctx.graphId, kind, id, backend),
       nodeKind.schema,
     );
   });

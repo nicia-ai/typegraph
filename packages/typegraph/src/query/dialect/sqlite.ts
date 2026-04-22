@@ -7,6 +7,7 @@
 import { sql } from "drizzle-orm";
 
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import { fts5Strategy } from "./fulltext-strategy";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -65,6 +66,7 @@ export const sqliteDialect: DialectAdapter = {
     forceRecursiveWorktableOuterJoinOrder: true,
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2"] as const,
+    supportsFulltext: true,
   },
 
   // ============================================================
@@ -276,4 +278,10 @@ export const sqliteDialect: DialectAdapter = {
     const asJson = JSON.stringify(embedding);
     return sql`vec_f32(${asJson})`;
   },
+
+  // ============================================================
+  // Fulltext Operations
+  // ============================================================
+
+  fulltext: fts5Strategy,
 };

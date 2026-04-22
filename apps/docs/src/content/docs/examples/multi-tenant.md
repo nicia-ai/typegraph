@@ -27,7 +27,7 @@ All tenants share the same database tables, filtered by `tenantId`.
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph } from "@nicia-ai/typegraph";
+import { defineNode, defineEdge, defineGraph, searchable } from "@nicia-ai/typegraph";
 
 // Tenant metadata
 const Tenant = defineNode("Tenant", {
@@ -45,8 +45,12 @@ const Tenant = defineNode("Tenant", {
 const Project = defineNode("Project", {
   schema: z.object({
     tenantId: z.string(),
-    name: z.string(),
-    description: z.string().optional(),
+    // Searchable fields so tenants can run BM25 search against their
+    // own projects without paying for an external search service.
+    // Fulltext filtering composes with the tenantId predicate — every
+    // query is authoritatively tenant-scoped.
+    name: searchable({ language: "english" }),
+    description: searchable({ language: "english" }).optional(),
     status: z.enum(["active", "archived"]).default("active"),
   }),
 });
@@ -54,7 +58,7 @@ const Project = defineNode("Project", {
 const Task = defineNode("Task", {
   schema: z.object({
     tenantId: z.string(),
-    title: z.string(),
+    title: searchable({ language: "english" }),
     status: z.enum(["todo", "in_progress", "done"]).default("todo"),
     priority: z.enum(["low", "medium", "high"]).default("medium"),
   }),
@@ -612,25 +616,35 @@ async function getTenantMetrics(): Promise<
 
 ### Cross-Tenant Search (Database Per Tenant)
 
+Fulltext search composes with tenant scope: the fulltext predicate
+narrows the candidate pool by relevance, and the per-tenant store
+supplies the isolation. Nothing from tenant A can ever appear in tenant
+B's results because each store wraps a different database:
+
 ```typescript
 async function searchAcrossTenants(
   query: string,
   tenantIds: string[]
-): Promise<Array<{ tenantId: string; results: ProjectProps[] }>> {
+): Promise<Array<{ tenantId: string; results: Array<ProjectProps & { score: number; snippet?: string }> }>> {
   const results = await Promise.all(
     tenantIds.map(async (tenantId) => {
       try {
         const store = await dbManager.getStore(tenantId);
 
-        const projects = await store
-          .query()
-          .from("Project", "p")
-          .whereNode("p", (p) => p.name.contains(query))
-          .select((ctx) => ctx.p)
-          .limit(10)
-          .execute();
+        const hits = await store.search.fulltext("Project", {
+          query,
+          limit: 10,
+          includeSnippets: true,
+        });
 
-        return { tenantId, results: projects };
+        return {
+          tenantId,
+          results: hits.map((hit) => ({
+            ...hit.node,
+            score: hit.score,
+            snippet: hit.snippet,
+          })),
+        };
       } catch (error) {
         console.error(`Failed to search tenant ${tenantId}:`, error);
         return { tenantId, results: [] };
@@ -641,6 +655,34 @@ async function searchAcrossTenants(
   return results;
 }
 ```
+
+### Tenant-Scoped Fulltext (Shared Tables)
+
+The composition most multi-tenant teams need: BM25 ranking *plus* a
+tenantId filter in a single query. The fulltext predicate scales with
+the tenant's data, not the whole table:
+
+```typescript
+async function searchTenantProjects(
+  tenantId: string,
+  query: string,
+  limit = 10,
+) {
+  return store
+    .query()
+    .from("Project", "p")
+    .whereNode("p", (p) =>
+      // Tenant filter first so the fulltext match is always scoped.
+      p.tenantId.eq(tenantId).and(p.$fulltext.matches(query, limit)),
+    )
+    .select((ctx) => ctx.p)
+    .execute();
+}
+```
+
+The tenant filter and fulltext match compose in one SQL statement; no
+post-filter in JS and no risk of leaking another tenant's data even if
+the caller forgets to verify.
 
 ## Tenant Lifecycle
 

@@ -44,9 +44,17 @@ export { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
 import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../errors";
-import { type QueryAst, type SetOperation } from "../ast";
 import {
+  type FulltextMatchPredicate,
+  type HybridFusionOptions,
+  type QueryAst,
+  type SetOperation,
+  type VectorSimilarityPredicate,
+} from "../ast";
+import {
+  type DialectAdapter,
   type DialectStandardQueryStrategy,
+  type FulltextStrategy,
   getDialect,
   type SqlDialect,
 } from "../dialect";
@@ -55,8 +63,12 @@ import {
   buildLimitOffsetClause,
   buildStandardEmbeddingsCte,
   buildStandardFromClause,
+  buildStandardFulltextCte,
+  buildStandardFulltextOrderBy,
   buildStandardGroupBy,
   buildStandardHaving,
+  buildStandardHybridCandidateCte,
+  buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
   buildStandardStartCte,
@@ -68,6 +80,7 @@ import { type LogicalPlan } from "./plan";
 import {
   compileKindFilter,
   compilePredicateClauses,
+  getHybridTargetAlias,
   getNodeKindsForAlias,
   getPredicatesForAlias,
   type PredicateIndex,
@@ -102,6 +115,14 @@ export type CompileQueryOptions = Readonly<{
   dialect?: SqlDialect | undefined;
   /** SQL schema configuration for table names. Defaults to standard names. */
   schema?: SqlSchema | undefined;
+  /**
+   * Fulltext strategy override. When set, overrides the dialect's
+   * default fulltext strategy for `$fulltext.matches()` compilation.
+   * Callers typically read this from `backend.fulltextStrategy` so a
+   * backend-declared strategy (e.g. ParadeDB) wins over the dialect
+   * default (tsvector).
+   */
+  fulltextStrategy?: FulltextStrategy | undefined;
 }>;
 
 /**
@@ -141,12 +162,12 @@ export function compileQuery(
   const dialect = options_.dialect ?? "sqlite";
   const schema = options_.schema ?? DEFAULT_SQL_SCHEMA;
 
-  const adapter = getDialect(dialect);
+  const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
   const ctx: PredicateCompilerContext = {
     dialect: adapter,
     schema,
     compileQuery: (subAst, subGraphId) =>
-      compileQuery(subAst, subGraphId, { dialect, schema }),
+      compileQuery(subAst, subGraphId, propagateOptions(options_)),
   };
 
   // Check for variable-length traversals
@@ -212,10 +233,43 @@ export function compileSetOperation(
   const dialect = options_.dialect ?? "sqlite";
   const schema = options_.schema ?? DEFAULT_SQL_SCHEMA;
 
-  const adapter = getDialect(dialect);
+  const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
   return compileSetOp(op, graphId, adapter, schema, (ast, gid) =>
-    compileQuery(ast, gid, { dialect, schema }),
+    compileQuery(ast, gid, propagateOptions(options_)),
   );
+}
+
+/**
+ * Builds the dialect adapter the compiler actually runs against,
+ * applying a caller-supplied fulltext strategy override on top of the
+ * dialect default. Returns the unmodified adapter when the override is
+ * absent or identical to the dialect default — shipped backends always
+ * set `fulltextStrategy`, so this short-circuit keeps the common path
+ * from allocating a fresh adapter on every compile.
+ */
+function resolveDialectAdapter(
+  dialect: SqlDialect,
+  fulltextStrategy: FulltextStrategy | undefined,
+): DialectAdapter {
+  const baseAdapter = getDialect(dialect);
+  if (
+    fulltextStrategy === undefined ||
+    fulltextStrategy === baseAdapter.fulltext
+  ) {
+    return baseAdapter;
+  }
+  return { ...baseAdapter, fulltext: fulltextStrategy };
+}
+
+/** Forwards compile options into recursive sub-compile calls. */
+function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
+  return {
+    dialect: options_.dialect ?? "sqlite",
+    ...(options_.schema === undefined ? {} : { schema: options_.schema }),
+    ...(options_.fulltextStrategy === undefined ?
+      {}
+    : { fulltextStrategy: options_.fulltextStrategy }),
+  };
 }
 
 // ============================================================
@@ -482,6 +536,44 @@ function compileStandardQuery(
   return handler(ast, graphId, ctx);
 }
 
+type SelectStandardOrderByInput = Readonly<{
+  ast: QueryAst;
+  collapsedTraversalCteAlias: string | undefined;
+  dialect: DialectAdapter;
+  fulltextPredicate: FulltextMatchPredicate | undefined;
+  fusion: HybridFusionOptions | undefined;
+  vectorPredicate: VectorSimilarityPredicate | undefined;
+}>;
+
+function selectStandardOrderBy(
+  input: SelectStandardOrderByInput,
+): SQL | undefined {
+  const {
+    ast,
+    collapsedTraversalCteAlias,
+    dialect,
+    fulltextPredicate,
+    fusion,
+    vectorPredicate,
+  } = input;
+  if (vectorPredicate && fulltextPredicate) {
+    return buildStandardHybridRrfOrderBy({ ast, dialect, fusion });
+  }
+  if (vectorPredicate) {
+    return buildStandardVectorOrderBy({ ast, dialect });
+  }
+  if (fulltextPredicate) {
+    return buildStandardFulltextOrderBy({ ast, dialect });
+  }
+  return buildStandardOrderBy({
+    ast,
+    ...(collapsedTraversalCteAlias === undefined ?
+      {}
+    : { collapsedTraversalCteAlias }),
+    dialect,
+  });
+}
+
 function compileStandardQueryWithCteStrategy(
   ast: QueryAst,
   graphId: string,
@@ -491,6 +583,8 @@ function compileStandardQueryWithCteStrategy(
   const {
     collapsedTraversalCteAlias,
     effectiveLimit,
+    fulltextPredicate,
+    fusion,
     logicalPlan,
     predicateIndex,
     requiredColumnsByAlias,
@@ -513,7 +607,7 @@ function compileStandardQueryWithCteStrategy(
     );
   }
 
-  if (!vectorPredicate) {
+  if (!vectorPredicate && !fulltextPredicate) {
     const fastPathSql = compileCountAggregateFastPath(
       ast,
       graphId,
@@ -565,7 +659,32 @@ function compileStandardQueryWithCteStrategy(
 
   // Add embeddings CTE if vector similarity is used
   if (vectorPredicate) {
-    ctes.push(buildStandardEmbeddingsCte({ ctx, graphId, vectorPredicate }));
+    const nodeKinds = getNodeKindsForAlias(ast, vectorPredicate.field.alias);
+    ctes.push(
+      buildStandardEmbeddingsCte({
+        ctx,
+        graphId,
+        nodeKinds,
+        vectorPredicate,
+      }),
+    );
+  }
+
+  // Add fulltext CTE if a matches() predicate is used
+  if (fulltextPredicate) {
+    const nodeKinds = getNodeKindsForAlias(ast, fulltextPredicate.field.alias);
+    ctes.push(
+      buildStandardFulltextCte({
+        ctx,
+        fulltextPredicate,
+        graphId,
+        nodeKinds,
+      }),
+    );
+  }
+
+  if (getHybridTargetAlias(vectorPredicate, fulltextPredicate) !== undefined) {
+    ctes.push(buildStandardHybridCandidateCte());
   }
 
   // Build main SELECT
@@ -582,21 +701,19 @@ function compileStandardQueryWithCteStrategy(
       {}
     : { collapsedTraversalCteAlias }),
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
+    ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   });
   const groupBy = buildStandardGroupBy({ ast, dialect });
   const having = buildStandardHaving({ ast, ctx });
 
-  // Order by distance if vector similarity, otherwise use AST order
-  const orderBy =
-    vectorPredicate ?
-      buildStandardVectorOrderBy({ ast, dialect })
-    : buildStandardOrderBy({
-        ast,
-        ...(collapsedTraversalCteAlias === undefined ?
-          {}
-        : { collapsedTraversalCteAlias }),
-        dialect,
-      });
+  const orderBy = selectStandardOrderBy({
+    ast,
+    collapsedTraversalCteAlias,
+    dialect,
+    fulltextPredicate,
+    fusion,
+    vectorPredicate,
+  });
 
   const limitOffset = buildLimitOffsetClause({
     limit: effectiveLimit,

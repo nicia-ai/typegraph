@@ -15,6 +15,11 @@ import {
   type SQLiteTableWithColumns,
 } from "drizzle-orm/sqlite-core";
 
+import {
+  fts5Strategy,
+  type FulltextStrategy,
+  tsvectorStrategy,
+} from "../../query/dialect";
 import { type PostgresTables, tables as postgresTables } from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
 
@@ -209,19 +214,44 @@ function generateSqliteCreateIndexSQL(
 }
 
 /**
+ * Returns true for a value that looks like a Drizzle SQLite table.
+ * The schema module exposes non-table values (e.g. `fulltextTableName: string`)
+ * alongside the Drizzle tables, and the DDL generators must skip them.
+ */
+function isSqliteTable(
+  value: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): value is SQLiteTableWithColumns<any> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    // Drizzle tables are always objects; strings are our escape hatch.
+    typeof value !== "string"
+  );
+}
+
+/**
  * Generates all DDL statements for the given SQLite tables.
  */
-export function generateSqliteDDL(tables: SqliteTables = sqliteTables): string[] {
+export function generateSqliteDDL(
+  tables: SqliteTables = sqliteTables,
+  fulltextStrategy: FulltextStrategy = fts5Strategy,
+): string[] {
   const statements: string[] = [];
 
   // Generate in dependency order (tables first, then indexes)
   for (const table of Object.values(tables)) {
+    if (!isSqliteTable(table)) continue;
     statements.push(generateSqliteCreateTableSQL(table));
   }
 
   for (const table of Object.values(tables)) {
+    if (!isSqliteTable(table)) continue;
     statements.push(...generateSqliteCreateIndexSQL(table));
   }
+
+  // Fulltext table is a virtual table; emit its DDL last.
+  statements.push(...fulltextStrategy.generateDdl(tables.fulltextTableName));
 
   return statements;
 }
@@ -230,8 +260,11 @@ export function generateSqliteDDL(tables: SqliteTables = sqliteTables): string[]
  * Generates a single SQL string for SQLite migrations.
  * Convenience function that joins all DDL statements.
  */
-export function generateSqliteMigrationSQL(tables: SqliteTables = sqliteTables): string {
-  return generateSqliteDDL(tables).join("\n\n");
+export function generateSqliteMigrationSQL(
+  tables: SqliteTables = sqliteTables,
+  fulltextStrategy: FulltextStrategy = fts5Strategy,
+): string {
+  return generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
 }
 
 // ============================================================
@@ -359,20 +392,38 @@ function generatePgCreateIndexSQL(
   return statements;
 }
 
+function isPgTable(
+  value: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): value is PgTableWithColumns<any> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof value !== "string"
+  );
+}
+
 /**
  * Generates all DDL statements for the given PostgreSQL tables.
  */
-export function generatePostgresDDL(tables: PostgresTables = postgresTables): string[] {
+export function generatePostgresDDL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+): string[] {
   const statements: string[] = [];
 
   // Generate in dependency order (tables first, then indexes)
   for (const table of Object.values(tables)) {
+    if (!isPgTable(table)) continue;
     statements.push(generatePgCreateTableSQL(table));
   }
 
   for (const table of Object.values(tables)) {
+    if (!isPgTable(table)) continue;
     statements.push(...generatePgCreateIndexSQL(table));
   }
+
+  statements.push(...fulltextStrategy.generateDdl(tables.fulltextTableName));
 
   return statements;
 }
@@ -384,9 +435,12 @@ export function generatePostgresDDL(tables: PostgresTables = postgresTables): st
  * Includes CREATE EXTENSION for pgvector since the embeddings table
  * uses the native VECTOR type.
  */
-export function generatePostgresMigrationSQL(tables: PostgresTables = postgresTables): string {
+export function generatePostgresMigrationSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+): string {
   // pgvector extension is required for the embeddings table
   const extensionSql = "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
-  const ddlSql = generatePostgresDDL(tables).join("\n\n");
+  const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
   return `${extensionSql}\n\n${ddlSql}`;
 }

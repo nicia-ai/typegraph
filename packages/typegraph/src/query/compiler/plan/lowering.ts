@@ -2,6 +2,7 @@ import { CompilerInvariantError } from "../../../errors";
 import type {
   AggregateExpr,
   ComposableQuery,
+  FulltextMatchPredicate,
   NodePredicate,
   QueryAst,
   SetOperation,
@@ -9,7 +10,9 @@ import type {
 } from "../../ast";
 import { getDialect, type SqlDialect } from "../../dialect";
 import {
+  resolveFulltextAwareLimit,
   resolveVectorAwareLimit,
+  runFulltextPredicatePass,
   runRecursiveTraversalSelectionPass,
   runVectorPredicatePass,
   type VariableLengthTraversal,
@@ -27,6 +30,7 @@ export type LowerStandardQueryToLogicalPlanInput = Readonly<{
   collapsedTraversalCteAlias?: string;
   dialect: SqlDialect;
   effectiveLimit?: number;
+  fulltextPredicate?: FulltextMatchPredicate;
   graphId: string;
   vectorPredicate?: VectorSimilarityPredicate;
 }>;
@@ -249,6 +253,15 @@ function lowerStandardQueryToLogicalPlanNode(
     };
   }
 
+  if (input.fulltextPredicate !== undefined) {
+    currentNode = {
+      id: nextPlanNodeId(),
+      input: currentNode,
+      op: "fulltext_match",
+      predicate: input.fulltextPredicate,
+    };
+  }
+
   return appendAggregateSortLimitAndProjectNodes(
     currentNode,
     ast,
@@ -350,11 +363,23 @@ function lowerComposableQueryToLogicalPlanNode(
     });
   }
 
+  const dialectAdapter = getDialect(dialect);
   const vectorPredicate = runVectorPredicatePass(
     query,
-    getDialect(dialect),
+    dialectAdapter,
   ).vectorPredicate;
-  const effectiveLimit = resolveVectorAwareLimit(query.limit, vectorPredicate);
+  const fulltextPredicate = runFulltextPredicatePass(
+    query,
+    dialectAdapter,
+  ).fulltextPredicate;
+  const limitAfterVector = resolveVectorAwareLimit(
+    query.limit,
+    vectorPredicate,
+  );
+  const effectiveLimit = resolveFulltextAwareLimit(
+    limitAfterVector,
+    fulltextPredicate,
+  );
   const loweringInput = {
     ast: query,
     dialect,
@@ -362,6 +387,7 @@ function lowerComposableQueryToLogicalPlanNode(
     nextPlanNodeId,
     ...(effectiveLimit === undefined ? {} : { effectiveLimit }),
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
+    ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   };
   return lowerStandardQueryToLogicalPlanNode(loweringInput);
 }

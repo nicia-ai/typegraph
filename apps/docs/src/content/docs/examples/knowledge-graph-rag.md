@@ -26,20 +26,22 @@ in the same chunk.
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, embedding, inverseOf } from "@nicia-ai/typegraph";
+import { defineNode, defineEdge, defineGraph, embedding, inverseOf, searchable } from "@nicia-ai/typegraph";
 
 // Source documents
 const Document = defineNode("Document", {
   schema: z.object({
-    title: z.string(),
+    title: searchable({ language: "english" }),
     source: z.string(),
   }),
 });
 
-// Text chunks with embeddings
+// Text chunks with embeddings + fulltext
 const Chunk = defineNode("Chunk", {
   schema: z.object({
-    text: z.string(),
+    // `searchable()` enables `$fulltext.matches()` for BM25 ranking,
+    // complementing the embedding-based semantic search below.
+    text: searchable({ language: "english" }),
     embedding: embedding(1536),
     position: z.number().int(),
   }),
@@ -48,7 +50,7 @@ const Chunk = defineNode("Chunk", {
 // Extracted entities
 const Entity = defineNode("Entity", {
   schema: z.object({
-    name: z.string(),
+    name: searchable({ language: "english" }),
     type: z.enum(["person", "organization", "location", "concept", "product", "event"]),
     description: z.string().optional(),
     embedding: embedding(1536).optional(),
@@ -289,6 +291,86 @@ async function getChunkWithContext(chunkId: string, windowSize = 1) {
 }
 ```
 
+## Hybrid Retrieval: Vector + Fulltext
+
+Vector search handles semantic similarity; fulltext search
+(`$fulltext.matches()`) nails exact-match terms that embeddings blur —
+proper nouns, SKUs, technical jargon. Combining both with Reciprocal
+Rank Fusion is the gold-standard RAG retrieval pattern.
+
+### Query-builder fusion (single SQL query)
+
+Use `$fulltext.matches()` and `.similarTo()` in the same `whereNode()`
+and TypeGraph fuses the two ranked lists with RRF at the SQL layer:
+
+```typescript
+async function hybridSearch(query: string, limit = 10) {
+  const queryEmbedding = await generateEmbedding(query);
+
+  return store
+    .query()
+    .from("Chunk", "c")
+    .whereNode("c", (c) =>
+      c.$fulltext
+        .matches(query, limit * 4)
+        .and(c.embedding.similarTo(queryEmbedding, limit * 4))
+    )
+    .select((ctx) => ({
+      chunkId: ctx.c.id,
+      text: ctx.c.text,
+    }))
+    .limit(limit)
+    .execute();
+}
+```
+
+Each source retrieves `limit * 4` candidates, RRF blends the rankings,
+and the outer `LIMIT` trims to the final top-k. The two CTEs join by
+`node_id` and the outer ORDER BY uses `1/(60 + rank_vec) + 1/(60 + rank_ft)`.
+
+### Store API (tunable weights)
+
+When you need to tune the fusion parameters (e.g. weighting fulltext
+higher for entity-heavy queries), use `store.search.hybrid()`:
+
+```typescript
+async function tunedHybrid(query: string, limit = 10) {
+  const queryEmbedding = await generateEmbedding(query);
+
+  const hits = await store.search.hybrid("Chunk", {
+    limit,
+    vector: {
+      fieldPath: "embedding",
+      queryEmbedding,
+      metric: "cosine",
+      k: 50,
+    },
+    fulltext: {
+      query,
+      k: 50,
+      includeSnippets: true,
+    },
+    fusion: {
+      method: "rrf",
+      k: 60,
+      weights: { vector: 1.0, fulltext: 1.5 },
+    },
+  });
+
+  return hits.map((h) => ({
+    chunkId: h.node.id,
+    text: h.node.text,
+    score: h.score,
+    vectorRank: h.vector?.rank,
+    fulltextRank: h.fulltext?.rank,
+    snippet: h.fulltext?.snippet,
+  }));
+}
+```
+
+See the [Fulltext Search guide](/fulltext-search) for tuning advice,
+query modes, and the full hybrid retrieval playbook.
+
 ## Hybrid Retrieval: Vector + Graph
 
 Combine vector similarity with graph traversal in a single query using the `from` option:
@@ -308,10 +390,12 @@ async function hybridRetrieval(query: string, limit = 10) {
     .to("Entity", "e")
     .traverse("containsChunk", "d_edge", { direction: "in", from: "c" }) // Fan-out from chunk
     .to("Document", "d")
+    // Results are already ordered by similarity (most similar first).
+    // When you need explicit scores, use `store.search.hybrid()` instead —
+    // it returns hits with `.score`, `.vector.score`, and `.fulltext.score`.
     .select((ctx) => ({
       chunkId: ctx.c.id,
       text: ctx.c.text,
-      score: ctx.c.embedding.similarity(queryEmbedding),
       source: ctx.d.title,
       entityName: ctx.e.name,
       entityType: ctx.e.type,

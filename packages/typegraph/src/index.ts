@@ -56,6 +56,7 @@ export {
   type AllNodeTypes,
   // External reference type for hybrid overlay patterns
   createExternalRef,
+  DEFAULT_SEARCHABLE_LANGUAGE,
   defineEdge,
   defineGraph,
   defineNode,
@@ -73,6 +74,7 @@ export {
   getExternalRefTable,
   getNodeKinds,
   type GetNodeType,
+  getSearchableMetadata,
   type GraphDef,
   // Type guards
   isEdgeType,
@@ -81,15 +83,38 @@ export {
   isExternalRefSchema,
   isGraphDef,
   isNodeType,
+  isSearchableSchema,
   metaEdge,
   type NodeKinds,
+  // Searchable type for fulltext search
+  searchable,
+  type SearchableMetadata,
+  type SearchableOptions,
+  type SearchableSchema,
 } from "./core";
 
 // ============================================================
 // Backend Types
 // ============================================================
 
-export type { GraphBackend, TransactionBackend } from "./backend/types";
+export type {
+  BackendCapabilities,
+  DeleteFulltextBatchParams,
+  FulltextBatchRow,
+  FulltextCapabilities,
+  FulltextQueryMode,
+  FulltextSearchParams,
+  FulltextSearchResult,
+  GraphBackend,
+  TransactionBackend,
+  UpsertFulltextBatchParams,
+  VectorCapabilities,
+} from "./backend/types";
+export type { FulltextStrategy } from "./query/dialect/fulltext-strategy";
+export {
+  fts5Strategy,
+  tsvectorStrategy,
+} from "./query/dialect/fulltext-strategy";
 
 // ============================================================
 // Core Types
@@ -194,11 +219,21 @@ export {
 // ============================================================
 
 export type {
+  FulltextSearchHit,
+  FulltextSearchOptions,
+  HybridFulltextOptions,
+  HybridFusionOptions,
+  HybridSearchHit,
+  HybridSearchOptions,
+  HybridVectorOptions,
+  RebuildFulltextOptions,
+  RebuildFulltextResult,
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
+  VectorSearchHit,
 } from "./store";
-export { createStore, createStoreWithSchema } from "./store";
+export { createStore, createStoreWithSchema, StoreSearch } from "./store";
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,

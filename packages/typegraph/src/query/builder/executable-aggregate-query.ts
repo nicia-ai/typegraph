@@ -7,6 +7,7 @@ import { type GraphDef } from "../../core/define-graph";
 import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { buildQueryAst } from "./ast-builder";
+import { buildCompileOptions } from "./compile-options";
 import {
   type AliasMap,
   type QueryBuilderConfig,
@@ -108,14 +109,8 @@ export class ExecutableAggregateQuery<
     return compiled;
   }
 
-  /**
-   * Builds compile options from the config.
-   */
   #compileOptions(): CompileQueryOptions {
-    return {
-      dialect: this.#config.dialect ?? "sqlite",
-      schema: this.#config.schema,
-    };
+    return buildCompileOptions(this.#config);
   }
 
   /**

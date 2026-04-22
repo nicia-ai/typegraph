@@ -27,6 +27,7 @@ import {
   defineGraph,
   defineNode,
   embedding,
+  searchable,
 } from "@nicia-ai/typegraph";
 import { createExampleBackend } from "./_helpers";
 
@@ -36,9 +37,15 @@ import { createExampleBackend } from "./_helpers";
 
 const Paper = defineNode("Paper", {
   schema: z.object({
-    title: z.string(),
+    // `searchable()` on title + abstract puts both into the BM25 index so
+    // rare-token queries (author surnames, dataset names, method acronyms)
+    // hit exact matches where embeddings are weakest. The semantic-
+    // retrieval scene below ranks by JS cosine for self-containment; a
+    // production deployment pairs this schema with `store.search.hybrid`
+    // for fused vector+fulltext retrieval.
+    title: searchable({ language: "english" }),
     year: z.number().int(),
-    abstract: z.string(),
+    abstract: searchable({ language: "english" }),
     embedding: embedding(128),
   }),
 });
@@ -496,6 +503,39 @@ export async function main(): Promise<void> {
     console.log(
       `  ${hit.similarity.toFixed(3)} ${stars.padEnd(10)} ${hit.paper.title}`,
     );
+  }
+
+  // ----------------------------------------------------------
+  // BM25 fulltext retrieval (sub-step of [1])
+  // ----------------------------------------------------------
+  //
+  // Title + abstract are `searchable()`, so the native FTS5 index is
+  // kept in sync on every write. BM25 and vector retrieval are
+  // complementary: embeddings handle the conceptual query above, but
+  // they smooth over rare exact tokens — dataset names, method
+  // acronyms, proper nouns — which is exactly where BM25 shines.
+  //
+  // The query below ("Dropout") is a rare token: it appears in one
+  // title and a couple of abstracts that cite the technique. A pure
+  // cosine ranker would surface generic deep-learning papers; BM25
+  // pins the technique paper and its direct users. In production
+  // you'd fuse the two via `store.search.hybrid(...)`; see example 15
+  // for the end-to-end hybrid walkthrough.
+
+  const fulltextQuery = "Dropout";
+  console.log(
+    `\n─── Fulltext retrieval (BM25 via FTS5) for: "${fulltextQuery}" ───`,
+  );
+  const fulltextHits = await store.search.fulltext("Paper", {
+    query: fulltextQuery,
+    limit: 3,
+    includeSnippets: true,
+  });
+  for (const hit of fulltextHits) {
+    console.log(`  ${hit.score.toFixed(3)}  ${hit.node.title}`);
+    if (hit.snippet !== undefined) {
+      console.log(`        ${hit.snippet}`);
+    }
   }
 
   // ----------------------------------------------------------

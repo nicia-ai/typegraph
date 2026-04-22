@@ -12,6 +12,7 @@ import {
   type AggregateExpr,
   type FieldRef,
   type GroupBySpec,
+  type HybridFusionOptions,
   mergeEdgeKinds,
   type OrderSpec,
   type PredicateExpression,
@@ -22,13 +23,9 @@ import {
 } from "../ast";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
-  arrayField,
-  baseField,
-  dateField,
-  embeddingField,
+  buildFieldBuilderForTypeInfo,
+  createFulltextAccessor,
   fieldRef,
-  numberField,
-  objectField,
   type Predicate,
   stringField,
 } from "../predicates";
@@ -49,7 +46,10 @@ import {
   type SelectContext,
   type UniqueAlias,
 } from "./types";
-import { validateSqlIdentifier } from "./validation";
+import {
+  validateHybridFusionOptions,
+  validateSqlIdentifier,
+} from "./validation";
 
 /**
  * Builds projected fields for a node alias (including all metadata columns).
@@ -808,6 +808,39 @@ export class QueryBuilder<
   }
 
   /**
+   * Sets fusion parameters for hybrid (vector + fulltext) queries.
+   *
+   * Applies only when the query contains both a `.similarTo()` and a
+   * `.$fulltext.matches()` predicate. Without this call, the default is
+   * RRF with k=60 and equal weights. A mismatch between `.fuseWith()`
+   * configuration and the predicates on the query is caught during
+   * compilation, not here.
+   *
+   * @example
+   * ```typescript
+   * store.query()
+   *   .from("Document", "d")
+   *   .whereNode("d", d =>
+   *     d.$fulltext.matches("renewable energy", 50)
+   *       .and(d.embedding.similarTo(vec, 50))
+   *       .and(d.tenantId.eq(tenant))
+   *   )
+   *   .fuseWith({ k: 60, weights: { fulltext: 1.5 } })
+   *   .limit(10)
+   *   .execute();
+   * ```
+   */
+  fuseWith(
+    options: HybridFusionOptions,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+    validateHybridFusionOptions(options);
+    return new QueryBuilder(this.#config, {
+      ...this.#state,
+      fusion: options,
+    });
+  }
+
+  /**
    * Applies a query fragment to transform this builder.
    *
    * Fragments are reusable query transformations that can add predicates,
@@ -888,36 +921,7 @@ export class QueryBuilder<
     ref: ReturnType<typeof fieldRef>,
     typeInfo: FieldTypeInfo | undefined,
   ): BaseFieldAccessor {
-    if (!typeInfo) {
-      return baseField(ref);
-    }
-
-    switch (typeInfo.valueType) {
-      case "string": {
-        return stringField(ref);
-      }
-      case "number": {
-        return numberField(ref);
-      }
-      case "boolean": {
-        return baseField(ref);
-      }
-      case "date": {
-        return dateField(ref);
-      }
-      case "array": {
-        return arrayField(ref);
-      }
-      case "object": {
-        return objectField(ref, { typeInfo });
-      }
-      case "embedding": {
-        return embeddingField(ref);
-      }
-      case "unknown": {
-        return baseField(ref);
-      }
-    }
+    return buildFieldBuilderForTypeInfo(ref, typeInfo);
   }
 
   #createNodeAccessor(alias: string): NodeAccessor<NodeType> {
@@ -927,6 +931,9 @@ export class QueryBuilder<
     );
     const kindAccessor = stringField(
       fieldRef(alias, ["kind"], { valueType: "string" }),
+    );
+    const fulltextAccessor = createFulltextAccessor(alias, () =>
+      this.#hasSearchableField(kindNames),
     );
 
     // Use a Proxy to provide flattened property access
@@ -940,11 +947,17 @@ export class QueryBuilder<
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
+        if (property === "$fulltext") return fulltextAccessor;
 
         // Schema properties
         return this.#getFieldBuilderForProperty(kindNames, property, alias);
       },
     });
+  }
+
+  #hasSearchableField(kindNames: readonly string[] | undefined): boolean {
+    if (!kindNames) return false;
+    return this.#config.schemaIntrospector.hasSearchableField(kindNames);
   }
 
   #expandTraversalEdgeKinds(

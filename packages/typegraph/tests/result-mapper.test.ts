@@ -32,6 +32,7 @@ describe("transformPathColumns", () => {
     asOf: undefined,
     groupBy: undefined,
     having: undefined,
+    fusion: undefined,
   };
 
   describe("dialect handling", () => {

@@ -20,6 +20,7 @@ import {
   defineEdge,
   defineGraph,
   embedding,
+  searchable,
   subClassOf,
   partOf,
   hasPart,
@@ -47,8 +48,12 @@ const Folder = defineNode("Folder", {
 // Document extends Content
 const Document = defineNode("Document", {
   schema: z.object({
-    title: z.string(),
-    content: z.string(),
+    // Both fields are indexed for BM25 ranked fulltext. Combined with
+    // the embedding below, this unlocks hybrid retrieval: title matches
+    // (proper nouns, acronyms, terms-of-art) via BM25 plus paraphrased
+    // / conceptual matches via the embedding.
+    title: searchable({ language: "english" }),
+    content: searchable({ language: "english" }),
     createdBy: z.string(),
     status: z.enum(["draft", "published", "archived"]).default("draft"),
     contentType: z.enum(["markdown", "html", "plaintext"]).default("markdown"),
@@ -258,10 +263,18 @@ async function updateDocument(
 
 ## Searching Documents
 
+Document search is the canonical hybrid-retrieval use case. Users search
+for proper nouns, project names, and quoted phrases that embeddings
+smooth over, plus conceptual questions that keyword search alone
+can't answer. This example shows both sides.
+
 ### Semantic Search
 
+Embedding-only search is still useful when the query is a paraphrase or
+a question rather than a set of keywords:
+
 ```typescript
-async function searchDocuments(
+async function searchDocumentsSemantically(
   query: string,
   options: {
     folderId?: string;
@@ -269,7 +282,7 @@ async function searchDocuments(
     limit?: number;
     minScore?: number;
   } = {}
-): Promise<Array<{ document: DocumentProps; score: number }>> {
+): Promise<DocumentProps[]> {
   const { folderId, status = "published", limit = 10, minScore = 0.7 } = options;
 
   const queryEmbedding = await generateEmbedding(query);
@@ -277,18 +290,11 @@ async function searchDocuments(
   let queryBuilder = store
     .query()
     .from("Document", "d")
-    .whereNode("d", (d) => {
-      let pred = d.embedding.similarTo(queryEmbedding, limit, {
-        metric: "cosine",
-        minScore,
-      });
-
-      if (status) {
-        pred = pred.and(d.status.eq(status));
-      }
-
-      return pred;
-    });
+    .whereNode("d", (d) =>
+      d.embedding
+        .similarTo(queryEmbedding, limit, { metric: "cosine", minScore })
+        .and(d.status.eq(status)),
+    );
 
   // If folderId specified, filter to folder descendants
   if (folderId) {
@@ -302,15 +308,113 @@ async function searchDocuments(
       .whereNode("d", (d) =>
         d.embedding
           .similarTo(queryEmbedding, limit, { metric: "cosine", minScore })
-          .and(d.status.eq(status))
+          .and(d.status.eq(status)),
       );
   }
 
-  return queryBuilder
-    .select((ctx) => ({
-      document: ctx.d,
-      score: ctx.d.embedding.similarity(queryEmbedding),
-    }))
+  // Results are already ordered by similarity (most similar first).
+  return queryBuilder.select((ctx) => ctx.d).execute();
+}
+```
+
+### Fulltext Search (BM25 with snippets)
+
+When the user types a proper noun, filename, or exact phrase, keyword
+search outperforms embeddings — and snippets give them a preview of
+where the match occurred:
+
+```typescript
+async function findDocumentsByKeyword(
+  query: string,
+  options: { limit?: number } = {},
+): Promise<Array<{ document: DocumentProps; score: number; snippet?: string }>> {
+  const hits = await store.search.fulltext("Document", {
+    query,
+    limit: options.limit ?? 10,
+    includeSnippets: true,
+  });
+
+  return hits.map((hit) => ({
+    document: hit.node,
+    score: hit.score,
+    snippet: hit.snippet,
+  }));
+}
+```
+
+### Hybrid Search (the production-grade path)
+
+Most document-search products want both signals. `store.search.hybrid()`
+runs fulltext + vector in parallel and fuses the rankings with RRF.
+Each hit carries sub-scores from each half for debugging:
+
+```typescript
+async function searchDocuments(
+  query: string,
+  options: {
+    status?: "draft" | "published" | "archived";
+    limit?: number;
+  } = {},
+): Promise<Array<{ document: DocumentProps; score: number; snippet?: string }>> {
+  const { status = "published", limit = 10 } = options;
+  const queryEmbedding = await generateEmbedding(query);
+
+  const hits = await store.search.hybrid("Document", {
+    limit,
+    vector: {
+      fieldPath: "embedding",
+      queryEmbedding,
+      metric: "cosine",
+      k: limit * 4,
+    },
+    fulltext: {
+      query,
+      k: limit * 4,
+      includeSnippets: true,
+    },
+    fusion: { method: "rrf", k: 60 },
+  });
+
+  return hits
+    .filter((hit) => hit.node.status === status)
+    .map((hit) => ({
+      document: hit.node,
+      score: hit.score,
+      snippet: hit.fulltext?.snippet,
+    }));
+}
+```
+
+### Folder-Scoped Hybrid Search (query builder path)
+
+For tighter composition — "only within this folder subtree, using hybrid
+retrieval" — `$fulltext.matches()` and `.similarTo()` combine in one
+query-builder statement. The fusion runs at the SQL layer:
+
+```typescript
+async function searchInFolder(
+  folderId: string,
+  query: string,
+  limit = 10,
+): Promise<DocumentProps[]> {
+  const queryEmbedding = await generateEmbedding(query);
+
+  return store
+    .query()
+    .from("Folder", "f")
+    .whereNode("f", (f) => f.id.eq(folderId))
+    .traverse("contains", "e")
+    .recursive()
+    .to("Document", "d")
+    .whereNode("d", (d) =>
+      d.$fulltext
+        .matches(query, limit * 4)
+        .and(d.embedding.similarTo(queryEmbedding, limit * 4))
+        .and(d.status.eq("published")),
+    )
+    .fuseWith({ k: 60 })
+    .select((ctx) => ctx.d)
+    .limit(limit)
     .execute();
 }
 ```

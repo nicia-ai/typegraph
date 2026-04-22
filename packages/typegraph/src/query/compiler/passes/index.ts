@@ -1,4 +1,10 @@
 export {
+  type FulltextPredicatePassResult,
+  resolveFulltextAwareLimit,
+  runFulltextPredicatePass,
+} from "./fulltext";
+export { type FusionConfigPassResult, runFusionConfigPass } from "./fusion";
+export {
   runRecursiveTraversalSelectionPass,
   type VariableLengthTraversal,
 } from "./recursive";

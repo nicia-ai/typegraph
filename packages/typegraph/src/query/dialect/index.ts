@@ -5,6 +5,13 @@
  * Use `getDialect()` to get the appropriate adapter for a dialect name.
  */
 
+export type { FulltextStrategy } from "./fulltext-strategy";
+export {
+  ALL_FULLTEXT_MODES,
+  buildFulltextCapabilities,
+  fts5Strategy,
+  tsvectorStrategy,
+} from "./fulltext-strategy";
 export { postgresDialect } from "./postgres";
 export { sqliteDialect } from "./sqlite";
 export type {
