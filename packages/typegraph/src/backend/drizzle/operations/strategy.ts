@@ -87,6 +87,7 @@ import {
   buildDeleteEmbedding,
   buildGetEmbedding,
   buildUpsertEmbeddingPostgres,
+  buildUpsertEmbeddingSqlite,
   buildVectorSearchPostgres,
 } from "./vectors";
 
@@ -192,7 +193,28 @@ export type PostgresVectorOperationStrategy = Readonly<{
   buildVectorSearch: (params: VectorSearchParams) => SQL;
 }>;
 
-export type SqliteOperationStrategy = CommonOperationStrategy;
+/**
+ * SQLite embedding operations. Uses sqlite-vec's `vec_f32('[...]')` to
+ * encode embeddings as BLOBs on write. Requires the sqlite-vec extension
+ * to be loaded on the connection; the backend factory checks for that
+ * and only exposes the backend methods when it is.
+ *
+ * `getEmbedding` is not included: reading the raw BLOB back as a number
+ * array requires `vec_to_json(...)` and additional row decoding, which
+ * the current consumers (embedding sync, `.similarTo()` predicate) do
+ * not need.
+ */
+export type SqliteVectorOperationStrategy = Readonly<{
+  buildUpsertEmbedding: (
+    params: UpsertEmbeddingParams,
+    timestamp: string,
+  ) => SQL;
+  buildDeleteEmbedding: (params: DeleteEmbeddingParams) => SQL;
+}>;
+
+export type SqliteOperationStrategy = Readonly<
+  CommonOperationStrategy & SqliteVectorOperationStrategy
+>;
 
 export type PostgresOperationStrategy = Readonly<
   CommonOperationStrategy & PostgresVectorOperationStrategy
@@ -337,7 +359,20 @@ export function createSqliteOperationStrategy(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy,
 ): SqliteOperationStrategy {
-  return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
+  const common = createCommonOperationStrategy(
+    tables,
+    "sqlite",
+    fulltextStrategy,
+  );
+  return {
+    ...common,
+    buildUpsertEmbedding(params: UpsertEmbeddingParams, timestamp: string): SQL {
+      return buildUpsertEmbeddingSqlite(tables, params, timestamp);
+    },
+    buildDeleteEmbedding(params: DeleteEmbeddingParams): SQL {
+      return buildDeleteEmbedding(tables, params);
+    },
+  };
 }
 
 export function createPostgresOperationStrategy(

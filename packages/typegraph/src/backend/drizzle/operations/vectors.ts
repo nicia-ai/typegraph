@@ -7,6 +7,7 @@ import type {
   VectorSearchParams,
 } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
+import type { SqliteTables } from "../schema/sqlite";
 import type { Tables } from "./shared";
 
 /**
@@ -63,6 +64,48 @@ export function buildUpsertEmbeddingPostgres(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${column(embeddings.embedding)} = ${embeddingLiteral}::vector,
+      ${column(embeddings.dimensions)} = ${params.dimensions},
+      ${column(embeddings.updatedAt)} = ${timestamp}
+  `;
+}
+
+/**
+ * Builds an UPSERT query for an embedding (SQLite with sqlite-vec).
+ *
+ * The embedding is stored as a BLOB produced by `vec_f32('[...]')`. This
+ * requires the sqlite-vec extension to be loaded on the connection. When
+ * the extension is missing, the insert will fail at execution time with
+ * a "no such function: vec_f32" error — createSqliteBackend guards against
+ * that by only exposing `upsertEmbedding` when vec_f32 is available.
+ */
+export function buildUpsertEmbeddingSqlite(
+  tables: SqliteTables,
+  params: UpsertEmbeddingParams,
+  timestamp: string,
+): SQL {
+  const { embeddings } = tables;
+  const embeddingJson = JSON.stringify(params.embedding);
+  // Validate finite numbers BEFORE stringify so the error names the
+  // offending index (stringify would mask NaN/Infinity as null).
+  assertFiniteNumberArray(params.embedding, "embedding");
+
+  const columns = sql.raw(
+    `"${embeddings.graphId.name}", "${embeddings.nodeKind.name}", "${embeddings.nodeId.name}", "${embeddings.fieldPath.name}", "${embeddings.embedding.name}", "${embeddings.dimensions.name}", "${embeddings.createdAt.name}", "${embeddings.updatedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${embeddings.graphId.name}", "${embeddings.nodeKind.name}", "${embeddings.nodeId.name}", "${embeddings.fieldPath.name}"`,
+  );
+  const column = (target: { name: string }) => sql.raw(`"${target.name}"`);
+
+  return sql`
+    INSERT INTO ${embeddings} (${columns})
+    VALUES (
+      ${params.graphId}, ${params.nodeKind}, ${params.nodeId}, ${params.fieldPath},
+      vec_f32(${embeddingJson}), ${params.dimensions}, ${timestamp}, ${timestamp}
+    )
+    ON CONFLICT (${conflictColumns})
+    DO UPDATE SET
+      ${column(embeddings.embedding)} = vec_f32(${embeddingJson}),
       ${column(embeddings.dimensions)} = ${params.dimensions},
       ${column(embeddings.updatedAt)} = ${timestamp}
   `;

@@ -31,6 +31,7 @@ import {
 import {
   type BackendCapabilities,
   type CreateVectorIndexParams,
+  type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
   type DropVectorIndexParams,
@@ -40,6 +41,7 @@ import {
   SQLITE_CAPABILITIES,
   type TransactionBackend,
   type TransactionOptions,
+  type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
 } from "../types";
@@ -92,6 +94,17 @@ export type SqliteBackendOptions = Readonly<{
    * built-in FTS5 virtual table). Most users should leave this alone.
    */
   fulltext?: FulltextStrategy;
+  /**
+   * Set to `true` when sqlite-vec has been loaded on the connection.
+   * Enables vector embedding persistence via `upsertEmbedding` /
+   * `deleteEmbedding`, which the store's embedding-sync path relies on
+   * whenever node schemas declare `embedding()` fields. When omitted the
+   * backend does not expose those methods and embedding values pass
+   * through writes without being indexed — matching existing behavior
+   * for backends without sqlite-vec. `createLocalSqliteBackend` sets
+   * this automatically when it loads the extension.
+   */
+  hasVectorEmbeddings?: boolean;
 }>;
 
 const SQLITE_MAX_BIND_PARAMETERS = 999;
@@ -220,6 +233,8 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   serializedQueue?: SerializedExecutionQueue;
   tableNames: SqlTableNames;
   fulltextStrategy: FulltextStrategy;
+  /** Wire up upsertEmbedding / deleteEmbedding. See transaction options for details. */
+  hasVectorEmbeddings?: boolean;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -230,6 +245,12 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   profileHints: SqliteExecutionProfileHints;
   tableNames: SqlTableNames;
   fulltextStrategy: FulltextStrategy;
+  /**
+   * When true, the backend exposes upsertEmbedding / deleteEmbedding —
+   * detected by probing `vec_f32(...)` on the connection at boot so the
+   * store's embedding-sync path persists vectors to the embeddings table.
+   */
+  hasVectorEmbeddings?: boolean;
 }>;
 
 function createSqliteOperationBackend(
@@ -309,9 +330,27 @@ function createSqliteOperationBackend(
         },
       };
 
+  const vectorEmbeddingMethods =
+    options.hasVectorEmbeddings
+      ? {
+          async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
+            const query = operationStrategy.buildUpsertEmbedding(
+              params,
+              nowIso(),
+            );
+            await execRun(query);
+          },
+          async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
+            const query = operationStrategy.buildDeleteEmbedding(params);
+            await execRun(query);
+          },
+        }
+      : {};
+
   const operationBackend: TransactionBackend = {
     ...commonBackend,
     ...executeRawMethod,
+    ...vectorEmbeddingMethods,
     capabilities,
     dialect: "sqlite",
     tableNames,
@@ -462,6 +501,11 @@ export function createSqliteBackend(
     fulltextStrategy,
   );
   const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
+  // Explicit opt-in: wire upsertEmbedding / deleteEmbedding only when
+  // the caller confirms sqlite-vec is loaded. Probing synchronously
+  // isn't portable across drizzle SQLite drivers (sync vs async), so
+  // the gate lives with the caller that loaded the extension.
+  const hasVectorEmbeddings = options.hasVectorEmbeddings === true;
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
@@ -469,6 +513,7 @@ export function createSqliteBackend(
     operationStrategy,
     tableNames,
     fulltextStrategy,
+    hasVectorEmbeddings,
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -516,6 +561,7 @@ export function createSqliteBackend(
             profileHints: { isSync: true },
             tableNames,
             fulltextStrategy,
+            hasVectorEmbeddings,
           });
           db.run(sql`BEGIN`);
 
@@ -540,6 +586,7 @@ export function createSqliteBackend(
             profileHints: { isSync },
             tableNames,
             fulltextStrategy,
+            hasVectorEmbeddings,
           });
           return fn(txBackend);
         }) as Promise<T>,
@@ -571,6 +618,9 @@ function createTransactionBackend(
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
+    ...(options.hasVectorEmbeddings === undefined
+      ? {}
+      : { hasVectorEmbeddings: options.hasVectorEmbeddings }),
   });
 }
 
