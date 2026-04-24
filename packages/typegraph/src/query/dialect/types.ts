@@ -63,6 +63,15 @@ export type DialectCapabilities = Readonly<{
   materializeIntermediateTraversalCtes: boolean;
 
   /**
+   * When true, emit an explicit `NOT MATERIALIZED` hint on non-materialized
+   * CTEs so the planner can inline them and see their row statistics. PostgreSQL
+   * otherwise defaults to materializing any CTE referenced more than once,
+   * which makes its planner opaque to the inner statistics. SQLite ignores
+   * CTE materialization hints entirely.
+   */
+  emitNotMaterializedHint: boolean;
+
+  /**
    * Whether recursive CTEs should enforce worktable-first join ordering.
    */
   forceRecursiveWorktableOuterJoinOrder: boolean;

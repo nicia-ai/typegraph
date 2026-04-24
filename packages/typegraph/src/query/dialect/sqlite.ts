@@ -63,6 +63,7 @@ export const sqliteDialect: DialectAdapter = {
     recursiveQueryStrategy: "recursive_cte",
     setOperationStrategy: "sqlite_compound",
     materializeIntermediateTraversalCtes: true,
+    emitNotMaterializedHint: false,
     forceRecursiveWorktableOuterJoinOrder: true,
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2"] as const,

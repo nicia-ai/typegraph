@@ -66,6 +66,56 @@ export function countDistinct(alias: string, field?: string): AggregateExpr {
 }
 
 /**
+ * Creates a COUNT aggregate expression over an edge alias.
+ *
+ * Counts edges directly, without joining back to the target node table.
+ * This has different semantics from `count(targetAlias)`:
+ *
+ * - `countEdges(edgeAlias)` — counts live edges, regardless of target-node
+ *   temporal state. If a target node's `validTo` is in the past while its
+ *   incident edges are still live, those edges are still counted.
+ * - `count(targetAlias)` — counts edges whose target node is currently
+ *   valid under the query's temporal mode.
+ *
+ * For the common case ("how many follow relationships does this user
+ * have?") the edge-count semantics is what you want, and the compiler
+ * can skip the target-node join entirely — measurably faster on
+ * full-graph aggregates where the join dominates cost.
+ *
+ * @example
+ * ```typescript
+ * store
+ *   .query()
+ *   .from("User", "u")
+ *   .optionalTraverse("follows", "e", { expand: "none" })
+ *   .to("User", "target")
+ *   .groupByNode("u")
+ *   .aggregate({
+ *     name: field("u", "name"),
+ *     // counts edges — skips the target-node join
+ *     followCount: countEdges("e"),
+ *   })
+ *   .execute();
+ * ```
+ */
+export function countEdges(edgeAlias: string): AggregateExpr {
+  return count(edgeAlias);
+}
+
+/**
+ * Creates a COUNT DISTINCT aggregate expression over an edge alias.
+ * See {@link countEdges} for semantics.
+ *
+ * Distinct-on-edge-id is equivalent to `countEdges` when the query
+ * surface produces each edge exactly once, but stays meaningful under
+ * polymorphic expansions and ontology-driven edge fan-outs where the
+ * same edge can appear multiple times in the join output.
+ */
+export function countDistinctEdges(edgeAlias: string): AggregateExpr {
+  return countDistinct(edgeAlias);
+}
+
+/**
  * Creates a SUM aggregate expression.
  *
  * @param alias - The node alias

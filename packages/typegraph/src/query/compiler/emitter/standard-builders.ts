@@ -112,12 +112,21 @@ type BuildStandardStartCteInput = Readonly<{
   predicateIndex: StandardEmitterPredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
   temporalFilterPass: TemporalFilterPass;
+  /**
+   * Optional LIMIT/OFFSET to apply inside the start CTE. Used by the count
+   * aggregate fast path to push limits past the GROUP BY when it's safe.
+   */
+  limitOffset?: Readonly<{ limit: number; offset?: number | undefined }>;
 }>;
 
 export function buildStandardStartCte(input: BuildStandardStartCteInput): SQL {
   const { ast, ctx, graphId, predicateIndex, requiredColumnsByAlias } = input;
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
+  const cteMaterialization =
+    ctx.dialect.capabilities.emitNotMaterializedHint ?
+      sql`NOT MATERIALIZED `
+    : sql``;
 
   const kindFilter = compileKindFilter(sql.raw("kind"), kinds);
   const temporalFilter = input.temporalFilterPass.forAlias();
@@ -139,14 +148,24 @@ export function buildStandardStartCte(input: BuildStandardStartCteInput): SQL {
       (requiredColumnsByAlias.get(alias) ?? EMPTY_REQUIRED_COLUMNS)
     : undefined;
 
+  const limitClause =
+    input.limitOffset === undefined ? sql``
+    : input.limitOffset.offset === undefined ?
+      sql`
+        LIMIT ${input.limitOffset.limit}
+      `
+    : sql`
+      LIMIT ${input.limitOffset.limit} OFFSET ${input.limitOffset.offset}
+    `;
+
   return sql`
-    cte_${sql.raw(alias)} AS (
+    cte_${sql.raw(alias)} AS ${cteMaterialization}(
       SELECT ${sql.join(
         compileNodeSelectColumns(undefined, alias, effectiveRequiredColumns),
         sql`, `,
       )}
       FROM ${ctx.schema.nodesTable}
-      WHERE ${sql.join(whereClauses, sql` AND `)}
+      WHERE ${sql.join(whereClauses, sql` AND `)}${limitClause}
     )
   `;
 }
@@ -246,7 +265,10 @@ export function buildStandardTraversalCte(
     ...compileEdgeSelectColumns("e", edgeAlias, requiredEdgeColumns),
     ...compileNodeSelectColumns("n", nodeAlias, requiredNodeColumns),
   ];
-  const cteMaterialization = materializeCte ? sql`MATERIALIZED ` : sql``;
+  const cteMaterialization =
+    materializeCte ? sql`MATERIALIZED `
+    : ctx.dialect.capabilities.emitNotMaterializedHint ? sql`NOT MATERIALIZED `
+    : sql``;
 
   function compileTraversalBranch(
     branch: Readonly<{

@@ -342,6 +342,8 @@ export {
   composeFragments,
   count,
   countDistinct,
+  countDistinctEdges,
+  countEdges,
   createFragment,
   createQueryBuilder,
   // SQL schema configuration
