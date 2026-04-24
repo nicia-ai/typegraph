@@ -89,6 +89,34 @@ describe("indexes", () => {
     expect(sqliteSql).toContain(`"${roleIndex.name}"`);
   });
 
+  it("emits real column expressions for indexes passed through Drizzle factories", () => {
+    // Regression: the DDL generator previously emitted `(unknown, unknown, ...)`
+    // for indexes threaded through createSqliteTables / createPostgresTables
+    // because the SQL-chunk flattener couldn't render Drizzle column
+    // references or StringChunks nested inside index keys.
+    const cityIndex = defineNodeIndex(Person, {
+      fields: ["email"],
+      coveringFields: ["name"],
+    });
+
+    const sqliteTables = createSqliteTables({}, { indexes: [cityIndex] });
+    const sqliteSql = generateSqliteDDL(sqliteTables).join("\n");
+    expect(sqliteSql).not.toContain("(unknown");
+    expect(sqliteSql).toMatch(
+      new RegExp(
+        String.raw`"${cityIndex.name}"[^\n]*"graph_id"[^\n]*"kind"[^\n]*json_extract[^\n]*'\$\."email"'[^\n]*json_extract[^\n]*'\$\."name"'`,
+      ),
+    );
+
+    const pgTables = createPostgresTables({}, { indexes: [cityIndex] });
+    const pgSql = generatePostgresDDL(pgTables).join("\n");
+    expect(pgSql).not.toContain("(unknown");
+    expect(pgSql).toContain(`"graph_id"`);
+    expect(pgSql).toContain(`"kind"`);
+    expect(pgSql).toContain(`ARRAY['email']`);
+    expect(pgSql).toContain(`ARRAY['name']`);
+  });
+
   it("prefixes edge indexes with the traversal join key when direction is set", () => {
     const out = defineEdgeIndex(worksAt, {
       fields: ["role"],
