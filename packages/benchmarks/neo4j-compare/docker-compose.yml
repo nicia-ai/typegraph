@@ -1,0 +1,21 @@
+services:
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: typegraph-compare-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/benchpass
+      NEO4J_dbms_memory_heap_initial__size: 1G
+      NEO4J_dbms_memory_heap_max__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 1G
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30

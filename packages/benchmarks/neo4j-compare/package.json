@@ -1,0 +1,19 @@
+{
+  "name": "typegraph-neo4j-compare",
+  "private": true,
+  "type": "module",
+  "description": "Head-to-head microbenchmark: TypeGraph (SQLite in-process) vs Neo4j 5.x Community on the same graph shape.",
+  "scripts": {
+    "seed": "tsx src/seed.ts",
+    "bench": "tsx src/bench.ts",
+    "bench:typegraph": "pnpm --filter @nicia-ai/typegraph-benchmarks bench"
+  },
+  "dependencies": {
+    "neo4j-driver": "^5.24.0",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "typescript": "^5.9.3"
+  }
+}
