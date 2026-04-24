@@ -19,6 +19,24 @@ export function median(values: readonly number[]): number {
   return sorted[middle]!;
 }
 
+/**
+ * Nearest-rank percentile over the sorted samples. For the default suite
+ * size (15 samples) this picks index ceil(0.95 * 15) - 1 = 14, i.e. the
+ * slowest sample — a conservative tail estimate suitable for catching
+ * occasional slow outliers in CI.
+ */
+export function percentile(values: readonly number[], p: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  if (!Number.isFinite(p) || p <= 0 || p > 1) {
+    throw new RangeError(`percentile rank must be in (0, 1], got ${p}`);
+  }
+  const sorted = values.toSorted((left, right) => left - right);
+  const index = Math.max(0, Math.ceil(p * sorted.length) - 1);
+  return sorted[index]!;
+}
+
 export function formatMs(value: number): string {
   return `${value.toFixed(1)}ms`;
 }

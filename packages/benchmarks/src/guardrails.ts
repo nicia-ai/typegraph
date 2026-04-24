@@ -88,6 +88,68 @@ export function evaluateGuardrails(
     });
   }
 
+  if (metrics.scopedAggregateMs > guardrails.scopedAggregateMsMax) {
+    violations.push({
+      label: "scoped aggregate latency (ms)",
+      actual: metrics.scopedAggregateMs,
+      expectedMax: guardrails.scopedAggregateMsMax,
+    });
+  }
+
+  if (metrics.aggregateEdgesMs > guardrails.aggregateEdgesMsMax) {
+    violations.push({
+      label: "aggregate edges latency (ms)",
+      actual: metrics.aggregateEdgesMs,
+      expectedMax: guardrails.aggregateEdgesMsMax,
+    });
+  }
+
+  if (metrics.indexedFilterMs > guardrails.indexedFilterMsMax) {
+    violations.push({
+      label: "indexed filter latency (ms)",
+      actual: metrics.indexedFilterMs,
+      expectedMax: guardrails.indexedFilterMsMax,
+    });
+  }
+
+  if (metrics.temporalAsOfMs > guardrails.temporalAsOfMsMax) {
+    violations.push({
+      label: "temporal asOf latency (ms)",
+      actual: metrics.temporalAsOfMs,
+      expectedMax: guardrails.temporalAsOfMsMax,
+    });
+  }
+
+  if (metrics.fulltextSearchMs > guardrails.fulltextSearchMsMax) {
+    violations.push({
+      label: "fulltext search latency (ms)",
+      actual: metrics.fulltextSearchMs,
+      expectedMax: guardrails.fulltextSearchMsMax,
+    });
+  }
+
+  if (
+    metrics.vectorSearchMs !== undefined &&
+    metrics.vectorSearchMs > guardrails.vectorSearchMsMax
+  ) {
+    violations.push({
+      label: "vector search latency (ms)",
+      actual: metrics.vectorSearchMs,
+      expectedMax: guardrails.vectorSearchMsMax,
+    });
+  }
+
+  if (
+    metrics.hybridSearchMs !== undefined &&
+    metrics.hybridSearchMs > guardrails.hybridSearchMsMax
+  ) {
+    violations.push({
+      label: "hybrid search latency (ms)",
+      actual: metrics.hybridSearchMs,
+      expectedMax: guardrails.hybridSearchMsMax,
+    });
+  }
+
   if (metrics.cachedExecuteMs > guardrails.cachedExecuteMsMax) {
     violations.push({
       label: "cached execute latency (ms)",
