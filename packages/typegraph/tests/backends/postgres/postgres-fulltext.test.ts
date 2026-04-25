@@ -57,6 +57,10 @@ beforeAll(async () => {
   // generated migration SQL uses `CREATE TABLE IF NOT EXISTS` so it's
   // safe to run alongside; per-test isolation is handled by TRUNCATE in
   // `beforeEach` below.
+  //
+  // Gated on POSTGRES_URL so `pnpm test:unit` doesn't try to attach to a
+  // stray Docker Postgres and race other postgres files.
+  if (!process.env.POSTGRES_URL) return;
   try {
     pool = new Pool({ connectionString: TEST_DATABASE_URL });
     await pool.query("SELECT 1");

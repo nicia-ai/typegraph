@@ -504,7 +504,10 @@ export type TransactionOptions = Readonly<{
 /**
  * Transaction backend - a backend scoped to a transaction.
  */
-export type TransactionBackend = Omit<GraphBackend, "transaction" | "close">;
+export type TransactionBackend = Omit<
+  GraphBackend,
+  "transaction" | "close" | "refreshStatistics"
+>;
 
 /**
  * The GraphBackend interface abstracts database operations.
@@ -652,6 +655,26 @@ export type GraphBackend = Readonly<{
    */
   bootstrapTables?: () => Promise<void>;
 
+  /**
+   * Refreshes the backend's query-planner statistics.
+   *
+   * Call this once after a large initial import or bulk backfill. Without
+   * up-to-date statistics, the planner can pick suboptimal execution plans
+   * — on PostgreSQL this is the difference between a 0.5ms and a 5ms
+   * forward traversal; on SQLite it's the difference between 0.9ms and
+   * 23ms fulltext search. Autovacuum / background statistics collection
+   * will catch up eventually, but calling this explicitly after a bulk
+   * load gives you correct latencies immediately.
+   *
+   * Implementations:
+   * - SQLite runs `ANALYZE`, which populates `sqlite_stat1`
+   * - PostgreSQL runs `ANALYZE` on the TypeGraph-managed tables
+   *
+   * Safe to call at any time; costs a few tens of milliseconds on the
+   * sizes this library is designed for.
+   */
+  refreshStatistics: () => Promise<void>;
+
   // === Query Execution ===
   execute: <T>(query: SQL) => Promise<readonly T[]>;
 
@@ -698,6 +721,30 @@ export function wrapWithManagedClose(
       await teardown();
     },
   };
+}
+
+/**
+ * Runs `fn` inside a transaction when the backend supports one, falling
+ * through to a direct invocation otherwise. Lets call sites benefit from
+ * atomicity on backends that have transactions while staying functional
+ * on backends that don't (Cloudflare D1, `drizzle-orm/neon-http` over
+ * HTTP). The single-statement race window is already implicit on any
+ * backend that reports `transactions: false`; callers that cannot
+ * tolerate it must branch on the capability themselves.
+ *
+ * Pass `fallback` only when the toplevel backend method would recurse
+ * — for example, when implementing `backend.setActiveSchema` itself,
+ * pass the operation-level backend so the no-tx path doesn't loop.
+ */
+export async function runOptionallyInTransaction<T>(
+  backend: GraphBackend,
+  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
+  fallback?: GraphBackend | TransactionBackend,
+): Promise<T> {
+  if (!backend.capabilities.transactions) {
+    return fn(fallback ?? backend);
+  }
+  return backend.transaction((tx) => fn(tx));
 }
 
 // ============================================================

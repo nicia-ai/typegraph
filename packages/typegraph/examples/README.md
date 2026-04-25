@@ -45,7 +45,13 @@ npx tsx examples/<example-name>.ts
 
 | Example | Description |
 |---------|-------------|
-| [10-postgresql.ts](./10-postgresql.ts) | PostgreSQL backend setup and usage |
+| [10-postgresql.ts](./10-postgresql.ts) | PostgreSQL backend setup, JSONB props, transactions, traversal queries |
+
+For wiring `createPostgresBackend` against `postgres-js`, `@neondatabase/serverless`
+(WebSockets), or `@neondatabase/serverless` (HTTP) instead of `node-postgres`, see the
+runtime-to-driver matrix and per-driver setup snippets in the
+[backend setup docs](https://typegraph.dev/backend-setup#choosing-a-postgresql-driver) —
+the only diff from example 10 is the import line and connection setup.
 
 ### Semantic Search & RAG
 
@@ -64,9 +70,10 @@ npx tsx examples/<example-name>.ts
 npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 ```
 
-### PostgreSQL Example (10-postgresql.ts)
+### PostgreSQL Example (10)
 
-Requires a running PostgreSQL instance:
+Requires a running PostgreSQL instance. Example 10 uses `node-postgres`; for other drivers
+(postgres-js, neon-serverless, neon-http), see the [backend setup docs](https://typegraph.dev/backend-setup#choosing-a-postgresql-driver).
 
 ```bash
 # Using Docker
@@ -75,10 +82,7 @@ docker run -d --name typegraph-pg \
   -p 5432:5432 \
   postgres:16
 
-# Set connection URL
 export POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres"
-
-# Run the example
 npx tsx examples/10-postgresql.ts
 ```
 

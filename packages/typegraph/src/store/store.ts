@@ -8,7 +8,11 @@
  * - Schema management
  * - Transaction handling
  */
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  runOptionallyInTransaction,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   type AllNodeTypes,
   type EdgeKinds,
@@ -531,10 +535,10 @@ export class Store<G extends GraphDef> {
       ...BatchableQuery<unknown>[],
     ],
   >(...queries: Queries): Promise<BatchResults<Queries>> {
-    return this.#backend.transaction(async (txBackend) => {
+    return runOptionallyInTransaction(this.#backend, async (target) => {
       const results: unknown[] = [];
       for (const query of queries) {
-        const result = await query.executeOn(txBackend);
+        const result = await query.executeOn(target);
         results.push(result);
       }
       return results as BatchResults<Queries>;
@@ -613,6 +617,13 @@ export class Store<G extends GraphDef> {
   async transaction<T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
   ): Promise<T> {
+    // Without a real transaction the tx-scoped collections would be
+    // bound to the same backend as this.nodes/this.edges and exposing
+    // the cached versions avoids rebuilding the proxies on every call.
+    if (!this.#backend.capabilities.transactions) {
+      return fn({ nodes: this.nodes, edges: this.edges });
+    }
+
     return this.#backend.transaction(async (txBackend) => {
       const txNodeOperations: NodeOperations = {
         ...this.#nodeOperations,
@@ -623,7 +634,6 @@ export class Store<G extends GraphDef> {
         createQuery: () => this.#createQueryForBackend(txBackend),
       };
 
-      // Create collections using transaction backend
       const nodes = createNodeCollectionsProxy(
         this.#graph,
         this.graphId,
@@ -674,6 +684,37 @@ export class Store<G extends GraphDef> {
   }
 
   // === Lifecycle ===
+
+  /**
+   * Refreshes the backend's query-planner statistics.
+   *
+   * Call this once after a large initial import or bulk backfill. The
+   * planner uses table statistics to choose between TypeGraph's
+   * multi-column indexes; without fresh stats a forward traversal can
+   * pick a reverse index and run an order of magnitude slower than
+   * needed. Autovacuum / background statistics will catch up
+   * eventually, but calling this explicitly after a bulk load gives
+   * you correct latencies immediately.
+   *
+   * Implementations:
+   * - SQLite runs `ANALYZE`, populating `sqlite_stat1`
+   * - PostgreSQL runs `ANALYZE` on the TypeGraph-managed tables
+   *
+   * Costs a few tens of milliseconds at the sizes this library is
+   * designed for. Safe to call at any time.
+   *
+   * @example
+   * ```typescript
+   * // After a bulk import
+   * for (const batch of batches) {
+   *   await store.bulkCreate(batch);
+   * }
+   * await store.refreshStatistics();
+   * ```
+   */
+  async refreshStatistics(): Promise<void> {
+    await this.#backend.refreshStatistics();
+  }
 
   /**
    * Closes the store and releases underlying resources.

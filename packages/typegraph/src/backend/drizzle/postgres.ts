@@ -1,12 +1,17 @@
 /**
  * PostgreSQL backend adapter for TypeGraph.
  *
- * Works with any Drizzle PostgreSQL database instance:
- * - node-postgres (pg)
- * - PGlite
- * - Neon
- * - Vercel Postgres
- * - Supabase
+ * Works with any Drizzle PostgreSQL database instance. Tested against:
+ * - `drizzle-orm/node-postgres` (pg Pool / Client)
+ * - `drizzle-orm/postgres-js` (postgres-js tagged-template client)
+ * - `drizzle-orm/neon-serverless` (@neondatabase/serverless Pool / Client)
+ * - `drizzle-orm/neon-http` (@neondatabase/serverless `neon(url)`) —
+ *   transactions are auto-disabled because HTTP can't hold a session;
+ *   use `drizzle-orm/neon-serverless` if you need transactional writes.
+ *
+ * Other pg-protocol Drizzle adapters (PGlite, Vercel Postgres, Supabase
+ * via pg) should work unchanged because they all expose a compatible
+ * `db.execute()` / `db.transaction()` surface.
  *
  * @example
  * ```typescript
@@ -22,6 +27,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { SqlTableNames } from "../../query/compiler/schema";
+import { quoteIdentifier } from "../../query/compiler/utils";
 import {
   buildFulltextCapabilities,
   type FulltextStrategy,
@@ -39,6 +45,7 @@ import {
   type FulltextSearchResult,
   type GraphBackend,
   POSTGRES_CAPABILITIES,
+  runOptionallyInTransaction,
   type TransactionBackend,
   type TransactionOptions,
   type UpsertEmbeddingParams,
@@ -51,6 +58,7 @@ import { generatePostgresDDL } from "./ddl";
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
+  isNeonHttpClient,
   type PostgresExecutionAdapter,
 } from "./execution/postgres-execution";
 import { createCommonOperationBackend } from "./operation-backend-core";
@@ -97,6 +105,19 @@ export type PostgresBackendOptions = Readonly<{
    * pgroonga without forking TypeGraph.
    */
   fulltext?: FulltextStrategy;
+  /**
+   * Override specific backend capabilities. Useful when the underlying
+   * driver doesn't support a feature TypeGraph would otherwise assume —
+   * for example, an HTTP-only Postgres driver that can't hold a session
+   * across statements would need `{ transactions: false }` so
+   * TypeGraph falls through to non-transactional execution paths.
+   *
+   * `drizzle-orm/neon-http` is auto-detected and has `transactions`
+   * disabled without an explicit override; this option exists for
+   * other HTTP-style drivers and for tests that need to simulate a
+   * capability gap.
+   */
+  capabilities?: Partial<BackendCapabilities>;
 }>;
 
 const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
@@ -206,7 +227,18 @@ export function createPostgresBackend(
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
-  const capabilities = buildPostgresCapabilities(fulltextStrategy);
+  const baseCapabilities = buildPostgresCapabilities(fulltextStrategy);
+  // HTTP-only drivers (notably `drizzle-orm/neon-http`) can't hold a
+  // session across statements, so multi-statement transactions are
+  // unavailable regardless of what we declare. Auto-detect and downgrade
+  // the capability so callers get correct fallback behavior without
+  // having to remember to override it themselves.
+  const httpOnlyOverrides = isNeonHttpClient(db) ? { transactions: false } : {};
+  const capabilities: BackendCapabilities = {
+    ...baseCapabilities,
+    ...httpOnlyOverrides,
+    ...options.capabilities,
+  };
   const executionAdapter = createPostgresExecutionAdapter(db);
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -214,6 +246,18 @@ export function createPostgresBackend(
     embeddings: getTableName(tables.embeddings),
     fulltext: tables.fulltextTableName,
   };
+  // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
+  // ANALYZE statement on every call.
+  const analyzeStatement = sql`ANALYZE ${sql.join(
+    [
+      tableNames.nodes,
+      tableNames.edges,
+      getTableName(tables.uniques),
+      tableNames.embeddings,
+      tableNames.fulltext,
+    ].map((name) => quoteIdentifier(name)),
+    sql`, `,
+  )}`;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
     fulltextStrategy,
@@ -237,10 +281,21 @@ export function createPostgresBackend(
       }
     },
 
+    async refreshStatistics(): Promise<void> {
+      // Scoped to TypeGraph-managed tables only — we don't touch
+      // unrelated tables in the same database. Without fresh stats
+      // after a bulk load the planner can pick a reverse-index scan
+      // with a filter (5ms forward traversal instead of 0.5ms) until
+      // autovacuum catches up.
+      await db.execute(analyzeStatement);
+    },
+
     async setActiveSchema(graphId: string, version: number): Promise<void> {
-      await backend.transaction(async (txBackend) => {
-        await txBackend.setActiveSchema(graphId, version);
-      });
+      await runOptionallyInTransaction(
+        backend,
+        (target) => target.setActiveSchema(graphId, version),
+        operations,
+      );
     },
 
     async transaction<T>(
@@ -308,22 +363,20 @@ function createPostgresOperationBackend(
     fulltextStrategy,
   } = options;
 
-  async function execAll<T>(query: SQL): Promise<T[]> {
-    const result = (await db.execute(query)) as Readonly<{
-      rows: T[];
-    }>;
-    return result.rows;
+  // Route through the execution adapter so driver-specific result shapes
+  // (`{rows}` for node-postgres / neon-serverless; bare array for
+  // postgres-js) are normalized in one place.
+  async function execAll<T>(query: SQL): Promise<readonly T[]> {
+    return executionAdapter.execute<T>(query);
   }
 
   async function execGet<T>(query: SQL): Promise<T | undefined> {
-    const result = (await db.execute(query)) as Readonly<{
-      rows: T[];
-    }>;
-    return result.rows[0];
+    const rows = await executionAdapter.execute<T>(query);
+    return rows[0];
   }
 
   async function execRun(query: SQL): Promise<void> {
-    await db.execute(query);
+    await executionAdapter.execute(query);
   }
 
   const commonBackend = createCommonOperationBackend({

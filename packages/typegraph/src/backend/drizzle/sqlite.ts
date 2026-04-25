@@ -38,6 +38,7 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
+  runOptionallyInTransaction,
   SQLITE_CAPABILITIES,
   type TransactionBackend,
   type TransactionOptions,
@@ -527,10 +528,21 @@ export function createSqliteBackend(
       }
     },
 
+    async refreshStatistics(): Promise<void> {
+      // `ANALYZE` populates `sqlite_stat1`. With no stat table, the
+      // planner falls back to heuristics that, at least for FTS5
+      // virtual-table queries and multi-column index selection, can be
+      // an order of magnitude slower. Running it explicitly makes the
+      // planner data-driven.
+      await db.run(sql`ANALYZE`);
+    },
+
     async setActiveSchema(graphId: string, version: number): Promise<void> {
-      await backend.transaction(async (txBackend) => {
-        await txBackend.setActiveSchema(graphId, version);
-      });
+      await runOptionallyInTransaction(
+        backend,
+        (target) => target.setActiveSchema(graphId, version),
+        operations,
+      );
     },
 
     async transaction<T>(

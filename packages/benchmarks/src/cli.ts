@@ -1,4 +1,8 @@
-import { type PerfBackend, type PerfCliOptions } from "./config";
+import {
+  type PerfBackend,
+  type PerfCliOptions,
+  type PostgresDriver,
+} from "./config";
 
 function parseBackend(rawBackend: string): PerfBackend {
   if (rawBackend === "sqlite" || rawBackend === "postgres") {
@@ -7,6 +11,16 @@ function parseBackend(rawBackend: string): PerfBackend {
 
   throw new Error(
     `Unsupported backend: "${rawBackend}". Expected "sqlite" or "postgres".`,
+  );
+}
+
+function parsePostgresDriver(raw: string): PostgresDriver {
+  if (raw === "pg" || raw === "postgres-js") {
+    return raw;
+  }
+
+  throw new Error(
+    `Unsupported --postgres-driver value: "${raw}". Expected "pg" or "postgres-js".`,
   );
 }
 
@@ -38,9 +52,18 @@ export function parseCliOptions(argv: readonly string[]): PerfCliOptions {
       parseScale(scaleArgument.slice("--scale=".length))
     );
 
+  const driverArgument = argv.find((argument) =>
+    argument.startsWith("--postgres-driver="),
+  );
+  const postgresDriver: PostgresDriver =
+    driverArgument === undefined ? "pg" : (
+      parsePostgresDriver(driverArgument.slice("--postgres-driver=".length))
+    );
+
   return {
     runChecks,
     backend,
+    postgresDriver,
     scale,
   };
 }

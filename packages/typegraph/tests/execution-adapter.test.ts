@@ -207,10 +207,24 @@ describe("postgres execution adapter", () => {
   });
 
   it("exposes executeCompiled and prepare when raw client is available", async () => {
-    const query = vi.fn((sqlText: string, params: readonly unknown[]) =>
-      Promise.resolve({
-        rows: [{ params, sqlText }],
-      }),
+    // The fast path now wraps the node-postgres client to use named
+    // server-side prepared statements: it calls
+    // `client.query({name, text, values, types})` instead of
+    // `client.query(text, values)`. The mock accepts either shape so
+    // tests can assert on the meaningful payload (text, values).
+    type QueryArgument =
+      | string
+      | Readonly<{ name: string; text: string; values: readonly unknown[] }>;
+    const query = vi.fn(
+      (configOrSql: QueryArgument, paramsArgument?: readonly unknown[]) => {
+        const sqlText =
+          typeof configOrSql === "string" ? configOrSql : configOrSql.text;
+        const params =
+          typeof configOrSql === "string" ?
+            (paramsArgument ?? [])
+          : configOrSql.values;
+        return Promise.resolve({ rows: [{ params, sqlText }] });
+      },
     );
     const db = {
       $client: { query },
@@ -245,7 +259,13 @@ describe("postgres execution adapter", () => {
 
     expect(compiledRows[0]?.sqlText).toBe("SELECT $1");
     expect(compiledRows[0]?.params).toEqual([42]);
-    expect(query).toHaveBeenCalledWith("SELECT $1", [42]);
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: expect.stringMatching(/^tg_\d+$/) as unknown,
+        text: "SELECT $1",
+        values: [42],
+      }),
+    );
 
     const prepare = adapter.prepare;
     if (prepare === undefined) {
@@ -260,6 +280,11 @@ describe("postgres execution adapter", () => {
     }>(["abc"]);
     expect(preparedRows[0]?.sqlText).toBe("SELECT $1");
     expect(preparedRows[0]?.params).toEqual(["abc"]);
-    expect(query).toHaveBeenCalledWith("SELECT $1", ["abc"]);
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "SELECT $1",
+        values: ["abc"],
+      }),
+    );
   });
 });

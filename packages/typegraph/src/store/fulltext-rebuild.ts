@@ -11,7 +11,12 @@
  */
 import { type z } from "zod";
 
-import type { GraphBackend, NodeRow } from "../backend/types";
+import {
+  type GraphBackend,
+  type NodeRow,
+  runOptionallyInTransaction,
+  type TransactionBackend,
+} from "../backend/types";
 import { ConfigurationError, ValidationError } from "../errors";
 import { type KindRegistry } from "../registry";
 import { computeFulltextContent, getSearchableFields } from "./fulltext-sync";
@@ -168,17 +173,19 @@ export async function rebuildFulltextIndex(
         skippedIds.push(...pageResult.skippedIds.slice(0, remaining));
       }
 
-      await backend.transaction(async (tx) => {
+      const writePage = async (
+        target: GraphBackend | TransactionBackend,
+      ): Promise<void> => {
         if (pageResult.toUpsert.length > 0) {
-          if (tx.upsertFulltextBatch) {
-            await tx.upsertFulltextBatch({
+          if (target.upsertFulltextBatch) {
+            await target.upsertFulltextBatch({
               graphId: ctx.graphId,
               nodeKind: kind,
               rows: pageResult.toUpsert,
             });
-          } else if (tx.upsertFulltext) {
+          } else if (target.upsertFulltext) {
             for (const item of pageResult.toUpsert) {
-              await tx.upsertFulltext({
+              await target.upsertFulltext({
                 graphId: ctx.graphId,
                 nodeKind: kind,
                 nodeId: item.nodeId,
@@ -189,15 +196,15 @@ export async function rebuildFulltextIndex(
           }
         }
         if (pageResult.toDelete.length > 0) {
-          if (tx.deleteFulltextBatch) {
-            await tx.deleteFulltextBatch({
+          if (target.deleteFulltextBatch) {
+            await target.deleteFulltextBatch({
               graphId: ctx.graphId,
               nodeKind: kind,
               nodeIds: pageResult.toDelete,
             });
-          } else if (tx.deleteFulltext) {
+          } else if (target.deleteFulltext) {
             for (const nodeId of pageResult.toDelete) {
-              await tx.deleteFulltext({
+              await target.deleteFulltext({
                 graphId: ctx.graphId,
                 nodeKind: kind,
                 nodeId,
@@ -205,7 +212,13 @@ export async function rebuildFulltextIndex(
             }
           }
         }
-      });
+      };
+
+      // Wrapped in a transaction when supported so a partial failure
+      // mid-page doesn't leave the index half-rebuilt. On backends without
+      // transactions, refusing to rebuild would be worse than the lost
+      // atomicity (the index would stay permanently stale).
+      await runOptionallyInTransaction(backend, writePage);
 
       processed += rows.length;
       upserted += pageResult.toUpsert.length;
