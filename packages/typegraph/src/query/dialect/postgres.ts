@@ -59,6 +59,7 @@ export const postgresDialect: DialectAdapter = {
     recursiveQueryStrategy: "recursive_cte",
     setOperationStrategy: "standard_parenthesized",
     materializeIntermediateTraversalCtes: false,
+    emitNotMaterializedHint: true,
     forceRecursiveWorktableOuterJoinOrder: false,
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,

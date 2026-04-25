@@ -21,6 +21,8 @@
  * const store = createStore(graph, backend);
  * ```
  */
+import { createRequire } from "node:module";
+
 import Database from "better-sqlite3";
 import {
   type BetterSQLite3Database,
@@ -35,6 +37,8 @@ import {
   tables as defaultTables,
 } from "../drizzle/sqlite";
 import { type GraphBackend, wrapWithManagedClose } from "../types";
+
+const nodeRequire = createRequire(import.meta.url);
 
 // ============================================================
 // Native Addon Helpers
@@ -165,6 +169,14 @@ export function createLocalSqliteBackend(
   const tables = options.tables ?? defaultTables;
 
   const sqlite = createDatabase(path);
+
+  // Best-effort: load sqlite-vec so embedding fields are persisted to the
+  // embeddings table. Without it, nodes with `embedding()` fields validate
+  // and insert but their vectors are silently dropped. When the user has
+  // installed sqlite-vec as a peer dep we load it; otherwise we proceed
+  // without vector support.
+  const hasVectorEmbeddings = tryLoadSqliteVec(sqlite);
+
   const db = drizzle(sqlite);
 
   // Generate and execute DDL from schema
@@ -178,10 +190,32 @@ export function createLocalSqliteBackend(
       isSync: true,
     },
     tables,
+    hasVectorEmbeddings,
   });
   const managedBackend = wrapWithManagedClose(backend, () => {
     sqlite.close();
   });
 
   return { backend: managedBackend, db };
+}
+
+function tryLoadSqliteVec(sqlite: Database.Database): boolean {
+  try {
+    // `sqlite-vec` is an optional peer dep; resolved via createRequire so
+    // bundlers don't mark it as a hard import. Node resolves the package
+    // only when it's actually installed.
+    const module_: unknown = nodeRequire("sqlite-vec");
+    if (
+      typeof module_ === "object" &&
+      module_ !== null &&
+      "load" in module_ &&
+      typeof module_.load === "function"
+    ) {
+      (module_ as { load: (db: Database.Database) => void }).load(sqlite);
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }

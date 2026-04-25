@@ -18,6 +18,8 @@ import {
   avg,
   count,
   countDistinct,
+  countDistinctEdges,
+  countEdges,
   createQueryBuilder,
   defineEdge,
   defineGraph,
@@ -664,7 +666,7 @@ describe("Query Compilation to SQL", () => {
     expect(sql).not.toContain("cte_friendOfFriend AS MATERIALIZED");
   });
 
-  it("does not materialize traversal CTEs for postgres multi-hop queries", () => {
+  it("emits NOT MATERIALIZED on postgres traversal CTEs so the planner can inline them", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
       .whereNode("p", (p) => p.id.eq("person-1"))
@@ -680,7 +682,30 @@ describe("Query Compilation to SQL", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id, "postgres");
     const { sql } = toSqlWithParams(sqlObject, "postgres");
 
-    expect(sql).not.toContain("MATERIALIZED");
+    // Each CTE (start + two traversals) should carry `NOT MATERIALIZED`.
+    const occurrences = sql.match(/NOT MATERIALIZED/g) ?? [];
+    expect(occurrences.length).toBeGreaterThanOrEqual(3);
+    // And no plain `MATERIALIZED` without the NOT prefix.
+    expect(sql).not.toMatch(/(?<!NOT )MATERIALIZED/);
+  });
+
+  it("does not emit NOT MATERIALIZED on sqlite (hint unsupported there)", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .whereNode("p", (p) => p.id.eq("person-1"))
+      .traverse("knows", "e1")
+      .to("Person", "friend")
+      .traverse("knows", "e2")
+      .to("Person", "friendOfFriend")
+      .select((context) => ({
+        friendName: context.friend.name,
+        fofName: context.friendOfFriend.name,
+      }));
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    expect(sql).not.toContain("NOT MATERIALIZED");
   });
 
   it("does not push traversal limits when ORDER BY is present", () => {
@@ -1096,6 +1121,214 @@ describe("Query Builder - Aggregations", () => {
     expect(sql).toContain("p_props");
     expect(sql).toContain("cte_p.p_kind = e.to_kind");
     expect(sql).toContain("n.kind = e.from_kind");
+  });
+
+  it("countEdges(edgeAlias) drops the target node join in the fast path", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        followCount: countEdges("k"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // Edge-only count should skip the typegraph_nodes n JOIN entirely.
+    expect(sql).not.toMatch(/JOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    // And count the edge table primary key directly.
+    expect(sql).toContain("COUNT(e.id)");
+    // Target-side temporal / deleted filters are not emitted.
+    expect(sql).not.toContain("n.deleted_at");
+  });
+
+  it("countDistinctEdges(edgeAlias) emits COUNT(DISTINCT e.id) without node join", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        distinctFollowers: countDistinctEdges("k"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    expect(sql).toContain("COUNT(DISTINCT e.id)");
+    expect(sql).not.toMatch(/JOIN\s+"typegraph_nodes"\s+n\s+ON/);
+  });
+
+  it("mixes node and edge counts — keeps the node join and emits both columns", () => {
+    // When a query mixes count(targetAlias) with countEdges(edgeAlias) the
+    // compiler must keep the target-node join (for count-target's temporal
+    // correctness) and emit distinct result columns for each aggregate.
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        liveFriends: count("friend"),
+        totalEdges: countEdges("k"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // No target predicate → LEFT JOIN so countEdges sees all live edges
+    // while count(target) still excludes edges to expired targets via
+    // COUNT ignoring NULL-valued n.id.
+    expect(sql).toMatch(/LEFT JOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    expect(sql).toContain("COUNT(n.id)");
+    expect(sql).toContain("COUNT(e.id)");
+    // Different column identifiers for each aggregate, not a merged column.
+    expect(sql).toContain("friend_count");
+    expect(sql).toContain("k_count");
+  });
+
+  it("switches to INNER JOIN when a whereNode predicate targets the traversal target", () => {
+    // With a whereNode predicate on the target alias, the predicate must
+    // constrain every aggregate — including countEdges. LEFT JOIN with the
+    // predicate in ON would let edges pointing at non-matching targets
+    // through and inflate COUNT(e.id).
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .whereNode("friend", (friend) => friend.name.eq("Alice"))
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        matchingKnows: countEdges("k"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // INNER JOIN (not LEFT JOIN) so predicate failures drop the edge row.
+    expect(sql).toMatch(/\bJOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    expect(sql).not.toMatch(/LEFT JOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    // Predicate lands in WHERE, not ON.
+    expect(sql).toMatch(/WHERE[\s\S]*json_extract\(n\.props,\s*'\$\."name"'\)/);
+    expect(sql).toContain("COUNT(e.id)");
+  });
+
+  it("joins to the target node table so target temporal filters apply", () => {
+    // count(target) must preserve the target node's validity window, which
+    // is NOT cascaded when a node is updated with `validTo`. The target
+    // node join is how we keep traversal-target visibility consistent.
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        friendCount: count("friend"),
+      });
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    expect(sql).toMatch(/JOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    expect(sql).toContain("COUNT(n.id)");
+    // Target-side temporal + deleted filters present.
+    expect(sql).toContain("n.deleted_at");
+  });
+
+  it("suppresses outer LIMIT/OFFSET when LIMIT+OFFSET was pushed into the start CTE", () => {
+    // When .limit(N).offset(M) is pushed into cte_u, the outer SELECT
+    // must not also emit LIMIT/OFFSET or the offset is applied twice.
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        friendCount: count("friend"),
+      })
+      .limit(20)
+      .offset(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql, params } = toSqlWithParams(sqlObject);
+
+    // Start CTE carries both LIMIT and OFFSET.
+    expect(sql).toMatch(/cte_p AS[\s\S]*?LIMIT\s+\?\s*OFFSET\s+\?\s*\)/);
+    // Outer SELECT does not re-emit them — anchor the final LIMIT keyword
+    // to the end of the statement and assert it's inside cte_p.
+    const outerLimitPattern = /LIMIT\s+\?(?:\s+OFFSET\s+\?)?\s*$/;
+    expect(sql.replaceAll(/\s+/g, " ")).not.toMatch(outerLimitPattern);
+    // Only one of each LIMIT/OFFSET value should be bound.
+    expect(params.filter((p) => p === 20)).toHaveLength(2);
+  });
+
+  it("pushes LIMIT into the start CTE for optional count aggregates", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        friendCount: count("friend"),
+      })
+      .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // The start CTE should carry the LIMIT so GROUP BY only runs over 20 rows.
+    expect(sql).toMatch(/cte_p AS[\s\S]*?LIMIT\s+\?\s*\)/);
+  });
+
+  it("does not push LIMIT past GROUP BY when an ORDER BY is set", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .optionalTraverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .orderBy("p", "name", "asc")
+      .aggregate({
+        name: field("p", "name"),
+        friendCount: count("friend"),
+      })
+      .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // ORDER BY over the full result requires the full result — no push-down.
+    expect(sql).not.toMatch(/cte_p AS[\s\S]*?LIMIT\s+\?\s*\)/);
+    // LIMIT still appears at the outer query level.
+    expect(sql).toMatch(/LIMIT\s+\?\s*$/);
+  });
+
+  it("does not push LIMIT past GROUP BY for required traversals", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("knows", "k")
+      .to("Person", "friend")
+      .groupByNode("p")
+      .aggregate({
+        name: field("p", "name"),
+        friendCount: count("friend"),
+      })
+      .limit(20);
+
+    const sqlObject = compileQuery(query.toAst(), graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // INNER JOIN can drop start rows; pushing LIMIT into cte_p could change
+    // the result set size.
+    expect(sql).not.toMatch(/cte_p AS[\s\S]*?LIMIT\s+\?\s*\)/);
   });
 
   it("supports HAVING clause to filter groups", () => {

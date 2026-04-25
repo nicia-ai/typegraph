@@ -32,6 +32,16 @@ const config: KnipConfig = {
       // Astro/Starlight plugins loaded via config
       ignoreDependencies: ["@astrojs/starlight-tailwind", "tailwindcss"],
     },
+    "packages/benchmarks": {
+      // Neo4j head-to-head harness is a standalone package installed with
+      // pnpm --ignore-workspace. Its src files are entrypoints invoked
+      // from its own package.json scripts; the monorepo never imports
+      // them.
+      ignore: ["neo4j-compare/**"],
+      // sqlite-vec is loaded dynamically via createRequire so the optional
+      // peer dep stays optional; knip's static scan doesn't see it.
+      ignoreDependencies: ["sqlite-vec"],
+    },
   },
 };
 

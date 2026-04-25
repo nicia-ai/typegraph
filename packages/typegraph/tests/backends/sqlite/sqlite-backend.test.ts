@@ -5,9 +5,14 @@
  * Follows Better Auth's pattern: users provide a configured Drizzle instance
  * and run migrations to create TypeGraph tables.
  */
+import { createRequire } from "node:module";
+
 import Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import {
+  type BetterSQLite3Database,
+  drizzle as drizzleBetterSqlite3,
+} from "drizzle-orm/better-sqlite3";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -18,6 +23,8 @@ import {
   defineNode,
   subClassOf,
 } from "../../../src";
+
+const nodeRequire = createRequire(import.meta.url);
 import { tables } from "../../../src/backend/drizzle/schema/sqlite";
 import {
   createSqliteBackend,
@@ -844,5 +851,95 @@ describe("Vector Search with SQLite (sqlite-vec)", () => {
         `SELECT vec_distance_ip(vec_f32('[1,0,0,0]'), vec_f32('[0,1,0,0]'))`,
       );
     }).toThrow(/no such function/);
+  });
+});
+
+// ============================================================
+// TypeGraph SQLite Embedding Persistence (end-to-end)
+// ============================================================
+
+describe("SQLite embedding persistence via createSqliteBackend", () => {
+  it("persists embeddings and returns results from .similarTo() when sqlite-vec is loaded", async () => {
+    // Best-effort: skip if the optional peer dep is not installed.
+    const sqlite = new Database(":memory:");
+    try {
+      const module_ = nodeRequire("sqlite-vec") as {
+        load: (db: Database.Database) => void;
+      };
+      module_.load(sqlite);
+    } catch {
+      sqlite.close();
+      return;
+    }
+
+    const { embedding, defineNode, defineGraph } = await import("../../../src");
+    const Document = defineNode("Doc", {
+      schema: z.object({
+        title: z.string(),
+        embedding: embedding(4),
+      }),
+    });
+    const graph = defineGraph({
+      id: "sqlite_vec_e2e",
+      nodes: { Doc: { type: Document } },
+      edges: {},
+    });
+
+    for (const statement of generateSqliteDDL(tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleBetterSqlite3(sqlite);
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables,
+      hasVectorEmbeddings: true,
+    });
+    expect(backend.upsertEmbedding).toBeDefined();
+
+    const store = createStore(graph, backend);
+    await store.nodes.Doc.create({
+      title: "Similar",
+      embedding: [1, 0, 0, 0],
+    });
+    await store.nodes.Doc.create({
+      title: "Dissimilar",
+      embedding: [0, 1, 0, 0],
+    });
+
+    // Embeddings table should now carry two rows.
+    const count = sqlite
+      .prepare("SELECT COUNT(*) AS n FROM typegraph_node_embeddings")
+      .get() as { n: number };
+    expect(count.n).toBe(2);
+
+    // `.similarTo()` should rank the identical embedding first.
+    const rows = await store
+      .query()
+      .from("Doc", "d")
+      .whereNode("d", (d) =>
+        d.embedding.similarTo([1, 0, 0, 0], 10, { metric: "cosine" }),
+      )
+      .select((ctx) => ({ title: ctx.d.title }))
+      .execute();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.title).toBe("Similar");
+    expect(rows[1]!.title).toBe("Dissimilar");
+
+    sqlite.close();
+  });
+
+  it("does not expose upsertEmbedding when hasVectorEmbeddings is false", () => {
+    const sqlite = new Database(":memory:");
+    for (const statement of generateSqliteDDL(tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleBetterSqlite3(sqlite);
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables,
+    });
+    expect(backend.upsertEmbedding).toBeUndefined();
+    expect(backend.deleteEmbedding).toBeUndefined();
+    sqlite.close();
   });
 });

@@ -1,4 +1,4 @@
-export const BENCHMARK_CONFIG = {
+const BASE_BENCHMARK_CONFIG = {
   userCount: 1200,
   followsPerUser: 10,
   postsPerUser: 5,
@@ -9,15 +9,65 @@ export const BENCHMARK_CONFIG = {
   sampleIterations: 15,
 } as const;
 
+/**
+ * Active benchmark configuration.
+ *
+ * Mutable because `--scale=N` scales `userCount` at startup. All other
+ * values are stable so per-user/per-post density doesn't drift with scale.
+ */
+export const BENCHMARK_CONFIG: {
+  userCount: number;
+  readonly followsPerUser: number;
+  readonly postsPerUser: number;
+  readonly userBioBytes: number;
+  readonly postBodyBytes: number;
+  readonly batchSize: number;
+  readonly warmupIterations: number;
+  readonly sampleIterations: number;
+} = { ...BASE_BENCHMARK_CONFIG };
+
+/**
+ * Minimum scale supported by the benchmark. Smaller values would reduce
+ * the graph below the 1000-hop recursive benchmark's required chain
+ * length, causing those measurements to silently return empty results.
+ * Tighten the recursive shapes and drop this if you need sub-1× scales.
+ */
+const MIN_SCALE = 1;
+
+export function applyScale(scale: number): void {
+  if (!Number.isFinite(scale) || scale <= 0) {
+    throw new Error(
+      `Invalid --scale value: ${scale}. Must be a positive number.`,
+    );
+  }
+  if (scale < MIN_SCALE) {
+    throw new Error(
+      `--scale=${scale} would shrink the graph below the 1000-hop recursive ` +
+        `benchmark's required chain length (1001 users). Minimum supported ` +
+        `scale is ${MIN_SCALE}.`,
+    );
+  }
+  BENCHMARK_CONFIG.userCount = Math.round(
+    BASE_BENCHMARK_CONFIG.userCount * scale,
+  );
+}
+
 const BASE_GUARDRAILS = {
   reverseToForwardRatioMax: 6,
   inverseTraversalMsMax: 500,
   inverseToForwardRatioMax: 10,
   threeHopMsMax: 500,
   threeHopToTwoHopRatioMax: 8,
-  aggregateMsMax: 500,
-  aggregateDistinctMsMax: 700,
+  aggregateMsMax: 100,
+  aggregateDistinctMsMax: 100,
   aggregateDistinctToAggregateRatioMax: 4,
+  aggregateEdgesMsMax: 50,
+  scopedAggregateMsMax: 50,
+  indexedFilterMsMax: 50,
+  temporalAsOfMsMax: 50,
+  fulltextSearchMsMax: 100,
+  vectorSearchMsMax: 200,
+  hybridSearchMsMax: 300,
   cachedExecuteMsMax: 500,
   preparedExecuteMsMax: 500,
   preparedToCachedRatioMax: 2,
@@ -38,7 +88,15 @@ const BACKEND_GUARDRAIL_OVERRIDES = {
     threeHopMsMax: 1000,
     inverseTraversalMsMax: 1000,
     inverseToForwardRatioMax: 30,
-    aggregateDistinctMsMax: 1200,
+    aggregateMsMax: 300,
+    aggregateDistinctMsMax: 300,
+    aggregateEdgesMsMax: 200,
+    scopedAggregateMsMax: 200,
+    indexedFilterMsMax: 200,
+    temporalAsOfMsMax: 200,
+    fulltextSearchMsMax: 300,
+    vectorSearchMsMax: 500,
+    hybridSearchMsMax: 800,
     preparedExecuteMsMax: 700,
   },
 } as const;
@@ -51,6 +109,7 @@ export type PerfBackend = "sqlite" | "postgres";
 export type PerfCliOptions = Readonly<{
   runChecks: boolean;
   backend: PerfBackend;
+  scale: number;
 }>;
 
 export type Guardrails = Readonly<{
@@ -62,6 +121,13 @@ export type Guardrails = Readonly<{
   aggregateMsMax: number;
   aggregateDistinctMsMax: number;
   aggregateDistinctToAggregateRatioMax: number;
+  aggregateEdgesMsMax: number;
+  scopedAggregateMsMax: number;
+  indexedFilterMsMax: number;
+  temporalAsOfMsMax: number;
+  fulltextSearchMsMax: number;
+  vectorSearchMsMax: number;
+  hybridSearchMsMax: number;
   cachedExecuteMsMax: number;
   preparedExecuteMsMax: number;
   preparedToCachedRatioMax: number;
@@ -93,6 +159,15 @@ export type QueryMetrics = Readonly<{
   threeHopMs: number;
   aggregateMs: number;
   aggregateDistinctMs: number;
+  aggregateEdgesMs: number;
+  scopedAggregateMs: number;
+  indexedFilterMs: number;
+  temporalAsOfMs: number;
+  fulltextSearchMs: number;
+  /** `undefined` when vector search is unavailable at this backend. */
+  vectorSearchMs: number | undefined;
+  /** `undefined` when vector search is unavailable at this backend. */
+  hybridSearchMs: number | undefined;
   cachedExecuteMs: number;
   preparedExecuteMs: number;
   subgraphFullMs: number;

@@ -1,22 +1,61 @@
+import { createRequire } from "node:module";
+
+import Database from "better-sqlite3";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { createStore } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
+  createPostgresTables,
   generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/postgres";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import {
+  createSqliteBackend,
+  createSqliteTables,
+  generateSqliteDDL,
+} from "@nicia-ai/typegraph/sqlite";
 
 import { DEFAULT_POSTGRES_URL, type PerfBackend } from "./config";
-import { perfGraph, type PerfStore } from "./graph";
+import { perfGraph, perfIndexes, type PerfStore } from "./graph";
 
 type BackendResources = Readonly<{
   store: PerfStore;
   close: () => Promise<void>;
+  /**
+   * True when the backend can evaluate `similarTo()` predicates:
+   * `sqlite-vec` is loaded on SQLite, or `pgvector` is available on
+   * PostgreSQL. The query-builder vector path uses this.
+   */
+  hasVectorPredicate: boolean;
+  /**
+   * True when `store.search.hybrid(...)` works. Requires the backend to
+   * implement the `vectorSearch` capability — currently PostgreSQL only.
+   */
+  hasHybridFacade: boolean;
 }>;
 
 function getPostgresUrl(): string {
   return process.env.POSTGRES_URL ?? DEFAULT_POSTGRES_URL;
+}
+
+/**
+ * Attempt to load `sqlite-vec` into a better-sqlite3 connection. Returns
+ * true on success. When sqlite-vec is missing (e.g. CI without the
+ * optional dep) we quietly skip vector measurements rather than fail.
+ */
+const sqliteVecRequire = createRequire(import.meta.url);
+
+function loadSqliteVec(sqlite: Database.Database): boolean {
+  try {
+    const sqliteVec = sqliteVecRequire("sqlite-vec") as {
+      load: (db: Database.Database) => void;
+    };
+    sqliteVec.load(sqlite);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function resetPostgresTables(pool: Pool): Promise<void> {
@@ -26,20 +65,42 @@ async function resetPostgresTables(pool: Pool): Promise<void> {
     DROP TABLE IF EXISTS typegraph_edges CASCADE;
     DROP TABLE IF EXISTS typegraph_nodes CASCADE;
     DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
+    DROP TABLE IF EXISTS typegraph_node_fulltext CASCADE;
   `);
-  await pool.query(generatePostgresMigrationSQL());
+  const tables = createPostgresTables({}, { indexes: perfIndexes });
+  await pool.query(generatePostgresMigrationSQL(tables));
 }
 
 export async function createBackendResources(
   backend: PerfBackend,
 ): Promise<BackendResources> {
   if (backend === "sqlite") {
-    const sqlite = createLocalSqliteBackend();
+    const tables = createSqliteTables({}, { indexes: perfIndexes });
+    const sqlite = new Database(":memory:");
+    const hasVectorEmbeddings = loadSqliteVec(sqlite);
+
+    for (const statement of generateSqliteDDL(tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleSqlite(sqlite);
+    const sqliteBackend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables,
+      hasVectorEmbeddings,
+    });
     return {
-      store: createStore(perfGraph, sqlite.backend, {
+      store: createStore(perfGraph, sqliteBackend, {
         queryDefaults: { traversalExpansion: "none" },
       }),
-      close: async () => sqlite.backend.close(),
+      close: async () => {
+        sqliteBackend.close();
+        sqlite.close();
+      },
+      hasVectorPredicate: sqliteBackend.upsertEmbedding !== undefined,
+      // The SQLite backend doesn't implement the hybrid-search facade
+      // capability (no `backend.vectorSearch`); store.search.hybrid() is
+      // PostgreSQL-only today.
+      hasHybridFacade: false,
     };
   }
 
@@ -61,7 +122,8 @@ export async function createBackendResources(
     );
   }
 
-  const postgresBackend = createPostgresBackend(drizzleDb);
+  const tables = createPostgresTables({}, { indexes: perfIndexes });
+  const postgresBackend = createPostgresBackend(drizzleDb, { tables });
   return {
     store: createStore(perfGraph, postgresBackend, {
       queryDefaults: { traversalExpansion: "none" },
@@ -70,5 +132,9 @@ export async function createBackendResources(
       await postgresBackend.close();
       await pool.end();
     },
+    // The migration enables the pgvector extension, so vector predicates
+    // and the hybrid facade are available on Postgres.
+    hasVectorPredicate: true,
+    hasHybridFacade: true,
   };
 }

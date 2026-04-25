@@ -45,6 +45,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../errors";
 import {
+  type AggregateExpr,
   type FulltextMatchPredicate,
   type HybridFusionOptions,
   type QueryAst,
@@ -76,7 +77,7 @@ import {
   buildStandardVectorOrderBy,
 } from "./emitter";
 import { type TemporalFilterPass } from "./passes";
-import { type LogicalPlan } from "./plan";
+import { type LogicalPlan, type LogicalPlanNode } from "./plan";
 import {
   compileKindFilter,
   compilePredicateClauses,
@@ -278,8 +279,14 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
 
 type CountAggregateFastPathPlan = Readonly<{
   traversal: QueryAst["traversals"][number];
-  requiresCount: boolean;
-  requiresCountDistinct: boolean;
+  /** Aggregate references `traversal.nodeAlias` (count of live target nodes). */
+  requiresNodeCount: boolean;
+  /** countDistinct over `traversal.nodeAlias`. */
+  requiresNodeCountDistinct: boolean;
+  /** Aggregate references `traversal.edgeAlias` (count of live edges). */
+  requiresEdgeCount: boolean;
+  /** countDistinct over `traversal.edgeAlias`. */
+  requiresEdgeCountDistinct: boolean;
 }>;
 
 function resolveCountAggregateFastPath(
@@ -313,8 +320,10 @@ function resolveCountAggregateFastPath(
     return undefined;
   }
 
-  let requiresCount = false;
-  let requiresCountDistinct = false;
+  let requiresNodeCount = false;
+  let requiresNodeCountDistinct = false;
+  let requiresEdgeCount = false;
+  let requiresEdgeCountDistinct = false;
 
   for (const projectedField of ast.projection.fields) {
     const source = projectedField.source;
@@ -326,34 +335,46 @@ function resolveCountAggregateFastPath(
       continue;
     }
 
-    if (
-      source.field.alias !== traversal.nodeAlias ||
-      !isIdFieldRef(source.field)
-    ) {
+    if (!isIdFieldRef(source.field)) {
+      return undefined;
+    }
+
+    const isNodeTarget = source.field.alias === traversal.nodeAlias;
+    const isEdgeTarget = source.field.alias === traversal.edgeAlias;
+    if (!isNodeTarget && !isEdgeTarget) {
       return undefined;
     }
 
     if (source.function === "count") {
-      requiresCount = true;
+      if (isNodeTarget) requiresNodeCount = true;
+      else requiresEdgeCount = true;
       continue;
     }
 
     if (source.function === "countDistinct") {
-      requiresCountDistinct = true;
+      if (isNodeTarget) requiresNodeCountDistinct = true;
+      else requiresEdgeCountDistinct = true;
       continue;
     }
 
     return undefined;
   }
 
-  if (!requiresCount && !requiresCountDistinct) {
+  if (
+    !requiresNodeCount &&
+    !requiresNodeCountDistinct &&
+    !requiresEdgeCount &&
+    !requiresEdgeCountDistinct
+  ) {
     return undefined;
   }
 
   return {
     traversal,
-    requiresCount,
-    requiresCountDistinct,
+    requiresNodeCount,
+    requiresNodeCountDistinct,
+    requiresEdgeCount,
+    requiresEdgeCountDistinct,
   };
 }
 
@@ -371,15 +392,23 @@ function compileCountAggregateFastPath(
     return undefined;
   }
 
-  const { traversal, requiresCount, requiresCountDistinct } = plan;
+  const {
+    traversal,
+    requiresNodeCount,
+    requiresNodeCountDistinct,
+    requiresEdgeCount,
+    requiresEdgeCountDistinct,
+  } = plan;
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
   const previousAlias = traversal.joinFromAlias;
   const previousAliasIdColumn = `${previousAlias}_id`;
   const previousAliasKindColumn = `${previousAlias}_kind`;
   const countCteAlias = `cte_${traversal.nodeAlias}_counts`;
-  const countColumn = `${traversal.nodeAlias}_count`;
-  const countDistinctColumn = `${traversal.nodeAlias}_count_distinct`;
+  const nodeCountColumn = `${traversal.nodeAlias}_count`;
+  const nodeCountDistinctColumn = `${traversal.nodeAlias}_count_distinct`;
+  const edgeCountColumn = `${traversal.edgeAlias}_count`;
+  const edgeCountDistinctColumn = `${traversal.edgeAlias}_count_distinct`;
 
   const previousNodeKinds = getNodeKindsForAlias(ast, traversal.joinFromAlias);
   const edgeKinds = [...new Set(traversal.edgeKinds)];
@@ -412,27 +441,106 @@ function compileCountAggregateFastPath(
   const targetKindField =
     traversal.direction === "out" ? "to_kind" : "from_kind";
 
+  // The target-node join is only needed when an aggregate actually counts
+  // live target nodes. For edge-only counts (countEdges / countDistinctEdges)
+  // the edge row alone is sufficient: the edge's own deleted_at and valid_*
+  // columns already constrain "live edge," and target-kind validation is
+  // enforced via the edge's to_kind filter (which the store's write path
+  // keeps consistent with the target node's kind at insert time).
+  const hasNodePredicates = nodePredicateClauses.length > 0;
+  const requiresNodeJoin =
+    requiresNodeCount || requiresNodeCountDistinct || hasNodePredicates;
+
+  // Join style depends on how the target-node join interacts with the
+  // aggregates:
+  //
+  // - INNER JOIN when the user applied a predicate to the target alias
+  //   (whereNode on the target). Predicates should constrain every
+  //   aggregate in the query — including countEdges — so they live in
+  //   WHERE and the JOIN filters edges whose targets fail to match.
+  //   With INNER JOIN, a group where every edge's target fails the
+  //   predicate produces no rows; GROUP BY omits it, and required
+  //   traversals correctly drop that start row.
+  //
+  // - LEFT JOIN when only temporal/deleted filters apply (no caller
+  //   predicates). This lets mixed aggregates differ: countEdges
+  //   counts all live edges (including edges to expired targets)
+  //   while count(target) only counts edges to live targets.
+  const useInnerJoin = hasNodePredicates;
+
   const whereClauses = [
     sql`e.graph_id = ${graphId}`,
     compileKindFilter(sql.raw("e.kind"), edgeKinds),
     compileKindFilter(sql.raw(`e.${joinKindField}`), previousNodeKinds),
     compileKindFilter(sql.raw(`e.${targetKindField}`), nodeKinds),
-    compileKindFilter(sql.raw("n.kind"), nodeKinds),
     edgeTemporalFilter,
-    nodeTemporalFilter,
-    ...nodePredicateClauses,
     ...edgePredicateClauses,
+    // INNER JOIN mode: node-side filters in WHERE constrain every aggregate.
+    ...(requiresNodeJoin && useInnerJoin ?
+      [
+        compileKindFilter(sql.raw("n.kind"), nodeKinds),
+        nodeTemporalFilter,
+        ...nodePredicateClauses,
+      ]
+    : []),
   ];
 
+  const nodeJoinOnClauses =
+    requiresNodeJoin ?
+      useInnerJoin ?
+        // INNER JOIN: only the key conditions; filters live in WHERE.
+        [
+          sql`n.graph_id = e.graph_id`,
+          sql`n.id = e.${sql.raw(targetField)}`,
+          sql`n.kind = e.${sql.raw(targetKindField)}`,
+        ]
+        // LEFT JOIN: temporal/kind filters gate the join, so countEdges
+        // still sees the full edge set while count(target) excludes edges
+        // to expired targets (via COUNT ignoring NULLs).
+      : [
+          sql`n.graph_id = e.graph_id`,
+          sql`n.id = e.${sql.raw(targetField)}`,
+          sql`n.kind = e.${sql.raw(targetKindField)}`,
+          compileKindFilter(sql.raw("n.kind"), nodeKinds),
+          nodeTemporalFilter,
+        ]
+    : [];
+
   const aggregateColumns: SQL[] = [];
-  if (requiresCount) {
-    aggregateColumns.push(sql`COUNT(n.id) AS ${sql.raw(countColumn)}`);
+  if (requiresNodeCount) {
+    aggregateColumns.push(sql`COUNT(n.id) AS ${sql.raw(nodeCountColumn)}`);
   }
-  if (requiresCountDistinct) {
+  if (requiresNodeCountDistinct) {
     aggregateColumns.push(
-      sql`COUNT(DISTINCT n.id) AS ${sql.raw(countDistinctColumn)}`,
+      sql`COUNT(DISTINCT n.id) AS ${sql.raw(nodeCountDistinctColumn)}`,
     );
   }
+  if (requiresEdgeCount) {
+    aggregateColumns.push(sql`COUNT(e.id) AS ${sql.raw(edgeCountColumn)}`);
+  }
+  if (requiresEdgeCountDistinct) {
+    aggregateColumns.push(
+      sql`COUNT(DISTINCT e.id) AS ${sql.raw(edgeCountDistinctColumn)}`,
+    );
+  }
+
+  // LIMIT push-down: when the outer SELECT applies LIMIT/OFFSET that do not
+  // depend on aggregate results, we can reduce the start CTE to just the
+  // required rows before aggregation. This turns an O(|start|) GROUP BY
+  // into an O(limit) GROUP BY.
+  //
+  // Safe when:
+  //   - The traversal is optional (LEFT JOIN outer). For INNER JOIN we can't
+  //     push down without potentially dropping rows the original query would
+  //     have kept.
+  //   - No ORDER BY. ORDER BY over the full result requires the full result.
+  //     (The fast path already restricts ORDER BY to the start alias, but we
+  //     still need every row to sort correctly.)
+  //   - LIMIT is defined. OFFSET is carried with it.
+  const startCteLimit =
+    traversal.optional && ast.orderBy === undefined && ast.limit !== undefined ?
+      { limit: ast.limit, offset: ast.offset }
+    : undefined;
 
   const startCte = buildStandardStartCte({
     ast,
@@ -441,7 +549,17 @@ function compileCountAggregateFastPath(
     predicateIndex,
     requiredColumnsByAlias,
     temporalFilterPass,
+    ...(startCteLimit === undefined ? {} : { limitOffset: startCteLimit }),
   });
+
+  const targetNodeJoinKeyword = useInnerJoin ? "JOIN" : "LEFT JOIN";
+  const targetNodeJoin =
+    requiresNodeJoin ?
+      sql`
+        ${sql.raw(targetNodeJoinKeyword)} ${ctx.schema.nodesTable} n ON ${sql.join(nodeJoinOnClauses, sql` AND `)}
+      `
+    : sql``;
+
   const countCte = sql`
     ${sql.raw(countCteAlias)} AS (
       SELECT
@@ -450,16 +568,21 @@ function compileCountAggregateFastPath(
         ${sql.join(aggregateColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
       JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}
-      JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
-        AND n.id = e.${sql.raw(targetField)}
-        AND n.kind = e.${sql.raw(targetKindField)}
+        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}${targetNodeJoin}
       WHERE ${sql.join(whereClauses, sql` AND `)}
       GROUP BY
         cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)},
         cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
     )
   `;
+
+  function resolveCountColumn(source: AggregateExpr): string {
+    const isEdge = source.field.alias === traversal.edgeAlias;
+    if (source.function === "countDistinct") {
+      return isEdge ? edgeCountDistinctColumn : nodeCountDistinctColumn;
+    }
+    return isEdge ? edgeCountColumn : nodeCountColumn;
+  }
 
   const projection = sql.join(
     ast.projection.fields.map((projectedField) => {
@@ -475,8 +598,7 @@ function compileCountAggregateFastPath(
         return sql`${value} AS ${quoteIdentifier(projectedField.outputName)}`;
       }
 
-      const projectedCountColumn =
-        source.function === "countDistinct" ? countDistinctColumn : countColumn;
+      const projectedCountColumn = resolveCountColumn(source);
       const countValue = sql`${sql.raw(countCteAlias)}.${sql.raw(projectedCountColumn)}`;
       const aggregateValue =
         traversal.optional ? sql`COALESCE(${countValue}, 0)` : countValue;
@@ -495,19 +617,51 @@ function compileCountAggregateFastPath(
   `;
 
   const orderBy = buildStandardOrderBy({ ast, dialect });
-  const limitOffset = buildLimitOffsetClause({
-    limit: ast.limit,
-    offset: ast.offset,
-  });
+  // When the LIMIT/OFFSET was pushed into the start CTE, the outer SELECT
+  // must not re-apply it — the start CTE already produced exactly the
+  // requested page, and the outer LEFT JOIN preserves its cardinality.
+  // Re-applying would double-offset and produce an empty page. Rewrite
+  // the logical plan to match: the emitter asserts plan shape aligns
+  // with emitted SQL, so dropping the clause and leaving the plan's
+  // `limit_offset` node behind would trip an invariant.
+  const emittedLogicalPlan =
+    startCteLimit === undefined ? logicalPlan : (
+      stripLimitOffsetFromPlan(logicalPlan)
+    );
+  const limitOffset =
+    startCteLimit === undefined ?
+      buildLimitOffsetClause({ limit: ast.limit, offset: ast.offset })
+    : undefined;
 
   return emitStandardQuerySql({
     ctes: [startCte, countCte],
     fromClause,
     ...(orderBy === undefined ? {} : { orderBy }),
     ...(limitOffset === undefined ? {} : { limitOffset }),
-    logicalPlan,
+    logicalPlan: emittedLogicalPlan,
     projection,
   });
+}
+
+/**
+ * Returns a copy of the logical plan with every `limit_offset` node
+ * elided. Used when the count aggregate fast path pushes LIMIT/OFFSET
+ * into the start CTE — the outer SELECT then carries no LIMIT/OFFSET,
+ * so the logical plan must not either or the emitter invariant check
+ * will disagree with the emitted SQL.
+ */
+function stripLimitOffsetFromPlan(plan: LogicalPlan): LogicalPlan {
+  return { ...plan, root: stripLimitOffsetFromPlanNode(plan.root) };
+}
+
+function stripLimitOffsetFromPlanNode(node: LogicalPlanNode): LogicalPlanNode {
+  if (node.op === "limit_offset") {
+    return stripLimitOffsetFromPlanNode(node.input);
+  }
+  if ("input" in node) {
+    return { ...node, input: stripLimitOffsetFromPlanNode(node.input) };
+  }
+  return node;
 }
 
 /**

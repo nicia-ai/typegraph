@@ -142,10 +142,27 @@ function flattenSqlChunk(chunk: unknown): string {
   }
 
   if (typeof chunk === "object" && chunk !== null) {
-    if ("value" in chunk && Array.isArray((chunk).value)) {
-      return (chunk as { value: readonly unknown[] }).value
-        .map((part) => flattenSqlChunk(part))
-        .join("");
+    // Drizzle column references (SQLiteText, PgText, etc.) carry the
+    // column name directly. Match these BEFORE the `getSQL` fallback —
+    // a column's `.getSQL()` wraps the column back inside a SQL object
+    // that points to itself, which would recurse infinitely.
+    if (
+      "name" in chunk &&
+      typeof (chunk).name === "string"
+    ) {
+      return `"${(chunk as { name: string }).name}"`;
+    }
+
+    // Drizzle's StringChunk stores its literal as `.value`, usually as a
+    // one-element array ([""], ["SELECT "]) but sometimes as a plain string.
+    if ("value" in chunk) {
+      const value = (chunk).value;
+      if (typeof value === "string") {
+        return value;
+      }
+      if (Array.isArray(value)) {
+        return value.map((part) => flattenSqlChunk(part)).join("");
+      }
     }
 
     if (

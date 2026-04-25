@@ -33,6 +33,8 @@ export {
   avg,
   count,
   countDistinct,
+  countDistinctEdges,
+  countEdges,
   field,
   having,
   havingEq,
