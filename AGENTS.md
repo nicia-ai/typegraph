@@ -57,7 +57,8 @@ pnpm test                 # Run all tests (SQLite only, postgres tests are skipp
 pnpm test:postgres        # Run PostgreSQL tests (starts Docker automatically)
 pnpm lint                 # Run ESLint
 pnpm typecheck            # TypeScript type checking
-pnpm fix                  # Auto-fix lint and formatting
+pnpm fix                  # Auto-fix lint and formatting (prettier + eslint --fix + markdownlint)
+pnpm test:unused          # Run knip (unused exports, deps, files)
 
 # From packages/typegraph
 pnpm test                 # Run unit tests
@@ -67,6 +68,21 @@ pnpm test:postgres        # Run PostgreSQL tests (starts Docker automatically)
 pnpm test:coverage        # Run tests with coverage
 pnpm test:mutation        # Run mutation testing
 ```
+
+# Before Committing
+
+Running `pnpm typecheck` and `pnpm lint` separately is *not* enough —
+prettier rules live outside eslint, and those commands won't surface
+formatting drift. The canonical pre-commit sequence is:
+
+```bash
+pnpm fix && pnpm typecheck && pnpm test
+```
+
+`pnpm fix` chains prettier, eslint `--fix` (so a separate `pnpm lint`
+is redundant), and markdownlint, exiting non-zero on any unfixable
+violation. If it modifies files, fold the changes into the same
+commit — they aren't a separate concern.
 
 **Important:** `pnpm test` runs only SQLite-backed tests. The PostgreSQL
 backend tests are **skipped** unless `POSTGRES_URL` is set. Always run
