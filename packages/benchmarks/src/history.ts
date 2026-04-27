@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type PerfBackend } from "./config";
+import { type PerfBackend, type PostgresDriver } from "./config";
 import { type LatencyRecord } from "./measurements";
 
 /**
@@ -15,6 +15,7 @@ type HistoryEntry = Readonly<{
   gitSha: string;
   gitRefName: string | undefined;
   backend: PerfBackend;
+  postgresDriver?: PostgresDriver;
   scale: number;
   userCount: number;
   latencies: Readonly<
@@ -60,6 +61,7 @@ function serializeLatencies(record: LatencyRecord): HistoryEntry["latencies"] {
 
 type WriteHistoryInput = Readonly<{
   backend: PerfBackend;
+  postgresDriver?: PostgresDriver;
   scale: number;
   userCount: number;
   latencies: LatencyRecord;
@@ -71,6 +73,9 @@ export function writeHistoryEntry(input: WriteHistoryInput): string {
     gitSha: resolveGitSha(),
     gitRefName: resolveGitRefName(),
     backend: input.backend,
+    ...(input.postgresDriver === undefined ?
+      {}
+    : { postgresDriver: input.postgresDriver }),
     scale: input.scale,
     userCount: input.userCount,
     latencies: serializeLatencies(input.latencies),

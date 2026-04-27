@@ -5,39 +5,50 @@ description: Known constraints and backend-specific limitations
 
 This page documents TypeGraph's known limitations and constraints.
 
-## Cloudflare D1 Transactions
+## Backends Without Atomic Transactions
 
-Cloudflare D1 does not support atomic transactions. When using D1, calling
-`store.transaction()` will throw a `ConfigurationError`.
+Some runtimes cannot hold a multi-statement database session and therefore
+cannot offer atomic transactions:
+
+- **Cloudflare D1** — the D1 binding has no transaction primitive.
+- **`drizzle-orm/neon-http`** — Neon's HTTP driver issues each statement as
+  an independent request; there is no session to bind a transaction to.
+
+These backends report `capabilities.transactions: false`. On such backends,
+`store.transaction(fn)` and `store.batch(...)` still run — `fn` executes
+against the same backend used outside `transaction()`, sequentially —
+**but writes are applied as they happen and a thrown error inside the
+callback does not roll back earlier writes**. Likewise, `store.batch(...)`
+runs each query over an independent connection, so two queries in the same
+batch may observe different database snapshots.
 
 ```typescript
-// Throws ConfigurationError on D1
+// On D1 / neon-http: every successful create is persisted immediately.
+// If the throw fires after Alice is created, Alice stays in the database.
 await store.transaction(async (tx) => {
-  // ...
+  await tx.nodes.Person.create({ name: "Alice" });
+  throw new Error("boom"); // does NOT roll back the create above
 });
 ```
 
-**Workaround:** Execute operations directly without transaction wrapper. Operations
-execute sequentially but without atomicity guarantees.
-
-```typescript
-// Alternative: execute operations directly (not atomic)
-const person = await store.nodes.Person.create({ name: "Alice" });
-const company = await store.nodes.Company.create({ name: "Acme" });
-await store.edges.worksAt.create(person, company, { role: "Engineer" });
-```
-
-**Check support programmatically:**
+**If you require atomicity, branch on the capability:**
 
 ```typescript
 if (backend.capabilities.transactions) {
   await store.transaction(async (tx) => {
-    /* ... */
+    /* atomic */
   });
 } else {
-  // Handle non-transactional execution
+  // Sequential, non-atomic — handle partial-failure recovery yourself.
+  const person = await store.nodes.Person.create({ name: "Alice" });
+  const company = await store.nodes.Company.create({ name: "Acme" });
+  await store.edges.worksAt.create(person, company, { role: "Engineer" });
 }
 ```
+
+If you need atomic writes from an edge runtime, use
+`drizzle-orm/neon-serverless` (WebSocket-backed Pool) instead of
+`drizzle-orm/neon-http`.
 
 ## libsql In-Memory Transactions
 

@@ -157,15 +157,27 @@
   },
   "peerDependencies": {
     "@libsql/client": ">=0.6.0",
+    "@neondatabase/serverless": ">=0.9.0 <2.0.0",
     "better-sqlite3": ">=9.0.0 <13.0.0",
     "drizzle-orm": ">=0.35.0 <1.0.0",
+    "pg": ">=8.0.0 <9.0.0",
+    "postgres": ">=3.4.0 <4.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@libsql/client": {
       "optional": true
     },
+    "@neondatabase/serverless": {
+      "optional": true
+    },
     "better-sqlite3": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "postgres": {
       "optional": true
     }
   },
@@ -174,6 +186,7 @@
   },
   "devDependencies": {
     "@libsql/client": "^0.17.2",
+    "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
     "@typegraph/eslint-config": "workspace:*",
@@ -186,6 +199,7 @@
     "eslint": "^10.2.1",
     "fast-check": "^4.7.0",
     "pg": "^8.20.0",
+    "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",

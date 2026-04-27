@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
+import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -159,25 +160,9 @@ function getOrCreatePreparedStatement(
   sqlText: string,
   cacheMax: number,
 ): PreparedAllStatement {
-  const cachedStatement = cache.get(sqlText);
-  if (cachedStatement !== undefined) {
-    // Promote to most-recently-used position for LRU eviction
-    cache.delete(sqlText);
-    cache.set(sqlText, cachedStatement);
-    return cachedStatement;
-  }
-
-  const preparedStatement = sqliteClient.prepare(sqlText);
-  cache.set(sqlText, preparedStatement);
-
-  if (cache.size > cacheMax) {
-    const oldestSqlText = cache.keys().next().value;
-    if (typeof oldestSqlText === "string") {
-      cache.delete(oldestSqlText);
-    }
-  }
-
-  return preparedStatement;
+  return getOrCreateLru(cache, sqlText, cacheMax, () =>
+    sqliteClient.prepare(sqlText),
+  );
 }
 
 // Uses unconditional `await` because Drizzle returns SQLiteRaw thenables

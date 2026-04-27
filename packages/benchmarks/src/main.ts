@@ -9,16 +9,22 @@ import {
 import { writeHistoryEntry } from "./history";
 import { measureQueries } from "./measurements";
 import { seedStore } from "./seed";
+import { formatMs, nowMs } from "./utils";
 
 async function main(argv: readonly string[]): Promise<void> {
   const options = parseCliOptions(argv);
   applyScale(options.scale);
   const scaleSuffix = options.scale === 1 ? "" : `, scale=${options.scale}`;
+  const driverSuffix =
+    options.backend === "postgres" ? `, driver=${options.postgresDriver}` : "";
   console.log(
-    `TypeGraph perf sanity (${options.runChecks ? "guardrail mode" : "report mode"}, backend=${options.backend}${scaleSuffix}, users=${BENCHMARK_CONFIG.userCount})`,
+    `TypeGraph perf sanity (${options.runChecks ? "guardrail mode" : "report mode"}, backend=${options.backend}${driverSuffix}${scaleSuffix}, users=${BENCHMARK_CONFIG.userCount})`,
   );
 
-  const resources = await createBackendResources(options.backend);
+  const resources = await createBackendResources(
+    options.backend,
+    options.postgresDriver,
+  );
   if (!resources.hasVectorPredicate) {
     console.log(
       "(vector predicate unavailable on this backend — vector and hybrid measurements will be skipped)",
@@ -31,6 +37,14 @@ async function main(argv: readonly string[]): Promise<void> {
   try {
     const seedResult = await seedStore(resources.store);
 
+    // Without this, PostgreSQL keeps using stale row-count estimates
+    // until autovacuum runs, which drives the planner to pick the wrong
+    // index for 1-hop traversals. Real deployments run ANALYZE after
+    // bulk loads; we match that convention to measure steady state.
+    const analyzeStart = nowMs();
+    await resources.store.refreshStatistics();
+    console.log(`analyze: ${formatMs(nowMs() - analyzeStart)}`);
+
     const { metrics, latencies } = await measureQueries(resources.store, {
       hasVectorPredicate: resources.hasVectorPredicate,
       hasHybridFacade: resources.hasHybridFacade,
@@ -40,6 +54,9 @@ async function main(argv: readonly string[]): Promise<void> {
 
     const historyPath = writeHistoryEntry({
       backend: options.backend,
+      ...(options.backend === "postgres" ?
+        { postgresDriver: options.postgresDriver }
+      : {}),
       scale: options.scale,
       userCount: BENCHMARK_CONFIG.userCount,
       latencies,

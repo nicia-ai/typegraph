@@ -1077,17 +1077,24 @@ context through your call chain.
 
 #### Backend support
 
-Not all backends support atomic transactions. Cloudflare D1, for example, does not —
-calling `store.transaction()` on a D1-backed store throws a `ConfigurationError`. Check
-support at runtime with:
+Not all backends support atomic transactions. Cloudflare D1 and
+`drizzle-orm/neon-http` cannot hold a multi-statement session and report
+`capabilities.transactions: false`. On these backends `store.transaction(fn)`
+still runs — `fn` executes against the same backend used outside
+`transaction()`, sequentially — **but writes are applied as they happen and
+a thrown error does not roll back earlier writes inside the callback**. If
+you require atomicity, branch on the capability:
 
 ```typescript
 if (backend.capabilities.transactions) {
-  await store.transaction(async (tx) => { /* ... */ });
+  await store.transaction(async (tx) => { /* atomic */ });
 } else {
-  // fall back to individual operations with manual error handling
+  // Sequential, non-atomic — handle partial-failure recovery yourself.
 }
 ```
+
+See [Limitations](/limitations#backends-without-atomic-transactions) for
+the full list of affected backends and edge-runtime alternatives.
 
 ### Clear
 

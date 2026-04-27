@@ -175,7 +175,39 @@ async function createLibsqlBackend(
 PostgreSQL is recommended for production deployments with concurrent access, large datasets,
 or when you need advanced features like pgvector.
 
-### Basic Setup
+`createPostgresBackend` is driver-agnostic. Pick the Drizzle adapter that matches your
+runtime, and TypeGraph works the same way against each.
+
+### Choosing a PostgreSQL driver
+
+| Runtime | Recommended driver | Drizzle adapter |
+|---|---|---|
+| Long-lived Node server (Fly, Render, Cloud Run, containers) | `pg` (node-postgres) or `postgres` (postgres-js) | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
+| Node serverless (Vercel Functions, AWS Lambda, Netlify Functions) | `postgres` (postgres-js) — faster cold start, lower per-query overhead | `drizzle-orm/postgres-js` |
+| Bun server | `postgres` (postgres-js) or Bun's built-in SQL | `drizzle-orm/postgres-js` or `drizzle-orm/bun-sql` |
+| Edge runtime (Cloudflare Workers, Vercel Edge, Netlify Edge) — needs transactions | `@neondatabase/serverless` Pool over WebSockets | `drizzle-orm/neon-serverless` |
+| Edge runtime — single-statement reads/writes only | `@neondatabase/serverless` `neon(url)` over HTTP | `drizzle-orm/neon-http` |
+| Cloudflare Hyperdrive | `pg` or `postgres` (through the Hyperdrive pooler) | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
+
+:::note[Neon HTTP vs WebSocket]
+Both Neon drivers work with TypeGraph. They have different tradeoffs:
+
+- **`drizzle-orm/neon-http`** uses HTTP per statement. Lowest cold-start cost; survives Workers'
+  per-request isolation. **Cannot hold a session across statements**, so multi-statement transactions
+  are unavailable — TypeGraph auto-detects this driver and sets `capabilities.transactions = false`,
+  so `store.transaction(...)` falls through to non-transactional sequential execution.
+- **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
+  semantics, but the WebSocket connection lifecycle needs care in serverless / per-request contexts
+  (you typically want a fresh Pool per request).
+
+Pick HTTP for stateless reads, single upserts, and migrations. Pick WebSockets if you need atomic
+multi-statement writes.
+:::
+
+### node-postgres (pg)
+
+The default choice for long-lived Node servers. Widest ecosystem and most deployment
+documentation.
 
 ```typescript
 import { Pool } from "pg";
@@ -183,17 +215,13 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
-// Create connection pool
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20, // Maximum connections
+  max: 20,
 });
 
-// Create Drizzle instance and backend
 const db = drizzle(pool);
 const backend = createPostgresBackend(db);
-
-// createStoreWithSchema auto-creates tables on first run
 const [store] = await createStoreWithSchema(graph, backend);
 ```
 
@@ -205,6 +233,98 @@ import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 await pool.query(generatePostgresMigrationSQL());
 const store = createStore(graph, backend);
 ```
+
+### postgres-js
+
+A leaner Postgres client with lower per-query overhead and smaller bundle size. Good
+default for Node serverless platforms and Bun. Fully tested against TypeGraph's adapter
+and integration suites.
+
+```bash
+npm install postgres drizzle-orm
+```
+
+```typescript
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
+
+const sql = postgres(process.env.DATABASE_URL, {
+  max: 10,
+  idle_timeout: 30,
+});
+
+const db = drizzle(sql);
+const backend = createPostgresBackend(db);
+const [store] = await createStoreWithSchema(graph, backend);
+```
+
+Transactions go through `sql.begin(fn)`; TypeGraph handles this automatically via
+Drizzle's `db.transaction()`. Isolation levels are honored the same way as with
+node-postgres.
+
+### Neon serverless (WebSockets)
+
+For edge runtimes like Cloudflare Workers, Vercel Edge, and Netlify Edge — anywhere
+native TCP sockets aren't available. Neon's `@neondatabase/serverless` driver speaks
+the Postgres wire protocol over WebSockets and exposes a pg-Pool-compatible API.
+
+```bash
+npm install @neondatabase/serverless drizzle-orm
+```
+
+```typescript
+import { Pool } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/neon-serverless";
+import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
+
+const pool = new Pool({ connectionString: env.NEON_DATABASE_URL });
+const db = drizzle(pool);
+const backend = createPostgresBackend(db);
+const [store] = await createStoreWithSchema(graph, backend);
+```
+
+When running under Node.js (for local testing), install `ws` and configure it once
+before connecting:
+
+```typescript
+import { neonConfig } from "@neondatabase/serverless";
+import ws from "ws";
+
+neonConfig.webSocketConstructor = ws;
+```
+
+Edge runtimes expose `WebSocket` globally and need no extra setup.
+
+### Neon HTTP
+
+For stateless edge workloads where you don't need transactional writes. The HTTP
+driver issues one request per query — lowest cold-start cost, no session lifecycle
+to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
+to `false`, so `store.transaction(...)` and `setActiveSchema(...)` fall through to
+sequential execution rather than throwing.
+
+```bash
+npm install @neondatabase/serverless drizzle-orm
+```
+
+```typescript
+import { neon } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/neon-http";
+import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createStore } from "@nicia-ai/typegraph";
+
+const sql = neon(env.NEON_DATABASE_URL);
+const db = drizzle({ client: sql });
+const backend = createPostgresBackend(db);
+const store = createStore(graph, backend);
+// backend.capabilities.transactions === false (auto-detected)
+```
+
+Use `neon-http` for reads, single upserts, and migrations. Use `neon-serverless`
+when you need atomic multi-statement writes.
 
 ### PostgreSQL with Vector Search
 
@@ -226,6 +346,52 @@ const backend = createPostgresBackend(db);
 ```
 
 See [Semantic Search](/semantic-search) for query examples.
+
+### Refreshing planner statistics after bulk loads
+
+Call `store.refreshStatistics()` after any large initial import or bulk
+backfill. PostgreSQL's query planner relies on table statistics to choose
+between multi-column indexes on `typegraph_edges` (forward vs reverse vs
+cardinality), and when those statistics are stale the planner can pick a
+reverse-index scan with a filter — turning a 0.5ms forward traversal into a
+5ms one. SQLite's planner is similarly sensitive: without `sqlite_stat1`
+data, some FTS5 fulltext queries fall back to a plan that's roughly 30×
+slower. Autovacuum / background statistics collection will catch up
+eventually, but refreshing explicitly gives correct latencies immediately.
+
+```typescript
+for (const batch of batches) {
+  await store.nodes.Document.bulkCreate(batch);
+}
+await store.refreshStatistics();
+```
+
+The implementation runs `ANALYZE` against the TypeGraph-managed tables in
+the configured backend — the call is safe regardless of custom table names
+or fulltext / embedding configuration. If you need to bypass the API for an
+unusual deployment (for example issuing `ANALYZE` over a separate admin
+connection), call `backend.execute()` with raw SQL as the escape hatch.
+
+### pgbouncer / transaction-pool mode
+
+By default, the node-postgres / neon-serverless fast path issues server-side
+prepared statements (`client.query({name, text, values})`) so PostgreSQL
+caches the parsed plan per session. This is incompatible with pgbouncer in
+transaction-pool mode: pgbouncer routes successive statements over different
+backend connections, so a `name` registered on one connection isn't visible
+on the next. Pass `prepareStatements: false` to fall back to unnamed
+positional queries:
+
+```typescript
+const backend = createPostgresBackend(db, {
+  prepareStatements: false, // pgbouncer transaction-pool compatibility
+});
+```
+
+The cache that maps SQL text → statement name is LRU-bounded (default 256
+entries, override via `preparedStatementCacheMax`). Worst-case server-side
+footprint is roughly `cap × pool size` prepared statements across all pooled
+connections.
 
 ### Connection Pooling
 
@@ -257,12 +423,41 @@ process.on("SIGTERM", async () => {
 
 #### `createPostgresBackend(db, options?)`
 
-Creates a PostgreSQL backend adapter.
+Creates a PostgreSQL backend adapter. Accepts any Drizzle PostgreSQL database
+instance, regardless of the underlying driver. Tested with `drizzle-orm/node-postgres`,
+`drizzle-orm/postgres-js`, `drizzle-orm/neon-serverless`, and
+`drizzle-orm/neon-http`. The neon-http driver is auto-detected and
+`capabilities.transactions` is set to `false` (HTTP can't hold a session); use
+`drizzle-orm/neon-serverless` if you need transactional writes.
 
 ```typescript
 function createPostgresBackend(
-  db: NodePgDatabase,
-  options?: { tables?: PostgresTables }
+  db: AnyPgDatabase,
+  options?: {
+    tables?: PostgresTables;
+    fulltext?: FulltextStrategy;
+    /**
+     * Override specific backend capabilities. Useful for HTTP-style
+     * drivers or test scenarios. neon-http already has `transactions:
+     * false` auto-applied — pass this to override that or to disable
+     * other capabilities for custom drivers.
+     */
+    capabilities?: Partial<BackendCapabilities>;
+    /**
+     * Use server-side prepared statements on the node-postgres /
+     * neon-serverless fast path. Default `true`. Set to `false` when
+     * pooling through pgbouncer in transaction-pool mode (named
+     * statements are invisible across pooled connections).
+     */
+    prepareStatements?: boolean;
+    /**
+     * LRU cap on the number of distinct SQL strings tracked for
+     * prepared-statement naming. Default 256. Worst-case server-side
+     * footprint is roughly `cap × pool size` prepared statements.
+     * Ignored when `prepareStatements` is `false`.
+     */
+    preparedStatementCacheMax?: number;
+  }
 ): GraphBackend;
 ```
 
@@ -343,7 +538,7 @@ if (backend.capabilities.transactions) {
   // Handle non-transactional execution
 }
 
-if (backend.capabilities.vectorSearch) {
+if (backend.capabilities.vector?.supported) {
   // Vector similarity queries available
 }
 ```

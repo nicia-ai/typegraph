@@ -106,9 +106,12 @@ export const DEFAULT_POSTGRES_URL =
 
 export type PerfBackend = "sqlite" | "postgres";
 
+export type PostgresDriver = "pg" | "postgres-js";
+
 export type PerfCliOptions = Readonly<{
   runChecks: boolean;
   backend: PerfBackend;
+  postgresDriver: PostgresDriver;
   scale: number;
 }>;
 

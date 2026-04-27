@@ -25,7 +25,10 @@ import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
 } from "../../../src/backend/drizzle/ddl";
-import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  createPostgresBackend,
+  createPostgresTables,
+} from "../../../src/backend/postgres";
 import { createStore } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -147,6 +150,12 @@ async function clearTestData(): Promise<void> {
 // ============================================================
 
 beforeAll(async () => {
+  // Only attempt to connect when POSTGRES_URL is explicitly set (i.e. via
+  // `scripts/test-postgres.sh`). Without the gate, a developer with a
+  // stray Docker Postgres container running would trigger the
+  // DROP+CREATE schema setup below during `pnpm test:unit` and race with
+  // other postgres test files sharing the same database.
+  if (!process.env.POSTGRES_URL) return;
   isPostgresAvailable = await initializePostgres();
   if (isPostgresAvailable) {
     await setupTestDatabase();
@@ -399,6 +408,53 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
       expect(fetched).toBeDefined();
+    });
+  });
+
+  describe("refreshStatistics()", () => {
+    it("runs ANALYZE on the default TypeGraph tables", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+    });
+
+    it("works against backends configured with non-default table names", async (ctx) => {
+      // Exercises the table-name parameterization path. Embedded-quote
+      // safety in the emitted SQL comes from routing through
+      // `quoteIdentifier`, which doubles `"` per the SQL spec — no
+      // additional integration coverage needed beyond verifying that
+      // custom names round-trip end-to-end.
+      const { pool } = requirePostgres(ctx);
+      const customTables = createPostgresTables({
+        nodes: "tg_custom_nodes",
+        edges: "tg_custom_edges",
+        uniques: "tg_custom_uniques",
+        embeddings: "tg_custom_embeddings",
+        fulltext: "tg_custom_fulltext",
+        schemaVersions: "tg_custom_schema_versions",
+      });
+
+      const customDdl = generatePostgresDDL(customTables);
+      try {
+        for (const statement of customDdl) {
+          await pool.query(statement);
+        }
+        const customBackend = createPostgresBackend(drizzle(pool), {
+          tables: customTables,
+        });
+        await expect(
+          customBackend.refreshStatistics(),
+        ).resolves.toBeUndefined();
+      } finally {
+        await pool.query(`
+          DROP TABLE IF EXISTS tg_custom_fulltext CASCADE;
+          DROP TABLE IF EXISTS tg_custom_embeddings CASCADE;
+          DROP TABLE IF EXISTS tg_custom_uniques CASCADE;
+          DROP TABLE IF EXISTS tg_custom_edges CASCADE;
+          DROP TABLE IF EXISTS tg_custom_nodes CASCADE;
+          DROP TABLE IF EXISTS tg_custom_schema_versions CASCADE;
+        `);
+      }
     });
   });
 });
