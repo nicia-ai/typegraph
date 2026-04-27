@@ -60,6 +60,7 @@ import {
   createPostgresExecutionAdapter,
   isNeonHttpClient,
   type PostgresExecutionAdapter,
+  type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
 import { createCommonOperationBackend } from "./operation-backend-core";
 import { createPostgresOperationStrategy } from "./operations/strategy";
@@ -118,6 +119,30 @@ export type PostgresBackendOptions = Readonly<{
    * capability gap.
    */
   capabilities?: Partial<BackendCapabilities>;
+  /**
+   * Use server-side prepared statements (named statements cached per
+   * pg connection) on the node-postgres / neon-serverless fast path.
+   * Defaults to `true`. Set to `false` when pooling through pgbouncer
+   * in transaction-pool mode — pgbouncer routes successive statements
+   * over different backend connections, and a `name` registered on one
+   * is invisible on the next.
+   *
+   * No effect on `drizzle-orm/postgres-js` (handles preparation
+   * internally) or `drizzle-orm/neon-http` (no fast path).
+   */
+  prepareStatements?: boolean;
+  /**
+   * Cap on the number of distinct SQL strings tracked for
+   * prepared-statement naming. Defaults to 256. The cache is LRU-
+   * bounded so high-cardinality SQL text (variable-length IN-lists,
+   * generated aliases, `backend.execute()` calls with one-off SQL)
+   * doesn't grow unbounded in either the Node process or in
+   * PostgreSQL's per-session prepared-statement memory. Worst-case
+   * server-side footprint is roughly `cap × pool size` statements
+   * across all pooled connections. Ignored when
+   * `prepareStatements` is `false`.
+   */
+  preparedStatementCacheMax?: number;
 }>;
 
 const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
@@ -239,7 +264,15 @@ export function createPostgresBackend(
     ...httpOnlyOverrides,
     ...options.capabilities,
   };
-  const executionAdapter = createPostgresExecutionAdapter(db);
+  const adapterOptions: PostgresExecutionAdapterOptions = {
+    ...(options.prepareStatements === undefined
+      ? {}
+      : { prepareStatements: options.prepareStatements }),
+    ...(options.preparedStatementCacheMax === undefined
+      ? {}
+      : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
+  };
+  const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -315,6 +348,7 @@ export function createPostgresBackend(
       return db.transaction(async (tx) => {
         const txBackend = createTransactionBackend({
           db: tx,
+          adapterOptions,
           operationStrategy,
           tableNames,
           capabilities,
@@ -345,6 +379,7 @@ type CreatePostgresOperationBackendOptions = Readonly<{
 type CreatePostgresTransactionBackendOptions = Readonly<{
   db: AnyPgDatabase;
   executionAdapter?: PostgresExecutionAdapter;
+  adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: SqlTableNames;
   capabilities: BackendCapabilities;
@@ -592,7 +627,8 @@ function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
 ): TransactionBackend {
   const txExecutionAdapter =
-    options.executionAdapter ?? createPostgresExecutionAdapter(options.db);
+    options.executionAdapter ??
+    createPostgresExecutionAdapter(options.db, options.adapterOptions);
 
   return createPostgresOperationBackend({
     db: options.db,

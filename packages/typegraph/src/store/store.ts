@@ -500,12 +500,19 @@ export class Store<G extends GraphDef> {
   // === Batch Query Execution ===
 
   /**
-   * Executes multiple queries over a single connection with snapshot consistency.
+   * Executes multiple queries and returns a typed tuple of results.
    *
-   * Acquires one connection via an implicit transaction, executes each query
-   * sequentially on that connection, and returns a typed tuple of results.
-   * Each query preserves its own result type, projection, filtering,
-   * sorting, and pagination.
+   * Each query preserves its own result type, projection, filtering, sorting,
+   * and pagination.
+   *
+   * **Snapshot consistency is conditional.** When
+   * `backend.capabilities.transactions` is `true`, queries run sequentially
+   * on a single connection inside an implicit transaction and observe the
+   * same database snapshot. When transactions are unavailable
+   * (Cloudflare D1, `drizzle-orm/neon-http`), queries run sequentially over
+   * independent connections and may observe writes that landed between them.
+   * Branch on `backend.capabilities.transactions` if you need a guaranteed
+   * snapshot.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *
@@ -613,6 +620,21 @@ export class Store<G extends GraphDef> {
    *   );
    * });
    * ```
+   *
+   * **Backends without transactions.** When `backend.capabilities.transactions`
+   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method runs the
+   * callback against the same backend used outside `transaction()` — writes
+   * are applied as they happen and a thrown error does **not** roll back
+   * earlier writes inside the callback. Branch on
+   * `backend.capabilities.transactions` if you require atomicity:
+   *
+   * ```typescript
+   * if (backend.capabilities.transactions) {
+   *   await store.transaction(async (tx) => { ... });
+   * } else {
+   *   // sequential, non-atomic — handle partial-failure recovery yourself
+   * }
+   * ```
    */
   async transaction<T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
@@ -707,7 +729,7 @@ export class Store<G extends GraphDef> {
    * ```typescript
    * // After a bulk import
    * for (const batch of batches) {
-   *   await store.bulkCreate(batch);
+   *   await store.nodes.Document.bulkCreate(batch);
    * }
    * await store.refreshStatistics();
    * ```

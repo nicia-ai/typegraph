@@ -347,26 +347,51 @@ const backend = createPostgresBackend(db);
 
 See [Semantic Search](/semantic-search) for query examples.
 
-### Running ANALYZE after bulk loads
+### Refreshing planner statistics after bulk loads
 
-Run `ANALYZE` after any large initial import or bulk backfill. PostgreSQL's query
-planner relies on table statistics to choose between multi-column indexes on
-`typegraph_edges` (forward vs reverse vs cardinality), and when those statistics
-are stale the planner can pick a reverse-index scan with a filter — turning a
-0.5ms forward traversal into a 5ms one. Autovacuum will catch up eventually, but
-running ANALYZE explicitly after a bulk load gives you correct latencies
-immediately.
+Call `store.refreshStatistics()` after any large initial import or bulk
+backfill. PostgreSQL's query planner relies on table statistics to choose
+between multi-column indexes on `typegraph_edges` (forward vs reverse vs
+cardinality), and when those statistics are stale the planner can pick a
+reverse-index scan with a filter — turning a 0.5ms forward traversal into a
+5ms one. SQLite's planner is similarly sensitive: without `sqlite_stat1`
+data, some FTS5 fulltext queries fall back to a plan that's roughly 30×
+slower. Autovacuum / background statistics collection will catch up
+eventually, but refreshing explicitly gives correct latencies immediately.
 
 ```typescript
-await pool.query(
-  "ANALYZE typegraph_nodes, typegraph_edges, typegraph_node_uniques, " +
-    "typegraph_node_embeddings, typegraph_node_fulltext",
-);
+for (const batch of batches) {
+  await store.nodes.Document.bulkCreate(batch);
+}
+await store.refreshStatistics();
 ```
 
-The same applies to SQLite: run `ANALYZE` once after a bulk load so the planner
-has `sqlite_stat1` data to work from. Without it, some FTS5 fulltext queries
-fall back to a plan that's roughly 30× slower.
+The implementation runs `ANALYZE` against the TypeGraph-managed tables in
+the configured backend — the call is safe regardless of custom table names
+or fulltext / embedding configuration. If you need to bypass the API for an
+unusual deployment (for example issuing `ANALYZE` over a separate admin
+connection), call `backend.execute()` with raw SQL as the escape hatch.
+
+### pgbouncer / transaction-pool mode
+
+By default, the node-postgres / neon-serverless fast path issues server-side
+prepared statements (`client.query({name, text, values})`) so PostgreSQL
+caches the parsed plan per session. This is incompatible with pgbouncer in
+transaction-pool mode: pgbouncer routes successive statements over different
+backend connections, so a `name` registered on one connection isn't visible
+on the next. Pass `prepareStatements: false` to fall back to unnamed
+positional queries:
+
+```typescript
+const backend = createPostgresBackend(db, {
+  prepareStatements: false, // pgbouncer transaction-pool compatibility
+});
+```
+
+The cache that maps SQL text → statement name is LRU-bounded (default 256
+entries, override via `preparedStatementCacheMax`). Worst-case server-side
+footprint is roughly `cap × pool size` prepared statements across all pooled
+connections.
 
 ### Connection Pooling
 
@@ -418,6 +443,20 @@ function createPostgresBackend(
      * other capabilities for custom drivers.
      */
     capabilities?: Partial<BackendCapabilities>;
+    /**
+     * Use server-side prepared statements on the node-postgres /
+     * neon-serverless fast path. Default `true`. Set to `false` when
+     * pooling through pgbouncer in transaction-pool mode (named
+     * statements are invisible across pooled connections).
+     */
+    prepareStatements?: boolean;
+    /**
+     * LRU cap on the number of distinct SQL strings tracked for
+     * prepared-statement naming. Default 256. Worst-case server-side
+     * footprint is roughly `cap × pool size` prepared statements.
+     * Ignored when `prepareStatements` is `false`.
+     */
+    preparedStatementCacheMax?: number;
   }
 ): GraphBackend;
 ```
@@ -499,7 +538,7 @@ if (backend.capabilities.transactions) {
   // Handle non-transactional execution
 }
 
-if (backend.capabilities.vectorSearch) {
+if (backend.capabilities.vector?.supported) {
   // Vector similarity queries available
 }
 ```

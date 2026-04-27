@@ -1,6 +1,7 @@
 import { type SQL } from "drizzle-orm";
 import { type PgDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
 
+import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -124,22 +125,53 @@ export function isNeonHttpClient(db: AnyPgDatabase): boolean {
 }
 
 /**
+ * Default cap on the number of distinct SQL strings tracked for
+ * server-side prepared statements. Mirrors the SQLite adapter's
+ * `DEFAULT_PREPARED_STATEMENT_CACHE_MAX`. High-cardinality SQL text —
+ * variable-length IN-list expansions, generated aliases, custom
+ * `backend.execute()` calls — would otherwise grow this map (and the
+ * matching per-session prepared-statement memory inside PostgreSQL)
+ * without bound.
+ */
+const DEFAULT_POSTGRES_STATEMENT_CACHE_MAX = 256;
+
+/**
  * Module-scope cache mapping each unique SQL text to a stable
  * prepared-statement name. PostgreSQL only requires statement names to
  * be unique per session, so a monotonic counter is sufficient — and
  * avoids depending on a hash primitive (`node:crypto` doesn't exist on
- * Cloudflare Workers, Web Crypto's digest is async). Cache size is
- * bounded by the number of distinct compiled SQL strings the
- * application emits, typically dozens.
+ * Cloudflare Workers, Web Crypto's digest is async).
+ *
+ * The cache is module-scope on purpose: pg `Pool` reuses connections,
+ * and the same SQL text needs the same statement name across every
+ * adapter that might end up driving the same connection. Without
+ * shared naming, two adapters could try to register two different
+ * statements under the same name on a recycled connection.
+ *
+ * Bounded by `cacheMax` per call (LRU eviction). The counter is
+ * deliberately independent of the cache size so eviction never
+ * recycles a name — a recycled name could collide with a still-cached
+ * statement on a long-lived pg connection ("prepared statement
+ * already exists" error with different text).
  */
 const STATEMENT_NAME_CACHE = new Map<string, string>();
+let nextStatementId = 0;
 
-function statementNameFor(sqlText: string): string {
-  const cached = STATEMENT_NAME_CACHE.get(sqlText);
-  if (cached !== undefined) return cached;
-  const name = `tg_${STATEMENT_NAME_CACHE.size}`;
-  STATEMENT_NAME_CACHE.set(sqlText, name);
-  return name;
+function statementNameFor(sqlText: string, cacheMax: number): string {
+  return getOrCreateLru(STATEMENT_NAME_CACHE, sqlText, cacheMax, () => {
+    const name = `tg_${nextStatementId}`;
+    nextStatementId += 1;
+    return name;
+  });
+}
+
+/**
+ * Test-only: reset the module-scope statement-name state. Used to
+ * isolate tests that assert on counter values or eviction behavior.
+ */
+export function resetStatementNameCacheForTests(): void {
+  STATEMENT_NAME_CACHE.clear();
+  nextStatementId = 0;
 }
 
 /**
@@ -200,17 +232,42 @@ function normalizeRows(
  * style accessors in the SELECT-result path return Date instances,
  * breaking user code that expects strings.
  */
-function wrapNodePgClient(client: NodePgClient): PgQueryClient {
+function wrapNodePgClient(
+  client: NodePgClient,
+  cacheMax: number,
+): PgQueryClient {
   return {
     async query(
       sqlText: string,
       params: readonly unknown[],
     ): Promise<PgQueryResult> {
       const result = await client.query({
-        name: statementNameFor(sqlText),
+        name: statementNameFor(sqlText, cacheMax),
         text: sqlText,
         values: params,
       });
+      return { rows: normalizeRows(result.rows) };
+    },
+  };
+}
+
+/**
+ * Variant that bypasses server-side prepared statements entirely.
+ * Required for pgbouncer in transaction-pool mode (named statements
+ * registered on one backend connection aren't visible on the next),
+ * and useful when memory-sensitive workloads can't afford to keep
+ * prepared statements warm across the pool.
+ *
+ * Same Date→ISO normalization as `wrapNodePgClient` so the row contract
+ * downstream stays identical.
+ */
+function wrapNodePgClientUnnamed(client: NodePgClient): PgQueryClient {
+  return {
+    async query(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<PgQueryResult> {
+      const result = await client.query(sqlText, params);
       return { rows: normalizeRows(result.rows) };
     },
   };
@@ -237,7 +294,10 @@ function adaptPostgresJsClient(sql: PostgresJsClient): PgQueryClient {
  *
  * - `drizzle-orm/node-postgres` (pg Pool / Client) — wrapped to use
  *   server-side prepared statements with stable counter-derived names
- *   keyed by the SQL text (see `statementNameFor`)
+ *   keyed by the SQL text (see `statementNameFor`). When
+ *   `prepareStatements` is `false`, falls back to unnamed
+ *   `client.query(text, values)` for pgbouncer transaction-pool
+ *   compatibility.
  * - `drizzle-orm/neon-serverless` (@neondatabase/serverless Pool) —
  *   pg-Pool-compatible, takes the same wrapper as node-postgres
  * - `drizzle-orm/postgres-js` (postgres-js tagged-template Sql) — adapted
@@ -250,7 +310,11 @@ function adaptPostgresJsClient(sql: PostgresJsClient): PgQueryClient {
  * through the Drizzle session and is always correct (just without the
  * server-side prepared-statement perf win).
  */
-function resolvePgClient(db: AnyPgDatabase): PgQueryClient | undefined {
+function resolvePgClient(
+  db: AnyPgDatabase,
+  prepareStatements: boolean,
+  cacheMax: number,
+): PgQueryClient | undefined {
   // Order matters: neon-http and postgres-js are both callable + have
   // `.unsafe`, but neon-http's `.unsafe` is a fragment builder (not a
   // query executor) and its `.query` doesn't accept the {name, text,
@@ -261,9 +325,15 @@ function resolvePgClient(db: AnyPgDatabase): PgQueryClient | undefined {
   }
   const client = (db as PgClientCarrier).$client;
   if (isPgNativeClient(client)) {
-    return wrapNodePgClient(client);
+    return prepareStatements
+      ? wrapNodePgClient(client, cacheMax)
+      : wrapNodePgClientUnnamed(client);
   }
   if (isPostgresJsClient(client)) {
+    // postgres-js handles its own preparation internally (controlled
+    // by the driver's own `prepare` connection option) — the
+    // `prepareStatements` flag here only affects the node-postgres
+    // path.
     return adaptPostgresJsClient(client);
   }
   return undefined;
@@ -304,10 +374,48 @@ function createPgPreparedStatement(
   };
 }
 
+/**
+ * Tuning options for the PostgreSQL execution fast path.
+ *
+ * Defaults are correct for `drizzle-orm/node-postgres` against a
+ * standalone PostgreSQL or session-pooled deployment. Override when:
+ *
+ * - **Pooling through pgbouncer in transaction-pool mode.** Set
+ *   `prepareStatements: false`. Named statements registered on one
+ *   pooled backend connection aren't visible to the next, so the
+ *   server-side prepared-statement cache must be off.
+ * - **High-cardinality SQL text.** If the application emits many
+ *   distinct compiled SQL strings (variable-length IN-list expansions,
+ *   custom `backend.execute()` calls, generated aliases), tune
+ *   `preparedStatementCacheMax` down to bound per-session memory more
+ *   aggressively, or up if memory is plentiful and you want fewer
+ *   re-PREPAREs.
+ */
+export type PostgresExecutionAdapterOptions = Readonly<{
+  /**
+   * When `true` (default), node-postgres / neon-serverless calls go
+   * through `client.query({name, text, values})` so PostgreSQL caches
+   * the parsed/planned statement per session. Set to `false` to issue
+   * unnamed `client.query(text, values)` calls — required for
+   * pgbouncer transaction-pool mode.
+   */
+  prepareStatements?: boolean;
+  /**
+   * Maximum number of distinct SQL strings tracked for prepared-
+   * statement naming. Defaults to `DEFAULT_POSTGRES_STATEMENT_CACHE_MAX`
+   * (256). Ignored when `prepareStatements` is `false`.
+   */
+  preparedStatementCacheMax?: number;
+}>;
+
 export function createPostgresExecutionAdapter(
   db: AnyPgDatabase,
+  options: PostgresExecutionAdapterOptions = {},
 ): PostgresExecutionAdapter {
-  const pgClient = resolvePgClient(db);
+  const prepareStatements = options.prepareStatements ?? true;
+  const cacheMax =
+    options.preparedStatementCacheMax ?? DEFAULT_POSTGRES_STATEMENT_CACHE_MAX;
+  const pgClient = resolvePgClient(db, prepareStatements, cacheMax);
 
   function compile(query: SQL): CompiledSqlQuery {
     return compileQueryWithDialect(db, query, "PostgreSQL");
