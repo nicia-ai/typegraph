@@ -45,6 +45,8 @@ import {
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
+  type VectorSearchParams,
+  type VectorSearchResult,
 } from "../types";
 import {
   type AnySqliteDatabase,
@@ -344,6 +346,18 @@ function createSqliteOperationBackend(
           async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
             const query = operationStrategy.buildDeleteEmbedding(params);
             await execRun(query);
+          },
+          async vectorSearch(
+            params: VectorSearchParams,
+          ): Promise<readonly VectorSearchResult[]> {
+            const query = operationStrategy.buildVectorSearch(params);
+            const rows = await execAll<{ node_id: string; score: number }>(
+              query,
+            );
+            return rows.map((row) => ({
+              nodeId: row.node_id,
+              score: row.score,
+            }));
           },
         }
       : {};

@@ -221,6 +221,17 @@ function buildVectorSearchMinScoreCondition(
   }
 }
 
+function assertVectorSearchBounds(params: VectorSearchParams): void {
+  if (params.minScore !== undefined && !Number.isFinite(params.minScore)) {
+    throw new TypeError(
+      `minScore must be a finite number, got: ${params.minScore}`,
+    );
+  }
+  if (!Number.isInteger(params.limit) || params.limit <= 0) {
+    throw new Error(`limit must be a positive integer, got: ${params.limit}`);
+  }
+}
+
 /**
  * Builds a vector similarity search query (PostgreSQL).
  * Returns node IDs ordered by similarity (closest first).
@@ -231,21 +242,98 @@ export function buildVectorSearchPostgres(
 ): SQL {
   const { embeddings } = tables;
   const queryLiteral = formatEmbeddingLiteral(params.queryEmbedding);
-
-  if (params.minScore !== undefined && !Number.isFinite(params.minScore)) {
-    throw new TypeError(
-      `minScore must be a finite number, got: ${params.minScore}`,
-    );
-  }
-
-  if (!Number.isInteger(params.limit) || params.limit <= 0) {
-    throw new Error(`limit must be a positive integer, got: ${params.limit}`);
-  }
+  assertVectorSearchBounds(params);
 
   const embeddingColumn = sql`${embeddings.embedding}`;
   const distanceExpression = buildDistanceExpression(
     embeddingColumn,
     queryLiteral,
+    params.metric,
+  );
+
+  const conditions = [
+    sql`${embeddings.graphId} = ${params.graphId}`,
+    sql`${embeddings.nodeKind} = ${params.nodeKind}`,
+    sql`${embeddings.fieldPath} = ${params.fieldPath}`,
+  ];
+
+  if (params.minScore !== undefined) {
+    conditions.push(
+      buildVectorSearchMinScoreCondition(
+        distanceExpression,
+        params.metric,
+        params.minScore,
+      ),
+    );
+  }
+
+  const whereClause = sql.join(conditions, sql` AND `);
+  const scoreExpression = buildVectorSearchScoreExpression(
+    distanceExpression,
+    params.metric,
+  );
+
+  return sql`
+    SELECT
+      ${embeddings.nodeId} as node_id,
+      ${scoreExpression} as score
+    FROM ${embeddings}
+    WHERE ${whereClause}
+    ORDER BY ${distanceExpression} ASC
+    LIMIT ${params.limit}
+  `;
+}
+
+function buildSqliteDistanceExpression(
+  embeddingColumn: SQL,
+  embeddingJson: string,
+  metric: VectorMetric,
+): SQL {
+  switch (metric) {
+    case "cosine": {
+      return sql`vec_distance_cosine(${embeddingColumn}, vec_f32(${embeddingJson}))`;
+    }
+    case "l2": {
+      return sql`vec_distance_l2(${embeddingColumn}, vec_f32(${embeddingJson}))`;
+    }
+    case "inner_product": {
+      // sqlite-vec has no vec_distance_ip — see
+      // https://alexgarcia.xyz/sqlite-vec/api-reference.html.
+      throw new Error(
+        "Inner product distance is not supported by sqlite-vec. Use 'cosine' or 'l2' metrics instead.",
+      );
+    }
+    default: {
+      const _exhaustive: never = metric;
+      throw new Error(`Unsupported vector metric: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Builds a vector similarity search query (SQLite with sqlite-vec).
+ * Returns node IDs ordered by similarity (closest first).
+ *
+ * Requires sqlite-vec to be loaded on the connection; `createSqliteBackend`
+ * gates `vectorSearch` exposure on `hasVectorEmbeddings` so callers don't
+ * hit "no such function: vec_distance_cosine" at execution time.
+ */
+export function buildVectorSearchSqlite(
+  tables: SqliteTables,
+  params: VectorSearchParams,
+): SQL {
+  const { embeddings } = tables;
+
+  // Validate finite numbers BEFORE stringify so the error names the
+  // offending index (stringify would mask NaN/Infinity as null).
+  assertFiniteNumberArray(params.queryEmbedding, "queryEmbedding");
+  const embeddingJson = JSON.stringify(params.queryEmbedding);
+  assertVectorSearchBounds(params);
+
+  const embeddingColumn = sql`${embeddings.embedding}`;
+  const distanceExpression = buildSqliteDistanceExpression(
+    embeddingColumn,
+    embeddingJson,
     params.metric,
   );
 
