@@ -510,14 +510,28 @@ const HybridGraph = defineGraph({
 });
 
 describe("hybrid search (vector + FTS, RRF fusion)", () => {
-  it("throws clearly when vector search not supported (sqlite)", async () => {
-    // SQLite needs sqlite-vec to be loaded at runtime for vector ops; the
-    // test backend doesn't load it, so vectorSearch is missing. Our fusion
-    // helper should report this as a configuration error.
-    const backend = createTestBackend();
-    await backend.bootstrapTables?.();
-    const store = createStore(HybridGraph, backend);
+  it("throws clearly when vector search not supported (sqlite without sqlite-vec)", async () => {
+    // Construct the backend by hand without `hasVectorEmbeddings` so the
+    // no-extension case is exercised regardless of whether the test runner
+    // has sqlite-vec installed locally.
+    const drizzleModule = await import("drizzle-orm/better-sqlite3");
+    const betterSqlite3 = await import("better-sqlite3");
+    const Database = betterSqlite3.default;
+    const sqliteModule = await import("../src/backend/drizzle/sqlite");
+    const ddlModule = await import("../src/backend/drizzle/ddl");
 
+    const sqlite = new Database(":memory:");
+    for (const statement of ddlModule.generateSqliteDDL(sqliteModule.tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleModule.drizzle(sqlite);
+    const backend = sqliteModule.createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: sqliteModule.tables,
+    });
+    expect(backend.vectorSearch).toBeUndefined();
+
+    const store = createStore(HybridGraph, backend);
     await store.nodes.HybridDoc.create({
       title: "doc",
       body: "body",
@@ -534,6 +548,80 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
         fulltext: { query: "doc" },
       }),
     ).rejects.toThrow(/vector search/);
+
+    sqlite.close();
+  });
+
+  it("fuses sqlite-vec and FTS5 results via RRF end-to-end", async () => {
+    const backend = createTestBackend();
+    if (backend.vectorSearch === undefined) return;
+    await backend.bootstrapTables?.();
+    const store = createStore(HybridGraph, backend);
+
+    const solar = await store.nodes.HybridDoc.create({
+      title: "Solar power",
+      body: "renewable energy from photovoltaics",
+      embedding: [1, 0, 0, 0],
+    });
+    const wind = await store.nodes.HybridDoc.create({
+      title: "Wind turbines",
+      body: "kinetic energy converted by rotors",
+      embedding: [0, 1, 0, 0],
+    });
+    const hydro = await store.nodes.HybridDoc.create({
+      title: "Hydroelectric dams",
+      body: "energy from controlled water flow",
+      embedding: [0, 0, 1, 0],
+    });
+
+    // Vector query targets `wind`; fulltext query targets `solar`. RRF
+    // should put one of those at the top, with `hydro` filling the
+    // long tail via the vector signal.
+    const results = await store.search.hybrid("HybridDoc", {
+      limit: 3,
+      vector: {
+        fieldPath: "embedding",
+        queryEmbedding: [0, 1, 0, 0],
+      },
+      fulltext: { query: "solar" },
+    });
+
+    expect(results.length).toBeGreaterThan(0);
+    const topId = results[0]!.node.id;
+    expect([solar.id, wind.id]).toContain(topId);
+
+    const fused = results.find(
+      (row) => row.vector !== undefined && row.fulltext !== undefined,
+    );
+    expect(fused).toBeDefined();
+
+    expect([solar.id, wind.id, hydro.id]).toContain(topId);
+  });
+
+  it("respects the limit on real SQLite hybrid fusion", async () => {
+    const backend = createTestBackend();
+    if (backend.vectorSearch === undefined) return;
+    await backend.bootstrapTables?.();
+    const store = createStore(HybridGraph, backend);
+
+    for (let index = 0; index < 5; index++) {
+      await store.nodes.HybridDoc.create({
+        title: `Doc ${index}`,
+        body: "shared keyword payload",
+        embedding: [Math.cos(index * 0.5), Math.sin(index * 0.5), 0, 0],
+      });
+    }
+
+    const results = await store.search.hybrid("HybridDoc", {
+      limit: 2,
+      vector: {
+        fieldPath: "embedding",
+        queryEmbedding: [1, 0, 0, 0],
+      },
+      fulltext: { query: "shared keyword" },
+    });
+
+    expect(results).toHaveLength(2);
   });
 
   it("RRF helper produces correct fused ordering for synthetic results", async () => {
