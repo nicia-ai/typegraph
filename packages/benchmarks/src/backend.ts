@@ -34,10 +34,7 @@ type BackendResources = Readonly<{
    * PostgreSQL. The query-builder vector path uses this.
    */
   hasVectorPredicate: boolean;
-  /**
-   * True when `store.search.hybrid(...)` works. Requires the backend to
-   * implement the `vectorSearch` capability — currently PostgreSQL only.
-   */
+  /** True when `store.search.hybrid(...)` works. */
   hasHybridFacade: boolean;
 }>;
 
@@ -112,10 +109,7 @@ export async function createBackendResources(
         sqlite.close();
       },
       hasVectorPredicate: sqliteBackend.upsertEmbedding !== undefined,
-      // The SQLite backend doesn't implement the hybrid-search facade
-      // capability (no `backend.vectorSearch`); store.search.hybrid() is
-      // PostgreSQL-only today.
-      hasHybridFacade: false,
+      hasHybridFacade: sqliteBackend.vectorSearch !== undefined,
     };
   }
 

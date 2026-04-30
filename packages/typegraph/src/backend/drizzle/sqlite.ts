@@ -45,6 +45,8 @@ import {
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
+  type VectorSearchParams,
+  type VectorSearchResult,
 } from "../types";
 import {
   type AnySqliteDatabase,
@@ -213,6 +215,46 @@ function runWithSerializedQueue<T>(
   return queue.runExclusive(task);
 }
 
+// sqlite-vec exposes vec_distance_cosine and vec_distance_l2 but has no
+// vec_distance_ip — keep this list aligned with the SQLite dialect's
+// vectorMetrics so query compilation and capability advertising agree.
+const SQLITE_VECTOR_METRICS = ["cosine", "l2"] as const;
+// sqlite-vec doesn't expose explicit index types (vec0 manages indexing
+// internally); createSqliteVectorIndex is a no-op. "none" matches that
+// reality without claiming HNSW/IVFFlat support we don't have.
+const SQLITE_VECTOR_INDEX_TYPES = ["none"] as const;
+// sqlite-vec's vec_f32 has no documented hard cap, but practical ANN
+// performance degrades well before pgvector's 16k limit. 8000 is a
+// conservative ceiling consistent with the extension's typical use.
+const SQLITE_VECTOR_MAX_DIMENSIONS = 8000;
+
+function buildSqliteCapabilities(
+  options: Readonly<{
+    fulltextStrategy: FulltextStrategy;
+    hasVectorEmbeddings: boolean;
+    transactionMode: SqliteExecutionAdapter["profile"]["transactionMode"];
+  }>,
+): BackendCapabilities {
+  const base =
+    options.transactionMode === "none"
+      ? { ...SQLITE_CAPABILITIES, transactions: false }
+      : SQLITE_CAPABILITIES;
+  return {
+    ...base,
+    fulltext: buildFulltextCapabilities(options.fulltextStrategy),
+    ...(options.hasVectorEmbeddings
+      ? {
+          vector: {
+            supported: true,
+            metrics: SQLITE_VECTOR_METRICS,
+            indexTypes: SQLITE_VECTOR_INDEX_TYPES,
+            maxDimensions: SQLITE_VECTOR_MAX_DIMENSIONS,
+          },
+        }
+      : {}),
+  };
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -344,6 +386,18 @@ function createSqliteOperationBackend(
           async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
             const query = operationStrategy.buildDeleteEmbedding(params);
             await execRun(query);
+          },
+          async vectorSearch(
+            params: VectorSearchParams,
+          ): Promise<readonly VectorSearchResult[]> {
+            const query = operationStrategy.buildVectorSearch(params);
+            const rows = await execAll<{ node_id: string; score: number }>(
+              query,
+            );
+            return rows.map((row) => ({
+              nodeId: row.node_id,
+              score: row.score,
+            }));
           },
         }
       : {};
@@ -482,14 +536,16 @@ export function createSqliteBackend(
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
   const { isSync, transactionMode } = executionAdapter.profile;
-  const baseCapabilities: BackendCapabilities =
-    transactionMode === "none"
-      ? { ...SQLITE_CAPABILITIES, transactions: false }
-      : SQLITE_CAPABILITIES;
-  const capabilities: BackendCapabilities = {
-    ...baseCapabilities,
-    fulltext: buildFulltextCapabilities(fulltextStrategy),
-  };
+  // Explicit opt-in: wire upsertEmbedding / deleteEmbedding only when
+  // the caller confirms sqlite-vec is loaded. Probing synchronously
+  // isn't portable across drizzle SQLite drivers (sync vs async), so
+  // the gate lives with the caller that loaded the extension.
+  const hasVectorEmbeddings = options.hasVectorEmbeddings === true;
+  const capabilities: BackendCapabilities = buildSqliteCapabilities({
+    fulltextStrategy,
+    hasVectorEmbeddings,
+    transactionMode,
+  });
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -502,11 +558,6 @@ export function createSqliteBackend(
     fulltextStrategy,
   );
   const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
-  // Explicit opt-in: wire upsertEmbedding / deleteEmbedding only when
-  // the caller confirms sqlite-vec is loaded. Probing synchronously
-  // isn't portable across drizzle SQLite drivers (sync vs async), so
-  // the gate lives with the caller that loaded the extension.
-  const hasVectorEmbeddings = options.hasVectorEmbeddings === true;
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
