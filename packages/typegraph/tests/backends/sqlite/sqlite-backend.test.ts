@@ -13,7 +13,7 @@ import {
   type BetterSQLite3Database,
   drizzle as drizzleBetterSqlite3,
 } from "drizzle-orm/better-sqlite3";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -940,6 +940,395 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     });
     expect(backend.upsertEmbedding).toBeUndefined();
     expect(backend.deleteEmbedding).toBeUndefined();
+    expect(backend.vectorSearch).toBeUndefined();
+    expect(backend.capabilities.vector).toBeUndefined();
     sqlite.close();
+  });
+
+  it("advertises vector capabilities when hasVectorEmbeddings is true", () => {
+    const sqlite = new Database(":memory:");
+    for (const statement of generateSqliteDDL(tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleBetterSqlite3(sqlite);
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables,
+      hasVectorEmbeddings: true,
+    });
+    // Documented public capability check — consumers branch on this to
+    // decide whether to take SQLite vector/hybrid paths.
+    expect(backend.capabilities.vector?.supported).toBe(true);
+    expect(backend.capabilities.vector?.metrics).toEqual(["cosine", "l2"]);
+    expect(backend.capabilities.vector?.indexTypes).toEqual(["none"]);
+    expect(backend.capabilities.vector?.maxDimensions).toBeGreaterThan(0);
+    sqlite.close();
+  });
+});
+
+// ============================================================
+// SQLite backend.vectorSearch — facade for hybrid retrieval
+// ============================================================
+
+describe("SQLite backend.vectorSearch", () => {
+  type Harness = Readonly<{
+    backend: ReturnType<typeof createSqliteBackend>;
+    sqlite: Database.Database;
+    graphId: string;
+    nodeKind: string;
+    fieldPath: string;
+    seed: (
+      rows: readonly Readonly<{
+        nodeId: string;
+        embedding: readonly number[];
+      }>[],
+    ) => Promise<void>;
+    // Convenience: pre-narrowed methods so tests don't sprinkle non-null
+    // assertions. The harness only exists when sqlite-vec is loaded, which
+    // is exactly when these methods exist.
+    vectorSearch: NonNullable<
+      ReturnType<typeof createSqliteBackend>["vectorSearch"]
+    >;
+    upsertEmbedding: NonNullable<
+      ReturnType<typeof createSqliteBackend>["upsertEmbedding"]
+    >;
+  }>;
+
+  // `undefined` when sqlite-vec is not installed — tests early-return so
+  // the suite stays skip-friendly on platforms without the optional dep.
+  let harness: Harness | undefined;
+
+  beforeEach(() => {
+    const sqlite = new Database(":memory:");
+    try {
+      const module_ = nodeRequire("sqlite-vec") as {
+        load: (db: Database.Database) => void;
+      };
+      module_.load(sqlite);
+    } catch {
+      sqlite.close();
+      harness = undefined;
+      return;
+    }
+
+    for (const statement of generateSqliteDDL(tables)) {
+      sqlite.exec(statement);
+    }
+    const db = drizzleBetterSqlite3(sqlite);
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables,
+      hasVectorEmbeddings: true,
+    });
+
+    const graphId = "vector_search_facade";
+    const nodeKind = "Doc";
+    const fieldPath = "embedding";
+    const upsertEmbedding = backend.upsertEmbedding!;
+    const vectorSearch = backend.vectorSearch!;
+
+    async function seed(
+      rows: readonly Readonly<{
+        nodeId: string;
+        embedding: readonly number[];
+      }>[],
+    ): Promise<void> {
+      for (const row of rows) {
+        await upsertEmbedding({
+          graphId,
+          nodeKind,
+          nodeId: row.nodeId,
+          fieldPath,
+          embedding: row.embedding,
+          dimensions: row.embedding.length,
+        });
+      }
+    }
+
+    harness = {
+      backend,
+      sqlite,
+      graphId,
+      nodeKind,
+      fieldPath,
+      seed,
+      vectorSearch,
+      upsertEmbedding,
+    };
+  });
+
+  afterEach(() => {
+    harness?.sqlite.close();
+    harness = undefined;
+  });
+
+  it("exposes vectorSearch when sqlite-vec is loaded", () => {
+    if (!harness) return;
+    expect(harness.backend.vectorSearch).toBeDefined();
+  });
+
+  it("ranks identical embeddings first under cosine similarity", async () => {
+    if (!harness) return;
+
+    await harness.seed([
+      { nodeId: "doc-x", embedding: [1, 0, 0, 0] },
+      { nodeId: "doc-y", embedding: [0, 1, 0, 0] },
+      { nodeId: "doc-close", embedding: [0.9, 0.1, 0, 0] },
+    ]);
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 3,
+    });
+
+    expect(results).toHaveLength(3);
+    expect(results[0]!.nodeId).toBe("doc-x");
+    expect(results[0]!.score).toBeCloseTo(1, 5);
+    expect(results[1]!.nodeId).toBe("doc-close");
+    expect(results[2]!.nodeId).toBe("doc-y");
+    expect(results[2]!.score).toBeCloseTo(0, 5);
+  });
+
+  it("ranks identical embeddings first under L2 distance (lower score)", async () => {
+    if (!harness) return;
+
+    await harness.seed([
+      { nodeId: "doc-zero", embedding: [1, 0, 0, 0] },
+      { nodeId: "doc-near", embedding: [2, 0, 0, 0] },
+      { nodeId: "doc-far", embedding: [10, 0, 0, 0] },
+    ]);
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "l2",
+      limit: 3,
+    });
+
+    expect(results).toHaveLength(3);
+    expect(results[0]!.nodeId).toBe("doc-zero");
+    expect(results[0]!.score).toBeCloseTo(0, 5);
+    expect(results[1]!.nodeId).toBe("doc-near");
+    expect(results[1]!.score).toBeCloseTo(1, 5);
+    expect(results[2]!.nodeId).toBe("doc-far");
+    expect(results[2]!.score).toBeGreaterThan(results[1]!.score);
+  });
+
+  it("rejects inner_product (sqlite-vec has no vec_distance_ip)", async () => {
+    if (!harness) return;
+
+    await harness.seed([{ nodeId: "doc-1", embedding: [1, 0, 0, 0] }]);
+
+    await expect(
+      harness.vectorSearch({
+        graphId: harness.graphId,
+        nodeKind: harness.nodeKind,
+        fieldPath: harness.fieldPath,
+        queryEmbedding: [1, 0, 0, 0],
+        metric: "inner_product",
+        limit: 5,
+      }),
+    ).rejects.toThrow(/inner product/i);
+  });
+
+  it("clips to limit when more rows match", async () => {
+    if (!harness) return;
+
+    const seed = Array.from({ length: 10 }, (_, index) => ({
+      nodeId: `doc-${index}`,
+      embedding: [Math.cos(index * 0.3), Math.sin(index * 0.3), 0, 0],
+    }));
+    await harness.seed(seed);
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 3,
+    });
+
+    expect(results).toHaveLength(3);
+  });
+
+  it("filters out results below cosine minScore", async () => {
+    if (!harness) return;
+
+    await harness.seed([
+      { nodeId: "doc-identical", embedding: [1, 0, 0, 0] },
+      { nodeId: "doc-similar", embedding: [0.9, 0.1, 0, 0] },
+      { nodeId: "doc-orthogonal", embedding: [0, 1, 0, 0] },
+    ]);
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 10,
+      minScore: 0.5,
+    });
+
+    const ids = results.map((row) => row.nodeId);
+    expect(ids).toContain("doc-identical");
+    expect(ids).toContain("doc-similar");
+    expect(ids).not.toContain("doc-orthogonal");
+    for (const row of results) {
+      expect(row.score).toBeGreaterThanOrEqual(0.5);
+    }
+  });
+
+  it("filters out results above L2 minScore (interpreted as max distance)", async () => {
+    if (!harness) return;
+
+    await harness.seed([
+      { nodeId: "doc-zero", embedding: [1, 0, 0, 0] },
+      { nodeId: "doc-near", embedding: [2, 0, 0, 0] },
+      { nodeId: "doc-far", embedding: [10, 0, 0, 0] },
+    ]);
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "l2",
+      limit: 10,
+      minScore: 2,
+    });
+
+    const ids = results.map((row) => row.nodeId);
+    expect(ids).toContain("doc-zero");
+    expect(ids).toContain("doc-near");
+    expect(ids).not.toContain("doc-far");
+  });
+
+  it("scopes results by graphId", async () => {
+    if (!harness) return;
+
+    await harness.seed([{ nodeId: "doc-here", embedding: [1, 0, 0, 0] }]);
+    await harness.upsertEmbedding({
+      graphId: "other_graph",
+      nodeKind: harness.nodeKind,
+      nodeId: "doc-elsewhere",
+      fieldPath: harness.fieldPath,
+      embedding: [1, 0, 0, 0],
+      dimensions: 4,
+    });
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 10,
+    });
+
+    expect(results.map((row) => row.nodeId)).toEqual(["doc-here"]);
+  });
+
+  it("scopes results by nodeKind", async () => {
+    if (!harness) return;
+
+    await harness.seed([{ nodeId: "doc-here", embedding: [1, 0, 0, 0] }]);
+    await harness.upsertEmbedding({
+      graphId: harness.graphId,
+      nodeKind: "OtherKind",
+      nodeId: "other-node",
+      fieldPath: harness.fieldPath,
+      embedding: [1, 0, 0, 0],
+      dimensions: 4,
+    });
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 10,
+    });
+
+    expect(results.map((row) => row.nodeId)).toEqual(["doc-here"]);
+  });
+
+  it("scopes results by fieldPath", async () => {
+    if (!harness) return;
+
+    await harness.seed([{ nodeId: "doc-here", embedding: [1, 0, 0, 0] }]);
+    await harness.upsertEmbedding({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      nodeId: "doc-here",
+      fieldPath: "secondary",
+      embedding: [1, 0, 0, 0],
+      dimensions: 4,
+    });
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 10,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.nodeId).toBe("doc-here");
+  });
+
+  it("returns an empty array when no rows match", async () => {
+    if (!harness) return;
+
+    const results = await harness.vectorSearch({
+      graphId: harness.graphId,
+      nodeKind: harness.nodeKind,
+      fieldPath: harness.fieldPath,
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      limit: 10,
+    });
+
+    expect(results).toEqual([]);
+  });
+
+  it("rejects non-finite query embedding values", async () => {
+    if (!harness) return;
+
+    await expect(
+      harness.vectorSearch({
+        graphId: harness.graphId,
+        nodeKind: harness.nodeKind,
+        fieldPath: harness.fieldPath,
+        queryEmbedding: [1, Number.NaN, 0, 0],
+        metric: "cosine",
+        limit: 5,
+      }),
+    ).rejects.toThrow(/finite number/);
+  });
+
+  it("rejects non-positive limits", async () => {
+    if (!harness) return;
+
+    await expect(
+      harness.vectorSearch({
+        graphId: harness.graphId,
+        nodeKind: harness.nodeKind,
+        fieldPath: harness.fieldPath,
+        queryEmbedding: [1, 0, 0, 0],
+        metric: "cosine",
+        limit: 0,
+      }),
+    ).rejects.toThrow(/positive integer/);
   });
 });

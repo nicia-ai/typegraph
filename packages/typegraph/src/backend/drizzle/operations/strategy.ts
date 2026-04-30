@@ -89,6 +89,7 @@ import {
   buildUpsertEmbeddingPostgres,
   buildUpsertEmbeddingSqlite,
   buildVectorSearchPostgres,
+  buildVectorSearchSqlite,
 } from "./vectors";
 
 export type CommonOperationStrategy = Readonly<{
@@ -194,15 +195,11 @@ export type PostgresVectorOperationStrategy = Readonly<{
 }>;
 
 /**
- * SQLite embedding operations. Uses sqlite-vec's `vec_f32('[...]')` to
- * encode embeddings as BLOBs on write. Requires the sqlite-vec extension
- * to be loaded on the connection; the backend factory checks for that
- * and only exposes the backend methods when it is.
+ * SQLite embedding operations.
  *
- * `getEmbedding` is not included: reading the raw BLOB back as a number
- * array requires `vec_to_json(...)` and additional row decoding, which
- * the current consumers (embedding sync, `.similarTo()` predicate) do
- * not need.
+ * `getEmbedding` is intentionally absent (asymmetry vs Postgres): reading
+ * the raw BLOB back as a number array requires `vec_to_json(...)` and
+ * additional row decoding, which no current consumer needs.
  */
 export type SqliteVectorOperationStrategy = Readonly<{
   buildUpsertEmbedding: (
@@ -210,6 +207,7 @@ export type SqliteVectorOperationStrategy = Readonly<{
     timestamp: string,
   ) => SQL;
   buildDeleteEmbedding: (params: DeleteEmbeddingParams) => SQL;
+  buildVectorSearch: (params: VectorSearchParams) => SQL;
 }>;
 
 export type SqliteOperationStrategy = Readonly<
@@ -371,6 +369,9 @@ export function createSqliteOperationStrategy(
     },
     buildDeleteEmbedding(params: DeleteEmbeddingParams): SQL {
       return buildDeleteEmbedding(tables, params);
+    },
+    buildVectorSearch(params: VectorSearchParams): SQL {
+      return buildVectorSearchSqlite(tables, params);
     },
   };
 }
