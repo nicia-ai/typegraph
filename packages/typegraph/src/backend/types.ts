@@ -467,7 +467,7 @@ export type FulltextSearchResult = Readonly<{
  * is created when the fulltext table itself is created. This is reserved
  * for advanced per-kind specializations.
  */
-export type CreateFulltextIndexParams = Readonly<{
+type CreateFulltextIndexParams = Readonly<{
   graphId: string;
   nodeKind: string;
   language: string;
@@ -476,7 +476,7 @@ export type CreateFulltextIndexParams = Readonly<{
 /**
  * Parameters for dropping a fulltext index created via createFulltextIndex.
  */
-export type DropFulltextIndexParams = Readonly<{
+type DropFulltextIndexParams = Readonly<{
   graphId: string;
   nodeKind: string;
 }>;

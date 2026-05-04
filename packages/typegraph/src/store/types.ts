@@ -34,7 +34,7 @@ import type { Predicate } from "../query/predicates";
  * update the row mapper functions as well (since their return type is
  * NodeMeta/EdgeMeta, which is derived from this mapping).
  */
-export type TemporalMetaFieldMap = Readonly<{
+type TemporalMetaFieldMap = Readonly<{
   valid_from: "validFrom";
   valid_to: "validTo";
   created_at: "createdAt";

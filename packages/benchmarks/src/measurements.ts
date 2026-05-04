@@ -11,7 +11,7 @@ import { type PerfStore } from "./graph";
 import { TEMPORAL_ARCHIVE_ASOF } from "./seed";
 import { formatMs, median, nowMs, percentile } from "./utils";
 
-export type LatencySample = Readonly<{
+type LatencySample = Readonly<{
   median: number;
   p95: number;
   samples: readonly number[];

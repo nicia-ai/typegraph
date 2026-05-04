@@ -18,7 +18,7 @@
     "eslint-plugin-functional": "^9.0.4",
     "eslint-plugin-simple-import-sort": "^13.0.0",
     "eslint-plugin-unicorn": "^64.0.0",
-    "typescript-eslint": "^8.59.0"
+    "typescript-eslint": "^8.59.2"
   },
   "peerDependencies": {
     "eslint": "^10.0.0",

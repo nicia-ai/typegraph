@@ -184,11 +184,10 @@ export type UniqueConstraint<
  * Predicate builder for uniqueness constraint where clause.
  * Uses -? to make all fields required in the builder, even if optional in the schema.
  */
-export type UniqueConstraintPredicateBuilder<
-  S extends z.ZodObject<z.ZodRawShape>,
-> = Readonly<{
-  [K in keyof z.infer<S>]-?: UniqueConstraintField;
-}>;
+type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> =
+  Readonly<{
+    [K in keyof z.infer<S>]-?: UniqueConstraintField;
+  }>;
 
 /**
  * Field operations for uniqueness constraint predicates.
@@ -201,7 +200,7 @@ type UniqueConstraintField = Readonly<{
 /**
  * A uniqueness constraint predicate (internal representation).
  */
-export type UniqueConstraintPredicate = Readonly<{
+type UniqueConstraintPredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
   op: "isNull" | "isNotNull";

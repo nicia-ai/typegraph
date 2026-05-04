@@ -364,7 +364,7 @@ export type PredicateExpression =
 /**
  * The starting point of a query (the FROM clause).
  */
-export type QueryStart = Readonly<{
+type QueryStart = Readonly<{
   alias: string;
   kinds: readonly string[]; // Expanded via ontology if includeSubClasses
   includeSubClasses: boolean;
@@ -459,7 +459,7 @@ export function mergeEdgeKinds(traversal: Traversal): readonly string[] {
 /**
  * Supported aggregate functions.
  */
-export type AggregateFunction =
+type AggregateFunction =
   | "count"
   | "countDistinct"
   | "sum"
@@ -538,7 +538,7 @@ export type SelectiveField = Readonly<{
 /**
  * Null ordering preference.
  */
-export type NullOrdering = "first" | "last";
+type NullOrdering = "first" | "last";
 
 /**
  * Sort direction.
@@ -575,7 +575,7 @@ export type NodePredicate = Readonly<{
 /**
  * Temporal query options.
  */
-export type TemporalOptions = Readonly<{
+type TemporalOptions = Readonly<{
   mode: TemporalMode;
   asOf?: string;
 }>;
