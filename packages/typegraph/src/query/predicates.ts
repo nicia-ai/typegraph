@@ -159,7 +159,7 @@ type BaseFieldBuilder = Readonly<{
  *   on the query builder) is the final result count returned to the
  *   caller after any fusion.
  */
-export type MatchesOptions = Readonly<{
+type MatchesOptions = Readonly<{
   /**
    * Parse mode for the query string. Default: "websearch".
    *

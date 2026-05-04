@@ -377,7 +377,7 @@ export type EdgeAccessor<E extends AnyEdgeType> = Readonly<{
 /**
  * Metadata for a selectable node result.
  */
-export type SelectableNodeMeta = Readonly<{
+type SelectableNodeMeta = Readonly<{
   version: number;
   validFrom: string | undefined;
   validTo: string | undefined;
@@ -403,7 +403,7 @@ export type SelectableNode<N extends NodeType> = Readonly<{
 /**
  * Metadata for a selectable edge result.
  */
-export type SelectableEdgeMeta = Readonly<{
+type SelectableEdgeMeta = Readonly<{
   validFrom: string | undefined;
   validTo: string | undefined;
   createdAt: string;

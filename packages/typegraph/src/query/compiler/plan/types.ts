@@ -98,7 +98,7 @@ export type VectorKnnPlanNode = Readonly<{
   predicate: VectorSimilarityPredicate;
 }>;
 
-export type FulltextMatchPlanNode = Readonly<{
+type FulltextMatchPlanNode = Readonly<{
   id: string;
   input: LogicalPlanNode;
   op: "fulltext_match";

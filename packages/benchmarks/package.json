@@ -22,7 +22,7 @@
     "pg": "^8.20.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

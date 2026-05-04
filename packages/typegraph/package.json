@@ -182,10 +182,10 @@
     }
   },
   "dependencies": {
-    "nanoid": "^5.1.9"
+    "nanoid": "^5.1.11"
   },
   "devDependencies": {
-    "@libsql/client": "^0.17.2",
+    "@libsql/client": "^0.17.3",
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
@@ -196,7 +196,7 @@
     "@vitest/coverage-v8": "^4.1.5",
     "better-sqlite3": "^12.9.0",
     "drizzle-orm": "^0.45.2",
-    "eslint": "^10.2.1",
+    "eslint": "^10.3.0",
     "fast-check": "^4.7.0",
     "pg": "^8.20.0",
     "postgres": "^3.4.9",
@@ -205,6 +205,6 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   }
 }
