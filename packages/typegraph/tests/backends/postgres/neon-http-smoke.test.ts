@@ -28,7 +28,36 @@ import { neon } from "@neondatabase/serverless";
 import { drizzle as drizzleNeonHttp } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
 
+import { ConfigurationError } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import type { SerializedSchema } from "../../../src/schema/types";
+
+const STUB_SCHEMA_DOC: SerializedSchema = {
+  graphId: "neon_http_refusal",
+  version: 1,
+  generatedAt: "2026-01-01T00:00:00.000Z",
+  nodes: {},
+  edges: {},
+  ontology: {
+    metaEdges: {},
+    relations: [],
+    closures: {
+      subClassAncestors: {},
+      subClassDescendants: {},
+      broaderClosure: {},
+      narrowerClosure: {},
+      equivalenceSets: {},
+      disjointPairs: [],
+      partOfClosure: {},
+      hasPartClosure: {},
+      iriToKind: {},
+      edgeInverses: {},
+      edgeImplicationsClosure: {},
+      edgeImplyingClosure: {},
+    },
+  },
+  defaults: { onNodeDelete: "restrict", temporalMode: "current" },
+};
 
 describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () => {
   it("auto-disables transactions when neon-http is detected", () => {
@@ -42,9 +71,10 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
 
     expect(backend.dialect).toBe("postgres");
     // The headline behavior: HTTP can't hold a session, so transactions
-    // are off. Callers like `setActiveSchema` and `store.transaction`
-    // check this capability and fall through to sequential execution
-    // when it's false.
+    // are off. Callers like `store.transaction` check this capability
+    // and fall through to sequential execution when it's false.
+    // `commitSchemaVersion` is the exception — it requires atomicity
+    // and refuses with a typed ConfigurationError on this backend.
     expect(backend.capabilities.transactions).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.cte).toBe(true);
@@ -67,6 +97,41 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
     // `execute` is always defined; it routes through db.execute for
     // neon-http.
     expect(typeof backend.execute).toBe("function");
+  });
+
+  it("refuses commitSchemaVersion before any HTTP traffic", async () => {
+    // The capability guard at the top of commitSchemaVersion fires
+    // synchronously, before any SQL is built or sent — so we can prove
+    // the refusal without hitting the invalid hostname. Documents the
+    // contract that schema migrations must run from a transactional
+    // driver (e.g. drizzle-orm/neon-serverless), not neon-http.
+    const sql = neon("postgresql://test:test@invalid.neon.tech/test");
+    const db = drizzleNeonHttp({ client: sql });
+    const backend = createPostgresBackend(db);
+
+    await expect(
+      backend.commitSchemaVersion({
+        graphId: "neon_http_refusal",
+        expected: { kind: "initial" },
+        version: 1,
+        schemaHash: "stub-hash",
+        schemaDoc: STUB_SCHEMA_DOC,
+      }),
+    ).rejects.toThrow(ConfigurationError);
+  });
+
+  it("refuses setActiveVersion before any HTTP traffic", async () => {
+    const sql = neon("postgresql://test:test@invalid.neon.tech/test");
+    const db = drizzleNeonHttp({ client: sql });
+    const backend = createPostgresBackend(db);
+
+    await expect(
+      backend.setActiveVersion({
+        graphId: "neon_http_refusal",
+        expected: { kind: "active", version: 1 },
+        version: 2,
+      }),
+    ).rejects.toThrow(ConfigurationError);
   });
 
   it("respects an explicit capabilities override", () => {

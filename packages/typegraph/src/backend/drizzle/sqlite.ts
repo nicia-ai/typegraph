@@ -30,6 +30,7 @@ import {
 } from "../../query/dialect/fulltext-strategy";
 import {
   type BackendCapabilities,
+  type CommitSchemaVersionParams,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -38,7 +39,8 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
-  runOptionallyInTransaction,
+  type SchemaVersionRow,
+  type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
   type TransactionBackend,
   type TransactionOptions,
@@ -56,7 +58,10 @@ import {
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import { generateSqliteDDL } from "./ddl";
-import { createCommonOperationBackend } from "./operation-backend-core";
+import {
+  type CommonOperationBackend,
+  createCommonOperationBackend,
+} from "./operation-backend-core";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   createEdgeRowMapper,
@@ -569,6 +574,83 @@ export function createSqliteBackend(
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
+  /**
+   * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
+   * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
+   * is serialized against concurrent writers — a deferred BEGIN would let
+   * two transactions race past the CAS read and one would later fail
+   * with SQLITE_BUSY instead of producing a clean StaleVersionError.
+   *
+   * Refuses on `transactionMode: "none"`. The orphan-row crash window
+   * cannot be eliminated without atomicity.
+   */
+  function runSchemaWriteTransaction<T>(
+    fn: (tx: CommonOperationBackend) => Promise<T>,
+  ): Promise<T> {
+    if (transactionMode === "none") {
+      throw new ConfigurationError(
+        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+          "but this SQLite backend has transactions disabled. Configure a " +
+          "driver that supports transactions (better-sqlite3, libsql, " +
+          "bun:sqlite) to use schema commits.",
+        {
+          backend: "sqlite",
+          capability: "transactions",
+          supportsTransactions: false,
+        },
+      );
+    }
+
+    if (transactionMode === "sql") {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        // The runtime object returned by createTransactionBackend always
+        // implements commitSchemaVersion / setActiveVersion (they live in
+        // the operation-backend-core impl); the public TransactionBackend
+        // type omits them so user-supplied transaction() callbacks can't
+        // bypass the locking wrapper. Cast back to the wider internal
+        // shape here, where the locking IS being applied.
+        const txBackend = createTransactionBackend({
+          capabilities,
+          db,
+          executionAdapter,
+          operationStrategy,
+          profileHints: { isSync: true },
+          tableNames,
+          fulltextStrategy,
+          hasVectorEmbeddings,
+        }) as unknown as CommonOperationBackend;
+        db.run(sql`BEGIN IMMEDIATE`);
+        try {
+          const result = await fn(txBackend);
+          db.run(sql`COMMIT`);
+          return result;
+        } catch (error) {
+          db.run(sql`ROLLBACK`);
+          throw error;
+        }
+      });
+    }
+
+    // transactionMode === "drizzle". Drizzle's sqlite-core transaction
+    // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
+    // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
+    // write lock at the start of the transaction.
+    return runWithSerializedQueue(serializedQueue, async () =>
+      db.transaction(async (tx) => {
+        const txBackend = createTransactionBackend({
+          capabilities,
+          db: tx,
+          operationStrategy,
+          profileHints: { isSync },
+          tableNames,
+          fulltextStrategy,
+          hasVectorEmbeddings,
+        }) as unknown as CommonOperationBackend;
+        return fn(txBackend);
+      }, { behavior: "immediate" }) as Promise<T>,
+    );
+  }
+
   const backend: GraphBackend = {
     ...operations,
 
@@ -588,11 +670,17 @@ export function createSqliteBackend(
       await db.run(sql`ANALYZE`);
     },
 
-    async setActiveSchema(graphId: string, version: number): Promise<void> {
-      await runOptionallyInTransaction(
-        backend,
-        (target) => target.setActiveSchema(graphId, version),
-        operations,
+    async commitSchemaVersion(
+      params: CommitSchemaVersionParams,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransaction((target) =>
+        target.commitSchemaVersion(params),
+      );
+    },
+
+    async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
+      await runSchemaWriteTransaction((target) =>
+        target.setActiveVersion(params),
       );
     },
 

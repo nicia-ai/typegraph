@@ -576,6 +576,88 @@ export class MigrationError extends TypeGraphError {
   }
 }
 
+/**
+ * Thrown by `commitSchemaVersion` and `setActiveVersion` when the
+ * caller's view of the active schema version is out of date — another
+ * writer has already advanced it.
+ *
+ * Recovery: re-read the active version with `getActiveSchema(graphId)`,
+ * recompute against the new baseline, and retry. This is a routine
+ * concurrency signal, not a bug.
+ *
+ * `actual` is `0` when no active version exists yet (initial-commit race
+ * where another writer initialized first).
+ */
+export class StaleVersionError extends TypeGraphError {
+  declare readonly details: Readonly<{
+    graphId: string;
+    expected: number;
+    actual: number;
+  }>;
+
+  constructor(
+    details: Readonly<{
+      graphId: string;
+      expected: number;
+      actual: number;
+    }>,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Schema version was advanced by another writer for graph "${details.graphId}": expected active version ${details.expected}, actual is ${details.actual}`,
+      "STALE_SCHEMA_VERSION",
+      {
+        details,
+        category: "system",
+        suggestion: `Re-read the active schema version, recompute the new version against that baseline, and retry the commit.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "StaleVersionError";
+  }
+}
+
+/**
+ * Thrown by `commitSchemaVersion` when a row already exists at the
+ * target version with a *different* schema hash — i.e. two writers
+ * committed materially different schemas at the same version number.
+ *
+ * Distinct from `StaleVersionError`: this is not a refetch-and-retry
+ * situation, it's a content disagreement that needs operator
+ * intervention. Typically caused by inconsistent application
+ * deployments writing schemas that hash differently.
+ */
+export class SchemaContentConflictError extends TypeGraphError {
+  declare readonly details: Readonly<{
+    graphId: string;
+    version: number;
+    existingHash: string;
+    incomingHash: string;
+  }>;
+
+  constructor(
+    details: Readonly<{
+      graphId: string;
+      version: number;
+      existingHash: string;
+      incomingHash: string;
+    }>,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Schema content conflict for graph "${details.graphId}" at version ${details.version}: existing hash ${details.existingHash} differs from incoming hash ${details.incomingHash}`,
+      "SCHEMA_CONTENT_CONFLICT",
+      {
+        details,
+        category: "system",
+        suggestion: `Two writers committed different schemas at the same version. Reconcile the application deployments so they produce the same canonical schema, then retry.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "SchemaContentConflictError";
+  }
+}
+
 // ============================================================
 // Configuration Errors (category: "user")
 // ============================================================

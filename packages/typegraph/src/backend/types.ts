@@ -502,11 +502,25 @@ export type TransactionOptions = Readonly<{
 // ============================================================
 
 /**
- * Transaction backend - a backend scoped to a transaction.
+ * Transaction backend — a backend scoped to a transaction.
+ *
+ * `commitSchemaVersion` and `setActiveVersion` are intentionally omitted:
+ * the atomicity / CAS guarantees of those primitives depend on
+ * dialect-specific write-locking (BEGIN IMMEDIATE on SQLite,
+ * `pg_advisory_xact_lock` on Postgres) acquired by the top-level
+ * backend wrappers, not the transaction itself. Calling them from a
+ * user-supplied `backend.transaction(...)` callback would bypass that
+ * locking and silently weaken the orphan-row crash window the primitive
+ * exists to eliminate. Schema commits go through the top-level backend
+ * methods only.
  */
 export type TransactionBackend = Omit<
   GraphBackend,
-  "transaction" | "close" | "refreshStatistics"
+  | "transaction"
+  | "close"
+  | "refreshStatistics"
+  | "commitSchemaVersion"
+  | "setActiveVersion"
 >;
 
 /**
@@ -602,8 +616,39 @@ export type GraphBackend = Readonly<{
     graphId: string,
     version: number,
   ) => Promise<SchemaVersionRow | undefined>;
-  insertSchema: (params: InsertSchemaParams) => Promise<SchemaVersionRow>;
-  setActiveSchema: (graphId: string, version: number) => Promise<void>;
+  /**
+   * Atomically inserts a new schema version and activates it as a single
+   * transactional unit, with optimistic compare-and-swap on the currently
+   * active version.
+   *
+   * - If `expected.kind === "active"` and the actual active version
+   *   differs, throws `StaleVersionError` (caller should refetch and
+   *   retry).
+   * - If a row already exists at `params.version` with the same
+   *   `schemaHash`, returns it idempotently — reactivating it if it was
+   *   left inactive by an earlier crashed commit.
+   * - If a row already exists at `params.version` with a different
+   *   `schemaHash`, throws `SchemaContentConflictError`.
+   *
+   * Requires `capabilities.transactions === true`. On non-transactional
+   * backends (e.g. Cloudflare D1, drizzle-orm/neon-http) this method
+   * throws `ConfigurationError` rather than running with degraded
+   * atomicity that would silently re-introduce the orphan-row crash
+   * window the primitive exists to eliminate.
+   */
+  commitSchemaVersion: (
+    params: CommitSchemaVersionParams,
+  ) => Promise<SchemaVersionRow>;
+  /**
+   * Atomically flips the active schema pointer to an existing version,
+   * with optimistic compare-and-swap on the currently active version.
+   * Used by `rollbackSchema` and any other "promote/demote existing
+   * version" workflow. Throws `StaleVersionError` on CAS mismatch and
+   * `MigrationError` if the target version row does not exist.
+   *
+   * Same transactional requirements as `commitSchemaVersion`.
+   */
+  setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
   upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
@@ -733,8 +778,8 @@ export function wrapWithManagedClose(
  * tolerate it must branch on the capability themselves.
  *
  * Pass `fallback` only when the toplevel backend method would recurse
- * — for example, when implementing `backend.setActiveSchema` itself,
- * pass the operation-level backend so the no-tx path doesn't loop.
+ * — pass the operation-level backend so the no-tx path doesn't loop
+ * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend,
@@ -799,6 +844,10 @@ export type CheckUniqueBatchParams = Readonly<{
 
 /**
  * Parameters for inserting a schema version.
+ *
+ * Used internally by backend implementations. Public callers go through
+ * `commitSchemaVersion`, which handles the insert + activate atomically
+ * with CAS guarantees.
  */
 export type InsertSchemaParams = Readonly<{
   graphId: string;
@@ -806,6 +855,53 @@ export type InsertSchemaParams = Readonly<{
   schemaHash: string;
   schemaDoc: SerializedSchema;
   isActive: boolean;
+}>;
+
+/**
+ * The caller's claim about the currently-active schema version, used as
+ * the optimistic compare-and-swap guard for `commitSchemaVersion`.
+ *
+ * - `{ kind: "initial" }` — caller is committing the first-ever version
+ *   for this graph and asserts no active version exists yet.
+ * - `{ kind: "active", version: N }` — caller observed version N as
+ *   active and is committing version N+1 against that baseline. The
+ *   commit fails with `StaleVersionError` if some other writer has
+ *   advanced or rolled back the pointer in the meantime.
+ *
+ * Tagged-union form (rather than a magic `version: 0` sentinel) because
+ * the two cases have materially different semantics: the initial path
+ * skips the "deactivate prior" UPDATE, and the no-active-row state is
+ * a *valid* expected state, not an out-of-band signal.
+ */
+export type CommitSchemaVersionExpected =
+  | Readonly<{ kind: "initial" }>
+  | Readonly<{ kind: "active"; version: number }>;
+
+/**
+ * Parameters for `commitSchemaVersion`.
+ */
+export type CommitSchemaVersionParams = Readonly<{
+  graphId: string;
+  /** CAS guard — see `CommitSchemaVersionExpected`. */
+  expected: CommitSchemaVersionExpected;
+  /** The new version to insert and activate. */
+  version: number;
+  schemaHash: string;
+  schemaDoc: SerializedSchema;
+}>;
+
+/**
+ * Parameters for `setActiveVersion`.
+ *
+ * Flips the active pointer from `expected` to `version` for an existing
+ * row. CAS prevents overwriting a concurrent rollback or commit.
+ */
+export type SetActiveVersionParams = Readonly<{
+  graphId: string;
+  /** CAS guard. Same semantics as `commitSchemaVersion.expected`. */
+  expected: CommitSchemaVersionExpected;
+  /** The version to mark active. Must already exist. */
+  version: number;
 }>;
 
 /**

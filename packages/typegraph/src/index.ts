@@ -99,6 +99,8 @@ export {
 
 export type {
   BackendCapabilities,
+  CommitSchemaVersionExpected,
+  CommitSchemaVersionParams,
   DeleteFulltextBatchParams,
   FulltextBatchRow,
   FulltextCapabilities,
@@ -106,6 +108,8 @@ export type {
   FulltextSearchParams,
   FulltextSearchResult,
   GraphBackend,
+  SchemaVersionRow,
+  SetActiveVersionParams,
   TransactionBackend,
   UpsertFulltextBatchParams,
   VectorCapabilities,
@@ -208,7 +212,9 @@ export {
   NodeConstraintNotFoundError,
   NodeNotFoundError,
   RestrictedDeleteError,
+  SchemaContentConflictError,
   SchemaMismatchError,
+  StaleVersionError,
   TypeGraphError,
   UniquenessError,
   UnsupportedPredicateError,

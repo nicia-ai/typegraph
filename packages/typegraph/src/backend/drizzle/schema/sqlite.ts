@@ -18,6 +18,7 @@
  * });
  * ```
  */
+import { sql } from "drizzle-orm";
 import {
   blob,
   index,
@@ -25,6 +26,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 import {
@@ -198,6 +200,14 @@ export function createSqliteTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.version] }),
       index(`${n.schemaVersions}_active_idx`).on(t.graphId, t.isActive),
+      // Partial unique index enforcing the "at most one active version
+      // per graph" invariant at the storage layer. Defense in depth
+      // against buggy backend implementations or out-of-band writes.
+      // Forces the deactivate-then-activate ordering used by
+      // `commitSchemaVersion` and `setActiveVersion`.
+      uniqueIndex(`${n.schemaVersions}_one_active_per_graph_idx`)
+        .on(t.graphId)
+        .where(sql`${t.isActive} = 1`),
     ],
   );
 
