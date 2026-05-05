@@ -23,6 +23,7 @@ import {
 } from "../ontology/types";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
+import { sortedReplacer } from "./canonical";
 import {
   type JsonSchema,
   type SchemaHash,
@@ -102,6 +103,9 @@ function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
     uniqueConstraints: serializeUniqueConstraints(registration.unique ?? []),
     onDelete: registration.onDelete ?? "restrict",
     description: node.description,
+    ...(node.annotations === undefined ?
+      {}
+    : { annotations: node.annotations }),
   };
 }
 
@@ -257,6 +261,9 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     cardinality: registration.cardinality ?? "many",
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     description: edge.description,
+    ...(edge.annotations === undefined ?
+      {}
+    : { annotations: edge.annotations }),
   };
 }
 
@@ -439,20 +446,6 @@ export async function computeSchemaHash(
   // Serialize with sorted keys for deterministic output
   const json = JSON.stringify(hashable, sortedReplacer);
   return sha256Hash(json);
-}
-
-/**
- * JSON replacer that sorts object keys for deterministic serialization.
- */
-function sortedReplacer(_key: string, value: unknown): unknown {
-  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).toSorted()) {
-      sorted[key] = (value as Record<string, unknown>)[key];
-    }
-    return sorted;
-  }
-  return value;
 }
 
 /**

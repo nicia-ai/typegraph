@@ -4,7 +4,8 @@ import {
   assertSchemaKeysAreFree,
   RESERVED_NODE_KEYS,
 } from "../store/reserved-keys";
-import { NODE_TYPE_BRAND, type NodeType } from "./types";
+import { assertJsonValue } from "./json-value";
+import { type KindAnnotations, NODE_TYPE_BRAND, type NodeType } from "./types";
 
 // ============================================================
 // Node Factory Options
@@ -18,6 +19,14 @@ export type DefineNodeOptions<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
   schema: S;
   /** Optional description for documentation */
   description?: string;
+  /**
+   * Consumer-owned structured annotations for the kind.
+   *
+   * Stored in the canonical schema and **participates in schema hashing** —
+   * any change bumps the schema version and shows up as a `safe`-severity
+   * diff in `getSchemaChanges`. See `KindAnnotations` for the contract.
+   */
+  annotations?: KindAnnotations;
 }>;
 
 // ============================================================
@@ -55,11 +64,15 @@ export function defineNode<
   S extends z.ZodObject<z.ZodRawShape>,
 >(name: K, options: DefineNodeOptions<S>): NodeType<K, S> {
   validateSchemaKeys(options.schema, name);
+  if (options.annotations !== undefined) {
+    assertJsonValue(options.annotations, "annotations", `Node "${name}"`);
+  }
 
   return Object.freeze({
     [NODE_TYPE_BRAND]: true as const,
     kind: name,
     schema: options.schema,
     description: options.description,
+    annotations: options.annotations,
   });
 }

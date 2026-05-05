@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph } from "../../src/core/define-graph";
-import { defineEdge } from "../../src/core/edge";
-import { defineNode } from "../../src/core/node";
+import { defineEdge, type DefineEdgeOptions } from "../../src/core/edge";
+import { defineNode, type DefineNodeOptions } from "../../src/core/node";
 import {
+  type AnyEdgeType,
   type Cardinality,
   type DeleteBehavior,
   type EndpointExistence,
+  type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
 import {
@@ -20,11 +22,13 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
+import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
 import {
   computeSchemaHash,
   serializeSchema,
 } from "../../src/schema/serializer";
+import { serializedSchemaZod } from "../../src/schema/types";
 
 // ============================================================
 // Arbitrary Generators
@@ -57,6 +61,25 @@ const graphIdArb = fc
 const descriptionArb = fc.option(fc.string({ minLength: 1, maxLength: 100 }), {
   nil: undefined,
 });
+
+/**
+ * Generate optional consumer-owned annotations (KindAnnotations).
+ *
+ * Uses arbitrary JSON values so the property tests cover deeply nested,
+ * heterogeneously-keyed shapes — exactly the kinds of structures consumers
+ * embed (UI hints, audit policy, provenance pointers, etc.).
+ */
+const annotationsKeyArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,7}$/);
+// fc.jsonValue() produces values that are valid JSON at runtime, but its
+// TypeScript type is wider than our KindAnnotations type. Cast the arbitrary
+// so the rest of the test sees the public type.
+const annotationsArb = fc.option(
+  fc.dictionary(annotationsKeyArb, fc.jsonValue(), {
+    minKeys: 0,
+    maxKeys: 4,
+  }),
+  { nil: undefined },
+) as fc.Arbitrary<KindAnnotations | undefined>;
 
 /**
  * Generate delete behaviors.
@@ -186,25 +209,38 @@ const nodeTypeArb = fc
     name: identifierArb,
     schema: simpleZodSchemaArb,
     description: descriptionArb,
+    annotations: annotationsArb,
   })
-  .map(({ name, schema, description }) =>
-    defineNode(name, description ? { schema, description } : { schema }),
+  .map(({ name, schema, description, annotations }) =>
+    defineNode(name, {
+      schema,
+      ...(description === undefined ? {} : { description }),
+      ...(annotations === undefined ? {} : { annotations }),
+    }),
   );
 
 /**
  * Generate an edge type with optional schema.
+ *
+ * Conditional spreads (instead of explicit `field: undefined`) keep us
+ * compatible with `exactOptionalPropertyTypes: true`.
  */
 const edgeTypeArb = fc
   .record({
     name: edgeIdentifierArb,
     schema: fc.option(simpleZodSchemaArb, { nil: undefined }),
     description: descriptionArb,
+    annotations: annotationsArb,
   })
-  .map(({ name, schema, description }) => {
-    if (schema && description) return defineEdge(name, { schema, description });
-    if (schema) return defineEdge(name, { schema });
-    if (description) return defineEdge(name, { description });
-    return defineEdge(name, {});
+  .map(({ name, schema, description, annotations }) => {
+    const annotationsPart = annotations === undefined ? {} : { annotations };
+    if (schema && description) {
+      return defineEdge(name, { schema, description, ...annotationsPart });
+    }
+    if (schema) return defineEdge(name, { schema, ...annotationsPart });
+    if (description)
+      return defineEdge(name, { description, ...annotationsPart });
+    return defineEdge(name, annotationsPart);
   });
 
 /**
@@ -399,7 +435,7 @@ describe("Schema Serialization Properties", () => {
           const serialized = serializeSchema(graph, version);
           const deserialized = deserializeSchema(serialized);
 
-          // Check metadata
+          // Check annotations
           expect(deserialized.graphId).toBe(graph.id);
           expect(deserialized.version).toBe(version);
 
@@ -452,6 +488,23 @@ describe("Schema Serialization Properties", () => {
           expect(Object.keys(raw.edges).toSorted()).toEqual(
             Object.keys(serialized.edges).toSorted(),
           );
+        }),
+        { numRuns: 50 },
+      );
+    });
+
+    it("serialize -> JSON -> Zod parse -> JSON is byte-identical", () => {
+      fc.assert(
+        fc.property(graphDefArb, versionArb, (graph, version) => {
+          const serialized = serializeSchema(graph, version);
+
+          const canonicalBefore = JSON.stringify(serialized, sortedReplacer);
+          const reparsed = serializedSchemaZod.parse(
+            JSON.parse(canonicalBefore),
+          );
+          const canonicalAfter = JSON.stringify(reparsed, sortedReplacer);
+
+          expect(canonicalAfter).toBe(canonicalBefore);
         }),
         { numRuns: 50 },
       );
@@ -545,6 +598,119 @@ describe("Schema Serialization Properties", () => {
         }),
         { numRuns: 50 },
       );
+    });
+
+    // Pins the load-bearing invariant from the issue: graphs that never set
+    // annotations produce identical canonical-form hashes to today, but an
+    // explicit empty object {} is a structural opt-in and bumps the hash.
+    //
+    // The "explicit-undefined" case uses a runtime cast to bypass
+    // exactOptionalPropertyTypes — that path can only originate from
+    // untyped JS callers or spread merges, but consumers can still hit it.
+    it("hash is invariant for absent vs explicit-undefined node annotations; differs for {}", async () => {
+      const baseSchema = z.object({ name: z.string() });
+      const withoutAnnotations = defineNode("Item", { schema: baseSchema });
+      const withUndefinedAnnotations = defineNode("Item", {
+        schema: baseSchema,
+        annotations: undefined,
+      } as unknown as DefineNodeOptions<typeof baseSchema>);
+      const withEmptyAnnotations = defineNode("Item", {
+        schema: baseSchema,
+        annotations: {},
+      });
+
+      const buildGraph = (node: typeof withoutAnnotations) =>
+        defineGraph({
+          id: "annotations_invariant_node",
+          nodes: { Item: { type: node } },
+          edges: {},
+        });
+
+      const hashAbsent = await computeSchemaHash(
+        serializeSchema(buildGraph(withoutAnnotations), 1),
+      );
+      const hashUndefined = await computeSchemaHash(
+        serializeSchema(buildGraph(withUndefinedAnnotations), 1),
+      );
+      const hashEmpty = await computeSchemaHash(
+        serializeSchema(buildGraph(withEmptyAnnotations), 1),
+      );
+
+      expect(hashUndefined).toBe(hashAbsent);
+      expect(hashEmpty).not.toBe(hashAbsent);
+    });
+
+    it("hash is invariant for absent vs explicit-undefined edge annotations; differs for {}", async () => {
+      const Source = defineNode("Source", {
+        schema: z.object({ name: z.string() }),
+      });
+      const Target = defineNode("Target", {
+        schema: z.object({ name: z.string() }),
+      });
+
+      const withoutAnnotations = defineEdge("links");
+      const withUndefinedAnnotations = defineEdge("links", {
+        annotations: undefined,
+      } as unknown as DefineEdgeOptions<z.ZodObject<z.ZodRawShape>>);
+      const withEmptyAnnotations = defineEdge("links", { annotations: {} });
+
+      const buildGraph = (edge: AnyEdgeType) =>
+        defineGraph({
+          id: "annotations_invariant_edge",
+          nodes: {
+            Source: { type: Source },
+            Target: { type: Target },
+          },
+          edges: {
+            links: { type: edge, from: [Source], to: [Target] },
+          },
+        });
+
+      const hashAbsent = await computeSchemaHash(
+        serializeSchema(buildGraph(withoutAnnotations), 1),
+      );
+      const hashUndefined = await computeSchemaHash(
+        serializeSchema(buildGraph(withUndefinedAnnotations), 1),
+      );
+      const hashEmpty = await computeSchemaHash(
+        serializeSchema(buildGraph(withEmptyAnnotations), 1),
+      );
+
+      expect(hashUndefined).toBe(hashAbsent);
+      expect(hashEmpty).not.toBe(hashAbsent);
+    });
+
+    // Hash compatibility for any deployment that existed before this field
+    // was added depends on the serialized schema_doc omitting `annotations`
+    // entirely when none are set — present-as-undefined would still appear
+    // in the canonical JSON and bump the hash.
+    it("graphs without annotations omit the field from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const knows = defineEdge("knows", {
+        schema: z.object({ since: z.string() }),
+      });
+
+      const graph = defineGraph({
+        id: "compat_test",
+        nodes: { Person: { type: Person } },
+        edges: {
+          knows: { type: knows, from: [Person], to: [Person] },
+        },
+      });
+
+      const serialized = serializeSchema(graph, 1);
+
+      for (const node of Object.values(serialized.nodes)) {
+        expect("annotations" in node).toBe(false);
+      }
+      for (const edge of Object.values(serialized.edges)) {
+        expect("annotations" in edge).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"annotations"');
     });
   });
 

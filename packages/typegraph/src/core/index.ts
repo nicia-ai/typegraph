@@ -68,6 +68,8 @@ export {
   isEdgeType,
   isEdgeTypeWithEndpoints,
   isNodeType,
+  type JsonValue,
+  type KindAnnotations,
   type NodeId,
   type NodeProps,
   type NodeRegistration,

@@ -12,6 +12,7 @@ import {
   type EdgeId,
   getEdgeKinds,
   getNodeKinds,
+  type KindAnnotations,
   type NodeId,
   type NodeRef,
   type Store,
@@ -43,6 +44,58 @@ const worksAt = defineEdge("worksAt", {
 });
 
 const knows = defineEdge("knows");
+
+const Incident = defineNode("Incident", {
+  schema: z.object({
+    title: z.string(),
+  }),
+  annotations: {
+    ui: { titleField: "title" },
+  },
+});
+
+const reportedBy = defineEdge("reportedBy", {
+  annotations: {
+    ui: { showInTimeline: true },
+  },
+});
+
+// KindAnnotations rejects non-JSON values at the type level.
+expectError(
+  defineNode("BadBigInt", {
+    schema: z.object({ name: z.string() }),
+    annotations: { audit: { version: 1n } },
+  }),
+);
+expectError(
+  defineNode("BadFunction", {
+    schema: z.object({ name: z.string() }),
+    annotations: { onClick: () => undefined },
+  }),
+);
+expectError(
+  defineNode("BadSymbol", {
+    schema: z.object({ name: z.string() }),
+    annotations: { tag: Symbol("x") },
+  }),
+);
+expectError(
+  defineNode("BadUndefined", {
+    schema: z.object({ name: z.string() }),
+    annotations: { value: undefined },
+  }),
+);
+expectError(
+  defineNode("BadNested", {
+    schema: z.object({ name: z.string() }),
+    annotations: { audit: { handler: () => undefined } },
+  }),
+);
+expectError(
+  defineEdge("badEdgeBigInt", {
+    annotations: { count: 99n },
+  }),
+);
 
 const graph = defineGraph({
   id: "public_api_test_graph",
@@ -93,6 +146,8 @@ const edgeKinds = getEdgeKinds(graph);
 
 expectType<readonly ("Person" | "Company" | "Project")[]>(nodeKinds);
 expectType<readonly ("worksAt" | "knows")[]>(edgeKinds);
+expectType<KindAnnotations | undefined>(Incident.annotations);
+expectType<KindAnnotations | undefined>(reportedBy.annotations);
 
 expectAssignable<NodeRef>({ kind: "AnyKind", id: "node-id" });
 expectAssignable<Parameters<typeof store.edges.worksAt.create>[0]>({

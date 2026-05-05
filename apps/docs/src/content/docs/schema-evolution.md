@@ -29,6 +29,7 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Adding new edge types
 - Adding optional properties (with defaults)
 - Adding ontology relations
+- Changing per-kind annotations (UI hints, audit policy, etc.)
 
 ### Adding an Optional Property
 
@@ -78,6 +79,62 @@ const graph = defineGraph({
 
 This is a single safe migration. New node and edge types don't affect existing
 data.
+
+### Changing Annotations
+
+The `annotations` field on `defineNode` and `defineEdge` is part of the canonical
+schema, so any change bumps the schema version. Changes are classified as
+`safe` — no data migration needed, only the schema document is updated.
+
+```typescript
+// Version 1
+const Incident = defineNode("Incident", {
+  schema: z.object({ title: z.string() }),
+  annotations: {
+    ui: { titleField: "title", icon: "alert-triangle" },
+  },
+});
+
+// Version 2 — swap the icon, add audit policy
+const Incident = defineNode("Incident", {
+  schema: z.object({ title: z.string() }),
+  annotations: {
+    ui: { titleField: "title", icon: "circle-alert" },
+    audit: { pii: false, retentionDays: 365 },
+  },
+});
+```
+
+`getSchemaChanges()` reports each annotations-only change per kind:
+
+```typescript
+import { getSchemaChanges } from "@nicia-ai/typegraph/schema";
+
+const diff = await getSchemaChanges(backend, graph);
+
+for (const change of diff?.nodes ?? []) {
+  if (change.details.includes("Annotations")) {
+    console.log(`${change.kind}: annotations changed (${change.severity})`);
+    // → "Incident: annotations changed (safe)"
+  }
+}
+```
+
+The hash is computed with stable sorted-key order at every depth, so
+re-formatting the annotations object — or swapping sibling key order — does
+not bump the version. Only structural or value changes do.
+
+A few things worth knowing:
+
+- Graphs that never set `annotations` produce identical canonical-form hashes
+  to graphs from before this field existed. Adoption requires no migration.
+- An explicit empty object (`annotations: {}`) is a structural opt-in and
+  bumps the hash — use the absent form to stay on the legacy hash.
+- Annotations values must be JSON-serializable (`bigint`, `function`, `Date`,
+  and other class instances are rejected at definition time).
+
+See the [schemas-stores reference](/schemas-stores#per-kind-annotations) for the
+full annotations contract.
 
 ## Breaking Changes
 
@@ -377,6 +434,7 @@ console.log("Current version:", active?.version);
 | Add edge type                  | Safe           | Yes            |
 | Add optional property          | Safe           | Yes            |
 | Add ontology relation          | Safe           | Yes            |
+| Change kind annotations           | Safe           | Yes            |
 | Add required property          | Breaking       | No             |
 | Remove property                | Breaking       | No             |
 | Remove node/edge type          | Breaking       | No             |
@@ -450,5 +508,5 @@ if (result.status === "migrated" && result.toVersion === 3) {
 - **Schema-level only.** Migrations operate on the graph definition, not on
   underlying database tables. TypeGraph's storage tables are
   schema-agnostic (nodes and edges are stored as JSON properties), so
-  "schema migration" means updating the metadata that TypeGraph tracks, not
-  running `ALTER TABLE`.
+  "schema migration" means updating the schema document that TypeGraph
+  tracks, not running `ALTER TABLE`.

@@ -14,6 +14,7 @@ import {
   type Collation,
   type DeleteBehavior,
   type EndpointExistence,
+  type KindAnnotations,
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
@@ -182,6 +183,7 @@ export type SerializedNodeDef = Readonly<{
   uniqueConstraints: readonly SerializedUniqueConstraint[];
   onDelete: DeleteBehavior;
   description: string | undefined;
+  annotations?: KindAnnotations;
 }>;
 
 // ============================================================
@@ -199,6 +201,7 @@ export type SerializedEdgeDef = Readonly<{
   cardinality: Cardinality;
   endpointExistence: EndpointExistence;
   description: string | undefined;
+  annotations?: KindAnnotations;
 }>;
 
 // ============================================================
@@ -265,6 +268,7 @@ export const serializedSchemaZod = z.object({
           ),
           onDelete: deleteBehaviorZod,
           description: z.string().optional(),
+          annotations: z.record(z.string(), z.json()).optional(),
         })
         .loose(),
     )
@@ -281,6 +285,7 @@ export const serializedSchemaZod = z.object({
           cardinality: cardinalityZod,
           endpointExistence: endpointExistenceZod,
           description: z.string().optional(),
+          annotations: z.record(z.string(), z.json()).optional(),
         })
         .loose(),
     )

@@ -81,6 +81,42 @@ describe("serializeSchema", () => {
     expect(serialized.nodes.Person?.description).toBe("A person entity");
   });
 
+  it("includes node annotations only when provided", () => {
+    const Incident = defineNode("Incident", {
+      schema: z.object({
+        title: z.string(),
+        occurredAt: z.string(),
+      }),
+      annotations: {
+        ui: {
+          titleField: "title",
+          temporalField: "occurredAt",
+        },
+        audit: { pii: false },
+      },
+    });
+
+    const graph = defineGraph({
+      id: "test_graph",
+      nodes: {
+        Incident: { type: Incident },
+        Person: { type: Person },
+      },
+      edges: {},
+    });
+
+    const serialized = serializeSchema(graph, 1);
+
+    expect(serialized.nodes.Incident?.annotations).toEqual({
+      ui: {
+        titleField: "title",
+        temporalField: "occurredAt",
+      },
+      audit: { pii: false },
+    });
+    expect("annotations" in serialized.nodes.Person!).toBe(false);
+  });
+
   it("serializes node properties to JSON Schema", () => {
     const graph = defineGraph({
       id: "test_graph",
@@ -115,6 +151,36 @@ describe("serializeSchema", () => {
     expect(serialized.edges.worksAt?.fromKinds).toEqual(["Person"]);
     expect(serialized.edges.worksAt?.toKinds).toEqual(["Organization"]);
     expect(serialized.edges.worksAt?.cardinality).toBe("many");
+  });
+
+  it("includes edge annotations when provided", () => {
+    const reportedBy = defineEdge("reportedBy", {
+      schema: z.object({ channel: z.string() }),
+      annotations: {
+        ui: { showInTimeline: true },
+      },
+    });
+
+    const graph = defineGraph({
+      id: "test_graph",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+      },
+      edges: {
+        reportedBy: {
+          type: reportedBy,
+          from: [Person],
+          to: [Organization],
+        },
+      },
+    });
+
+    const serialized = serializeSchema(graph, 1);
+
+    expect(serialized.edges.reportedBy?.annotations).toEqual({
+      ui: { showInTimeline: true },
+    });
   });
 
   it("serializes ontology relations and computes closures", () => {
@@ -337,6 +403,53 @@ describe("computeSchemaHash", () => {
     const hash2 = await computeSchemaHash(serializeSchema(graph2, 1));
 
     expect(hash1).not.toBe(hash2);
+  });
+
+  it("includes annotations in hashes with stable key ordering", async () => {
+    const IncidentA = defineNode("Incident", {
+      schema: z.object({ title: z.string() }),
+      annotations: {
+        ui: { titleField: "title", icon: "alert-triangle" },
+        audit: { pii: false },
+      },
+    });
+    const IncidentB = defineNode("Incident", {
+      schema: z.object({ title: z.string() }),
+      annotations: {
+        audit: { pii: false },
+        ui: { icon: "alert-triangle", titleField: "title" },
+      },
+    });
+    const IncidentC = defineNode("Incident", {
+      schema: z.object({ title: z.string() }),
+      annotations: {
+        ui: { titleField: "title", icon: "circle-alert" },
+        audit: { pii: false },
+      },
+    });
+
+    const graphA = defineGraph({
+      id: "test_graph",
+      nodes: { Incident: { type: IncidentA } },
+      edges: {},
+    });
+    const graphB = defineGraph({
+      id: "test_graph",
+      nodes: { Incident: { type: IncidentB } },
+      edges: {},
+    });
+    const graphC = defineGraph({
+      id: "test_graph",
+      nodes: { Incident: { type: IncidentC } },
+      edges: {},
+    });
+
+    const hashA = await computeSchemaHash(serializeSchema(graphA, 1));
+    const hashB = await computeSchemaHash(serializeSchema(graphB, 1));
+    const hashC = await computeSchemaHash(serializeSchema(graphC, 1));
+
+    expect(hashA).toBe(hashB);
+    expect(hashA).not.toBe(hashC);
   });
 });
 

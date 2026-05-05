@@ -4,7 +4,13 @@ import {
   assertSchemaKeysAreFree,
   RESERVED_EDGE_KEYS,
 } from "../store/reserved-keys";
-import { EDGE_TYPE_BRAND, type EdgeType, type NodeType } from "./types";
+import { assertJsonValue } from "./json-value";
+import {
+  EDGE_TYPE_BRAND,
+  type EdgeType,
+  type KindAnnotations,
+  type NodeType,
+} from "./types";
 
 // ============================================================
 // Edge Factory Options
@@ -22,6 +28,14 @@ export type DefineEdgeOptions<
   schema?: S;
   /** Optional description for documentation */
   description?: string;
+  /**
+   * Consumer-owned structured annotations for the kind.
+   *
+   * Stored in the canonical schema and **participates in schema hashing** —
+   * any change bumps the schema version and shows up as a `safe`-severity
+   * diff in `getSchemaChanges`. See `KindAnnotations` for the contract.
+   */
+  annotations?: KindAnnotations;
   /** Node types that can be the source of this edge (domain constraint) */
   from?: From;
   /** Node types that can be the target of this edge (range constraint) */
@@ -108,12 +122,16 @@ export function defineEdge<
 ): EdgeType<K, S, From, To> | EdgeType<K, EmptySchema> {
   const schema = options?.schema ?? EMPTY_SCHEMA;
   validateSchemaKeys(schema, name);
+  if (options?.annotations !== undefined) {
+    assertJsonValue(options.annotations, "annotations", `Edge "${name}"`);
+  }
 
   return Object.freeze({
     [EDGE_TYPE_BRAND]: true as const,
     kind: name,
     schema,
     description: options?.description,
+    annotations: options?.annotations,
     from: options?.from,
     to: options?.to,
   }) as EdgeType<K, S, From, To> | EdgeType<K, EmptySchema>;

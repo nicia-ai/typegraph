@@ -353,6 +353,90 @@ describe("Schema Changes Detection", () => {
 
     expect(diff).toBeUndefined();
   });
+
+  it("getSchemaChanges surfaces annotations-only node changes as safe", async () => {
+    const backend = createTestBackend();
+
+    const PersonWithUiHint = defineNode("Person", {
+      schema: z.object({ name: z.string() }),
+      annotations: { ui: { titleField: "name", icon: "user" } },
+    });
+    const graphV1 = defineGraph({
+      id: "annotations_diff_test",
+      nodes: { Person: { type: PersonWithUiHint } },
+      edges: {},
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    const PersonWithDifferentIcon = defineNode("Person", {
+      schema: z.object({ name: z.string() }),
+      annotations: { ui: { titleField: "name", icon: "user-circle" } },
+    });
+    const graphV2 = defineGraph({
+      id: "annotations_diff_test",
+      nodes: { Person: { type: PersonWithDifferentIcon } },
+      edges: {},
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+
+    expect(diff).toBeDefined();
+    expect(diff!.hasChanges).toBe(true);
+    expect(diff!.hasBreakingChanges).toBe(false);
+    expect(diff!.nodes).toHaveLength(1);
+    expect(diff!.nodes[0]).toMatchObject({
+      type: "modified",
+      kind: "Person",
+      severity: "safe",
+    });
+    expect(diff!.nodes[0]!.details).toContain("Annotations");
+  });
+
+  it("getSchemaChanges surfaces annotations-only edge changes as safe", async () => {
+    const backend = createTestBackend();
+
+    const reportedByV1 = defineEdge("reportedBy", {
+      annotations: { ui: { showInTimeline: true } },
+    });
+    const graphV1 = defineGraph({
+      id: "annotations_diff_edge_test",
+      nodes: {
+        Person: { type: PersonV1 },
+        Company: { type: Company },
+      },
+      edges: {
+        reportedBy: { type: reportedByV1, from: [PersonV1], to: [Company] },
+      },
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    const reportedByV2 = defineEdge("reportedBy", {
+      annotations: { ui: { showInTimeline: false } },
+    });
+    const graphV2 = defineGraph({
+      id: "annotations_diff_edge_test",
+      nodes: {
+        Person: { type: PersonV1 },
+        Company: { type: Company },
+      },
+      edges: {
+        reportedBy: { type: reportedByV2, from: [PersonV1], to: [Company] },
+      },
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+
+    expect(diff).toBeDefined();
+    expect(diff!.hasChanges).toBe(true);
+    expect(diff!.hasBreakingChanges).toBe(false);
+    expect(diff!.edges).toHaveLength(1);
+    expect(diff!.edges[0]).toMatchObject({
+      type: "modified",
+      kind: "reportedBy",
+      severity: "safe",
+    });
+    expect(diff!.edges[0]!.details).toContain("Annotations");
+  });
 });
 
 describe("Migration Options", () => {
