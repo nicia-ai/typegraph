@@ -58,7 +58,10 @@ import {
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import { generateSqliteDDL } from "./ddl";
-import { createCommonOperationBackend } from "./operation-backend-core";
+import {
+  type CommonOperationBackend,
+  createCommonOperationBackend,
+} from "./operation-backend-core";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   createEdgeRowMapper,
@@ -582,7 +585,7 @@ export function createSqliteBackend(
    * cannot be eliminated without atomicity.
    */
   function runSchemaWriteTransaction<T>(
-    fn: (tx: TransactionBackend) => Promise<T>,
+    fn: (tx: CommonOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (transactionMode === "none") {
       throw new ConfigurationError(
@@ -600,6 +603,12 @@ export function createSqliteBackend(
 
     if (transactionMode === "sql") {
       return runWithSerializedQueue(serializedQueue, async () => {
+        // The runtime object returned by createTransactionBackend always
+        // implements commitSchemaVersion / setActiveVersion (they live in
+        // the operation-backend-core impl); the public TransactionBackend
+        // type omits them so user-supplied transaction() callbacks can't
+        // bypass the locking wrapper. Cast back to the wider internal
+        // shape here, where the locking IS being applied.
         const txBackend = createTransactionBackend({
           capabilities,
           db,
@@ -609,7 +618,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           hasVectorEmbeddings,
-        });
+        }) as unknown as CommonOperationBackend;
         db.run(sql`BEGIN IMMEDIATE`);
         try {
           const result = await fn(txBackend);
@@ -636,7 +645,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           hasVectorEmbeddings,
-        });
+        }) as unknown as CommonOperationBackend;
         return fn(txBackend);
       }, { behavior: "immediate" }) as Promise<T>,
     );

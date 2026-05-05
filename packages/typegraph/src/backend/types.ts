@@ -502,11 +502,25 @@ export type TransactionOptions = Readonly<{
 // ============================================================
 
 /**
- * Transaction backend - a backend scoped to a transaction.
+ * Transaction backend — a backend scoped to a transaction.
+ *
+ * `commitSchemaVersion` and `setActiveVersion` are intentionally omitted:
+ * the atomicity / CAS guarantees of those primitives depend on
+ * dialect-specific write-locking (BEGIN IMMEDIATE on SQLite,
+ * `pg_advisory_xact_lock` on Postgres) acquired by the top-level
+ * backend wrappers, not the transaction itself. Calling them from a
+ * user-supplied `backend.transaction(...)` callback would bypass that
+ * locking and silently weaken the orphan-row crash window the primitive
+ * exists to eliminate. Schema commits go through the top-level backend
+ * methods only.
  */
 export type TransactionBackend = Omit<
   GraphBackend,
-  "transaction" | "close" | "refreshStatistics"
+  | "transaction"
+  | "close"
+  | "refreshStatistics"
+  | "commitSchemaVersion"
+  | "setActiveVersion"
 >;
 
 /**

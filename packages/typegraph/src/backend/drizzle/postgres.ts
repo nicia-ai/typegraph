@@ -65,7 +65,10 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
-import { createCommonOperationBackend } from "./operation-backend-core";
+import {
+  type CommonOperationBackend,
+  createCommonOperationBackend,
+} from "./operation-backend-core";
 import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
   createEdgeRowMapper,
@@ -321,7 +324,7 @@ export function createPostgresBackend(
    */
   function runSchemaWriteTransaction<T>(
     graphId: string,
-    fn: (tx: TransactionBackend) => Promise<T>,
+    fn: (tx: CommonOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (!capabilities.transactions) {
       throw new ConfigurationError(
@@ -344,6 +347,11 @@ export function createPostgresBackend(
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
       );
+      // The runtime object always implements commitSchemaVersion /
+      // setActiveVersion (they live in operation-backend-core); the
+      // public TransactionBackend type omits them so user-supplied
+      // transaction() callbacks can't bypass the advisory lock. Cast
+      // back to the wider internal shape here, where the lock IS held.
       const txBackend = createTransactionBackend({
         db: tx,
         adapterOptions,
@@ -351,7 +359,7 @@ export function createPostgresBackend(
         tableNames,
         capabilities,
         fulltextStrategy,
-      });
+      }) as unknown as CommonOperationBackend;
       return fn(txBackend);
     });
   }

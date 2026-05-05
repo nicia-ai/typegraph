@@ -38,12 +38,19 @@ import type {
 import { type CommonOperationStrategy } from "./operations/strategy";
 import { nowIso as defaultNowIso } from "./row-mappers";
 
-type CommonOperationBackend = Pick<
+/**
+ * The internal operation backend — what `createCommonOperationBackend`
+ * returns. Includes `commitSchemaVersion` and `setActiveVersion` so the
+ * top-level backend wrappers can call them on a fresh tx-scoped
+ * operation backend (created inside the dialect-specific
+ * write-locking transaction). These methods are deliberately NOT on
+ * the public `TransactionBackend` type — see the comment there.
+ */
+export type CommonOperationBackend = Pick<
   TransactionBackend,
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
-  | "commitSchemaVersion"
   | "countEdgesByKind"
   | "countEdgesFrom"
   | "countNodesByKind"
@@ -71,10 +78,15 @@ type CommonOperationBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "insertUnique"
-  | "setActiveVersion"
   | "updateEdge"
   | "updateNode"
->;
+> &
+  Readonly<{
+    commitSchemaVersion: (
+      params: CommitSchemaVersionParams,
+    ) => Promise<SchemaVersionRow>;
+    setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+  }>;
 
 type OperationBackendExecution = Readonly<{
   execAll: <TRow>(query: SQL) => Promise<readonly TRow[]>;
