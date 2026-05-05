@@ -71,6 +71,9 @@ describe("serializedSchemaZod", () => {
             uniqueConstraints: [],
             onDelete: "restrict",
             description: undefined,
+            annotations: {
+              ui: { titleField: "name" },
+            },
           },
         },
         edges: {
@@ -82,6 +85,9 @@ describe("serializedSchemaZod", () => {
             cardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
+            annotations: {
+              ui: { showInTimeline: true },
+            },
           },
         },
       };
@@ -486,6 +492,74 @@ describe("serializedSchemaZod", () => {
       };
       const result = serializedSchemaZod.safeParse(document);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe("annotations JSON validation", () => {
+    it("accepts annotations containing nested plain JSON values", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {},
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              ui: { titleField: "name", icon: "user" },
+              audit: { pii: false, retentionDays: 365 },
+              // eslint-disable-next-line unicorn/no-null -- valid JSON value
+              tags: ["a", "b", null],
+            },
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(document);
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects annotations containing non-JSON values at the parse boundary", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {},
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              audit: { handler: () => 1 },
+            },
+          },
+        },
+      };
+      const result = serializedSchemaZod.safeParse(document);
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects annotations containing non-finite numbers at the parse boundary", () => {
+      for (const badValue of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
+        const document = {
+          ...createValidSchemaDocument(),
+          nodes: {
+            Person: {
+              kind: "Person",
+              properties: {},
+              uniqueConstraints: [],
+              onDelete: "restrict",
+              description: undefined,
+              annotations: { stats: { mean: badValue } },
+            },
+          },
+        };
+        expect(serializedSchemaZod.safeParse(document).success).toBe(false);
+      }
     });
   });
 });

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   defineEdge,
   defineGraph,
   defineNode,
@@ -18,6 +19,8 @@ import {
   getNodeKinds,
   subClassOf,
 } from "../src";
+import { type DefineEdgeOptions } from "../src/core/edge";
+import { type DefineNodeOptions } from "../src/core/node";
 
 describe("defineNode()", () => {
   it("creates a node kind with a name and schema", () => {
@@ -40,7 +43,129 @@ describe("defineNode()", () => {
 
     expect(Company.description).toBe("A legal business entity");
   });
+
+  it("accepts consumer-owned annotations", () => {
+    const Incident = defineNode("Incident", {
+      schema: z.object({ title: z.string() }),
+      annotations: {
+        ui: { titleField: "title", icon: "alert-triangle" },
+        audit: { pii: false },
+      },
+    });
+
+    expect(Incident.annotations).toEqual({
+      ui: { titleField: "title", icon: "alert-triangle" },
+      audit: { pii: false },
+    });
+  });
+
+  describe("annotations JSON validation", () => {
+    const baseSchema = z.object({ name: z.string() });
+
+    it("rejects bigint values", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ audit: { version: 1n } })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects function values", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ onClick: noop })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects symbol values", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ tag: Symbol("x") })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects explicit undefined values", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ value: undefined })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects Date instances", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ createdAt: new Date() })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects Set and other class instances", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ tags: new Set(["a"]) })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects non-JSON values nested inside arrays", () => {
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ items: [1, noop] })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("rejects NaN, Infinity, and -Infinity", () => {
+      // JSON.stringify silently coerces these to "null", which would
+      // change the canonical hash without the consumer noticing.
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ score: Number.NaN })),
+      ).toThrow(/NaN/);
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ score: Number.POSITIVE_INFINITY })),
+      ).toThrow(/Infinity/);
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ score: Number.NEGATIVE_INFINITY })),
+      ).toThrow(/-Infinity/);
+      expect(() =>
+        defineNode("Bad", badNodeOptions({ stats: { mean: Number.NaN } })),
+      ).toThrow(/annotations\.stats\.mean.*NaN/s);
+    });
+
+    it("error message includes the offending path and node kind", () => {
+      expect(() =>
+        defineNode("Incident", badNodeOptions({ audit: { version: 1n } })),
+      ).toThrow(/Node "Incident".*annotations\.audit\.version.*bigint/s);
+    });
+
+    it("accepts null, nested arrays, and deep plain objects", () => {
+      expect(() =>
+        defineNode("Good", {
+          schema: baseSchema,
+          annotations: {
+            // eslint-disable-next-line unicorn/no-null -- valid JSON value
+            placeholder: null,
+            tags: ["a", "b", ["nested"]],
+            nested: { deeper: { value: 42 } },
+          },
+        }),
+      ).not.toThrow();
+    });
+  });
 });
+
+// Helpers hoisted outside any describe so they aren't recreated per test —
+// silences unicorn/consistent-function-scoping. Casts simulate untyped JS
+// callers or `as any` escape hatches that reach the runtime guard.
+function noop(): number {
+  return 0;
+}
+
+function badNodeOptions(
+  annotations: unknown,
+): DefineNodeOptions<z.ZodObject<{ name: z.ZodString }>> {
+  return {
+    schema: z.object({ name: z.string() }),
+    annotations,
+  } as unknown as DefineNodeOptions<z.ZodObject<{ name: z.ZodString }>>;
+}
+
+function badEdgeOptions(
+  annotations: unknown,
+): DefineEdgeOptions<z.ZodObject<z.ZodRawShape>> {
+  return { annotations } as unknown as DefineEdgeOptions<
+    z.ZodObject<z.ZodRawShape>
+  >;
+}
 
 describe("defineEdge()", () => {
   it("creates an edge kind with just a name (no properties)", () => {
@@ -61,6 +186,38 @@ describe("defineEdge()", () => {
 
     expect(worksAt.kind).toBe("worksAt");
     expect(worksAt.description).toBe("Employment relationship");
+  });
+
+  it("accepts consumer-owned annotations", () => {
+    const reportedBy = defineEdge("reportedBy", {
+      annotations: {
+        ui: { showInTimeline: true },
+      },
+    });
+
+    expect(reportedBy.annotations).toEqual({
+      ui: { showInTimeline: true },
+    });
+  });
+
+  describe("annotations JSON validation", () => {
+    it("rejects bigint values", () => {
+      expect(() => defineEdge("bad", badEdgeOptions({ count: 99n }))).toThrow(
+        ConfigurationError,
+      );
+    });
+
+    it("rejects function values", () => {
+      expect(() =>
+        defineEdge("bad", badEdgeOptions({ handler: noop })),
+      ).toThrow(ConfigurationError);
+    });
+
+    it("error message includes the offending path and edge kind", () => {
+      expect(() =>
+        defineEdge("reportedBy", badEdgeOptions({ ui: { onTap: noop } })),
+      ).toThrow(/Edge "reportedBy".*annotations\.ui\.onTap.*function/s);
+    });
   });
 });
 

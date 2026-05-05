@@ -525,6 +525,97 @@ describe("computeSchemaDiff", () => {
       expect(diff.nodes).toHaveLength(1);
       expect(diff.nodes[0]!.type).toBe("modified");
     });
+
+    it("detects node annotations changes as safe", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Incident: {
+            kind: "Incident",
+            properties: {
+              type: "object",
+              properties: { title: { type: "string" } },
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              ui: { titleField: "title", icon: "alert-triangle" },
+            },
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Incident: {
+            kind: "Incident",
+            properties: {
+              type: "object",
+              properties: { title: { type: "string" } },
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              ui: { titleField: "title", icon: "circle-alert" },
+            },
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.hasBreakingChanges).toBe(false);
+      expect(diff.nodes).toHaveLength(1);
+      expect(diff.nodes[0]).toMatchObject({
+        type: "modified",
+        kind: "Incident",
+        severity: "safe",
+      });
+      expect(diff.nodes[0]!.details).toContain("Annotations");
+    });
+
+    it("ignores annotations object key order in node diffs", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Incident: {
+            kind: "Incident",
+            properties: { type: "object", properties: {} },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              ui: { titleField: "title", icon: "alert-triangle" },
+              audit: { pii: false },
+            },
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Incident: {
+            kind: "Incident",
+            properties: { type: "object", properties: {} },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+            annotations: {
+              audit: { pii: false },
+              ui: { icon: "alert-triangle", titleField: "title" },
+            },
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(false);
+      expect(diff.nodes).toHaveLength(0);
+    });
   });
 
   // ============================================================
@@ -755,6 +846,55 @@ describe("computeSchemaDiff", () => {
         severity: "safe",
       });
       expect(diff.edges[0]!.details).toContain("Properties");
+    });
+
+    it("detects edge annotations changes as safe", () => {
+      const before = createSchema({
+        version: 1,
+        edges: {
+          reportedBy: {
+            kind: "reportedBy",
+            fromKinds: ["Incident"],
+            toKinds: ["Person"],
+            properties: { type: "object", properties: {} },
+            cardinality: "many",
+            endpointExistence: "notDeleted",
+            description: undefined,
+            annotations: {
+              ui: { showInTimeline: true },
+            },
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        edges: {
+          reportedBy: {
+            kind: "reportedBy",
+            fromKinds: ["Incident"],
+            toKinds: ["Person"],
+            properties: { type: "object", properties: {} },
+            cardinality: "many",
+            endpointExistence: "notDeleted",
+            description: undefined,
+            annotations: {
+              ui: { showInTimeline: false },
+            },
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.hasBreakingChanges).toBe(false);
+      expect(diff.edges).toHaveLength(1);
+      expect(diff.edges[0]).toMatchObject({
+        type: "modified",
+        kind: "reportedBy",
+        severity: "safe",
+      });
+      expect(diff.edges[0]!.details).toContain("Annotations");
     });
 
     it("handles multiple edge changes in single diff", () => {

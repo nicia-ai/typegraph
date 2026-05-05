@@ -21,6 +21,44 @@ declare const __edgeId: unique symbol;
 // ============================================================
 
 /**
+ * Any JSON-serializable value.
+ *
+ * Mirrors the JSON wire format: primitives, arrays, and string-keyed objects.
+ * `null` is included because the JSON spec requires it for "no value here";
+ * this is the one place in the public API that uses `null` over `undefined`.
+ */
+export type JsonValue =
+  | null
+  | string
+  | number
+  | boolean
+  | readonly JsonValue[]
+  | Readonly<{ [key: string]: JsonValue }>;
+
+/**
+ * Consumer-owned per-kind annotations.
+ *
+ * Stable labels attached to a node or edge kind at definition time — UI hints,
+ * audit policy, provenance pointers, tooling annotations.
+ *
+ * **Consumer-owned, fully.** TypeGraph never reads, validates, or interprets
+ * values in this field. Consumers own the entire namespace; there are no
+ * reserved keys or extension prefixes. Future library-owned per-kind state,
+ * if needed, will use a separate sibling field rather than carving out keys
+ * here.
+ *
+ * **Annotations participate in schema hashing.** Any change to an annotation
+ * value (or adding/removing an annotation key) bumps the canonical schema
+ * hash and is reported as a `safe`-severity diff by `getSchemaChanges`. If
+ * you don't want versioning for a piece of state, do not put it here.
+ *
+ * Values must be JSON-serializable — `bigint`, `function`, `symbol`, `undefined`,
+ * `Date`, and other class instances are rejected at definition time so they can
+ * never silently break schema hashing or storage round-trips.
+ */
+export type KindAnnotations = Readonly<Record<string, JsonValue>>;
+
+/**
  * A node type definition.
  *
  * Created via `defineNode()`. Represents a type of node in the graph
@@ -34,6 +72,7 @@ export type NodeType<
   kind: K;
   schema: S;
   description: string | undefined;
+  annotations: KindAnnotations | undefined;
 }>;
 
 /**
@@ -74,6 +113,7 @@ export type EdgeType<
   kind: K;
   schema: S;
   description: string | undefined;
+  annotations: KindAnnotations | undefined;
   from: From;
   to: To;
 }>;

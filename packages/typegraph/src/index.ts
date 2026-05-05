@@ -134,6 +134,8 @@ export type {
   EdgeTypeWithEndpoints,
   EndpointExistence,
   GraphDefaults,
+  JsonValue,
+  KindAnnotations,
   MetaEdgeOptions,
   NodeId,
   NodeProps,

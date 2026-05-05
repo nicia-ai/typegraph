@@ -4,6 +4,7 @@
  * Provides diff detection between schema versions to identify
  * what has changed and what migrations might be needed.
  */
+import { canonicalEqual } from "./canonical";
 import {
   type SerializedEdgeDef,
   type SerializedNodeDef,
@@ -275,6 +276,17 @@ function diffNodeDef(
     });
   }
 
+  if (annotationsChanged(before.annotations, after.annotations)) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "safe",
+      details: `Annotations changed for "${name}"`,
+      before,
+      after,
+    });
+  }
+
   return changes;
 }
 
@@ -428,7 +440,24 @@ function diffEdgeDef(
     });
   }
 
+  if (annotationsChanged(before.annotations, after.annotations)) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "safe",
+      details: `Annotations changed for "${name}"`,
+      before,
+      after,
+    });
+  }
+
   return changes;
+}
+
+function annotationsChanged(before: unknown, after: unknown): boolean {
+  if (before === undefined && after === undefined) return false;
+  if (before === undefined || after === undefined) return true;
+  return !canonicalEqual(before, after);
 }
 
 // ============================================================

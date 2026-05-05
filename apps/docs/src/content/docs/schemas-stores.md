@@ -19,6 +19,7 @@ function defineNode<K extends string, S extends z.ZodObject<any>>(
   options: {
     schema: S;
     description?: string;
+    annotations?: Readonly<Record<string, JsonValue>>;
   },
 ): NodeType<K, S>;
 ```
@@ -30,6 +31,7 @@ function defineNode<K extends string, S extends z.ZodObject<any>>(
 | `name` | `string` | Unique name for this node type |
 | `options.schema` | `z.ZodObject` | Zod object schema for node properties |
 | `options.description` | `string` | Optional description |
+| `options.annotations` | `KindAnnotations` | Optional consumer-owned per-kind annotations. See [Per-kind annotations](#per-kind-annotations). |
 
 **Example:**
 
@@ -40,6 +42,29 @@ const Person = defineNode("Person", {
     email: z.string().email().optional(),
   }),
   description: "A person in the system",
+});
+```
+
+**With annotations:**
+
+```typescript
+const Incident = defineNode("Incident", {
+  schema: z.object({
+    title: z.string(),
+    summary: z.string(),
+    occurredAt: z.string().datetime(),
+  }),
+  annotations: {
+    ui: {
+      titleField: "title",
+      temporalField: "occurredAt",
+      icon: "alert-triangle",
+    },
+    audit: {
+      pii: false,
+      retentionDays: 365,
+    },
+  },
 });
 ```
 
@@ -55,6 +80,7 @@ function defineEdge<K extends string, S extends z.ZodObject<any>>(
   options?: {
     schema?: S;
     description?: string;
+    annotations?: Readonly<Record<string, JsonValue>>;
     from?: NodeType[];
     to?: NodeType[];
   },
@@ -68,6 +94,7 @@ function defineEdge<K extends string, S extends z.ZodObject<any>>(
 | `name` | `string` | Unique name for this edge type |
 | `options.schema` | `z.ZodObject` | Optional Zod object schema (defaults to empty object) |
 | `options.description` | `string` | Optional description |
+| `options.annotations` | `KindAnnotations` | Optional consumer-owned per-kind annotations. See [Per-kind annotations](#per-kind-annotations). |
 | `options.from` | `NodeType[]` | Optional domain constraint (valid source node types) |
 | `options.to` | `NodeType[]` | Optional range constraint (valid target node types) |
 
@@ -82,6 +109,19 @@ const worksAt = defineEdge("worksAt", {
 });
 
 const knows = defineEdge("knows"); // No schema needed
+```
+
+**With annotations:**
+
+```typescript
+const reportedBy = defineEdge("reportedBy", {
+  schema: z.object({ channel: z.string() }),
+  from: [Incident],
+  to: [Person],
+  annotations: {
+    ui: { showInTimeline: true, badge: "report" },
+  },
+});
 ```
 
 **With Domain/Range Constraints:**
@@ -126,6 +166,70 @@ const graph = defineGraph({
 ```
 
 See [Core Concepts](/core-concepts#domain-and-range-constraints) for detailed documentation on domain/range constraints.
+
+### Per-kind annotations
+
+Both `defineNode` and `defineEdge` accept an optional `annotations` field — a
+plain JSON object for consumer-owned, structured per-kind data that doesn't
+belong in the Zod schema. Common uses:
+
+- **Generic UI rendering.** Which property is the title for list views? Which
+  is the canonical date for sorting? Which icon represents the kind?
+- **Audit and compliance hints.** Mark a kind as PII, set retention windows,
+  attach data-classification labels.
+- **Tooling annotations.** Group kinds in catalogs, mark provenance
+  ("originated from agent run X"), attach feature-flag gates.
+
+```typescript
+const Incident = defineNode("Incident", {
+  schema: z.object({
+    title: z.string(),
+    occurredAt: z.string().datetime(),
+  }),
+  annotations: {
+    ui: { titleField: "title", temporalField: "occurredAt", icon: "alert-triangle" },
+    audit: { pii: false, retentionDays: 365 },
+  },
+});
+```
+
+Reading annotations back from a kind:
+
+```typescript
+const titleField = (Incident.annotations?.ui as { titleField?: string })?.titleField;
+```
+
+Or from a stored schema:
+
+```typescript
+import { getSchemaChanges, getActiveSchema } from "@nicia-ai/typegraph/schema";
+
+const stored = await getActiveSchema(backend, "my_graph");
+const incidentMeta = stored?.nodes.Incident?.annotations;
+```
+
+**Key guarantees and constraints:**
+
+- **TypeGraph never reads, validates, or interprets keys inside `annotations`.**
+  Consumers own the entire namespace — no reserved prefixes, no `x-typegraph`
+  extension convention. Future library-owned per-kind state, if needed, will
+  use a separate sibling field rather than carving out keys here.
+- **Annotations participate in schema hashing and migration diffs.** Changing
+  `annotations` bumps the schema version like any other structural change, and
+  the diff is reported as a `safe`-severity change per kind. See
+  [Schema Evolution](/schema-evolution#changing-annotations).
+- **Values must be JSON-serializable.** Strings, numbers, booleans, `null`,
+  arrays, and plain objects only. `bigint`, `function`, `symbol`, `undefined`,
+  `Date`, `Map`, `Set`, and other class instances are rejected at definition
+  time with a `ConfigurationError` so they can never silently break hashing or
+  storage round-trips.
+- **Default is `undefined`, not `{}`.** Graphs that never set `annotations`
+  produce identical canonical-form hashes to graphs from before this field
+  existed — adoption requires no migration. An explicit empty object (`{}`)
+  is a structural opt-in and bumps the hash.
+- **Annotations are not a typed contract.** TypeScript types them as
+  `Readonly<Record<string, JsonValue>>`. Wrap reads in your own typed
+  accessors at consumer boundaries if you need stronger guarantees.
 
 ### `embedding(dimensions)`
 
