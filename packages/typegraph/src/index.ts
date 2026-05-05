@@ -402,6 +402,41 @@ export type {
 } from "./query";
 
 // ============================================================
+// Runtime Extension (issue #101)
+// ============================================================
+
+export type {
+  CompiledEdge,
+  CompiledExtension,
+  CompiledNode,
+  RuntimeArrayItemType,
+  RuntimeArrayProperty,
+  RuntimeBooleanProperty,
+  RuntimeEdgeDocument,
+  RuntimeEmbeddingModifier,
+  RuntimeEnumProperty,
+  RuntimeExtensionIssue,
+  RuntimeExtensionIssueCode,
+  RuntimeGraphDocument,
+  RuntimeNodeDocument,
+  RuntimeNumberProperty,
+  RuntimeObjectFieldProperty,
+  RuntimeObjectProperty,
+  RuntimeOntologyRelation,
+  RuntimePropertyType,
+  RuntimeSearchableModifier,
+  RuntimeStringProperty,
+  RuntimeUniqueConstraint,
+  RuntimeUniqueWhere,
+} from "./runtime";
+export {
+  compileRuntimeExtension,
+  defineRuntimeExtension,
+  RuntimeExtensionValidationError,
+  validateRuntimeExtension,
+} from "./runtime";
+
+// ============================================================
 // Utilities
 // ============================================================
 
