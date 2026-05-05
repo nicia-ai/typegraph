@@ -246,11 +246,11 @@ describe("Safe Migration", () => {
     expect(v1).toBeDefined();
     expect(v2).toBeDefined();
     expect(v2?.is_active).toBe(true);
-    // Note: v1 should now be inactive after setActiveSchema was called for v2
+    // After commitSchemaVersion, v1 should be inactive in the same atomic step
     expect(v1?.is_active).toBe(false);
   });
 
-  it("setActiveSchema deactivates previous versions", async () => {
+  it("commitSchemaVersion deactivates previous versions", async () => {
     const backend = createTestBackend();
 
     // Initialize with v1

@@ -42,9 +42,10 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
 
     expect(backend.dialect).toBe("postgres");
     // The headline behavior: HTTP can't hold a session, so transactions
-    // are off. Callers like `setActiveSchema` and `store.transaction`
-    // check this capability and fall through to sequential execution
-    // when it's false.
+    // are off. Callers like `store.transaction` check this capability
+    // and fall through to sequential execution when it's false.
+    // `commitSchemaVersion` is the exception — it requires atomicity
+    // and refuses with a typed ConfigurationError on this backend.
     expect(backend.capabilities.transactions).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.cte).toBe(true);

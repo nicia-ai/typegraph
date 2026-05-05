@@ -26,6 +26,7 @@
  */
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
 import { quoteIdentifier } from "../../query/compiler/utils";
 import {
@@ -35,6 +36,7 @@ import {
 } from "../../query/dialect/fulltext-strategy";
 import {
   type BackendCapabilities,
+  type CommitSchemaVersionParams,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -45,7 +47,8 @@ import {
   type FulltextSearchResult,
   type GraphBackend,
   POSTGRES_CAPABILITIES,
-  runOptionallyInTransaction,
+  type SchemaVersionRow,
+  type SetActiveVersionParams,
   type TransactionBackend,
   type TransactionOptions,
   type UpsertEmbeddingParams,
@@ -304,6 +307,55 @@ export function createPostgresBackend(
     fulltextStrategy,
   });
 
+  /**
+   * Runs `fn` inside a Postgres transaction, holding an
+   * `pg_advisory_xact_lock` keyed on the graph id. The advisory lock
+   * serializes all schema commits per-graph: the read-then-write CAS in
+   * `commitSchemaVersion` is safe even for the initial-commit case
+   * where there is no row yet to `SELECT ... FOR UPDATE`.
+   *
+   * Refuses on backends that don't support transactions
+   * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
+   * eliminated without atomicity, so silent best-effort degradation is
+   * worse than a typed error.
+   */
+  function runSchemaWriteTransaction<T>(
+    graphId: string,
+    fn: (tx: TransactionBackend) => Promise<T>,
+  ): Promise<T> {
+    if (!capabilities.transactions) {
+      throw new ConfigurationError(
+        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+          "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
+          "driver communicates over HTTP and cannot hold a session across statements; " +
+          "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
+        {
+          backend: "postgres",
+          capability: "transactions",
+          supportsTransactions: false,
+        },
+      );
+    }
+
+    return db.transaction(async (tx) => {
+      // Advisory lock: hashtext($graphId) is collision-tolerant for the
+      // size of an active graph set; collisions just serialize unrelated
+      // graphs which is harmless. Held until the transaction commits.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+      );
+      const txBackend = createTransactionBackend({
+        db: tx,
+        adapterOptions,
+        operationStrategy,
+        tableNames,
+        capabilities,
+        fulltextStrategy,
+      });
+      return fn(txBackend);
+    });
+  }
+
   const backend: GraphBackend = {
     ...operations,
 
@@ -323,11 +375,17 @@ export function createPostgresBackend(
       await db.execute(analyzeStatement);
     },
 
-    async setActiveSchema(graphId: string, version: number): Promise<void> {
-      await runOptionallyInTransaction(
-        backend,
-        (target) => target.setActiveSchema(graphId, version),
-        operations,
+    async commitSchemaVersion(
+      params: CommitSchemaVersionParams,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransaction(params.graphId, (target) =>
+        target.commitSchemaVersion(params),
+      );
+    },
+
+    async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
+      await runSchemaWriteTransaction(params.graphId, (target) =>
+        target.setActiveVersion(params),
       );
     },
 

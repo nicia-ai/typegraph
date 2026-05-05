@@ -918,9 +918,10 @@ export function createAdapterTestSuite(
     // ============================================================
 
     describe("Schema Operations", () => {
-      it("inserts and retrieves active schema", async () => {
-        const inserted = await backend.insertSchema({
+      it("commits and retrieves the active schema", async () => {
+        const inserted = await backend.commitSchemaVersion({
           graphId: "test_graph",
+          expected: { kind: "initial" },
           version: 1,
           schemaHash: "abc123",
           schemaDoc: createTestSchemaDocument({
@@ -934,7 +935,6 @@ export function createAdapterTestSuite(
               },
             },
           }),
-          isActive: true,
         });
 
         expect(inserted.version).toBe(1);
@@ -956,34 +956,47 @@ export function createAdapterTestSuite(
         expect(active).toBeUndefined();
       });
 
-      it("inserts inactive schema", async () => {
-        await backend.insertSchema({
+      it("commits a successor version and deactivates the prior", async () => {
+        await backend.commitSchemaVersion({
           graphId: "test_graph",
+          expected: { kind: "initial" },
           version: 1,
-          schemaHash: "abc123",
+          schemaHash: "v1-hash",
           schemaDoc: createTestSchemaDocument(),
-          isActive: false,
         });
 
+        await backend.commitSchemaVersion({
+          graphId: "test_graph",
+          expected: { kind: "active", version: 1 },
+          version: 2,
+          schemaHash: "v2-hash",
+          schemaDoc: createTestSchemaDocument({ version: 2 }),
+        });
+
+        const v1 = await backend.getSchemaVersion("test_graph", 1);
+        const v2 = await backend.getSchemaVersion("test_graph", 2);
+        expect(v1!.is_active).toBe(false);
+        expect(v2!.is_active).toBe(true);
+
         const active = await backend.getActiveSchema("test_graph");
-        expect(active).toBeUndefined();
+        expect(active!.version).toBe(2);
       });
 
       it("handles schemas in different graphs", async () => {
-        await backend.insertSchema({
+        await backend.commitSchemaVersion({
           graphId: "graph_a",
+          expected: { kind: "initial" },
           version: 1,
           schemaHash: "hash-a",
           schemaDoc: createTestSchemaDocument({ graphId: "graph_a" }),
-          isActive: true,
         });
 
-        await backend.insertSchema({
+        await backend.commitSchemaVersion({
           graphId: "graph_b",
+          expected: { kind: "initial" },
           version: 1,
           schemaHash: "hash-b",
           schemaDoc: createTestSchemaDocument({ graphId: "graph_b" }),
-          isActive: true,
         });
 
         const activeA = await backend.getActiveSchema("graph_a");

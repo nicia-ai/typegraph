@@ -240,7 +240,11 @@ export async function ensureSchema<G extends GraphDef>(
 /**
  * Initializes the schema for a new graph.
  *
- * Creates version 1 of the schema and marks it as active.
+ * Creates version 1 of the schema and marks it as active. Goes through
+ * the same `commitSchemaVersion` primitive as `migrateSchema` so the
+ * initial-commit race (two processes booting against an empty database
+ * simultaneously) resolves with `StaleVersionError` or idempotent
+ * success rather than a raw PK violation.
  *
  * @param backend - The database backend
  * @param graph - The graph definition
@@ -253,20 +257,24 @@ export async function initializeSchema<G extends GraphDef>(
   const schema = serializeSchema(graph, 1);
   const hash = await computeSchemaHash(schema);
 
-  return backend.insertSchema({
+  return backend.commitSchemaVersion({
     graphId: graph.id,
+    expected: { kind: "initial" },
     version: 1,
     schemaHash: hash,
     schemaDoc: schema,
-    isActive: true,
   });
 }
 
 /**
  * Migrates the schema to match the current graph definition.
  *
- * This creates a new schema version and marks it as active.
- * The old version is preserved for history/rollback.
+ * Creates a new schema version and atomically activates it via the
+ * `commitSchemaVersion` backend primitive — insert and activate happen
+ * in a single transactional unit with optimistic compare-and-swap on
+ * the currently-active version. If another writer has advanced the
+ * active version since `currentVersion` was read, this throws
+ * `StaleVersionError`; the caller should refetch and retry.
  *
  * @param backend - The database backend
  * @param graph - The current graph definition
@@ -282,17 +290,13 @@ export async function migrateSchema<G extends GraphDef>(
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
 
-  // Insert new version (not active yet)
-  await backend.insertSchema({
+  await backend.commitSchemaVersion({
     graphId: graph.id,
+    expected: { kind: "active", version: currentVersion },
     version: newVersion,
     schemaHash: hash,
     schemaDoc: schema,
-    isActive: false,
   });
-
-  // Atomically switch to the new version
-  await backend.setActiveSchema(graph.id, newVersion);
 
   return newVersion;
 }
@@ -303,24 +307,34 @@ export async function migrateSchema<G extends GraphDef>(
  * The target version must already exist in the version history.
  * This does not delete newer versions — it simply switches the active pointer.
  *
+ * Uses the `setActiveVersion` backend primitive, which performs the flip
+ * atomically with optimistic compare-and-swap on the currently-active
+ * version. Concurrent rollbacks or commits surface as
+ * `StaleVersionError`.
+ *
  * @param backend - The database backend
  * @param graphId - The graph ID
  * @param targetVersion - The version to roll back to
  * @throws MigrationError if the target version does not exist
+ * @throws StaleVersionError if another writer changed the active version concurrently
  */
 export async function rollbackSchema(
   backend: GraphBackend,
   graphId: string,
   targetVersion: number,
 ): Promise<void> {
-  const row = await backend.getSchemaVersion(graphId, targetVersion);
-  if (!row) {
+  const activeRow = await backend.getActiveSchema(graphId);
+  if (!activeRow) {
     throw new MigrationError(
-      `Cannot rollback to version ${targetVersion}: version does not exist.`,
-      { graphId, fromVersion: targetVersion, toVersion: targetVersion },
+      `Cannot rollback graph "${graphId}": no active schema version exists.`,
+      { graphId, fromVersion: 0, toVersion: targetVersion },
     );
   }
-  await backend.setActiveSchema(graphId, targetVersion);
+  await backend.setActiveVersion({
+    graphId,
+    expected: { kind: "active", version: activeRow.version },
+    version: targetVersion,
+  });
 }
 
 /**

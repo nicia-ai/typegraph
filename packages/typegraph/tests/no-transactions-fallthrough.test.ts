@@ -10,10 +10,13 @@
  * `backend.transaction(...)` in any of these paths, the corresponding
  * test will fail with the synthetic transaction-disabled error.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStore,
   defineEdge,
   defineGraph,
@@ -21,6 +24,8 @@ import {
   type GraphBackend,
   searchable,
 } from "../src";
+import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createTestBackend } from "./test-utils";
 
@@ -88,35 +93,12 @@ describe("backends with transactions: false fall through to sequential execution
     expect(backend.capabilities.transactions).toBe(false);
   });
 
-  it("setActiveSchema runs sequentially without throwing", async () => {
-    // Insert two real schema versions, then flip the active pointer.
-    // The toplevel backend used to wrap deactivate-all + activate in a
-    // transaction; the fall-through executes them as two sequential
-    // statements.
-    const v1 = serializeSchema(graph, 1);
-    const v2 = serializeSchema(graph, 2);
-
-    await backend.insertSchema({
-      graphId: graph.id,
-      version: 1,
-      schemaHash: await computeSchemaHash(v1),
-      schemaDoc: v1,
-      isActive: true,
-    });
-    await backend.insertSchema({
-      graphId: graph.id,
-      version: 2,
-      schemaHash: await computeSchemaHash(v2),
-      schemaDoc: v2,
-      isActive: false,
-    });
-
-    await expect(backend.setActiveSchema(graph.id, 2)).resolves.toBeUndefined();
-
-    const active = await backend.getActiveSchema(graph.id);
-    expect(active?.version).toBe(2);
-    expect(active?.is_active).toBe(true);
-  });
+  // Note: schema commits are NOT a fall-through path — they refuse on
+  // non-transactional backends. That contract is exercised below with a
+  // genuinely-non-transactional backend, since the synthetic disable
+  // wrapper used elsewhere in this file only overrides public methods
+  // and can't reach into the backend's closure-scoped transaction
+  // config.
 
   it("store.transaction(fn) executes fn against the main backend", async () => {
     const store = createStore(graph, backend);
@@ -211,5 +193,51 @@ describe("backends with transactions: false fall through to sequential execution
     expect(result.processed).toBe(2);
     expect(result.upserted).toBe(2);
     expect(result.skipped).toBe(0);
+  });
+});
+
+describe("backends with transactions: false refuse schema commits", () => {
+  // Genuine non-transactional configuration via the SQLite execution
+  // profile, so the closure-scoped transactionMode inside the backend
+  // observes "none" — the production code path for D1 / DurableObjects.
+  let nonTxBackend: GraphBackend;
+  let sqlite: Database.Database;
+
+  beforeEach(() => {
+    sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    for (const statement of generateSqliteDDL()) {
+      sqlite.exec(statement);
+    }
+    nonTxBackend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+  });
+
+  afterEach(() => {
+    sqlite.close();
+  });
+
+  it("commitSchemaVersion throws ConfigurationError", async () => {
+    const v1 = serializeSchema(graph, 1);
+    await expect(
+      nonTxBackend.commitSchemaVersion({
+        graphId: graph.id,
+        expected: { kind: "initial" },
+        version: 1,
+        schemaHash: await computeSchemaHash(v1),
+        schemaDoc: v1,
+      }),
+    ).rejects.toThrow(ConfigurationError);
+  });
+
+  it("setActiveVersion throws ConfigurationError", async () => {
+    await expect(
+      nonTxBackend.setActiveVersion({
+        graphId: graph.id,
+        expected: { kind: "active", version: 1 },
+        version: 2,
+      }),
+    ).rejects.toThrow(ConfigurationError);
   });
 });

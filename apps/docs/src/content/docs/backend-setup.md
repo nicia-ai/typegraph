@@ -303,8 +303,16 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
 to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
-to `false`, so `store.transaction(...)` and `setActiveSchema(...)` fall through to
-sequential execution rather than throwing.
+to `false`, so `store.transaction(...)` falls through to sequential execution
+rather than throwing.
+
+Schema commits are the one exception: `commitSchemaVersion` and
+`setActiveVersion` require atomicity to eliminate the orphan-row crash window
+they exist to fix, so they refuse with a typed `ConfigurationError` on
+non-transactional backends. Run schema migrations from a process with a
+transactional driver (`drizzle-orm/neon-serverless`, regular `pg`, etc.); the
+edge worker can keep using neon-http for reads and writes once the schema is
+established.
 
 ```bash
 npm install @neondatabase/serverless drizzle-orm

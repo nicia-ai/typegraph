@@ -1,9 +1,16 @@
 import { type SQL } from "drizzle-orm";
 
-import { DatabaseOperationError, UniquenessError } from "../../errors";
+import {
+  DatabaseOperationError,
+  MigrationError,
+  SchemaContentConflictError,
+  StaleVersionError,
+  UniquenessError,
+} from "../../errors";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  CommitSchemaVersionParams,
   CountEdgesByKindParams,
   CountEdgesFromParams,
   CountNodesByKindParams,
@@ -19,10 +26,10 @@ import type {
   HardDeleteNodeParams,
   InsertEdgeParams,
   InsertNodeParams,
-  InsertSchemaParams,
   InsertUniqueParams,
   NodeRow,
   SchemaVersionRow,
+  SetActiveVersionParams,
   TransactionBackend,
   UniqueRow,
   UpdateEdgeParams,
@@ -36,6 +43,7 @@ type CommonOperationBackend = Pick<
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
+  | "commitSchemaVersion"
   | "countEdgesByKind"
   | "countEdgesFrom"
   | "countNodesByKind"
@@ -62,9 +70,8 @@ type CommonOperationBackend = Pick<
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
-  | "insertSchema"
   | "insertUnique"
-  | "setActiveSchema"
+  | "setActiveVersion"
   | "updateEdge"
   | "updateNode"
 >;
@@ -113,11 +120,35 @@ function chunkArray<T>(
   return chunks;
 }
 
+function verifyExpectedActiveVersion(
+  graphId: string,
+  expected: CommitSchemaVersionParams["expected"],
+  actualActiveVersion: number,
+): void {
+  const expectedVersion = expected.kind === "active" ? expected.version : 0;
+  if (actualActiveVersion !== expectedVersion) {
+    throw new StaleVersionError({
+      graphId,
+      expected: expectedVersion,
+      actual: actualActiveVersion,
+    });
+  }
+}
+
 export function createCommonOperationBackend(
   options: CreateCommonOperationBackendOptions,
 ): CommonOperationBackend {
   const { batchConfig, execution, operationStrategy, rowMappers } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
+
+  // Returns 0 when no row is currently active — that's the sentinel
+  // `expected: { kind: "initial" }` matches against.
+  async function readActiveVersion(graphId: string): Promise<number> {
+    const row = await execution.execGet<Record<string, unknown>>(
+      operationStrategy.buildGetActiveSchema(graphId),
+    );
+    return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
+  }
 
   return {
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
@@ -418,14 +449,6 @@ export function createCommonOperationBackend(
       return row ? rowMappers.toSchemaVersionRow(row) : undefined;
     },
 
-    async insertSchema(params: InsertSchemaParams): Promise<SchemaVersionRow> {
-      const timestamp = nowIso();
-      const query = operationStrategy.buildInsertSchema(params, timestamp);
-      const row = await execution.execGet<Record<string, unknown>>(query);
-      if (!row) throw new DatabaseOperationError("Insert schema failed: no row returned", { operation: "insert", entity: "schema" });
-      return rowMappers.toSchemaVersionRow(row);
-    },
-
     async getSchemaVersion(
       graphId: string,
       version: number,
@@ -435,8 +458,130 @@ export function createCommonOperationBackend(
       return row ? rowMappers.toSchemaVersionRow(row) : undefined;
     },
 
-    async setActiveSchema(graphId: string, version: number): Promise<void> {
-      const queries = operationStrategy.buildSetActiveSchema(graphId, version);
+    async commitSchemaVersion(
+      params: CommitSchemaVersionParams,
+    ): Promise<SchemaVersionRow> {
+      // The top-level backend wraps this method in a transaction with
+      // appropriate write-locking (BEGIN IMMEDIATE on SQLite,
+      // pg_advisory_xact_lock on Postgres) so the read-then-write
+      // sequence below is serialized against concurrent commits.
+
+      const existingRaw = await execution.execGet<Record<string, unknown>>(
+        operationStrategy.buildGetSchemaVersion(
+          params.graphId,
+          params.version,
+        ),
+      );
+      const actualActiveVersion = await readActiveVersion(params.graphId);
+
+      // Same-version-different-hash → content conflict. Always wins
+      // over CAS: a hash disagreement is operator-intervention
+      // territory regardless of which writer "got there first."
+      if (existingRaw !== undefined) {
+        const existing = rowMappers.toSchemaVersionRow(existingRaw);
+        if (existing.schema_hash !== params.schemaHash) {
+          throw new SchemaContentConflictError({
+            graphId: params.graphId,
+            version: params.version,
+            existingHash: existing.schema_hash,
+            incomingHash: params.schemaHash,
+          });
+        }
+        // Same-version-same-hash already active → idempotent success.
+        // Skips the CAS intentionally: same hash means identical
+        // content, so there's no disagreement for the caller to refetch.
+        if (existing.is_active) {
+          return existing;
+        }
+        // Same-version-same-hash but inactive: orphan row left by a
+        // crashed earlier commit. Reactivation requires CAS because
+        // we're about to flip the active pointer — fall through.
+        verifyExpectedActiveVersion(
+          params.graphId,
+          params.expected,
+          actualActiveVersion,
+        );
+        const reactivate = operationStrategy.buildSetActiveSchema(
+          params.graphId,
+          params.version,
+        );
+        await execution.execRun(reactivate.deactivateAll);
+        await execution.execRun(reactivate.activateVersion);
+        // Project the result instead of re-SELECTing: the partial
+        // unique index guarantees this is the only active row for the
+        // graph after the UPDATEs above.
+        return { ...existing, is_active: true };
+      }
+
+      verifyExpectedActiveVersion(
+        params.graphId,
+        params.expected,
+        actualActiveVersion,
+      );
+
+      // Fresh insert path. For the "active" expected case, deactivate
+      // the prior active row first so the partial unique index (one
+      // active per graph) is satisfied at every statement boundary.
+      // The "initial" case has no prior active, so skip.
+      if (params.expected.kind === "active") {
+        const flip = operationStrategy.buildSetActiveSchema(
+          params.graphId,
+          params.version,
+        );
+        await execution.execRun(flip.deactivateAll);
+      }
+
+      const timestamp = nowIso();
+      const insertQuery = operationStrategy.buildInsertSchema(
+        {
+          graphId: params.graphId,
+          version: params.version,
+          schemaHash: params.schemaHash,
+          schemaDoc: params.schemaDoc,
+          isActive: true,
+        },
+        timestamp,
+      );
+      const insertedRaw =
+        await execution.execGet<Record<string, unknown>>(insertQuery);
+      if (!insertedRaw) {
+        throw new DatabaseOperationError(
+          "Insert schema failed: no row returned",
+          { operation: "insert", entity: "schema" },
+        );
+      }
+      return rowMappers.toSchemaVersionRow(insertedRaw);
+    },
+
+    async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
+      const actualActiveVersion = await readActiveVersion(params.graphId);
+      verifyExpectedActiveVersion(
+        params.graphId,
+        params.expected,
+        actualActiveVersion,
+      );
+
+      const targetRaw = await execution.execGet<Record<string, unknown>>(
+        operationStrategy.buildGetSchemaVersion(
+          params.graphId,
+          params.version,
+        ),
+      );
+      if (!targetRaw) {
+        throw new MigrationError(
+          `Cannot activate version ${params.version}: version does not exist for graph "${params.graphId}".`,
+          {
+            graphId: params.graphId,
+            fromVersion: actualActiveVersion,
+            toVersion: params.version,
+          },
+        );
+      }
+
+      const queries = operationStrategy.buildSetActiveSchema(
+        params.graphId,
+        params.version,
+      );
       await execution.execRun(queries.deactivateAll);
       await execution.execRun(queries.activateVersion);
     },
