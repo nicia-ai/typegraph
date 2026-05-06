@@ -10,6 +10,7 @@
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { DatabaseOperationError, MigrationError } from "../errors";
+import { mergeRuntimeExtension } from "../runtime/merge";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -26,7 +27,7 @@ import { type SerializedSchema, serializedSchemaZod } from "./types";
  * corruption, incompatible schema versions, or truncated JSON at the
  * parse boundary rather than letting invalid data propagate silently.
  */
-function parseSerializedSchema(json: string): SerializedSchema {
+export function parseSerializedSchema(json: string): SerializedSchema {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -68,6 +69,62 @@ const MISSING_TABLE_PATTERNS = [
 function isMissingTableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return MISSING_TABLE_PATTERNS.some((pattern) => message.includes(pattern));
+}
+
+/**
+ * Reads the active schema row, bootstrapping the base tables on the
+ * first call against an empty database.
+ */
+export async function loadActiveSchemaWithBootstrap(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<SchemaVersionRow | undefined> {
+  try {
+    return await backend.getActiveSchema(graphId);
+  } catch (error) {
+    if (backend.bootstrapTables && isMissingTableError(error)) {
+      await backend.bootstrapTables();
+      return await backend.getActiveSchema(graphId);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Reads the active schema, parses it, and folds any persisted runtime
+ * extension document into the supplied compile-time graph. Returns the
+ * merged graph alongside the prefetched row + parsed schema so the
+ * caller can pass them through to `ensureSchema` without paying for a
+ * second `getActiveSchema` round trip or a second
+ * `serializedSchemaZod` walk.
+ *
+ * Throws `ConfigurationError` if the persisted runtime document
+ * references a compile-time kind that no longer exists (the
+ * startup-conflict case).
+ */
+export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+): Promise<
+  Readonly<{
+    graph: G;
+    activeRow: SchemaVersionRow | undefined;
+    storedSchema: SerializedSchema | undefined;
+  }>
+> {
+  const activeRow = await loadActiveSchemaWithBootstrap(backend, graph.id);
+  if (activeRow === undefined) {
+    return { graph, activeRow: undefined, storedSchema: undefined };
+  }
+  const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+  if (storedSchema.runtimeDocument === undefined) {
+    return { graph, activeRow, storedSchema };
+  }
+  return {
+    graph: mergeRuntimeExtension(graph, storedSchema.runtimeDocument),
+    activeRow,
+    storedSchema,
+  };
 }
 
 // ============================================================
@@ -139,25 +196,37 @@ export type SchemaManagerOptions = Readonly<{
 export async function ensureSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  options?: SchemaManagerOptions,
+  options?: SchemaManagerOptions & {
+    /**
+     * Pre-fetched active row + parsed stored schema. When the loader
+     * (`createStoreWithSchema`) has already paid for `getActiveSchema`
+     * and `parseSerializedSchema` to peek at `runtimeDocument`, it
+     * passes the results through here so `ensureSchema` doesn't repeat
+     * the round trip + Zod walk on every Store boot.
+     */
+    preloaded?: Readonly<{
+      activeRow: SchemaVersionRow | undefined;
+      storedSchema: SerializedSchema | undefined;
+    }>;
+  },
 ): Promise<SchemaValidationResult> {
   const autoMigrate = options?.autoMigrate ?? true;
   const throwOnBreaking = options?.throwOnBreaking ?? true;
 
-  // Get the active schema from the database.
-  // On a fresh database the base tables may not exist yet. If
-  // bootstrapTables is available, create them and retry.
-  let activeSchema: SchemaVersionRow | undefined;
-  try {
-    activeSchema = await backend.getActiveSchema(graph.id);
-  } catch (error) {
-    if (backend.bootstrapTables && isMissingTableError(error)) {
-      await backend.bootstrapTables();
-      activeSchema = await backend.getActiveSchema(graph.id);
-    } else {
-      throw error;
-    }
-  }
+  // When `preloaded` is supplied we trust both fields verbatim, even
+  // when `activeRow` is undefined — that means the loader explicitly
+  // checked and saw no schema yet. Falling back to `??` would refetch
+  // and could observe a row that another process committed in the
+  // race window between the loader's read and this point; ensureSchema
+  // would then diff a runtime-extended persisted schema against the
+  // unmerged graph and throw a misleading MigrationError. With the
+  // sentinel check the race surfaces as a clean `StaleVersionError`
+  // from `commitSchemaVersion` inside `initializeSchema` instead.
+  const preloaded = options?.preloaded;
+  const activeSchema =
+    preloaded === undefined ?
+      await loadActiveSchemaWithBootstrap(backend, graph.id)
+    : preloaded.activeRow;
 
   if (!activeSchema) {
     // No schema exists - initialize with version 1
@@ -165,8 +234,9 @@ export async function ensureSchema<G extends GraphDef>(
     return { status: "initialized", version: result.version };
   }
 
-  // Parse the stored schema
-  const storedSchema = parseSerializedSchema(activeSchema.schema_doc);
+  // Reuse the loader's parsed schema when supplied; otherwise parse now.
+  const storedSchema =
+    preloaded?.storedSchema ?? parseSerializedSchema(activeSchema.schema_doc);
 
   // Serialize the current graph for comparison
   const currentSchema = serializeSchema(graph, activeSchema.version + 1);

@@ -27,6 +27,8 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
+import { defineRuntimeExtension } from "../../src/runtime";
+import { mergeRuntimeExtension } from "../../src/runtime/merge";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
 import {
@@ -790,6 +792,54 @@ describe("Schema Serialization Properties", () => {
       const hashBA = await computeSchemaHash(serializeSchema(graphBA, 1));
 
       expect(hashAB).toBe(hashBA);
+    });
+
+    // The persisted runtime extension document is the durable source the
+    // loader uses to rebuild runtime Zod validators. Graphs that have
+    // never been runtime-extended must omit the slice entirely so legacy
+    // schemas hash byte-identically.
+    it("graphs without runtimeDocument omit the field from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+
+      const graph = defineGraph({
+        id: "runtime_doc_omit_compat",
+        nodes: { Person: { type: Person } },
+        edges: {},
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect("runtimeDocument" in serialized).toBe(false);
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"runtimeDocument"');
+    });
+
+    it("hash differs when a runtimeDocument is present", async () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+
+      const baseGraph = defineGraph({
+        id: "runtime_doc_hash",
+        nodes: { Person: { type: Person } },
+        edges: {},
+      });
+
+      const baseHash = await computeSchemaHash(serializeSchema(baseGraph, 1));
+
+      const extension = defineRuntimeExtension({
+        nodes: {
+          Tag: { properties: { name: { type: "string" } } },
+        },
+      });
+      const extendedGraph = mergeRuntimeExtension(baseGraph, extension);
+      const extendedHash = await computeSchemaHash(
+        serializeSchema(extendedGraph, 1),
+      );
+
+      expect(extendedHash).not.toBe(baseHash);
     });
 
     it("graphs without indexes omit the field from canonical serialization", () => {

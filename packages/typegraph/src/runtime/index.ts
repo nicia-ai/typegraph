@@ -43,3 +43,7 @@ export {
 
 // Result-returning validator (for callers that prefer Result-style)
 export { validateRuntimeExtension } from "./validation";
+
+// Merge: compile a runtime extension and fold it into a host GraphDef.
+// Used by the schema-aware loader at startup and by `store.evolve()`.
+export { mergeRuntimeExtension } from "./merge";

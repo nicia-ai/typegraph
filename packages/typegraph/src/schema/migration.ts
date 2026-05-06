@@ -103,6 +103,25 @@ export type IndexChange = Readonly<{
 }>;
 
 // ============================================================
+// Runtime Document Changes
+// ============================================================
+
+/**
+ * A change to the persisted runtime extension document.
+ *
+ * v1 runtime extensions are additive only (kind-name collisions are
+ * rejected at evolve time; removal of runtime kinds is out of scope), so
+ * a `runtimeDocument` change is always `safe`-severity. The detailed
+ * per-kind effect is captured in the corresponding node/edge/ontology
+ * changes the merged document produced.
+ */
+export type RuntimeDocumentChange = Readonly<{
+  type: ChangeType;
+  severity: ChangeSeverity;
+  details: string;
+}>;
+
+// ============================================================
 // Schema Diff
 // ============================================================
 
@@ -124,6 +143,12 @@ export type SchemaDiff = Readonly<{
 
   /** Changes to index declarations */
   indexes: readonly IndexChange[];
+
+  /**
+   * Change to the runtime extension document, if any. `undefined` when
+   * the slice is unchanged on both sides (the common case).
+   */
+  runtimeDocument?: RuntimeDocumentChange;
 
   /** Whether any breaking changes exist */
   hasBreakingChanges: boolean;
@@ -157,6 +182,10 @@ export function computeSchemaDiff(
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = diffOntology(before.ontology, after.ontology);
   const indexChanges = diffIndexes(before.indexes, after.indexes);
+  const runtimeDocumentChange = diffRuntimeDocument(
+    before.runtimeDocument,
+    after.runtimeDocument,
+  );
 
   const allChanges = [
     ...nodeChanges,
@@ -167,7 +196,8 @@ export function computeSchemaDiff(
   const hasBreakingChanges = allChanges.some(
     (change) => change.severity === "breaking",
   );
-  const hasChanges = allChanges.length > 0;
+  const hasChanges =
+    allChanges.length > 0 || runtimeDocumentChange !== undefined;
 
   const summary = generateSummary(
     nodeChanges,
@@ -183,6 +213,9 @@ export function computeSchemaDiff(
     edges: edgeChanges,
     ontology: ontologyChanges,
     indexes: indexChanges,
+    ...(runtimeDocumentChange === undefined ?
+      {}
+    : { runtimeDocument: runtimeDocumentChange }),
     hasBreakingChanges,
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
@@ -651,6 +684,48 @@ function diffIndexes(
   }
 
   return changes;
+}
+
+// ============================================================
+// Runtime Document Diff
+// ============================================================
+
+/**
+ * Computes the change to the runtime extension document, if any. v1
+ * runtime extensions are additive only (collisions rejected at evolve
+ * time, removal out of scope), so the change severity is always `safe` —
+ * the per-kind effects of the merged document already surface as
+ * node/edge/ontology changes.
+ */
+function diffRuntimeDocument(
+  before: SerializedSchema["runtimeDocument"],
+  after: SerializedSchema["runtimeDocument"],
+): RuntimeDocumentChange | undefined {
+  // Reference-equality short-circuit: when the loader threads the same
+  // persisted document reference into the merged graph (the common
+  // restart-with-no-evolve case), we avoid stringifying potentially
+  // large agent-generated documents on every ensureSchema call.
+  if (before === after) return undefined;
+  if (before === undefined) {
+    return {
+      type: "added",
+      severity: "safe",
+      details: "Runtime extension document was added",
+    };
+  }
+  if (after === undefined) {
+    return {
+      type: "removed",
+      severity: "safe",
+      details: "Runtime extension document was removed",
+    };
+  }
+  if (canonicalEqual(before, after)) return undefined;
+  return {
+    type: "modified",
+    severity: "safe",
+    details: "Runtime extension document was modified",
+  };
 }
 
 // ============================================================

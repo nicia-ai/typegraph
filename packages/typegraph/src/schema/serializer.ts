@@ -61,6 +61,7 @@ export function serializeSchema<G extends GraphDef>(
   const edges = serializeEdges(graph);
   const ontology = serializeOntology(graph.ontology);
   const indexes = serializeIndexes(graph.indexes);
+  const runtimeDocument = graph.runtimeDocument;
 
   return {
     graphId: graph.id,
@@ -78,6 +79,11 @@ export function serializeSchema<G extends GraphDef>(
     // in that case so legacy graphs hash byte-identically to the
     // pre-`indexes` form.
     ...(indexes === undefined ? {} : { indexes }),
+    // The runtime extension document is the durable source the loader
+    // uses to rebuild runtime Zod validators on restart. Omitted on
+    // graphs that have never been runtime-extended so legacy schemas
+    // hash byte-identically.
+    ...(runtimeDocument === undefined ? {} : { runtimeDocument }),
   };
 }
 

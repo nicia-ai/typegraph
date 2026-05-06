@@ -21,6 +21,7 @@ import {
 import { type IndexDeclaration } from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
+import { type RuntimeGraphDocument } from "../runtime/document-types";
 
 // ============================================================
 // Enum Zod Schemas
@@ -215,6 +216,56 @@ const indexDeclarationZod = z.discriminatedUnion("entity", [
   nodeIndexDeclarationZod,
   edgeIndexDeclarationZod,
 ]);
+
+// ============================================================
+// RuntimeGraphDocument Zod schema
+// ============================================================
+
+// Boundary parser for the persisted runtime extension document. The
+// pure-value validator in `runtime/validation.ts` is the authoritative
+// shape check (re-run on every load via the runtime compiler); this
+// schema's job is only to confirm the JSON shape is round-trippable
+// and to keep `SerializedSchema.runtimeDocument` typed.
+//
+// `.loose()` on every nested object accepts forward-compatible
+// extensions without breaking older readers — same posture as the rest
+// of the schema document.
+const runtimePropertyZod = z.record(z.string(), z.unknown());
+
+const runtimeNodeDocumentZod = z
+  .object({
+    description: z.string().optional(),
+    annotations: z.record(z.string(), z.json()).optional(),
+    properties: z.record(z.string(), runtimePropertyZod),
+    unique: z.array(z.object({}).loose()).optional(),
+  })
+  .loose();
+
+const runtimeEdgeDocumentZod = z
+  .object({
+    description: z.string().optional(),
+    annotations: z.record(z.string(), z.json()).optional(),
+    from: z.array(z.string()),
+    to: z.array(z.string()),
+    properties: z.record(z.string(), runtimePropertyZod).optional(),
+  })
+  .loose();
+
+const runtimeOntologyRelationZod = z
+  .object({
+    metaEdge: z.string(),
+    from: z.string(),
+    to: z.string(),
+  })
+  .loose();
+
+const runtimeGraphDocumentZod = z
+  .object({
+    nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
+    edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
+    ontology: z.array(runtimeOntologyRelationZod).optional(),
+  })
+  .loose() as unknown as z.ZodType<RuntimeGraphDocument>;
 
 // ============================================================
 // JSON Schema Types (from Zod)
@@ -508,6 +559,17 @@ export const serializedSchemaZod = z.object({
    * authored before `indexes` existed.
    */
   indexes: z.array(indexDeclarationZod).optional(),
+  /**
+   * Runtime extension document persisted alongside the compiled
+   * `nodes` / `edges` / `ontology` slices. The loader rebuilds runtime
+   * Zod validators from this document (the only durable source);
+   * legacy graphs omit the field and hash byte-identically to before
+   * runtime extensions existed.
+   *
+   * `.loose()` on the inner shape accepts forward-compatible extensions
+   * without breaking older readers.
+   */
+  runtimeDocument: runtimeGraphDocumentZod.optional(),
 });
 
 /**
@@ -540,6 +602,19 @@ export type SerializedSchema = Readonly<{
    * only `"runtime"` is emitted explicitly.
    */
   indexes?: readonly IndexDeclaration[];
+  /**
+   * Runtime extension document, when this schema was produced from a
+   * graph that had been merged with a runtime extension. The loader
+   * uses this document (and only this document) to rebuild runtime
+   * Zod validators on restart — the merged `nodes` / `edges` /
+   * `ontology` maps above carry the JSON-Schema-shaped views for diff
+   * machinery and human-readable reporting, but they cannot
+   * reconstruct Zod alone.
+   *
+   * Omitted entirely on graphs that have never been runtime-extended
+   * — legacy schemas hash byte-identically.
+   */
+  runtimeDocument?: RuntimeGraphDocument;
 }>;
 
 // ============================================================
