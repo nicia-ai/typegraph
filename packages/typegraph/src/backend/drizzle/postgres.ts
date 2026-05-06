@@ -24,7 +24,7 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import { getTableName, type SQL, sql } from "drizzle-orm";
+import { eq, getTableName, type SQL, sql } from "drizzle-orm";
 
 import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -46,7 +46,9 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
+  type IndexMaterializationRow,
   POSTGRES_CAPABILITIES,
+  type RecordIndexMaterializationParams,
   type SchemaVersionRow,
   type SetActiveVersionParams,
   type TransactionBackend,
@@ -372,6 +374,75 @@ export function createPostgresBackend(
       for (const statement of statements) {
         await db.execute(sql.raw(statement));
       }
+    },
+
+    async executeDdl(ddl: string): Promise<void> {
+      await db.execute(sql.raw(ddl));
+    },
+
+    async getIndexMaterialization(
+      indexName: string,
+    ): Promise<IndexMaterializationRow | undefined> {
+      const t = tables.indexMaterializations;
+      const rows = await db.select().from(t).where(eq(t.indexName, indexName));
+      const row = rows[0];
+      if (row === undefined) return undefined;
+      const lastAttemptedAt = formatPostgresTimestamp(row.lastAttemptedAt);
+      if (lastAttemptedAt === undefined) {
+        throw new Error(
+          `materialization row missing required last_attempted_at: ${row.indexName}`,
+        );
+      }
+      return {
+        indexName: row.indexName,
+        graphId: row.graphId,
+        entity: row.entity as "node" | "edge",
+        kind: row.kind,
+        signature: row.signature,
+        schemaVersion: row.schemaVersion,
+        materializedAt: formatPostgresTimestamp(row.materializedAt),
+        lastAttemptedAt,
+        lastError: row.lastError ?? undefined,
+      };
+    },
+
+    async recordIndexMaterialization(
+      params: RecordIndexMaterializationParams,
+    ): Promise<void> {
+      const t = tables.indexMaterializations;
+      const materializedAtSet =
+        params.materializedAt === undefined
+          ? sql`COALESCE(excluded.${sql.identifier("materialized_at")}, ${t.materializedAt})`
+          : sql`excluded.${sql.identifier("materialized_at")}`;
+      await db
+        .insert(t)
+        .values({
+          indexName: params.indexName,
+          graphId: params.graphId,
+          entity: params.entity,
+          kind: params.kind,
+          signature: params.signature,
+          schemaVersion: params.schemaVersion,
+          materializedAt:
+            params.materializedAt === undefined
+              ? undefined
+              : new Date(params.materializedAt),
+          lastAttemptedAt: new Date(params.attemptedAt),
+          lastError: params.error,
+        })
+        .onConflictDoUpdate({
+          target: t.indexName,
+          set: {
+            graphId: sql`excluded.${sql.identifier("graph_id")}`,
+            entity: sql`excluded.${sql.identifier("entity")}`,
+            kind: sql`excluded.${sql.identifier("kind")}`,
+            signature: sql`excluded.${sql.identifier("signature")}`,
+            schemaVersion: sql`excluded.${sql.identifier("schema_version")}`,
+            materializedAt: materializedAtSet,
+            lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
+            lastError: sql`excluded.${sql.identifier("last_error")}`,
+          },
+        });
     },
 
     async refreshStatistics(): Promise<void> {

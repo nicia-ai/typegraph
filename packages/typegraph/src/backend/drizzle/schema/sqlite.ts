@@ -45,6 +45,7 @@ export type SqliteTableNames = Readonly<{
   schemaVersions: string;
   embeddings: string;
   fulltext: string;
+  indexMaterializations: string;
 }>;
 
 export type CreateSqliteTablesOptions = Readonly<{
@@ -64,6 +65,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   schemaVersions: "typegraph_schema_versions",
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
+  indexMaterializations: "typegraph_index_materializations",
 };
 
 /**
@@ -255,12 +257,36 @@ export function createSqliteTables(
     ],
   );
 
+  /**
+   * Per-deployment record of which declared indexes have been
+   * materialized against this database. Owned and written by
+   * `store.materializeIndexes()`. Keyed on `index_name` because SQL
+   * index names are physical, database-global identifiers — `graphId`
+   * is provenance, not identity.
+   */
+  const indexMaterializations = sqliteTable(
+    n.indexMaterializations,
+    {
+      indexName: text("index_name").notNull(),
+      graphId: text("graph_id").notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      signature: text("signature").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      materializedAt: text("materialized_at"),
+      lastAttemptedAt: text("last_attempted_at").notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [primaryKey({ columns: [t.indexName] })],
+  );
+
   return {
     nodes,
     edges,
     uniques,
     schemaVersions,
     embeddings,
+    indexMaterializations,
     /**
      * The fulltext storage is a FTS5 virtual table which Drizzle cannot
      * represent. DDL is emitted as raw SQL and operations query it via

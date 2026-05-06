@@ -49,6 +49,11 @@ import {
   type NodeOperations,
 } from "./collection-factory";
 import {
+  materializeIndexes as materializeIndexesImpl,
+  type MaterializeIndexesOptions,
+  type MaterializeIndexesResult,
+} from "./materialize-indexes";
+import {
   type EdgeOperationContext,
   executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
@@ -910,6 +915,60 @@ export class Store<G extends GraphDef> {
     options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
   ): Promise<Store<G>> {
     return this.#updateDeprecatedKinds("remove", names, options);
+  }
+
+  /**
+   * Runs `CREATE INDEX` DDL for the indexes declared on this graph and
+   * records per-deployment status in `typegraph_index_materializations`.
+   * The status table is per-database (two replicas of the same
+   * `schema_doc` are still two different databases for DDL purposes),
+   * so the same call against two replicas materializes independently.
+   *
+   * Idempotent. Re-running the verb against an already-materialized
+   * index is a no-op (`status: "alreadyMaterialized"`). Postgres uses
+   * `CREATE INDEX CONCURRENTLY` so live tables never take an
+   * `AccessExclusiveLock`. SQLite is single-writer regardless.
+   *
+   * Best-effort by default: a failed index records `status: "failed"`
+   * with the error and the loop continues. Pass `{ stopOnError: true }`
+   * to halt on the first failure.
+   *
+   * @param options.kinds - Restrict to indexes whose `kind` is in this
+   *   set. Throws `ConfigurationError` (`code:
+   *   "MATERIALIZE_UNKNOWN_KIND"`) if any name doesn't match a known
+   *   compile-time or runtime kind.
+   * @param options.stopOnError - Halt on first failure. Default false.
+   *
+   * @throws {ConfigurationError} `MATERIALIZE_BACKEND_UNSUPPORTED` if
+   *   the backend lacks `executeDdl`, `getIndexMaterialization`, or
+   *   `recordIndexMaterialization`; `MATERIALIZE_UNKNOWN_KIND` for an
+   *   unknown kind name; `MATERIALIZE_BEFORE_INITIALIZE` if the store
+   *   has no schema yet.
+   */
+  async materializeIndexes(
+    options?: MaterializeIndexesOptions,
+  ): Promise<MaterializeIndexesResult> {
+    const activeRow = await loadActiveSchemaWithBootstrap(
+      this.#backend,
+      this.graphId,
+    );
+    if (activeRow === undefined) {
+      throw new ConfigurationError(
+        `Cannot materialize indexes on graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
+        { code: "MATERIALIZE_BEFORE_INITIALIZE" },
+      );
+    }
+    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+    const baseline = this.#catchUpToStored(storedSchema);
+    return materializeIndexesImpl(
+      {
+        graph: baseline,
+        graphId: this.graphId,
+        backend: this.#backend,
+        schemaVersion: activeRow.version,
+      },
+      options ?? {},
+    );
   }
 
   async #updateDeprecatedKinds(
