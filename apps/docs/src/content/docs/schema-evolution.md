@@ -6,7 +6,9 @@ description: Step-by-step guide for safely evolving your graph schema across dep
 Your graph schema will change as your application grows. This guide covers how
 to make those changes safely — from adding a field to renaming a node type.
 
-For API reference, see [Schema Migrations](/schema-management).
+For API reference, see [Schema Migrations](/schema-management). For evolving
+the kind set itself **at runtime** (agent-induced kinds, plugin-supplied
+kinds, multi-tenant kind sets), see [Runtime Extensions](/runtime-extensions).
 
 ## How Schema Evolution Works
 
