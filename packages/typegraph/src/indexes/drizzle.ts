@@ -10,7 +10,6 @@ import {
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
-import { EDGE_INDEX_TYPE_MARKER, NODE_INDEX_TYPE_MARKER } from "../constants";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -18,10 +17,10 @@ import {
   type IndexCompilationContext,
 } from "./compiler";
 import {
-  type EdgeIndex,
-  type NodeIndex,
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type NodeIndexDeclaration,
   type SystemColumnName,
-  type TypeGraphIndex,
 } from "./types";
 
 // ============================================================
@@ -30,10 +29,10 @@ import {
 
 export function buildPostgresNodeIndexBuilders(
   table: NodeIndexTable,
-  indexes: readonly TypeGraphIndex[],
+  indexes: readonly IndexDeclaration[],
 ): readonly PgIndexBuilder[] {
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndex => index.__type === NODE_INDEX_TYPE_MARKER,
+    (index): index is NodeIndexDeclaration => index.entity === "node",
   );
 
   return nodeIndexes.map((index) => {
@@ -68,10 +67,10 @@ export function buildPostgresNodeIndexBuilders(
 
 export function buildPostgresEdgeIndexBuilders(
   table: EdgeIndexTable,
-  indexes: readonly TypeGraphIndex[],
+  indexes: readonly IndexDeclaration[],
 ): readonly PgIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndex => index.__type === EDGE_INDEX_TYPE_MARKER,
+    (index): index is EdgeIndexDeclaration => index.entity === "edge",
   );
 
   return edgeIndexes.map((index) => {
@@ -198,10 +197,10 @@ function getPostgresEdgeSystemColumn(
 
 export function buildSqliteNodeIndexBuilders(
   table: NodeIndexTable,
-  indexes: readonly TypeGraphIndex[],
+  indexes: readonly IndexDeclaration[],
 ): readonly SqliteIndexBuilder[] {
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndex => index.__type === NODE_INDEX_TYPE_MARKER,
+    (index): index is NodeIndexDeclaration => index.entity === "node",
   );
 
   return nodeIndexes.map((index) => {
@@ -237,10 +236,10 @@ export function buildSqliteNodeIndexBuilders(
 
 export function buildSqliteEdgeIndexBuilders(
   table: EdgeIndexTable,
-  indexes: readonly TypeGraphIndex[],
+  indexes: readonly IndexDeclaration[],
 ): readonly SqliteIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndex => index.__type === EDGE_INDEX_TYPE_MARKER,
+    (index): index is EdgeIndexDeclaration => index.entity === "edge",
   );
 
   return edgeIndexes.map((index) => {

@@ -1,7 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 import { CasingCache } from "drizzle-orm/casing";
 
-import { NODE_INDEX_TYPE_MARKER } from "../constants";
 import { getDialect, type SqlDialect } from "../query/dialect";
 import {
   compileEdgeIndexKeys,
@@ -10,10 +9,10 @@ import {
   type IndexCompilationContext,
 } from "./compiler";
 import {
-  type EdgeIndex,
-  type NodeIndex,
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type NodeIndexDeclaration,
   type SystemColumnName,
-  type TypeGraphIndex,
 } from "./types";
 
 export type GenerateIndexDdlOptions = Readonly<{
@@ -22,19 +21,22 @@ export type GenerateIndexDdlOptions = Readonly<{
   ifNotExists?: boolean | undefined;
 }>;
 
+/**
+ * Generate `CREATE INDEX` DDL for a single index declaration.
+ */
 export function generateIndexDDL(
-  index: TypeGraphIndex,
+  index: IndexDeclaration,
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
-  if (index.__type === NODE_INDEX_TYPE_MARKER) {
+  if (index.entity === "node") {
     return generateNodeIndexDDL(index, dialect, options);
   }
   return generateEdgeIndexDDL(index, dialect, options);
 }
 
 export function generateNodeIndexDDL(
-  index: NodeIndex,
+  index: NodeIndexDeclaration,
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
@@ -43,7 +45,7 @@ export function generateNodeIndexDDL(
 }
 
 export function generateEdgeIndexDDL(
-  index: EdgeIndex,
+  index: EdgeIndexDeclaration,
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
@@ -52,7 +54,7 @@ export function generateEdgeIndexDDL(
 }
 
 function generateTableIndexDDL(
-  index: TypeGraphIndex,
+  index: IndexDeclaration,
   dialect: SqlDialect,
   tableName: string,
   options: GenerateIndexDdlOptions,
@@ -63,7 +65,7 @@ function generateTableIndexDDL(
     sql.raw(quoteIdentifier(column));
 
   const keys =
-    index.__type === NODE_INDEX_TYPE_MARKER ?
+    index.entity === "node" ?
       compileNodeIndexKeys(index, dialect, propsColumn, systemColumn).keys
     : compileEdgeIndexKeys(index, dialect, propsColumn, systemColumn).keys;
 

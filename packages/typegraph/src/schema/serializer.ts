@@ -17,6 +17,11 @@ import {
   type UniqueConstraint,
 } from "../core/types";
 import {
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type NodeIndexDeclaration,
+} from "../indexes/types";
+import {
   getTypeName,
   type MetaEdge,
   type OntologyRelation,
@@ -55,6 +60,7 @@ export function serializeSchema<G extends GraphDef>(
   const nodes = serializeNodes(graph);
   const edges = serializeEdges(graph);
   const ontology = serializeOntology(graph.ontology);
+  const indexes = serializeIndexes(graph.indexes);
 
   return {
     graphId: graph.id,
@@ -67,6 +73,94 @@ export function serializeSchema<G extends GraphDef>(
       onNodeDelete: graph.defaults.onNodeDelete,
       temporalMode: graph.defaults.temporalMode,
     },
+    // `serializeIndexes` collapses both absent and empty inputs to
+    // `undefined` (see the helper's docstring); omit the field entirely
+    // in that case so legacy graphs hash byte-identically to the
+    // pre-`indexes` form.
+    ...(indexes === undefined ? {} : { indexes }),
+  };
+}
+
+// ============================================================
+// Index Serialization
+// ============================================================
+
+/**
+ * Returns the canonical-form `indexes` slice for the schema document, or
+ * `undefined` when the input graph never declared the slice (so the
+ * field is omitted entirely).
+ *
+ * Canonical-form rules (load-bearing for hash stability):
+ * - `origin: "compile-time"` is the default and is omitted from the
+ *   serialized form. Only `origin: "runtime"` is emitted explicitly so
+ *   the loader can route the declaration through the runtime compiler on
+ *   restart.
+ *
+ * The slice is order-canonicalized (sorted by name) and collapses both
+ * `undefined` and an empty array to "no slice" so the hash and the diff
+ * agree: indexes are an unordered set keyed by name, and an empty list
+ * carries no semantic meaning that an absent slice doesn't.
+ */
+function serializeIndexes(
+  indexes: readonly IndexDeclaration[] | undefined,
+): readonly IndexDeclaration[] | undefined {
+  if (indexes === undefined || indexes.length === 0) return undefined;
+  return indexes
+    .toSorted((a, b) =>
+      a.name < b.name ? -1
+      : a.name > b.name ? 1
+      : 0,
+    )
+    .map((index) => serializeIndexDeclaration(index));
+}
+
+function serializeIndexDeclaration(
+  declaration: IndexDeclaration,
+): IndexDeclaration {
+  if (declaration.entity === "node") {
+    return serializeNodeIndexDeclaration(declaration);
+  }
+  return serializeEdgeIndexDeclaration(declaration);
+}
+
+function serializeNodeIndexDeclaration(
+  declaration: NodeIndexDeclaration,
+): NodeIndexDeclaration {
+  return {
+    entity: "node",
+    kind: declaration.kind,
+    name: declaration.name,
+    fields: declaration.fields,
+    fieldValueTypes: declaration.fieldValueTypes,
+    coveringFields: declaration.coveringFields,
+    coveringFieldValueTypes: declaration.coveringFieldValueTypes,
+    unique: declaration.unique,
+    scope: declaration.scope,
+    where: declaration.where,
+    // `origin: "compile-time"` is the default and is omitted from the
+    // canonical form (absence == compile-time). Only `runtime` is
+    // emitted explicitly so the restart loader can route the declaration
+    // through the runtime compiler.
+    ...(declaration.origin === "runtime" ? { origin: "runtime" as const } : {}),
+  };
+}
+
+function serializeEdgeIndexDeclaration(
+  declaration: EdgeIndexDeclaration,
+): EdgeIndexDeclaration {
+  return {
+    entity: "edge",
+    kind: declaration.kind,
+    name: declaration.name,
+    direction: declaration.direction,
+    fields: declaration.fields,
+    fieldValueTypes: declaration.fieldValueTypes,
+    coveringFields: declaration.coveringFields,
+    coveringFieldValueTypes: declaration.coveringFieldValueTypes,
+    unique: declaration.unique,
+    scope: declaration.scope,
+    where: declaration.where,
+    ...(declaration.origin === "runtime" ? { origin: "runtime" as const } : {}),
   };
 }
 
@@ -434,13 +528,17 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
 export async function computeSchemaHash(
   schema: SerializedSchema,
 ): Promise<SchemaHash> {
-  // Create a hashable representation excluding dynamic fields
+  // Create a hashable representation excluding dynamic fields. `indexes`
+  // is included only when set so legacy schemas without the slice hash
+  // identically (the slice's canonical-form rules — including
+  // `origin: "compile-time"` omission — are applied at serialize time).
   const hashable = {
     graphId: schema.graphId,
     nodes: schema.nodes,
     edges: schema.edges,
     ontology: schema.ontology,
     defaults: schema.defaults,
+    ...(schema.indexes === undefined ? {} : { indexes: schema.indexes }),
   };
 
   // Serialize with sorted keys for deterministic output

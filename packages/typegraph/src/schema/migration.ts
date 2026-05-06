@@ -4,6 +4,7 @@
  * Provides diff detection between schema versions to identify
  * what has changed and what migrations might be needed.
  */
+import { type IndexDeclaration } from "../indexes/types";
 import { canonicalEqual } from "./canonical";
 import {
   type SerializedEdgeDef,
@@ -77,6 +78,31 @@ export type OntologyChange = Readonly<{
 }>;
 
 // ============================================================
+// Index Changes
+// ============================================================
+
+/**
+ * A change to an index declaration.
+ *
+ * Index changes are always `safe`-severity: index DDL is materialized
+ * separately and never blocks schema-version commits or migrations.
+ * Adding, removing, or modifying an index never invalidates existing
+ * data — it only changes which physical indexes the deployment will
+ * materialize on its next pass.
+ */
+export type IndexChange = Readonly<{
+  type: ChangeType;
+  /** Index name (the diffing identity key). */
+  name: string;
+  /** Whether this index is on a node or edge kind. */
+  entity: "node" | "edge";
+  severity: ChangeSeverity;
+  details: string;
+  before?: IndexDeclaration | undefined;
+  after?: IndexDeclaration | undefined;
+}>;
+
+// ============================================================
 // Schema Diff
 // ============================================================
 
@@ -95,6 +121,9 @@ export type SchemaDiff = Readonly<{
 
   /** Changes to ontology */
   ontology: readonly OntologyChange[];
+
+  /** Changes to index declarations */
+  indexes: readonly IndexChange[];
 
   /** Whether any breaking changes exist */
   hasBreakingChanges: boolean;
@@ -127,14 +156,25 @@ export function computeSchemaDiff(
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = diffOntology(before.ontology, after.ontology);
+  const indexChanges = diffIndexes(before.indexes, after.indexes);
 
-  const allChanges = [...nodeChanges, ...edgeChanges, ...ontologyChanges];
+  const allChanges = [
+    ...nodeChanges,
+    ...edgeChanges,
+    ...ontologyChanges,
+    ...indexChanges,
+  ];
   const hasBreakingChanges = allChanges.some(
     (change) => change.severity === "breaking",
   );
   const hasChanges = allChanges.length > 0;
 
-  const summary = generateSummary(nodeChanges, edgeChanges, ontologyChanges);
+  const summary = generateSummary(
+    nodeChanges,
+    edgeChanges,
+    ontologyChanges,
+    indexChanges,
+  );
 
   return {
     fromVersion: before.version,
@@ -142,6 +182,7 @@ export function computeSchemaDiff(
     nodes: nodeChanges,
     edges: edgeChanges,
     ontology: ontologyChanges,
+    indexes: indexChanges,
     hasBreakingChanges,
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
@@ -539,6 +580,80 @@ function diffOntology(
 }
 
 // ============================================================
+// Index Diff
+// ============================================================
+
+/**
+ * Computes changes between index declarations.
+ *
+ * Indexes are identified by `name`. Add/remove/modify produce
+ * `safe`-severity changes — index DDL is materialized separately and
+ * never blocks schema-version commits.
+ */
+function diffIndexes(
+  before: readonly IndexDeclaration[] | undefined,
+  after: readonly IndexDeclaration[] | undefined,
+): readonly IndexChange[] {
+  const beforeIndexes = before ?? [];
+  const afterIndexes = after ?? [];
+
+  const beforeByName = new Map<string, IndexDeclaration>();
+  for (const index of beforeIndexes) {
+    beforeByName.set(index.name, index);
+  }
+  const afterByName = new Map<string, IndexDeclaration>();
+  for (const index of afterIndexes) {
+    afterByName.set(index.name, index);
+  }
+
+  const changes: IndexChange[] = [];
+
+  for (const [name, index] of beforeByName) {
+    if (!afterByName.has(name)) {
+      changes.push({
+        type: "removed",
+        name,
+        entity: index.entity,
+        severity: "safe",
+        details: `Index "${name}" was removed`,
+        before: index,
+      });
+    }
+  }
+
+  for (const [name, index] of afterByName) {
+    if (!beforeByName.has(name)) {
+      changes.push({
+        type: "added",
+        name,
+        entity: index.entity,
+        severity: "safe",
+        details: `Index "${name}" was added`,
+        after: index,
+      });
+    }
+  }
+
+  for (const [name, beforeIndex] of beforeByName) {
+    const afterIndex = afterByName.get(name);
+    if (!afterIndex) continue;
+    if (!canonicalEqual(beforeIndex, afterIndex)) {
+      changes.push({
+        type: "modified",
+        name,
+        entity: beforeIndex.entity,
+        severity: "safe",
+        details: `Index "${name}" was modified`,
+        before: beforeIndex,
+        after: afterIndex,
+      });
+    }
+  }
+
+  return changes;
+}
+
+// ============================================================
 // Summary Generation
 // ============================================================
 
@@ -549,6 +664,7 @@ function generateSummary(
   nodeChanges: readonly NodeChange[],
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
+  indexChanges: readonly IndexChange[],
 ): string {
   const parts: string[] = [];
 
@@ -581,6 +697,18 @@ function generateSummary(
 
   if (ontologyAdded > 0 || ontologyRemoved > 0) {
     parts.push(`Ontology: ${ontologyAdded} added, ${ontologyRemoved} removed`);
+  }
+
+  const indexAdded = indexChanges.filter((c) => c.type === "added").length;
+  const indexRemoved = indexChanges.filter((c) => c.type === "removed").length;
+  const indexModified = indexChanges.filter(
+    (c) => c.type === "modified",
+  ).length;
+
+  if (indexAdded > 0 || indexRemoved > 0 || indexModified > 0) {
+    parts.push(
+      `Indexes: ${indexAdded} added, ${indexRemoved} removed, ${indexModified} modified`,
+    );
   }
 
   if (parts.length === 0) {

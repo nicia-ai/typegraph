@@ -13,8 +13,10 @@ import { z } from "zod";
 import {
   ConfigurationError,
   defineEdge,
+  defineEdgeIndex,
   defineGraph,
   defineNode,
+  defineNodeIndex,
   getEdgeKinds,
   getNodeKinds,
   subClassOf,
@@ -365,5 +367,155 @@ describe("defineGraph()", () => {
     const constraint = registration.unique[0];
     expect(constraint.name).toBe("person_name_unique");
     expect(constraint.fields).toEqual(["name"]);
+  });
+});
+
+describe("defineGraph() with indexes", () => {
+  const Person = defineNode("Person", {
+    schema: z.object({
+      name: z.string(),
+      email: z.string(),
+    }),
+  });
+
+  const knows = defineEdge("knows", {
+    schema: z.object({ since: z.string() }),
+  });
+
+  it("attaches compile-time node indexes to graph.indexes", () => {
+    const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+
+    const graph = defineGraph({
+      id: "with_node_index",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      indexes: [personEmail],
+    });
+
+    expect(graph.indexes).toHaveLength(1);
+    const declaration = graph.indexes![0]!;
+    expect(declaration.entity).toBe("node");
+    expect(declaration.kind).toBe("Person");
+    // `origin` is omitted from canonical form for compile-time indexes
+    // (absence == compile-time). Consumers needing a concrete value
+    // coalesce: `declaration.origin ?? "compile-time"`.
+    expect(declaration.origin).toBeUndefined();
+    expect(declaration.name).toBe(personEmail.name);
+  });
+
+  it("attaches compile-time edge indexes to graph.indexes", () => {
+    const knowsSince = defineEdgeIndex(knows, {
+      fields: ["since"],
+      direction: "out",
+    });
+
+    const graph = defineGraph({
+      id: "with_edge_index",
+      nodes: { Person: { type: Person } },
+      edges: { knows: { type: knows, from: [Person], to: [Person] } },
+      indexes: [knowsSince],
+    });
+
+    expect(graph.indexes).toHaveLength(1);
+    const declaration = graph.indexes![0]!;
+    expect(declaration.entity).toBe("edge");
+    expect(declaration.kind).toBe("knows");
+    expect(declaration.origin).toBeUndefined();
+  });
+
+  it("accepts runtime-origin IndexDeclaration values alongside typed-builder outputs", () => {
+    const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+    const declaration = {
+      ...personEmail,
+      name: "person_email_runtime",
+      origin: "runtime" as const,
+    };
+
+    const graph = defineGraph({
+      id: "mixed_origins",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      indexes: [personEmail, declaration],
+    });
+
+    expect(graph.indexes).toHaveLength(2);
+    expect(graph.indexes![0]!.origin).toBeUndefined();
+    expect(graph.indexes![1]!.origin).toBe("runtime");
+  });
+
+  it("leaves graph.indexes as undefined when the slice is omitted", () => {
+    const graph = defineGraph({
+      id: "no_indexes",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+
+    expect(graph.indexes).toBeUndefined();
+  });
+
+  it("preserves an explicit empty indexes array on the in-memory graph", () => {
+    // The serialized form collapses `[]` to "no slice" so hash and diff
+    // agree, but the in-memory `GraphDef.indexes` reflects whatever the
+    // caller passed for introspection purposes.
+    const graph = defineGraph({
+      id: "explicit_empty_indexes",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      indexes: [],
+    });
+
+    expect(graph.indexes).toEqual([]);
+  });
+
+  it("rejects node indexes that reference an unregistered node kind", () => {
+    const Stranger = defineNode("Stranger", {
+      schema: z.object({ name: z.string() }),
+    });
+    const strangerName = defineNodeIndex(Stranger, { fields: ["name"] });
+
+    expect(() =>
+      defineGraph({
+        id: "missing_node_kind",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [strangerName],
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("rejects edge indexes that reference an unregistered edge kind", () => {
+    const orphanEdge = defineEdge("orphans", {
+      schema: z.object({ at: z.string() }),
+    });
+    const orphanIndex = defineEdgeIndex(orphanEdge, { fields: ["at"] });
+
+    expect(() =>
+      defineGraph({
+        id: "missing_edge_kind",
+        nodes: { Person: { type: Person } },
+        edges: { knows: { type: knows, from: [Person], to: [Person] } },
+        indexes: [orphanIndex],
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("rejects duplicate index names", () => {
+    const explicit = defineNodeIndex(Person, {
+      fields: ["email"],
+      name: "person_email",
+    });
+    const duplicate = defineNodeIndex(Person, {
+      fields: ["name"],
+      name: "person_email",
+    });
+
+    expect(() =>
+      defineGraph({
+        id: "duplicate_index_name",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [explicit, duplicate],
+      }),
+    ).toThrow(/Duplicate index name/);
   });
 });

@@ -18,7 +18,9 @@ import {
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
+import { type IndexDeclaration } from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
+import { type JsonPointer } from "../query/json-pointer";
 
 // ============================================================
 // Enum Zod Schemas
@@ -55,6 +57,163 @@ const inferenceTypeZod = z.enum([
   "composition",
   "association",
   "none",
+]);
+
+const indexScopeZod = z.enum(["graphAndKind", "graph", "none"]);
+
+const indexOriginZod = z.enum(["compile-time", "runtime"]);
+
+const edgeIndexDirectionZod = z.enum(["out", "in", "none"]);
+
+const valueTypeZod = z.enum([
+  "string",
+  "number",
+  "boolean",
+  "date",
+  "array",
+  "object",
+  "embedding",
+  "unknown",
+]);
+
+const valueTypeOrUndefinedZod = valueTypeZod.optional();
+
+// ============================================================
+// Index WHERE expression Zod schemas
+// ============================================================
+
+const systemColumnNameZod = z.enum([
+  "graph_id",
+  "kind",
+  "id",
+  "from_kind",
+  "from_id",
+  "to_kind",
+  "to_id",
+  "deleted_at",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "version",
+]);
+
+const indexWhereOperandZod = z.discriminatedUnion("__type", [
+  z.object({
+    __type: z.literal("index_operand_system"),
+    column: systemColumnNameZod,
+    valueType: valueTypeOrUndefinedZod,
+  }),
+  z.object({
+    __type: z.literal("index_operand_prop"),
+    field: z.string(),
+    valueType: valueTypeOrUndefinedZod,
+  }),
+]);
+
+const indexWhereLiteralZod = z.object({
+  __type: z.literal("index_where_literal"),
+  value: z.union([z.string(), z.number(), z.boolean()]),
+  valueType: valueTypeZod,
+});
+
+const indexWhereOpZod = z.enum([
+  "eq",
+  "neq",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "in",
+  "notIn",
+]);
+
+interface IndexWhereExpressionShape {
+  __type:
+    | "index_where_and"
+    | "index_where_or"
+    | "index_where_not"
+    | "index_where_comparison"
+    | "index_where_null_check";
+}
+
+const indexWhereExpressionZod: z.ZodType<IndexWhereExpressionShape> = z.lazy(
+  () =>
+    z.discriminatedUnion("__type", [
+      z.object({
+        __type: z.literal("index_where_and"),
+        predicates: z.array(indexWhereExpressionZod),
+      }),
+      z.object({
+        __type: z.literal("index_where_or"),
+        predicates: z.array(indexWhereExpressionZod),
+      }),
+      z.object({
+        __type: z.literal("index_where_not"),
+        predicate: indexWhereExpressionZod,
+      }),
+      z.object({
+        __type: z.literal("index_where_comparison"),
+        left: indexWhereOperandZod,
+        op: indexWhereOpZod,
+        right: z.union([indexWhereLiteralZod, z.array(indexWhereLiteralZod)]),
+      }),
+      z.object({
+        __type: z.literal("index_where_null_check"),
+        operand: indexWhereOperandZod,
+        op: z.enum(["isNull", "isNotNull"]),
+      }),
+    ]) as unknown as z.ZodType<IndexWhereExpressionShape>,
+);
+
+// ============================================================
+// IndexDeclaration Zod schema
+// ============================================================
+
+// `JsonPointer` is a branded `string`. Validating with the brand
+// preserved keeps `SerializedSchema` and the Zod-inferred type aligned
+// without an `as unknown` cast at the parse boundary in `manager.ts`.
+const jsonPointerZod = z.custom<JsonPointer>(
+  (value) => typeof value === "string",
+  { message: "Expected a JSON pointer string" },
+);
+
+const indexDeclarationCommonShape = {
+  name: z.string(),
+  // `origin` is optional. `"compile-time"` is the default and is omitted
+  // from canonical form so legacy graphs without indexes hash
+  // byte-identically. Consumers that need a concrete value should
+  // coalesce `index.origin ?? "compile-time"`.
+  origin: indexOriginZod.optional(),
+  fields: z.array(jsonPointerZod),
+  fieldValueTypes: z.array(valueTypeOrUndefinedZod),
+  coveringFields: z.array(jsonPointerZod),
+  coveringFieldValueTypes: z.array(valueTypeOrUndefinedZod),
+  unique: z.boolean(),
+  scope: indexScopeZod,
+  where: indexWhereExpressionZod.optional(),
+} as const;
+
+const nodeIndexDeclarationZod = z
+  .object({
+    entity: z.literal("node"),
+    kind: z.string(),
+    ...indexDeclarationCommonShape,
+  })
+  .loose();
+
+const edgeIndexDeclarationZod = z
+  .object({
+    entity: z.literal("edge"),
+    kind: z.string(),
+    direction: edgeIndexDirectionZod,
+    ...indexDeclarationCommonShape,
+  })
+  .loose();
+
+const indexDeclarationZod = z.discriminatedUnion("entity", [
+  nodeIndexDeclarationZod,
+  edgeIndexDeclarationZod,
 ]);
 
 // ============================================================
@@ -341,6 +500,14 @@ export const serializedSchemaZod = z.object({
       temporalMode: temporalModeZod,
     })
     .loose(),
+  /**
+   * Index declarations attached to the graph.
+   *
+   * Optional: graphs that never declared the slice omit the field
+   * entirely so their canonical-form hash is byte-identical to graphs
+   * authored before `indexes` existed.
+   */
+  indexes: z.array(indexDeclarationZod).optional(),
 });
 
 /**
@@ -363,6 +530,16 @@ export type SerializedSchema = Readonly<{
     onNodeDelete: DeleteBehavior;
     temporalMode: TemporalMode;
   }>;
+  /**
+   * Index declarations attached to the graph.
+   *
+   * Omitted entirely when the graph never declared the slice — legacy
+   * schemas hash byte-identically to before `indexes` existed. Each
+   * entry carries an `origin` discriminator: `"compile-time"` is the
+   * default and is omitted from the canonical form (see `serializer.ts`);
+   * only `"runtime"` is emitted explicitly.
+   */
+  indexes?: readonly IndexDeclaration[];
 }>;
 
 // ============================================================
