@@ -122,6 +122,23 @@ export type RuntimeDocumentChange = Readonly<{
 }>;
 
 // ============================================================
+// Deprecated Kinds Changes
+// ============================================================
+
+/**
+ * Change to the soft-deprecated kind set. `safe`-severity by
+ * construction — deprecation is a metadata signal that doesn't gate
+ * reads, writes, or queries. The `added` and `removed` arrays carry
+ * the per-name deltas so consumers can render granular diffs.
+ */
+export type DeprecatedKindsChange = Readonly<{
+  added: readonly string[];
+  removed: readonly string[];
+  severity: ChangeSeverity;
+  details: string;
+}>;
+
+// ============================================================
 // Schema Diff
 // ============================================================
 
@@ -149,6 +166,12 @@ export type SchemaDiff = Readonly<{
    * the slice is unchanged on both sides (the common case).
    */
   runtimeDocument?: RuntimeDocumentChange;
+
+  /**
+   * Change to the soft-deprecated kind set, if any. `undefined` when
+   * the set is unchanged on both sides.
+   */
+  deprecatedKinds?: DeprecatedKindsChange;
 
   /** Whether any breaking changes exist */
   hasBreakingChanges: boolean;
@@ -186,6 +209,10 @@ export function computeSchemaDiff(
     before.runtimeDocument,
     after.runtimeDocument,
   );
+  const deprecatedKindsChange = diffDeprecatedKinds(
+    before.deprecatedKinds,
+    after.deprecatedKinds,
+  );
 
   const allChanges = [
     ...nodeChanges,
@@ -197,13 +224,17 @@ export function computeSchemaDiff(
     (change) => change.severity === "breaking",
   );
   const hasChanges =
-    allChanges.length > 0 || runtimeDocumentChange !== undefined;
+    allChanges.length > 0 ||
+    runtimeDocumentChange !== undefined ||
+    deprecatedKindsChange !== undefined;
 
   const summary = generateSummary(
     nodeChanges,
     edgeChanges,
     ontologyChanges,
     indexChanges,
+    runtimeDocumentChange,
+    deprecatedKindsChange,
   );
 
   return {
@@ -216,6 +247,9 @@ export function computeSchemaDiff(
     ...(runtimeDocumentChange === undefined ?
       {}
     : { runtimeDocument: runtimeDocumentChange }),
+    ...(deprecatedKindsChange === undefined ?
+      {}
+    : { deprecatedKinds: deprecatedKindsChange }),
     hasBreakingChanges,
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
@@ -729,6 +763,47 @@ function diffRuntimeDocument(
 }
 
 // ============================================================
+// Deprecated Kinds Diff
+// ============================================================
+
+/**
+ * Computes the change to the soft-deprecated kind set, if any.
+ * `safe`-severity by construction; the per-name `added` / `removed`
+ * deltas let consumers render granular diffs without re-comparing the
+ * whole set.
+ */
+function diffDeprecatedKinds(
+  before: SerializedSchema["deprecatedKinds"],
+  after: SerializedSchema["deprecatedKinds"],
+): DeprecatedKindsChange | undefined {
+  // Both inputs come from independent `parseSerializedSchema` calls,
+  // so reference equality only fires for the `undefined`/`undefined`
+  // case — covered by the empty-set comparison below.
+  const beforeSet = new Set(before);
+  const afterSet = new Set(after);
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const name of afterSet) {
+    if (!beforeSet.has(name)) added.push(name);
+  }
+  for (const name of beforeSet) {
+    if (!afterSet.has(name)) removed.push(name);
+  }
+  if (added.length === 0 && removed.length === 0) return undefined;
+  added.sort();
+  removed.sort();
+  const parts: string[] = [];
+  if (added.length > 0) parts.push(`added ${added.join(", ")}`);
+  if (removed.length > 0) parts.push(`removed ${removed.join(", ")}`);
+  return {
+    added,
+    removed,
+    severity: "safe",
+    details: `Deprecated kinds: ${parts.join("; ")}`,
+  };
+}
+
+// ============================================================
 // Summary Generation
 // ============================================================
 
@@ -740,6 +815,8 @@ function generateSummary(
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
   indexChanges: readonly IndexChange[],
+  runtimeDocumentChange: RuntimeDocumentChange | undefined,
+  deprecatedKindsChange: DeprecatedKindsChange | undefined,
 ): string {
   const parts: string[] = [];
 
@@ -783,6 +860,17 @@ function generateSummary(
   if (indexAdded > 0 || indexRemoved > 0 || indexModified > 0) {
     parts.push(
       `Indexes: ${indexAdded} added, ${indexRemoved} removed, ${indexModified} modified`,
+    );
+  }
+
+  if (runtimeDocumentChange !== undefined) {
+    parts.push(`Runtime document: ${runtimeDocumentChange.type}`);
+  }
+
+  if (deprecatedKindsChange !== undefined) {
+    const { added, removed } = deprecatedKindsChange;
+    parts.push(
+      `Deprecated kinds: ${added.length} added, ${removed.length} removed`,
     );
   }
 

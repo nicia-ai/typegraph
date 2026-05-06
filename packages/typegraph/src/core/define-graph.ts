@@ -236,6 +236,14 @@ export type GraphDef<
    * have never been runtime-extended; legacy graphs hash byte-identically.
    */
   runtimeDocument: RuntimeGraphDocument | undefined;
+  /**
+   * Soft-deprecated kind names attached to this graph. Set by the
+   * loader from the persisted schema and by `store.deprecateKinds(...)`
+   * / `store.undeprecateKinds(...)`. A purely informational signal
+   * surfaced for introspection — does not gate reads, writes, or
+   * queries. Defaults to the empty set on freshly-defined graphs.
+   */
+  deprecatedKinds: ReadonlySet<string>;
 }>;
 
 // ============================================================
@@ -347,8 +355,15 @@ export function defineGraph<
     defaults,
     indexes,
     runtimeDocument: undefined,
+    deprecatedKinds: EMPTY_DEPRECATED_KINDS,
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
 }
+
+// Sharing one frozen empty Set keeps the canonical-form hash stable
+// across graphs that never deprecate any kinds.
+const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
+  new Set<string>(),
+);
 
 // ============================================================
 // Index Normalization

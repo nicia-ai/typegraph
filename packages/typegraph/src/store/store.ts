@@ -34,9 +34,11 @@ import { buildKindRegistry, type KindRegistry } from "../registry";
 import { type RuntimeGraphDocument } from "../runtime/document-types";
 import { mergeRuntimeExtension } from "../runtime/merge";
 import {
+  applyDeprecatedKinds,
   loadActiveSchemaWithBootstrap,
   parseSerializedSchema,
 } from "../schema/manager";
+import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
 import { createGraphAlgorithms, type GraphAlgorithms } from "./algorithms";
@@ -175,6 +177,16 @@ export class Store<G extends GraphDef> {
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
+  }
+
+  /**
+   * Names of node and edge kinds the operator has soft-deprecated via
+   * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
+   * (codegen, UI tooling, lints) can route around them. Reads, writes,
+   * and queries are unaffected — deprecation is a signal, not a gate.
+   */
+  get deprecatedKinds(): ReadonlySet<string> {
+    return this.#graph.deprecatedKinds;
   }
 
   /** The database backend */
@@ -808,23 +820,19 @@ export class Store<G extends GraphDef> {
       );
     }
 
-    // Catch up to the persisted state first. If another process has
-    // evolved the graph since this Store was constructed, the active
-    // row's runtimeDocument contains kinds that this.#graph doesn't —
-    // applying the new extension on top of the stale local view would
-    // make ensureSchema diff against the persisted schema and treat
-    // the missing-locally kinds as removed (a breaking-change
-    // MigrationError). Auto-merging the stored doc into the baseline
-    // makes evolve self-healing across multi-process races; the CAS
-    // guard inside commitSchemaVersion still serializes the actual
-    // commit. If the stored doc redefines a local runtime kind with a
-    // different shape, the merge throws RUNTIME_KIND_REDEFINITION
-    // here — surfacing the divergence rather than overwriting.
+    // Catch up to the persisted state first (runtime document AND
+    // deprecated set). Without this, a stale store applying an
+    // extension on top of an out-of-date baseline would make
+    // ensureSchema diff against the persisted schema and either treat
+    // missing-locally kinds as removed (breaking MigrationError) or
+    // silently drop another writer's deprecation flags. The CAS guard
+    // inside commitSchemaVersion still serializes the actual commit.
+    // If the stored doc redefines a local runtime kind with a
+    // different shape, the runtime merge throws
+    // RUNTIME_KIND_REDEFINITION here — surfacing the divergence
+    // rather than overwriting.
     const storedSchema = parseSerializedSchema(activeRow.schema_doc);
-    const baselineGraph =
-      storedSchema.runtimeDocument === undefined ?
-        this.#graph
-      : mergeRuntimeExtension(this.#graph, storedSchema.runtimeDocument);
+    const baselineGraph = this.#catchUpToStored(storedSchema);
     const merged = mergeRuntimeExtension(baselineGraph, extension);
 
     // No-op evolve (extension already applied): return `this` so the
@@ -848,6 +856,124 @@ export class Store<G extends GraphDef> {
       autoMigrate: true,
     });
     return this.#cloneWithGraph(merged, options?.ref);
+  }
+
+  /**
+   * Marks the named node and edge kinds as soft-deprecated. Surfaces in
+   * `store.deprecatedKinds` for introspection (codegen, UI tooling,
+   * lints) but does not gate reads, writes, or queries — deprecation
+   * is a signal, not a removal.
+   *
+   * Atomically commits a new schema version through the same primitive
+   * `evolve()` uses, so concurrent deprecate/evolve calls produce
+   * `StaleVersionError | SchemaContentConflictError` race losers that
+   * the caller refetches and retries. Idempotent: re-deprecating a
+   * kind that's already marked is a no-op (no version bump).
+   *
+   * @param names - Node or edge kind names to mark as deprecated.
+   * @param options.ref - Optional handle to be re-pointed atomically
+   *   with the schema commit, mirroring `evolve()`.
+   *
+   * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE` (no
+   *   schema yet) or `DEPRECATE_UNKNOWN_KIND` (name not on the graph).
+   * @throws {StaleVersionError} when another writer has advanced the
+   *   schema since this store was constructed; refetch and retry per
+   *   the same recipe `evolve()` documents.
+   * @throws {SchemaContentConflictError} when a row already exists at
+   *   the target version with a different content hash.
+   */
+  async deprecateKinds(
+    names: readonly string[],
+    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
+  ): Promise<Store<G>> {
+    return this.#updateDeprecatedKinds("add", names, options);
+  }
+
+  /**
+   * Reverses `deprecateKinds(...)` for the named kinds. Same race +
+   * idempotency semantics: removing a name that isn't currently
+   * deprecated is a no-op for that name (the call as a whole is a
+   * no-op only if every name was already absent).
+   *
+   * @param names - Node or edge kind names to remove from the
+   *   deprecated set.
+   * @param options.ref - Optional handle to be re-pointed atomically
+   *   with the schema commit.
+   *
+   * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE`.
+   * @throws {StaleVersionError} on a CAS race with another writer.
+   * @throws {SchemaContentConflictError} on a same-version content
+   *   conflict.
+   */
+  async undeprecateKinds(
+    names: readonly string[],
+    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
+  ): Promise<Store<G>> {
+    return this.#updateDeprecatedKinds("remove", names, options);
+  }
+
+  async #updateDeprecatedKinds(
+    direction: "add" | "remove",
+    names: readonly string[],
+    options: Readonly<{ ref?: StoreRef<Store<G>> }> | undefined,
+  ): Promise<Store<G>> {
+    const verb = direction === "add" ? "deprecate" : "undeprecate";
+    const activeRow = await loadActiveSchemaWithBootstrap(
+      this.#backend,
+      this.graphId,
+    );
+    if (activeRow === undefined) {
+      throw new ConfigurationError(
+        `Cannot ${verb} kinds on graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
+        { code: "DEPRECATE_BEFORE_INITIALIZE" },
+      );
+    }
+
+    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+    const baseline = this.#catchUpToStored(storedSchema);
+    const nextSet = new Set(baseline.deprecatedKinds);
+
+    if (direction === "add") {
+      for (const name of names) {
+        if (!isKnownKind(baseline, name)) {
+          throw new ConfigurationError(
+            `Cannot deprecate unknown kind "${name}" on graph "${this.graphId}". Only kinds declared on the graph (compile-time or runtime) can be deprecated.`,
+            { code: "DEPRECATE_UNKNOWN_KIND" },
+          );
+        }
+        nextSet.add(name);
+      }
+    } else {
+      for (const name of names) nextSet.delete(name);
+    }
+
+    if (setsEqual(nextSet, baseline.deprecatedKinds)) {
+      // True no-op only when the catch-up didn't change anything
+      // either. Otherwise the caller's `this` reference is stale
+      // relative to the persisted state — return a clone of the
+      // caught-up baseline so they pick up another writer's
+      // runtime kinds and deprecation flags.
+      if (baseline === this.#graph) {
+        if (options?.ref !== undefined) options.ref.current = this;
+        return this;
+      }
+      return this.#cloneWithGraph(baseline, options?.ref);
+    }
+
+    const merged = applyDeprecatedKinds(baseline, [...nextSet]);
+    await ensureSchemaImpl(this.#backend, merged, {
+      preloaded: { activeRow, storedSchema },
+      autoMigrate: true,
+    });
+    return this.#cloneWithGraph(merged, options?.ref);
+  }
+
+  #catchUpToStored(storedSchema: SerializedSchema): G {
+    const withRuntime =
+      storedSchema.runtimeDocument === undefined ?
+        this.#graph
+      : mergeRuntimeExtension(this.#graph, storedSchema.runtimeDocument);
+    return applyDeprecatedKinds(withRuntime, storedSchema.deprecatedKinds);
   }
 
   #cloneWithGraph(graph: G, ref: StoreRef<Store<G>> | undefined): Store<G> {
@@ -1027,6 +1153,16 @@ export function createStore<G extends GraphDef>(
   options?: StoreOptions,
 ): Store<G> {
   return new Store(graph, backend, options);
+}
+
+function isKnownKind(graph: GraphDef, name: string): boolean {
+  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
+}
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
 }
 
 // ============================================================

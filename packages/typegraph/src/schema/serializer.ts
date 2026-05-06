@@ -62,6 +62,7 @@ export function serializeSchema<G extends GraphDef>(
   const ontology = serializeOntology(graph.ontology);
   const indexes = serializeIndexes(graph.indexes);
   const runtimeDocument = graph.runtimeDocument;
+  const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
 
   return {
     graphId: graph.id,
@@ -84,7 +85,18 @@ export function serializeSchema<G extends GraphDef>(
     // graphs that have never been runtime-extended so legacy schemas
     // hash byte-identically.
     ...(runtimeDocument === undefined ? {} : { runtimeDocument }),
+    // Soft-deprecated kind names. Omitted when empty so legacy
+    // schemas hash byte-identically; sorted for canonical-form
+    // stability across insertion-order differences.
+    ...(deprecatedKinds === undefined ? {} : { deprecatedKinds }),
   };
+}
+
+function serializeDeprecatedKinds(
+  set: ReadonlySet<string> | undefined,
+): readonly string[] | undefined {
+  if (set === undefined || set.size === 0) return undefined;
+  return [...set].toSorted();
 }
 
 // ============================================================
@@ -534,10 +546,11 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
 export async function computeSchemaHash(
   schema: SerializedSchema,
 ): Promise<SchemaHash> {
-  // Create a hashable representation excluding dynamic fields. `indexes`
-  // is included only when set so legacy schemas without the slice hash
-  // identically (the slice's canonical-form rules — including
-  // `origin: "compile-time"` omission — are applied at serialize time).
+  // Create a hashable representation excluding dynamic fields
+  // (version, generatedAt). Optional slices are included only when
+  // set so legacy schemas without them hash byte-identically — the
+  // per-slice canonical-form rules (e.g., `indexes` sort + origin
+  // omission, `deprecatedKinds` sort) are applied at serialize time.
   const hashable = {
     graphId: schema.graphId,
     nodes: schema.nodes,
@@ -545,6 +558,12 @@ export async function computeSchemaHash(
     ontology: schema.ontology,
     defaults: schema.defaults,
     ...(schema.indexes === undefined ? {} : { indexes: schema.indexes }),
+    ...(schema.runtimeDocument === undefined ?
+      {}
+    : { runtimeDocument: schema.runtimeDocument }),
+    ...(schema.deprecatedKinds === undefined ?
+      {}
+    : { deprecatedKinds: schema.deprecatedKinds }),
   };
 
   // Serialize with sorted keys for deterministic output

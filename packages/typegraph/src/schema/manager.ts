@@ -117,14 +117,46 @@ export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
     return { graph, activeRow: undefined, storedSchema: undefined };
   }
   const storedSchema = parseSerializedSchema(activeRow.schema_doc);
-  if (storedSchema.runtimeDocument === undefined) {
-    return { graph, activeRow, storedSchema };
-  }
+  const merged =
+    storedSchema.runtimeDocument === undefined ?
+      graph
+    : mergeRuntimeExtension(graph, storedSchema.runtimeDocument);
   return {
-    graph: mergeRuntimeExtension(graph, storedSchema.runtimeDocument),
+    graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
     activeRow,
     storedSchema,
   };
+}
+
+/**
+ * Returns a graph carrying the supplied deprecated-kind names. Used by
+ * the loader to propagate `SerializedSchema.deprecatedKinds` onto the
+ * `GraphDef` that the Store sees, and by `Store.deprecateKinds` /
+ * `Store.undeprecateKinds` to construct the next graph.
+ *
+ * Returns the original graph reference when the desired set already
+ * matches `graph.deprecatedKinds` — covers both the no-deprecations
+ * load path (empty equals empty) and the loader's restart-with-same-
+ * persisted-set hot path. Skips a Set allocation + spread + freeze.
+ */
+export function applyDeprecatedKinds<G extends GraphDef>(
+  graph: G,
+  names: readonly string[] | undefined,
+): G {
+  const empty = names === undefined || names.length === 0;
+  const current = graph.deprecatedKinds;
+  if (empty && current.size === 0) return graph;
+  if (
+    !empty &&
+    names.length === current.size &&
+    names.every((name) => current.has(name))
+  ) {
+    return graph;
+  }
+  return Object.freeze({
+    ...graph,
+    deprecatedKinds: Object.freeze(empty ? new Set<string>() : new Set(names)),
+  });
 }
 
 // ============================================================

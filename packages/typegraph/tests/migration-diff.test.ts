@@ -1201,6 +1201,36 @@ describe("computeSchemaDiff", () => {
       expect(diff.summary).toContain("1 removed");
       expect(diff.summary).toContain("Edges:");
     });
+
+    it("includes deprecated kinds in the summary when only deprecation changed", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        deprecatedKinds: ["Person", "Company"],
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.summary).toContain("Deprecated kinds");
+      expect(diff.summary).toContain("2 added");
+      expect(diff.summary).toContain("0 removed");
+    });
+
+    it("includes runtime document in the summary when only it changed", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        runtimeDocument: {
+          nodes: { Tag: { properties: { label: { type: "string" } } } },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.summary).toContain("Runtime document");
+    });
   });
 
   // ============================================================
