@@ -1,6 +1,6 @@
 import { type z } from "zod";
 
-import { type AnyEdgeType, type EdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type ValueType } from "../query/ast";
 import {
   type JsonPointer,
@@ -199,10 +199,50 @@ export type EdgeIndexConfig<E extends AnyEdgeType> = Readonly<{
   where?: IndexWhereInput<EdgeIndexWhereBuilder<E>> | undefined;
 }>;
 
-export type NodeIndex<N extends NodeType = NodeType> = Readonly<{
-  __type: "typegraph_node_index";
-  node: N;
-  nodeKind: N["kind"];
+// ============================================================
+// Index Origin
+// ============================================================
+
+/**
+ * Where an index declaration originated.
+ *
+ * - `compile-time`: declared via `defineNodeIndex` / `defineEdgeIndex` and
+ *   threaded through `defineGraph({ indexes })`. This is the default and is
+ *   omitted from the canonical schema document so legacy graphs hash
+ *   byte-identically.
+ * - `runtime`: produced by a runtime extension. Always emitted explicitly
+ *   so the loader can re-route the declaration through the runtime
+ *   compiler on restart.
+ */
+export type IndexOrigin = "compile-time" | "runtime";
+
+// ============================================================
+// Serializable Index Declaration
+// ============================================================
+
+/**
+ * Common shape shared by node and edge index declarations.
+ *
+ * `IndexDeclaration` is the canonical, JSON-serializable representation of
+ * an index that flows through `GraphDef.indexes` and
+ * `SerializedSchema.indexes`. It carries everything the DDL compiler and
+ * the Drizzle schema factories need to generate index SQL — the same
+ * value can come from a typed builder (`defineNodeIndex` /
+ * `defineEdgeIndex`) or be reconstructed from a runtime extension
+ * document on restart.
+ */
+type IndexDeclarationBase = Readonly<{
+  /** Unique index name (used in DDL and as the diffing identity key). */
+  name: string;
+  /**
+   * Where this declaration originated.
+   *
+   * `undefined` is the canonical representation of `"compile-time"` —
+   * the default origin is omitted from the serialized form so legacy
+   * graphs (no `indexes` slice) hash byte-identically with new graphs
+   * that declare only compile-time indexes.
+   */
+  origin?: IndexOrigin;
   fields: readonly JsonPointer[];
   fieldValueTypes: readonly (ValueType | undefined)[];
   coveringFields: readonly JsonPointer[];
@@ -210,25 +250,31 @@ export type NodeIndex<N extends NodeType = NodeType> = Readonly<{
   unique: boolean;
   scope: IndexScope;
   where: IndexWhereExpression | undefined;
-  name: string;
 }>;
 
-export type EdgeIndex<E extends AnyEdgeType = EdgeType> = Readonly<{
-  __type: "typegraph_edge_index";
-  edge: E;
-  edgeKind: E["kind"];
-  fields: readonly JsonPointer[];
-  fieldValueTypes: readonly (ValueType | undefined)[];
-  coveringFields: readonly JsonPointer[];
-  coveringFieldValueTypes: readonly (ValueType | undefined)[];
-  unique: boolean;
-  scope: IndexScope;
-  direction: EdgeIndexDirection;
-  where: IndexWhereExpression | undefined;
-  name: string;
-}>;
+export type NodeIndexDeclaration = IndexDeclarationBase &
+  Readonly<{
+    entity: "node";
+    kind: string;
+  }>;
 
-export type TypeGraphIndex = NodeIndex | EdgeIndex;
+export type EdgeIndexDeclaration = IndexDeclarationBase &
+  Readonly<{
+    entity: "edge";
+    kind: string;
+    direction: EdgeIndexDirection;
+  }>;
+
+/**
+ * A serializable index declaration that flows through `GraphDef.indexes`
+ * and `SerializedSchema.indexes`.
+ *
+ * Discriminated by `entity`. Everything is JSON round-trippable so a
+ * declaration produced by `defineNodeIndex` and a declaration
+ * reconstructed from a stored schema document compile to byte-identical
+ * SQL.
+ */
+export type IndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // ============================================================
 // System Columns

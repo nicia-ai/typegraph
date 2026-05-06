@@ -14,6 +14,11 @@ import {
   type TemporalMode,
 } from "../../src/core/types";
 import {
+  defineEdgeIndex,
+  defineNodeIndex,
+  type IndexDeclaration,
+} from "../../src/indexes";
+import {
   broader,
   disjointWith,
   equivalentTo,
@@ -711,6 +716,187 @@ describe("Schema Serialization Properties", () => {
 
       const canonical = JSON.stringify(serialized, sortedReplacer);
       expect(canonical).not.toContain('"annotations"');
+    });
+
+    // Indexes are an unordered set keyed by name; an empty list carries
+    // no semantic meaning that an absent slice doesn't. Hash and diff
+    // both treat `undefined` and `[]` as the canonical "no indexes" form
+    // so they can never disagree.
+    it("hash collapses absent and empty indexes; differs for non-empty", async () => {
+      const Item = defineNode("Item", {
+        schema: z.object({ name: z.string() }),
+      });
+
+      const buildGraphAbsent = () =>
+        defineGraph({
+          id: "indexes_invariant",
+          nodes: { Item: { type: Item } },
+          edges: {},
+        });
+
+      const buildGraphEmpty = () =>
+        defineGraph({
+          id: "indexes_invariant",
+          nodes: { Item: { type: Item } },
+          edges: {},
+          indexes: [],
+        });
+
+      const itemNameIndex = defineNodeIndex(Item, { fields: ["name"] });
+      const buildGraphWithIndex = () =>
+        defineGraph({
+          id: "indexes_invariant",
+          nodes: { Item: { type: Item } },
+          edges: {},
+          indexes: [itemNameIndex],
+        });
+
+      const hashAbsent = await computeSchemaHash(
+        serializeSchema(buildGraphAbsent(), 1),
+      );
+      const hashEmpty = await computeSchemaHash(
+        serializeSchema(buildGraphEmpty(), 1),
+      );
+      const hashWithIndex = await computeSchemaHash(
+        serializeSchema(buildGraphWithIndex(), 1),
+      );
+
+      expect(hashEmpty).toBe(hashAbsent);
+      expect(hashWithIndex).not.toBe(hashAbsent);
+    });
+
+    it("hash is invariant under index ordering", async () => {
+      const Item = defineNode("Item", {
+        schema: z.object({ name: z.string(), city: z.string() }),
+      });
+
+      const nameIndex = defineNodeIndex(Item, { fields: ["name"] });
+      const cityIndex = defineNodeIndex(Item, { fields: ["city"] });
+
+      const graphAB = defineGraph({
+        id: "indexes_order_invariant",
+        nodes: { Item: { type: Item } },
+        edges: {},
+        indexes: [nameIndex, cityIndex],
+      });
+      const graphBA = defineGraph({
+        id: "indexes_order_invariant",
+        nodes: { Item: { type: Item } },
+        edges: {},
+        indexes: [cityIndex, nameIndex],
+      });
+
+      const hashAB = await computeSchemaHash(serializeSchema(graphAB, 1));
+      const hashBA = await computeSchemaHash(serializeSchema(graphBA, 1));
+
+      expect(hashAB).toBe(hashBA);
+    });
+
+    it("graphs without indexes omit the field from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+
+      const graph = defineGraph({
+        id: "indexes_omit_compat",
+        nodes: { Person: { type: Person } },
+        edges: {},
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect("indexes" in serialized).toBe(false);
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"indexes"');
+    });
+
+    // `origin: "compile-time"` is the default. The serializer must omit
+    // it from the document so only runtime-origin indexes ever cause an
+    // `origin` field to appear in the canonical form.
+    it("compile-time indexes omit `origin` from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+
+      const graph = defineGraph({
+        id: "compile_origin_omit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [personEmail],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      for (const index of serialized.indexes ?? []) {
+        expect("origin" in index).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"origin"');
+    });
+
+    // Conversely, `origin: "runtime"` is emitted explicitly so the
+    // restart loader can route it through the runtime compiler.
+    it('runtime indexes emit `origin: "runtime"` in canonical serialization', () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const compiled = defineNodeIndex(Person, { fields: ["email"] });
+
+      const runtimeIndex: IndexDeclaration = {
+        ...compiled,
+        origin: "runtime",
+      };
+
+      const graph = defineGraph({
+        id: "runtime_origin_emit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [runtimeIndex],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      expect(serialized.indexes?.[0]?.origin).toBe("runtime");
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).toContain('"origin":"runtime"');
+    });
+
+    // Round-trip: a serialized schema with indexes survives JSON
+    // serialization and zod parsing without canonical-form drift.
+    it("round-trips a graph with indexes through JSON and serializedSchemaZod", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string(), name: z.string() }),
+      });
+      const Activity = defineEdge("performed", {
+        schema: z.object({ at: z.string() }),
+      });
+      const personEmail = defineNodeIndex(Person, {
+        fields: ["email"],
+        unique: true,
+      });
+      const performedAt = defineEdgeIndex(Activity, {
+        fields: ["at"],
+        direction: "out",
+      });
+
+      const graph = defineGraph({
+        id: "roundtrip_indexes",
+        nodes: { Person: { type: Person } },
+        edges: {
+          performed: { type: Activity, from: [Person], to: [Person] },
+        },
+        indexes: [personEmail, performedAt],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const json = JSON.stringify(serialized, sortedReplacer);
+      const parsed = serializedSchemaZod.parse(JSON.parse(json));
+      const reSerialized = JSON.stringify(parsed, sortedReplacer);
+
+      expect(reSerialized).toBe(json);
     });
   });
 

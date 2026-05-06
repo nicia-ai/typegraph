@@ -402,7 +402,32 @@ export type {
 } from "./query";
 
 // ============================================================
-// Runtime Extension (issue #101)
+// Indexes
+// ============================================================
+
+export {
+  andWhere,
+  defineEdgeIndex,
+  defineNodeIndex,
+  type EdgeIndexConfig,
+  type EdgeIndexDeclaration,
+  type EdgeIndexDirection,
+  type EdgeIndexWhereBuilder,
+  type IndexDeclaration,
+  type IndexOrigin,
+  type IndexScope,
+  type IndexWhereExpression,
+  type IndexWhereFieldBuilder,
+  type IndexWhereInput,
+  type NodeIndexConfig,
+  type NodeIndexDeclaration,
+  type NodeIndexWhereBuilder,
+  notWhere,
+  orWhere,
+} from "./indexes";
+
+// ============================================================
+// Runtime Extension
 // ============================================================
 
 export type {

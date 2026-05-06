@@ -57,6 +57,7 @@ export {
   computeSchemaDiff,
   type EdgeChange,
   getMigrationActions,
+  type IndexChange,
   isBackwardsCompatible,
   type NodeChange,
   type OntologyChange,

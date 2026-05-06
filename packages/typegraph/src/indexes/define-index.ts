@@ -1,10 +1,8 @@
 import { type z } from "zod";
 
 import {
-  EDGE_INDEX_TYPE_MARKER,
   IDENTIFIER_COMPONENT_MAX_LENGTH,
   MAX_PG_IDENTIFIER_LENGTH,
-  NODE_INDEX_TYPE_MARKER,
   TRUNCATED_IDENTIFIER_MAX_LENGTH,
 } from "../constants";
 import { type AnyEdgeType, type NodeType } from "../core/types";
@@ -25,8 +23,8 @@ import {
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
 import { fnv1aBase36 } from "../utils/hash";
 import {
-  type EdgeIndex,
   type EdgeIndexConfig,
+  type EdgeIndexDeclaration,
   type EdgeIndexDirection,
   type EdgeIndexWhereBuilder,
   type IndexFieldInput,
@@ -36,8 +34,8 @@ import {
   type IndexWhereLiteral,
   type IndexWhereOp,
   type IndexWhereOperand,
-  type NodeIndex,
   type NodeIndexConfig,
+  type NodeIndexDeclaration,
   type NodeIndexWhereBuilder,
   type SystemColumnName,
 } from "./types";
@@ -49,7 +47,7 @@ import {
 export function defineNodeIndex<N extends NodeType>(
   node: N,
   config: NodeIndexConfig<N>,
-): NodeIndex<N> {
+): NodeIndexDeclaration {
   const scope = config.scope ?? "graphAndKind";
   const unique = config.unique ?? false;
 
@@ -92,10 +90,13 @@ export function defineNodeIndex<N extends NodeType>(
       coveringFields,
     });
 
+  // `origin` is intentionally omitted: `"compile-time"` is the default
+  // and is canonicalized by absence so the serialized form stays
+  // byte-identical for legacy graphs.
   return {
-    __type: NODE_INDEX_TYPE_MARKER,
-    node,
-    nodeKind: node.kind,
+    entity: "node",
+    kind: node.kind,
+    name,
     fields,
     fieldValueTypes,
     coveringFields,
@@ -103,14 +104,13 @@ export function defineNodeIndex<N extends NodeType>(
     unique,
     scope,
     where,
-    name,
   };
 }
 
 export function defineEdgeIndex<E extends AnyEdgeType>(
   edge: E,
   config: EdgeIndexConfig<E>,
-): EdgeIndex<E> {
+): EdgeIndexDeclaration {
   const scope = config.scope ?? "graphAndKind";
   const unique = config.unique ?? false;
   const direction = config.direction ?? "none";
@@ -156,9 +156,9 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     });
 
   return {
-    __type: EDGE_INDEX_TYPE_MARKER,
-    edge,
-    edgeKind: edge.kind,
+    entity: "edge",
+    kind: edge.kind,
+    name,
     fields,
     fieldValueTypes,
     coveringFields,
@@ -167,7 +167,6 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     scope,
     direction,
     where,
-    name,
   };
 }
 

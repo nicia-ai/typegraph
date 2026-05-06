@@ -49,8 +49,9 @@ function parseSerializedSchema(json: string): SerializedSchema {
   }
 
   // The Zod schema validates enum fields (temporalMode, cardinality, etc.)
-  // against the real literal unions. The cast is sound — the only broadening
-  // is .loose() on objects (extra fields), not on enum values.
+  // against the real literal unions. The cast is sound — the only
+  // broadening is `.loose()` on objects (extra fields), not on enum
+  // values.
   return result.data as SerializedSchema;
 }
 

@@ -32,7 +32,7 @@ import {
 import {
   buildSqliteEdgeIndexBuilders,
   buildSqliteNodeIndexBuilders,
-  type TypeGraphIndex,
+  type IndexDeclaration,
 } from "../../../indexes";
 
 /**
@@ -54,7 +54,7 @@ export type CreateSqliteTablesOptions = Readonly<{
    * These become first-class Drizzle indexes, so drizzle-kit migrations will
    * pick them up automatically.
    */
-  indexes?: readonly TypeGraphIndex[] | undefined;
+  indexes?: readonly IndexDeclaration[] | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: SqliteTableNames = {

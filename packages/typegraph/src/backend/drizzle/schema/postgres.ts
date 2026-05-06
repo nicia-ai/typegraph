@@ -40,7 +40,7 @@ import {
 import {
   buildPostgresEdgeIndexBuilders,
   buildPostgresNodeIndexBuilders,
-  type TypeGraphIndex,
+  type IndexDeclaration,
 } from "../../../indexes";
 import { vector } from "../columns/vector";
 
@@ -63,7 +63,7 @@ export type CreatePostgresTablesOptions = Readonly<{
    * These become first-class Drizzle indexes, so drizzle-kit migrations will
    * pick them up automatically.
    */
-  indexes?: readonly TypeGraphIndex[] | undefined;
+  indexes?: readonly IndexDeclaration[] | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = {

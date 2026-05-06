@@ -44,6 +44,21 @@ function emptyOntology(): SerializedOntology {
   };
 }
 
+function makeIndex(name: string, kind: string) {
+  return {
+    entity: "node" as const,
+    kind,
+    name,
+    fields: [],
+    fieldValueTypes: [],
+    coveringFields: [],
+    coveringFieldValueTypes: [],
+    unique: false,
+    scope: "graphAndKind" as const,
+    where: undefined,
+  };
+}
+
 /**
  * Creates a base schema for testing.
  */
@@ -1294,6 +1309,76 @@ describe("computeSchemaDiff", () => {
 
       // Person removed (breaking) + NewSafeNode added (safe)
       expect(diff.hasBreakingChanges).toBe(true);
+    });
+  });
+
+  describe("index changes", () => {
+    it("detects added indexes as safe", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        indexes: [makeIndex("Person_email_idx", "Person")],
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.hasBreakingChanges).toBe(false);
+      expect(diff.indexes).toHaveLength(1);
+      expect(diff.indexes[0]).toMatchObject({
+        type: "added",
+        name: "Person_email_idx",
+        entity: "node",
+        severity: "safe",
+      });
+    });
+
+    it("detects removed indexes as safe", () => {
+      const before = createSchema({
+        version: 1,
+        indexes: [makeIndex("Person_email_idx", "Person")],
+      });
+      const after = createSchema({ version: 2 });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.indexes).toHaveLength(1);
+      expect(diff.indexes[0]).toMatchObject({
+        type: "removed",
+        name: "Person_email_idx",
+        severity: "safe",
+      });
+    });
+
+    it("detects modified indexes as safe", () => {
+      const before = createSchema({
+        version: 1,
+        indexes: [
+          { ...makeIndex("Person_email_idx", "Person"), unique: false },
+        ],
+      });
+      const after = createSchema({
+        version: 2,
+        indexes: [{ ...makeIndex("Person_email_idx", "Person"), unique: true }],
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.indexes).toHaveLength(1);
+      expect(diff.indexes[0]).toMatchObject({
+        type: "modified",
+        name: "Person_email_idx",
+        severity: "safe",
+      });
+    });
+
+    it("treats absent vs explicit-empty indexes as no change", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({ version: 2, indexes: [] });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.indexes).toHaveLength(0);
     });
   });
 });

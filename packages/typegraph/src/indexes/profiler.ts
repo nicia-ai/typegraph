@@ -1,36 +1,18 @@
-import { NODE_INDEX_TYPE_MARKER } from "../constants";
 import { type DeclaredIndex } from "../profiler/types";
-import { type EdgeIndex, type NodeIndex, type TypeGraphIndex } from "./types";
+import { type IndexDeclaration } from "./types";
 
-export function toDeclaredIndex(index: TypeGraphIndex): DeclaredIndex {
-  if (index.__type === NODE_INDEX_TYPE_MARKER) {
-    return toDeclaredNodeIndex(index);
-  }
-  return toDeclaredEdgeIndex(index);
+export function toDeclaredIndex(index: IndexDeclaration): DeclaredIndex {
+  return {
+    entityType: index.entity,
+    kind: index.kind,
+    fields: [...index.fields],
+    unique: index.unique,
+    name: index.name,
+  };
 }
 
 export function toDeclaredIndexes(
-  indexes: readonly TypeGraphIndex[],
+  indexes: readonly IndexDeclaration[],
 ): readonly DeclaredIndex[] {
   return indexes.map((index) => toDeclaredIndex(index));
-}
-
-function toDeclaredNodeIndex(index: NodeIndex): DeclaredIndex {
-  return {
-    entityType: "node",
-    kind: index.nodeKind,
-    fields: [...index.fields],
-    unique: index.unique,
-    name: index.name,
-  };
-}
-
-function toDeclaredEdgeIndex(index: EdgeIndex): DeclaredIndex {
-  return {
-    entityType: "edge",
-    kind: index.edgeKind,
-    fields: [...index.fields],
-    unique: index.unique,
-    name: index.name,
-  };
 }

@@ -39,13 +39,6 @@ export const DEFAULT_PAGINATION_LIMIT = 20;
 export const DEFAULT_STREAM_BATCH_SIZE = 1000;
 
 // ============================================================
-// Index Type Markers
-// ============================================================
-
-export const NODE_INDEX_TYPE_MARKER = "typegraph_node_index" as const;
-export const EDGE_INDEX_TYPE_MARKER = "typegraph_edge_index" as const;
-
-// ============================================================
 // Path Delimiters
 // ============================================================
 

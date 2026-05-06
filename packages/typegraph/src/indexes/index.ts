@@ -4,16 +4,34 @@
  * Type-safe index definitions + helpers for generating DDL and integrating
  * with Drizzle schema definitions.
  *
- * @example Drizzle schema integration
+ * The recommended way to attach indexes to a graph is to pass them through
+ * `defineGraph({ ..., indexes: [...] })`. They flow into
+ * `SerializedSchema.indexes` and can be materialized via the same code
+ * path as runtime-declared indexes.
+ *
+ * @example Indexes via defineGraph
  * ```ts
- * import { defineNode } from "@nicia-ai/typegraph";
- * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
- * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+ * import { defineGraph, defineNode, defineNodeIndex } from "@nicia-ai/typegraph";
  * import { z } from "zod";
  *
  * const Person = defineNode("Person", {
  *   schema: z.object({ email: z.string().email(), name: z.string() }),
  * });
+ *
+ * const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+ *
+ * const graph = defineGraph({
+ *   id: "social",
+ *   nodes: { Person: { type: Person } },
+ *   edges: {},
+ *   indexes: [personEmail],
+ * });
+ * ```
+ *
+ * @example Direct Drizzle schema integration (lower-level)
+ * ```ts
+ * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+ * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
  *
  * const personEmail = defineNodeIndex(Person, { fields: ["email"] });
  *
@@ -37,18 +55,19 @@ export {
 } from "./drizzle";
 export { toDeclaredIndex, toDeclaredIndexes } from "./profiler";
 export type {
-  EdgeIndex,
   EdgeIndexConfig,
+  EdgeIndexDeclaration,
   EdgeIndexDirection,
   EdgeIndexWhereBuilder,
+  IndexDeclaration,
+  IndexOrigin,
   IndexScope,
   IndexWhereExpression,
   IndexWhereFieldBuilder,
   IndexWhereInput,
-  NodeIndex,
   NodeIndexConfig,
+  NodeIndexDeclaration,
   NodeIndexWhereBuilder,
   SystemColumnName,
-  TypeGraphIndex,
 } from "./types";
 export { andWhere, notWhere, orWhere } from "./where";

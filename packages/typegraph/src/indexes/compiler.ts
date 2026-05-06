@@ -4,12 +4,12 @@ import { type ValueType } from "../query/ast";
 import { getDialect, type SqlDialect } from "../query/dialect";
 import { type JsonPointer, jsonPointer } from "../query/json-pointer";
 import {
-  type EdgeIndex,
+  type EdgeIndexDeclaration,
   type IndexWhereExpression,
   type IndexWhereLiteral,
   type IndexWhereOp,
   type IndexWhereOperand,
-  type NodeIndex,
+  type NodeIndexDeclaration,
   type SystemColumnName,
 } from "./types";
 
@@ -33,7 +33,7 @@ type CompiledIndexKeys = Readonly<{
 // ============================================================
 
 export function compileNodeIndexKeys(
-  index: NodeIndex,
+  index: NodeIndexDeclaration,
   dialect: SqlDialect,
   propsColumn: SQL,
   systemColumn: (column: SystemColumnName) => SQL,
@@ -66,7 +66,7 @@ export function compileNodeIndexKeys(
 }
 
 export function compileEdgeIndexKeys(
-  index: EdgeIndex,
+  index: EdgeIndexDeclaration,
   dialect: SqlDialect,
   propsColumn: SQL,
   systemColumn: (column: SystemColumnName) => SQL,
@@ -130,7 +130,7 @@ function compileIndexKeyValue(
 }
 
 function getNodeScopeColumns(
-  scope: NodeIndex["scope"],
+  scope: NodeIndexDeclaration["scope"],
 ): readonly SystemColumnName[] {
   switch (scope) {
     case "graphAndKind": {
@@ -146,8 +146,8 @@ function getNodeScopeColumns(
 }
 
 function getEdgeScopeColumns(
-  scope: EdgeIndex["scope"],
-  direction: EdgeIndex["direction"],
+  scope: EdgeIndexDeclaration["scope"],
+  direction: EdgeIndexDeclaration["direction"],
 ): readonly SystemColumnName[] {
   const base =
     scope === "graphAndKind" ? (["graph_id", "kind"] as const)
