@@ -20,6 +20,7 @@ import {
   type NodeKinds,
 } from "../core/define-graph";
 import type { NodeId } from "../core/types";
+import { ConfigurationError } from "../errors";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -30,6 +31,12 @@ import {
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
+import { type RuntimeGraphDocument } from "../runtime/document-types";
+import { mergeRuntimeExtension } from "../runtime/merge";
+import {
+  loadActiveSchemaWithBootstrap,
+  parseSerializedSchema,
+} from "../schema/manager";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
 import { createGraphAlgorithms, type GraphAlgorithms } from "./algorithms";
@@ -82,6 +89,7 @@ import {
   type QueryOptions,
   type StoreHooks,
   type StoreOptions,
+  type StoreRef,
   type TransactionContext,
 } from "./types";
 
@@ -129,6 +137,11 @@ export class Store<G extends GraphDef> {
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
   readonly #defaultTraversalExpansion: TraversalExpansion;
+  // Stored verbatim so `evolve()` can construct the next Store with
+  // identical options. Reconstructing from the individual private
+  // fields would silently drop any future StoreOptions field a
+  // maintainer adds without also threading it through evolve.
+  readonly #options: StoreOptions | undefined;
   #nodeCollections: GraphNodeCollections<G> | undefined;
   #edgeCollections: GraphEdgeCollections<G> | undefined;
   #algorithms: GraphAlgorithms<G> | undefined;
@@ -144,6 +157,7 @@ export class Store<G extends GraphDef> {
       (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
+    this.#options = options;
   }
 
   // === Accessors ===
@@ -736,6 +750,110 @@ export class Store<G extends GraphDef> {
    */
   async refreshStatistics(): Promise<void> {
     await this.#backend.refreshStatistics();
+  }
+
+  /**
+   * Evolves the graph at runtime by merging a runtime extension document
+   * into the current schema, atomically committing a new schema version,
+   * and returning a fresh `Store` constructed against the merged graph.
+   *
+   * The `Store` is immutable — its registry, collections, and operation
+   * contexts close over the graph at construction time — so callers
+   * must use the returned store (or pass a `ref` to be re-pointed) for
+   * any work involving the new kinds.
+   *
+   * **Cost is proportional to schema document size, not row count.** The
+   * commit is a single CAS write; `evolve()` never reads or scans data
+   * rows, so the runtime is independent of the table's row count.
+   *
+   * **Concurrent evolve recovery.** On `StaleVersionError`, refetch the
+   * current active schema (or dereference your `StoreRef`),
+   * reconstruct your `Store`, and re-call `evolve(extension)` against
+   * the new store. Re-validation may now surface deterministic errors
+   * (e.g., another caller just added a kind that collides with yours,
+   * or redeclared one of yours with a different shape). Don't loop
+   * blindly — surface the error.
+   *
+   * @param extension - Runtime extension document produced by
+   *   `defineRuntimeExtension(...)`.
+   * @param options.ref - Optional handle whose `current` is overwritten
+   *   atomically with the schema commit. Long-lived consumers
+   *   (request handlers, background workers) that dereference through
+   *   the ref see the new kinds on the *next* call.
+   *
+   * @throws {RuntimeExtensionValidationError} when the document is
+   *   structurally invalid.
+   * @throws {ConfigurationError} on kind-name collisions with
+   *   compile-time kinds (`RUNTIME_KIND_NAME_COLLISION`),
+   *   redefinitions of existing runtime kinds with a different shape
+   *   (`RUNTIME_KIND_REDEFINITION`), or unresolvable edge endpoints
+   *   (`RUNTIME_EXTENSION_UNRESOLVED_ENDPOINT`).
+   * @throws {StaleVersionError} when another writer has advanced the
+   *   schema since this store was constructed; recovery as above.
+   * @throws {SchemaContentConflictError} when a row already exists at
+   *   the target version with a different content hash.
+   */
+  async evolve(
+    extension: RuntimeGraphDocument,
+    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
+  ): Promise<Store<G>> {
+    const activeRow = await loadActiveSchemaWithBootstrap(
+      this.#backend,
+      this.graphId,
+    );
+    if (activeRow === undefined) {
+      throw new ConfigurationError(
+        `Cannot evolve graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
+        { code: "EVOLVE_BEFORE_INITIALIZE" },
+      );
+    }
+
+    // Catch up to the persisted state first. If another process has
+    // evolved the graph since this Store was constructed, the active
+    // row's runtimeDocument contains kinds that this.#graph doesn't —
+    // applying the new extension on top of the stale local view would
+    // make ensureSchema diff against the persisted schema and treat
+    // the missing-locally kinds as removed (a breaking-change
+    // MigrationError). Auto-merging the stored doc into the baseline
+    // makes evolve self-healing across multi-process races; the CAS
+    // guard inside commitSchemaVersion still serializes the actual
+    // commit. If the stored doc redefines a local runtime kind with a
+    // different shape, the merge throws RUNTIME_KIND_REDEFINITION
+    // here — surfacing the divergence rather than overwriting.
+    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+    const baselineGraph =
+      storedSchema.runtimeDocument === undefined ?
+        this.#graph
+      : mergeRuntimeExtension(this.#graph, storedSchema.runtimeDocument);
+    const merged = mergeRuntimeExtension(baselineGraph, extension);
+
+    // No-op evolve (extension already applied): return `this` so the
+    // agent loop's repeated `evolve(sameExt)` keeps warm registry,
+    // collection, and query caches instead of discarding them on every
+    // call. The reference comparison only holds when both merges
+    // (stored + extension) returned their input unchanged.
+    if (merged === this.#graph) {
+      if (options?.ref !== undefined) options.ref.current = this;
+      return this;
+    }
+
+    // Delegate the serialize → hash → diff → commit dance to
+    // `ensureSchema`. It already implements the same-hash short-circuit
+    // and the migrate-via-CAS commit; reusing it avoids computing
+    // serializeSchema + computeSchemaHash twice (once here, once in
+    // migrateSchema). Runtime extensions are additive only, so the
+    // diff is always backwards-compatible — autoMigrate succeeds.
+    await ensureSchemaImpl(this.#backend, merged, {
+      preloaded: { activeRow, storedSchema },
+      autoMigrate: true,
+    });
+    return this.#cloneWithGraph(merged, options?.ref);
+  }
+
+  #cloneWithGraph(graph: G, ref: StoreRef<Store<G>> | undefined): Store<G> {
+    const next = createStore(graph, this.#backend, this.#options);
+    if (ref !== undefined) ref.current = next;
+    return next;
   }
 
   /**

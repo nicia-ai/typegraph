@@ -279,6 +279,36 @@ export type StoreOptions = Readonly<{
   }>;
 }>;
 
+/**
+ * A mutable handle to the current `Store`, used by `store.evolve(...)`
+ * so long-lived consumers can dereference through the ref and pick up
+ * the new store after each evolve call. `current` is overwritten by
+ * `evolve()` atomically with the schema commit when the ref is passed
+ * via `evolve(extension, { ref })`.
+ *
+ * **Mid-request semantics.** `ref.current` flips on the *next* call
+ * after evolve, not mid-handler. Dereference once at request entry and
+ * reuse the captured `Store` for the duration:
+ *
+ * ```ts
+ * async function handleRequest(): Promise<void> {
+ *   const store = ref.current; // capture once
+ *   const tag = await store.nodes.Tag?.create({ label: "..." });
+ *   // ...further work on the same `store`...
+ * }
+ * ```
+ *
+ * Pure dereferenceable handle — no event/subscription machinery. If
+ * consumers need eventing, they wrap the ref themselves.
+ *
+ * Generic over the held value (typically `Store<G>`) so the store
+ * module can refer to it without importing the `Store` class into
+ * `types.ts`.
+ */
+export interface StoreRef<T> {
+  current: T;
+}
+
 // ============================================================
 // Get-Or-Create Types
 // ============================================================

@@ -57,16 +57,18 @@ type RuntimePropertyModifiers = Readonly<{
 /**
  * String property. Compiles to `z.string()` plus the requested refinements.
  * `format` accepts the two formats motivated by induced schemas in
- * practice — datetime strings (`z.iso.datetime()`) and URI strings
- * (`z.url()`). Other JSON-Schema formats are deliberately not supported
- * in v1.
+ * practice — covers ISO datetimes, URIs, email addresses, UUIDs, and
+ * date-only strings. Each format routes to the corresponding Zod
+ * factory (`z.iso.datetime()`, `z.url()`, `z.email()`, `z.uuid()`,
+ * `z.iso.date()`); other JSON-Schema formats are deliberately not
+ * supported in v1.
  */
 export type RuntimeStringProperty = Readonly<{
   type: "string";
   minLength?: number;
   maxLength?: number;
   pattern?: string;
-  format?: "datetime" | "uri";
+  format?: "datetime" | "uri" | "email" | "uuid" | "date";
 }> &
   RuntimePropertyModifiers;
 

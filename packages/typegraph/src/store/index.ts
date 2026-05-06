@@ -23,6 +23,7 @@ export {
   type QueryOptions,
   type StoreHooks,
   type StoreOptions,
+  type StoreRef,
   type TransactionContext,
   type TypedEdgeCollection,
   type UpdateEdgeInput,

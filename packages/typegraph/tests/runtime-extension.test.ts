@@ -196,6 +196,70 @@ describe("string property parity", () => {
     });
   });
 
+  it("format: email parses addresses and rejects non-emails", () => {
+    const handwritten = defineNode("Contact", {
+      schema: z.object({ email: z.email() }),
+    });
+    const compiled = compileSingleNode(
+      defineRuntimeExtension({
+        nodes: {
+          Contact: {
+            properties: { email: { type: "string", format: "email" } },
+          },
+        },
+      }),
+    );
+    assertParsedEqual(handwritten.schema, compiled.schema, {
+      email: "alice@example.com",
+    });
+    assertRejectedEquivalently(handwritten.schema, compiled.schema, {
+      email: "not-an-email",
+    });
+  });
+
+  it("format: uuid parses UUIDs and rejects non-UUIDs", () => {
+    const handwritten = defineNode("Resource", {
+      schema: z.object({ externalId: z.uuid() }),
+    });
+    const compiled = compileSingleNode(
+      defineRuntimeExtension({
+        nodes: {
+          Resource: {
+            properties: { externalId: { type: "string", format: "uuid" } },
+          },
+        },
+      }),
+    );
+    assertParsedEqual(handwritten.schema, compiled.schema, {
+      externalId: "550e8400-e29b-41d4-a716-446655440000",
+    });
+    assertRejectedEquivalently(handwritten.schema, compiled.schema, {
+      externalId: "not-a-uuid",
+    });
+  });
+
+  it("format: date parses date-only strings and rejects datetimes", () => {
+    const handwritten = defineNode("Birthday", {
+      schema: z.object({ on: z.iso.date() }),
+    });
+    const compiled = compileSingleNode(
+      defineRuntimeExtension({
+        nodes: {
+          Birthday: {
+            properties: { on: { type: "string", format: "date" } },
+          },
+        },
+      }),
+    );
+    assertParsedEqual(handwritten.schema, compiled.schema, {
+      on: "1990-01-15",
+    });
+    // Datetime is not a date — both sides reject identically.
+    assertRejectedEquivalently(handwritten.schema, compiled.schema, {
+      on: "1990-01-15T00:00:00.000Z",
+    });
+  });
+
   it("optional string makes the field omittable on both sides", () => {
     const handwritten = defineNode("Opt", {
       schema: z.object({ note: z.string().optional() }),
