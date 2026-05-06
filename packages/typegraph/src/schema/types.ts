@@ -570,6 +570,15 @@ export const serializedSchemaZod = z.object({
    * without breaking older readers.
    */
   runtimeDocument: runtimeGraphDocumentZod.optional(),
+  /**
+   * Names of node and edge kinds the operator has soft-deprecated via
+   * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
+   * (codegen, UI tooling, lints) can route around them. Does not affect
+   * reads, writes, or queries.
+   *
+   * Omitted when empty so legacy schemas hash byte-identically.
+   */
+  deprecatedKinds: z.array(z.string()).optional(),
 });
 
 /**
@@ -615,6 +624,14 @@ export type SerializedSchema = Readonly<{
    * — legacy schemas hash byte-identically.
    */
   runtimeDocument?: RuntimeGraphDocument;
+  /**
+   * Soft-deprecated node and edge kind names. Set by
+   * `store.deprecateKinds(...)`; cleared by `store.undeprecateKinds(...)`.
+   * Surfaces in introspection but does not affect reads, writes, or
+   * queries. Omitted entirely when empty so legacy schemas hash
+   * byte-identically.
+   */
+  deprecatedKinds?: readonly string[];
 }>;
 
 // ============================================================

@@ -35,6 +35,7 @@ export {
 // ============================================================
 
 export {
+  applyDeprecatedKinds,
   ensureSchema,
   getActiveSchema,
   getSchemaChanges,
@@ -58,6 +59,7 @@ export {
   type ChangeSeverity,
   type ChangeType,
   computeSchemaDiff,
+  type DeprecatedKindsChange,
   type EdgeChange,
   getMigrationActions,
   type IndexChange,
