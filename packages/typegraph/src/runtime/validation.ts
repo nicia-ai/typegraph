@@ -106,7 +106,13 @@ const OBJECT_REFINEMENT_KEYS = new Set([
   "description",
 ]);
 
-const SUPPORTED_STRING_FORMATS = new Set(["datetime", "uri"]);
+const SUPPORTED_STRING_FORMATS = new Set([
+  "datetime",
+  "uri",
+  "email",
+  "uuid",
+  "date",
+]);
 
 /**
  * Validates a runtime extension document.
@@ -790,7 +796,7 @@ function validateStringProperty(
     }
   }
 
-  let format: "datetime" | "uri" | undefined;
+  let format: RuntimeStringProperty["format"];
   if (raw.format !== undefined) {
     if (
       typeof raw.format !== "string" ||
@@ -802,7 +808,7 @@ function validateStringProperty(
         code: "INVALID_PROPERTY_REFINEMENT",
       });
     } else {
-      format = raw.format as "datetime" | "uri";
+      format = raw.format as RuntimeStringProperty["format"];
     }
   }
 

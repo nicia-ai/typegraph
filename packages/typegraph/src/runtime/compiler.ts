@@ -232,18 +232,31 @@ function compileProperty(property: RuntimePropertyType): ZodType {
 
 function compileStringProperty(property: RuntimeStringProperty): ZodType {
   // `searchable` and `format` are mutually exclusive (rejected by
-  // validation): the format-routed schemas (`z.iso.datetime` / `z.url`)
-  // are not z.ZodString subclasses we can chain `searchable()` through.
+  // validation): the format-routed schemas aren't `z.ZodString`
+  // subclasses we can chain `searchable()` through.
   if (property.searchable !== undefined) {
     return applyStringRefinements(searchable(property.searchable), property);
   }
-  if (property.format === "datetime") {
-    return z.iso.datetime();
+  if (property.format === undefined) {
+    return applyStringRefinements(z.string(), property);
   }
-  if (property.format === "uri") {
-    return z.url();
+  switch (property.format) {
+    case "datetime": {
+      return z.iso.datetime();
+    }
+    case "date": {
+      return z.iso.date();
+    }
+    case "uri": {
+      return z.url();
+    }
+    case "email": {
+      return z.email();
+    }
+    case "uuid": {
+      return z.uuid();
+    }
   }
-  return applyStringRefinements(z.string(), property);
 }
 
 function applyStringRefinements(

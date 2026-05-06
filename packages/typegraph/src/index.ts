@@ -295,6 +295,7 @@ export type {
   StoreHooks,
   StoreOptions,
   StoreProjection,
+  StoreRef,
   TransactionContext,
   TypedEdgeCollection,
   UpdateEdgeInput,
