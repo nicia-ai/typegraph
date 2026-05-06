@@ -482,6 +482,51 @@ type DropFulltextIndexParams = Readonly<{
 }>;
 
 // ============================================================
+// Index Materialization Status
+// ============================================================
+
+/**
+ * Per-deployment record for a single declared index.
+ *
+ * Identified by `indexName` because SQL index names are physical,
+ * database-global identifiers — `graphId` is provenance, not identity.
+ * `materializedAt` is null until the first successful CREATE INDEX
+ * completes; `lastAttemptedAt` is always set, even on failure.
+ */
+export type IndexMaterializationRow = Readonly<{
+  indexName: string;
+  graphId: string;
+  entity: "node" | "edge";
+  kind: string;
+  signature: string;
+  schemaVersion: number;
+  materializedAt: string | undefined;
+  lastAttemptedAt: string;
+  lastError: string | undefined;
+}>;
+
+/**
+ * Parameters for upserting a materialization attempt.
+ *
+ * On success: pass `materializedAt` (ISO timestamp) and undefined `error`.
+ * On failure: pass undefined `materializedAt` (preserve any existing
+ * timestamp from a prior success) and the error message.
+ */
+export type RecordIndexMaterializationParams = Readonly<{
+  indexName: string;
+  graphId: string;
+  entity: "node" | "edge";
+  kind: string;
+  signature: string;
+  schemaVersion: number;
+  attemptedAt: string;
+  /** ISO timestamp on success; undefined on failure (preserves existing). */
+  materializedAt: string | undefined;
+  /** Error message on failure; undefined on success (clears existing). */
+  error: string | undefined;
+}>;
+
+// ============================================================
 // Query Types
 // ============================================================
 
@@ -684,6 +729,23 @@ export type GraphBackend = Readonly<{
   createFulltextIndex?: (params: CreateFulltextIndexParams) => Promise<void>;
   dropFulltextIndex?: (params: DropFulltextIndexParams) => Promise<void>;
 
+  // === Index Materialization (used by store.materializeIndexes) ===
+  /**
+   * Look up a recorded materialization for a declared index by its
+   * physical SQL index name. Returns `undefined` if no row exists.
+   */
+  getIndexMaterialization?: (
+    indexName: string,
+  ) => Promise<IndexMaterializationRow | undefined>;
+  /**
+   * Upsert a materialization attempt — success or failure. Failure rows
+   * preserve any prior `materializedAt` so the historical successful
+   * timestamp survives across error windows.
+   */
+  recordIndexMaterialization?: (
+    params: RecordIndexMaterializationParams,
+  ) => Promise<void>;
+
   // === Graph Lifecycle ===
   /**
    * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
@@ -733,6 +795,19 @@ export type GraphBackend = Readonly<{
   compileSql?: (
     query: SQL,
   ) => Readonly<{ sql: string; params: readonly unknown[] }>;
+
+  /**
+   * Execute a DDL statement that returns no rows (CREATE INDEX,
+   * CREATE TABLE, ALTER TABLE, etc.). Separate from `executeRaw`
+   * because some drivers (better-sqlite3) require `.run()` for DDL
+   * and `.all()` for queries — the ambiguity can't be resolved by
+   * inspecting the SQL string portably.
+   *
+   * Postgres path can use this for `CREATE INDEX CONCURRENTLY`, which
+   * cannot run inside a transaction. Implementations must execute the
+   * statement outside `transaction(...)`.
+   */
+  executeDdl?: (ddl: string) => Promise<void>;
 
   // === Transaction ===
   transaction: <T>(

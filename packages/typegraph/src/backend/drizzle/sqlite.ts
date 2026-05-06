@@ -19,7 +19,7 @@
  * const backend = createSqliteBackend(db, { tables });
  * ```
  */
-import { getTableName, type SQL, sql } from "drizzle-orm";
+import { eq, getTableName, type SQL, sql } from "drizzle-orm";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -39,6 +39,8 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
+  type IndexMaterializationRow,
+  type RecordIndexMaterializationParams,
   type SchemaVersionRow,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
@@ -659,6 +661,69 @@ export function createSqliteBackend(
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
+    },
+
+    async executeDdl(ddl: string): Promise<void> {
+      await db.run(sql.raw(ddl));
+    },
+
+    async getIndexMaterialization(
+      indexName: string,
+    ): Promise<IndexMaterializationRow | undefined> {
+      const t = tables.indexMaterializations;
+      const rows = await db.select().from(t).where(eq(t.indexName, indexName));
+      const row = rows[0];
+      if (row === undefined) return undefined;
+      return {
+        indexName: row.indexName,
+        graphId: row.graphId,
+        entity: row.entity as "node" | "edge",
+        kind: row.kind,
+        signature: row.signature,
+        schemaVersion: row.schemaVersion,
+        materializedAt: row.materializedAt ?? undefined,
+        lastAttemptedAt: row.lastAttemptedAt,
+        lastError: row.lastError ?? undefined,
+      };
+    },
+
+    async recordIndexMaterialization(
+      params: RecordIndexMaterializationParams,
+    ): Promise<void> {
+      const t = tables.indexMaterializations;
+      // Preserve any prior successful `materializedAt` when this attempt
+      // failed (params.materializedAt === undefined). On success, the
+      // new timestamp overwrites.
+      const materializedAtSet =
+        params.materializedAt === undefined
+          ? sql`COALESCE(excluded.${sql.identifier("materialized_at")}, ${t.materializedAt})`
+          : sql`excluded.${sql.identifier("materialized_at")}`;
+      await db
+        .insert(t)
+        .values({
+          indexName: params.indexName,
+          graphId: params.graphId,
+          entity: params.entity,
+          kind: params.kind,
+          signature: params.signature,
+          schemaVersion: params.schemaVersion,
+          materializedAt: params.materializedAt,
+          lastAttemptedAt: params.attemptedAt,
+          lastError: params.error,
+        })
+        .onConflictDoUpdate({
+          target: t.indexName,
+          set: {
+            graphId: sql`excluded.${sql.identifier("graph_id")}`,
+            entity: sql`excluded.${sql.identifier("entity")}`,
+            kind: sql`excluded.${sql.identifier("kind")}`,
+            signature: sql`excluded.${sql.identifier("signature")}`,
+            schemaVersion: sql`excluded.${sql.identifier("schema_version")}`,
+            materializedAt: materializedAtSet,
+            lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
+            lastError: sql`excluded.${sql.identifier("last_error")}`,
+          },
+        });
     },
 
     async refreshStatistics(): Promise<void> {

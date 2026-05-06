@@ -42,6 +42,11 @@ export type {
 export { defineSubgraphProject } from "./subgraph";
 
 // Store
+export type {
+  MaterializeIndexesEntry,
+  MaterializeIndexesOptions,
+  MaterializeIndexesResult,
+} from "./materialize-indexes";
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
 export type { Store } from "./store";
 export { createStore, createStoreWithSchema } from "./store";

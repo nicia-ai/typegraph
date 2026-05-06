@@ -54,6 +54,7 @@ export type PostgresTableNames = Readonly<{
   schemaVersions: string;
   embeddings: string;
   fulltext: string;
+  indexMaterializations: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -73,6 +74,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   schemaVersions: "typegraph_schema_versions",
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
+  indexMaterializations: "typegraph_index_materializations",
 };
 
 /**
@@ -267,12 +269,38 @@ export function createPostgresTables(
     ],
   );
 
+  /**
+   * Per-deployment record of which declared indexes have been
+   * materialized against this database. Owned and written by
+   * `store.materializeIndexes()`. Keyed on `index_name` because SQL
+   * index names are physical, database-global identifiers — `graphId`
+   * is provenance, not identity.
+   */
+  const indexMaterializations = pgTable(
+    n.indexMaterializations,
+    {
+      indexName: text("index_name").notNull(),
+      graphId: text("graph_id").notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      signature: text("signature").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      materializedAt: timestamp("materialized_at", { withTimezone: true }),
+      lastAttemptedAt: timestamp("last_attempted_at", {
+        withTimezone: true,
+      }).notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [primaryKey({ columns: [t.indexName] })],
+  );
+
   return {
     nodes,
     edges,
     uniques,
     schemaVersions,
     embeddings,
+    indexMaterializations,
     /**
      * The fulltext storage table is owned by the active `FulltextStrategy`,
      * not Drizzle. Shapes vary across strategies — the default `tsvectorStrategy`

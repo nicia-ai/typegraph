@@ -19,6 +19,14 @@ export type GenerateIndexDdlOptions = Readonly<{
   nodesTableName?: string | undefined;
   edgesTableName?: string | undefined;
   ifNotExists?: boolean | undefined;
+  /**
+   * Emit `CREATE INDEX CONCURRENTLY` (Postgres only). Required for
+   * `store.materializeIndexes()` so live tables don't take an
+   * `AccessExclusiveLock`. Ignored on SQLite (no equivalent; SQLite is
+   * single-writer regardless). When true on Postgres, the resulting
+   * statement cannot be executed inside a transaction.
+   */
+  concurrent?: boolean | undefined;
 }>;
 
 /**
@@ -86,11 +94,15 @@ function generateTableIndexDDL(
 
   const keySql = keys.map((k) => sqlToInlineString(k, dialect)).join(", ");
   const unique = index.unique ? "UNIQUE " : "";
+  const concurrent =
+    options.concurrent === true && dialect === "postgres" ?
+      "CONCURRENTLY "
+    : "";
   const ifNotExistsSql = ifNotExists ? "IF NOT EXISTS " : "";
 
   const whereClause = whereSql ? ` WHERE ${whereSql}` : "";
 
-  return `CREATE ${unique}INDEX ${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} (${keySql})${whereClause};`;
+  return `CREATE ${unique}INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} (${keySql})${whereClause};`;
 }
 
 function quoteIdentifier(identifier: string): string {
