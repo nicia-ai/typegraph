@@ -22,6 +22,11 @@
  * ```
  */
 
+// Type-only import: `materialize-indexes.ts` value-imports
+// `ConfigurationError` from this file, but type-only imports are erased
+// at runtime so this back-edge does not create a value cycle.
+import type { MaterializeIndexesResult } from "../store/materialize-indexes";
+
 // ============================================================
 // Types
 // ============================================================
@@ -574,6 +579,77 @@ export class MigrationError extends TypeGraphError {
     });
     this.name = "MigrationError";
   }
+}
+
+/**
+ * Thrown by `Store.evolve(extension, { eager: true })` when the schema
+ * commit succeeded but the follow-on `materializeIndexes()` produced
+ * one or more failed entries.
+ *
+ * Recovery: the schema commit is NOT rolled back. The new `Store` is
+ * fully constructed and (when `options.ref` was supplied) `ref.current`
+ * already points to it — the caller can read the new store via the ref
+ * and decide how to handle the failed indexes (retry, skip, alert).
+ * The full `MaterializeIndexesResult` is attached as `.materialization`.
+ *
+ * @example
+ * ```ts
+ * const ref = { current: store };
+ * try {
+ *   await store.evolve(extension, { ref, eager: true });
+ * } catch (error) {
+ *   if (error instanceof EagerMaterializationError) {
+ *     // schema is committed; ref.current is the new store
+ *     log.warn(
+ *       { failed: error.failedIndexNames },
+ *       "indexes did not materialize; will retry",
+ *     );
+ *     await ref.current.materializeIndexes();
+ *   } else {
+ *     throw error;
+ *   }
+ * }
+ * ```
+ */
+export class EagerMaterializationError extends TypeGraphError {
+  /**
+   * The full materialization result, including successful and failed
+   * entries. Same shape as `Store.materializeIndexes()` returns.
+   */
+  readonly materialization: MaterializeIndexesResult;
+
+  constructor(materialization: MaterializeIndexesResult, graphId: string) {
+    const names = collectFailedIndexNames(materialization);
+    super(
+      `Eager materialization failed for ${names.length} index(es) on graph "${graphId}": ${names.join(", ")}. The schema commit succeeded; the new Store is available via the ref handle (when supplied) and the failed indexes can be retried via store.materializeIndexes().`,
+      "EAGER_MATERIALIZATION_FAILED",
+      {
+        details: { graphId, failedIndexNames: names },
+        category: "system",
+        suggestion: `Inspect error.materialization for per-index errors. Each failure preserves any prior successful materialization timestamp; the schema is committed regardless.`,
+      },
+    );
+    this.name = "EagerMaterializationError";
+    this.materialization = materialization;
+  }
+
+  /**
+   * Names of just the indexes that failed — derived from
+   * `materialization.results` so the two views can never disagree.
+   */
+  get failedIndexNames(): readonly string[] {
+    return collectFailedIndexNames(this.materialization);
+  }
+}
+
+function collectFailedIndexNames(
+  materialization: MaterializeIndexesResult,
+): readonly string[] {
+  const names: string[] = [];
+  for (const entry of materialization.results) {
+    if (entry.status === "failed") names.push(entry.indexName);
+  }
+  return names;
 }
 
 /**

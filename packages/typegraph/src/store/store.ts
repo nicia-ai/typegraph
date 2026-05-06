@@ -20,7 +20,7 @@ import {
   type NodeKinds,
 } from "../core/define-graph";
 import type { NodeId } from "../core/types";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, EagerMaterializationError } from "../errors";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -812,7 +812,21 @@ export class Store<G extends GraphDef> {
    */
   async evolve(
     extension: RuntimeGraphDocument,
-    options?: Readonly<{ ref?: StoreRef<Store<G>> }>,
+    options?: Readonly<{
+      ref?: StoreRef<Store<G>>;
+      /**
+       * After the schema commit succeeds, automatically run
+       * `materializeIndexes()` on the new Store. The schema-version
+       * write is NOT rolled back if materialization produces failed
+       * entries — failure surfaces as `EagerMaterializationError` thrown
+       * AFTER the new Store is constructed and `ref.current` is updated,
+       * so the caller can recover via the ref handle.
+       *
+       * Pass `true` for default behavior (all declared indexes,
+       * best-effort) or an options object for finer control.
+       */
+      eager?: boolean | MaterializeIndexesOptions;
+    }>,
   ): Promise<Store<G>> {
     const activeRow = await loadActiveSchemaWithBootstrap(
       this.#backend,
@@ -840,13 +854,19 @@ export class Store<G extends GraphDef> {
     const baselineGraph = this.#catchUpToStored(storedSchema);
     const merged = mergeRuntimeExtension(baselineGraph, extension);
 
-    // No-op evolve (extension already applied): return `this` so the
+    // No-op evolve (extension already applied): reuse `this` so the
     // agent loop's repeated `evolve(sameExt)` keeps warm registry,
     // collection, and query caches instead of discarding them on every
     // call. The reference comparison only holds when both merges
-    // (stored + extension) returned their input unchanged.
+    // (stored + extension) returned their input unchanged. Eager still
+    // runs because the contract is "schema committed AND indexes
+    // materialized" — the local DB may have unmaterialized indexes
+    // even when the local graph hasn't changed (restart-parity flow,
+    // prior failed materialize). `materializeIndexes` is idempotent
+    // so the verification is cheap.
     if (merged === this.#graph) {
       if (options?.ref !== undefined) options.ref.current = this;
+      if (options?.eager) await this.#runEagerOrThrow(this, options.eager);
       return this;
     }
 
@@ -860,7 +880,19 @@ export class Store<G extends GraphDef> {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
     });
-    return this.#cloneWithGraph(merged, options?.ref);
+    const evolved = this.#cloneWithGraph(merged, options?.ref);
+    if (options?.eager) await this.#runEagerOrThrow(evolved, options.eager);
+    return evolved;
+  }
+
+  async #runEagerOrThrow(
+    store: Store<G>,
+    eager: true | MaterializeIndexesOptions,
+  ): Promise<void> {
+    const result = await store.materializeIndexes(eager === true ? {} : eager);
+    if (result.results.some((entry) => entry.status === "failed")) {
+      throw new EagerMaterializationError(result, this.graphId);
+    }
   }
 
   /**

@@ -198,6 +198,7 @@ export {
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
+  EagerMaterializationError,
   EdgeNotFoundError,
   EndpointError,
   EndpointNotFoundError,
