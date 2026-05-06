@@ -13,6 +13,7 @@ import {
 } from "../core/define-graph";
 import {
   type EdgeRegistration,
+  type KindAnnotations,
   type NodeRegistration,
   type UniqueConstraint,
 } from "../core/types";
@@ -97,6 +98,21 @@ function serializeDeprecatedKinds(
 ): readonly string[] | undefined {
   if (set === undefined || set.size === 0) return undefined;
   return [...set].toSorted();
+}
+
+/**
+ * Annotations are omitted from the canonical form when absent OR
+ * empty (`{}`). Mirrors the omit-when-empty rule applied to
+ * `indexes` and `deprecatedKinds` so that legacy graphs without
+ * annotations and graphs declaring `annotations: {}` hash
+ * byte-identically.
+ */
+function canonicalAnnotations(
+  annotations: KindAnnotations | undefined,
+): KindAnnotations | undefined {
+  if (annotations === undefined) return undefined;
+  if (Object.keys(annotations).length === 0) return undefined;
+  return annotations;
 }
 
 // ============================================================
@@ -208,6 +224,7 @@ function serializeNodes<G extends GraphDef>(
  */
 function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
   const node = registration.type;
+  const annotations = canonicalAnnotations(node.annotations);
 
   return {
     kind: node.kind,
@@ -215,9 +232,7 @@ function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
     uniqueConstraints: serializeUniqueConstraints(registration.unique ?? []),
     onDelete: registration.onDelete ?? "restrict",
     description: node.description,
-    ...(node.annotations === undefined ?
-      {}
-    : { annotations: node.annotations }),
+    ...(annotations === undefined ? {} : { annotations }),
   };
 }
 
@@ -364,6 +379,7 @@ function serializeEdges<G extends GraphDef>(
  */
 function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
   const edge = registration.type;
+  const annotations = canonicalAnnotations(edge.annotations);
 
   return {
     kind: edge.kind,
@@ -373,9 +389,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     cardinality: registration.cardinality ?? "many",
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     description: edge.description,
-    ...(edge.annotations === undefined ?
-      {}
-    : { annotations: edge.annotations }),
+    ...(annotations === undefined ? {} : { annotations }),
   };
 }
 

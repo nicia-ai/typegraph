@@ -731,6 +731,23 @@ export type GraphBackend = Readonly<{
 
   // === Index Materialization (used by store.materializeIndexes) ===
   /**
+   * Idempotently ensure ONLY the `typegraph_index_materializations`
+   * table exists — separate from `bootstrapTables` so that
+   * `materializeIndexes` doesn't pull in the full base-table DDL set
+   * just to access the status table.
+   *
+   * Why focused: `bootstrapTables` issues 20+ `CREATE TABLE / CREATE
+   * INDEX IF NOT EXISTS` statements covering every base table. Two
+   * concurrent calls (e.g. two replicas of the same `schema_doc` both
+   * starting up and calling `materializeIndexes`) race on
+   * Postgres SHARE locks and DEADLOCK. Restricting the ensure-step to
+   * the single status table eliminates the cross-table race entirely
+   * — concurrent `CREATE TABLE IF NOT EXISTS` for one specific table
+   * is well-behaved on Postgres.
+   */
+  ensureIndexMaterializationsTable?: () => Promise<void>;
+
+  /**
    * Look up a recorded materialization for a declared index by its
    * physical SQL index name. Returns `undefined` if no row exists.
    */

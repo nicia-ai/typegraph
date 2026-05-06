@@ -59,7 +59,7 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
-import { generatePostgresDDL } from "./ddl";
+import { generatePgCreateTableSQL, generatePostgresDDL } from "./ddl";
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
@@ -378,6 +378,12 @@ export function createPostgresBackend(
 
     async executeDdl(ddl: string): Promise<void> {
       await db.execute(sql.raw(ddl));
+    },
+
+    async ensureIndexMaterializationsTable(): Promise<void> {
+      await db.execute(
+        sql.raw(generatePgCreateTableSQL(tables.indexMaterializations)),
+      );
     },
 
     async getIndexMaterialization(

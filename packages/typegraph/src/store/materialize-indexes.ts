@@ -89,10 +89,19 @@ export async function materializeIndexes(
     );
   }
 
-  // Ensure the status table exists for legacy DBs whose base tables
-  // were created before this library version added the new slot.
-  // Idempotent on fresh DBs (CREATE TABLE IF NOT EXISTS).
-  await backend.bootstrapTables?.();
+  // Ensure ONLY the materializations status table exists for legacy
+  // DBs whose base tables predate this slot. Deliberately scoped to
+  // one table — `bootstrapTables` issues 20+ CREATE TABLE / CREATE
+  // INDEX statements covering every base table, and two concurrent
+  // calls (e.g. two replicas starting up and calling
+  // `materializeIndexes`) deadlock on Postgres SHARE locks.
+  // `ensureIndexMaterializationsTable` is the focused alternative
+  // that the bundled backends provide; legacy custom backends without
+  // it fall back to `bootstrapTables` (retains the deadlock risk under
+  // concurrent callers but preserves backward compatibility).
+  await (backend.ensureIndexMaterializationsTable === undefined ?
+    backend.bootstrapTables?.()
+  : backend.ensureIndexMaterializationsTable());
 
   const declared = graph.indexes ?? [];
   const kindFilter =
