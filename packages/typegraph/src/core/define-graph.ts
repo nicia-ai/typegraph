@@ -1,6 +1,7 @@
 import { ConfigurationError } from "../errors/index";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
+import { type RuntimeGraphDocument } from "../runtime/document-types";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -226,6 +227,15 @@ export type GraphDef<
    * that an absent slice doesn't.
    */
   indexes: readonly IndexDeclaration[] | undefined;
+  /**
+   * Runtime extension document this graph was merged with, if any. Set
+   * by `mergeRuntimeExtension`; never set by `defineGraph` directly.
+   * Exists solely so re-serialization is stable — the rest of the
+   * system reads the merged kinds through `nodes` / `edges` /
+   * `ontology` and never inspects this field. Absent on graphs that
+   * have never been runtime-extended; legacy graphs hash byte-identically.
+   */
+  runtimeDocument: RuntimeGraphDocument | undefined;
 }>;
 
 // ============================================================
@@ -336,6 +346,7 @@ export function defineGraph<
     ontology: config.ontology ?? ([] as unknown as TOntology),
     defaults,
     indexes,
+    runtimeDocument: undefined,
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
 }
 

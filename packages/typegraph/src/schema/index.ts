@@ -40,8 +40,11 @@ export {
   getSchemaChanges,
   initializeSchema,
   isSchemaInitialized,
+  loadActiveSchemaWithBootstrap,
+  loadAndMergeRuntimeDocument,
   migrateSchema,
   type MigrationHookContext,
+  parseSerializedSchema,
   rollbackSchema,
   type SchemaManagerOptions,
   type SchemaValidationResult,
@@ -61,6 +64,7 @@ export {
   isBackwardsCompatible,
   type NodeChange,
   type OntologyChange,
+  type RuntimeDocumentChange,
   type SchemaDiff,
 } from "./migration";
 

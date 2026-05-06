@@ -923,6 +923,7 @@ export type {
 
 import {
   ensureSchema as ensureSchemaImpl,
+  loadAndMergeRuntimeDocument,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
@@ -960,7 +961,22 @@ export async function createStoreWithSchema<G extends GraphDef>(
   backend: GraphBackend,
   options?: StoreOptions & SchemaManagerOptions,
 ): Promise<[Store<G>, SchemaValidationResult]> {
-  const store = createStore(graph, backend, options);
-  const result = await ensureSchemaImpl(backend, graph, options);
+  // Fold any persisted runtime extension document into the graph
+  // BEFORE constructing the Store. The prefetched row + parsed schema
+  // thread through to ensureSchema so each Store boot pays for one DB
+  // round trip and one Zod parse, not two. Additional runtime kinds
+  // are reachable through the registry but invisible to the type
+  // system — see `mergeRuntimeExtension`.
+  const {
+    graph: merged,
+    activeRow,
+    storedSchema,
+  } = await loadAndMergeRuntimeDocument(backend, graph);
+
+  const store = createStore(merged, backend, options);
+  const result = await ensureSchemaImpl(backend, merged, {
+    ...options,
+    preloaded: { activeRow, storedSchema },
+  });
   return [store, result];
 }

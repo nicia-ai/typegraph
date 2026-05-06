@@ -457,6 +457,7 @@ export type {
 export {
   compileRuntimeExtension,
   defineRuntimeExtension,
+  mergeRuntimeExtension,
   RuntimeExtensionValidationError,
   validateRuntimeExtension,
 } from "./runtime";
