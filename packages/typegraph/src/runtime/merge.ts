@@ -216,7 +216,14 @@ function unionDocuments(
       undefined
     : dedupRelations([...(existing.ontology ?? []), ...(next.ontology ?? [])]);
 
+  // Both inputs come through the validator, so `version` is always
+  // populated. Forward it on the merged document so the canonical-form
+  // hash agrees between the first-evolve fast path (which returns
+  // `next` directly) and this re-merge path.
+  const version = next.version ?? existing.version;
+
   return Object.freeze({
+    ...(version === undefined ? {} : { version }),
     ...(nodes === undefined ? {} : { nodes }),
     ...(edges === undefined ? {} : { edges }),
     ...(ontology === undefined ? {} : { ontology }),

@@ -14,24 +14,27 @@ export {
 } from "./compiler";
 
 // Document type surface
-export type {
-  RuntimeArrayItemType,
-  RuntimeArrayProperty,
-  RuntimeBooleanProperty,
-  RuntimeEdgeDocument,
-  RuntimeEmbeddingModifier,
-  RuntimeEnumProperty,
-  RuntimeGraphDocument,
-  RuntimeNodeDocument,
-  RuntimeNumberProperty,
-  RuntimeObjectFieldProperty,
-  RuntimeObjectProperty,
-  RuntimeOntologyRelation,
-  RuntimePropertyType,
-  RuntimeSearchableModifier,
-  RuntimeStringProperty,
-  RuntimeUniqueConstraint,
-  RuntimeUniqueWhere,
+export {
+  CURRENT_RUNTIME_DOCUMENT_VERSION,
+  LEGACY_RUNTIME_DOCUMENT_VERSION,
+  type RuntimeArrayItemType,
+  type RuntimeArrayProperty,
+  type RuntimeBooleanProperty,
+  type RuntimeDocumentVersion,
+  type RuntimeEdgeDocument,
+  type RuntimeEmbeddingModifier,
+  type RuntimeEnumProperty,
+  type RuntimeGraphDocument,
+  type RuntimeNodeDocument,
+  type RuntimeNumberProperty,
+  type RuntimeObjectFieldProperty,
+  type RuntimeObjectProperty,
+  type RuntimeOntologyRelation,
+  type RuntimePropertyType,
+  type RuntimeSearchableModifier,
+  type RuntimeStringProperty,
+  type RuntimeUniqueConstraint,
+  type RuntimeUniqueWhere,
 } from "./document-types";
 
 // Errors

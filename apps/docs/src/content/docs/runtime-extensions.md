@@ -98,6 +98,47 @@ A complete runnable version is in [`examples/16-runtime-extensions.ts`](https://
 kinds. The document is JSON-serializable — that's load-bearing for
 durability (see [Restart parity](#restart-parity-the-load-bearing-invariant)).
 
+### Document format versioning
+
+Every document carries a `version` field (currently `1`). The validator
+stamps the version automatically when you call
+`defineRuntimeExtension`, so consumer code never has to set it
+explicitly. Stored documents from before this field existed are
+treated as `version: 1` (the legacy default).
+
+The forward-compat policy:
+
+- **Additive minor changes** (new optional property modifier, new
+  `format` value, new top-level slice within the same major) ride
+  forward without bumping `version`. The validator does not reject
+  unknown top-level keys, and the persistence-side zod is `.loose()`
+  on every nested object — an older runtime reading a newer document
+  silently ignores unknown fields and continues working.
+- **Breaking changes** bump `version` to a higher major. An older
+  runtime reading a higher-version document fails with
+  `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` and an actionable error
+  pointing the operator at upgrading the library — there is no
+  automatic downgrade path. The current major is exported as
+  `CURRENT_RUNTIME_DOCUMENT_VERSION` for tooling that wants to
+  pre-flight check.
+- **Legacy documents** (committed before `version` existed) and
+  documents that explicitly omit `version` are interpreted as
+  `LEGACY_RUNTIME_DOCUMENT_VERSION`, pinned permanently to `1`. This
+  is deliberately distinct from `CURRENT`: when a future v2 ships,
+  legacy v1 documents continue parsing as v1 (so the version-mismatch
+  path can route them through migration) rather than being silently
+  re-classified as v2 by a default-equals-current rule.
+
+```ts
+import {
+  CURRENT_RUNTIME_DOCUMENT_VERSION,
+  LEGACY_RUNTIME_DOCUMENT_VERSION,
+} from "@nicia-ai/typegraph";
+
+console.log(CURRENT_RUNTIME_DOCUMENT_VERSION); // 1 (today; bumps with breaking changes)
+console.log(LEGACY_RUNTIME_DOCUMENT_VERSION);  // 1 (always; the pre-versioning default)
+```
+
 ### Property types (the v1 subset)
 
 The following types are supported. The set is deliberately small so that

@@ -220,4 +220,46 @@ describe("runtime document persistence — loader rewire", () => {
     expect(restoredResult.status).toBe("unchanged");
     expect(restored.registry.hasNodeType("Person")).toBe(true);
   });
+
+  it("loads a persisted runtimeDocument that was committed before the version field existed", async () => {
+    // Back-compat regression: a runtimeDocument committed by an older
+    // library version has no `version` field. The loader must treat
+    // it as version 1 (the current major) and reconstruct the merged
+    // graph without throwing.
+    const backend = createTestBackend();
+    const [, initial] = await createStoreWithSchema(baseGraph, backend);
+    expect(initial.status).toBe("initialized");
+
+    const merged = mergeRuntimeExtension(
+      baseGraph,
+      defineRuntimeExtension({
+        nodes: { Tag: { properties: { name: { type: "string" } } } },
+      }),
+    );
+    // Strip `version` from the runtimeDocument to simulate a pre-versioning
+    // stored document.
+    const evolvedSchema = serializeSchema(merged, 2);
+    const { version: _stripVersion, ...legacyRuntimeDocument } =
+      evolvedSchema.runtimeDocument!;
+    const legacyEvolvedSchema = {
+      ...evolvedSchema,
+      runtimeDocument: legacyRuntimeDocument,
+    };
+    const legacyHash = await computeSchemaHash(legacyEvolvedSchema);
+    await backend.commitSchemaVersion({
+      graphId: baseGraph.id,
+      expected: { kind: "active", version: 1 },
+      version: 2,
+      schemaHash: legacyHash,
+      schemaDoc: legacyEvolvedSchema,
+    });
+
+    // Loader must accept the version-less document.
+    const [restored, restoredResult] = await createStoreWithSchema(
+      baseGraph,
+      backend,
+    );
+    expect(restoredResult.status).toBe("unchanged");
+    expect(restored.registry.hasNodeType("Tag")).toBe(true);
+  });
 });

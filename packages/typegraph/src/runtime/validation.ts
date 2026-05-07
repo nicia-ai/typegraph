@@ -16,8 +16,11 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
 import { err, ok, type Result } from "../utils/result";
 import {
+  CURRENT_RUNTIME_DOCUMENT_VERSION,
+  LEGACY_RUNTIME_DOCUMENT_VERSION,
   type RuntimeArrayProperty,
   type RuntimeBooleanProperty,
+  type RuntimeDocumentVersion,
   type RuntimeEdgeDocument,
   type RuntimeEnumProperty,
   type RuntimeGraphDocument,
@@ -48,63 +51,12 @@ const SUPPORTED_PROPERTY_TYPES = new Set([
   "object",
 ]);
 
-const STRING_REFINEMENT_KEYS = new Set([
-  "type",
-  "minLength",
-  "maxLength",
-  "pattern",
-  "format",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
-
-const NUMBER_REFINEMENT_KEYS = new Set([
-  "type",
-  "min",
-  "max",
-  "int",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
-
-const BOOLEAN_REFINEMENT_KEYS = new Set([
-  "type",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
-
-const ENUM_REFINEMENT_KEYS = new Set([
-  "type",
-  "values",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
-
-const ARRAY_REFINEMENT_KEYS = new Set([
-  "type",
-  "items",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
-
-const OBJECT_REFINEMENT_KEYS = new Set([
-  "type",
-  "properties",
-  "optional",
-  "searchable",
-  "embedding",
-  "description",
-]);
+// Per-property-type refinement-key sets were removed in the
+// forward-compat pass — see the `rejectUnknownRefinements` removal
+// docstring near the bottom of this file. Recognized refinements are
+// still defined inline by the per-type validators that read them
+// (e.g. `minLength` in `validateStringProperty`); unknown keys are
+// silently passed through.
 
 const SUPPORTED_STRING_FORMATS = new Set([
   "datetime",
@@ -138,16 +90,17 @@ export function validateRuntimeExtension(
 
   const documentRecord = input;
 
-  const allowedTopLevelKeys = new Set(["nodes", "edges", "ontology"]);
-  for (const key of Object.keys(documentRecord)) {
-    if (!allowedTopLevelKeys.has(key)) {
-      issues.push({
-        path: `/${escapePointerSegment(key)}`,
-        message: `Unknown top-level key "${key}". Allowed keys: nodes, edges, ontology.`,
-        code: "INVALID_DOCUMENT_SHAPE",
-      });
-    }
-  }
+  // Forward-compat: unknown top-level keys are intentionally NOT
+  // rejected. The persistence-side zod schema is `.loose()` on every
+  // nested object, and the documented format-versioning policy
+  // promises that additive minor changes (a new top-level slice in
+  // a future v1.x.y) ride forward without bumping the major. A strict
+  // check here would defeat that promise — an older v1 runtime
+  // reading a document committed by a newer v1 writer would reject
+  // perfectly-valid additive fields. Typos in consumer code are
+  // caught by TypeScript at the `defineRuntimeExtension` call site,
+  // which is where they originate.
+  const version = validateVersion(documentRecord.version, issues);
 
   const nodes = validateNodesSection(documentRecord.nodes, issues);
   const edges = validateEdgesSection(documentRecord.edges, issues);
@@ -166,7 +119,47 @@ export function validateRuntimeExtension(
     return err(new RuntimeExtensionValidationError(issues));
   }
 
-  return ok(freezeDocument({ nodes, edges, ontology }));
+  return ok(freezeDocument({ version, nodes, edges, ontology }));
+}
+
+/**
+ * Validates the `version` field against the current supported major.
+ *
+ * Absent → treated as `LEGACY_RUNTIME_DOCUMENT_VERSION` (a stable `1`)
+ * for back-compat with documents persisted before the field existed.
+ * Splitting this from `CURRENT` is load-bearing for future major
+ * bumps: when v2 ships, a stored v1 document still parses as v1.
+ * Equal to current → accepted. Higher major → rejected with
+ * `RUNTIME_EXTENSION_VERSION_UNSUPPORTED`. Non-integer / non-positive
+ * → rejected with `INVALID_DOCUMENT_SHAPE`.
+ *
+ * Returns the resolved version. The frozen output document carries
+ * this value verbatim — the serializer applies the omit-when-default
+ * canonical-form rule against `LEGACY_RUNTIME_DOCUMENT_VERSION` so
+ * stored documents from any era hash byte-identically.
+ */
+function validateVersion(
+  raw: unknown,
+  issues: RuntimeExtensionIssue[],
+): RuntimeDocumentVersion {
+  if (raw === undefined) return LEGACY_RUNTIME_DOCUMENT_VERSION;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    issues.push({
+      path: "/version",
+      message: `Document version must be a positive integer; received ${JSON.stringify(raw)}.`,
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return LEGACY_RUNTIME_DOCUMENT_VERSION;
+  }
+  if (raw > CURRENT_RUNTIME_DOCUMENT_VERSION) {
+    issues.push({
+      path: "/version",
+      message: `Document was authored against runtimeDocument version ${raw} but this library only supports up to version ${CURRENT_RUNTIME_DOCUMENT_VERSION}. Upgrade @nicia-ai/typegraph.`,
+      code: "RUNTIME_EXTENSION_VERSION_UNSUPPORTED",
+    });
+    return LEGACY_RUNTIME_DOCUMENT_VERSION;
+  }
+  return raw;
 }
 
 // ============================================================
@@ -744,8 +737,8 @@ function validateStringProperty(
   path: string,
   issues: RuntimeExtensionIssue[],
 ): RuntimeStringProperty | undefined {
-  rejectUnknownRefinements(raw, STRING_REFINEMENT_KEYS, path, "string", issues);
-
+  // Forward-compat: unknown refinement keys are silently accepted.
+  // See `rejectUnknownRefinements` removal docstring for details.
   const minLength = validateNonNegativeInteger(
     raw.minLength,
     `${path}/minLength`,
@@ -798,18 +791,24 @@ function validateStringProperty(
 
   let format: RuntimeStringProperty["format"];
   if (raw.format !== undefined) {
-    if (
-      typeof raw.format !== "string" ||
-      !SUPPORTED_STRING_FORMATS.has(raw.format)
-    ) {
+    // Forward-compat: a future v1.x.y may introduce new format
+    // identifiers (e.g. `"uri-reference"`). Older runtimes accept
+    // them silently and compile to a plain string schema — the
+    // newer format's behavior simply isn't applied. Non-string
+    // `format` values (number, object, etc.) are still rejected
+    // because they're structurally invalid, not future-additive.
+    if (typeof raw.format !== "string") {
       issues.push({
         path: `${path}/format`,
-        message: `Unsupported string format ${describeUnknownValue(raw.format)}. Supported: ${[...SUPPORTED_STRING_FORMATS].join(", ")}.`,
+        message: `String format must be a string; received ${describeUnknownValue(raw.format)}.`,
         code: "INVALID_PROPERTY_REFINEMENT",
       });
-    } else {
+    } else if (SUPPORTED_STRING_FORMATS.has(raw.format)) {
       format = raw.format as RuntimeStringProperty["format"];
     }
+    // Unknown string format → silently dropped from the compiled
+    // schema. The compiler builds a plain `z.string()` for this
+    // field. See format-versioning policy for rationale.
   }
 
   const modifiers = validatePropertyModifiers(raw, path, "string", issues);
@@ -858,8 +857,7 @@ function validateNumberProperty(
   path: string,
   issues: RuntimeExtensionIssue[],
 ): RuntimeNumberProperty | undefined {
-  rejectUnknownRefinements(raw, NUMBER_REFINEMENT_KEYS, path, "number", issues);
-
+  // Forward-compat: unknown refinement keys are silently accepted.
   let min: number | undefined;
   let max: number | undefined;
   if (raw.min !== undefined) {
@@ -944,13 +942,7 @@ function validateBooleanProperty(
   path: string,
   issues: RuntimeExtensionIssue[],
 ): RuntimeBooleanProperty | undefined {
-  rejectUnknownRefinements(
-    raw,
-    BOOLEAN_REFINEMENT_KEYS,
-    path,
-    "boolean",
-    issues,
-  );
+  // Forward-compat: unknown refinement keys are silently accepted.
   const modifiers = validatePropertyModifiers(raw, path, "boolean", issues);
   if (modifiers === undefined) return undefined;
   return compactUndefined<RuntimeBooleanProperty>({
@@ -967,8 +959,7 @@ function validateEnumProperty(
   path: string,
   issues: RuntimeExtensionIssue[],
 ): RuntimeEnumProperty | undefined {
-  rejectUnknownRefinements(raw, ENUM_REFINEMENT_KEYS, path, "enum", issues);
-
+  // Forward-compat: unknown refinement keys are silently accepted.
   const valuesRaw = raw.values;
   if (!Array.isArray(valuesRaw) || valuesRaw.length === 0) {
     issues.push({
@@ -1021,8 +1012,7 @@ function validateArrayProperty(
   depth: number,
   issues: RuntimeExtensionIssue[],
 ): RuntimeArrayProperty | undefined {
-  rejectUnknownRefinements(raw, ARRAY_REFINEMENT_KEYS, path, "array", issues);
-
+  // Forward-compat: unknown refinement keys are silently accepted.
   const itemsRaw = raw.items;
   if (itemsRaw === undefined) {
     issues.push({
@@ -1076,8 +1066,7 @@ function validateObjectProperty(
   depth: number,
   issues: RuntimeExtensionIssue[],
 ): RuntimeObjectProperty | undefined {
-  rejectUnknownRefinements(raw, OBJECT_REFINEMENT_KEYS, path, "object", issues);
-
+  // Forward-compat: unknown refinement keys are silently accepted.
   if (depth >= 1) {
     issues.push({
       path,
@@ -1566,23 +1555,20 @@ function validateAnnotations(
 // Helpers
 // ============================================================
 
-function rejectUnknownRefinements(
-  raw: Record<string, unknown>,
-  allowed: ReadonlySet<string>,
-  path: string,
-  propertyType: RuntimePropertyType["type"],
-  issues: RuntimeExtensionIssue[],
-): void {
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      issues.push({
-        path: `${path}/${escapePointerSegment(key)}`,
-        message: `Refinement "${key}" is not supported on ${propertyType} properties.`,
-        code: "INVALID_PROPERTY_REFINEMENT",
-      });
-    }
-  }
-}
+// `rejectUnknownRefinements` was removed to match the documented
+// format-versioning policy: additive minor changes (new optional
+// property modifiers in a future v1.x.y) ride forward. Older runtimes
+// silently ignore unknown refinement keys — the older compiler builds
+// a Zod schema from the refinements it recognizes, and the new
+// modifier's behavior simply isn't applied. Rejecting unknown keys
+// here would have made forward-compat impossible.
+//
+// Trade-off: typos (`displayName` instead of `description`) will not
+// be caught at the validator boundary anymore. They're caught at the
+// `defineRuntimeExtension` call site by TypeScript when the consumer
+// uses the typed API; only untyped JSON-shaped input slips through.
+// `RuntimePropertyType` is exported so consumers writing runtime-shape
+// generators can add their own strict-key check if needed.
 
 function validateNonNegativeInteger(
   value: unknown,
@@ -1666,16 +1652,19 @@ function escapePointerSegment(segment: string): string {
 // ============================================================
 
 function freezeDocument(input: {
+  version: RuntimeDocumentVersion;
   nodes: Record<string, RuntimeNodeDocument> | undefined;
   edges: Record<string, RuntimeEdgeDocument> | undefined;
   ontology: readonly RuntimeOntologyRelation[] | undefined;
 }): RuntimeGraphDocument {
   return Object.freeze(
     compactUndefined<{
+      version: RuntimeDocumentVersion;
       nodes?: Record<string, RuntimeNodeDocument>;
       edges?: Record<string, RuntimeEdgeDocument>;
       ontology?: readonly RuntimeOntologyRelation[];
     }>({
+      version: input.version,
       nodes: input.nodes === undefined ? undefined : freezeDeep(input.nodes),
       edges: input.edges === undefined ? undefined : freezeDeep(input.edges),
       ontology:

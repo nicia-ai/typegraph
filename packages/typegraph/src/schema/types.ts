@@ -261,6 +261,11 @@ const runtimeOntologyRelationZod = z
 
 const runtimeGraphDocumentZod = z
   .object({
+    // Version is parsed loosely here so the persistence boundary
+    // never rejects a stored document — the runtime validator owns
+    // the version check and produces actionable errors. Documents
+    // that pre-date the field round-trip as `version: undefined`.
+    version: z.number().optional(),
     nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
     edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
     ontology: z.array(runtimeOntologyRelationZod).optional(),

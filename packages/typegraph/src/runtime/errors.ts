@@ -61,7 +61,8 @@ export type RuntimeExtensionIssueCode =
   | "ONTOLOGY_CYCLE"
   | "ONTOLOGY_SELF_LOOP"
   | "DUPLICATE_ONTOLOGY_RELATION"
-  | "INVALID_DOCUMENT_SHAPE";
+  | "INVALID_DOCUMENT_SHAPE"
+  | "RUNTIME_EXTENSION_VERSION_UNSUPPORTED";
 
 /**
  * Thrown when `defineRuntimeExtension(...)` rejects an input document.
