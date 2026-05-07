@@ -266,6 +266,76 @@ export type EdgeIndexDeclaration = IndexDeclarationBase &
   }>;
 
 /**
+ * Distance metric for vector similarity. Mirrors `EmbeddingMetric` from
+ * `core/embedding.ts` (re-exported here as part of the index surface).
+ */
+export type VectorIndexMetric = "cosine" | "l2" | "inner_product";
+
+/**
+ * Vector index implementation. `none` is a declarative opt-out: the
+ * declaration carries shape metadata for tooling but `materializeIndexes`
+ * skips the DDL.
+ */
+export type VectorIndexImplementation = "hnsw" | "ivfflat" | "none";
+
+/**
+ * Vector-index parameters. Concrete defaults are applied at the
+ * `embedding(...)` brand boundary; this carries them onto the
+ * declaration so the materializer / signature / drift detection have
+ * everything they need without re-resolving from the brand.
+ */
+export type VectorIndexParams = Readonly<{
+  /** HNSW: max connections per layer. */
+  m: number;
+  /** HNSW: build-time search depth. */
+  efConstruction: number;
+  /** IVFFlat: number of inverted lists. `undefined` when not IVFFlat. */
+  lists: number | undefined;
+}>;
+
+/**
+ * Vector index declaration. Auto-derived from `embedding()` brands at
+ * `defineGraph()` time and explicitly buildable via `defineVectorIndex`.
+ *
+ * Identity key is `(kind, fieldPath)` — v1 allows at most one vector
+ * index per (kind, field) pair. The `name` field is generated
+ * deterministically from this tuple plus the metric so consumers don't
+ * accidentally collide vector index names with relational indexes.
+ *
+ * `unique` / `scope` / `where` from the relational base are NOT
+ * supported on vector — pgvector / sqlite-vec don't implement them.
+ */
+export type VectorIndexDeclaration = Readonly<{
+  entity: "vector";
+  /** Index name (also the physical identity key in the materialization status table). */
+  name: string;
+  origin?: IndexOrigin;
+  /** Node kind the embedding lives on. */
+  kind: string;
+  /** JSON-pointer-style field path for the embedding inside the node's props. */
+  fieldPath: string;
+  /** Embedding dimensionality. */
+  dimensions: number;
+  /** Distance metric. */
+  metric: VectorIndexMetric;
+  /** Index implementation. */
+  indexType: VectorIndexImplementation;
+  /** Concrete index parameters. */
+  indexParams: VectorIndexParams;
+}>;
+
+/**
+ * Relational subset of `IndexDeclaration` — the variants that emit
+ * `CREATE INDEX` DDL via `generateIndexDDL`. Used to narrow input
+ * types in the relational DDL / serializer / migration code paths
+ * that don't apply to vector indexes (which use a different
+ * materialization primitive on the backend).
+ */
+export type RelationalIndexDeclaration =
+  | NodeIndexDeclaration
+  | EdgeIndexDeclaration;
+
+/**
  * A serializable index declaration that flows through `GraphDef.indexes`
  * and `SerializedSchema.indexes`.
  *
@@ -274,7 +344,9 @@ export type EdgeIndexDeclaration = IndexDeclarationBase &
  * reconstructed from a stored schema document compile to byte-identical
  * SQL.
  */
-export type IndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
+export type IndexDeclaration =
+  | RelationalIndexDeclaration
+  | VectorIndexDeclaration;
 
 // ============================================================
 // System Columns

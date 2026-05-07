@@ -402,7 +402,7 @@ export function createPostgresBackend(
       return {
         indexName: row.indexName,
         graphId: row.graphId,
-        entity: row.entity as "node" | "edge",
+        entity: row.entity as "node" | "edge" | "vector",
         kind: row.kind,
         signature: row.signature,
         schemaVersion: row.schemaVersion,

@@ -10,8 +10,8 @@ import {
 } from "./compiler";
 import {
   type EdgeIndexDeclaration,
-  type IndexDeclaration,
   type NodeIndexDeclaration,
+  type RelationalIndexDeclaration,
   type SystemColumnName,
 } from "./types";
 
@@ -30,10 +30,17 @@ export type GenerateIndexDdlOptions = Readonly<{
 }>;
 
 /**
- * Generate `CREATE INDEX` DDL for a single index declaration.
+ * Generate `CREATE INDEX` DDL for a single relational index declaration.
+ *
+ * Vector index declarations (`entity: "vector"`) are NOT handled here —
+ * they go through `backend.createVectorIndex` instead because the DDL
+ * is dialect-specific (`USING hnsw (...) WITH (m=..., ef_construction=...)`
+ * on Postgres) and operates on the embeddings table, not
+ * `typegraph_nodes` / `typegraph_edges`. Callers narrow to the
+ * relational subset before calling this function.
  */
 export function generateIndexDDL(
-  index: IndexDeclaration,
+  index: RelationalIndexDeclaration,
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
@@ -62,7 +69,7 @@ export function generateEdgeIndexDDL(
 }
 
 function generateTableIndexDDL(
-  index: IndexDeclaration,
+  index: RelationalIndexDeclaration,
   dialect: SqlDialect,
   tableName: string,
   options: GenerateIndexDdlOptions,

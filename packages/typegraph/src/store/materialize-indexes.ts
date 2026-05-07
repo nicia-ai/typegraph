@@ -27,12 +27,18 @@
  */
 
 import {
+  type CreateVectorIndexParams,
   type GraphBackend,
   type RecordIndexMaterializationParams,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
-import { generateIndexDDL, type IndexDeclaration } from "../indexes";
+import {
+  generateIndexDDL,
+  type IndexDeclaration,
+  type RelationalIndexDeclaration,
+  type VectorIndexDeclaration,
+} from "../indexes";
 import { sortedReplacer } from "../schema/canonical";
 import { nowIso } from "../utils/date";
 
@@ -43,12 +49,32 @@ export type MaterializeIndexesOptions = Readonly<{
   stopOnError?: boolean;
 }>;
 
+/**
+ * Per-index outcome from `materializeIndexes()`.
+ *
+ * Status values:
+ * - `created`: DDL ran successfully and a new physical index now exists.
+ * - `alreadyMaterialized`: status table shows a prior successful
+ *   materialization with the same signature; no DDL ran.
+ * - `failed`: the DDL or status write failed; `error` carries the
+ *   captured exception. Best-effort mode continues to the next index;
+ *   `stopOnError: true` halts.
+ * - `skipped`: the backend can't materialize this index variant in its
+ *   current configuration (e.g. vector indexes against SQLite without
+ *   sqlite-vec, or `indexType: "none"` declared on an embedding). The
+ *   declaration is recognized but intentionally not acted on. Status
+ *   table is NOT updated for skipped entries.
+ */
 export type MaterializeIndexesEntry = Readonly<{
   indexName: string;
-  entity: "node" | "edge";
+  entity: "node" | "edge" | "vector";
   kind: string;
-  status: "created" | "alreadyMaterialized" | "failed";
+  status: "created" | "alreadyMaterialized" | "failed" | "skipped";
   error?: Error;
+  /**
+   * Human-readable reason. Required for `skipped`; optional otherwise.
+   */
+  reason?: string;
 }>;
 
 export type MaterializeIndexesResult = Readonly<{
@@ -146,99 +172,307 @@ export async function materializeIndexes(
 
   const results: MaterializeIndexesEntry[] = [];
   for (const declaration of candidates) {
-    const ddl = generateIndexDDL(declaration, dialect, ddlOptions);
-    const targetTable =
-      declaration.entity === "node" ?
-        (ddlOptions.nodesTableName ?? "typegraph_nodes")
-      : (ddlOptions.edgesTableName ?? "typegraph_edges");
-    const signature = await computeIndexSignature(
-      dialect,
-      targetTable,
-      declaration,
-    );
-
-    const existing = await backend.getIndexMaterialization(declaration.name);
-    if (existing?.materializedAt !== undefined) {
-      if (existing.signature === signature) {
-        results.push({
-          indexName: declaration.name,
-          entity: declaration.entity,
-          kind: declaration.kind,
-          status: "alreadyMaterialized",
-        });
-        continue;
-      }
-      // Signature drift — recorded shape does not match the current
-      // declaration. Refuse to silently drop+recreate.
-      const error = new Error(
-        `Index "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
-      );
-      await backend.recordIndexMaterialization(
-        buildAttempt({
+    const entry =
+      declaration.entity === "vector" ?
+        await materializeVectorIndex(
           declaration,
+          backend,
           graphId,
-          signature,
           schemaVersion,
-          materializedAt: undefined,
-          error,
-        }),
-      );
-      results.push({
-        indexName: declaration.name,
-        entity: declaration.entity,
-        kind: declaration.kind,
-        status: "failed",
-        error,
-      });
-      if (options.stopOnError === true) break;
-      continue;
-    }
-
-    try {
-      await backend.executeDdl(ddl);
-      const attemptedAt = nowIso();
-      await backend.recordIndexMaterialization(
-        buildAttempt({
+        )
+      : await materializeRelationalIndex(
           declaration,
+          backend,
+          dialect,
+          ddlOptions,
           graphId,
-          signature,
           schemaVersion,
-          materializedAt: attemptedAt,
-          error: undefined,
-          attemptedAt,
-        }),
-      );
-      results.push({
-        indexName: declaration.name,
-        entity: declaration.entity,
-        kind: declaration.kind,
-        status: "created",
-      });
-    } catch (error_) {
-      const error =
-        error_ instanceof Error ? error_ : new Error(String(error_));
-      await backend.recordIndexMaterialization(
-        buildAttempt({
-          declaration,
-          graphId,
-          signature,
-          schemaVersion,
-          materializedAt: undefined,
-          error,
-        }),
-      );
-      results.push({
-        indexName: declaration.name,
-        entity: declaration.entity,
-        kind: declaration.kind,
-        status: "failed",
-        error,
-      });
-      if (options.stopOnError === true) break;
-    }
+        );
+    results.push(entry);
+    if (entry.status === "failed" && options.stopOnError === true) break;
   }
 
   return { results };
+}
+
+async function materializeRelationalIndex(
+  declaration: RelationalIndexDeclaration,
+  backend: GraphBackend,
+  dialect: "sqlite" | "postgres",
+  ddlOptions: Readonly<{
+    ifNotExists: boolean;
+    concurrent: boolean;
+    nodesTableName?: string;
+    edgesTableName?: string;
+  }>,
+  graphId: string,
+  schemaVersion: number,
+): Promise<MaterializeIndexesEntry> {
+  // Narrowed by callsite — these are guaranteed defined when this is
+  // reached (validated above).
+  const executeDdl = backend.executeDdl!;
+  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const getIndexMaterialization = backend.getIndexMaterialization!;
+
+  const ddl = generateIndexDDL(declaration, dialect, ddlOptions);
+  const targetTable =
+    declaration.entity === "node" ?
+      (ddlOptions.nodesTableName ?? "typegraph_nodes")
+    : (ddlOptions.edgesTableName ?? "typegraph_edges");
+  const signature = await computeIndexSignature(
+    dialect,
+    targetTable,
+    declaration,
+  );
+
+  const existing = await getIndexMaterialization(declaration.name);
+  if (existing?.materializedAt !== undefined) {
+    if (existing.signature === signature) {
+      return {
+        indexName: declaration.name,
+        entity: declaration.entity,
+        kind: declaration.kind,
+        status: "alreadyMaterialized",
+      };
+    }
+    const error = new Error(
+      `Index "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
+    );
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: undefined,
+        error,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: declaration.entity,
+      kind: declaration.kind,
+      status: "failed",
+      error,
+    };
+  }
+
+  try {
+    await executeDdl(ddl);
+    const attemptedAt = nowIso();
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: attemptedAt,
+        error: undefined,
+        attemptedAt,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: declaration.entity,
+      kind: declaration.kind,
+      status: "created",
+    };
+  } catch (error_) {
+    const error = error_ instanceof Error ? error_ : new Error(String(error_));
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: undefined,
+        error,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: declaration.entity,
+      kind: declaration.kind,
+      status: "failed",
+      error,
+    };
+  }
+}
+
+async function materializeVectorIndex(
+  declaration: VectorIndexDeclaration,
+  backend: GraphBackend,
+  graphId: string,
+  schemaVersion: number,
+): Promise<MaterializeIndexesEntry> {
+  // `indexType: "none"` is a declarative opt-out — the declaration
+  // carries shape metadata (dimensions, metric) for tooling but the
+  // operator has signaled "no automatic index". Surface as `skipped`.
+  if (declaration.indexType === "none") {
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "skipped",
+      reason: "indexType: 'none' opts out of automatic materialization",
+    };
+  }
+
+  // Capability check: backends declare vector support via
+  // `capabilities.vector` (e.g. SQLite needs sqlite-vec opt-in via
+  // `hasVectorEmbeddings: true` at backend creation; Postgres needs
+  // pgvector). When unsupported, surface as skipped — the declaration
+  // is recognized but the backend can't act on it.
+  const vectorCapability = backend.capabilities.vector;
+  if (
+    vectorCapability?.supported !== true ||
+    backend.createVectorIndex === undefined
+  ) {
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "skipped",
+      reason: `Backend (${backend.dialect}) does not support vector indexes in its current configuration`,
+    };
+  }
+  // Capability check (per index type): backends advertise the specific
+  // index implementations they support (e.g. SQLite + sqlite-vec
+  // accepts vectors but no HNSW/IVFFlat — the brute-force scan IS the
+  // "index"). Surface unsupported types as skipped so consumers see a
+  // clear "this backend can't materialize this declaration" signal
+  // instead of a silent no-op masquerading as `created`.
+  if (!vectorCapability.indexTypes.includes(declaration.indexType)) {
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "skipped",
+      reason: `Backend (${backend.dialect}) does not support index type "${declaration.indexType}" for vector indexes; supported: ${vectorCapability.indexTypes.join(", ") || "(none)"}`,
+    };
+  }
+
+  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const getIndexMaterialization = backend.getIndexMaterialization!;
+
+  const signature = await computeIndexSignature(
+    backend.dialect,
+    "typegraph_node_embeddings",
+    declaration,
+  );
+
+  // Compound status-table key for vector entries. Pgvector creates
+  // one physical index per (graphId, kind, field) — so the
+  // per-deployment status table needs to disambiguate entries that
+  // SHARE a declaration name but belong to different graphs.
+  // Applied uniformly to auto-derived AND explicit declarations: the
+  // declaration name stays clean for inspection, the status key gets
+  // the graph scope. Without this, two graphs reusing the same
+  // explicit declaration name would collide — the second would
+  // falsely report `alreadyMaterialized` from the first's row.
+  const statusKey = vectorStatusKey(graphId, declaration.name);
+
+  const existing = await getIndexMaterialization(statusKey);
+  if (existing?.materializedAt !== undefined) {
+    if (existing.signature === signature) {
+      return {
+        indexName: declaration.name,
+        entity: "vector",
+        kind: declaration.kind,
+        status: "alreadyMaterialized",
+      };
+    }
+    const error = new Error(
+      `Vector index "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
+    );
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: undefined,
+        error,
+        statusName: statusKey,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "failed",
+      error,
+    };
+  }
+
+  try {
+    const params: CreateVectorIndexParams = {
+      graphId,
+      nodeKind: declaration.kind,
+      fieldPath: declaration.fieldPath,
+      dimensions: declaration.dimensions,
+      metric: declaration.metric,
+      indexType: declaration.indexType,
+      indexParams: {
+        m: declaration.indexParams.m,
+        efConstruction: declaration.indexParams.efConstruction,
+        ...(declaration.indexParams.lists === undefined ?
+          {}
+        : { lists: declaration.indexParams.lists }),
+      },
+    };
+    await backend.createVectorIndex(params);
+    const attemptedAt = nowIso();
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: attemptedAt,
+        error: undefined,
+        attemptedAt,
+        statusName: statusKey,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "created",
+    };
+  } catch (error_) {
+    const error = error_ instanceof Error ? error_ : new Error(String(error_));
+    await recordIndexMaterialization(
+      buildAttempt({
+        declaration,
+        graphId,
+        signature,
+        schemaVersion,
+        materializedAt: undefined,
+        error,
+        statusName: statusKey,
+      }),
+    );
+    return {
+      indexName: declaration.name,
+      entity: "vector",
+      kind: declaration.kind,
+      status: "failed",
+      error,
+    };
+  }
+}
+
+/**
+ * Compose the per-deployment status-table key for a vector index.
+ * Pgvector physical indexes are partial-by-graph_id (one per graph),
+ * so the status table needs graph-scoped identity to disambiguate
+ * two graphs reusing the same declaration name. The `::` separator
+ * keeps the compound visually unambiguous when inspecting the table.
+ */
+function vectorStatusKey(graphId: string, declarationName: string): string {
+  return `${graphId}::${declarationName}`;
 }
 
 function buildAttempt(
@@ -250,10 +484,17 @@ function buildAttempt(
     materializedAt: string | undefined;
     error: Error | undefined;
     attemptedAt?: string;
+    /**
+     * Override the status-table identity. Used by vector entries to
+     * inject the graph-scoped compound key (`vectorStatusKey`).
+     * Relational entries default to the declaration name because
+     * physical CREATE INDEX names are already database-global.
+     */
+    statusName?: string;
   }>,
 ): RecordIndexMaterializationParams {
   return {
-    indexName: args.declaration.name,
+    indexName: args.statusName ?? args.declaration.name,
     graphId: args.graphId,
     entity: args.declaration.entity,
     kind: args.declaration.kind,

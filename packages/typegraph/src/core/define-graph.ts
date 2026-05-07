@@ -1,4 +1,8 @@
 import { ConfigurationError } from "../errors/index";
+import {
+  autoDeriveVectorIndexes,
+  mergeVectorIndexes,
+} from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
 import { type RuntimeGraphDocument } from "../runtime/document-types";
@@ -341,10 +345,30 @@ export function defineGraph<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  // Vector indexes are auto-derived from `embedding()` brands on node
+  // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
+  // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
+  // collisions so consumers can override defaults — see
+  // `mergeVectorIndexes`. The merged list flows through
+  // `normalizeIndexes` for the standard kind-registered + unique-name
+  // checks.
+  //
+  // Preservation rule: if the consumer never passed `indexes` at all
+  // AND no embedding brands exist, leave `graph.indexes` undefined to
+  // keep the introspection surface stable for legacy graphs. If the
+  // consumer passed an explicit `[]`, surface it as `[]` (not
+  // `undefined`) to match the contract pinned by the
+  // "preserves an explicit empty indexes array" test.
+  const autoVectorIndexes = autoDeriveVectorIndexes(config.nodes);
+  const explicitProvided = config.indexes !== undefined;
+  const mergedIndexes = mergeVectorIndexes(
+    config.indexes ?? [],
+    autoVectorIndexes,
+  );
   const indexes =
-    config.indexes === undefined ?
+    !explicitProvided && mergedIndexes.length === 0 ?
       undefined
-    : normalizeIndexes(config.indexes, config.nodes, normalizedEdges);
+    : normalizeIndexes(mergedIndexes, config.nodes, normalizedEdges);
 
   return Object.freeze({
     [GRAPH_DEF_BRAND]: true as const,
@@ -390,7 +414,9 @@ function normalizeIndexes(
   const seenNames = new Set<string>();
 
   for (const declaration of inputs) {
-    if (declaration.entity === "node") {
+    if (declaration.entity === "node" || declaration.entity === "vector") {
+      // Vector indexes attach to node kinds (the embedding lives on a
+      // node field). Validation reuses the node-kind check.
       assertKindRegistered(declaration, nodeKinds, "node");
     } else {
       assertKindRegistered(declaration, edgeKinds, "edge");

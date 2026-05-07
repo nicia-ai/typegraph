@@ -51,7 +51,7 @@ function buildGraphWithoutIndexes() {
  */
 async function forceSignatureDrift(
   backend: ReturnType<typeof createTestBackend>,
-  declared: { name: string; entity: "node" | "edge"; kind: string },
+  declared: { name: string; entity: "node" | "edge" | "vector"; kind: string },
   overrides: { signature?: string; graphId?: string } = {},
 ) {
   await backend.recordIndexMaterialization!({

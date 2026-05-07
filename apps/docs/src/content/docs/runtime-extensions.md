@@ -334,14 +334,83 @@ on the merged graph and tracks per-deployment status in
   `stopOnError: true` to halt on the first failure.
 
 The returned `MaterializeIndexesResult` has one entry per declared
-index with `status: "created" | "alreadyMaterialized" | "failed"`.
+index with `status: "created" | "alreadyMaterialized" | "failed" | "skipped"`.
+The `skipped` status surfaces when the backend recognizes the
+declaration but can't act on it in its current configuration — e.g.
+vector indexes against SQLite without the `sqlite-vec` extension, or
+`embedding(dims, { indexType: "none" })` opting out of automatic
+materialization.
 
-### v1 scope
+### Vector indexes
 
-PR 6 covers **relational indexes only**. Vector and fulltext indexes
-continue to use the existing per-kind imperative APIs
-(`backend.createVectorIndex` / `createFulltextIndex`); lifting them
-into the unified declaration channel is a future PR.
+Vector indexes are **auto-derived** from `embedding()` brands at
+`defineGraph()` time. Every top-level node field declared with
+`embedding(dims, opts?)` produces one `VectorIndexDeclaration` that
+flows through `materializeIndexes()` like any relational index. No
+extra wiring required.
+
+```ts
+const Document = defineNode("Document", {
+  schema: z.object({
+    title: z.string(),
+    // Auto-derives a cosine HNSW vector index with pgvector
+    // defaults (m=16, ef_construction=64).
+    embedding: embedding(384),
+  }),
+});
+
+// Customize the auto-derived index by passing options at the brand.
+const Image = defineNode("Image", {
+  schema: z.object({
+    embedding: embedding(512, { metric: "l2", m: 32, efConstruction: 100 }),
+  }),
+});
+
+// Opt out of automatic materialization while keeping the embedding.
+const Manual = defineNode("Manual", {
+  schema: z.object({
+    embedding: embedding(384, { indexType: "none" }),
+  }),
+});
+```
+
+On `materializeIndexes()`:
+
+- Postgres with pgvector: emits `CREATE INDEX ... USING hnsw ...` (or
+  `ivfflat`) on `typegraph_node_embeddings` and reports `created`.
+- SQLite with `sqlite-vec`: vectors are stored but the brute-force
+  scan IS the "index"; declarations report `skipped` because
+  HNSW/IVFFlat aren't available natively on SQLite.
+- SQLite without `sqlite-vec`: declarations report `skipped` with a
+  reason indicating the backend lacks vector support.
+
+The vector declaration's identity key within a single graph is
+`(kind, fieldPath)` — v1 allows at most one vector index per
+(kind, field) pair. The auto-derived deterministic declaration
+name is `tg_vec_{kind}_{field}_{metric}` — clean and scannable for
+inspection in `pg_indexes` and result entries. Changing the metric
+requires a different declaration name and explicit
+re-materialization.
+
+Cross-graph disambiguation lives at the materialization boundary,
+not in the declaration name. Vector status rows in
+`typegraph_index_materializations` are keyed on the compound
+`{graphId}::{declaration.name}` for both auto-derived and explicit
+`VectorIndexDeclaration` entries — so two graphs reusing the same
+declaration name (whether auto-derived from the same kind/field or
+constructed explicitly via `defineGraph({ indexes: [...] })`) don't
+collide in the status table. Each graph's `materializeIndexes()`
+call creates its own physical pgvector index (which is itself
+partial-by-graph_id) and records its own status row.
+
+### Fulltext indexes (out of scope for v1)
+
+Fulltext indexes are NOT in the unified declaration channel for v1.
+The fulltext table's canonical index (Postgres GIN on `tsv`, SQLite
+FTS5 virtual table) is created with the table itself by
+`bootstrapTables` per the active `FulltextStrategy`. Per-kind fulltext
+indexes are an "advanced strategy" surface that doesn't fit the
+relational-style declaration model and is reserved for future work.
 
 ### Caveats (Postgres)
 
@@ -475,10 +544,17 @@ as untrusted data. Specifically:
   signal; a hard-removal verb has a long edge-case tail (existing
   rows, edges referencing the kind, ontology references, fulltext /
   embedding rows, tombstoned rows) and deserves its own design pass.
-- **Vector and fulltext index unification.** `materializeIndexes`
-  covers relational indexes only. Vector / fulltext continue to use
-  the existing per-kind imperative APIs. Lifting them into the unified
-  declaration channel is future work.
+- **Fulltext index unification.** Vector indexes flow through the
+  unified channel (auto-derived from `embedding()` brands). Fulltext
+  is still per-strategy: the GIN / FTS5 index is created with the
+  fulltext table at `bootstrapTables` time. Per-kind fulltext indexes
+  are reserved for future work.
+- **Multiple vector indexes per (kind, field).** v1 allows at most
+  one. To use a different metric for the same field, use a different
+  field name or wait for v2.
+- **Vector index for runtime-declared kinds.** Auto-derivation walks
+  compile-time node schemas. Runtime-extension documents cannot yet
+  declare embeddings — coming in a follow-up.
 - **Hard-blocking reads/writes on deprecated kinds.** Deprecation is
   informational. If you want strict enforcement, wrap collection
   access yourself.

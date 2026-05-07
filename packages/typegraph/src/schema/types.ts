@@ -212,9 +212,36 @@ const edgeIndexDeclarationZod = z
   })
   .loose();
 
+const vectorIndexMetricZod = z.enum(["cosine", "l2", "inner_product"]);
+
+const vectorIndexImplementationZod = z.enum(["hnsw", "ivfflat", "none"]);
+
+const vectorIndexParamsZod = z
+  .object({
+    m: z.number(),
+    efConstruction: z.number(),
+    lists: z.number().optional(),
+  })
+  .loose();
+
+const vectorIndexDeclarationZod = z
+  .object({
+    entity: z.literal("vector"),
+    name: z.string(),
+    origin: indexOriginZod.optional(),
+    kind: z.string(),
+    fieldPath: z.string(),
+    dimensions: z.number(),
+    metric: vectorIndexMetricZod,
+    indexType: vectorIndexImplementationZod,
+    indexParams: vectorIndexParamsZod,
+  })
+  .loose();
+
 const indexDeclarationZod = z.discriminatedUnion("entity", [
   nodeIndexDeclarationZod,
   edgeIndexDeclarationZod,
+  vectorIndexDeclarationZod,
 ]);
 
 // ============================================================
