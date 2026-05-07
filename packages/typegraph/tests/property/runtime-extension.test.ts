@@ -1,5 +1,5 @@
 /**
- * Property-based tests for the runtime extension document and compiler.
+ * Property-based tests for the graph-extension document and compiler.
  *
  * fast-check generates arbitrary documents over the v1 property-type
  * subset, and the suite asserts the load-bearing invariant from issue
@@ -16,19 +16,31 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { type z } from "zod";
+import { z } from "zod";
 
+import { defineGraph } from "../../src/core/define-graph";
 import { getEmbeddingDimensions } from "../../src/core/embedding";
+import { defineNode } from "../../src/core/node";
 import { getSearchableMetadata } from "../../src/core/searchable";
 import {
   defineGraphExtension,
   type ExtensionArrayItemType,
+  type ExtensionNodeDef,
   type ExtensionObjectFieldProperty,
   type ExtensionPropertyType,
+  type GraphExtension,
+  validateGraphExtension,
 } from "../../src/runtime";
-// Internal compiler — reached via file path so the property tests
-// exercise it without forcing the barrel to re-export it.
+// Internal compiler / merge / canonical — reached via file path so
+// the property tests can exercise round-trip invariants without
+// forcing the barrel to re-export them.
 import { compileRuntimeExtension } from "../../src/runtime/compiler";
+import { mergeRuntimeExtension } from "../../src/runtime/merge";
+import { canonicalEqual, sortedReplacer } from "../../src/schema/canonical";
+import {
+  computeSchemaHash,
+  serializeSchema,
+} from "../../src/schema/serializer";
 
 // ============================================================
 // Identifier arbitraries
@@ -287,6 +299,139 @@ describe("runtime extension property tests", () => {
         expect(getEmbeddingDimensions(schema! as z.ZodType)).toBe(dimensions);
       }),
       { numRuns: 30 },
+    );
+  });
+});
+
+// ============================================================
+// Multi-node extension arbitrary (for round-trip / merge invariants)
+//
+// `nodeArb` produces one (kindName, properties) tuple. The next group
+// of tests wants extensions with N kinds, so we lift `nodeArb` into a
+// `uniqueArray` keyed by `kindName` to avoid colliding kinds.
+// ============================================================
+
+const multiNodeExtensionArb: fc.Arbitrary<GraphExtension> = fc
+  .uniqueArray(nodeArb, {
+    minLength: 1,
+    maxLength: 4,
+    selector: (n) => n.kindName,
+  })
+  .map((nodes): GraphExtension => {
+    const nodesRecord: Record<string, ExtensionNodeDef> = {};
+    for (const { kindName, properties } of nodes) {
+      nodesRecord[kindName] = { properties };
+    }
+    return defineGraphExtension({ nodes: nodesRecord });
+  });
+
+const multiNodeRecordArb: fc.Arbitrary<
+  readonly Readonly<{
+    kindName: string;
+    properties: Record<string, ExtensionPropertyType>;
+  }>[]
+> = fc.uniqueArray(nodeArb, {
+  minLength: 2,
+  maxLength: 4,
+  selector: (n) => n.kindName,
+});
+
+// Real-Zod baseline graph for the merge / hash invariants. The
+// extension layer never inspects compile-time Zod, but
+// `mergeRuntimeExtension` does call `defineGraph` machinery that
+// requires an actual `defineNode` shape.
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const baselineGraph = defineGraph({
+  id: "prop_extension_invariants",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
+
+// ============================================================
+// Algebraic invariants
+//
+// These pin properties that follow from the design — idempotency of
+// the document factory, declaration-order independence of canonical
+// hashes, JSON round-trip stability, merge idempotency. They aren't
+// strictly redundant with the unit tests because fast-check explores
+// the cross-product of property types / refinements that hand-written
+// tests can't enumerate.
+// ============================================================
+
+describe("graph extension — algebraic invariants", () => {
+  it("defineGraphExtension is idempotent under canonical equality", () => {
+    fc.assert(
+      fc.property(multiNodeExtensionArb, (extension) => {
+        const reapplied = defineGraphExtension(extension);
+        expect(canonicalEqual(extension, reapplied)).toBe(true);
+      }),
+      { numRuns: 80 },
+    );
+  });
+
+  it("canonical-form JSON round-trip preserves the extension", () => {
+    fc.assert(
+      fc.property(multiNodeExtensionArb, (extension) => {
+        const serialized = JSON.stringify(extension, sortedReplacer);
+        const parsed = JSON.parse(serialized) as unknown;
+        const revalidated = validateGraphExtension(parsed, { strict: true });
+        expect(revalidated.success).toBe(true);
+        if (!revalidated.success) throw revalidated.error;
+        expect(canonicalEqual(extension, revalidated.data)).toBe(true);
+      }),
+      { numRuns: 80 },
+    );
+  });
+
+  it("declaration order does not affect the merged-graph schema hash", async () => {
+    // Two extensions whose nodes are declared in opposite order must
+    // produce the same canonical schema hash — the persistence layer
+    // sorts every collection by name before hashing, so insertion
+    // order isn't part of the schema's identity.
+    await fc.assert(
+      fc.asyncProperty(multiNodeRecordArb, async (nodes) => {
+        const forward: Record<string, ExtensionNodeDef> = {};
+        const reversed: Record<string, ExtensionNodeDef> = {};
+        for (const { kindName, properties } of nodes) {
+          forward[kindName] = { properties };
+        }
+        for (const { kindName, properties } of nodes.toReversed()) {
+          reversed[kindName] = { properties };
+        }
+        const forwardGraph = mergeRuntimeExtension(
+          baselineGraph,
+          defineGraphExtension({ nodes: forward }),
+        );
+        const reversedGraph = mergeRuntimeExtension(
+          baselineGraph,
+          defineGraphExtension({ nodes: reversed }),
+        );
+        const forwardHash = await computeSchemaHash(
+          serializeSchema(forwardGraph, 1),
+        );
+        const reversedHash = await computeSchemaHash(
+          serializeSchema(reversedGraph, 1),
+        );
+        expect(forwardHash).toBe(reversedHash);
+      }),
+      { numRuns: 30 },
+    );
+  });
+
+  it("mergeRuntimeExtension is idempotent when the same extension is applied twice", () => {
+    fc.assert(
+      fc.property(multiNodeExtensionArb, (extension) => {
+        const once = mergeRuntimeExtension(baselineGraph, extension);
+        const twice = mergeRuntimeExtension(once, extension);
+        // The merge short-circuits when the union equals the existing
+        // document — same reference returned, not just structurally
+        // equal. That's the contract `Store.evolve`'s no-op fast path
+        // depends on for the agent-loop hot path.
+        expect(twice).toBe(once);
+      }),
+      { numRuns: 40 },
     );
   });
 });

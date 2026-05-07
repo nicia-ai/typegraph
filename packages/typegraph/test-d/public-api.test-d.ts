@@ -247,7 +247,7 @@ expectAssignable<DynamicEdgeCollection | undefined>(
 );
 
 // ============================================================
-// Runtime extension — public surface published in 0.25
+// Graph extension — public surface published in 0.25
 // ============================================================
 
 import {
@@ -269,9 +269,19 @@ import {
   type ExtensionPropertyType,
   type ExtensionStringProperty,
   type ExtensionUniqueConstraint,
+  type IncompatibleChange,
   type StoreRef,
   validateGraphExtension,
+  GraphExtensionError,
+  GraphExtensionUnresolvedEndpointError,
   GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
+  IncompatibleChangeError,
+  KindCollisionError,
+  KindHasReferentsError,
+  KindNotFoundError,
+  RemoveCompileTimeKindError,
+  TypeGraphError,
 } from "..";
 
 // defineGraphExtension accepts a typed GraphExtension.
@@ -402,3 +412,115 @@ declare const compileTimeHybrid: Awaited<
   ReturnType<typeof store.search.hybrid<"Person">>
 >;
 expectAssignable<Node<typeof Person>>(compileTimeHybrid[0]!.node);
+
+// ============================================================
+// Error class hierarchy — every public error is reachable as
+// TypeGraphError, and the GraphExtension family is reachable as
+// GraphExtensionError. Pinning these guards against an accidental
+// inheritance flip during refactors.
+// ============================================================
+
+declare const graphExtensionError: GraphExtensionError;
+expectAssignable<TypeGraphError>(graphExtensionError);
+expectType<string>(graphExtensionError.code);
+
+// Validation error: structured `issues` list with frozen entries.
+declare const validationError: GraphExtensionValidationError;
+expectAssignable<GraphExtensionError>(validationError);
+expectType<readonly GraphExtensionIssue[]>(validationError.issues);
+expectType<"GRAPH_EXTENSION_INVALID">(validationError.code);
+
+// Version-unsupported error: persisted/current numeric majors.
+declare const versionError: GraphExtensionVersionUnsupportedError;
+expectAssignable<GraphExtensionError>(versionError);
+expectType<number>(versionError.persistedVersion);
+expectType<number>(versionError.currentVersion);
+expectType<"GRAPH_EXTENSION_VERSION_UNSUPPORTED">(versionError.code);
+
+// Unresolved endpoint: edge + side + endpoint kind name.
+declare const unresolvedEndpointError: GraphExtensionUnresolvedEndpointError;
+expectAssignable<GraphExtensionError>(unresolvedEndpointError);
+expectType<string>(unresolvedEndpointError.edgeKind);
+expectType<"from" | "to">(unresolvedEndpointError.side);
+expectType<string>(unresolvedEndpointError.endpoint);
+expectType<"GRAPH_EXTENSION_UNRESOLVED_ENDPOINT">(unresolvedEndpointError.code);
+
+// Kind-collision: declared kind name shadows a compile-time kind.
+declare const kindCollisionError: KindCollisionError;
+expectAssignable<GraphExtensionError>(kindCollisionError);
+expectType<string>(kindCollisionError.kindName);
+expectType<"node" | "edge">(kindCollisionError.entity);
+expectType<"KIND_COLLISION">(kindCollisionError.code);
+
+// Incompatible-change: structured `changes` list (one entry per delta).
+declare const incompatibleError: IncompatibleChangeError;
+expectAssignable<GraphExtensionError>(incompatibleError);
+expectType<readonly IncompatibleChange[]>(incompatibleError.changes);
+expectType<"INCOMPATIBLE_CHANGE">(incompatibleError.code);
+
+// Kind-has-referents: removeKinds blocked by a referent declaration.
+// Carries the structured `referents` list so a UI can show every
+// compile-time edge / ontology declaration that points at the kind.
+declare const referentsError: KindHasReferentsError;
+expectAssignable<GraphExtensionError>(referentsError);
+expectType<string>(referentsError.kindName);
+expectType<"KIND_HAS_REFERENTS">(referentsError.code);
+expectAssignable<
+  readonly Readonly<{
+    type: "compile-time-edge" | "compile-time-ontology";
+    name: string;
+  }>[]
+>(referentsError.referents);
+
+// Remove-compile-time-kind: removeKinds attempted against a static kind.
+declare const removeCompileTimeError: RemoveCompileTimeKindError;
+expectAssignable<GraphExtensionError>(removeCompileTimeError);
+expectType<string>(removeCompileTimeError.kindName);
+expectType<"node" | "edge">(removeCompileTimeError.entity);
+expectType<"REMOVE_COMPILE_TIME_KIND">(removeCompileTimeError.code);
+
+// Kind-not-found is general (not in the GraphExtension hierarchy)
+// but carries the same kindName / entity discriminators.
+declare const notFoundError: KindNotFoundError;
+expectAssignable<TypeGraphError>(notFoundError);
+expectType<string>(notFoundError.kindName);
+expectType<"node" | "edge">(notFoundError.entity);
+
+// `instanceof` checks narrow to the concrete subclass — the abstract
+// base's `code: string` widens to `string`, but each concrete class
+// pins its `code` as a literal, so the narrowed branch can branch on
+// the field. A consumer can catch the family with one
+// `instanceof GraphExtensionError`, then switch on `error.code` for
+// per-subclass handling.
+function classifyExtensionError(error: GraphExtensionError): string {
+  if (error instanceof GraphExtensionValidationError) {
+    expectType<"GRAPH_EXTENSION_INVALID">(error.code);
+    return error.issues.length.toString();
+  }
+  if (error instanceof GraphExtensionVersionUnsupportedError) {
+    expectType<"GRAPH_EXTENSION_VERSION_UNSUPPORTED">(error.code);
+    return `v${error.persistedVersion}`;
+  }
+  if (error instanceof GraphExtensionUnresolvedEndpointError) {
+    expectType<"GRAPH_EXTENSION_UNRESOLVED_ENDPOINT">(error.code);
+    return error.edgeKind;
+  }
+  if (error instanceof KindCollisionError) {
+    expectType<"KIND_COLLISION">(error.code);
+    return error.kindName;
+  }
+  if (error instanceof KindHasReferentsError) {
+    expectType<"KIND_HAS_REFERENTS">(error.code);
+    return `${error.kindName} (${error.referents.length} referents)`;
+  }
+  if (error instanceof IncompatibleChangeError) {
+    expectType<"INCOMPATIBLE_CHANGE">(error.code);
+    return error.changes.length.toString();
+  }
+  if (error instanceof RemoveCompileTimeKindError) {
+    expectType<"REMOVE_COMPILE_TIME_KIND">(error.code);
+    return error.kindName;
+  }
+  return "unknown";
+}
+expectType<(error: GraphExtensionError) => string>(classifyExtensionError);
