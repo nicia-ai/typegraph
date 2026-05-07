@@ -17,7 +17,7 @@ import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { EagerMaterializationError } from "../src/errors";
 import { defineNodeIndex } from "../src/indexes";
-import { defineRuntimeExtension } from "../src/runtime";
+import { defineGraphExtension } from "../src/runtime";
 import type { Store } from "../src/store/store";
 import { createStoreWithSchema } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
@@ -76,7 +76,7 @@ describe("Store.evolve — eager materialization", () => {
     const ref: StoreRef<Store<typeof graph>> = { current: store };
 
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
       { ref, eager: true },
@@ -100,7 +100,7 @@ describe("Store.evolve — eager materialization", () => {
     const [store] = await createStoreWithSchema(graph, backend);
 
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
       { eager: true },
@@ -120,7 +120,7 @@ describe("Store.evolve — eager materialization", () => {
     // extension adds Tag (no indexes). This proves the options pass
     // through without throwing on a known kind.
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
       { eager: { kinds: ["Person"], stopOnError: true } },
@@ -136,7 +136,7 @@ describe("Store.evolve — eager materialization", () => {
   it("eager: true still materializes when the merge is a no-op (restart-parity contract)", async () => {
     // A second store wraps a database whose schema already includes
     // the runtime kind (e.g. another writer committed it, or this
-    // process restarted from a persisted runtimeDocument). Evolving
+    // process restarted from a persisted extension). Evolving
     // with the same extension produces a no-op merge — but the local
     // database may still have unmaterialized indexes (the prior
     // writer never called materializeIndexes, or a previous attempt
@@ -145,7 +145,7 @@ describe("Store.evolve — eager materialization", () => {
     // branch would return false success.
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
 
@@ -154,7 +154,7 @@ describe("Store.evolve — eager materialization", () => {
     const [storeA] = await createStoreWithSchema(graph, backend);
     await storeA.evolve(extension);
 
-    // Second writer (fresh store) sees the persisted runtimeDocument
+    // Second writer (fresh store) sees the persisted extension
     // via createStoreWithSchema's catch-up. Evolving with the same
     // extension is a no-op merge.
     const [storeB] = await createStoreWithSchema(graph, backend);
@@ -177,7 +177,7 @@ describe("Store.evolve — eager materialization", () => {
     const [store] = await createStoreWithSchema(graph, backend);
 
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
       { eager: false },
@@ -200,7 +200,7 @@ describe("Store.evolve — eager materialization", () => {
     const ref: StoreRef<Store<typeof graph>> = { current: store };
     const caught = await store
       .evolve(
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
         { ref, eager: true },
@@ -228,7 +228,7 @@ describe("Store.evolve — eager materialization", () => {
 
     await store
       .evolve(
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
         { eager: true },
@@ -251,7 +251,7 @@ describe("Store.evolve — eager materialization", () => {
 
     const caught = await store
       .evolve(
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
         { eager: true },

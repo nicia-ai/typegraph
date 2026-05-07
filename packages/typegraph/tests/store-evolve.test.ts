@@ -22,13 +22,19 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
+import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
 import {
   ConfigurationError,
+  KindNotFoundError,
   SchemaContentConflictError,
   StaleVersionError,
 } from "../src/errors";
-import { defineRuntimeExtension } from "../src/runtime";
+import {
+  defineGraphExtension,
+  GraphExtensionValidationError,
+  IncompatibleChangeError,
+} from "../src/runtime";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
 import { createTestBackend } from "./test-utils";
@@ -55,7 +61,7 @@ describe("Store.evolve — basic flow", () => {
     const [store, init] = await createStoreWithSchema(baseGraph, backend);
     expect(init).toEqual({ status: "initialized", version: 1 });
 
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     const evolved = await store.evolve(extension);
@@ -72,7 +78,7 @@ describe("Store.evolve — basic flow", () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     const first = await store.evolve(extension);
@@ -89,7 +95,7 @@ describe("Store.evolve — basic flow", () => {
     const backend = createTestBackend();
     // Construct a Store *without* initializing the schema.
     const store = createStore(baseGraph, backend);
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     await expect(store.evolve(extension)).rejects.toBeInstanceOf(
@@ -97,33 +103,46 @@ describe("Store.evolve — basic flow", () => {
     );
   });
 
-  it("rejects same-name runtime kind redefined with a different shape", async () => {
+  it("rejects ADD_REQUIRED_PROPERTY on a populated extension kind", async () => {
+    // Adding a required property to an extension kind that already
+    // has rows is rejected because the existing rows would fail
+    // validation. Same kind would have succeeded if Tag were empty
+    // (allowed-on-empty classification — see store-evolve-modify
+    // tests for the full matrix).
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
-    const v1 = defineRuntimeExtension({
+    const v1 = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     const evolved = await store.evolve(v1);
+    // Populate Tag so the empty-probe finds rows.
+    const tags = evolved.getNodeCollectionOrThrow("Tag");
+    await tags.create({ label: "alpha" });
 
-    // v1 extensions are additive-only — re-declaring Tag with an extra
-    // property is a redefinition, not an additive change. Use a new
-    // kind name to evolve a kind in v1.
-    const v2 = defineRuntimeExtension({
+    const v2 = defineGraphExtension({
       nodes: {
         Tag: {
           properties: {
             label: { type: "string" },
+            // New REQUIRED property — needs back-fill to validate
+            // existing rows. Rejected.
             color: { type: "string" },
           },
         },
       },
     });
     const caught = await evolved.evolve(v2).catch((error: unknown) => error);
-    expect(caught).toBeInstanceOf(ConfigurationError);
-    expect((caught as ConfigurationError).details).toMatchObject({
-      code: "RUNTIME_KIND_REDEFINITION",
-    });
+    expect(caught).toBeInstanceOf(IncompatibleChangeError);
+    const error = caught as IncompatibleChangeError;
+    expect(
+      error.changes.some(
+        (change) =>
+          change.kind === "Tag" &&
+          change.field === "color" &&
+          change.type === "ADD_REQUIRED_PROPERTY",
+      ),
+    ).toBe(true);
   });
 
   it("stale store auto-merges the persisted runtime document before applying", async () => {
@@ -136,9 +155,9 @@ describe("Store.evolve — basic flow", () => {
     const [storeB] = await createStoreWithSchema(baseGraph, backend);
 
     // B evolves with Tag — backend now carries Tag in its
-    // runtimeDocument. A's local #graph still has no runtimeDocument.
+    // extension. A's local #graph still has no extension.
     await storeB.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
@@ -149,7 +168,7 @@ describe("Store.evolve — basic flow", () => {
     // would diff the merged-with-Category-only graph against the
     // stored-with-Tag schema and treat Tag as a removed kind.
     const evolved = await storeA.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Category: { properties: { name: { type: "string" } } } },
       }),
     );
@@ -160,6 +179,24 @@ describe("Store.evolve — basic flow", () => {
     expect(active?.version).toBe(3);
   });
 
+  it("does not row-count probe for purely additive extensions", async () => {
+    const backend = {
+      ...createTestBackend(),
+      countNodesByKind: () =>
+        Promise.reject(new Error("additive evolve should not count node rows")),
+      countEdgesByKind: () =>
+        Promise.reject(new Error("additive evolve should not count edge rows")),
+    } satisfies ReturnType<typeof createTestBackend>;
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    expect(evolved.registry.hasNodeType("Tag")).toBe(true);
+  });
+
   it("re-evolving the same ontology relation is idempotent (no duplicate persisted)", async () => {
     // unionDocuments used to concatenate ontology arrays; re-evolving
     // the same ontology relation appended a duplicate that the next
@@ -167,7 +204,7 @@ describe("Store.evolve — basic flow", () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: {
         Doc: { properties: { title: { type: "string" } } },
         Article: { properties: { title: { type: "string" } } },
@@ -198,12 +235,12 @@ describe("Store.evolve — basic flow", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
     const withTag = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
     const withTagAndCategory = await withTag.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Category: { properties: { name: { type: "string" } } } },
       }),
     );
@@ -252,7 +289,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
       runtimeBackend,
     );
     const evolved = await runtimeStore.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
@@ -299,7 +336,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
       runtimeBackend,
     );
     const evolved = await runtimeStore.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
@@ -345,7 +382,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
         edges: {
           appliesTo: { from: ["Tag"], to: ["Person"], properties: {} },
@@ -395,7 +432,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
         edges: {
           appliesTo: { from: ["Tag"], to: ["Person"], properties: {} },
@@ -419,10 +456,10 @@ describe("Store.evolve — concurrency", () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
-    const tagExtension = defineRuntimeExtension({
+    const tagExtension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
-    const categoryExtension = defineRuntimeExtension({
+    const categoryExtension = defineGraphExtension({
       nodes: { Category: { properties: { name: { type: "string" } } } },
     });
 
@@ -464,7 +501,7 @@ describe("StoreRef pattern (consumer-composed)", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const ref: StoreRef<typeof store> = { current: store };
 
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     const evolved = await ref.current.evolve(extension, { ref });
@@ -478,7 +515,7 @@ describe("StoreRef pattern (consumer-composed)", () => {
     let [store] = await createStoreWithSchema(baseGraph, backend);
     const original = store;
 
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
     store = await store.evolve(extension);
@@ -486,5 +523,377 @@ describe("StoreRef pattern (consumer-composed)", () => {
     expect(store).not.toBe(original);
     expect(store.registry.hasNodeType("Tag")).toBe(true);
     expect(original.registry.hasNodeType("Tag")).toBe(false);
+  });
+});
+
+describe("Store.evolve — runtime vector index derivation", () => {
+  // Runtime kinds with `embedding()` modifiers must auto-derive a
+  // `VectorIndexDeclaration` and flow it into `graph.indexes` with
+  // `origin: "runtime"`, mirroring the compile-time auto-derivation
+  // path. Without this, runtime-extended graphs cannot materialize
+  // their own vector indexes.
+  it("auto-derives vector indexes from runtime embedding modifiers", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const extension = defineGraphExtension({
+      nodes: {
+        Paper: {
+          properties: {
+            title: { type: "string" },
+            embedding: {
+              type: "array",
+              items: { type: "number" },
+              embedding: { dimensions: 384 },
+            },
+          },
+        },
+      },
+    });
+    const evolved = await store.evolve(extension);
+
+    const indexes = (evolved.graph as { indexes?: readonly unknown[] }).indexes;
+    expect(indexes).toBeDefined();
+    type RuntimeVectorIndex = Readonly<{
+      entity: string;
+      kind: string;
+      fieldPath: string;
+      dimensions: number;
+      origin: string;
+    }>;
+    const vectorIndexes = (indexes ?? []).filter(
+      (entry): entry is RuntimeVectorIndex =>
+        (entry as { entity?: string }).entity === "vector",
+    );
+    const paperIndex = vectorIndexes.find((entry) => entry.kind === "Paper");
+    expect(paperIndex).toBeDefined();
+    expect(paperIndex?.origin).toBe("runtime");
+    expect(paperIndex?.fieldPath).toBe("embedding");
+    expect(paperIndex?.dimensions).toBe(384);
+  });
+
+  it("preserves compile-time indexes alongside runtime-derived ones", async () => {
+    // Compile-time auto-derived embedding stays in graph.indexes as
+    // origin: undefined; the runtime-derived one is added with
+    // origin: "runtime". Both must coexist.
+    const Person = defineNode("Person", {
+      schema: z.object({
+        name: z.string(),
+        embedding: embedding(256),
+      }),
+    });
+    const compileTimeGraph = defineGraph({
+      id: "store_evolve_compile_time_vec",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(compileTimeGraph, backend);
+
+    const extension = defineGraphExtension({
+      nodes: {
+        Paper: {
+          properties: {
+            embedding: {
+              type: "array",
+              items: { type: "number" },
+              embedding: { dimensions: 384 },
+            },
+          },
+        },
+      },
+    });
+    const evolved = await store.evolve(extension);
+
+    type IndexEntry = Readonly<{
+      entity: string;
+      kind: string;
+      origin?: string;
+    }>;
+    const indexes = (
+      (evolved.graph as { indexes?: readonly IndexEntry[] }).indexes ?? []
+    ).filter((entry) => entry.entity === "vector");
+    const personIndex = indexes.find((entry) => entry.kind === "Person");
+    const paperIndex = indexes.find((entry) => entry.kind === "Paper");
+
+    expect(personIndex).toBeDefined();
+    expect(personIndex?.origin).toBeUndefined();
+    expect(paperIndex).toBeDefined();
+    expect(paperIndex?.origin).toBe("runtime");
+  });
+});
+
+describe("Store.evolve — runtime-declared relational indexes", () => {
+  // Runtime documents can carry an `indexes` array (analogue of
+  // compile-time `defineGraph({ indexes: [...] })`). Each entry
+  // resolves at merge time against runtime-or-compile-time kinds and
+  // flows into `graph.indexes` as `origin: "runtime"`.
+  it("flows a document-declared node index into graph.indexes", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {
+          Paper: {
+            properties: {
+              doi: { type: "string" },
+              title: { type: "string" },
+            },
+          },
+        },
+        indexes: [
+          {
+            entity: "node",
+            kind: "Paper",
+            name: "paper_by_doi",
+            fields: ["doi"],
+            unique: true,
+          },
+        ],
+      }),
+    );
+
+    type IndexEntry = Readonly<{
+      entity: string;
+      kind: string;
+      name: string;
+      origin?: string;
+      unique?: boolean;
+    }>;
+    const indexes =
+      (evolved.graph as { indexes?: readonly IndexEntry[] }).indexes ?? [];
+    const paperIndex = indexes.find((entry) => entry.name === "paper_by_doi");
+    expect(paperIndex).toBeDefined();
+    expect(paperIndex?.entity).toBe("node");
+    expect(paperIndex?.kind).toBe("Paper");
+    expect(paperIndex?.origin).toBe("runtime");
+    expect(paperIndex?.unique).toBe(true);
+  });
+
+  it("flows a document-declared edge index into graph.indexes", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {
+          Paper: { properties: { doi: { type: "string" } } },
+          Author: { properties: { orcid: { type: "string" } } },
+        },
+        edges: {
+          authoredBy: {
+            from: ["Paper"],
+            to: ["Author"],
+            properties: { contributionType: { type: "string" } },
+          },
+        },
+        indexes: [
+          {
+            entity: "edge",
+            kind: "authoredBy",
+            name: "authored_by_contribution",
+            fields: ["contributionType"],
+            direction: "out",
+          },
+        ],
+      }),
+    );
+
+    type IndexEntry = Readonly<{
+      entity: string;
+      kind: string;
+      name: string;
+      origin?: string;
+      direction?: string;
+    }>;
+    const indexes =
+      (evolved.graph as { indexes?: readonly IndexEntry[] }).indexes ?? [];
+    const edgeIndex = indexes.find(
+      (entry) => entry.name === "authored_by_contribution",
+    );
+    expect(edgeIndex).toBeDefined();
+    expect(edgeIndex?.entity).toBe("edge");
+    expect(edgeIndex?.kind).toBe("authoredBy");
+    expect(edgeIndex?.origin).toBe("runtime");
+    expect(edgeIndex?.direction).toBe("out");
+  });
+
+  it("rejects index referencing a kind not present in document or host graph", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const caught = await store
+      .evolve(
+        defineGraphExtension({
+          nodes: { Paper: { properties: { doi: { type: "string" } } } },
+          indexes: [
+            {
+              entity: "node",
+              kind: "Nonexistent",
+              fields: ["doi"],
+            },
+          ],
+        }),
+      )
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(KindNotFoundError);
+    expect((caught as KindNotFoundError).kindName).toBe("Nonexistent");
+    expect((caught as KindNotFoundError).entity).toBe("node");
+  });
+
+  it("targets a compile-time host kind", async () => {
+    // Runtime indexes can attach to compile-time kinds — the merge
+    // resolves the kind reference against both runtime nodes and
+    // compile-time graph.nodes.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        indexes: [
+          {
+            entity: "node",
+            kind: "Person",
+            name: "person_by_name",
+            fields: ["name"],
+          },
+        ],
+      }),
+    );
+
+    type IndexEntry = Readonly<{
+      entity: string;
+      kind: string;
+      name: string;
+      origin?: string;
+    }>;
+    const indexes =
+      (evolved.graph as { indexes?: readonly IndexEntry[] }).indexes ?? [];
+    const personIndex = indexes.find(
+      (entry) => entry.name === "person_by_name",
+    );
+    expect(personIndex).toBeDefined();
+    expect(personIndex?.kind).toBe("Person");
+    expect(personIndex?.origin).toBe("runtime");
+  });
+
+  it("persists runtime indexes through the schema document", async () => {
+    // The extension is the source of truth — restart-parity
+    // means a fresh Store reading the same backend reconstructs the
+    // runtime indexes from the persisted document.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    await store.evolve(
+      defineGraphExtension({
+        nodes: { Paper: { properties: { doi: { type: "string" } } } },
+        indexes: [
+          {
+            entity: "node",
+            kind: "Paper",
+            name: "paper_by_doi",
+            fields: ["doi"],
+            unique: true,
+          },
+        ],
+      }),
+    );
+
+    // Construct a fresh Store against the same backend; the loader
+    // reads the persisted extension and re-derives indexes.
+    const [reloaded] = await createStoreWithSchema(baseGraph, backend);
+    type IndexEntry = Readonly<{
+      entity: string;
+      kind: string;
+      name: string;
+      origin?: string;
+    }>;
+    const indexes =
+      (reloaded.graph as { indexes?: readonly IndexEntry[] }).indexes ?? [];
+    const paperIndex = indexes.find((entry) => entry.name === "paper_by_doi");
+    expect(paperIndex).toBeDefined();
+    expect(paperIndex?.origin).toBe("runtime");
+  });
+
+  it("rejects malformed runtime index entries at authoring time", () => {
+    let caught: unknown;
+    try {
+      defineGraphExtension({
+        nodes: { Paper: { properties: { doi: { type: "string" } } } },
+        indexes: [
+          // empty fields array
+          { entity: "node", kind: "Paper", fields: [] },
+        ],
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GraphExtensionValidationError);
+    const error = caught as GraphExtensionValidationError;
+    const codes = error.details.issues.map((issue) => issue.code);
+    expect(codes).toContain("EMPTY_INDEX_FIELDS");
+  });
+
+  it("rejects runtime indexes without fields at authoring time", () => {
+    let caught: unknown;
+    try {
+      defineGraphExtension({
+        nodes: { Paper: { properties: { doi: { type: "string" } } } },
+        indexes: [{ entity: "node", kind: "Paper" } as never],
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GraphExtensionValidationError);
+    const error = caught as GraphExtensionValidationError;
+    expect(error.details.issues).toContainEqual(
+      expect.objectContaining({
+        path: "/indexes/0/fields",
+        code: "EMPTY_INDEX_FIELDS",
+      }),
+    );
+  });
+
+  it("rejects duplicate runtime index names across separate evolves", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {
+          Paper: {
+            properties: {
+              doi: { type: "string" },
+              title: { type: "string" },
+            },
+          },
+        },
+        indexes: [
+          {
+            entity: "node",
+            kind: "Paper",
+            name: "paper_lookup",
+            fields: ["doi"],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      evolved.evolve(
+        defineGraphExtension({
+          indexes: [
+            {
+              entity: "node",
+              kind: "Paper",
+              name: "paper_lookup",
+              fields: ["title"],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toBeInstanceOf(GraphExtensionValidationError);
   });
 });

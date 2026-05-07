@@ -5,7 +5,7 @@
  * subset, and the suite asserts the load-bearing invariant from issue
  * #101 PR 3:
  *
- * - `compileRuntimeExtension(defineRuntimeExtension(doc))` always
+ * - `compileRuntimeExtension(defineGraphExtension(doc))` always
  *   succeeds and produces a Zod schema that accepts the document's own
  *   example values.
  *
@@ -21,12 +21,14 @@ import { type z } from "zod";
 import { getEmbeddingDimensions } from "../../src/core/embedding";
 import { getSearchableMetadata } from "../../src/core/searchable";
 import {
-  compileRuntimeExtension,
-  defineRuntimeExtension,
-  type RuntimeArrayItemType,
-  type RuntimeObjectFieldProperty,
-  type RuntimePropertyType,
+  defineGraphExtension,
+  type ExtensionArrayItemType,
+  type ExtensionObjectFieldProperty,
+  type ExtensionPropertyType,
 } from "../../src/runtime";
+// Internal compiler — reached via file path so the property tests
+// exercise it without forcing the barrel to re-export it.
+import { compileRuntimeExtension } from "../../src/runtime/compiler";
 
 // ============================================================
 // Identifier arbitraries
@@ -54,7 +56,7 @@ const enumValueArb = fc
 // ============================================================
 
 type PropertyAndExample = Readonly<{
-  property: RuntimePropertyType;
+  property: ExtensionPropertyType;
   example: unknown;
 }>;
 
@@ -79,7 +81,7 @@ const stringPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
       if (wantSearchable) property.searchable = { language: "english" };
       const example = "x".repeat(Math.max(minLength ?? 0, 1));
       return {
-        property: property as unknown as RuntimePropertyType,
+        property: property as unknown as ExtensionPropertyType,
         example,
       };
     },
@@ -95,7 +97,7 @@ const numberPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
     if (int) property.int = true;
     if (optional) property.optional = true;
     return {
-      property: property as unknown as RuntimePropertyType,
+      property: property as unknown as ExtensionPropertyType,
       example: int ? 7 : 1.5,
     };
   });
@@ -106,7 +108,7 @@ const booleanPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
     const property: Record<string, unknown> = { type: "boolean" };
     if (optional) property.optional = true;
     return {
-      property: property as unknown as RuntimePropertyType,
+      property: property as unknown as ExtensionPropertyType,
       example: true,
     };
   });
@@ -132,7 +134,7 @@ const arrayPropertyArb: fc.Arbitrary<PropertyAndExample> = leafPropertyArb.map(
     return {
       property: {
         type: "array",
-        items: leaf.property as RuntimeArrayItemType,
+        items: leaf.property as ExtensionArrayItemType,
       },
       example: [leaf.example],
     };
@@ -146,10 +148,10 @@ const objectPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
     selector: ([name]) => name,
   })
   .map((entries): PropertyAndExample => {
-    const properties: Record<string, RuntimeObjectFieldProperty> = {};
+    const properties: Record<string, ExtensionObjectFieldProperty> = {};
     const example: Record<string, unknown> = {};
     for (const [name, leaf] of entries) {
-      properties[name] = leaf.property as RuntimeObjectFieldProperty;
+      properties[name] = leaf.property as ExtensionObjectFieldProperty;
       example[name] = leaf.example;
     }
     return {
@@ -170,7 +172,7 @@ const propertyArb: fc.Arbitrary<PropertyAndExample> = fc.oneof(
 
 type NodeAndExample = Readonly<{
   kindName: string;
-  properties: Record<string, RuntimePropertyType>;
+  properties: Record<string, ExtensionPropertyType>;
   example: Record<string, unknown>;
 }>;
 
@@ -187,7 +189,7 @@ const nodeArb: fc.Arbitrary<NodeAndExample> = fc
     ),
   })
   .map(({ kindName, fields }) => {
-    const properties: Record<string, RuntimePropertyType> = {};
+    const properties: Record<string, ExtensionPropertyType> = {};
     const example: Record<string, unknown> = {};
     for (const [name, propertyAndExample, includeOptional] of fields) {
       properties[name] = propertyAndExample.property;
@@ -209,7 +211,7 @@ describe("runtime extension property tests", () => {
   it("compiles every well-formed document and accepts the example payload", () => {
     fc.assert(
       fc.property(nodeArb, ({ kindName, properties, example }) => {
-        const document = defineRuntimeExtension({
+        const document = defineGraphExtension({
           nodes: { [kindName]: { properties } },
         });
         const compiled = compileRuntimeExtension(document);
@@ -238,7 +240,7 @@ describe("runtime extension property tests", () => {
     });
     fc.assert(
       fc.property(arb, ({ kindName, propertyName, language }) => {
-        const document = defineRuntimeExtension({
+        const document = defineGraphExtension({
           nodes: {
             [kindName]: {
               properties: {
@@ -266,7 +268,7 @@ describe("runtime extension property tests", () => {
     });
     fc.assert(
       fc.property(arb, ({ kindName, propertyName, dimensions }) => {
-        const document = defineRuntimeExtension({
+        const document = defineGraphExtension({
           nodes: {
             [kindName]: {
               properties: {

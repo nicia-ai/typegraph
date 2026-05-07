@@ -1,52 +1,62 @@
 /**
- * Runtime graph extension — pure-value document layer and Zod compiler.
+ * Runtime graph extension — pure-value document layer + public errors.
+ *
+ * The Zod compiler (`compileRuntimeExtension`) and host-graph merge
+ * (`mergeRuntimeExtension`) live in this directory but are NOT
+ * re-exported from this barrel — they're internal plumbing reached
+ * via file-path imports (`schema/manager.ts`, `store/store.ts`).
+ * `Store.evolve` is the supported public path; consumers needing a
+ * pre-merge inspection use `validateGraphExtension` (Result-style)
+ * or `defineGraphExtension` (throwing) on the document, not the
+ * compiler output.
  */
 
 // Public entry
-export { defineRuntimeExtension } from "./define-runtime-extension";
-
-// Compiler
-export {
-  type CompiledEdge,
-  type CompiledExtension,
-  type CompiledNode,
-  compileRuntimeExtension,
-} from "./compiler";
+export { defineGraphExtension } from "./define-graph-extension";
 
 // Document type surface
 export {
-  CURRENT_RUNTIME_DOCUMENT_VERSION,
-  LEGACY_RUNTIME_DOCUMENT_VERSION,
-  type RuntimeArrayItemType,
-  type RuntimeArrayProperty,
-  type RuntimeBooleanProperty,
-  type RuntimeDocumentVersion,
-  type RuntimeEdgeDocument,
-  type RuntimeEmbeddingModifier,
-  type RuntimeEnumProperty,
-  type RuntimeGraphDocument,
-  type RuntimeNodeDocument,
-  type RuntimeNumberProperty,
-  type RuntimeObjectFieldProperty,
-  type RuntimeObjectProperty,
-  type RuntimeOntologyRelation,
-  type RuntimePropertyType,
-  type RuntimeSearchableModifier,
-  type RuntimeStringProperty,
-  type RuntimeUniqueConstraint,
-  type RuntimeUniqueWhere,
-} from "./document-types";
+  CURRENT_GRAPH_EXTENSION_VERSION,
+  type ExtensionArrayItemType,
+  type ExtensionArrayProperty,
+  type ExtensionBooleanProperty,
+  type ExtensionEdgeDef,
+  type ExtensionEdgeIndex,
+  type ExtensionEmbeddingModifier,
+  type ExtensionEnumProperty,
+  type ExtensionIndex,
+  type ExtensionIndexWhere,
+  type ExtensionNodeDef,
+  type ExtensionNodeIndex,
+  type ExtensionNumberProperty,
+  type ExtensionObjectFieldProperty,
+  type ExtensionObjectProperty,
+  type ExtensionOntologyRelation,
+  type ExtensionPropertyType,
+  type ExtensionSearchableModifier,
+  type ExtensionStringProperty,
+  type ExtensionUniqueConstraint,
+  type ExtensionUniqueWhere,
+  type GraphExtension,
+  type GraphExtensionVersion,
+  LEGACY_GRAPH_EXTENSION_VERSION,
+} from "./extension-types";
 
 // Errors
 export {
-  type RuntimeExtensionIssue,
-  type RuntimeExtensionIssueCode,
-  RuntimeExtensionValidationError,
+  GraphExtensionError,
+  type GraphExtensionIssue,
+  type GraphExtensionIssueCode,
+  GraphExtensionUnresolvedEndpointError,
+  GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
+  type IncompatibleChange,
+  IncompatibleChangeError,
+  KindCollisionError,
+  KindHasReferentsError,
+  type KindReferent,
+  RemoveCompileTimeKindError,
 } from "./errors";
 
 // Result-returning validator (for callers that prefer Result-style)
-export { validateRuntimeExtension } from "./validation";
-
-// Merge: compile a runtime extension and fold it into a host GraphDef.
-// Used by the schema-aware loader at startup and by `store.evolve()`.
-export { mergeRuntimeExtension } from "./merge";
+export { validateGraphExtension } from "./validation";

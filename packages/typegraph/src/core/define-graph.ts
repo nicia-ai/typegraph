@@ -5,7 +5,7 @@ import {
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
-import { type RuntimeGraphDocument } from "../runtime/document-types";
+import { type GraphExtension } from "../runtime/extension-types";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -175,7 +175,7 @@ type GraphDefConfig<
    *
    * Accepts the outputs of `defineNodeIndex` / `defineEdgeIndex` (which
    * already return `IndexDeclaration` values) or pre-built declarations
-   * reconstructed from a stored schema or runtime extension document.
+   * reconstructed from a stored schema or graph extension.
    *
    * Validated at definition time: every index must reference a `kind`
    * that exists in `nodes` / `edges`, and index `name`s must be unique
@@ -232,14 +232,14 @@ export type GraphDef<
    */
   indexes: readonly IndexDeclaration[] | undefined;
   /**
-   * Runtime extension document this graph was merged with, if any. Set
-   * by `mergeRuntimeExtension`; never set by `defineGraph` directly.
+   * Graph extension this graph was merged with, if any. Set by
+   * `mergeRuntimeExtension`; never set by `defineGraph` directly.
    * Exists solely so re-serialization is stable — the rest of the
    * system reads the merged kinds through `nodes` / `edges` /
    * `ontology` and never inspects this field. Absent on graphs that
-   * have never been runtime-extended; legacy graphs hash byte-identically.
+   * have never been extended; legacy graphs hash byte-identically.
    */
-  runtimeDocument: RuntimeGraphDocument | undefined;
+  extension: GraphExtension | undefined;
   /**
    * Soft-deprecated kind names attached to this graph. Set by the
    * loader from the persisted schema and by `store.deprecateKinds(...)`
@@ -378,7 +378,7 @@ export function defineGraph<
     ontology: config.ontology ?? ([] as unknown as TOntology),
     defaults,
     indexes,
-    runtimeDocument: undefined,
+    extension: undefined,
     deprecatedKinds: EMPTY_DEPRECATED_KINDS,
   }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
 }

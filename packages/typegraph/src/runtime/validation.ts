@@ -1,5 +1,5 @@
 /**
- * Pure structural validation for `RuntimeGraphDocument`.
+ * Pure structural validation for `GraphExtension`.
  *
  * Walks the document and accumulates every issue (no fail-fast) so a
  * caller showing the document to a human reviewer can surface all
@@ -14,30 +14,33 @@ import { ConfigurationError } from "../errors";
 import { computeTransitiveClosure } from "../ontology/closures";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
+import { isPlainObject } from "../utils/object";
 import { err, ok, type Result } from "../utils/result";
 import {
-  CURRENT_RUNTIME_DOCUMENT_VERSION,
-  LEGACY_RUNTIME_DOCUMENT_VERSION,
-  type RuntimeArrayProperty,
-  type RuntimeBooleanProperty,
-  type RuntimeDocumentVersion,
-  type RuntimeEdgeDocument,
-  type RuntimeEnumProperty,
-  type RuntimeGraphDocument,
-  type RuntimeNodeDocument,
-  type RuntimeNumberProperty,
-  type RuntimeObjectFieldProperty,
-  type RuntimeObjectProperty,
-  type RuntimeOntologyRelation,
-  type RuntimePropertyType,
-  type RuntimeStringProperty,
-  type RuntimeUniqueConstraint,
-} from "./document-types";
-import {
-  type RuntimeExtensionIssue,
-  type RuntimeExtensionIssueCode,
-  RuntimeExtensionValidationError,
+  type GraphExtensionIssue,
+  type GraphExtensionIssueCode,
+  GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
 } from "./errors";
+import {
+  CURRENT_GRAPH_EXTENSION_VERSION,
+  type ExtensionArrayProperty,
+  type ExtensionBooleanProperty,
+  type ExtensionEdgeDef,
+  type ExtensionEnumProperty,
+  type ExtensionIndex,
+  type ExtensionNodeDef,
+  type ExtensionNumberProperty,
+  type ExtensionObjectFieldProperty,
+  type ExtensionObjectProperty,
+  type ExtensionOntologyRelation,
+  type ExtensionPropertyType,
+  type ExtensionStringProperty,
+  type ExtensionUniqueConstraint,
+  type GraphExtension,
+  type GraphExtensionVersion,
+  LEGACY_GRAPH_EXTENSION_VERSION,
+} from "./extension-types";
 import { compactUndefined } from "./internal";
 
 const META_EDGE_NAME_SET: ReadonlySet<string> = new Set(ALL_META_EDGE_NAMES);
@@ -67,17 +70,50 @@ const SUPPORTED_STRING_FORMATS = new Set([
 ]);
 
 /**
- * Validates a runtime extension document.
- *
- * Returns the (frozen, deeply normalized) document on success, or a
- * `RuntimeExtensionValidationError` carrying every issue on failure. The
- * function never throws — callers that prefer exceptions wrap with
- * `unwrap()`.
+ * Top-level keys recognized by the v1 runtime document. New additive
+ * keys land here as the document format grows. Used by the strict
+ * authoring path (`defineGraphExtension`) to surface typos like
+ * `node` instead of `nodes`; the loose persistence-load path ignores
+ * unknown keys for forward compatibility.
  */
-export function validateRuntimeExtension(
+const KNOWN_DOCUMENT_KEYS = new Set([
+  "version",
+  "nodes",
+  "edges",
+  "ontology",
+  "indexes",
+]);
+
+type ValidateGraphExtensionOptions = Readonly<{
+  /**
+   * Reject unknown top-level keys and unsupported string formats.
+   * Used by `defineGraphExtension`, where the document is being
+   * authored fresh against the current library version — typos in
+   * `nodes` / `format: "date-time"` etc. should fail loudly. The
+   * persistence-load path leaves this off so a document committed by
+   * a future v1.x writer with additive fields still parses on an
+   * older v1 reader.
+   */
+  strict?: boolean;
+}>;
+
+/**
+ * Validates a graph extension.
+ *
+ * Returns the (frozen, deeply normalized) extension on success, or a
+ * `GraphExtensionValidationError` carrying every issue on authoring
+ * failure. Unsupported future major versions throw
+ * `GraphExtensionVersionUnsupportedError` immediately because the
+ * current library cannot safely decode the rest of the document.
+ * Callers that prefer exceptions for validation failures wrap the
+ * returned `Result` with `unwrap()`.
+ */
+export function validateGraphExtension(
   input: unknown,
-): Result<RuntimeGraphDocument, RuntimeExtensionValidationError> {
-  const issues: RuntimeExtensionIssue[] = [];
+  options: ValidateGraphExtensionOptions = {},
+): Result<GraphExtension, GraphExtensionValidationError> {
+  const issues: GraphExtensionIssue[] = [];
+  const strict = options.strict === true;
 
   if (!isPlainObject(input)) {
     issues.push({
@@ -85,25 +121,36 @@ export function validateRuntimeExtension(
       message: "Document must be a plain object.",
       code: "INVALID_DOCUMENT_SHAPE",
     });
-    return err(new RuntimeExtensionValidationError(issues));
+    return err(new GraphExtensionValidationError(issues));
   }
 
   const documentRecord = input;
 
-  // Forward-compat: unknown top-level keys are intentionally NOT
-  // rejected. The persistence-side zod schema is `.loose()` on every
-  // nested object, and the documented format-versioning policy
-  // promises that additive minor changes (a new top-level slice in
-  // a future v1.x.y) ride forward without bumping the major. A strict
-  // check here would defeat that promise — an older v1 runtime
-  // reading a document committed by a newer v1 writer would reject
-  // perfectly-valid additive fields. Typos in consumer code are
-  // caught by TypeScript at the `defineRuntimeExtension` call site,
-  // which is where they originate.
+  // Forward-compat: in non-strict (persistence-load) mode, unknown
+  // top-level keys are intentionally NOT rejected. The persistence-
+  // side zod schema is `.loose()` on every nested object, and the
+  // documented format-versioning policy promises that additive minor
+  // changes (a new top-level slice in a future v1.x.y) ride forward
+  // without bumping the major. In strict (authoring) mode, unknown
+  // keys surface as `UNKNOWN_DOCUMENT_KEY` so a typo like `node`
+  // instead of `nodes` fails loudly instead of silently producing an
+  // empty extension.
+  if (strict) {
+    for (const key of Object.keys(documentRecord)) {
+      if (!KNOWN_DOCUMENT_KEYS.has(key)) {
+        issues.push({
+          path: `/${escapePointerSegment(key)}`,
+          message: `Unknown top-level key "${key}". Did you mean one of: ${[...KNOWN_DOCUMENT_KEYS].join(", ")}?`,
+          code: "UNKNOWN_DOCUMENT_KEY",
+        });
+      }
+    }
+  }
+
   const version = validateVersion(documentRecord.version, issues);
 
-  const nodes = validateNodesSection(documentRecord.nodes, issues);
-  const edges = validateEdgesSection(documentRecord.edges, issues);
+  const nodes = validateNodesSection(documentRecord.nodes, issues, strict);
+  const edges = validateEdgesSection(documentRecord.edges, issues, strict);
 
   // Edge endpoints can reference (a) kinds declared in this same document,
   // (b) compile-time host kinds resolved at merge time, or (c) external
@@ -115,49 +162,54 @@ export function validateRuntimeExtension(
     validateOntology(ontology, nodes, issues);
   }
 
+  const indexes = validateIndexesSection(documentRecord.indexes, issues);
+
   if (issues.length > 0) {
-    return err(new RuntimeExtensionValidationError(issues));
+    return err(new GraphExtensionValidationError(issues));
   }
 
-  return ok(freezeDocument({ version, nodes, edges, ontology }));
+  return ok(freezeDocument({ version, nodes, edges, ontology, indexes }));
 }
 
 /**
  * Validates the `version` field against the current supported major.
  *
- * Absent → treated as `LEGACY_RUNTIME_DOCUMENT_VERSION` (a stable `1`)
- * for back-compat with documents persisted before the field existed.
- * Splitting this from `CURRENT` is load-bearing for future major
- * bumps: when v2 ships, a stored v1 document still parses as v1.
- * Equal to current → accepted. Higher major → rejected with
- * `RUNTIME_EXTENSION_VERSION_UNSUPPORTED`. Non-integer / non-positive
- * → rejected with `INVALID_DOCUMENT_SHAPE`.
+ * Absent → resolved to `LEGACY_GRAPH_EXTENSION_VERSION` (a stable
+ * `1`). The serializer omits `version` from the canonical persisted
+ * form when it equals the legacy default, so the on-disk shape is
+ * always version-less for v1 documents — the validator's absent →
+ * legacy mapping closes that round-trip. Splitting `LEGACY` from
+ * `CURRENT` is forward-looking design for future major bumps: when
+ * v2 ships, `CURRENT` becomes `2` but `LEGACY` stays `1`, so a v1-era
+ * stored document still parses as v1.
  *
- * Returns the resolved version. The frozen output document carries
- * this value verbatim — the serializer applies the omit-when-default
- * canonical-form rule against `LEGACY_RUNTIME_DOCUMENT_VERSION` so
- * stored documents from any era hash byte-identically.
+ * Equal to current → accepted. Higher major → rejected with
+ * `GRAPH_EXTENSION_VERSION_UNSUPPORTED`. Non-integer / non-positive
+ * → rejected with `INVALID_DOCUMENT_SHAPE`.
  */
 function validateVersion(
   raw: unknown,
-  issues: RuntimeExtensionIssue[],
-): RuntimeDocumentVersion {
-  if (raw === undefined) return LEGACY_RUNTIME_DOCUMENT_VERSION;
+  issues: GraphExtensionIssue[],
+): GraphExtensionVersion {
+  if (raw === undefined) return LEGACY_GRAPH_EXTENSION_VERSION;
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
     issues.push({
       path: "/version",
       message: `Document version must be a positive integer; received ${JSON.stringify(raw)}.`,
       code: "INVALID_DOCUMENT_SHAPE",
     });
-    return LEGACY_RUNTIME_DOCUMENT_VERSION;
+    return LEGACY_GRAPH_EXTENSION_VERSION;
   }
-  if (raw > CURRENT_RUNTIME_DOCUMENT_VERSION) {
-    issues.push({
-      path: "/version",
-      message: `Document was authored against runtimeDocument version ${raw} but this library only supports up to version ${CURRENT_RUNTIME_DOCUMENT_VERSION}. Upgrade @nicia-ai/typegraph.`,
-      code: "RUNTIME_EXTENSION_VERSION_UNSUPPORTED",
-    });
-    return LEGACY_RUNTIME_DOCUMENT_VERSION;
+  if (raw > CURRENT_GRAPH_EXTENSION_VERSION) {
+    // Version mismatch is unrecoverable — the rest of the document
+    // may use fields the current library can't decode. Throw the
+    // typed class directly rather than batching into the issue list,
+    // which is reserved for per-field validation problems a UI can
+    // surface alongside others.
+    throw new GraphExtensionVersionUnsupportedError(
+      raw,
+      CURRENT_GRAPH_EXTENSION_VERSION,
+    );
   }
   return raw;
 }
@@ -168,8 +220,9 @@ function validateVersion(
 
 function validateNodesSection(
   rawNodes: unknown,
-  issues: RuntimeExtensionIssue[],
-): Record<string, RuntimeNodeDocument> | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): Record<string, ExtensionNodeDef> | undefined {
   if (rawNodes === undefined) return undefined;
 
   if (!isPlainObject(rawNodes)) {
@@ -181,7 +234,7 @@ function validateNodesSection(
     return undefined;
   }
 
-  const result: Record<string, RuntimeNodeDocument> = {};
+  const result: Record<string, ExtensionNodeDef> = {};
   const recorded = new Set<string>();
 
   for (const [kindName, rawNode] of Object.entries(rawNodes)) {
@@ -205,7 +258,7 @@ function validateNodesSection(
       continue;
     }
 
-    const node = validateNodeDocument(kindName, rawNode, path, issues);
+    const node = validateNodeDocument(kindName, rawNode, path, issues, strict);
     if (node === undefined) continue;
     result[kindName] = node;
     recorded.add(kindName);
@@ -218,8 +271,9 @@ function validateNodeDocument(
   kindName: string,
   raw: unknown,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeNodeDocument | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionNodeDef | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
       path,
@@ -265,6 +319,7 @@ function validateNodeDocument(
     "node",
     kindName,
     issues,
+    strict,
   );
   if (properties === undefined) return undefined;
 
@@ -276,7 +331,7 @@ function validateNodeDocument(
     issues,
   );
 
-  return compactUndefined<RuntimeNodeDocument>({
+  return compactUndefined<ExtensionNodeDef>({
     description,
     annotations,
     properties,
@@ -290,8 +345,9 @@ function validateNodeDocument(
 
 function validateEdgesSection(
   rawEdges: unknown,
-  issues: RuntimeExtensionIssue[],
-): Record<string, RuntimeEdgeDocument> | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): Record<string, ExtensionEdgeDef> | undefined {
   if (rawEdges === undefined) return undefined;
 
   if (!isPlainObject(rawEdges)) {
@@ -303,7 +359,7 @@ function validateEdgesSection(
     return undefined;
   }
 
-  const result: Record<string, RuntimeEdgeDocument> = {};
+  const result: Record<string, ExtensionEdgeDef> = {};
   const recorded = new Set<string>();
 
   for (const [kindName, rawEdge] of Object.entries(rawEdges)) {
@@ -327,7 +383,7 @@ function validateEdgesSection(
       continue;
     }
 
-    const edge = validateEdgeDocument(kindName, rawEdge, path, issues);
+    const edge = validateEdgeDocument(kindName, rawEdge, path, issues, strict);
     if (edge === undefined) continue;
     result[kindName] = edge;
     recorded.add(kindName);
@@ -340,8 +396,9 @@ function validateEdgeDocument(
   kindName: string,
   raw: unknown,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeEdgeDocument | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionEdgeDef | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
       path,
@@ -395,10 +452,11 @@ function validateEdgeDocument(
         "edge",
         kindName,
         issues,
+        strict,
       );
   if (properties === undefined) return undefined;
 
-  return compactUndefined<RuntimeEdgeDocument>({
+  return compactUndefined<ExtensionEdgeDef>({
     description,
     annotations,
     from,
@@ -410,7 +468,7 @@ function validateEdgeDocument(
 function validateEndpointList(
   raw: unknown,
   path: string,
-  issues: RuntimeExtensionIssue[],
+  issues: GraphExtensionIssue[],
 ): readonly string[] | undefined {
   if (!Array.isArray(raw)) {
     issues.push({
@@ -449,8 +507,8 @@ function validateEndpointList(
 
 function validateOntologySection(
   raw: unknown,
-  issues: RuntimeExtensionIssue[],
-): RuntimeOntologyRelation[] | undefined {
+  issues: GraphExtensionIssue[],
+): ExtensionOntologyRelation[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
     issues.push({
@@ -461,7 +519,7 @@ function validateOntologySection(
     return undefined;
   }
 
-  const result: RuntimeOntologyRelation[] = [];
+  const result: ExtensionOntologyRelation[] = [];
   for (const [index, entry] of raw.entries()) {
     const path = `/ontology/${index}`;
     if (!isPlainObject(entry)) {
@@ -518,9 +576,9 @@ function validateOntologySection(
 }
 
 function validateOntology(
-  ontology: readonly RuntimeOntologyRelation[],
-  _nodes: Record<string, RuntimeNodeDocument> | undefined,
-  issues: RuntimeExtensionIssue[],
+  ontology: readonly ExtensionOntologyRelation[],
+  _nodes: Record<string, ExtensionNodeDef> | undefined,
+  issues: GraphExtensionIssue[],
 ): void {
   const seenKey = new Set<string>();
 
@@ -554,6 +612,14 @@ function validateOntology(
   // this document. Cross-document cycles will be caught at evolve() time
   // when the runtime extension is merged with the existing graph.
   detectHierarchicalCycles(ontology, issues);
+
+  // disjointWith ↔ subClassOf contradictions: declaring two kinds as
+  // both subclass-related (subClassOf, broader, narrower) AND
+  // disjointWith is incoherent — a subclass instance is also an
+  // instance of its parent, so they can't be in disjoint sets.
+  // Detect within the document; cross-document detection happens at
+  // merge time when the registry's closures are rebuilt.
+  detectDisjointHierarchyContradictions(ontology, issues);
 }
 
 const STRICTLY_HIERARCHICAL: ReadonlySet<MetaEdgeName> = new Set([
@@ -589,8 +655,8 @@ const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
 ]);
 
 function detectHierarchicalCycles(
-  ontology: readonly RuntimeOntologyRelation[],
-  issues: RuntimeExtensionIssue[],
+  ontology: readonly ExtensionOntologyRelation[],
+  issues: GraphExtensionIssue[],
 ): void {
   type NormalizedEdge = Readonly<{
     from: string;
@@ -634,6 +700,362 @@ function detectHierarchicalCycles(
   }
 }
 
+/**
+ * Detects `disjointWith` ↔ subClassOf-family contradictions: declaring
+ * `(A, B) disjointWith` AND `(A, B) subClassOf` (or any subclass-
+ * relating meta-edge) in the same document is incoherent — a subclass
+ * instance is also an instance of its parent, so they can't be in
+ * disjoint sets.
+ *
+ * Detection runs against the closure of the hierarchical relations
+ * because `(A, B) subClassOf` plus `(B, C) subClassOf` makes A and C
+ * disjoint-incompatible too. `narrower` / `hasPart` are flipped to
+ * their canonical direction during normalization, mirroring how
+ * `detectHierarchicalCycles` builds its groups.
+ *
+ * Cross-document contradictions (extension declares `disjointWith(A,B)`
+ * while a previously-evolved extension declared `subClassOf(A,B)`) are
+ * caught at merge time when the registry's closures are rebuilt.
+ */
+function detectDisjointHierarchyContradictions(
+  ontology: readonly ExtensionOntologyRelation[],
+  issues: GraphExtensionIssue[],
+): void {
+  const disjointPairs = new Set<string>();
+  const disjointPath = new Map<string, string>();
+  for (const [index, relation] of ontology.entries()) {
+    if (relation.metaEdge !== "disjointWith") continue;
+    // disjointWith is symmetric; record both orderings so the closure
+    // check below catches the contradiction regardless of which side
+    // the subclass relation orders by.
+    disjointPairs.add(`${relation.from}|${relation.to}`);
+    disjointPairs.add(`${relation.to}|${relation.from}`);
+    disjointPath.set(`${relation.from}|${relation.to}`, `/ontology/${index}`);
+    disjointPath.set(`${relation.to}|${relation.from}`, `/ontology/${index}`);
+  }
+  if (disjointPairs.size === 0) return;
+
+  // Walk the closure of every hierarchical group; any (from, reachable)
+  // pair that also appears in `disjointPairs` is a contradiction.
+  type NormalizedEdge = Readonly<{
+    from: string;
+    to: string;
+    originalIndex: number;
+  }>;
+  const groups = new Map<MetaEdgeName, NormalizedEdge[]>();
+  for (const [index, relation] of ontology.entries()) {
+    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
+    if (normalization === undefined) continue;
+    const from = normalization.flip ? relation.to : relation.from;
+    const to = normalization.flip ? relation.from : relation.to;
+    const list = groups.get(normalization.canonical) ?? [];
+    list.push({ from, to, originalIndex: index });
+    groups.set(normalization.canonical, list);
+  }
+  const reported = new Set<string>();
+  for (const [name, edges] of groups) {
+    const closure = computeTransitiveClosure(
+      edges.map((edge) => [edge.from, edge.to] as const),
+    );
+    for (const [from, reachable] of closure) {
+      for (const to of reachable) {
+        const pairKey = `${from}|${to}`;
+        if (!disjointPairs.has(pairKey)) continue;
+        if (reported.has(pairKey)) continue;
+        reported.add(pairKey);
+        issues.push({
+          path: disjointPath.get(pairKey) ?? "/ontology",
+          message: `Contradiction: "${from}" and "${to}" are declared disjointWith but also related by "${name}" (directly or transitively).`,
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        });
+      }
+    }
+  }
+}
+
+// ============================================================
+// Section: indexes
+// ============================================================
+
+const INDEX_SCOPE_VALUES: ReadonlySet<string> = new Set([
+  "graphAndKind",
+  "graph",
+  "none",
+]);
+
+const EDGE_INDEX_DIRECTION_VALUES: ReadonlySet<string> = new Set([
+  "out",
+  "in",
+  "none",
+]);
+
+const RUNTIME_INDEX_WHERE_OPS: ReadonlySet<string> = new Set([
+  "isNull",
+  "isNotNull",
+]);
+
+function validateIndexesSection(
+  rawIndexes: unknown,
+  issues: GraphExtensionIssue[],
+): readonly ExtensionIndex[] | undefined {
+  if (rawIndexes === undefined) return undefined;
+  if (!Array.isArray(rawIndexes)) {
+    issues.push({
+      path: "/indexes",
+      message: "`indexes` must be an array of index declarations.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return undefined;
+  }
+
+  const result: ExtensionIndex[] = [];
+  const seenNames = new Set<string>();
+
+  for (const [arrayIndex, entry] of rawIndexes.entries()) {
+    const path = `/indexes/${arrayIndex}`;
+    const validated = validateIndexEntry(entry, path, issues);
+    if (validated === undefined) continue;
+
+    if (validated.name !== undefined) {
+      if (seenNames.has(validated.name)) {
+        issues.push({
+          path: `${path}/name`,
+          message: `Duplicate index name "${validated.name}".`,
+          code: "DUPLICATE_INDEX_NAME",
+        });
+        continue;
+      }
+      seenNames.add(validated.name);
+    }
+    result.push(validated);
+  }
+
+  return result;
+}
+
+function validateIndexEntry(
+  raw: unknown,
+  path: string,
+  issues: GraphExtensionIssue[],
+): ExtensionIndex | undefined {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      path,
+      message: "Index entry must be a plain object.",
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+
+  const entity = raw.entity;
+  if (entity !== "node" && entity !== "edge") {
+    issues.push({
+      path: `${path}/entity`,
+      message: `Index \`entity\` must be "node" or "edge"; received ${describeUnknownValue(entity)}.`,
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+
+  if (typeof raw.kind !== "string" || !isValidKindName(raw.kind)) {
+    issues.push({
+      path: `${path}/kind`,
+      message:
+        "Index `kind` must be a non-empty kind name matching /^[A-Za-z_][A-Za-z0-9_]*$/.",
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+
+  const fields = validateStringList(raw.fields, `${path}/fields`, issues, {
+    allowEmpty: false,
+    label: "fields",
+    emptyCode: "EMPTY_INDEX_FIELDS",
+  });
+  if (fields === undefined) return undefined;
+
+  const coveringFields = validateStringList(
+    raw.coveringFields,
+    `${path}/coveringFields`,
+    issues,
+    { allowEmpty: true, label: "coveringFields" },
+  );
+
+  if (raw.unique !== undefined && typeof raw.unique !== "boolean") {
+    issues.push({
+      path: `${path}/unique`,
+      message: "Index `unique` must be a boolean.",
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+
+  let name: string | undefined;
+  if (raw.name !== undefined) {
+    if (typeof raw.name !== "string" || raw.name.length === 0) {
+      issues.push({
+        path: `${path}/name`,
+        message: "Index `name` must be a non-empty string.",
+        code: "INVALID_INDEX_DECLARATION",
+      });
+      return undefined;
+    }
+    name = raw.name;
+  }
+
+  let scope: ExtensionIndex["scope"];
+  if (raw.scope !== undefined) {
+    if (typeof raw.scope !== "string" || !INDEX_SCOPE_VALUES.has(raw.scope)) {
+      issues.push({
+        path: `${path}/scope`,
+        message: `Index \`scope\` must be one of: ${[...INDEX_SCOPE_VALUES].join(", ")}.`,
+        code: "INVALID_INDEX_DECLARATION",
+      });
+      return undefined;
+    }
+    scope = raw.scope as ExtensionIndex["scope"];
+  }
+
+  const where = validateRuntimeIndexWhere(raw.where, `${path}/where`, issues);
+
+  if (entity === "node") {
+    return compactUndefined<ExtensionIndex>({
+      entity: "node",
+      kind: raw.kind,
+      name,
+      fields,
+      coveringFields,
+      unique: raw.unique,
+      scope,
+      where,
+    });
+  }
+
+  let direction: "out" | "in" | "none" | undefined;
+  if (raw.direction !== undefined) {
+    if (
+      typeof raw.direction !== "string" ||
+      !EDGE_INDEX_DIRECTION_VALUES.has(raw.direction)
+    ) {
+      issues.push({
+        path: `${path}/direction`,
+        message: `Edge index \`direction\` must be one of: ${[...EDGE_INDEX_DIRECTION_VALUES].join(", ")}.`,
+        code: "INVALID_INDEX_DECLARATION",
+      });
+      return undefined;
+    }
+    direction = raw.direction as "out" | "in" | "none";
+  }
+
+  return compactUndefined<ExtensionIndex>({
+    entity: "edge",
+    kind: raw.kind,
+    name,
+    direction,
+    fields,
+    coveringFields,
+    unique: raw.unique,
+    scope,
+    where,
+  });
+}
+
+function validateStringList(
+  raw: unknown,
+  path: string,
+  issues: GraphExtensionIssue[],
+  options: Readonly<{
+    allowEmpty: boolean;
+    label: string;
+    emptyCode?: GraphExtensionIssueCode;
+  }>,
+): readonly string[] | undefined {
+  if (raw === undefined) {
+    if (options.allowEmpty) return undefined;
+    issues.push({
+      path,
+      message: `\`${options.label}\` is required and must contain at least one entry.`,
+      code: options.emptyCode ?? "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    issues.push({
+      path,
+      message: `\`${options.label}\` must be an array of strings.`,
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const [index, value] of raw.entries()) {
+    if (typeof value !== "string" || value.length === 0) {
+      issues.push({
+        path: `${path}/${index}`,
+        message: `\`${options.label}[${index}]\` must be a non-empty string.`,
+        code: "INVALID_INDEX_DECLARATION",
+      });
+      return undefined;
+    }
+    if (seen.has(value)) {
+      issues.push({
+        path: `${path}/${index}`,
+        message: `Duplicate ${options.label} entry "${value}".`,
+        code: "INVALID_INDEX_DECLARATION",
+      });
+      return undefined;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+  if (!options.allowEmpty && result.length === 0) {
+    issues.push({
+      path,
+      message: `\`${options.label}\` must contain at least one entry.`,
+      code: options.emptyCode ?? "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  return result;
+}
+
+function validateRuntimeIndexWhere(
+  raw: unknown,
+  path: string,
+  issues: GraphExtensionIssue[],
+): ExtensionIndex["where"] {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    issues.push({
+      path,
+      message: "Index `where` must be a plain object.",
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  if (typeof raw.field !== "string" || raw.field.length === 0) {
+    issues.push({
+      path: `${path}/field`,
+      message: "`where.field` must be a non-empty string.",
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  if (typeof raw.op !== "string" || !RUNTIME_INDEX_WHERE_OPS.has(raw.op)) {
+    issues.push({
+      path: `${path}/op`,
+      message: '`where.op` must be "isNull" or "isNotNull" in v1.',
+      code: "INVALID_INDEX_DECLARATION",
+    });
+    return undefined;
+  }
+  return Object.freeze({
+    field: raw.field,
+    op: raw.op as "isNull" | "isNotNull",
+  });
+}
+
 // ============================================================
 // Properties and refinements
 // ============================================================
@@ -643,8 +1065,9 @@ function validatePropertiesMap(
   path: string,
   ownerType: "node" | "edge",
   ownerName: string,
-  issues: RuntimeExtensionIssue[],
-): Record<string, RuntimePropertyType> | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): Record<string, ExtensionPropertyType> | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
       path,
@@ -656,7 +1079,7 @@ function validatePropertiesMap(
 
   const reserved =
     ownerType === "node" ? RESERVED_NODE_KEYS : RESERVED_EDGE_KEYS;
-  const result: Record<string, RuntimePropertyType> = {};
+  const result: Record<string, ExtensionPropertyType> = {};
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
     const propertyPath = `${path}/${escapePointerSegment(propertyName)}`;
     if (reserved.has(propertyName)) {
@@ -675,7 +1098,13 @@ function validatePropertiesMap(
       });
       continue;
     }
-    const validated = validateProperty(propertyValue, propertyPath, 0, issues);
+    const validated = validateProperty(
+      propertyValue,
+      propertyPath,
+      0,
+      issues,
+      strict,
+    );
     if (validated === undefined) continue;
     result[propertyName] = validated;
   }
@@ -687,8 +1116,9 @@ function validateProperty(
   raw: unknown,
   path: string,
   depth: number,
-  issues: RuntimeExtensionIssue[],
-): RuntimePropertyType | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionPropertyType | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
       path,
@@ -711,7 +1141,7 @@ function validateProperty(
 
   switch (type) {
     case "string": {
-      return validateStringProperty(property, path, issues);
+      return validateStringProperty(property, path, issues, strict);
     }
     case "number": {
       return validateNumberProperty(property, path, issues);
@@ -723,10 +1153,10 @@ function validateProperty(
       return validateEnumProperty(property, path, issues);
     }
     case "array": {
-      return validateArrayProperty(property, path, depth, issues);
+      return validateArrayProperty(property, path, depth, issues, strict);
     }
     case "object": {
-      return validateObjectProperty(property, path, depth, issues);
+      return validateObjectProperty(property, path, depth, issues, strict);
     }
   }
   return undefined;
@@ -735,8 +1165,9 @@ function validateProperty(
 function validateStringProperty(
   raw: Record<string, unknown>,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeStringProperty | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionStringProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   // See `rejectUnknownRefinements` removal docstring for details.
   const minLength = validateNonNegativeInteger(
@@ -789,14 +1220,8 @@ function validateStringProperty(
     }
   }
 
-  let format: RuntimeStringProperty["format"];
+  let format: ExtensionStringProperty["format"];
   if (raw.format !== undefined) {
-    // Forward-compat: a future v1.x.y may introduce new format
-    // identifiers (e.g. `"uri-reference"`). Older runtimes accept
-    // them silently and compile to a plain string schema — the
-    // newer format's behavior simply isn't applied. Non-string
-    // `format` values (number, object, etc.) are still rejected
-    // because they're structurally invalid, not future-additive.
     if (typeof raw.format !== "string") {
       issues.push({
         path: `${path}/format`,
@@ -804,11 +1229,22 @@ function validateStringProperty(
         code: "INVALID_PROPERTY_REFINEMENT",
       });
     } else if (SUPPORTED_STRING_FORMATS.has(raw.format)) {
-      format = raw.format as RuntimeStringProperty["format"];
+      format = raw.format as ExtensionStringProperty["format"];
+    } else if (strict) {
+      // Authoring-mode reject. A typo like `"date-time"` (no
+      // hyphen) silently compiled to a plain `z.string()` in earlier
+      // versions, so `safeParse("not-a-date")` succeeded — surfacing
+      // the typo here is the contract.
+      issues.push({
+        path: `${path}/format`,
+        message: `Unsupported string format "${raw.format}". Supported: ${[...SUPPORTED_STRING_FORMATS].join(", ")}.`,
+        code: "UNSUPPORTED_STRING_FORMAT",
+      });
     }
-    // Unknown string format → silently dropped from the compiled
-    // schema. The compiler builds a plain `z.string()` for this
-    // field. See format-versioning policy for rationale.
+    // Non-strict (persistence-load) path: unknown format silently
+    // drops to a plain `z.string()`. A future v1.x.y writer may
+    // introduce a new format identifier; an older v1 reader still
+    // parses the document, just without the new format's behaviour.
   }
 
   const modifiers = validatePropertyModifiers(raw, path, "string", issues);
@@ -839,7 +1275,7 @@ function validateStringProperty(
     return undefined;
   }
 
-  return compactUndefined<RuntimeStringProperty>({
+  return compactUndefined<ExtensionStringProperty>({
     type: "string",
     minLength,
     maxLength,
@@ -855,8 +1291,8 @@ function validateStringProperty(
 function validateNumberProperty(
   raw: Record<string, unknown>,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeNumberProperty | undefined {
+  issues: GraphExtensionIssue[],
+): ExtensionNumberProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   let min: number | undefined;
   let max: number | undefined;
@@ -925,7 +1361,7 @@ function validateNumberProperty(
   const modifiers = validatePropertyModifiers(raw, path, "number", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<RuntimeNumberProperty>({
+  return compactUndefined<ExtensionNumberProperty>({
     type: "number",
     min,
     max,
@@ -940,12 +1376,12 @@ function validateNumberProperty(
 function validateBooleanProperty(
   raw: Record<string, unknown>,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeBooleanProperty | undefined {
+  issues: GraphExtensionIssue[],
+): ExtensionBooleanProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   const modifiers = validatePropertyModifiers(raw, path, "boolean", issues);
   if (modifiers === undefined) return undefined;
-  return compactUndefined<RuntimeBooleanProperty>({
+  return compactUndefined<ExtensionBooleanProperty>({
     type: "boolean",
     optional: modifiers.optional,
     searchable: modifiers.searchable,
@@ -957,8 +1393,8 @@ function validateBooleanProperty(
 function validateEnumProperty(
   raw: Record<string, unknown>,
   path: string,
-  issues: RuntimeExtensionIssue[],
-): RuntimeEnumProperty | undefined {
+  issues: GraphExtensionIssue[],
+): ExtensionEnumProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   const valuesRaw = raw.values;
   if (!Array.isArray(valuesRaw) || valuesRaw.length === 0) {
@@ -996,7 +1432,7 @@ function validateEnumProperty(
   const modifiers = validatePropertyModifiers(raw, path, "enum", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<RuntimeEnumProperty>({
+  return compactUndefined<ExtensionEnumProperty>({
     type: "enum",
     values,
     optional: modifiers.optional,
@@ -1010,8 +1446,9 @@ function validateArrayProperty(
   raw: Record<string, unknown>,
   path: string,
   depth: number,
-  issues: RuntimeExtensionIssue[],
-): RuntimeArrayProperty | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionArrayProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   const itemsRaw = raw.items;
   if (itemsRaw === undefined) {
@@ -1039,7 +1476,13 @@ function validateArrayProperty(
     });
     return undefined;
   }
-  const items = validateProperty(itemsRaw, `${path}/items`, depth + 1, issues);
+  const items = validateProperty(
+    itemsRaw,
+    `${path}/items`,
+    depth + 1,
+    issues,
+    strict,
+  );
   if (items === undefined) return undefined;
   if (items.type === "array") {
     // Defensive: shouldn't be reachable because we checked above, but keeps
@@ -1050,7 +1493,7 @@ function validateArrayProperty(
   const modifiers = validatePropertyModifiers(raw, path, "array", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<RuntimeArrayProperty>({
+  return compactUndefined<ExtensionArrayProperty>({
     type: "array",
     items: items,
     optional: modifiers.optional,
@@ -1064,8 +1507,9 @@ function validateObjectProperty(
   raw: Record<string, unknown>,
   path: string,
   depth: number,
-  issues: RuntimeExtensionIssue[],
-): RuntimeObjectProperty | undefined {
+  issues: GraphExtensionIssue[],
+  strict: boolean,
+): ExtensionObjectProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
   if (depth >= 1) {
     issues.push({
@@ -1096,7 +1540,7 @@ function validateObjectProperty(
     return undefined;
   }
 
-  const fields: Record<string, RuntimeObjectFieldProperty> = {};
+  const fields: Record<string, ExtensionObjectFieldProperty> = {};
   for (const [name, value] of propertiesEntries) {
     const fieldPath = `${path}/properties/${escapePointerSegment(name)}`;
     if (!isPlainObject(value)) {
@@ -1116,15 +1560,15 @@ function validateObjectProperty(
       });
       continue;
     }
-    const field = validateProperty(value, fieldPath, depth + 1, issues);
+    const field = validateProperty(value, fieldPath, depth + 1, issues, strict);
     if (field === undefined) continue;
-    fields[name] = field as RuntimeObjectFieldProperty;
+    fields[name] = field as ExtensionObjectFieldProperty;
   }
 
   const modifiers = validatePropertyModifiers(raw, path, "object", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<RuntimeObjectProperty>({
+  return compactUndefined<ExtensionObjectProperty>({
     type: "object",
     properties: fields,
     optional: modifiers.optional,
@@ -1148,8 +1592,8 @@ type NormalizedModifiers = Readonly<{
 function validatePropertyModifiers(
   raw: Record<string, unknown>,
   path: string,
-  propertyType: RuntimePropertyType["type"],
-  issues: RuntimeExtensionIssue[],
+  propertyType: ExtensionPropertyType["type"],
+  issues: GraphExtensionIssue[],
 ): NormalizedModifiers | undefined {
   let valid = true;
 
@@ -1292,9 +1736,9 @@ function validatePropertyModifiers(
 function validateUniqueConstraints(
   raw: unknown,
   path: string,
-  properties: Record<string, RuntimePropertyType>,
-  issues: RuntimeExtensionIssue[],
-): readonly RuntimeUniqueConstraint[] | undefined {
+  properties: Record<string, ExtensionPropertyType>,
+  issues: GraphExtensionIssue[],
+): readonly ExtensionUniqueConstraint[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
     issues.push({
@@ -1305,7 +1749,7 @@ function validateUniqueConstraints(
     return undefined;
   }
 
-  const result: RuntimeUniqueConstraint[] = [];
+  const result: ExtensionUniqueConstraint[] = [];
   const names = new Set<string>();
   for (const [index, entry] of raw.entries()) {
     const constraintPath = `${path}/${index}`;
@@ -1441,7 +1885,7 @@ function validateUniqueConstraints(
     }
 
     result.push(
-      compactUndefined<RuntimeUniqueConstraint>({
+      compactUndefined<ExtensionUniqueConstraint>({
         name,
         fields,
         scope,
@@ -1457,8 +1901,8 @@ function validateUniqueConstraints(
 function validateUniqueWhere(
   raw: unknown,
   path: string,
-  properties: Record<string, RuntimePropertyType>,
-  issues: RuntimeExtensionIssue[],
+  properties: Record<string, ExtensionPropertyType>,
+  issues: GraphExtensionIssue[],
 ): { field: string; op: "isNull" | "isNotNull" } | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
@@ -1515,7 +1959,7 @@ function validateAnnotations(
   raw: unknown,
   path: string,
   ownerLabel: string,
-  issues: RuntimeExtensionIssue[],
+  issues: GraphExtensionIssue[],
 ): KindAnnotations | undefined {
   if (raw === undefined) return undefined;
   if (!isPlainObject(raw)) {
@@ -1565,17 +2009,17 @@ function validateAnnotations(
 //
 // Trade-off: typos (`displayName` instead of `description`) will not
 // be caught at the validator boundary anymore. They're caught at the
-// `defineRuntimeExtension` call site by TypeScript when the consumer
+// `defineGraphExtension` call site by TypeScript when the consumer
 // uses the typed API; only untyped JSON-shaped input slips through.
-// `RuntimePropertyType` is exported so consumers writing runtime-shape
+// `ExtensionPropertyType` is exported so consumers writing runtime-shape
 // generators can add their own strict-key check if needed.
 
 function validateNonNegativeInteger(
   value: unknown,
   path: string,
   label: string,
-  code: RuntimeExtensionIssueCode,
-  issues: RuntimeExtensionIssue[],
+  code: GraphExtensionIssueCode,
+  issues: GraphExtensionIssue[],
 ): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
@@ -1592,7 +2036,7 @@ function validateNonNegativeInteger(
 function validateOptionalString(
   value: unknown,
   path: string,
-  issues: RuntimeExtensionIssue[],
+  issues: GraphExtensionIssue[],
 ): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") {
@@ -1632,12 +2076,6 @@ function describeUnknownValue(value: unknown): string {
   }
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
 /**
  * Escapes a JSON-pointer reference segment per RFC 6901. `~` becomes
  * `~0`, `/` becomes `~1`. The resulting segment is appended after the
@@ -1652,17 +2090,19 @@ function escapePointerSegment(segment: string): string {
 // ============================================================
 
 function freezeDocument(input: {
-  version: RuntimeDocumentVersion;
-  nodes: Record<string, RuntimeNodeDocument> | undefined;
-  edges: Record<string, RuntimeEdgeDocument> | undefined;
-  ontology: readonly RuntimeOntologyRelation[] | undefined;
-}): RuntimeGraphDocument {
+  version: GraphExtensionVersion;
+  nodes: Record<string, ExtensionNodeDef> | undefined;
+  edges: Record<string, ExtensionEdgeDef> | undefined;
+  ontology: readonly ExtensionOntologyRelation[] | undefined;
+  indexes: readonly ExtensionIndex[] | undefined;
+}): GraphExtension {
   return Object.freeze(
     compactUndefined<{
-      version: RuntimeDocumentVersion;
-      nodes?: Record<string, RuntimeNodeDocument>;
-      edges?: Record<string, RuntimeEdgeDocument>;
-      ontology?: readonly RuntimeOntologyRelation[];
+      version: GraphExtensionVersion;
+      nodes?: Record<string, ExtensionNodeDef>;
+      edges?: Record<string, ExtensionEdgeDef>;
+      ontology?: readonly ExtensionOntologyRelation[];
+      indexes?: readonly ExtensionIndex[];
     }>({
       version: input.version,
       nodes: input.nodes === undefined ? undefined : freezeDeep(input.nodes),
@@ -1673,6 +2113,10 @@ function freezeDocument(input: {
         : Object.freeze(
             input.ontology.map((entry) => Object.freeze({ ...entry })),
           ),
+      indexes:
+        input.indexes === undefined ?
+          undefined
+        : Object.freeze(input.indexes.map((entry) => freezeDeep({ ...entry }))),
     }),
   );
 }

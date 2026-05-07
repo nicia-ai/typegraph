@@ -1,8 +1,8 @@
 /**
- * Example 16: Runtime Graph Extensions (agent-driven schema induction)
+ * Example 16: Graph Extensions (agent-driven schema induction)
  *
- * This example demonstrates the runtime-extension feature added in
- * #101. The motivating use case: an agent (LLM, scraper, ETL pipeline)
+ * This example demonstrates the graph-extension feature added in #101.
+ * The motivating use case: an agent (LLM, scraper, ETL pipeline)
  * proposes a new graph kind at runtime, an operator approves it, and
  * the live database starts ingesting under the new kind — no code
  * change, no restart, full Zod validation, fulltext / embedding /
@@ -11,17 +11,17 @@
  * The flow demonstrated below:
  *
  * 1. Boot a graph with a single compile-time kind (Document).
- * 2. An "agent" proposes a Paper kind via a runtime extension document.
+ * 2. An "agent" proposes a Paper kind via a graph extension.
  * 3. Operator approves; `store.evolve(extension)` atomically commits
  *    the new schema version and returns a new Store carrying the kind.
  * 4. Materialize indexes for the new kind via `materializeIndexes()`
  *    (or use the `eager: true` shortcut on `evolve()`).
  * 5. Ingest data using the dynamic-collection escape hatch
  *    (`store.getNodeCollection("Paper")`) — the type system doesn't
- *    see runtime kinds, so the dynamic accessor is the operator path.
+ *    see extension kinds, so the dynamic accessor is the operator path.
  * 6. Soft-deprecate the legacy Document kind via `deprecateKinds`.
  * 7. Restart parity: a fresh Store reading the same database sees
- *    everything — runtime kind, deprecation flag, materialized indexes.
+ *    everything — extension kind, deprecation flag, materialized indexes.
  */
 import { z } from "zod";
 
@@ -29,7 +29,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineRuntimeExtension,
+  defineGraphExtension,
 } from "@nicia-ai/typegraph";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
@@ -70,13 +70,13 @@ async function main() {
   console.log("    Materialized 1 compile-time index");
 
   // ============================================================
-  // Step 2: Agent proposes a runtime extension
+  // Step 2: Agent proposes a graph extension
   // ============================================================
 
   // The "agent" returns a structured proposal — a TypeGraph-native
   // value, not arbitrary code. Operator can inspect, version-control,
   // and approve before applying.
-  const agentProposal = defineRuntimeExtension({
+  const agentProposal = defineGraphExtension({
     nodes: {
       Paper: {
         description: "An academic paper inferred from the corpus",
@@ -88,8 +88,17 @@ async function main() {
         unique: [{ name: "paper_doi_unique", fields: ["doi"] }],
       },
     },
+    indexes: [
+      {
+        entity: "node",
+        kind: "Paper",
+        name: "paper_by_doi",
+        fields: ["doi"],
+        unique: true,
+      },
+    ],
   });
-  console.log("\n[2] Agent proposed runtime extension: nodes.Paper");
+  console.log("\n[2] Agent proposed graph extension: nodes.Paper + paper_by_doi index");
 
   // ============================================================
   // Step 3: Operator approves; commit atomically
@@ -104,11 +113,10 @@ async function main() {
   // Step 4: Materialize indexes (or use eager mode)
   // ============================================================
 
-  // Runtime extensions today don't carry indexes (relational indexes
-  // come from compile-time `defineGraph({ indexes: [...] })`). Calling
-  // materializeIndexes here is a no-op for runtime kinds — included
-  // to demonstrate the verb. With eager: true on evolve(), this would
-  // run automatically inline.
+  // The Paper index was declared inside the graph extension. It flows
+  // into the merged graph with origin: "runtime" and materializes
+  // through the same DDL path as compile-time indexes. With
+  // `{ eager: true }` on evolve(), this would run automatically inline.
   const materialization = await evolved.materializeIndexes();
   console.log("\n[4] materializeIndexes() — results:");
   for (const entry of materialization.results) {
@@ -158,7 +166,10 @@ async function main() {
   // ============================================================
 
   const deprecated = await evolved.deprecateKinds(["Document"]);
-  console.log("\n[6] Deprecated kinds:", [...deprecated.deprecatedKinds]);
+  console.log(
+    "\n[6] Deprecated kinds:",
+    [...deprecated.introspect().deprecatedKinds],
+  );
   console.log("    Active schema version:", await activeVersion(backend));
 
   // Deprecation is a signal, not a gate — reads/writes still work.
@@ -179,7 +190,7 @@ async function main() {
   console.log("\n[7] Restart parity:");
   console.log("    validation.status:", validation.status);
   console.log("    registry.hasNodeType('Paper'):", restored.registry.hasNodeType("Paper"));
-  console.log("    deprecatedKinds:", [...restored.deprecatedKinds]);
+  console.log("    deprecatedKinds:", [...restored.introspect().deprecatedKinds]);
 
   const restoredPapers = restored.getNodeCollection("Paper");
   const allPapers = await restoredPapers!.find({});

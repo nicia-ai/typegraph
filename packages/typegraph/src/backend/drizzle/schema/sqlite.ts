@@ -46,6 +46,7 @@ export type SqliteTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  kindRemovals: string;
 }>;
 
 export type CreateSqliteTablesOptions = Readonly<{
@@ -66,6 +67,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  kindRemovals: "typegraph_kind_removals",
 };
 
 /**
@@ -280,6 +282,27 @@ export function createSqliteTables(
     (t) => [primaryKey({ columns: [t.indexName] })],
   );
 
+  /**
+   * Per-deployment record of extension kinds removed via
+   * `store.removeKinds()` whose data has not yet been cleaned up by
+   * `store.materializeRemovals()`. Keyed on `(graph_id, kind_name)`.
+   * `removed_at` is null until the data-cleanup pass succeeds; the
+   * pending set is "rows where removed_at IS NULL".
+   */
+  const kindRemovals = sqliteTable(
+    n.kindRemovals,
+    {
+      graphId: text("graph_id").notNull(),
+      kindName: text("kind_name").notNull(),
+      entity: text("entity").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      removedAt: text("removed_at"),
+      lastAttemptedAt: text("last_attempted_at").notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [primaryKey({ columns: [t.graphId, t.kindName] })],
+  );
+
   return {
     nodes,
     edges,
@@ -287,6 +310,7 @@ export function createSqliteTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    kindRemovals,
     /**
      * The fulltext storage is a FTS5 virtual table which Drizzle cannot
      * represent. DDL is emitted as raw SQL and operations query it via

@@ -92,6 +92,24 @@ export type HybridVectorOptions = Readonly<{
   minScore?: number;
 }>;
 
+/**
+ * Options for the standalone `store.search.vector` path. Mirrors the
+ * vector half of `HybridSearchOptions` but flattens it because the
+ * standalone path doesn't fuse against fulltext.
+ */
+export type VectorSearchOptions = Readonly<{
+  /** Field path of the embedding column on the node kind. */
+  fieldPath: string;
+  /** Query embedding to compare against. */
+  queryEmbedding: readonly number[];
+  /** Max results. Required. */
+  limit: number;
+  /** Distance metric. Default: "cosine". */
+  metric?: VectorMetric;
+  /** Minimum similarity to include (units depend on metric). */
+  minScore?: number;
+}>;
+
 export type HybridFulltextOptions = Readonly<{
   query: string;
   /** How many candidates to retrieve from the fulltext side. Default: 4 * limit. */
@@ -168,6 +186,49 @@ export async function executeFulltextSearch<N = Node>(
       rank,
       ...(row.snippet === undefined ? {} : { snippet: row.snippet }),
     });
+    rank += 1;
+  }
+  return hits;
+}
+
+export async function executeVectorSearch<N = Node>(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  options: VectorSearchOptions,
+): Promise<readonly VectorSearchHit<N>[]> {
+  const { backend, graphId } = ctx;
+  if (!backend.vectorSearch) {
+    throw new ConfigurationError("Backend does not support vector search", {
+      backend: backend.dialect,
+      capability: "vector",
+    });
+  }
+  if (!Number.isInteger(options.limit) || options.limit <= 0) {
+    throw new RangeError(
+      `vectorSearch.limit must be a positive integer, got: ${options.limit}`,
+    );
+  }
+
+  const rows = await backend.vectorSearch({
+    graphId,
+    nodeKind,
+    fieldPath: options.fieldPath,
+    queryEmbedding: options.queryEmbedding,
+    metric: options.metric ?? "cosine",
+    limit: options.limit,
+    ...(options.minScore === undefined ? {} : { minScore: options.minScore }),
+  });
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((row) => row.nodeId);
+  const nodeMap = await fetchNodesByIds(backend, graphId, nodeKind, ids);
+
+  const hits: VectorSearchHit<N>[] = [];
+  let rank = 1;
+  for (const row of rows) {
+    const node = nodeMap.get(row.nodeId);
+    if (!node) continue;
+    hits.push({ node: node as N, score: row.score, rank });
     rank += 1;
   }
   return hits;

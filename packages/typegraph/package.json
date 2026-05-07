@@ -8,104 +8,54 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
-      },
-      "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
-      }
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     },
     "./interchange": {
-      "import": {
-        "types": "./dist/interchange/index.d.ts",
-        "default": "./dist/interchange/index.js"
-      },
-      "require": {
-        "types": "./dist/interchange/index.d.cts",
-        "default": "./dist/interchange/index.cjs"
-      }
+      "types": "./dist/interchange/index.d.ts",
+      "import": "./dist/interchange/index.js",
+      "require": "./dist/interchange/index.cjs"
     },
     "./profiler": {
-      "import": {
-        "types": "./dist/profiler/index.d.ts",
-        "default": "./dist/profiler/index.js"
-      },
-      "require": {
-        "types": "./dist/profiler/index.d.cts",
-        "default": "./dist/profiler/index.cjs"
-      }
+      "types": "./dist/profiler/index.d.ts",
+      "import": "./dist/profiler/index.js",
+      "require": "./dist/profiler/index.cjs"
     },
     "./schema": {
-      "import": {
-        "types": "./dist/schema/index.d.ts",
-        "default": "./dist/schema/index.js"
-      },
-      "require": {
-        "types": "./dist/schema/index.d.cts",
-        "default": "./dist/schema/index.cjs"
-      }
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js",
+      "require": "./dist/schema/index.cjs"
     },
     "./indexes": {
-      "import": {
-        "types": "./dist/indexes/index.d.ts",
-        "default": "./dist/indexes/index.js"
-      },
-      "require": {
-        "types": "./dist/indexes/index.d.cts",
-        "default": "./dist/indexes/index.cjs"
-      }
+      "types": "./dist/indexes/index.d.ts",
+      "import": "./dist/indexes/index.js",
+      "require": "./dist/indexes/index.cjs"
     },
     "./runtime": {
-      "import": {
-        "types": "./dist/runtime/index.d.ts",
-        "default": "./dist/runtime/index.js"
-      },
-      "require": {
-        "types": "./dist/runtime/index.d.cts",
-        "default": "./dist/runtime/index.cjs"
-      }
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js",
+      "require": "./dist/runtime/index.cjs"
     },
     "./sqlite": {
-      "import": {
-        "types": "./dist/backend/sqlite/index.d.ts",
-        "default": "./dist/backend/sqlite/index.js"
-      },
-      "require": {
-        "types": "./dist/backend/sqlite/index.d.cts",
-        "default": "./dist/backend/sqlite/index.cjs"
-      }
+      "types": "./dist/backend/sqlite/index.d.ts",
+      "import": "./dist/backend/sqlite/index.js",
+      "require": "./dist/backend/sqlite/index.cjs"
     },
     "./postgres": {
-      "import": {
-        "types": "./dist/backend/postgres/index.d.ts",
-        "default": "./dist/backend/postgres/index.js"
-      },
-      "require": {
-        "types": "./dist/backend/postgres/index.d.cts",
-        "default": "./dist/backend/postgres/index.cjs"
-      }
+      "types": "./dist/backend/postgres/index.d.ts",
+      "import": "./dist/backend/postgres/index.js",
+      "require": "./dist/backend/postgres/index.cjs"
     },
     "./sqlite/local": {
-      "import": {
-        "types": "./dist/backend/sqlite/local.d.ts",
-        "default": "./dist/backend/sqlite/local.js"
-      },
-      "require": {
-        "types": "./dist/backend/sqlite/local.d.cts",
-        "default": "./dist/backend/sqlite/local.cjs"
-      }
+      "types": "./dist/backend/sqlite/local.d.ts",
+      "import": "./dist/backend/sqlite/local.js",
+      "require": "./dist/backend/sqlite/local.cjs"
     },
     "./sqlite/libsql": {
-      "import": {
-        "types": "./dist/backend/sqlite/libsql.d.ts",
-        "default": "./dist/backend/sqlite/libsql.js"
-      },
-      "require": {
-        "types": "./dist/backend/sqlite/libsql.d.cts",
-        "default": "./dist/backend/sqlite/libsql.cjs"
-      }
+      "types": "./dist/backend/sqlite/libsql.d.ts",
+      "import": "./dist/backend/sqlite/libsql.js",
+      "require": "./dist/backend/sqlite/libsql.cjs"
     }
   },
   "files": [

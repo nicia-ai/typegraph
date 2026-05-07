@@ -1,17 +1,29 @@
 /**
- * Errors raised while parsing and validating a `RuntimeGraphDocument`.
+ * Errors raised across the graph-extension surface.
  *
- * Every issue carries a JSON-pointer-style `path` (e.g.
- * `/nodes/Paper/properties/title/format`) so the caller can drop the
- * pointer straight into the offending document and see the exact field
- * that failed.
+ * Two flavours:
+ *
+ * - **Validation issues** (`GraphExtensionValidationError` +
+ *   `GraphExtensionIssue` / `GraphExtensionIssueCode`) — produced by
+ *   `validateGraphExtension`. The issue list batches every failure
+ *   with a JSON-pointer `path` so a UI can highlight every offending
+ *   field at once.
+ * - **Operation errors** (every other class in this file, all extending
+ *   `GraphExtensionError`) — thrown one at a time from `evolve`,
+ *   `removeKinds`, `materializeIndexes`, search, etc. Each carries a
+ *   stable string `code` for logging / serialization PLUS a typed
+ *   shape so consumers can `instanceof` for control flow.
  */
-import { TypeGraphError } from "../errors";
+import { type ErrorCategory, TypeGraphError } from "../errors";
+
+// ============================================================
+// Validation issues (multi-issue batch)
+// ============================================================
 
 /**
- * One specific issue raised during runtime extension validation.
+ * One specific issue raised during graph-extension validation.
  */
-export type RuntimeExtensionIssue = Readonly<{
+export type GraphExtensionIssue = Readonly<{
   /**
    * JSON-pointer path to the offending value, rooted at the document
    * (e.g. `/nodes/Paper/properties/title/pattern`). The empty string
@@ -25,15 +37,20 @@ export type RuntimeExtensionIssue = Readonly<{
    * specific failure modes without parsing messages. New codes are
    * additive.
    */
-  code: RuntimeExtensionIssueCode;
+  code: GraphExtensionIssueCode;
 }>;
 
 /**
  * Stable machine codes for every validation failure produced by the
  * document validator. New codes are additive — existing codes never
  * change meaning.
+ *
+ * Note: codes here describe per-field validation problems. Operation-
+ * level errors (kind not found, version mismatch on persisted doc,
+ * compile-time-kind removal, etc.) surface as typed Error subclasses
+ * exported below — not as issue codes.
  */
-export type RuntimeExtensionIssueCode =
+export type GraphExtensionIssueCode =
   | "UNSUPPORTED_PROPERTY_TYPE"
   | "INVALID_PROPERTY_REFINEMENT"
   | "NESTED_ARRAY"
@@ -60,46 +77,85 @@ export type RuntimeExtensionIssueCode =
   | "UNKNOWN_META_EDGE"
   | "ONTOLOGY_CYCLE"
   | "ONTOLOGY_SELF_LOOP"
+  | "ONTOLOGY_DISJOINT_CONFLICT"
   | "DUPLICATE_ONTOLOGY_RELATION"
   | "INVALID_DOCUMENT_SHAPE"
-  | "RUNTIME_EXTENSION_VERSION_UNSUPPORTED";
+  | "UNKNOWN_DOCUMENT_KEY"
+  | "UNSUPPORTED_STRING_FORMAT"
+  | "INVALID_INDEX_DECLARATION"
+  | "DUPLICATE_INDEX_NAME"
+  | "EMPTY_INDEX_FIELDS";
+
+// ============================================================
+// Operation errors (typed, single-error throws)
+// ============================================================
 
 /**
- * Thrown when `defineRuntimeExtension(...)` rejects an input document.
- *
- * The `details.issues` array carries every failure with a JSON-pointer
- * `path`, so callers presenting the document to a human reviewer can
- * highlight the exact offending field.
+ * Base class for every graph-extension error. Consumers can catch
+ * the family with one `instanceof GraphExtensionError` check and
+ * branch on the concrete subclass beneath. Carries the same
+ * `code` / `category` / `details` slots as `TypeGraphError` so existing
+ * `isTypeGraphError` / `isUserRecoverable` helpers continue to apply.
  */
-export class RuntimeExtensionValidationError extends TypeGraphError {
-  declare readonly details: Readonly<{
-    issues: readonly RuntimeExtensionIssue[];
-  }>;
+export abstract class GraphExtensionError extends TypeGraphError {
+  // The concrete `code` is set as a literal-typed property on each
+  // subclass so consumers can branch on it with full type narrowing.
+  declare readonly code: string;
 
-  constructor(issues: readonly RuntimeExtensionIssue[], cause?: unknown) {
-    const summary = summarizeIssues(issues);
-    super(
-      `Runtime extension document is invalid (${issues.length} issue${
-        issues.length === 1 ? "" : "s"
-      }): ${summary}`,
-      "RUNTIME_EXTENSION_INVALID",
-      {
-        details: { issues: Object.freeze([...issues]) },
-        category: "user",
-        suggestion: `Inspect error.details.issues for per-field paths and codes; each issue's "path" is a JSON pointer into the source document.`,
-        cause,
-      },
-    );
-    this.name = "RuntimeExtensionValidationError";
+  protected constructor(spec: {
+    message: string;
+    code: string;
+    details: Readonly<Record<string, unknown>>;
+    suggestion: string;
+    category?: ErrorCategory;
+    cause?: unknown;
+  }) {
+    super(spec.message, spec.code, {
+      details: spec.details,
+      category: spec.category ?? "user",
+      suggestion: spec.suggestion,
+      ...(spec.cause === undefined ? {} : { cause: spec.cause }),
+    });
+    // `new.target.name` resolves to the concrete subclass at construction
+    // time, eliminating per-subclass `this.name = "ClassName"` repetition.
+    this.name = new.target.name;
   }
 }
 
 /**
- * Builds the one-line summary the base `Error.message` shows. Keeps the
- * full structured list available on `details.issues` for programmatic
- * use.
+ * Thrown when `validateGraphExtension` (or `defineGraphExtension`)
+ * rejects an input document for one or more shape/content reasons.
+ *
+ * The `issues` array carries every failure with a JSON-pointer
+ * `path`, so callers presenting the document to a human reviewer can
+ * highlight every offending field at once.
  */
-function summarizeIssues(issues: readonly RuntimeExtensionIssue[]): string {
+export class GraphExtensionValidationError extends GraphExtensionError {
+  readonly code = "GRAPH_EXTENSION_INVALID" as const;
+  readonly issues: readonly GraphExtensionIssue[];
+  declare readonly details: Readonly<{
+    issues: readonly GraphExtensionIssue[];
+  }>;
+
+  constructor(issues: readonly GraphExtensionIssue[], cause?: unknown) {
+    const frozenIssues = Object.freeze([...issues]);
+    super({
+      message: `Graph extension document is invalid (${issues.length} issue${
+        issues.length === 1 ? "" : "s"
+      }): ${summarizeIssues(issues)}`,
+      code: "GRAPH_EXTENSION_INVALID",
+      details: { issues: frozenIssues },
+      suggestion: `Inspect error.issues for per-field paths and codes; each issue's "path" is a JSON pointer into the source document.`,
+      cause,
+    });
+    this.issues = frozenIssues;
+  }
+}
+
+/**
+ * Builds the one-line summary the base `Error.message` shows.
+ */
+function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
   if (issues.length === 0) return "no specific issues recorded";
   const head = issues
     .slice(0, 3)
@@ -107,4 +163,213 @@ function summarizeIssues(issues: readonly RuntimeExtensionIssue[]): string {
     .join("; ");
   const overflow = issues.length > 3 ? ` (+${issues.length - 3} more)` : "";
   return `${head}${overflow}`;
+}
+
+/**
+ * Thrown when an extension declares a kind whose name collides with an
+ * existing compile-time kind. The graph-extension contract is
+ * additive: runtime-declared kinds cannot shadow compile-time kinds.
+ */
+export class KindCollisionError extends GraphExtensionError {
+  readonly code = "KIND_COLLISION" as const;
+  readonly kindName: string;
+  readonly entity: "node" | "edge";
+
+  constructor(kindName: string, entity: "node" | "edge", graphId: string) {
+    super({
+      message: `Graph extension declares ${entity} kind "${kindName}" which already exists as a compile-time kind on graph "${graphId}". Runtime-declared kinds cannot collide with compile-time kinds.`,
+      code: "KIND_COLLISION",
+      details: { kindName, entity, graphId },
+      suggestion:
+        "Pick a different runtime-declared kind name, or remove the compile-time declaration.",
+    });
+    this.kindName = kindName;
+    this.entity = entity;
+  }
+}
+
+/**
+ * One classified delta in a `IncompatibleChangeError`.
+ *
+ * `field` is `undefined` for kind-level changes (e.g. tightening edge
+ * endpoints, adding a unique constraint to a populated kind). `detail`
+ * is human-readable and intended for surfaces showing the change to a
+ * reviewer (e.g. `"minLength: 5 → 10"`).
+ */
+export type IncompatibleChange = Readonly<{
+  kind: string;
+  field?: string;
+  type:
+    | "REMOVE_PROPERTY"
+    | "ADD_REQUIRED_PROPERTY"
+    | "TIGHTEN_OPTIONALITY"
+    | "TIGHTEN_CONSTRAINT"
+    | "ADD_PATTERN"
+    | "CHANGE_PATTERN"
+    | "ADD_FORMAT"
+    | "CHANGE_FORMAT"
+    | "TIGHTEN_INT"
+    | "TIGHTEN_ENUM"
+    | "TYPE_CHANGE"
+    | "ADD_UNIQUE_ON_POPULATED"
+    | "TIGHTEN_EDGE_ENDPOINTS";
+  detail?: string;
+}>;
+
+/**
+ * Thrown when `evolve` rejects one or more deltas against an existing
+ * extension kind. Carries a structured `changes` list so a reviewer
+ * UI can show the incompatible deltas across every affected kind in
+ * one shot.
+ */
+export class IncompatibleChangeError extends GraphExtensionError {
+  readonly code = "INCOMPATIBLE_CHANGE" as const;
+  readonly changes: readonly IncompatibleChange[];
+
+  constructor(changes: readonly IncompatibleChange[], graphId: string) {
+    const frozenChanges = Object.freeze([...changes]);
+    super({
+      message: `Graph extension contains ${changes.length} incompatible change${
+        changes.length === 1 ? "" : "s"
+      } against existing runtime kinds on graph "${graphId}": ${summarizeChanges(changes)}`,
+      code: "INCOMPATIBLE_CHANGE",
+      details: { graphId, changes: frozenChanges },
+      suggestion:
+        "Inspect error.changes for the per-field rejections. Compatible options: change the modification to an additive one (e.g. `optional: true`), or apply the change against an empty kind.",
+    });
+    this.changes = frozenChanges;
+  }
+}
+
+function summarizeChanges(changes: readonly IncompatibleChange[]): string {
+  if (changes.length === 0) return "(no specific changes recorded)";
+  const head = changes
+    .slice(0, 3)
+    .map((change) => {
+      const field = change.field === undefined ? "" : `.${change.field}`;
+      const detail = change.detail === undefined ? "" : ` (${change.detail})`;
+      return `${change.kind}${field}: ${change.type}${detail}`;
+    })
+    .join("; ");
+  const overflow = changes.length > 3 ? ` (+${changes.length - 3} more)` : "";
+  return `${head}${overflow}`;
+}
+
+/**
+ * Thrown when an extension's edge or ontology endpoint references a
+ * kind that exists in neither the extension nor the host graph.
+ * Distinct from `KindNotFoundError` because the cause is a
+ * stale persisted extension (a compile-time kind was removed from
+ * source after the extension was committed) rather than a
+ * call-site typo.
+ */
+export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
+  readonly code = "GRAPH_EXTENSION_UNRESOLVED_ENDPOINT" as const;
+  readonly edgeKind: string;
+  readonly side: "from" | "to";
+  readonly endpoint: string;
+
+  constructor(
+    edgeKind: string,
+    side: "from" | "to",
+    endpoint: string,
+    graphId: string,
+  ) {
+    super({
+      message: `Graph-extension edge "${edgeKind}" ${side}-endpoint "${endpoint}" does not resolve to any kind on graph "${graphId}". The compile-time kind may have been removed since the extension was committed.`,
+      code: "GRAPH_EXTENSION_UNRESOLVED_ENDPOINT",
+      details: { edgeKind, side, endpoint, graphId },
+      suggestion:
+        "Restore the compile-time kind, or remove the runtime-declared kind via store.removeKinds before redeploying without it.",
+    });
+    this.edgeKind = edgeKind;
+    this.side = side;
+    this.endpoint = endpoint;
+  }
+}
+
+/**
+ * Thrown by `removeKinds` when the removal list contains a compile-
+ * time kind. Compile-time kinds are removed by recompiling and
+ * redeploying — persisting "removed-compile-time-kind" state in
+ * `schema_doc` is incoherent because the kind would resurrect on the
+ * next deploy.
+ */
+export class RemoveCompileTimeKindError extends GraphExtensionError {
+  readonly code = "REMOVE_COMPILE_TIME_KIND" as const;
+  readonly kindName: string;
+  readonly entity: "node" | "edge";
+
+  constructor(kindName: string, entity: "node" | "edge", graphId: string) {
+    super({
+      message: `Cannot remove compile-time ${entity} kind "${kindName}" via store.removeKinds. Compile-time kinds are removed by recompiling and redeploying without them on graph "${graphId}".`,
+      code: "REMOVE_COMPILE_TIME_KIND",
+      details: { kindName, entity, graphId },
+      suggestion:
+        "Drop the kind from your defineGraph call and redeploy. Only runtime-extended kinds (added via store.evolve) are removable through removeKinds.",
+    });
+    this.kindName = kindName;
+    this.entity = entity;
+  }
+}
+
+/**
+ * Thrown by `removeKinds` when a compile-time edge or ontology
+ * relation references the runtime kind being removed. Removing the
+ * kind would orphan compile-time references — incoherent at the next
+ * deploy.
+ */
+export class KindHasReferentsError extends GraphExtensionError {
+  readonly code = "KIND_HAS_REFERENTS" as const;
+  readonly kindName: string;
+  readonly referents: readonly KindReferent[];
+
+  constructor(
+    kindName: string,
+    referents: readonly KindReferent[],
+    graphId: string,
+  ) {
+    const summary = referents
+      .map((referent) => `${referent.type}:${referent.name}`)
+      .join(", ");
+    const frozenReferents = Object.freeze([...referents]);
+    super({
+      message: `Cannot remove runtime kind "${kindName}" on graph "${graphId}" — it is referenced by compile-time declarations: ${summary}.`,
+      code: "KIND_HAS_REFERENTS",
+      details: { kindName, graphId, referents: frozenReferents },
+      suggestion:
+        "Remove the compile-time references first (drop the edge or ontology relation from defineGraph), or pick a different kind to remove.",
+    });
+    this.kindName = kindName;
+    this.referents = frozenReferents;
+  }
+}
+
+export type KindReferent = Readonly<{
+  type: "compile-time-edge" | "compile-time-ontology";
+  name: string;
+}>;
+
+/**
+ * Thrown when a persisted graph extension was authored against a
+ * higher major version of the graph-extension format than the
+ * current library supports. The library refuses to load it rather
+ * than risk silently misreading newer fields.
+ */
+export class GraphExtensionVersionUnsupportedError extends GraphExtensionError {
+  readonly code = "GRAPH_EXTENSION_VERSION_UNSUPPORTED" as const;
+  readonly persistedVersion: number;
+  readonly currentVersion: number;
+
+  constructor(persistedVersion: number, currentVersion: number) {
+    super({
+      message: `Persisted extension was authored against graph-extension format v${persistedVersion}, but this library only supports up to v${currentVersion}. Upgrade @nicia-ai/typegraph.`,
+      code: "GRAPH_EXTENSION_VERSION_UNSUPPORTED",
+      details: { persistedVersion, currentVersion },
+      category: "system",
+      suggestion: `Upgrade @nicia-ai/typegraph to a version that supports graph-extension format v${persistedVersion}, or downgrade the writer.`,
+    });
+    this.persistedVersion = persistedVersion;
+    this.currentVersion = currentVersion;
+  }
 }

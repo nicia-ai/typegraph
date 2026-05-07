@@ -8,7 +8,7 @@ to make those changes safely — from adding a field to renaming a node type.
 
 For API reference, see [Schema Migrations](/schema-management). For evolving
 the kind set itself **at runtime** (agent-induced kinds, plugin-supplied
-kinds, multi-tenant kind sets), see [Runtime Extensions](/runtime-extensions).
+kinds, multi-tenant kind sets), see [Graph Extensions](/graph-extensions).
 
 ## How Schema Evolution Works
 
@@ -130,8 +130,9 @@ A few things worth knowing:
 
 - Graphs that never set `annotations` produce identical canonical-form hashes
   to graphs from before this field existed. Adoption requires no migration.
-- An explicit empty object (`annotations: {}`) is a structural opt-in and
-  bumps the hash — use the absent form to stay on the legacy hash.
+- The canonical form omits empty / default annotations, so absent,
+  explicit `undefined`, and explicit `{}` all hash identically — no migration
+  is triggered just by writing `annotations: {}`.
 - Annotations values must be JSON-serializable (`bigint`, `function`, `Date`,
   and other class instances are rejected at definition time).
 

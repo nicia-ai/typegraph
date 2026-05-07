@@ -1,29 +1,31 @@
 ---
-title: Runtime Graph Extensions
+title: Graph Extensions
 description: Extend a TypeGraph schema at runtime — durable, multi-process safe, with full Zod validation and unique-constraint enforcement.
 ---
 
-Runtime graph extensions let your application declare new node and edge
+Graph extensions let your application declare new node and edge
 kinds **at runtime** — durable across restarts, with semantic parity to
 compile-time `defineNode` / `defineEdge`. The motivating use case:
 **agent-driven schema induction**, where an LLM proposes a typed schema
 from a corpus, an operator approves it, and the live graph immediately
 ingests under the new schema with no code change or restart.
 
-This guide covers the four verbs:
+This guide covers the core verbs:
 
-| Verb                       | Purpose                                                                  |
-| -------------------------- | ------------------------------------------------------------------------ |
-| `defineRuntimeExtension`   | Build a typed extension document (pure value, no I/O)                    |
-| `store.evolve(extension)`  | Atomically commit a new schema version with the extension applied       |
-| `store.materializeIndexes()` | Run declared `CREATE INDEX` DDL against the live database              |
-| `store.deprecateKinds(...)` | Soft-deprecate kinds for codegen / lint signaling                       |
+| Verb                                             | Purpose                                                           |
+| ------------------------------------------------ | ----------------------------------------------------------------- |
+| `defineGraphExtension`                           | Build a typed extension (pure value, no I/O)                      |
+| `store.evolve(extension)`                        | Atomically commit a new schema version with the extension applied |
+| `store.materializeIndexes()`                     | Run declared `CREATE INDEX` DDL against the live database         |
+| `store.deprecateKinds(...)` / `undeprecateKinds` | Soft-deprecate kinds for codegen / lint signaling                 |
+| `store.removeKinds(...)`                         | Remove runtime-declared kinds from the active schema              |
+| `store.materializeRemovals()`                    | Delete rows queued by runtime-kind removal                        |
 
-For the schema-management primitives that runtime extensions ride on top
+For the schema-management primitives that graph extensions ride on top
 of, see [Schema Migrations](/schema-management) and [Evolving
 Schemas](/schema-evolution).
 
-## When to use runtime extensions
+## When to use graph extensions
 
 Use them when **the kind set is not known at code time**:
 
@@ -34,7 +36,7 @@ Use them when **the kind set is not known at code time**:
 
 For everything else — kinds you can declare in TypeScript at deploy time
 — use the compile-time DSL (`defineNode`, `defineEdge`, `defineGraph`).
-The compile-time path is type-safe end-to-end; runtime extensions trade
+The compile-time path is type-safe end-to-end; graph extensions trade
 some of that type-safety for the ability to evolve without redeploying.
 
 ## A complete example
@@ -45,7 +47,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineRuntimeExtension,
+  defineGraphExtension,
 } from "@nicia-ai/typegraph";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
@@ -63,7 +65,7 @@ const { backend } = createLocalSqliteBackend();
 const [store] = await createStoreWithSchema(baseGraph, backend);
 
 // 2. An agent proposes a new kind at runtime.
-const proposal = defineRuntimeExtension({
+const proposal = defineGraphExtension({
   nodes: {
     Paper: {
       description: "An academic paper inferred from the corpus",
@@ -75,13 +77,22 @@ const proposal = defineRuntimeExtension({
       unique: [{ name: "paper_doi_unique", fields: ["doi"] }],
     },
   },
+  indexes: [
+    {
+      entity: "node",
+      kind: "Paper",
+      name: "paper_by_doi",
+      fields: ["doi"],
+      unique: true,
+    },
+  ],
 });
 
 // 3. Operator approves; commit atomically.
 const evolved = await store.evolve(proposal);
 
 // 4. Use the dynamic-collection accessor (the type system does not
-//    widen for runtime kinds — see "Reaching runtime kinds" below).
+//    widen for extension kinds — see "Reaching extension kinds" below).
 const papers = evolved.getNodeCollection("Paper")!;
 await papers.create({
   title: "Attention is all you need",
@@ -90,19 +101,19 @@ await papers.create({
 });
 ```
 
-A complete runnable version is in [`examples/16-runtime-extensions.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/16-runtime-extensions.ts).
+A complete runnable version is in [`examples/16-graph-extensions.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/16-graph-extensions.ts).
 
-## The runtime extension document
+## The graph extension
 
-`defineRuntimeExtension` accepts a structured value describing the new
-kinds. The document is JSON-serializable — that's load-bearing for
+`defineGraphExtension` accepts a structured value describing the new
+kinds. The extension is JSON-serializable — that's load-bearing for
 durability (see [Restart parity](#restart-parity-the-load-bearing-invariant)).
 
 ### Document format versioning
 
 Every document carries a `version` field (currently `1`). The validator
 stamps the version automatically when you call
-`defineRuntimeExtension`, so consumer code never has to set it
+`defineGraphExtension`, so consumer code never has to set it
 explicitly. Stored documents from before this field existed are
 treated as `version: 1` (the legacy default).
 
@@ -112,31 +123,31 @@ The forward-compat policy:
   `format` value, new top-level slice within the same major) ride
   forward without bumping `version`. The validator does not reject
   unknown top-level keys, and the persistence-side zod is `.loose()`
-  on every nested object — an older runtime reading a newer document
+  on every nested object — an older runtime reading a newer extension
   silently ignores unknown fields and continues working.
 - **Breaking changes** bump `version` to a higher major. An older
-  runtime reading a higher-version document fails with
-  `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` and an actionable error
+  runtime reading a higher-version extension fails with
+  `GRAPH_EXTENSION_VERSION_UNSUPPORTED` and an actionable error
   pointing the operator at upgrading the library — there is no
   automatic downgrade path. The current major is exported as
-  `CURRENT_RUNTIME_DOCUMENT_VERSION` for tooling that wants to
+  `CURRENT_GRAPH_EXTENSION_VERSION` for tooling that wants to
   pre-flight check.
-- **Legacy documents** (committed before `version` existed) and
-  documents that explicitly omit `version` are interpreted as
-  `LEGACY_RUNTIME_DOCUMENT_VERSION`, pinned permanently to `1`. This
+- **Legacy extensions** (committed before `version` existed) and
+  extensions that explicitly omit `version` are interpreted as
+  `LEGACY_GRAPH_EXTENSION_VERSION`, pinned permanently to `1`. This
   is deliberately distinct from `CURRENT`: when a future v2 ships,
-  legacy v1 documents continue parsing as v1 (so the version-mismatch
+  legacy v1 extensions continue parsing as v1 (so the version-mismatch
   path can route them through migration) rather than being silently
   re-classified as v2 by a default-equals-current rule.
 
 ```ts
 import {
-  CURRENT_RUNTIME_DOCUMENT_VERSION,
-  LEGACY_RUNTIME_DOCUMENT_VERSION,
+  CURRENT_GRAPH_EXTENSION_VERSION,
+  LEGACY_GRAPH_EXTENSION_VERSION,
 } from "@nicia-ai/typegraph";
 
-console.log(CURRENT_RUNTIME_DOCUMENT_VERSION); // 1 (today; bumps with breaking changes)
-console.log(LEGACY_RUNTIME_DOCUMENT_VERSION);  // 1 (always; the pre-versioning default)
+console.log(CURRENT_GRAPH_EXTENSION_VERSION); // 1 (today; bumps with breaking changes)
+console.log(LEGACY_GRAPH_EXTENSION_VERSION);  // 1 (always; the pre-versioning default)
 ```
 
 ### Property types (the v1 subset)
@@ -175,6 +186,37 @@ Supports `scope`, `collation`, and a restricted `where` clause limited
 to `isNull` / `isNotNull` (the only operations round-trippable through
 the persisted form).
 
+### Relational indexes
+
+Pass `indexes: [...]` at the document top level to declare relational
+indexes for runtime or compile-time host kinds:
+
+```ts
+const proposal = defineGraphExtension({
+  nodes: {
+    Paper: {
+      properties: {
+        doi: { type: "string" },
+        title: { type: "string", searchable: { language: "english" } },
+      },
+    },
+  },
+  indexes: [
+    {
+      entity: "node",
+      kind: "Paper",
+      name: "paper_by_doi",
+      fields: ["doi"],
+      unique: true,
+    },
+  ],
+});
+```
+
+Index `name`s are unique across the merged graph. A runtime index that
+reuses a compile-time index name, or a later extension that reuses an
+earlier runtime index name for a different declaration, is rejected.
+
 ### Edges
 
 Edges follow the same shape as nodes but add `from: [...]` and `to:
@@ -195,20 +237,20 @@ const evolved = await store.evolve(extension, { ref });
 const evolved = await store.evolve(extension, { eager: true });
 ```
 
-`evolve` is the consumer-facing primitive that drives runtime
-extension. It:
+`evolve` is the consumer-facing primitive that drives extension. It:
 
 1. **Catches up to persisted state** — folds any persisted
-   runtimeDocument and deprecation set into the local baseline so a
+   extension and deprecation set into the local baseline so a
    stale store doesn't trample another writer's progress.
 2. **Merges** the new extension into the baseline graph. Re-declaring
-   an existing runtime kind with the same shape is a no-op; with a
-   different shape it throws `RUNTIME_KIND_REDEFINITION`.
+   an existing extension kind with the same shape is a no-op; with a
+   non-additive change against existing rows it throws
+   `IncompatibleChangeError` (code `INCOMPATIBLE_CHANGE`).
 3. **Atomically commits** a new schema version via `commitSchemaVersion`
    (CAS on the active version).
 4. **Returns a new `Store<G>`** carrying the extended graph. The type
-   parameter `G` does NOT widen — see [Reaching runtime
-   kinds](#reaching-runtime-kinds-from-the-type-system) below.
+   parameter `G` does NOT widen — see [Reaching extension
+   kinds](#reaching-extension-kinds-from-the-type-system) below.
 
 ### The `ref` pattern
 
@@ -239,12 +281,10 @@ const evolved = await store.evolve(extension, { eager: true });
 Or pass options:
 
 ```ts
-// Restrict to compile-time kinds that actually carry indexes (v1
-// runtime extensions don't carry relational indexes — see "v1 scope"
-// below). `Document` is from the worked example at the top of this
-// page.
+// Restrict to the extension kind whose index was declared in the
+// proposal above.
 const evolved = await store.evolve(extension, {
-  eager: { kinds: ["Document"], stopOnError: true },
+  eager: { kinds: ["Paper"], stopOnError: true },
 });
 ```
 
@@ -271,15 +311,15 @@ try {
 }
 ```
 
-## Reaching runtime kinds from the type system
+## Reaching extension kinds from the type system
 
 TypeScript can't see kinds that don't exist at compile time. The
 `Store<G>` returned by `evolve()` keeps the same generic parameter as
 the original — `evolved.nodes.Paper` would not type-check.
 
 The escape hatch is `store.getNodeCollection(kind)` and
-`store.getEdgeCollection(kind)`, which return a typed `DynamicNode
-Collection` / `DynamicEdgeCollection`:
+`store.getEdgeCollection(kind)`, which return a typed
+`DynamicNodeCollection` / `DynamicEdgeCollection`:
 
 ```ts
 const papers = evolved.getNodeCollection("Paper");
@@ -307,14 +347,35 @@ const personType = store.registry.getNodeType("Person"); // NodeType | undefined
 `KindRegistry` also exposes `hasNodeType(name)` / `hasEdgeType(name)`
 for existence checks.
 
+The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
+`rebuildFulltext` — accepts any registered kind, compile-time or
+runtime, with no type cast. The hit's `node` type narrows to the
+concrete typed node only when the kind literal is statically known
+in `Store<G>`; extension kinds widen to the base `Node`. Misspelled
+kind names throw a `ConfigurationError` at the call site instead of
+returning empty results.
+
+```ts
+// Compile-time kind: hit.node.title is narrowed.
+const compileTimeHits = await store.search.fulltext("Document", {
+  query: "climate",
+  limit: 10,
+});
+
+// Extension kind: same call shape, no cast. hit.node is the base
+// `Node` shape since "Paper" isn't in the static `G`.
+const runtimeHits = await store.search.fulltext("Paper", {
+  query: "attention transformer",
+  limit: 10,
+});
+```
+
 ## `store.materializeIndexes(options?)`
 
 ```ts
 const result = await store.materializeIndexes();
-// Restrict to specific compile-time kinds. Filtering by a v1 runtime
-// kind is a no-op because runtime extensions don't carry relational
-// indexes yet — see "v1 scope" below.
-const result = await store.materializeIndexes({ kinds: ["Document"] });
+// Restrict to specific compile-time or extension kinds.
+const result = await store.materializeIndexes({ kinds: ["Paper"] });
 const result = await store.materializeIndexes({ stopOnError: true });
 ```
 
@@ -341,13 +402,19 @@ vector indexes against SQLite without the `sqlite-vec` extension, or
 `embedding(dims, { indexType: "none" })` opting out of automatic
 materialization.
 
+Runtime-declared relational indexes use the same declaration shape as
+compile-time `defineNodeIndex` / `defineEdgeIndex`, but in a
+JSON-serializable form. They are persisted in `schema_doc.extension`,
+re-derived on restart, and surface in `store.graph.indexes` with
+`origin: "runtime"`.
+
 ### Vector indexes
 
-Vector indexes are **auto-derived** from `embedding()` brands at
-`defineGraph()` time. Every top-level node field declared with
-`embedding(dims, opts?)` produces one `VectorIndexDeclaration` that
-flows through `materializeIndexes()` like any relational index. No
-extra wiring required.
+Vector indexes are **auto-derived** from `embedding()` brands on both
+compile-time and extension node kinds. Every top-level node field
+declared with `embedding(dims, opts?)` produces one
+`VectorIndexDeclaration` that flows through `materializeIndexes()`
+like any relational index. No extra wiring required.
 
 ```ts
 const Document = defineNode("Document", {
@@ -426,13 +493,14 @@ relational-style declaration model and is reserved for future work.
 
 ```ts
 await store.deprecateKinds(["LegacyDocument"]);
-console.log([...store.deprecatedKinds]); // ["LegacyDocument"]
+console.log([...store.introspect().deprecatedKinds]); // ["LegacyDocument"]
 
 await store.undeprecateKinds(["LegacyDocument"]);
 ```
 
-Soft-deprecation surfaces in `store.deprecatedKinds: ReadonlySet<string>`
-for introspection (codegen, UI tooling, lints) but does not gate reads,
+Soft-deprecation surfaces in
+`store.introspect().deprecatedKinds: ReadonlySet<string>` for
+introspection (codegen, UI tooling, lints) but does not gate reads,
 writes, or queries. Bumps the schema version like any other change;
 idempotent — re-deprecating an already-deprecated kind is a no-op.
 
@@ -443,16 +511,43 @@ Use cases:
 - Lint rules flag new code that touches deprecated kinds.
 - UI tooling hides deprecated kinds from picker menus.
 
-For full removal of a runtime-declared kind, see [Out of
-scope](#out-of-scope-for-v1) below.
+## `store.removeKinds(...)` / `materializeRemovals()`
+
+`removeKinds()` removes runtime-declared kinds from the active schema.
+It is intentionally two-phase:
+
+1. **Schema commit.** `removeKinds(names)` rewrites the persisted graph
+   extension without the named runtime kinds, cascades extension edges
+   and ontology relations that can no longer resolve, and commits a
+   new schema version with CAS.
+2. **Data cleanup.** `materializeRemovals()` deletes rows for removed
+   node and edge kinds on the current deployment.
+
+```ts
+const withoutPaper = await evolved.removeKinds(["Paper"]);
+await withoutPaper.materializeRemovals();
+```
+
+Pass `{ eager: true }` to run cleanup inline after the schema commit:
+
+```ts
+const withoutPaper = await evolved.removeKinds(["Paper"], { eager: true });
+```
+
+Removal only applies to runtime-declared kinds. Removing a compile-time
+kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code
+for compile-time schema removal. Removing a runtime kind that is still
+referenced by a compile-time edge or ontology relation throws
+`KindHasReferentsError`, because TypeGraph cannot rewrite your
+compiled graph for you.
 
 ## Restart parity (the load-bearing invariant)
 
-The runtime extension document is the **durable source of truth**.
+The graph extension is the **durable source of truth**.
 Every call to `evolve()` persists the merged document into
-`schema_doc.runtimeDocument`. On startup, `createStoreWithSchema()`
+`schema_doc.extension`. On startup, `createStoreWithSchema()`
 reads it back, runs the same compiler, and reconstructs identical
-Zod-bearing `GraphDef`. Net: a runtime kind defined via `evolve()` is
+Zod-bearing `GraphDef`. Net: an extension kind defined via `evolve()` is
 indistinguishable from a compile-time kind after restart.
 
 Verify this in your own tests:
@@ -487,7 +582,7 @@ Retry recipe (only catches `StaleVersionError`):
 ```ts
 async function evolveWithRetry<G extends GraphDef>(
   ref: StoreRef<Store<G>>,
-  extension: RuntimeGraphDocument,
+  extension: GraphExtension,
   attempts = 3,
 ): Promise<Store<G>> {
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -500,7 +595,7 @@ async function evolveWithRetry<G extends GraphDef>(
         // baseline, so the next attempt diffs against fresh state.
         continue;
       }
-      // SchemaContentConflictError, RuntimeExtensionValidationError,
+      // SchemaContentConflictError, GraphExtensionValidationError,
       // EagerMaterializationError, etc. all surface to the caller —
       // they require operator intervention or different handling, not
       // blind retry.
@@ -519,14 +614,16 @@ out-of-date baseline doesn't trample another writer's progress.
 
 ## Trust boundary
 
-When the runtime extension document originates from an **untrusted
+When the graph extension originates from an **untrusted
 source** — an LLM completion, user input, an external API — treat it
 as untrusted data. Specifically:
 
-- **Validation runs at the boundary.** `defineRuntimeExtension(doc)`
+- **Validation runs at the boundary.** `defineGraphExtension(doc)`
   rejects any input that doesn't match the v1 subset
-  (`RuntimeExtensionValidationError` with per-issue paths). Don't skip
-  this step.
+  (`GraphExtensionValidationError` with per-issue paths). Don't skip
+  this step. If you want Result-style handling for untrusted JSON, call
+  `validateGraphExtension(raw, { strict: true })` and surface the
+  structured issues before calling `evolve()`.
 - **Property types are deliberately small.** The supported set
   excludes things like `bigint`, `Date`, custom Zod refinements, and
   arbitrary functions. An LLM cannot inject executable code by
@@ -540,10 +637,6 @@ as untrusted data. Specifically:
 
 ## Out of scope for v1
 
-- **Removal of runtime-declared kinds.** `deprecateKinds` is the soft
-  signal; a hard-removal verb has a long edge-case tail (existing
-  rows, edges referencing the kind, ontology references, fulltext /
-  embedding rows, tombstoned rows) and deserves its own design pass.
 - **Fulltext index unification.** Vector indexes flow through the
   unified channel (auto-derived from `embedding()` brands). Fulltext
   is still per-strategy: the GIN / FTS5 index is created with the
@@ -552,9 +645,6 @@ as untrusted data. Specifically:
 - **Multiple vector indexes per (kind, field).** v1 allows at most
   one. To use a different metric for the same field, use a different
   field name or wait for v2.
-- **Vector index for runtime-declared kinds.** Auto-derivation walks
-  compile-time node schemas. Runtime-extension documents cannot yet
-  declare embeddings — coming in a follow-up.
 - **Hard-blocking reads/writes on deprecated kinds.** Deprecation is
   informational. If you want strict enforcement, wrap collection
   access yourself.
@@ -566,4 +656,4 @@ as untrusted data. Specifically:
 
 - [Schema Migrations](/schema-management) — the lower-level primitives `evolve()` rides on.
 - [Evolving Schemas](/schema-evolution) — recipes for compile-time schema changes.
-- [Errors](/errors) — `EagerMaterializationError`, `RuntimeExtensionValidationError`, `StaleVersionError`, `SchemaContentConflictError`.
+- [Errors](/errors) — `EagerMaterializationError`, `GraphExtensionValidationError`, `StaleVersionError`, `SchemaContentConflictError`.

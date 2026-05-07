@@ -1221,7 +1221,7 @@ describe("computeSchemaDiff", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
-        runtimeDocument: {
+        extension: {
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         },
       });

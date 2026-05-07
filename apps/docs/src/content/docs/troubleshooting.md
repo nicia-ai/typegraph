@@ -263,7 +263,7 @@ store.query()
    ```typescript
    import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 
-   const nameIndex = defineNodeIndex("Person", ["name"]);
+   const nameIndex = defineNodeIndex(Person, { fields: ["name"] });
    ```
 
 3. **Limit results:**

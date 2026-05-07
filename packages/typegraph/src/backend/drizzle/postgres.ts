@@ -24,7 +24,7 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import { eq, getTableName, type SQL, sql } from "drizzle-orm";
+import { and, eq, getTableName, isNull, type SQL, sql } from "drizzle-orm";
 
 import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -47,8 +47,10 @@ import {
   type FulltextSearchResult,
   type GraphBackend,
   type IndexMaterializationRow,
+  type KindRemovalRow,
   POSTGRES_CAPABILITIES,
   type RecordIndexMaterializationParams,
+  type RecordKindRemovalParams,
   type SchemaVersionRow,
   type SetActiveVersionParams,
   type TransactionBackend,
@@ -67,6 +69,18 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import {
+  buildMaterializationInsertValues,
+  buildMaterializationOnConflictSet,
+  mapMaterializationRow,
+  POSTGRES_INDEX_MAT_TIMESTAMPS,
+} from "./index-materializations";
+import {
+  buildKindRemovalInsertValues,
+  buildKindRemovalOnConflictSet,
+  mapKindRemovalRow,
+  POSTGRES_KIND_REMOVAL_TIMESTAMPS,
+} from "./kind-removals";
 import {
   type CommonOperationBackend,
   createCommonOperationBackend,
@@ -393,61 +407,62 @@ export function createPostgresBackend(
       const rows = await db.select().from(t).where(eq(t.indexName, indexName));
       const row = rows[0];
       if (row === undefined) return undefined;
-      const lastAttemptedAt = formatPostgresTimestamp(row.lastAttemptedAt);
-      if (lastAttemptedAt === undefined) {
-        throw new Error(
-          `materialization row missing required last_attempted_at: ${row.indexName}`,
-        );
-      }
-      return {
-        indexName: row.indexName,
-        graphId: row.graphId,
-        entity: row.entity as "node" | "edge" | "vector",
-        kind: row.kind,
-        signature: row.signature,
-        schemaVersion: row.schemaVersion,
-        materializedAt: formatPostgresTimestamp(row.materializedAt),
-        lastAttemptedAt,
-        lastError: row.lastError ?? undefined,
-      };
+      return mapMaterializationRow(row, POSTGRES_INDEX_MAT_TIMESTAMPS.decode);
     },
 
     async recordIndexMaterialization(
       params: RecordIndexMaterializationParams,
     ): Promise<void> {
       const t = tables.indexMaterializations;
-      const materializedAtSet =
-        params.materializedAt === undefined
-          ? sql`COALESCE(excluded.${sql.identifier("materialized_at")}, ${t.materializedAt})`
-          : sql`excluded.${sql.identifier("materialized_at")}`;
       await db
         .insert(t)
-        .values({
-          indexName: params.indexName,
-          graphId: params.graphId,
-          entity: params.entity,
-          kind: params.kind,
-          signature: params.signature,
-          schemaVersion: params.schemaVersion,
-          materializedAt:
-            params.materializedAt === undefined
-              ? undefined
-              : new Date(params.materializedAt),
-          lastAttemptedAt: new Date(params.attemptedAt),
-          lastError: params.error,
-        })
+        .values(
+          buildMaterializationInsertValues(
+            params,
+            POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
+          ),
+        )
         .onConflictDoUpdate({
           target: t.indexName,
-          set: {
-            graphId: sql`excluded.${sql.identifier("graph_id")}`,
-            entity: sql`excluded.${sql.identifier("entity")}`,
-            kind: sql`excluded.${sql.identifier("kind")}`,
-            signature: sql`excluded.${sql.identifier("signature")}`,
-            schemaVersion: sql`excluded.${sql.identifier("schema_version")}`,
-            materializedAt: materializedAtSet,
-            lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
-            lastError: sql`excluded.${sql.identifier("last_error")}`,
-          },
+          set: buildMaterializationOnConflictSet(
+            t.materializedAt,
+            params.materializedAt,
+          ),
+        });
+    },
+
+    async ensureKindRemovalsTable(): Promise<void> {
+      await db.execute(
+        sql.raw(generatePgCreateTableSQL(tables.kindRemovals)),
+      );
+    },
+
+    async getPendingKindRemovals(
+      graphId: string,
+    ): Promise<readonly KindRemovalRow[]> {
+      const t = tables.kindRemovals;
+      const rows = await db
+        .select()
+        .from(t)
+        .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+      return rows.map((row) =>
+        mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
+      );
+    },
+
+    async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
+      const t = tables.kindRemovals;
+      await db
+        .insert(t)
+        .values(
+          buildKindRemovalInsertValues(
+            params,
+            POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
+          ),
+        )
+        .onConflictDoUpdate({
+          target: [t.graphId, t.kindName],
+          set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
         });
     },
 

@@ -1,5 +1,5 @@
 /**
- * One-way compiler from a validated `RuntimeGraphDocument` to Zod-bearing
+ * One-way compiler from a validated `GraphExtension` to Zod-bearing
  * `NodeType` / `EdgeType` / `OntologyRelation` values.
  *
  * The output is structurally indistinguishable from equivalent
@@ -24,19 +24,20 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { core as coreOntology } from "../ontology/core-meta-edges";
 import { type MetaEdge, type OntologyRelation } from "../ontology/types";
 import {
-  type RuntimeArrayItemType,
-  type RuntimeArrayProperty,
-  type RuntimeEdgeDocument,
-  type RuntimeEnumProperty,
-  type RuntimeGraphDocument,
-  type RuntimeNodeDocument,
-  type RuntimeNumberProperty,
-  type RuntimeObjectProperty,
-  type RuntimeOntologyRelation,
-  type RuntimePropertyType,
-  type RuntimeStringProperty,
-  type RuntimeUniqueConstraint,
-} from "./document-types";
+  type ExtensionArrayItemType,
+  type ExtensionArrayProperty,
+  type ExtensionEdgeDef,
+  type ExtensionEnumProperty,
+  type ExtensionIndex,
+  type ExtensionNodeDef,
+  type ExtensionNumberProperty,
+  type ExtensionObjectProperty,
+  type ExtensionOntologyRelation,
+  type ExtensionPropertyType,
+  type ExtensionStringProperty,
+  type ExtensionUniqueConstraint,
+  type GraphExtension,
+} from "./extension-types";
 import { compactUndefined } from "./internal";
 
 // ============================================================
@@ -48,14 +49,23 @@ import { compactUndefined } from "./internal";
  * host `GraphDef`. Each `OntologyRelation`'s `from` / `to` is a `NodeType`
  * when the document name matches a declared kind, or the raw string
  * (treated as an external IRI by downstream code) otherwise.
+ *
+ * `indexes` are pass-through document entries — their final
+ * `IndexDeclaration` shape requires Zod-introspection of the target
+ * kind's schema, which depends on cross-graph kind resolution that
+ * only the host-graph merge step has full information about. The
+ * compiler validates the document; the merge resolves the kind
+ * reference and calls the appropriate `defineNodeIndex` /
+ * `defineEdgeIndex`.
  */
-export type CompiledExtension = Readonly<{
+type CompiledExtension = Readonly<{
   nodes: readonly CompiledNode[];
   edges: readonly CompiledEdge[];
   ontology: readonly OntologyRelation[];
+  indexes: readonly ExtensionIndex[];
 }>;
 
-export type CompiledNode = Readonly<{
+type CompiledNode = Readonly<{
   type: NodeType;
   unique: readonly UniqueConstraint[];
 }>;
@@ -71,7 +81,7 @@ export type CompiledNode = Readonly<{
  * references; merge-time reconstructs it once the full endpoint set is
  * known.
  */
-export type CompiledEdge = Readonly<{
+type CompiledEdge = Readonly<{
   type: EdgeType;
   from: readonly (NodeType | string)[];
   to: readonly (NodeType | string)[];
@@ -85,11 +95,11 @@ export type CompiledEdge = Readonly<{
  * Compiles a validated runtime extension document into Zod-bearing kinds.
  *
  * Pure function with no I/O. Assumes the input has already passed
- * `validateRuntimeExtension(...)` — invariant violations (e.g. unknown
+ * `validateGraphExtension(...)` — invariant violations (e.g. unknown
  * meta-edge name) are programming bugs and surface as plain `Error`s.
  */
 export function compileRuntimeExtension(
-  document: RuntimeGraphDocument,
+  document: GraphExtension,
 ): CompiledExtension {
   const nodes: CompiledNode[] = [];
   const nodeTypeByName = new Map<string, NodeType>();
@@ -115,6 +125,11 @@ export function compileRuntimeExtension(
     nodes: Object.freeze(nodes),
     edges: Object.freeze(edges),
     ontology: Object.freeze(ontology),
+    // Indexes pass through — the merge step resolves the kind name
+    // against runtime-or-compile-time NodeType / EdgeType and builds
+    // the final `IndexDeclaration` via `defineNodeIndex` /
+    // `defineEdgeIndex`.
+    indexes: Object.freeze([...(document.indexes ?? [])]),
   });
 }
 
@@ -124,7 +139,7 @@ export function compileRuntimeExtension(
 
 function compileNode(
   kindName: string,
-  document: RuntimeNodeDocument,
+  document: ExtensionNodeDef,
 ): CompiledNode {
   const schema = buildObjectSchema(document.properties);
 
@@ -150,7 +165,7 @@ function compileNode(
 
 function compileEdge(
   kindName: string,
-  document: RuntimeEdgeDocument,
+  document: ExtensionEdgeDef,
   nodeTypeByName: ReadonlyMap<string, NodeType>,
 ): CompiledEdge {
   const schema = buildObjectSchema(document.properties ?? {});
@@ -191,7 +206,7 @@ function compileEdge(
 }
 
 function buildObjectSchema(
-  properties: Readonly<Record<string, RuntimePropertyType>>,
+  properties: Readonly<Record<string, ExtensionPropertyType>>,
 ): ZodObject<ZodRawShape> {
   const shape: Record<string, ZodType> = {};
   for (const [propertyName, propertyType] of Object.entries(properties)) {
@@ -204,10 +219,10 @@ function buildObjectSchema(
 }
 
 // ============================================================
-// Property compilation (RuntimePropertyType -> z.ZodType)
+// Property compilation (ExtensionPropertyType -> z.ZodType)
 // ============================================================
 
-function compileProperty(property: RuntimePropertyType): ZodType {
+function compileProperty(property: ExtensionPropertyType): ZodType {
   switch (property.type) {
     case "string": {
       return compileStringProperty(property);
@@ -230,7 +245,7 @@ function compileProperty(property: RuntimePropertyType): ZodType {
   }
 }
 
-function compileStringProperty(property: RuntimeStringProperty): ZodType {
+function compileStringProperty(property: ExtensionStringProperty): ZodType {
   // `searchable` and `format` are mutually exclusive (rejected by
   // validation): the format-routed schemas aren't `z.ZodString`
   // subclasses we can chain `searchable()` through.
@@ -261,7 +276,7 @@ function compileStringProperty(property: RuntimeStringProperty): ZodType {
 
 function applyStringRefinements(
   base: z.ZodString,
-  property: RuntimeStringProperty,
+  property: ExtensionStringProperty,
 ): z.ZodString {
   let schema = base;
   if (property.minLength !== undefined) schema = schema.min(property.minLength);
@@ -272,7 +287,7 @@ function applyStringRefinements(
   return schema;
 }
 
-function compileNumberProperty(property: RuntimeNumberProperty): ZodType {
+function compileNumberProperty(property: ExtensionNumberProperty): ZodType {
   let schema: z.ZodNumber = z.number();
   if (property.int === true) {
     schema = schema.int();
@@ -286,13 +301,13 @@ function compileNumberProperty(property: RuntimeNumberProperty): ZodType {
   return schema;
 }
 
-function compileEnumProperty(property: RuntimeEnumProperty): ZodType {
+function compileEnumProperty(property: ExtensionEnumProperty): ZodType {
   // `z.enum([...])` requires at least one value; validation guarantees
   // this. The cast quiets the readonly-tuple check Zod's overload uses.
   return z.enum(property.values as unknown as [string, ...string[]]);
 }
 
-function compileArrayProperty(property: RuntimeArrayProperty): ZodType {
+function compileArrayProperty(property: ExtensionArrayProperty): ZodType {
   if (property.embedding !== undefined) {
     // The embedding modifier replaces the ordinary `z.array(z.number())`
     // with the branded `embedding(dimensions)` schema so downstream
@@ -303,11 +318,11 @@ function compileArrayProperty(property: RuntimeArrayProperty): ZodType {
   return z.array(inner);
 }
 
-function compilePropertyForArrayItem(item: RuntimeArrayItemType): ZodType {
+function compilePropertyForArrayItem(item: ExtensionArrayItemType): ZodType {
   return applyOptional(compileProperty(item), item);
 }
 
-function compileObjectProperty(property: RuntimeObjectProperty): ZodType {
+function compileObjectProperty(property: ExtensionObjectProperty): ZodType {
   return buildObjectSchema(property.properties);
 }
 
@@ -323,7 +338,7 @@ function applyOptional(
 // ============================================================
 
 function compileUniqueConstraint(
-  document: RuntimeUniqueConstraint,
+  document: ExtensionUniqueConstraint,
 ): UniqueConstraint {
   const base = {
     name: document.name,
@@ -391,7 +406,7 @@ const META_EDGE_BY_NAME: Readonly<Record<MetaEdgeName, MetaEdge>> =
   ) as Readonly<Record<MetaEdgeName, MetaEdge>>;
 
 function compileOntologyRelation(
-  relation: RuntimeOntologyRelation,
+  relation: ExtensionOntologyRelation,
   nodeTypeByName: ReadonlyMap<string, NodeType>,
 ): OntologyRelation {
   // `relation.metaEdge` is typed as `MetaEdgeName` so the lookup is

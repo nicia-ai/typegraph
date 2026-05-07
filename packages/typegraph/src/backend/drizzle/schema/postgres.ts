@@ -55,6 +55,7 @@ export type PostgresTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  kindRemovals: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -75,6 +76,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  kindRemovals: "typegraph_kind_removals",
 };
 
 /**
@@ -294,6 +296,29 @@ export function createPostgresTables(
     (t) => [primaryKey({ columns: [t.indexName] })],
   );
 
+  /**
+   * Per-deployment record of extension kinds removed via
+   * `store.removeKinds()` whose data has not yet been cleaned up by
+   * `store.materializeRemovals()`. Same per-deployment rationale as
+   * `indexMaterializations`: two replicas of the same `schema_doc` may
+   * be at different stages of the data-cleanup phase.
+   */
+  const kindRemovals = pgTable(
+    n.kindRemovals,
+    {
+      graphId: text("graph_id").notNull(),
+      kindName: text("kind_name").notNull(),
+      entity: text("entity").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      removedAt: timestamp("removed_at", { withTimezone: true }),
+      lastAttemptedAt: timestamp("last_attempted_at", {
+        withTimezone: true,
+      }).notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [primaryKey({ columns: [t.graphId, t.kindName] })],
+  );
+
   return {
     nodes,
     edges,
@@ -301,6 +326,7 @@ export function createPostgresTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    kindRemovals,
     /**
      * The fulltext storage table is owned by the active `FulltextStrategy`,
      * not Drizzle. Shapes vary across strategies — the default `tsvectorStrategy`

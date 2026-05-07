@@ -112,15 +112,15 @@ export type IndexChange = Readonly<{
 // ============================================================
 
 /**
- * A change to the persisted runtime extension document.
+ * A change to the persisted graph-extension document.
  *
- * v1 runtime extensions are additive only (kind-name collisions are
- * rejected at evolve time; removal of runtime kinds is out of scope), so
- * a `runtimeDocument` change is always `safe`-severity. The detailed
+ * Graph-extension document changes are committed only through the
+ * runtime lifecycle verbs (`evolve` and `removeKinds`), so the
+ * extension-slice change itself is `safe`-severity. The detailed
  * per-kind effect is captured in the corresponding node/edge/ontology
  * changes the merged document produced.
  */
-export type RuntimeDocumentChange = Readonly<{
+export type ExtensionChange = Readonly<{
   type: ChangeType;
   severity: ChangeSeverity;
   details: string;
@@ -167,10 +167,10 @@ export type SchemaDiff = Readonly<{
   indexes: readonly IndexChange[];
 
   /**
-   * Change to the runtime extension document, if any. `undefined` when
+   * Change to the graph-extension document, if any. `undefined` when
    * the slice is unchanged on both sides (the common case).
    */
-  runtimeDocument?: RuntimeDocumentChange;
+  extension?: ExtensionChange;
 
   /**
    * Change to the soft-deprecated kind set, if any. `undefined` when
@@ -210,10 +210,7 @@ export function computeSchemaDiff(
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = diffOntology(before.ontology, after.ontology);
   const indexChanges = diffIndexes(before.indexes, after.indexes);
-  const runtimeDocumentChange = diffRuntimeDocument(
-    before.runtimeDocument,
-    after.runtimeDocument,
-  );
+  const extensionChange = diffExtension(before.extension, after.extension);
   const deprecatedKindsChange = diffDeprecatedKinds(
     before.deprecatedKinds,
     after.deprecatedKinds,
@@ -230,7 +227,7 @@ export function computeSchemaDiff(
   );
   const hasChanges =
     allChanges.length > 0 ||
-    runtimeDocumentChange !== undefined ||
+    extensionChange !== undefined ||
     deprecatedKindsChange !== undefined;
 
   const summary = generateSummary(
@@ -238,7 +235,7 @@ export function computeSchemaDiff(
     edgeChanges,
     ontologyChanges,
     indexChanges,
-    runtimeDocumentChange,
+    extensionChange,
     deprecatedKindsChange,
   );
 
@@ -249,9 +246,7 @@ export function computeSchemaDiff(
     edges: edgeChanges,
     ontology: ontologyChanges,
     indexes: indexChanges,
-    ...(runtimeDocumentChange === undefined ?
-      {}
-    : { runtimeDocument: runtimeDocumentChange }),
+    ...(extensionChange === undefined ? {} : { extension: extensionChange }),
     ...(deprecatedKindsChange === undefined ?
       {}
     : { deprecatedKinds: deprecatedKindsChange }),
@@ -730,16 +725,14 @@ function diffIndexes(
 // ============================================================
 
 /**
- * Computes the change to the runtime extension document, if any. v1
- * runtime extensions are additive only (collisions rejected at evolve
- * time, removal out of scope), so the change severity is always `safe` —
- * the per-kind effects of the merged document already surface as
- * node/edge/ontology changes.
+ * Computes the change to the graph-extension document, if any. The
+ * extension-slice change itself is always `safe` — the per-kind effects
+ * of the merged document already surface as node/edge/ontology changes.
  */
-function diffRuntimeDocument(
-  before: SerializedSchema["runtimeDocument"],
-  after: SerializedSchema["runtimeDocument"],
-): RuntimeDocumentChange | undefined {
+function diffExtension(
+  before: SerializedSchema["extension"],
+  after: SerializedSchema["extension"],
+): ExtensionChange | undefined {
   // Reference-equality short-circuit: when the loader threads the same
   // persisted document reference into the merged graph (the common
   // restart-with-no-evolve case), we avoid stringifying potentially
@@ -749,21 +742,21 @@ function diffRuntimeDocument(
     return {
       type: "added",
       severity: "safe",
-      details: "Runtime extension document was added",
+      details: "Graph extension document was added",
     };
   }
   if (after === undefined) {
     return {
       type: "removed",
       severity: "safe",
-      details: "Runtime extension document was removed",
+      details: "Graph extension document was removed",
     };
   }
   if (canonicalEqual(before, after)) return undefined;
   return {
     type: "modified",
     severity: "safe",
-    details: "Runtime extension document was modified",
+    details: "Graph extension document was modified",
   };
 }
 
@@ -820,7 +813,7 @@ function generateSummary(
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
   indexChanges: readonly IndexChange[],
-  runtimeDocumentChange: RuntimeDocumentChange | undefined,
+  extensionChange: ExtensionChange | undefined,
   deprecatedKindsChange: DeprecatedKindsChange | undefined,
 ): string {
   const parts: string[] = [];
@@ -868,8 +861,8 @@ function generateSummary(
     );
   }
 
-  if (runtimeDocumentChange !== undefined) {
-    parts.push(`Runtime document: ${runtimeDocumentChange.type}`);
+  if (extensionChange !== undefined) {
+    parts.push(`Runtime document: ${extensionChange.type}`);
   }
 
   if (deprecatedKindsChange !== undefined) {

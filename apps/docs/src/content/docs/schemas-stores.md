@@ -236,8 +236,8 @@ const incidentMeta = stored?.nodes.Incident?.annotations;
 Creates a Zod schema for vector embeddings with dimension validation.
 Carries optional vector-index configuration that the auto-derivation
 pass at `defineGraph()` time reads to produce
-`VectorIndexDeclaration` entries — see [Runtime Extensions →
-Vector indexes](/runtime-extensions#vector-indexes) for the full
+`VectorIndexDeclaration` entries — see [Graph Extensions →
+Vector indexes](/graph-extensions#vector-indexes) for the full
 materialization flow.
 
 ```typescript
@@ -308,7 +308,7 @@ const Article = defineNode("Article", {
 ```
 
 See [Semantic Search](/semantic-search) for query usage and
-[Runtime Extensions](/runtime-extensions#vector-indexes) for how the
+[Graph Extensions](/graph-extensions#vector-indexes) for how the
 auto-derived index flows through `materializeIndexes()`.
 
 ### `externalRef(table)`
@@ -387,6 +387,11 @@ function defineGraph<G extends GraphDef>(config: {
   nodes: Record<string, NodeRegistration>;
   edges: Record<string, EdgeRegistration | EdgeType>;
   ontology?: OntologyRelation[];
+  indexes?: IndexDeclaration[];
+  defaults?: {
+    onNodeDelete?: DeleteBehavior;
+    temporalMode?: TemporalMode;
+  };
 }): G;
 ```
 
@@ -398,6 +403,8 @@ function defineGraph<G extends GraphDef>(config: {
 | `nodes` | `Record<string, NodeRegistration>` | Node type registrations |
 | `edges` | `Record<string, EdgeRegistration \| EdgeType>` | Edge registrations or edge types directly |
 | `ontology` | `OntologyRelation[]` | Optional semantic relationships |
+| `indexes` | `IndexDeclaration[]` | Optional explicit index declarations from `defineNodeIndex` / `defineEdgeIndex`. Vector indexes are auto-derived from `embedding()` brands; explicit declarations win on `(kind, fieldPath)` collisions. |
+| `defaults` | `{ onNodeDelete?, temporalMode? }` | Optional graph-wide defaults. `onNodeDelete` defaults to `"restrict"`; `temporalMode` defaults to `"current"`. |
 
 Edge entries can be:
 

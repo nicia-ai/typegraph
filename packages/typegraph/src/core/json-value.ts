@@ -7,6 +7,7 @@
  * and `as any` escape hatches that bypass the `JsonValue` type.
  */
 import { ConfigurationError } from "../errors";
+import { isPlainObject } from "../utils/object";
 
 /**
  * Asserts that `value` is JSON-serializable.
@@ -60,17 +61,9 @@ function walk(value: unknown, path: string, ownerKind: string): void {
   if (!isPlainObject(value)) {
     throwInvalid(path, describeNonPlain(value), ownerKind);
   }
-  for (const [key, nested] of Object.entries(
-    value as Record<string, unknown>,
-  )) {
+  for (const [key, nested] of Object.entries(value)) {
     walk(nested, `${path}.${key}`, ownerKind);
   }
-}
-
-function isPlainObject(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) return false;
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
 }
 
 function describeNonFinite(value: number): string {

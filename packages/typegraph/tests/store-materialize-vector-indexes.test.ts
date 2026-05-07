@@ -15,6 +15,7 @@ import { z } from "zod";
 import { defineGraph, defineNode } from "../src";
 import { embedding } from "../src/core/embedding";
 import { type VectorIndexDeclaration } from "../src/indexes/types";
+import { defineGraphExtension } from "../src/runtime";
 import { createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
 
@@ -303,5 +304,46 @@ describe("cross-graph vector status disambiguation (compound key)", () => {
     expect(entryB.indexName).toBe("shared_explicit_vec");
     expect(entryA.status).not.toBe("alreadyMaterialized");
     expect(entryB.status).not.toBe("alreadyMaterialized");
+  });
+});
+
+describe("runtime-extension embedding modifiers flow through materializeIndexes", () => {
+  it("auto-derives a vector index from a runtime kind's embedding modifier", async () => {
+    const backend = createTestBackend();
+    const baseGraph = defineGraph({
+      id: "vector_runtime_extension",
+      nodes: { Plain: { type: Plain } },
+      edges: {},
+    });
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {
+          Article: {
+            properties: {
+              title: { type: "string" },
+              embedding: {
+                type: "array",
+                items: { type: "number" },
+                embedding: { dimensions: 384 },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const result = await evolved.materializeIndexes();
+    const articleVector = result.results.find(
+      (entry) => entry.entity === "vector" && entry.kind === "Article",
+    );
+    expect(articleVector).toBeDefined();
+    // Test backend lacks sqlite-vec, so the entry surfaces as skipped
+    // — but it surfaces, which proves the runtime kind's embedding
+    // brand auto-derived a `VectorIndexDeclaration` and the
+    // materializer dispatched on it.
+    expect(articleVector?.status).toBe("skipped");
+    expect(articleVector?.indexName).toContain("article");
   });
 });

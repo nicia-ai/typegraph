@@ -118,9 +118,9 @@ export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
   }
   const storedSchema = parseSerializedSchema(activeRow.schema_doc);
   const merged =
-    storedSchema.runtimeDocument === undefined ?
+    storedSchema.extension === undefined ?
       graph
-    : mergeRuntimeExtension(graph, storedSchema.runtimeDocument);
+    : mergeRuntimeExtension(graph, storedSchema.extension);
   return {
     graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
     activeRow,
@@ -232,7 +232,7 @@ export async function ensureSchema<G extends GraphDef>(
     /**
      * Pre-fetched active row + parsed stored schema. When the loader
      * (`createStoreWithSchema`) has already paid for `getActiveSchema`
-     * and `parseSerializedSchema` to peek at `runtimeDocument`, it
+     * and `parseSerializedSchema` to peek at `extension`, it
      * passes the results through here so `ensureSchema` doesn't repeat
      * the round trip + Zod walk on every Store boot.
      */

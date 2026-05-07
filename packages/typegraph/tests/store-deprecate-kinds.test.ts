@@ -2,7 +2,7 @@
  * Tests for `store.deprecateKinds(...)` and `store.undeprecateKinds(...)`.
  *
  * Deprecation is a soft signal: the kind set surfaces in
- * `store.deprecatedKinds` for introspection but doesn't gate reads,
+ * `store.introspect().deprecatedKinds` for introspection but doesn't gate reads,
  * writes, or queries. Persistence round-trips through the schema
  * document; restart parity verified by re-loading via
  * `createStoreWithSchema`.
@@ -14,10 +14,11 @@ import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import {
   ConfigurationError,
+  KindNotFoundError,
   SchemaContentConflictError,
   StaleVersionError,
 } from "../src/errors";
-import { defineRuntimeExtension } from "../src/runtime";
+import { defineGraphExtension } from "../src/runtime";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
 import { createTestBackend } from "./test-utils";
@@ -38,10 +39,10 @@ describe("Store.deprecateKinds — basic flow", () => {
     const [store, init] = await createStoreWithSchema(baseGraph, backend);
     expect(init).toEqual({ status: "initialized", version: 1 });
 
-    expect(store.deprecatedKinds.size).toBe(0);
+    expect(store.introspect().deprecatedKinds.size).toBe(0);
 
     const evolved = await store.deprecateKinds(["Person"]);
-    expect(evolved.deprecatedKinds.has("Person")).toBe(true);
+    expect(evolved.introspect().deprecatedKinds.has("Person")).toBe(true);
 
     const active = await backend.getActiveSchema(baseGraph.id);
     expect(active?.version).toBe(2);
@@ -53,14 +54,14 @@ describe("Store.deprecateKinds — basic flow", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
     const withTag = await store.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
     const deprecated = await withTag.deprecateKinds(["Tag"]);
 
-    expect(deprecated.deprecatedKinds.has("Tag")).toBe(true);
-    expect(deprecated.deprecatedKinds.has("Person")).toBe(false);
+    expect(deprecated.introspect().deprecatedKinds.has("Tag")).toBe(true);
+    expect(deprecated.introspect().deprecatedKinds.has("Person")).toBe(false);
   });
 
   it("is idempotent on re-deprecating an already-deprecated kind (no version bump)", async () => {
@@ -74,7 +75,7 @@ describe("Store.deprecateKinds — basic flow", () => {
     const secondActive = await backend.getActiveSchema(baseGraph.id);
 
     expect(secondActive?.version).toBe(firstActive?.version);
-    expect(second.deprecatedKinds.has("Person")).toBe(true);
+    expect(second.introspect().deprecatedKinds.has("Person")).toBe(true);
   });
 
   it("rejects deprecating an unknown kind", async () => {
@@ -84,10 +85,8 @@ describe("Store.deprecateKinds — basic flow", () => {
     const caught = await store
       .deprecateKinds(["NotAKind"])
       .catch((error: unknown) => error);
-    expect(caught).toBeInstanceOf(ConfigurationError);
-    expect((caught as ConfigurationError).details).toMatchObject({
-      code: "DEPRECATE_UNKNOWN_KIND",
-    });
+    expect(caught).toBeInstanceOf(KindNotFoundError);
+    expect((caught as KindNotFoundError).kindName).toBe("NotAKind");
   });
 
   it("rejects deprecate before any schema has been initialized", async () => {
@@ -107,7 +106,7 @@ describe("Store.deprecateKinds — basic flow", () => {
     const alice = await deprecated.nodes.Person.create({ name: "alice" });
     const fetched = await deprecated.nodes.Person.getById(alice.id);
     expect(fetched?.name).toBe("alice");
-    expect(deprecated.deprecatedKinds.has("Person")).toBe(true);
+    expect(deprecated.introspect().deprecatedKinds.has("Person")).toBe(true);
   });
 });
 
@@ -117,10 +116,10 @@ describe("Store.undeprecateKinds", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
     const deprecated = await store.deprecateKinds(["Person"]);
-    expect(deprecated.deprecatedKinds.has("Person")).toBe(true);
+    expect(deprecated.introspect().deprecatedKinds.has("Person")).toBe(true);
 
     const restored = await deprecated.undeprecateKinds(["Person"]);
-    expect(restored.deprecatedKinds.has("Person")).toBe(false);
+    expect(restored.introspect().deprecatedKinds.has("Person")).toBe(false);
 
     const active = await backend.getActiveSchema(baseGraph.id);
     expect(active?.version).toBe(3);
@@ -134,7 +133,7 @@ describe("Store.undeprecateKinds", () => {
     const same = await store.undeprecateKinds(["Person"]);
     const active = await backend.getActiveSchema(baseGraph.id);
 
-    expect(same.deprecatedKinds.size).toBe(0);
+    expect(same.introspect().deprecatedKinds.size).toBe(0);
     expect(active?.version).toBe(1);
   });
 });
@@ -146,7 +145,7 @@ describe("Store.deprecateKinds — concurrency + StoreRef", () => {
     const [storeB] = await createStoreWithSchema(baseGraph, backend);
 
     const Tag = await storeA.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
@@ -177,7 +176,7 @@ describe("Store.deprecateKinds — concurrency + StoreRef", () => {
     const evolved = await ref.current.deprecateKinds(["Person"], { ref });
 
     expect(ref.current).toBe(evolved);
-    expect(ref.current.deprecatedKinds.has("Person")).toBe(true);
+    expect(ref.current.introspect().deprecatedKinds.has("Person")).toBe(true);
   });
 });
 
@@ -199,17 +198,17 @@ describe("Cross-flow safety: deprecate × evolve", () => {
     // deprecation set, otherwise the resulting schema would lose the
     // "Person is deprecated" signal.
     const evolved = await storeA.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
 
-    expect(evolved.deprecatedKinds.has("Person")).toBe(true);
+    expect(evolved.introspect().deprecatedKinds.has("Person")).toBe(true);
     expect(evolved.registry.hasNodeType("Tag")).toBe(true);
 
     // Persisted form carries both — verifiable via fresh restart.
     const [restored] = await createStoreWithSchema(baseGraph, backend);
-    expect(restored.deprecatedKinds.has("Person")).toBe(true);
+    expect(restored.introspect().deprecatedKinds.has("Person")).toBe(true);
     expect(restored.registry.hasNodeType("Tag")).toBe(true);
   });
 
@@ -225,7 +224,7 @@ describe("Cross-flow safety: deprecate × evolve", () => {
 
     // B evolves with Tag and deprecates Person.
     const evolvedB = await storeB.evolve(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
@@ -237,7 +236,7 @@ describe("Cross-flow safety: deprecate × evolve", () => {
     // stale `this` and the caller would never see Tag.
     const result = await storeA.deprecateKinds(["Person"]);
 
-    expect(result.deprecatedKinds.has("Person")).toBe(true);
+    expect(result.introspect().deprecatedKinds.has("Person")).toBe(true);
     expect(result.registry.hasNodeType("Tag")).toBe(true);
     expect(result).not.toBe(storeA);
   });
@@ -257,7 +256,7 @@ describe("Persistence + restart parity", () => {
       backend,
     );
     expect(restoredResult.status).toBe("unchanged");
-    expect(restored.deprecatedKinds.has("Person")).toBe(true);
+    expect(restored.introspect().deprecatedKinds.has("Person")).toBe(true);
   });
 
   it("graphs that never deprecated anything hash byte-identically to legacy", async () => {

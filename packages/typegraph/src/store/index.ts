@@ -47,11 +47,23 @@ export type {
   MaterializeIndexesOptions,
   MaterializeIndexesResult,
 } from "./materialize-indexes";
+export type {
+  MaterializeRemovalsEntry,
+  MaterializeRemovalsOptions,
+  MaterializeRemovalsResult,
+} from "./materialize-removals";
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
 export type { Store } from "./store";
 export { createStore, createStoreWithSchema } from "./store";
 
 // Search facade and option / result types
+export type {
+  EdgeIntrospection,
+  KindIntrospection,
+  OntologyIntrospection,
+  SchemaIntrospection,
+  UniqueIntrospection,
+} from "./introspect";
 export type {
   FulltextSearchHit,
   FulltextSearchOptions,
@@ -61,6 +73,7 @@ export type {
   HybridSearchOptions,
   HybridVectorOptions,
   VectorSearchHit,
+  VectorSearchOptions,
 } from "./search";
 export { StoreSearch } from "./search-facade";
 

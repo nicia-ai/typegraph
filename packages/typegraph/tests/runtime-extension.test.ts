@@ -1,12 +1,12 @@
 /**
- * Round-trip parity tests for `defineRuntimeExtension` /
+ * Round-trip parity tests for `defineGraphExtension` /
  * `compileRuntimeExtension`.
  *
  * For every type in the v1 property-type subset and every interesting
  * modifier combination, this suite declares the same kind two ways:
  *
  *  (a) hand-written via `defineNode` / `defineEdge` with explicit Zod
- *  (b) declared via `defineRuntimeExtension(...)` and compiled
+ *  (b) declared via `defineGraphExtension(...)` and compiled
  *
  * It then asserts structural equivalence between the two — same parsed
  * output for valid inputs, equivalent error paths/counts for invalid
@@ -33,24 +33,28 @@ import {
   type UniqueConstraint,
 } from "../src/core/types";
 import {
-  compileRuntimeExtension,
-  defineRuntimeExtension,
-  RuntimeExtensionValidationError,
-  type RuntimeGraphDocument,
-  validateRuntimeExtension,
+  defineGraphExtension,
+  type GraphExtension,
+  GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
+  validateGraphExtension,
 } from "../src/runtime";
+// `compileRuntimeExtension` is internal — reached via file path so
+// these unit tests can exercise it without forcing the barrel to
+// re-export it as part of the public API.
+import { compileRuntimeExtension } from "../src/runtime/compiler";
 
 // ============================================================
 // Helpers
 // ============================================================
 
-function compileSingleNode(document: RuntimeGraphDocument): NodeType {
+function compileSingleNode(document: GraphExtension): NodeType {
   const compiled = compileRuntimeExtension(document);
   expect(compiled.nodes).toHaveLength(1);
   return compiled.nodes[0]!.type;
 }
 
-function compileSingleEdge(document: RuntimeGraphDocument): EdgeType {
+function compileSingleEdge(document: GraphExtension): EdgeType {
   const compiled = compileRuntimeExtension(document);
   expect(compiled.edges).toHaveLength(1);
   return compiled.edges[0]!.type;
@@ -111,7 +115,7 @@ describe("string property parity", () => {
       schema: z.object({ name: z.string() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Plain: { properties: { name: { type: "string" } } } },
       }),
     );
@@ -130,7 +134,7 @@ describe("string property parity", () => {
       }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Sized: {
             properties: {
@@ -159,7 +163,7 @@ describe("string property parity", () => {
       schema: z.object({ at: z.iso.datetime() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Stamp: {
             properties: { at: { type: "string", format: "datetime" } },
@@ -180,7 +184,7 @@ describe("string property parity", () => {
       schema: z.object({ href: z.url() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Link: {
             properties: { href: { type: "string", format: "uri" } },
@@ -201,7 +205,7 @@ describe("string property parity", () => {
       schema: z.object({ email: z.email() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Contact: {
             properties: { email: { type: "string", format: "email" } },
@@ -222,7 +226,7 @@ describe("string property parity", () => {
       schema: z.object({ externalId: z.uuid() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Resource: {
             properties: { externalId: { type: "string", format: "uuid" } },
@@ -243,7 +247,7 @@ describe("string property parity", () => {
       schema: z.object({ on: z.iso.date() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Birthday: {
             properties: { on: { type: "string", format: "date" } },
@@ -265,7 +269,7 @@ describe("string property parity", () => {
       schema: z.object({ note: z.string().optional() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Opt: {
             properties: { note: { type: "string", optional: true } },
@@ -284,7 +288,7 @@ describe("string property parity", () => {
       }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Doc: {
             properties: {
@@ -310,7 +314,7 @@ describe("string property parity", () => {
 
     // Also verify the marker survives `.optional()` in the compiled form.
     const optionalCompiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Doc: {
             properties: {
@@ -333,7 +337,7 @@ describe("string property parity", () => {
 
   it("searchable defaults to language=english when omitted", () => {
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           D: {
             properties: { body: { type: "string", searchable: {} } },
@@ -359,7 +363,7 @@ describe("number property parity", () => {
       schema: z.object({ score: z.number() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { N: { properties: { score: { type: "number" } } } },
       }),
     );
@@ -371,7 +375,7 @@ describe("number property parity", () => {
       schema: z.object({ count: z.number().int().min(0).max(10) }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Bound: {
             properties: {
@@ -401,7 +405,7 @@ describe("boolean and enum property parity", () => {
       schema: z.object({ active: z.boolean() }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { B: { properties: { active: { type: "boolean" } } } },
       }),
     );
@@ -418,7 +422,7 @@ describe("boolean and enum property parity", () => {
       }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           E: {
             properties: {
@@ -450,7 +454,7 @@ describe("array and object property parity", () => {
       schema: z.object({ tags: z.array(z.string()) }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           A: {
             properties: {
@@ -478,7 +482,7 @@ describe("array and object property parity", () => {
       }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           O: {
             properties: {
@@ -504,7 +508,7 @@ describe("array and object property parity", () => {
       schema: z.object({ vector: embedding(384) }),
     });
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           V: {
             properties: {
@@ -541,7 +545,7 @@ describe("array and object property parity", () => {
 describe("annotations passthrough", () => {
   it("preserves consumer annotations on nodes", () => {
     const compiled = compileSingleNode(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           P: {
             annotations: {
@@ -561,7 +565,7 @@ describe("annotations passthrough", () => {
 
   it("preserves consumer annotations on edges", () => {
     const compiled = compileSingleEdge(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { A: { properties: { x: { type: "string" } } } },
         edges: {
           link: {
@@ -586,7 +590,7 @@ describe("annotations passthrough", () => {
 describe("edge compilation", () => {
   it("resolves endpoint names to NodeType references", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Paper: { properties: { doi: { type: "string" } } },
           Author: { properties: { name: { type: "string" } } },
@@ -608,7 +612,7 @@ describe("edge compilation", () => {
 
   it("preserves unresolved endpoints as raw strings for host-graph merge", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Paper: { properties: { doi: { type: "string" } } } },
         edges: {
           authoredBy: {
@@ -628,7 +632,7 @@ describe("edge compilation", () => {
 
   it("compiles ontology relations referencing declared nodes", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Podcast: { properties: { title: { type: "string" } } },
           Media: { properties: { title: { type: "string" } } },
@@ -646,7 +650,7 @@ describe("edge compilation", () => {
 
   it("ontology endpoints that don't resolve fall through as IRI strings", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Podcast: { properties: { title: { type: "string" } } } },
         ontology: [
           {
@@ -671,7 +675,7 @@ describe("edge compilation", () => {
 describe("unique constraint compilation", () => {
   it("compiles fields, scope, and collation defaults", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Paper: {
             properties: { doi: { type: "string" } },
@@ -691,7 +695,7 @@ describe("unique constraint compilation", () => {
 
   it("compiles where: isNull / isNotNull predicates round-trippable", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Item: {
             properties: {
@@ -738,7 +742,7 @@ describe("unique constraint compilation", () => {
 
   it("honours custom scope and collation when provided", () => {
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           Email: {
             properties: { addr: { type: "string" } },
@@ -768,15 +772,15 @@ function expectInvalid(
   fn: () => unknown,
   code: string,
   pathFragment?: string,
-): RuntimeExtensionValidationError {
+): GraphExtensionValidationError {
   let caught: unknown;
   try {
     fn();
   } catch (error) {
     caught = error;
   }
-  expect(caught).toBeInstanceOf(RuntimeExtensionValidationError);
-  const error = caught as RuntimeExtensionValidationError;
+  expect(caught).toBeInstanceOf(GraphExtensionValidationError);
+  const error = caught as GraphExtensionValidationError;
   const codes = error.details.issues.map((index) => index.code);
   expect(codes).toContain(code);
   if (pathFragment !== undefined) {
@@ -792,8 +796,10 @@ describe("validation failures", () => {
   it("rejects unsupported property types", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
-          nodes: { N: { properties: { x: { type: "bigint" } } } },
+        defineGraphExtension({
+          nodes: {
+            N: { properties: { x: { type: "bigint" } as never } },
+          },
         }),
       "UNSUPPORTED_PROPERTY_TYPE",
       "/nodes/N/properties/x/type",
@@ -803,7 +809,7 @@ describe("validation failures", () => {
   it("rejects searchable + format on the same string property", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -824,7 +830,7 @@ describe("validation failures", () => {
   it("rejects format combined with minLength/maxLength/pattern", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -841,7 +847,7 @@ describe("validation failures", () => {
   it("rejects embedding arrays whose items carry refinements", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -864,7 +870,7 @@ describe("validation failures", () => {
     // it forms a cycle in the normalized broader group.
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             A: { properties: { name: { type: "string" } } },
             B: { properties: { name: { type: "string" } } },
@@ -881,7 +887,7 @@ describe("validation failures", () => {
   it("detects hasPart/partOf cross-direction cycles", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             Whole: { properties: { name: { type: "string" } } },
             Part: { properties: { name: { type: "string" } } },
@@ -903,7 +909,7 @@ describe("validation failures", () => {
     // misapplied refinement (e.g. `pattern` on a number) is dropped
     // from the compiled schema; the Zod schema for `score` remains a
     // plain `z.number()` with no pattern check.
-    const document = defineRuntimeExtension({
+    const document = defineGraphExtension({
       nodes: {
         N: {
           properties: {
@@ -931,7 +937,7 @@ describe("validation failures", () => {
   it("rejects nested arrays", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -940,7 +946,7 @@ describe("validation failures", () => {
                   items: {
                     type: "array",
                     items: { type: "number" },
-                  },
+                  } as never,
                 },
               },
             },
@@ -954,7 +960,7 @@ describe("validation failures", () => {
   it("rejects two-level nested objects", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -964,7 +970,7 @@ describe("validation failures", () => {
                     inner: {
                       type: "object",
                       properties: { x: { type: "string" } },
-                    },
+                    } as never,
                   },
                 },
               },
@@ -979,7 +985,7 @@ describe("validation failures", () => {
   it("rejects ontology cycles", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             A: { properties: { x: { type: "string" } } },
             B: { properties: { x: { type: "string" } } },
@@ -995,10 +1001,67 @@ describe("validation failures", () => {
     );
   });
 
+  it("rejects direct disjointWith ↔ subClassOf contradictions", () => {
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            A: { properties: { x: { type: "string" } } },
+            B: { properties: { x: { type: "string" } } },
+          },
+          ontology: [
+            { metaEdge: "subClassOf", from: "A", to: "B" },
+            { metaEdge: "disjointWith", from: "A", to: "B" },
+          ],
+        }),
+      "ONTOLOGY_DISJOINT_CONFLICT",
+    );
+  });
+
+  it("rejects transitive disjointWith ↔ subClassOf contradictions", () => {
+    // (A subClassOf B) + (B subClassOf C) makes A-C subclass-related
+    // by closure; disjointWith(A, C) is a contradiction.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            A: { properties: { x: { type: "string" } } },
+            B: { properties: { x: { type: "string" } } },
+            C: { properties: { x: { type: "string" } } },
+          },
+          ontology: [
+            { metaEdge: "subClassOf", from: "A", to: "B" },
+            { metaEdge: "subClassOf", from: "B", to: "C" },
+            { metaEdge: "disjointWith", from: "A", to: "C" },
+          ],
+        }),
+      "ONTOLOGY_DISJOINT_CONFLICT",
+    );
+  });
+
+  it("detects disjointWith conflicts independent of declaration order (symmetry)", () => {
+    // disjointWith is symmetric — `(B, A) disjointWith` should be
+    // caught even when the subclass is declared `(A, B)`.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            A: { properties: { x: { type: "string" } } },
+            B: { properties: { x: { type: "string" } } },
+          },
+          ontology: [
+            { metaEdge: "subClassOf", from: "A", to: "B" },
+            { metaEdge: "disjointWith", from: "B", to: "A" },
+          ],
+        }),
+      "ONTOLOGY_DISJOINT_CONFLICT",
+    );
+  });
+
   it("rejects ontology self-loops on hierarchical meta-edges", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: { A: { properties: { x: { type: "string" } } } },
           ontology: [{ metaEdge: "subClassOf", from: "A", to: "A" }],
         }),
@@ -1010,7 +1073,7 @@ describe("validation failures", () => {
     // Endpoints can reference compile-time host kinds or external IRIs;
     // cross-graph resolution happens at merge time, not here.
     const compiled = compileRuntimeExtension(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { A: { properties: { x: { type: "string" } } } },
         edges: {
           partial: {
@@ -1029,9 +1092,11 @@ describe("validation failures", () => {
   it("rejects unknown meta-edge names", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: { A: { properties: { x: { type: "string" } } } },
-          ontology: [{ metaEdge: "notARealMetaEdge", from: "A", to: "A" }],
+          ontology: [
+            { metaEdge: "notARealMetaEdge", from: "A", to: "A" } as never,
+          ],
         }),
       "UNKNOWN_META_EDGE",
     );
@@ -1040,7 +1105,7 @@ describe("validation failures", () => {
   it("rejects unique constraint references to undeclared fields", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: { id: { type: "string" } },
@@ -1055,7 +1120,7 @@ describe("validation failures", () => {
   it("rejects unique where predicates with unsupported ops", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: { x: { type: "string" } },
@@ -1063,7 +1128,7 @@ describe("validation failures", () => {
                 {
                   name: "by_x",
                   fields: ["x"],
-                  where: { field: "x", op: "equals" },
+                  where: { field: "x", op: "equals" as never },
                 },
               ],
             },
@@ -1076,7 +1141,7 @@ describe("validation failures", () => {
   it("rejects searchable on non-string properties", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -1095,7 +1160,7 @@ describe("validation failures", () => {
   it("rejects embedding on non-array-of-number properties", () => {
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             N: {
               properties: {
@@ -1119,7 +1184,7 @@ describe("validation failures", () => {
     // (metaEdge, from, to) tuple.
     expectInvalid(
       () =>
-        defineRuntimeExtension({
+        defineGraphExtension({
           nodes: {
             A: { properties: { x: { type: "string" } } },
             B: { properties: { x: { type: "string" } } },
@@ -1136,7 +1201,7 @@ describe("validation failures", () => {
   it("collects multiple issues in a single error", () => {
     let caught: unknown;
     try {
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           N: {
             properties: {
@@ -1144,7 +1209,10 @@ describe("validation failures", () => {
               x: { type: "weird" } as never,
               y: {
                 type: "array",
-                items: { type: "array", items: { type: "string" } },
+                items: {
+                  type: "array",
+                  items: { type: "string" },
+                } as never,
               },
             },
           },
@@ -1153,14 +1221,77 @@ describe("validation failures", () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(RuntimeExtensionValidationError);
-    const error = caught as RuntimeExtensionValidationError;
+    expect(caught).toBeInstanceOf(GraphExtensionValidationError);
+    const error = caught as GraphExtensionValidationError;
     expect(error.details.issues.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("validateRuntimeExtension is the result-returning variant", () => {
-    const result = validateRuntimeExtension({
+  it("validateGraphExtension is the result-returning variant", () => {
+    const result = validateGraphExtension({
       nodes: { N: { properties: { x: { type: "string" } } } },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects unknown top-level keys in strict (authoring) mode", () => {
+    // The reviewer-reproduced case: `node` typo'd for `nodes` used to
+    // silently produce an empty extension; defineGraphExtension now
+    // surfaces the typo with UNKNOWN_DOCUMENT_KEY.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          node: { N: { properties: { x: { type: "string" } } } },
+        } as never),
+      "UNKNOWN_DOCUMENT_KEY",
+      "/node",
+    );
+  });
+
+  it("accepts unknown top-level keys in loose (persistence-load) mode", () => {
+    // Forward-compat: a future v1.x writer may add a new top-level
+    // slice; an older v1 reader must still parse the document. The
+    // load path leaves strict off so the unknown key is ignored
+    // rather than rejected.
+    const result = validateGraphExtension({
+      nodes: { N: { properties: { x: { type: "string" } } } },
+      futureAdditive: { whatever: true },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects unsupported string formats in strict mode", () => {
+    // Reviewer reproduction: `format: "date-time"` (typo for `datetime`)
+    // used to compile to a plain `z.string()` and accept "not-a-date";
+    // defineGraphExtension now surfaces it with UNSUPPORTED_STRING_FORMAT.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            N: {
+              properties: {
+                at: { type: "string", format: "date-time" as never },
+              },
+            },
+          },
+        }),
+      "UNSUPPORTED_STRING_FORMAT",
+      "/nodes/N/properties/at/format",
+    );
+  });
+
+  it("accepts unsupported string formats in loose mode (compiles to z.string)", () => {
+    // Loose mode preserves the persistence-load forward-compat
+    // behaviour: a document committed by a future writer with a new
+    // format identifier still parses on an older reader, just without
+    // the new format's behaviour.
+    const result = validateGraphExtension({
+      nodes: {
+        N: {
+          properties: {
+            at: { type: "string", format: "date-time" },
+          },
+        },
+      },
     });
     expect(result.success).toBe(true);
   });
@@ -1172,7 +1303,7 @@ describe("validation failures", () => {
 
 describe("document immutability", () => {
   it("returned document is deeply frozen", () => {
-    const document = defineRuntimeExtension({
+    const document = defineGraphExtension({
       nodes: {
         N: {
           properties: { x: { type: "string" } },
@@ -1193,14 +1324,14 @@ describe("document immutability", () => {
 
 describe("document format versioning", () => {
   it("validator stamps the current version when none is supplied", () => {
-    const document = defineRuntimeExtension({
+    const document = defineGraphExtension({
       nodes: { N: { properties: { x: { type: "string" } } } },
     });
     expect(document.version).toBe(1);
   });
 
   it("accepts an explicit version equal to the current major", () => {
-    const result = validateRuntimeExtension({
+    const result = validateGraphExtension({
       version: 1,
       nodes: { N: { properties: { x: { type: "string" } } } },
     });
@@ -1209,18 +1340,24 @@ describe("document format versioning", () => {
     expect(result.data.version).toBe(1);
   });
 
-  it("rejects a version higher than the current major with RUNTIME_EXTENSION_VERSION_UNSUPPORTED", () => {
-    const result = validateRuntimeExtension({
-      version: 99,
-      nodes: { N: { properties: { x: { type: "string" } } } },
-    });
-    expect(result.success).toBe(false);
-    if (result.success) throw new Error("expected validation failure");
-    const issue = result.error.details.issues.find(
-      (entry) => entry.code === "RUNTIME_EXTENSION_VERSION_UNSUPPORTED",
-    );
-    expect(issue?.path).toBe("/version");
-    expect(issue?.message).toContain("version 99");
+  it("rejects a version higher than the current major with GraphExtensionVersionUnsupportedError", () => {
+    // Version mismatch is unrecoverable — the document may use newer
+    // fields this library can't decode — so the validator throws the
+    // typed class directly rather than batching it as a per-field
+    // issue.
+    let caught: unknown;
+    try {
+      validateGraphExtension({
+        version: 99,
+        nodes: { N: { properties: { x: { type: "string" } } } },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GraphExtensionVersionUnsupportedError);
+    const error = caught as GraphExtensionVersionUnsupportedError;
+    expect(error.persistedVersion).toBe(99);
+    expect(error.currentVersion).toBeGreaterThanOrEqual(1);
   });
 
   it("rejects non-integer / non-positive version with INVALID_DOCUMENT_SHAPE", () => {
@@ -1229,7 +1366,7 @@ describe("document format versioning", () => {
     // document, which is exactly the path validateVersion guards.
     // eslint-disable-next-line unicorn/no-null
     for (const bogus of [0, -1, 1.5, "1", null]) {
-      const result = validateRuntimeExtension({
+      const result = validateGraphExtension({
         version: bogus,
         nodes: { N: { properties: { x: { type: "string" } } } },
       });
@@ -1253,10 +1390,10 @@ describe("document format versioning", () => {
     // older v1 runtimes. Rejecting unknown keys here would defeat
     // that promise; the persistence-side zod is `.loose()` for the
     // same reason.
-    const result = validateRuntimeExtension({
+    const result = validateGraphExtension({
       nodes: { N: { properties: { x: { type: "string" } } } },
       // Hypothetical future v1.x.y additive slice.
-      indexes: [{ name: "future_slice", entity: "node", kind: "N" }],
+      futureSlice: [{ name: "future_slice", enabled: true }],
     });
     expect(result.success).toBe(true);
   });
@@ -1266,7 +1403,7 @@ describe("document format versioning", () => {
     // The format-versioning policy promises that new optional
     // property modifiers in a future v1.x.y ride forward via older
     // runtimes silently ignoring the new keys.
-    const result = validateRuntimeExtension({
+    const result = validateGraphExtension({
       nodes: {
         N: {
           properties: {
@@ -1285,7 +1422,7 @@ describe("document format versioning", () => {
     // identifiers (e.g. `"uri-reference"`) in a future v1.x.y must
     // ride forward — older runtimes parse the field as a plain
     // string without the format-specific check.
-    const result = validateRuntimeExtension({
+    const result = validateGraphExtension({
       nodes: {
         N: {
           properties: {
@@ -1302,7 +1439,7 @@ describe("document format versioning", () => {
     // CURRENT becomes 2 but stored v1 documents (no version field)
     // must continue to parse as v1 — never silently re-classified as
     // v2 by the validator's default.
-    const result = validateRuntimeExtension({
+    const result = validateGraphExtension({
       nodes: { N: { properties: { x: { type: "string" } } } },
     });
     expect(result.success).toBe(true);
@@ -1323,7 +1460,7 @@ describe("ontology cycle detection", () => {
   it("ignores cycles across non-transitive meta-edges", () => {
     // `relatedTo` is symmetric but not strictly hierarchical; cycles
     // there are not domain errors. This document must succeed.
-    const document = defineRuntimeExtension({
+    const document = defineGraphExtension({
       nodes: {
         A: { properties: { x: { type: "string" } } },
         B: { properties: { x: { type: "string" } } },
@@ -1339,7 +1476,7 @@ describe("ontology cycle detection", () => {
   it("rejects 2-cycle on broader/narrower", () => {
     let caught: unknown;
     try {
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: {
           A: { properties: { x: { type: "string" } } },
           B: { properties: { x: { type: "string" } } },
@@ -1352,10 +1489,10 @@ describe("ontology cycle detection", () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(RuntimeExtensionValidationError);
-    const codes = (
-      caught as RuntimeExtensionValidationError
-    ).details.issues.map((index) => index.code);
+    expect(caught).toBeInstanceOf(GraphExtensionValidationError);
+    const codes = (caught as GraphExtensionValidationError).details.issues.map(
+      (index) => index.code,
+    );
     expect(codes).toContain("ONTOLOGY_CYCLE");
   });
 });
@@ -1368,7 +1505,7 @@ describe("edge schema parity", () => {
   it("edge with no properties matches handwritten empty edge", () => {
     const handwritten = defineEdge("emptyEdge");
     const compiled = compileSingleEdge(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { A: { properties: { x: { type: "string" } } } },
         edges: { emptyEdge: { from: ["A"], to: ["A"], properties: {} } },
       }),
@@ -1381,7 +1518,7 @@ describe("edge schema parity", () => {
       schema: z.object({ since: z.iso.datetime(), weight: z.number() }),
     });
     const compiled = compileSingleEdge(
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { A: { properties: { x: { type: "string" } } } },
         edges: {
           link: {
