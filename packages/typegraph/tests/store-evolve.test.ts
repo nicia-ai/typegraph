@@ -34,7 +34,7 @@ import {
   defineGraphExtension,
   GraphExtensionValidationError,
   IncompatibleChangeError,
-} from "../src/runtime";
+} from "../src/graph-extension";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
 import { createTestBackend } from "./test-utils";

@@ -20,7 +20,7 @@ import {
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
 import { unwrap } from "../utils/result";
-import { compileRuntimeExtension } from "./compiler";
+import { compileGraphExtension } from "./compiler";
 import {
   GraphExtensionUnresolvedEndpointError,
   KindCollisionError,
@@ -67,7 +67,7 @@ import { validateGraphExtension } from "./validation";
  * v1 subset surface as `GraphExtensionValidationError` rather than
  * raw compiler crashes.
  */
-export function mergeRuntimeExtension<G extends GraphDef>(
+export function mergeGraphExtension<G extends GraphDef>(
   graph: G,
   document: GraphExtension,
 ): G {
@@ -97,7 +97,7 @@ export function mergeRuntimeExtension<G extends GraphDef>(
     return graph;
   }
 
-  const compiled = compileRuntimeExtension(validatedUnion);
+  const compiled = compileGraphExtension(validatedUnion);
 
   // Existing runtime-origin kind names — these aren't compile-time
   // collisions when re-applied, so we skip the collision check for them
@@ -224,7 +224,7 @@ export function mergeRuntimeExtension<G extends GraphDef>(
 }
 
 function deriveRuntimeVectorIndexes(
-  compiledNodes: ReturnType<typeof compileRuntimeExtension>["nodes"],
+  compiledNodes: ReturnType<typeof compileGraphExtension>["nodes"],
 ): readonly VectorIndexDeclaration[] {
   if (compiledNodes.length === 0) return [];
   const registrations: Record<string, NodeRegistration> = {};

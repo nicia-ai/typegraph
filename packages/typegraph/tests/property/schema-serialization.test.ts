@@ -13,6 +13,8 @@ import {
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
+import { defineGraphExtension } from "../../src/graph-extension";
+import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import {
   defineEdgeIndex,
   defineNodeIndex,
@@ -27,8 +29,6 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
-import { defineGraphExtension } from "../../src/runtime";
-import { mergeRuntimeExtension } from "../../src/runtime/merge";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
 import {
@@ -862,7 +862,7 @@ describe("Schema Serialization Properties", () => {
           Tag: { properties: { name: { type: "string" } } },
         },
       });
-      const extendedGraph = mergeRuntimeExtension(baseGraph, extension);
+      const extendedGraph = mergeGraphExtension(baseGraph, extension);
       const extendedHash = await computeSchemaHash(
         serializeSchema(extendedGraph, 1),
       );

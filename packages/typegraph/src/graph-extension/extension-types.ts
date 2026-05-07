@@ -349,7 +349,7 @@ export type GraphExtensionVersion = number;
  *
  * Frozen at construction. Round-trips losslessly through `JSON.stringify`
  * / `JSON.parse`; the `GraphExtension → CompiledExtension` direction
- * is provided by `compileRuntimeExtension(...)`. There is no
+ * is provided by `compileGraphExtension(...)`. There is no
  * `Zod → GraphExtension` direction because runtime kinds always
  * originate as documents.
  *

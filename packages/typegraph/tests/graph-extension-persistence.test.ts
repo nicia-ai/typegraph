@@ -3,7 +3,7 @@
  * for the persisted runtime extension document.
  *
  * Simulates "an earlier process persisted a runtime extension" by
- * composing `mergeRuntimeExtension(...)` + `serializeSchema(...)` +
+ * composing `mergeGraphExtension(...)` + `serializeSchema(...)` +
  * `backend.commitSchemaVersion(...)` directly, then verifies that a
  * fresh `createStoreWithSchema(graph, backend)` reconstructs an
  * identical `Store` — same kinds, same query behavior.
@@ -13,9 +13,9 @@ import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
-import { GraphExtensionUnresolvedEndpointError } from "../src/runtime";
-import { defineGraphExtension } from "../src/runtime";
-import { mergeRuntimeExtension } from "../src/runtime/merge";
+import { GraphExtensionUnresolvedEndpointError } from "../src/graph-extension";
+import { defineGraphExtension } from "../src/graph-extension";
+import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { ensureSchema } from "../src/schema/manager";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createStoreWithSchema } from "../src/store/store";
@@ -33,14 +33,14 @@ const baseGraph = defineGraph({
 
 async function persistEvolvedSchema(
   backend: ReturnType<typeof createTestBackend>,
-  document: Parameters<typeof mergeRuntimeExtension>[1],
+  document: Parameters<typeof mergeGraphExtension>[1],
 ): Promise<void> {
   // Bring the backend to a baseline at version 1 with the unmerged
   // graph, then commit a v2 carrying the merged runtime document.
   const [, initial] = await createStoreWithSchema(baseGraph, backend);
   expect(initial.status).toBe("initialized");
 
-  const merged = mergeRuntimeExtension(baseGraph, document);
+  const merged = mergeGraphExtension(baseGraph, document);
   const evolvedSchema = serializeSchema(merged, 2);
   const evolvedHash = await computeSchemaHash(evolvedSchema);
   await backend.commitSchemaVersion({
@@ -94,7 +94,7 @@ describe("runtime document persistence — loader rewire", () => {
     // same hash that was persisted — this is what makes ensureSchema's
     // hash-equality check return "unchanged" rather than triggering a
     // spurious migration on every boot.
-    const merged = mergeRuntimeExtension(baseGraph, extension);
+    const merged = mergeGraphExtension(baseGraph, extension);
     const reSerialized = serializeSchema(merged, persistedRow!.version);
     const reHash = await computeSchemaHash(reSerialized);
     expect(reHash).toBe(persistedRow!.schema_hash);
@@ -230,7 +230,7 @@ describe("runtime document persistence — loader rewire", () => {
     const [, initial] = await createStoreWithSchema(baseGraph, backend);
     expect(initial.status).toBe("initialized");
 
-    const merged = mergeRuntimeExtension(
+    const merged = mergeGraphExtension(
       baseGraph,
       defineGraphExtension({
         nodes: { Tag: { properties: { name: { type: "string" } } } },

@@ -32,7 +32,7 @@ import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
 import { searchable } from "../src/core/searchable";
-import { defineGraphExtension } from "../src/runtime";
+import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 

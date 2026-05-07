@@ -98,7 +98,7 @@ type CompiledEdge = Readonly<{
  * `validateGraphExtension(...)` — invariant violations (e.g. unknown
  * meta-edge name) are programming bugs and surface as plain `Error`s.
  */
-export function compileRuntimeExtension(
+export function compileGraphExtension(
   document: GraphExtension,
 ): CompiledExtension {
   const nodes: CompiledNode[] = [];

@@ -1,8 +1,8 @@
 /**
  * Runtime graph extension — pure-value document layer + public errors.
  *
- * The Zod compiler (`compileRuntimeExtension`) and host-graph merge
- * (`mergeRuntimeExtension`) live in this directory but are NOT
+ * The Zod compiler (`compileGraphExtension`) and host-graph merge
+ * (`mergeGraphExtension`) live in this directory but are NOT
  * re-exported from this barrel — they're internal plumbing reached
  * via file-path imports (`schema/manager.ts`, `store/store.ts`).
  * `Store.evolve` is the supported public path; consumers needing a

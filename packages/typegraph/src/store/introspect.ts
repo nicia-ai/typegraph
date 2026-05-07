@@ -29,12 +29,12 @@ import {
   type NodeType,
   type UniquenessScope,
 } from "../core/types";
-import { getTypeName } from "../ontology/types";
-import { type GraphExtension } from "../runtime/extension-types";
+import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   buildRuntimeOntologyKeySet,
   compileTimeOntologyKey,
-} from "../runtime/ontology-keys";
+} from "../graph-extension/ontology-keys";
+import { getTypeName } from "../ontology/types";
 import { serializeSchemaProperties } from "../schema/serializer";
 import { type JsonSchema } from "../schema/types";
 

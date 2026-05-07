@@ -23,7 +23,7 @@ import {
   type GraphExtension,
   type IncompatibleChange,
   IncompatibleChangeError,
-} from "../src/runtime";
+} from "../src/graph-extension";
 import { createStoreWithSchema, type Store } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 

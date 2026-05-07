@@ -1,6 +1,6 @@
 /**
  * Round-trip parity tests for `defineGraphExtension` /
- * `compileRuntimeExtension`.
+ * `compileGraphExtension`.
  *
  * For every type in the v1 property-type subset and every interesting
  * modifier combination, this suite declares the same kind two ways:
@@ -38,24 +38,24 @@ import {
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   validateGraphExtension,
-} from "../src/runtime";
-// `compileRuntimeExtension` is internal — reached via file path so
+} from "../src/graph-extension";
+// `compileGraphExtension` is internal — reached via file path so
 // these unit tests can exercise it without forcing the barrel to
 // re-export it as part of the public API.
-import { compileRuntimeExtension } from "../src/runtime/compiler";
+import { compileGraphExtension } from "../src/graph-extension/compiler";
 
 // ============================================================
 // Helpers
 // ============================================================
 
 function compileSingleNode(document: GraphExtension): NodeType {
-  const compiled = compileRuntimeExtension(document);
+  const compiled = compileGraphExtension(document);
   expect(compiled.nodes).toHaveLength(1);
   return compiled.nodes[0]!.type;
 }
 
 function compileSingleEdge(document: GraphExtension): EdgeType {
-  const compiled = compileRuntimeExtension(document);
+  const compiled = compileGraphExtension(document);
   expect(compiled.edges).toHaveLength(1);
   return compiled.edges[0]!.type;
 }
@@ -589,7 +589,7 @@ describe("annotations passthrough", () => {
 
 describe("edge compilation", () => {
   it("resolves endpoint names to NodeType references", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: {
           Paper: { properties: { doi: { type: "string" } } },
@@ -611,7 +611,7 @@ describe("edge compilation", () => {
   });
 
   it("preserves unresolved endpoints as raw strings for host-graph merge", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: { Paper: { properties: { doi: { type: "string" } } } },
         edges: {
@@ -631,7 +631,7 @@ describe("edge compilation", () => {
   });
 
   it("compiles ontology relations referencing declared nodes", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: {
           Podcast: { properties: { title: { type: "string" } } },
@@ -649,7 +649,7 @@ describe("edge compilation", () => {
   });
 
   it("ontology endpoints that don't resolve fall through as IRI strings", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: { Podcast: { properties: { title: { type: "string" } } } },
         ontology: [
@@ -674,7 +674,7 @@ describe("edge compilation", () => {
 
 describe("unique constraint compilation", () => {
   it("compiles fields, scope, and collation defaults", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: {
           Paper: {
@@ -694,7 +694,7 @@ describe("unique constraint compilation", () => {
   });
 
   it("compiles where: isNull / isNotNull predicates round-trippable", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: {
           Item: {
@@ -741,7 +741,7 @@ describe("unique constraint compilation", () => {
   });
 
   it("honours custom scope and collation when provided", () => {
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: {
           Email: {
@@ -1072,7 +1072,7 @@ describe("validation failures", () => {
   it("accepts edge endpoints that don't resolve in-document (host-graph merge resolves)", () => {
     // Endpoints can reference compile-time host kinds or external IRIs;
     // cross-graph resolution happens at merge time, not here.
-    const compiled = compileRuntimeExtension(
+    const compiled = compileGraphExtension(
       defineGraphExtension({
         nodes: { A: { properties: { x: { type: "string" } } } },
         edges: {

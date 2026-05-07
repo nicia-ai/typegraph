@@ -23,7 +23,7 @@ import {
   defineGraphExtension,
   KindHasReferentsError,
   RemoveCompileTimeKindError,
-} from "../src/runtime";
+} from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 

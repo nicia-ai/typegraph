@@ -441,7 +441,7 @@ export {
 } from "./indexes";
 
 // ============================================================
-// Runtime Extension
+// Graph Extension
 // ============================================================
 
 export type {
@@ -469,8 +469,8 @@ export type {
   GraphExtensionIssue,
   GraphExtensionIssueCode,
   GraphExtensionVersion,
-} from "./runtime";
-export type { IncompatibleChange, KindReferent } from "./runtime";
+} from "./graph-extension";
+export type { IncompatibleChange, KindReferent } from "./graph-extension";
 export {
   CURRENT_GRAPH_EXTENSION_VERSION,
   defineGraphExtension,
@@ -484,7 +484,7 @@ export {
   LEGACY_GRAPH_EXTENSION_VERSION,
   RemoveCompileTimeKindError,
   validateGraphExtension,
-} from "./runtime";
+} from "./graph-extension";
 
 // ============================================================
 // Utilities

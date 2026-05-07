@@ -18,7 +18,7 @@ Public API:
 
 The v1 document subset supports nodes, edges, ontology relations, annotations, unique constraints, relational indexes, searchable string fields, and embedding fields. Restart parity is load-bearing: `createStoreWithSchema()` reads `schema_doc.extension`, recompiles the extension, and rebuilds the same Zod-bearing merged graph in a fresh process.
 
-The final public naming is `defineGraphExtension`, not the earlier pre-release `defineRuntimeExtension` draft. The value being defined is a graph-extension document; the runtime action is `store.evolve()`.
+The final public naming is `defineGraphExtension`, not the earlier pre-release `defineRuntimeExtension` draft. The value being defined is a graph-extension document; the runtime action is `store.evolve()`. The corresponding subpath export is `@nicia-ai/typegraph/graph-extension` (renamed from the pre-release `@nicia-ai/typegraph/runtime` for the same reason). All graph-extension exports also remain available from the package root.
 
 This release also tightens release-blocking validation and DX gaps:
 

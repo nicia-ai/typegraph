@@ -287,7 +287,7 @@ describe("runtime-declared relational indexes flow through materializeIndexes", 
     });
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
-    const { defineGraphExtension } = await import("../src/runtime");
+    const { defineGraphExtension } = await import("../src/graph-extension");
     const evolved = await store.evolve(
       defineGraphExtension({
         nodes: { Paper: { properties: { doi: { type: "string" } } } },

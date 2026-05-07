@@ -5,7 +5,7 @@
  * subset, and the suite asserts the load-bearing invariant from issue
  * #101 PR 3:
  *
- * - `compileRuntimeExtension(defineGraphExtension(doc))` always
+ * - `compileGraphExtension(defineGraphExtension(doc))` always
  *   succeeds and produces a Zod schema that accepts the document's own
  *   example values.
  *
@@ -30,12 +30,12 @@ import {
   type ExtensionPropertyType,
   type GraphExtension,
   validateGraphExtension,
-} from "../../src/runtime";
+} from "../../src/graph-extension";
 // Internal compiler / merge / canonical — reached via file path so
 // the property tests can exercise round-trip invariants without
 // forcing the barrel to re-export them.
-import { compileRuntimeExtension } from "../../src/runtime/compiler";
-import { mergeRuntimeExtension } from "../../src/runtime/merge";
+import { compileGraphExtension } from "../../src/graph-extension/compiler";
+import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import { canonicalEqual, sortedReplacer } from "../../src/schema/canonical";
 import {
   computeSchemaHash,
@@ -226,7 +226,7 @@ describe("runtime extension property tests", () => {
         const document = defineGraphExtension({
           nodes: { [kindName]: { properties } },
         });
-        const compiled = compileRuntimeExtension(document);
+        const compiled = compileGraphExtension(document);
         expect(compiled.nodes).toHaveLength(1);
         const node = compiled.nodes[0]!;
         expect(node.type.kind).toBe(kindName);
@@ -261,7 +261,7 @@ describe("runtime extension property tests", () => {
             },
           },
         });
-        const compiled = compileRuntimeExtension(document);
+        const compiled = compileGraphExtension(document);
         const schema = compiled.nodes[0]!.type.schema.shape[propertyName];
         expect(schema).toBeDefined();
         expect(getSearchableMetadata(schema! as z.ZodType)).toEqual({
@@ -293,7 +293,7 @@ describe("runtime extension property tests", () => {
             },
           },
         });
-        const compiled = compileRuntimeExtension(document);
+        const compiled = compileGraphExtension(document);
         const schema = compiled.nodes[0]!.type.schema.shape[propertyName];
         expect(schema).toBeDefined();
         expect(getEmbeddingDimensions(schema! as z.ZodType)).toBe(dimensions);
@@ -338,7 +338,7 @@ const multiNodeRecordArb: fc.Arbitrary<
 
 // Real-Zod baseline graph for the merge / hash invariants. The
 // extension layer never inspects compile-time Zod, but
-// `mergeRuntimeExtension` does call `defineGraph` machinery that
+// `mergeGraphExtension` does call `defineGraph` machinery that
 // requires an actual `defineNode` shape.
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -400,11 +400,11 @@ describe("graph extension — algebraic invariants", () => {
         for (const { kindName, properties } of nodes.toReversed()) {
           reversed[kindName] = { properties };
         }
-        const forwardGraph = mergeRuntimeExtension(
+        const forwardGraph = mergeGraphExtension(
           baselineGraph,
           defineGraphExtension({ nodes: forward }),
         );
-        const reversedGraph = mergeRuntimeExtension(
+        const reversedGraph = mergeGraphExtension(
           baselineGraph,
           defineGraphExtension({ nodes: reversed }),
         );
@@ -420,11 +420,11 @@ describe("graph extension — algebraic invariants", () => {
     );
   });
 
-  it("mergeRuntimeExtension is idempotent when the same extension is applied twice", () => {
+  it("mergeGraphExtension is idempotent when the same extension is applied twice", () => {
     fc.assert(
       fc.property(multiNodeExtensionArb, (extension) => {
-        const once = mergeRuntimeExtension(baselineGraph, extension);
-        const twice = mergeRuntimeExtension(once, extension);
+        const once = mergeGraphExtension(baselineGraph, extension);
+        const twice = mergeGraphExtension(once, extension);
         // The merge short-circuits when the union equals the existing
         // document — same reference returned, not just structurally
         // equal. That's the contract `Store.evolve`'s no-op fast path

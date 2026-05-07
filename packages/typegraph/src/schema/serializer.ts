@@ -18,6 +18,10 @@ import {
   type UniqueConstraint,
 } from "../core/types";
 import {
+  type GraphExtension,
+  LEGACY_GRAPH_EXTENSION_VERSION,
+} from "../graph-extension/extension-types";
+import {
   type EdgeIndexDeclaration,
   type IndexDeclaration,
   type NodeIndexDeclaration,
@@ -29,10 +33,6 @@ import {
   type OntologyRelation,
 } from "../ontology/types";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
-import {
-  type GraphExtension,
-  LEGACY_GRAPH_EXTENSION_VERSION,
-} from "../runtime/extension-types";
 import { nowIso } from "../utils/date";
 import { sortedReplacer } from "./canonical";
 import {

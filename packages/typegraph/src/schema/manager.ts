@@ -10,7 +10,7 @@
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { DatabaseOperationError, MigrationError } from "../errors";
-import { mergeRuntimeExtension } from "../runtime/merge";
+import { mergeGraphExtension } from "../graph-extension/merge";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -120,7 +120,7 @@ export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
   const merged =
     storedSchema.extension === undefined ?
       graph
-    : mergeRuntimeExtension(graph, storedSchema.extension);
+    : mergeGraphExtension(graph, storedSchema.extension);
   return {
     graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
     activeRow,

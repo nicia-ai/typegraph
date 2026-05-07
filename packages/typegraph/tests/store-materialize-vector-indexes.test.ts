@@ -14,8 +14,8 @@ import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
 import { embedding } from "../src/core/embedding";
+import { defineGraphExtension } from "../src/graph-extension";
 import { type VectorIndexDeclaration } from "../src/indexes/types";
-import { defineGraphExtension } from "../src/runtime";
 import { createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
 

@@ -18,10 +18,10 @@ import {
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
+import { type GraphExtension } from "../graph-extension/extension-types";
 import { type IndexDeclaration } from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
-import { type GraphExtension } from "../runtime/extension-types";
 
 // ============================================================
 // Enum Zod Schemas

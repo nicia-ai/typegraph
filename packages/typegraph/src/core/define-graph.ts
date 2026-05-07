@@ -1,11 +1,11 @@
 import { ConfigurationError } from "../errors/index";
+import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   autoDeriveVectorIndexes,
   mergeVectorIndexes,
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
-import { type GraphExtension } from "../runtime/extension-types";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -233,7 +233,7 @@ export type GraphDef<
   indexes: readonly IndexDeclaration[] | undefined;
   /**
    * Graph extension this graph was merged with, if any. Set by
-   * `mergeRuntimeExtension`; never set by `defineGraph` directly.
+   * `mergeGraphExtension`; never set by `defineGraph` directly.
    * Exists solely so re-serialization is stable — the rest of the
    * system reads the merged kinds through `nodes` / `edges` /
    * `ontology` and never inspects this field. Absent on graphs that

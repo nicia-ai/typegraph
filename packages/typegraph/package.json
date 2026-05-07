@@ -32,10 +32,10 @@
       "import": "./dist/indexes/index.js",
       "require": "./dist/indexes/index.cjs"
     },
-    "./runtime": {
-      "types": "./dist/runtime/index.d.ts",
-      "import": "./dist/runtime/index.js",
-      "require": "./dist/runtime/index.cjs"
+    "./graph-extension": {
+      "types": "./dist/graph-extension/index.d.ts",
+      "import": "./dist/graph-extension/index.js",
+      "require": "./dist/graph-extension/index.cjs"
     },
     "./sqlite": {
       "types": "./dist/backend/sqlite/index.d.ts",

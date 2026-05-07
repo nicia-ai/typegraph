@@ -15,7 +15,7 @@ import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
 import { KindNotFoundError } from "../src";
-import { defineGraphExtension } from "../src/runtime";
+import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 

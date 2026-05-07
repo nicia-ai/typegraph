@@ -26,6 +26,15 @@ import {
   EagerMaterializationError,
   KindNotFoundError,
 } from "../errors";
+import {
+  buildIncompatibleChangeError,
+  classifyModifications,
+  type RequireEmptyEntry,
+} from "../graph-extension/classify";
+import { IncompatibleChangeError } from "../graph-extension/errors";
+import { type GraphExtension } from "../graph-extension/extension-types";
+import { mergeGraphExtension } from "../graph-extension/merge";
+import { planRemovals, stripRuntime } from "../graph-extension/remove";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -36,15 +45,6 @@ import {
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
-import {
-  buildIncompatibleChangeError,
-  classifyModifications,
-  type RequireEmptyEntry,
-} from "../runtime/classify";
-import { IncompatibleChangeError } from "../runtime/errors";
-import { type GraphExtension } from "../runtime/extension-types";
-import { mergeRuntimeExtension } from "../runtime/merge";
-import { planRemovals, stripRuntime } from "../runtime/remove";
 import {
   applyDeprecatedKinds,
   loadActiveSchemaWithBootstrap,
@@ -935,7 +935,7 @@ export class Store<G extends GraphDef> {
     // again" hot path short-circuits before we walk every property in
     // `classifyModifications`. The merge itself canonicalEqual-checks
     // and returns the input graph unchanged for no-op re-evolves.
-    const merged = mergeRuntimeExtension(baseline, extension);
+    const merged = mergeGraphExtension(baseline, extension);
 
     // No-op evolve (extension already applied): reuse `this` so the
     // agent loop's repeated `evolve(sameExt)` keeps warm registry,
@@ -1166,7 +1166,7 @@ export class Store<G extends GraphDef> {
     const merged =
       plan.document === undefined ?
         compileTimeGraph
-      : mergeRuntimeExtension(compileTimeGraph, plan.document);
+      : mergeGraphExtension(compileTimeGraph, plan.document);
     const finalGraph = applyDeprecatedKinds(merged, [
       ...baseline.deprecatedKinds,
     ]);
@@ -1313,7 +1313,7 @@ export class Store<G extends GraphDef> {
     const withRuntime =
       storedSchema.extension === undefined ?
         this.#graph
-      : mergeRuntimeExtension(this.#graph, storedSchema.extension);
+      : mergeGraphExtension(this.#graph, storedSchema.extension);
     return applyDeprecatedKinds(withRuntime, storedSchema.deprecatedKinds);
   }
 
@@ -1686,7 +1686,7 @@ export async function createStoreWithSchema<G extends GraphDef>(
   // through to ensureSchema so each Store boot pays for one DB round
   // trip and one Zod parse, not two. Additional extension kinds are
   // reachable through the registry but invisible to the type system —
-  // see `mergeRuntimeExtension`.
+  // see `mergeGraphExtension`.
   const {
     graph: merged,
     activeRow,

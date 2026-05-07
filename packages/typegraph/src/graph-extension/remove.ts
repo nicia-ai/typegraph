@@ -178,7 +178,7 @@ export function planRemovals<G extends GraphDef>(
   // Drop runtime indexes referencing removed kinds (relational + edge
   // entries; the auto-derived vector indexes follow the runtime nodes
   // they were derived from, so dropping the runtime node implicitly
-  // drops the index when `mergeRuntimeExtension` re-runs auto-derive
+  // drops the index when `mergeGraphExtension` re-runs auto-derive
   // against the smaller node set).
   const allRemovedKinds = new Set([
     ...removedNodeKindsSet,
@@ -211,7 +211,7 @@ export function planRemovals<G extends GraphDef>(
 
 /**
  * Returns a graph with the runtime slice stripped: nodes and edges
- * registered by `mergeRuntimeExtension` are dropped along with the
+ * registered by `mergeGraphExtension` are dropped along with the
  * `extension` itself, leaving the compile-time-only graph.
  *
  * Used by `removeKinds` as the base for re-merging the post-removal
@@ -239,7 +239,7 @@ export function stripRuntime<G extends GraphDef>(graph: G): G {
   const compileOntology = graph.ontology.filter(
     (relation) => !runtimeOntologyKeys.has(compileTimeOntologyKey(relation)),
   );
-  // Drop runtime-origin indexes too — `mergeRuntimeExtension` re-runs
+  // Drop runtime-origin indexes too — `mergeGraphExtension` re-runs
   // auto-derivation against the new (smaller) runtime kind set.
   const compileIndexes = (graph.indexes ?? []).filter(
     (index) => index.origin !== "runtime",
