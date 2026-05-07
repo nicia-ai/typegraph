@@ -1,5 +1,635 @@
 # @nicia-ai/typegraph
 
+## 0.25.0
+
+### Minor Changes
+
+- [#106](https://github.com/nicia-ai/typegraph/pull/106) [`40b97b1`](https://github.com/nicia-ai/typegraph/commit/40b97b1b5fe3a858830f9fd3619db1ed7f10ec54) Thanks [@pdlug](https://github.com/pdlug)! - Replace the unwrapped `insertSchema` + `setActiveSchema` two-step migration flow with a single atomic `commitSchemaVersion` backend primitive (plus `setActiveVersion` for rollback). Fixes the orphan-row bug where a crash between insert and activate left the system wedged at the next `ensureSchema` call.
+
+  **The bug.** `migrateSchema` called `backend.insertSchema(v=N+1, isActive=false)` then `backend.setActiveSchema(N+1)` as two independent operations with no surrounding transaction. A crash in between left an inactive `v=N+1` row that nothing referenced; the next migration attempt computed the same `newVersion=N+1` and hit a primary-key violation, requiring manual operator cleanup. Closes [#104](https://github.com/nicia-ai/typegraph/issues/104).
+
+  **New primitives:**
+
+  ```typescript
+  backend.commitSchemaVersion({
+    graphId,
+    expected: { kind: "initial" } | { kind: "active"; version: N },
+    version: N + 1,
+    schemaHash,
+    schemaDoc,
+  });
+
+  backend.setActiveVersion({ graphId, expected, version });
+  ```
+
+  `commitSchemaVersion` inserts and activates as one transactional unit with optimistic compare-and-swap on the currently-active version, idempotency on same-hash retry (orphan reactivation), and explicit conflict detection. The CAS guard takes a tagged-union `expected` rather than a magic `version: 0` sentinel — initial commits have materially different semantics from successor commits and the type system reflects that.
+
+  **New error types** (both extend `TypeGraphError`):
+  - `StaleVersionError` — thrown when the caller's `expected` active version doesn't match what the database has. Includes `details.actual` so the caller knows what to refetch. Recovery: re-read with `getActiveSchema(graphId)` and retry against the new baseline.
+  - `SchemaContentConflictError` — thrown when a row already exists at the target version with a different `schemaHash`. This is a content disagreement (two writers committed different schemas at the same version), not a stale-read race; recovery requires operator intervention, not retry.
+
+  **Storage-layer invariant.** Adds a partial unique index `(graph_id) WHERE is_active = TRUE` on `typegraph_schema_versions`. Defense in depth: the database will refuse a corrupt "two active rows on one graph" state regardless of the application path that produced it.
+
+  **Non-transactional backends refuse the primitive.** On Cloudflare D1, Cloudflare Durable Objects, `drizzle-orm/neon-http`, and any SQLite backend configured with `transactionMode: "none"`, `commitSchemaVersion` and `setActiveVersion` throw `ConfigurationError`. The orphan-row crash window cannot be eliminated without atomicity, so silent best-effort degradation would re-introduce the exact bug this primitive fixes. Run schema migrations from a process with a transactional driver; the edge worker can keep using its non-transactional driver for reads and ordinary writes once the schema is established.
+
+  **Locking.**
+  - SQLite: `BEGIN IMMEDIATE` (sync paths) or Drizzle's `behavior: "immediate"` (async paths) acquires a reserved write lock at the start of the transaction so the read-then-write CAS sequence is serialized.
+  - Postgres: `pg_advisory_xact_lock(hashtext(graphId))` serializes commits per-graph, covering both the "active row exists" and "initial commit" cases under one mechanism.
+
+  **Breaking changes for backend implementers.** `insertSchema` and `setActiveSchema` are removed from the `GraphBackend` interface; custom backend implementations must implement `commitSchemaVersion` and `setActiveVersion` instead. Callers using the public `initializeSchema`, `migrateSchema`, and `rollbackSchema` helpers from `@nicia-ai/typegraph/schema` need no changes — these now route through the new primitives transparently.
+
+  Existing deployments need to add the partial unique index when they upgrade. `bootstrapTables` regenerates the full DDL set (idempotent; existing tables are unchanged); manually-managed schemas should run an additional `CREATE UNIQUE INDEX IF NOT EXISTS typegraph_schema_versions_one_active_per_graph_idx ON typegraph_schema_versions (graph_id) WHERE is_active = TRUE;` for Postgres or the equivalent `WHERE is_active = 1` for SQLite. Existing data that has only ever maintained one active row per graph will satisfy the constraint — the application path has always done so by convention; the index just makes the invariant structural.
+
+- [#111](https://github.com/nicia-ai/typegraph/pull/111) [`167ba1a`](https://github.com/nicia-ai/typegraph/commit/167ba1a8d1e792df50a5d1aae18afc446be0e08c) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.deprecateKinds(names)` and `store.undeprecateKinds(names)` — the soft-deprecation signal for runtime extension's PR series. Library-owned per-graph kind set persisted in `schema_doc.deprecatedKinds`, surfaces in `store.deprecatedKinds` for introspection, does not affect reads, writes, or queries. Bumps the schema version like any other change. Originally folded into `store.evolve()` design; pulled into its own PR for review focus.
+
+  ```typescript
+  const [store] = await createStoreWithSchema(graph, backend);
+
+  // Mark a kind as deprecated. Surfaces in introspection (codegen, UI
+  // tooling, lints) but reads/writes still work normally.
+  const evolved = await store.deprecateKinds(["LegacyDocument"]);
+  console.log([...evolved.deprecatedKinds]); // ["LegacyDocument"]
+
+  // Reverse it.
+  const restored = await evolved.undeprecateKinds(["LegacyDocument"]);
+
+  // Works on both compile-time and runtime kinds. The standard StoreRef
+  // re-binding pattern applies; pass `{ ref }` to be re-pointed
+  // atomically with the schema commit.
+  ```
+
+  ## Public API
+  - `Store.deprecateKinds(names: readonly string[], options?: { ref?: StoreRef<Store<G>> })` — async, atomically commits a new schema version with `names` added to the persisted set. Idempotent: re-deprecating an already-deprecated kind is a no-op (no version bump). Throws `ConfigurationError` (`code: "DEPRECATE_UNKNOWN_KIND"`) if any name doesn't match a known compile-time or runtime kind on the catchup-merged baseline.
+  - `Store.undeprecateKinds(names: readonly string[], options?)` — symmetric reverse.
+  - `Store.deprecatedKinds: ReadonlySet<string>` — getter for introspection.
+  - `SchemaDiff.deprecatedKinds?: DeprecatedKindsChange` — diff classification (always `safe`-severity); `added` / `removed` arrays carry the per-name deltas.
+  - `applyDeprecatedKinds(graph, names)` — exported from `@nicia-ai/typegraph/schema` for advanced consumers; same API the loader uses to fold persisted deprecations onto a fresh `GraphDef`.
+
+  ## Storage
+  - New top-level slice on `SerializedSchema`: `deprecatedKinds?: readonly string[]` (sorted for canonical-form stability).
+  - Omitted entirely when empty so legacy schemas hash byte-identically to before this PR landed.
+  - Loader (`loadAndMergeRuntimeDocument`) applies the persisted set onto the merged graph alongside the runtime extension document.
+
+  ## Bug fix included
+
+  `computeSchemaHash` was building its hashable subset by enumerating fields explicitly and was missing `runtimeDocument` and `deprecatedKinds`. For runtime extensions the missing field didn't matter in practice because the merged graph's `nodes` / `edges` always changed on `evolve()` — but for deprecation (which is metadata only), the missing `deprecatedKinds` slot meant the hash stayed identical and `ensureSchema` returned `unchanged` instead of migrating. Fixed: both slices are now part of the hashable subset, with the same omit-when-empty rule.
+
+  ## Concurrency + multi-process safety
+
+  Same primitive as `Store.evolve()`: `commitSchemaVersion` CAS on the active version. Concurrent deprecate/evolve calls produce one winner; the loser surfaces `StaleVersionError` or `SchemaContentConflictError` from the commit primitive. The internal `#catchUpToStored` helper folds the persisted runtime document AND deprecated set into the local baseline before computing the next state, so a stale store's deprecate call doesn't trample another writer's runtime extension (the same auto-merge approach `evolve()` uses).
+
+  ## Out of scope
+  - **Removal of runtime-declared kinds.** Deprecation is the soft-signal alternative; full runtime-kind removal remains its own future design.
+  - **Hard-blocking reads/writes on deprecated kinds.** Deprecation is informational; if consumers want to refuse operations on deprecated kinds, they wrap the collection access themselves.
+
+- [#114](https://github.com/nicia-ai/typegraph/pull/114) [`0731ed0`](https://github.com/nicia-ai/typegraph/commit/0731ed02f7af21da1a7503b92b0e79fe47de80f1) Thanks [@pdlug](https://github.com/pdlug)! - Add `eager` option to `Store.evolve()` for one-call schema-commit + index-materialize. Closes the eager-mode follow-up from [#101](https://github.com/nicia-ai/typegraph/issues/101) / PR 6.
+
+  ```typescript
+  // All-in-one: commit the schema and materialize all declared indexes.
+  const evolved = await store.evolve(extension, { eager: true });
+
+  // Pass through MaterializeIndexesOptions for finer control. v1
+  // runtime extensions don't carry relational indexes, so the kinds
+  // filter only meaningfully restricts to compile-time kinds.
+  const evolved = await store.evolve(extension, {
+    eager: { kinds: ["Document"], stopOnError: true },
+  });
+  ```
+
+  ## Semantics
+  - Eager mode runs `materializeIndexes()` AFTER the schema commit succeeds. The schema-version write is **not** rolled back if materialization produces failed entries — eager is a convenience, not a transaction.
+  - On per-index failure, `evolve()` throws `EagerMaterializationError` AFTER the new `Store` is constructed and `ref.current` is updated. The caller can recover via the ref handle:
+
+  ```typescript
+  const ref = { current: store };
+  try {
+    await store.evolve(extension, { ref, eager: true });
+  } catch (error) {
+    if (error instanceof EagerMaterializationError) {
+      // Schema is committed; ref.current is the new store.
+      log.warn(
+        { failed: error.failedIndexNames },
+        "indexes did not materialize; will retry",
+      );
+      await ref.current.materializeIndexes();
+    } else {
+      throw error;
+    }
+  }
+  ```
+
+  - `eager: false` (the default) preserves the existing behavior — `evolve()` returns the new `Store` immediately and the consumer calls `materializeIndexes()` separately if they need to.
+  - `eager` accepts `boolean | MaterializeIndexesOptions`. Passing an object lets you scope to specific kinds or set `stopOnError`.
+
+  ## API additions
+  - `Store.evolve(extension, options?)` — `options.eager?: boolean | MaterializeIndexesOptions`.
+  - `EagerMaterializationError` — new error class exported from `@nicia-ai/typegraph`. Carries `materialization: MaterializeIndexesResult` (full result) and `failedIndexNames: readonly string[]` (convenience). `code: "EAGER_MATERIALIZATION_FAILED"`.
+
+  ## When to use eager
+
+  The flag is dev-loop convenience and one-off scripts. Production code that wants nuanced failure handling (per-index retries, alerting on specific failures, deferred materialization) should keep the explicit two-call pattern: `await store.evolve(ext)` then `await store.materializeIndexes()` separately. The single-call shape pays for itself when the surrounding code doesn't care about distinguishing schema commits from index materializations — a single throw / no-throw signal is enough.
+
+- [#107](https://github.com/nicia-ai/typegraph/pull/107) [`e46ce46`](https://github.com/nicia-ai/typegraph/commit/e46ce46745f2d4edef0716d4136c019027dc6876) Thanks [@pdlug](https://github.com/pdlug)! - Bring compile-time indexes into `defineGraph` and `SerializedSchema` so they flow through the canonical schema document uniformly with future runtime-declared indexes.
+
+  ```typescript
+  const personEmail = defineNodeIndex(Person, {
+    fields: ["email"],
+    unique: true,
+  });
+
+  const graph = defineGraph({
+    id: "social",
+    nodes: { Person: { type: Person } },
+    edges: {},
+    indexes: [personEmail],
+  });
+
+  // graph.indexes is readonly IndexDeclaration[] — JSON-serializable,
+  // flows into SerializedSchema.indexes, ready for materialization.
+  ```
+
+  **Public API additions:**
+  - `defineNodeIndex`, `defineEdgeIndex`, `andWhere`, `orWhere`, and `notWhere` now ship from the main `@nicia-ai/typegraph` entry point. The `@nicia-ai/typegraph/indexes` subpath remains for advanced consumers (Drizzle schema integration, `generateIndexDDL`, `toDeclaredIndex` for the profiler).
+  - `defineNodeIndex` / `defineEdgeIndex` now return `NodeIndexDeclaration` / `EdgeIndexDeclaration` directly — the same JSON-serializable shape that flows through `SerializedSchema.indexes`. There is no separate "live" index value; the previous `NodeIndex` / `EdgeIndex` / `TypeGraphIndex` types and the `toIndexDeclaration` adapter have been removed.
+  - `defineGraph({ ..., indexes: [...] })` accepts those declarations directly (whether produced by the typed builders or reconstructed from a stored schema document). Validated at definition time: every index must reference a registered `kind`, and index `name`s must be unique within a graph. Throws `ConfigurationError` otherwise.
+  - New types: `IndexDeclaration` (discriminated union of `NodeIndexDeclaration` / `EdgeIndexDeclaration`), `IndexOrigin`.
+
+  **`SerializedSchema.indexes` slice.** Each entry carries an `origin?: "compile-time" | "runtime"` discriminator so a runtime extension loader can route declarations through the runtime compiler. Index DDL generation (`generateIndexDDL`, the Drizzle schema factories, the profiler `toDeclaredIndex` adapter) all read from this single canonical form — no parallel paths.
+
+  **Diffing.** `computeSchemaDiff` / `SchemaManager.getSchemaChanges` now classify index additions, removals, and modifications. All index changes are `safe`-severity: index DDL is materialized separately and never blocks schema-version commits.
+
+  **Load-bearing canonical-form invariants** (verified by tests in `tests/property/schema-serialization.test.ts`):
+  - Graphs that never declare indexes produce identical canonical-form hashes to today — adoption requires no migration.
+  - The serialized slice is order-canonicalized (sorted by `name`) and treats `undefined` and `[]` as the same "no slice" form. Indexes are an unordered set keyed by name; an empty list carries no semantic meaning that an absent slice doesn't, so the hash and the diff agree on both points (reorders are a no-op, opting in with `[]` doesn't bump the hash). The in-memory `GraphDef.indexes` still preserves whatever the caller passed for introspection.
+  - A populated `indexes` array bumps the hash. Round-trip (`serialize → JSON → serializedSchemaZod.parse → JSON`) is byte-identical after the canonical sort.
+  - `origin: "compile-time"` is the default and is omitted from canonical form. Only `origin: "runtime"` is emitted explicitly. Absence-as-default keeps compile-only graphs hashing identically while leaving the discriminator ready for runtime extensions.
+
+  **Forward compatibility.** `serializedSchemaZod` parses both old (no `indexes`) and new documents, with extras-allowed (`.loose()`) on each declaration so future fields don't break older readers.
+
+- [#112](https://github.com/nicia-ai/typegraph/pull/112) [`0eb92aa`](https://github.com/nicia-ai/typegraph/commit/0eb92aa89c23601884e9946c4c92faa30eef9d01) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.materializeIndexes(options?)` — runs `CREATE INDEX` DDL for the indexes declared on a graph and tracks per-deployment status in a new `typegraph_index_materializations` table. Closes the runtime-extension PR series for [#101](https://github.com/nicia-ai/typegraph/issues/101).
+
+  ```typescript
+  const [store] = await createStoreWithSchema(graph, backend);
+
+  // Materialize all declared indexes (idempotent — second call reports
+  // alreadyMaterialized for each).
+  const result = await store.materializeIndexes();
+
+  // Restrict by kind:
+  await store.materializeIndexes({ kinds: ["Paper", "Author"] });
+
+  // Halt on first failure (default is best-effort — failures are
+  // recorded per-index in the result and the loop continues):
+  await store.materializeIndexes({ stopOnError: true });
+  ```
+
+  ## Public API
+  - `Store.materializeIndexes(options?: { kinds?: readonly string[]; stopOnError?: boolean })` — async; returns `MaterializeIndexesResult`.
+  - `MaterializeIndexesResult.results: readonly MaterializeIndexesEntry[]` — one entry per declared index with `status: "created" | "alreadyMaterialized" | "failed"`.
+  - New backend primitives on `GraphBackend`: `executeDdl(sql)`, `getIndexMaterialization(indexName)`, `recordIndexMaterialization(params)`. Bundled SQLite + Postgres backends implement all three.
+  - `GenerateIndexDdlOptions.concurrent` — Postgres-only flag for `CREATE INDEX CONCURRENTLY`. SQLite ignores. Set automatically by `materializeIndexes`.
+
+  ## Storage
+  - New table `typegraph_index_materializations` (PK on `index_name` because SQL index names are physical, database-global identifiers — `graph_id` is provenance, not identity). Auto-bootstrapped via `bootstrapTables` for fresh DBs and re-run inside `materializeIndexes` for legacy DBs that pre-date this slice.
+  - Per-row signature is the SHA-256 hash of `{ dialect, targetTableName, declaration }` under sorted-key serialization. Includes the physical target table because consumers can override `tableNames` and a declaration-only signature would falsely report "already materialized" after a table rename. Excludes execution flags (`CONCURRENTLY`, `IF NOT EXISTS`) — those are runtime modifiers, not shape.
+
+  ## Concurrency + safety
+  - Postgres uses `CREATE INDEX CONCURRENTLY`, so live tables never take an `AccessExclusiveLock`. The DDL runs at the top-level backend (not inside `transaction()`) because CIC cannot run inside a transaction.
+  - Status-table writes use `INSERT ... ON CONFLICT DO UPDATE` so concurrent callers don't deadlock on the bookkeeping. Failed attempts preserve any prior successful `materialized_at` timestamp via `COALESCE(excluded.materialized_at, materialized_at)`.
+  - Best-effort by default: per-index failures land in the result (`status: "failed"` with the captured `Error`), the loop continues, and the failure is recorded in `last_error`.
+  - `IF NOT EXISTS` does not validate shape on Postgres — only that something with that name exists. Drift detection here uses TypeGraph's recorded `signature`, not PG metadata. Signature mismatch surfaces as `failed` with a `different signature` message; v1 does not auto drop+recreate.
+  - Failed `CONCURRENTLY` builds leave invalid indexes (`pg_index.indisvalid = false`). v1 surfaces this as a `failed` result; the operator drops the invalid index manually before retry.
+
+  ## Out of scope (deferred follow-ups)
+  - **Vector + fulltext index unification.** PR 6 covers only relational indexes. Vector / fulltext continue to use the existing per-kind imperative APIs (`createVectorIndex`, `createFulltextIndex`); lifting them into the unified declaration channel is a future PR.
+  - **`evolve(extension, { eager: true })`.** Convenience flag to auto-materialize after `evolve()` deferred to its own small PR — changes `evolve()` semantics on a hot path and benefits from separate review.
+  - **Public status-reader API.** The returned `MaterializeIndexesResult` plus the table itself is enough for v1; consumers query the table directly if they need monitoring. Will add `Store.getIndexMaterializationStatus()` only if usage demands it.
+  - **Auto drop+recreate on signature drift.** v1 surfaces drift; auto-cleanup is risky enough to defer.
+
+- [#103](https://github.com/nicia-ai/typegraph/pull/103) [`0917312`](https://github.com/nicia-ai/typegraph/commit/09173127ef6fcf748ef1dbd63aa1cce33e7aea0d) Thanks [@pdlug](https://github.com/pdlug)! - Add optional `annotations` field to `defineNode` and `defineEdge` for consumer-owned per-kind structured data — UI hints, audit policy, provenance pointers, and other tooling labels that don't belong in the Zod schema.
+
+  ```typescript
+  const Incident = defineNode("Incident", {
+    schema: z.object({
+      title: z.string(),
+      summary: z.string(),
+      occurredAt: z.string().datetime(),
+    }),
+    annotations: {
+      ui: {
+        titleField: "title",
+        temporalField: "occurredAt",
+        icon: "alert-triangle",
+      },
+      audit: {
+        pii: false,
+        retentionDays: 365,
+      },
+    },
+  });
+
+  const reportedBy = defineEdge("reportedBy", {
+    annotations: {
+      ui: { showInTimeline: true },
+    },
+  });
+  ```
+
+  **Contract:**
+  - TypeGraph stores and versions `annotations` but never reads, validates, or interprets keys inside the field. Consumers own the entire namespace — no reserved prefixes, no `x-typegraph` extension convention. Future library-owned per-kind state, if needed, will use a separate sibling field rather than carving out keys here.
+  - Annotations are included in `SerializedSchema.{nodes,edges}[*].annotations` and contribute to schema hashing with stable sorted-key ordering. Changes surface as `safe`-severity diffs through `getSchemaChanges()` / `SchemaManager`, so reformatting the annotations object doesn't bump the version, but value or structure changes do.
+  - Graphs that never set `annotations` produce identical canonical-form hashes to today — adoption requires no migration. An explicit empty object (`{}`) is a structural opt-in and bumps the hash.
+  - Values must be JSON-serializable. The `KindAnnotations` type is `Readonly<Record<string, JsonValue>>`, and at runtime `defineNode` / `defineEdge` reject `bigint`, `function`, `symbol`, `undefined`, `Date`, and other class instances with a `ConfigurationError` — so accidentally-non-JSON annotations can never silently break hashing or storage round-trips.
+
+  Closes [#102](https://github.com/nicia-ai/typegraph/issues/102).
+
+- [#109](https://github.com/nicia-ai/typegraph/pull/109) [`814f8df`](https://github.com/nicia-ai/typegraph/commit/814f8dfbdc74954154ebe9108b995f523a9e555a) Thanks [@pdlug](https://github.com/pdlug)! - Persist `RuntimeGraphDocument` in `SerializedSchema` and rewire the schema-aware loader (`createStoreWithSchema`) so a `Store` is built against a graph that already has the persisted runtime extension merged in. This is the durable-storage half of the runtime-extension feature (issue [#101](https://github.com/nicia-ai/typegraph/issues/101) PR 4/6); `store.evolve()` and `StoreRef` ship in PR 5, `materializeIndexes()` in PR 6.
+
+  ```typescript
+  // Process A (PR 5 will turn this into store.evolve(...) — for PR 4 we
+  // invoke the pieces directly):
+  const merged = mergeRuntimeExtension(graph, runtimeExtension);
+  const evolvedSchema = serializeSchema(merged, activeVersion + 1);
+  await backend.commitSchemaVersion({
+    graphId: graph.id,
+    expected: { kind: "active", version: activeVersion },
+    version: activeVersion + 1,
+    schemaHash: await computeSchemaHash(evolvedSchema),
+    schemaDoc: evolvedSchema,
+  });
+
+  // Process B (different process, possibly different machine), boots
+  // against the same backend with the original compile-time graph:
+  const [store] = await createStoreWithSchema(graph, backend);
+  // store.registry.hasNodeType("RuntimeKindFromExtensionA") === true
+  ```
+
+  **The load-bearing constraint** (`schema/deserializer.ts:5`): the existing `Zod → JSON Schema` path is one-way, so `SerializedSchema.{nodes,edges,ontology}` cannot reconstruct runtime Zod validators on its own. The persisted `runtimeDocument` is the only durable source the loader uses to rebuild them — the merged maps remain useful for diff machinery and human-readable schema reporting but never for validator reconstruction.
+
+  **Public-API additions:**
+  - `GraphDef.runtimeDocument: RuntimeGraphDocument | undefined` — set by the loader (and by `store.evolve()` in PR 5), never by `defineGraph` directly. Serializes through to the canonical document so re-serializing the merged graph reproduces the same hash.
+  - `SerializedSchema.runtimeDocument?: RuntimeGraphDocument` — the persisted slice. Omitted on graphs that have never been runtime-extended; legacy schemas hash byte-identically.
+  - `mergeRuntimeExtension(graph, document)` — pure function: structurally validates the document, compiles it, validates that every edge endpoint resolves either to a runtime kind in the same document or to a compile-time kind in the host graph, throws `ConfigurationError` on collisions or unresolvable references (or `RuntimeExtensionValidationError` for malformed documents), and returns the merge applied to `graph`.
+  - `loadAndMergeRuntimeDocument(backend, graph)` — schema-layer helper that reads the active row, parses it, folds any persisted runtime extension into the supplied graph, and returns the merged graph alongside the prefetched row + parsed schema. The loader passes those through to `ensureSchema` via a new `preloaded` option so each Store boot pays for one `getActiveSchema` round trip and one `serializedSchemaZod` walk, not two.
+  - `loadActiveSchemaWithBootstrap(backend, graphId)` and `parseSerializedSchema(json)` — factored out of `ensureSchema` for the load-and-merge helper; both surface from `@nicia-ai/typegraph/schema`.
+  - `RuntimeDocumentChange` and `SchemaDiff.runtimeDocument` — the diff classifies runtime-document changes as `safe`-severity (v1 runtime extensions are additive only; per-kind effects already surface in the node/edge/ontology change arrays).
+
+  **Loader rewire.** `createStoreWithSchema` now reads the active schema row before constructing the `Store`. If the row's `runtimeDocument` is present, the loader compiles + merges it into the application's compile-time `GraphDef` and constructs the `Store` against the merged graph; `ensureSchema` then runs against the merged form. The prefetched row and parsed schema thread through a new `preloaded` option on `ensureSchema`, so legacy graphs (no runtime extension persisted) still pay for exactly one `getActiveSchema` round trip and one Zod parse at startup.
+
+  **Startup-conflict behavior.** If application code has been updated such that a compile-time kind referenced by `runtimeDocument` (via an edge endpoint) no longer exists, `mergeRuntimeExtension` throws `ConfigurationError` with `code: "RUNTIME_EXTENSION_UNRESOLVED_ENDPOINT"`. Operators handle this by reverting the application change or evolving the runtime extension to drop the reference. Ontology endpoints remain permissive (unresolved strings pass through as external IRIs, matching the existing runtime-compiler behavior).
+
+  **Load-bearing canonical-form invariants** (verified by tests in `tests/property/schema-serialization.test.ts` and `tests/runtime-document-persistence.test.ts`):
+  - Graphs that have never been runtime-extended produce identical canonical-form hashes to today — adoption requires no migration.
+  - A graph merged with a runtime extension serializes to a hash that round-trips: re-merging the same extension on top of the same compile-time graph in a different process yields the same hash, so `ensureSchema` returns `unchanged` on restart instead of triggering a spurious migration.
+  - The diff distinguishes "runtime document added" / "modified" / "removed" as a single `RuntimeDocumentChange` alongside the per-kind node/edge/ontology changes the merge produces.
+
+  **Forward compatibility.** `runtimeDocumentZod` uses `.loose()` on every nested object so future v2 property-type extensions don't fail older readers; the runtime/validation.ts validator is the authoritative shape check on the way back up.
+
+- [#116](https://github.com/nicia-ai/typegraph/pull/116) [`ff4866a`](https://github.com/nicia-ai/typegraph/commit/ff4866ae575c8953625f71a3e3862e2ae2f2251b) Thanks [@pdlug](https://github.com/pdlug)! - Add format versioning to `RuntimeGraphDocument`. Sets up future format evolution for the runtime-extension document so older runtimes can refuse newer-major documents with an actionable error instead of silently misreading them.
+
+  ## Public API
+  - `RuntimeGraphDocument.version?: 1` — optional major-version tag. The validator stamps the current version on every consumer-supplied document, so `defineRuntimeExtension(doc)` always returns `{ version: 1, ... }` even when `doc` doesn't include it.
+  - `CURRENT_RUNTIME_DOCUMENT_VERSION = 1` — exported constant for tooling that wants to pre-flight check documents.
+  - `RuntimeDocumentVersion` — type alias.
+  - New issue code: `RUNTIME_EXTENSION_VERSION_UNSUPPORTED`. Surfaces when a document declares a version higher than the current major.
+
+  ## Forward-compat policy
+  - **Additive minor changes** (new optional property modifier, new `format` value, new top-level slice) ride forward via `.loose()` on every nested object schema. An older runtime reading a newer document silently ignores unknown fields and continues working.
+  - **Breaking changes** bump `version` to a higher major. An older runtime reading a higher-version document fails fast with `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` and an actionable error pointing the operator at upgrading the library — there is no automatic downgrade path.
+
+  ## Hash invariance
+
+  The persisted `runtimeDocument`'s `version` field is omitted from the canonical form when it equals the current major (today: `1`). This means:
+  - Documents persisted by older library versions (no `version` field) hash byte-identically to documents persisted by this version (`version: 1`).
+  - Future v2+ documents will emit `version: 2` explicitly because that value differs from the current default.
+  - Existing deployments see no schema-version bump on upgrade.
+
+  Mirrors the omit-when-default rule already applied to `indexes`, `annotations`, and `deprecatedKinds`.
+
+  ## Validation
+  - Absent `version` → treated as current major.
+  - Integer equal to current major → accepted.
+  - Integer higher than current major → `RUNTIME_EXTENSION_VERSION_UNSUPPORTED`.
+  - Non-integer / non-positive → `INVALID_DOCUMENT_SHAPE` with path `/version`.
+
+  ## Tests
+  - 4 new validator tests pinning version stamping, accept-current, reject-future, reject-bogus.
+  - New restart-parity test confirming a stored document committed by an earlier (pre-versioning) library version still loads — the loader treats absent `version` as `1`.
+  - Existing same-hash idempotent re-evolve test still passes (proves canonical-form omission works).
+
+- [#108](https://github.com/nicia-ai/typegraph/pull/108) [`aa53372`](https://github.com/nicia-ai/typegraph/commit/aa53372f6032362f0b06b6812f3347cf539566c1) Thanks [@{](https://github.com/{)! - Add `defineRuntimeExtension(...)` and `compileRuntimeExtension(...)` — a TypeGraph-native runtime graph document and a one-way compiler that turns it into Zod-bearing `NodeType` / `EdgeType` / `OntologyRelation` values. This is the value-layer foundation of the runtime-extension feature (issue [#101](https://github.com/nicia-ai/typegraph/issues/101) PR 3/6); persistence (`SerializedSchema.runtimeDocument`), the loader rewire, and `store.evolve()` land in PRs 4 and 5.
+
+  ```typescript
+  import {
+    compileRuntimeExtension,
+    defineRuntimeExtension,
+  } from "@nicia-ai/typegraph";
+
+  const document = defineRuntimeExtension({
+    nodes: {
+      Paper: {
+        properties: {
+          doi: { type: "string" },
+          title: { type: "string", searchable: { language: "english" } },
+          abstract: {
+            type: "string",
+            searchable: { language: "english" },
+            optional: true,
+          },
+          publishedAt: { type: "string", format: "datetime" },
+          publicationType: {
+            type: "enum",
+            values: ["preprint", "conference", "journal", "workshop"],
+          },
+        },
+        unique: [{ name: "paper_doi", fields: ["doi"] }],
+      },
+
+        properties: { name: { type: "string", minLength: 1 } },
+      },
+    },
+    edges: {
+      authoredBy: { from: ["Paper"], to: ["Author"], properties: {} },
+    },
+  });
+
+  const compiled = compileRuntimeExtension(document);
+  // compiled.nodes[*].type is a NodeType, structurally indistinguishable from
+  // the equivalent hand-written `defineNode(...)`.
+  ```
+
+  **Why a TypeGraph-native document and not JSON Schema → Zod.** The existing `Zod → JSON Schema` path is one-way (`schema/deserializer.ts:5` documents the constraint). Running the loop in the other direction would lose `searchable()` markers, the `embedding()` brand, `.optional()` shape, and unique-constraint extraction — exactly the metadata the rest of TypeGraph reads at runtime. Owning both ends of the document → Zod path keeps the round-trip lossless. The runtime document is the canonical durable form; Zod is derived on each load. PR 4 will persist this document; PR 5 will let `store.evolve()` commit one and rebuild a `Store<ExtendedGraph>`.
+
+  **v1 property-type subset is intentionally narrow** — it covers what LLM-induced schemas actually emit and nothing more. Anything outside the set fails synchronously at `defineRuntimeExtension(...)` with a JSON-pointer path to the offending node.
+
+  | Type      | Refinements                                                        |
+  | --------- | ------------------------------------------------------------------ |
+  | `string`  | `minLength`, `maxLength`, `pattern`, `format: "datetime" \| "uri"` |
+  | `number`  | `min`, `max`, `int`                                                |
+  | `boolean` | —                                                                  |
+  | `enum`    | `values: readonly string[]`                                        |
+  | `array`   | `items: <any of these types>` (no nested arrays)                   |
+  | `object`  | `properties: { ... }` (single nesting level)                       |
+
+  Plus per-property `optional`, `searchable: { language? }`, `embedding: { dimensions }`, and per-kind `unique: [{ name, fields, scope?, collation?, where? }]` where `where` is limited to `isNull` / `isNotNull` (matches the existing `serializeWherePredicate` capability). Adding refinements later is non-breaking; allowing the wrong shape now is forever.
+
+  **Modifier combinations the v1 compiler can't honor are rejected at validation**, with an `INVALID_PROPERTY_REFINEMENT` issue and a JSON-pointer path:
+  - `format` + `searchable` — the format-routed Zod schemas (`z.iso.datetime` / `z.url`) aren't `z.ZodString` and can't carry the searchable brand.
+  - `format` + `minLength` / `maxLength` / `pattern` — same shape limitation; mixing them silently dropped the refinements before this fix.
+  - `embedding` + item refinements — `embedding(dimensions)` replaces the array's item validator, so any `min` / `max` / `int` on the items would silently disappear.
+
+  **Edge endpoints can reference unresolved kinds.** Endpoint names that don't match a kind declared in this same document are preserved as raw strings on `CompiledEdge.from` / `to` (typed `(NodeType | string)[]`) so the host-graph merge step can resolve them against compile-time kinds or treat them as external IRIs. Cross-graph resolution is intentionally out of scope for this PR.
+
+  **Hierarchical-cycle detection normalizes inverse meta-edges before checking**, mirroring the registry's relation flattening: `narrower A→B` and `hasPart A→B` are treated as `broader B→A` and `partOf B→A` respectively. Mixed-direction cycles (e.g. `broader A→B` + `narrower A→B`) are now caught at validation instead of slipping through to runtime.
+
+  **Round-trip parity is the load-bearing invariant.** For every type and modifier in the v1 subset, the test suite declares the same kind two ways — hand-written via `defineNode` / `defineEdge` and document-via-`defineRuntimeExtension` — and asserts that downstream introspection (`getSearchableMetadata`, `getEmbeddingDimensions`, unique-constraint extraction) returns identical results, that valid inputs parse to the same value, and that invalid inputs reject with the same issue paths. Property tests over the type subset further generate arbitrary documents and assert the compile pipeline always produces a Zod schema that accepts the document's own example values.
+
+  **Two `validateRuntimeExtension` shapes.** Consumers that prefer `Result`-style get `validateRuntimeExtension(input)` returning `Result<RuntimeGraphDocument, RuntimeExtensionValidationError>`. The throw-on-error variant `defineRuntimeExtension(input)` is a thin wrapper that unwraps. Errors carry a structured `issues` array with stable `RuntimeExtensionIssueCode` values and JSON-pointer paths so callers can render field-level diagnostics without parsing message text.
+
+  **Out of scope for this PR.** No `store.evolve()`. No `SerializedSchema` changes. No persistence. No DDL. No backend touches. The compiled output is a pure value the next PR will merge into a `GraphDef`.
+
+  Closes part of [#101](https://github.com/nicia-ai/typegraph/issues/101).
+
+- [#113](https://github.com/nicia-ai/typegraph/pull/113) [`de8ef3b`](https://github.com/nicia-ai/typegraph/commit/de8ef3ba5aa5fdf8a29aaf7415f56bbdcfa0bcf4) Thanks [@pdlug](https://github.com/pdlug)! - 1.0 hygiene pass on the runtime-extension surface from [#101](https://github.com/nicia-ai/typegraph/issues/101).
+
+  ## Public API narrowing
+
+  Removed two internal helpers from the root export (`@nicia-ai/typegraph`). They remain available via the deep import `@nicia-ai/typegraph/runtime` for tests and library-internal callers, but are no longer part of the consumer-facing API:
+  - `compileRuntimeExtension` — the value→Zod compiler that turns a `RuntimeGraphDocument` into a compiled schema. The compiler runs implicitly inside `Store.evolve()` and inside the schema loader on restart; consumers never need to call it directly.
+  - `mergeRuntimeExtension` — folds a runtime extension document into a `GraphDef`. Only meaningful inside `Store.evolve()` and `loadAndMergeRuntimeDocument`; consumers never call it directly.
+
+  Consumer-facing surface stays as it was: `defineRuntimeExtension`, `validateRuntimeExtension`, `RuntimeExtensionValidationError`, the `RuntimeGraphDocument` type, `Store.evolve()`, `Store.materializeIndexes()`, `Store.deprecateKinds()` / `undeprecateKinds()`, `Store.deprecatedKinds`, `StoreRef<T>`, and `applyDeprecatedKinds` (advanced).
+
+  ## Hash invariance: `annotations: {}` no longer bumps the hash
+
+  Before this change, declaring a kind with `annotations: {}` (an empty object) produced a different schema hash than omitting `annotations` entirely. This was an asymmetry against the rule applied to `indexes` (where `[]` and absent both omit-when-empty so legacy graphs hash byte-identically with new graphs that opt into the slice).
+
+  Annotations now follow the same omit-when-empty rule:
+  - Absent annotations → omitted from canonical form.
+  - `annotations: undefined` → omitted from canonical form.
+  - `annotations: {}` → omitted from canonical form.
+  - `annotations: { ui: "hidden" }` (non-empty) → included.
+
+  Net effect: `{}` is now hash-equivalent to absent, eliminating a footgun for codegen / spread-based builders that may emit `annotations: {}` even when the consumer declared no annotations.
+
+  This is a one-time hash change for any deployed graph that has stored a schema with `annotations: {}` in the `schema_doc`. On the next `ensureSchema()` call, the change will surface as a structural diff (annotations classification → no actual change in semantics, since both empty and absent mean "no annotations"). Pre-1.0 acceptable.
+
+- [#110](https://github.com/nicia-ai/typegraph/pull/110) [`200e467`](https://github.com/nicia-ai/typegraph/commit/200e467658ed66944f900b8a652f06cacc92db47) Thanks [@pdlug](https://github.com/pdlug)! - Add `Store.evolve(extension, options?)` and the `StoreRef<T>` type — the public ergonomic for runtime-extending a graph at runtime. This is the headline of the runtime-extension feature (issue [#101](https://github.com/nicia-ai/typegraph/issues/101) PR 5/6); index materialization (`store.materializeIndexes`) lands in PR 6, and the deprecation marker (`store.deprecateKinds`) lands separately.
+
+  ## The two consumer patterns
+
+  **Single-caller / let-rebind.** The common case — a script, test, or service with one entry point. `evolve()` returns the new store; reassign:
+
+  ```typescript
+  import {
+    createStoreWithSchema,
+    defineRuntimeExtension,
+  } from "@nicia-ai/typegraph";
+
+  let [store] = await createStoreWithSchema(graph, backend);
+
+  const extension = defineRuntimeExtension({
+    nodes: { Paper: { properties: { doi: { type: "string" } } } },
+  });
+
+  store = await store.evolve(extension);
+  // `store` now carries Paper alongside the original compile-time kinds.
+  ```
+
+  **Many-caller / consumer-composed ref.** When request handlers, background workers, or an agent loop share the store reference and you can't reassign at every call site. Compose a `StoreRef`, share `ref` (not `ref.current`), pass it to `evolve` to be re-pointed atomically with the schema commit:
+
+  ```typescript
+  import {
+    createStoreWithSchema,
+    defineRuntimeExtension,
+    type StoreRef,
+  } from "@nicia-ai/typegraph";
+
+  const [store] = await createStoreWithSchema(graph, backend);
+  const ref: StoreRef<typeof store> = { current: store };
+
+  // Long-lived consumers hold `ref` and dereference at use time:
+  async function handleRequest(): Promise<void> {
+    await ref.current.nodes.Paper?.create({ doi: "..." });
+  }
+
+  // Evolve re-points the ref atomically:
+  await ref.current.evolve(extension, { ref });
+  // All consumers dereferencing through `ref` now see Paper.
+  ```
+
+  `StoreRef<T>` is `{ current: T }` — a plain mutable handle. No event/subscription machinery; consumers wrap if they need eventing. There's no dedicated `createStoreRef` factory: composing the ref is one line and keeps the library API surface minimal.
+
+  ## `Store.evolve(extension, options?)`
+
+  Validates the document, atomically commits a new schema version through the `commitSchemaVersion` primitive (CAS on the active version), constructs a fresh `Store<G>` against the merged graph, and returns it. Cost is proportional to schema document size, not row count — `evolve()` never reads or scans data rows.
+
+  **Additive-only semantics.** v1 extensions are additive over the canonical document:
+  - New kinds, new edges referencing existing kinds (compile-time or runtime), and new ontology relations: **allowed**.
+  - Re-declaring an existing runtime kind with the **same shape**: **no-op** (idempotent re-evolve).
+  - Re-declaring an existing runtime kind with a **different shape**: **rejected** with `ConfigurationError` (`code: "RUNTIME_KIND_REDEFINITION"`). Use a new kind name to evolve a kind in v1.
+  - Collisions with **compile-time** kinds: rejected with `RUNTIME_KIND_NAME_COLLISION`.
+
+  **Concurrent evolve.** Two simultaneous calls produce one winner — the loser surfaces `StaleVersionError` or `SchemaContentConflictError` from the commit primitive, depending on whether the race resolved at the active-pointer or content-hash check. Recovery: refetch the active schema, reconstruct your `Store` (or dereference your `StoreRef`), and re-call `evolve(extension)`. Re-validation may now surface deterministic errors (e.g., a kind another caller just added that collides with yours) — don't loop blindly.
+
+  The agent-loop hot path of repeated same-extension `evolve()` short-circuits in `mergeRuntimeExtension` via a structural-equal union check, so no-op evolves skip compile + filter + merge entirely and `Store.evolve` returns `this` to keep warm caches.
+
+  ## v1 string property formats
+
+  The supported `format` values widened: `"datetime" | "uri" | "email" | "uuid" | "date"`. Each routes to the corresponding Zod factory (`z.iso.datetime()`, `z.url()`, `z.email()`, `z.uuid()`, `z.iso.date()`). Other JSON-Schema formats remain rejected at validation time with a usable error.
+
+  ## Acceptance gates
+  - **Round-trip parity:** for every public Store API path covered (create, getById, find, count, update, delete, edge endpoint resolution), a kind added via `evolve()` produces identical results to the same kind declared at compile time. Runtime kinds are reached through `store.getNodeCollection(kind)` since the type system doesn't see them.
+  - **Cross-kind traversal:** runtime edges between runtime and compile-time kinds are queryable end-to-end via `findFrom` / `findTo` — exercises the actual data path through the merged graph.
+  - **Concurrent evolve:** two simultaneous `evolve()` calls produce exactly one winner; the loser is rejected with `StaleVersionError | SchemaContentConflictError`.
+  - **Additive-merge enforcement:** redefining an existing runtime kind with a different shape is rejected with `RUNTIME_KIND_REDEFINITION`; same-shape re-evolves are idempotent.
+
+  ## Out of scope
+
+  Per the issue's v1 pinning:
+  - `unique`-on-populated-kind rejection — in v1 runtime extensions only ADD new kinds (collisions rejected outright), so every runtime kind is brand new with no rows. The rule becomes meaningful when `mode: "merge"` lands.
+  - Modifying an existing runtime kind — covered by the additive-only rule above; use a new kind name.
+  - `materializeIndexes()` — PR 6.
+  - `deprecateKinds()` — separate PR.
+  - Cross-store auto-refresh — `StoreRef` is the re-binding affordance; auto-refresh is a separate observability concern.
+  - Numeric / boolean enums — v1 enum is `readonly string[]` only.
+
+- [#117](https://github.com/nicia-ai/typegraph/pull/117) [`1e9e9b5`](https://github.com/nicia-ai/typegraph/commit/1e9e9b550c55db9cc922a41f2407045000daa474) Thanks [@pdlug](https://github.com/pdlug)! - Unify vector indexes through the same declaration channel as relational indexes. Vector indexes are now auto-derived from `embedding()` brands at `defineGraph()` time and flow through `Store.materializeIndexes()` like any other index. Closes the second of two PRs needed to ship [#101](https://github.com/nicia-ai/typegraph/issues/101) properly.
+
+  ## What changed
+
+  ```typescript
+  const Document = defineNode("Document", {
+    schema: z.object({
+      title: z.string(),
+      // Auto-derives a cosine HNSW vector index with pgvector defaults.
+      embedding: embedding(384),
+    }),
+  });
+
+  // Override the auto-derived defaults at the brand site.
+  const Image = defineNode("Image", {
+    schema: z.object({
+      embedding: embedding(512, { metric: "l2", m: 32, efConstruction: 100 }),
+    }),
+  });
+
+  // Opt out of automatic materialization while keeping the embedding column.
+  const Manual = defineNode("Manual", {
+    schema: z.object({
+      embedding: embedding(384, { indexType: "none" }),
+    }),
+  });
+
+  const [store] = await createStoreWithSchema(graph, backend);
+  const result = await store.materializeIndexes();
+  // Postgres+pgvector → status: "created"
+  // SQLite (or `indexType: "none"`) → status: "skipped" with reason
+  ```
+
+  ## API additions
+  - `embedding(dimensions, options?)` — `options` is the new
+    `EmbeddingIndexOptions` carrying `metric`, `indexType`, HNSW `m` /
+    `efConstruction`, and IVFFlat `lists`. Defaults: `cosine` /
+    `hnsw` / `m=16` / `efConstruction=64` (pgvector defaults).
+  - `EmbeddingMetric`, `EmbeddingIndexType`, `EmbeddingIndexOptions`,
+    `ResolvedEmbeddingIndex` — exported types.
+  - `getEmbeddingIndex(schema)` — read the resolved index config from
+    an embedding brand.
+  - `IndexDeclaration` — now a discriminated union of
+    `NodeIndexDeclaration | EdgeIndexDeclaration | VectorIndexDeclaration`.
+  - `RelationalIndexDeclaration` — alias for the relational subset
+    (the variants `generateIndexDDL` consumes).
+  - `VectorIndexDeclaration`, `VectorIndexMetric`,
+    `VectorIndexImplementation`, `VectorIndexParams` — exported types.
+  - `MaterializeIndexesEntry.entity` — extended to include `"vector"`.
+  - `MaterializeIndexesEntry.status` — new variant `"skipped"` with a
+    `reason` field. Surfaces when the backend recognizes the
+    declaration but can't act on it (vector indexes against SQLite
+    without `sqlite-vec`, or `indexType: "none"`).
+
+  ## Auto-derivation
+
+  At `defineGraph()` time, every top-level node field declared with
+  `embedding()` produces one `VectorIndexDeclaration`. The declarations
+  flow through `GraphDef.indexes` and `SerializedSchema.indexes` like
+  relational indexes. v1 limits:
+  - One vector index per (kind, fieldPath). To use a different metric
+    for the same field, use a different field name or wait for v2.
+  - Top-level fields only. Embeddings nested inside object properties
+    are not auto-derived (pgvector's column-based indexes don't address
+    sub-paths cleanly).
+
+  Explicit `VectorIndexDeclaration` entries passed via
+  `defineGraph({ indexes })` win on (kind, fieldPath) collisions, so
+  consumers can override defaults without losing auto-derivation for
+  other fields.
+
+  ## Materialization dispatch
+
+  `materializeIndexes()` reads `IndexDeclaration.entity` and dispatches:
+  - `node` / `edge` → existing path: `generateIndexDDL` →
+    `executeDdl`.
+  - `vector` → calls `backend.createVectorIndex(params)` with the
+    resolved metric, indexType, dimensions, and HNSW / IVFFlat params.
+
+  Status tracking goes through the existing
+  `typegraph_index_materializations` table; the `entity` column was
+  widened to accept `"vector"`. Signature includes vector params for
+  drift detection.
+
+  ## Capability checks
+
+  `materializeIndexes()` checks `backend.capabilities.vector?.supported`
+  and `backend.capabilities.vector.indexTypes` before dispatching. When
+  the backend can't handle the requested vector indexType, the entry
+  reports `status: "skipped"` with a clear reason rather than silently
+  returning `"created"` for a no-op.
+
+  ## Backend interface cleanup
+
+  Removed dead code from `GraphBackend`:
+  - `createFulltextIndex?` — never called from anywhere in the store
+    layer; the fulltext table's canonical index is created with the
+    table itself by `bootstrapTables`.
+  - `dropFulltextIndex?` — same.
+
+  Custom backends implementing these methods will need to remove them.
+  Pre-1.0 acceptable.
+
+  ## Out of scope (still deferred)
+  - **Fulltext index unification.** Fulltext stays per-strategy in v1;
+    the GIN / FTS5 index is created with the fulltext table at
+    `bootstrapTables` time.
+  - **Multiple vector indexes per (kind, field).** v1 allows at most
+    one. Use a different field name for now.
+  - **Vector indexes for runtime-declared kinds.** Auto-derivation
+    walks compile-time node schemas. Runtime-extension documents can't
+    yet declare embeddings — coming in a follow-up.
+
+### Patch Changes
+
+- [#115](https://github.com/nicia-ai/typegraph/pull/115) [`cfdf052`](https://github.com/nicia-ai/typegraph/commit/cfdf05257ed9a35bd119fa34b8660c233d09192b) Thanks [@pdlug](https://github.com/pdlug)! - Documentation + runnable example for the runtime-extension feature
+  shipped in [#101](https://github.com/nicia-ai/typegraph/issues/101). No code changes — purely a documentation drop so the
+  feature is discoverable for the announcement.
+  - New docs page `Runtime Extensions` covering the full flow:
+    `defineRuntimeExtension`, `Store.evolve` (with ref pattern + eager
+    flag), `Store.materializeIndexes`, `Store.deprecateKinds` /
+    `undeprecateKinds`, the dynamic-collection escape hatch
+    (`store.getNodeCollection(kind)` / `getEdgeCollection(kind)`),
+    restart parity, multi-process race recovery recipe, and a trust
+    boundary section for LLM-induced schemas.
+  - New runnable example `examples/16-runtime-extensions.ts` walking
+    through the agent-driven schema-induction flow end-to-end:
+    compile-time boot → agent proposes Paper kind → operator approves
+    via `evolve` → materialize indexes → ingest via dynamic collection
+    → soft-deprecate the legacy kind → restart parity verification.
+  - Sidebar entry under "Guides" and inclusion in the
+    `LLMS_SMALL_PAGES` set so the docs are part of the small llms.txt
+    context bundle.
+  - Cross-link from `schema-evolution.md` so users searching for
+    "evolving schemas" find the runtime path too.
+
 ## 0.24.1
 
 ### Patch Changes
