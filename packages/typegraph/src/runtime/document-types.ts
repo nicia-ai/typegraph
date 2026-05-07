@@ -255,6 +255,44 @@ export type RuntimeOntologyRelation = Readonly<{
 // ============================================================
 
 /**
+ * Stable default major used when a stored document omits `version`.
+ *
+ * Pinned to `1` permanently. Pre-versioning documents (those persisted
+ * before the field existed) and documents that explicitly omit
+ * `version` are interpreted as `1` regardless of which major the
+ * library currently supports. Splitting this from
+ * `CURRENT_RUNTIME_DOCUMENT_VERSION` is load-bearing for future major
+ * bumps: when v2 ships, `CURRENT` becomes `2` but `LEGACY` stays at
+ * `1`, so a v1-era stored document still parses as v1 (and the
+ * version-mismatch path can route it through a migration) rather than
+ * being silently misinterpreted as v2.
+ */
+export const LEGACY_RUNTIME_DOCUMENT_VERSION = 1 as const;
+
+/**
+ * Current major version of the `RuntimeGraphDocument` format.
+ *
+ * Documents with a higher major version than this constant are
+ * rejected with `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` — there is no
+ * automatic downgrade path. Minor / additive changes ride forward-
+ * compat via `.loose()` on every nested object schema.
+ */
+export const CURRENT_RUNTIME_DOCUMENT_VERSION = 1 as const;
+
+/**
+ * Type of the `RuntimeGraphDocument.version` field. Stays `number`
+ * rather than `typeof CURRENT_RUNTIME_DOCUMENT_VERSION` because the
+ * field can carry any major across the library version range a
+ * stored document might have been written by — the
+ * runtime-vs-supported check happens in the validator, not at the
+ * type level. Pinning to the current literal would prevent a v1
+ * runtime from typing a v2 document at all, which is the wrong
+ * relationship: we WANT a v1 runtime to receive v2 documents and
+ * report `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` cleanly.
+ */
+export type RuntimeDocumentVersion = number;
+
+/**
  * The canonical pure-value runtime extension document.
  *
  * Frozen at construction. Round-trips losslessly through `JSON.stringify`
@@ -262,8 +300,18 @@ export type RuntimeOntologyRelation = Readonly<{
  * is provided by `compileRuntimeExtension(...)`. There is no
  * `Zod → RuntimeGraphDocument` direction because runtime kinds always
  * originate as documents.
+ *
+ * `version` is the major-version tag for the document format. The
+ * compiler accepts documents whose version is equal to the current
+ * supported major (today: 1) or absent (treated as 1 for back-compat
+ * with documents persisted before the field existed). Higher majors
+ * surface as `RUNTIME_EXTENSION_VERSION_UNSUPPORTED` so a newer-version
+ * document committed by a future writer can't be silently misread by
+ * an older runtime. See `runtime-extensions.md` for the format-versioning
+ * policy.
  */
 export type RuntimeGraphDocument = Readonly<{
+  version?: RuntimeDocumentVersion;
   nodes?: Readonly<Record<string, RuntimeNodeDocument>>;
   edges?: Readonly<Record<string, RuntimeEdgeDocument>>;
   ontology?: readonly RuntimeOntologyRelation[];

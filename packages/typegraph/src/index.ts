@@ -442,6 +442,7 @@ export type {
   RuntimeArrayItemType,
   RuntimeArrayProperty,
   RuntimeBooleanProperty,
+  RuntimeDocumentVersion,
   RuntimeEdgeDocument,
   RuntimeEmbeddingModifier,
   RuntimeEnumProperty,
@@ -460,7 +461,9 @@ export type {
   RuntimeUniqueWhere,
 } from "./runtime";
 export {
+  CURRENT_RUNTIME_DOCUMENT_VERSION,
   defineRuntimeExtension,
+  LEGACY_RUNTIME_DOCUMENT_VERSION,
   RuntimeExtensionValidationError,
   validateRuntimeExtension,
 } from "./runtime";

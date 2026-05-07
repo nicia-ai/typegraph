@@ -895,19 +895,37 @@ describe("validation failures", () => {
     );
   });
 
-  it("rejects refinements on the wrong type (pattern on number)", () => {
-    expectInvalid(
-      () =>
-        defineRuntimeExtension({
-          nodes: {
-            N: {
-              properties: { score: { type: "number", pattern: "abc" } },
-            },
+  it("silently accepts refinements that don't apply to a property type (forward-compat)", () => {
+    // Behavior change pinned: per the format-versioning policy,
+    // unknown refinement keys ride forward — they're silently
+    // ignored at the validator boundary so a future v1.x.y can
+    // introduce new modifiers without breaking older readers. The
+    // misapplied refinement (e.g. `pattern` on a number) is dropped
+    // from the compiled schema; the Zod schema for `score` remains a
+    // plain `z.number()` with no pattern check.
+    const document = defineRuntimeExtension({
+      nodes: {
+        N: {
+          properties: {
+            score: {
+              type: "number",
+              // `pattern` belongs on string, not number. Older
+              // behavior rejected this; new behavior silently drops
+              // the unknown refinement.
+              pattern: "abc",
+            } as never,
           },
-        }),
-      "INVALID_PROPERTY_REFINEMENT",
-      "/nodes/N/properties/score/pattern",
-    );
+        },
+      },
+    });
+    // The document is accepted and the property compiles.
+    const compiled = compileSingleNode(document);
+    const parsed = compiled.schema.safeParse({ score: 5 });
+    expect(parsed.success).toBe(true);
+    // Misapplied refinement does not gate the value — `5` matches
+    // because it's a finite number, regardless of `pattern`.
+    const stringInput = compiled.schema.safeParse({ score: "abc" });
+    expect(stringInput.success).toBe(false); // still must be a number
   });
 
   it("rejects nested arrays", () => {
@@ -1166,6 +1184,134 @@ describe("document immutability", () => {
     expect(Object.isFrozen(document.nodes!)).toBe(true);
     expect(Object.isFrozen(document.nodes!.N!)).toBe(true);
     expect(Object.isFrozen(document.nodes!.N!.properties)).toBe(true);
+  });
+});
+
+// ============================================================
+// Document format versioning
+// ============================================================
+
+describe("document format versioning", () => {
+  it("validator stamps the current version when none is supplied", () => {
+    const document = defineRuntimeExtension({
+      nodes: { N: { properties: { x: { type: "string" } } } },
+    });
+    expect(document.version).toBe(1);
+  });
+
+  it("accepts an explicit version equal to the current major", () => {
+    const result = validateRuntimeExtension({
+      version: 1,
+      nodes: { N: { properties: { x: { type: "string" } } } },
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("validation failed");
+    expect(result.data.version).toBe(1);
+  });
+
+  it("rejects a version higher than the current major with RUNTIME_EXTENSION_VERSION_UNSUPPORTED", () => {
+    const result = validateRuntimeExtension({
+      version: 99,
+      nodes: { N: { properties: { x: { type: "string" } } } },
+    });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected validation failure");
+    const issue = result.error.details.issues.find(
+      (entry) => entry.code === "RUNTIME_EXTENSION_VERSION_UNSUPPORTED",
+    );
+    expect(issue?.path).toBe("/version");
+    expect(issue?.message).toContain("version 99");
+  });
+
+  it("rejects non-integer / non-positive version with INVALID_DOCUMENT_SHAPE", () => {
+    // Untrusted-input shapes the validator must reject — the `null`
+    // entry mirrors what JSON.parse can return for a manually-edited
+    // document, which is exactly the path validateVersion guards.
+    // eslint-disable-next-line unicorn/no-null
+    for (const bogus of [0, -1, 1.5, "1", null]) {
+      const result = validateRuntimeExtension({
+        version: bogus,
+        nodes: { N: { properties: { x: { type: "string" } } } },
+      });
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error("expected validation failure");
+      const issue = result.error.details.issues.find(
+        (entry) =>
+          entry.path === "/version" && entry.code === "INVALID_DOCUMENT_SHAPE",
+      );
+      expect(
+        issue,
+        `expected /version issue for ${JSON.stringify(bogus)}`,
+      ).toBeDefined();
+    }
+  });
+
+  it("accepts unknown top-level keys for forward-compat (additive minor changes ride forward)", () => {
+    // Regression for the strict-keys vs. loose-zod contradiction. The
+    // documented forward-compat policy says additive minor changes
+    // (a future v1.x.y top-level slice) must parse cleanly through
+    // older v1 runtimes. Rejecting unknown keys here would defeat
+    // that promise; the persistence-side zod is `.loose()` for the
+    // same reason.
+    const result = validateRuntimeExtension({
+      nodes: { N: { properties: { x: { type: "string" } } } },
+      // Hypothetical future v1.x.y additive slice.
+      indexes: [{ name: "future_slice", entity: "node", kind: "N" }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts unknown nested property modifiers for forward-compat (additive minor changes ride forward)", () => {
+    // Regression for the previously-strict refinement-key check.
+    // The format-versioning policy promises that new optional
+    // property modifiers in a future v1.x.y ride forward via older
+    // runtimes silently ignoring the new keys.
+    const result = validateRuntimeExtension({
+      nodes: {
+        N: {
+          properties: {
+            // `displayName` is a hypothetical future modifier that
+            // doesn't exist in v1 today.
+            x: { type: "string", displayName: "X" },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts unknown string format values for forward-compat", () => {
+    // Regression for the previously-strict format check. New format
+    // identifiers (e.g. `"uri-reference"`) in a future v1.x.y must
+    // ride forward — older runtimes parse the field as a plain
+    // string without the format-specific check.
+    const result = validateRuntimeExtension({
+      nodes: {
+        N: {
+          properties: {
+            ref: { type: "string", format: "uri-reference" },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("treats absent version as the legacy default (1) regardless of CURRENT", () => {
+    // Regression for the "current as default" trap: when v2 ships,
+    // CURRENT becomes 2 but stored v1 documents (no version field)
+    // must continue to parse as v1 — never silently re-classified as
+    // v2 by the validator's default.
+    const result = validateRuntimeExtension({
+      nodes: { N: { properties: { x: { type: "string" } } } },
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("validation failed");
+    // Today CURRENT === LEGACY === 1, so this is hard to distinguish
+    // observably; the assertion documents the intent. When v2 ships,
+    // this test is the canary that fails if the default starts using
+    // CURRENT instead of LEGACY.
+    expect(result.data.version).toBe(1);
   });
 });
 

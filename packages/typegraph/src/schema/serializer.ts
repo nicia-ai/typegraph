@@ -28,6 +28,10 @@ import {
   type OntologyRelation,
 } from "../ontology/types";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
+import {
+  LEGACY_RUNTIME_DOCUMENT_VERSION,
+  type RuntimeGraphDocument,
+} from "../runtime/document-types";
 import { nowIso } from "../utils/date";
 import { sortedReplacer } from "./canonical";
 import {
@@ -62,7 +66,7 @@ export function serializeSchema<G extends GraphDef>(
   const edges = serializeEdges(graph);
   const ontology = serializeOntology(graph.ontology);
   const indexes = serializeIndexes(graph.indexes);
-  const runtimeDocument = graph.runtimeDocument;
+  const runtimeDocument = canonicalRuntimeDocument(graph.runtimeDocument);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
 
   return {
@@ -98,6 +102,32 @@ function serializeDeprecatedKinds(
 ): readonly string[] | undefined {
   if (set === undefined || set.size === 0) return undefined;
   return [...set].toSorted();
+}
+
+/**
+ * Strips `version` from the persisted runtimeDocument when it equals
+ * the legacy default (a stable `1`). The version is metadata about
+ * the document format, not semantic schema content; omitting the
+ * default value from the canonical form means documents persisted
+ * before the version field existed (no `version`) hash byte-identically
+ * with documents persisted after (`version: 1`).
+ *
+ * Pinned to `LEGACY_RUNTIME_DOCUMENT_VERSION` rather than
+ * `CURRENT_RUNTIME_DOCUMENT_VERSION` so future major bumps don't
+ * silently re-classify already-stored documents — when v2 ships,
+ * v1 documents continue to omit `version` (because `1 ===
+ * LEGACY`), and v2 documents emit `version: 2` explicitly. The
+ * canonical-form rule stays stable across library versions.
+ */
+function canonicalRuntimeDocument(
+  document: RuntimeGraphDocument | undefined,
+): RuntimeGraphDocument | undefined {
+  if (document === undefined) return undefined;
+  if (document.version === undefined) return document;
+
+  if (document.version !== LEGACY_RUNTIME_DOCUMENT_VERSION) return document;
+  const { version: _omit, ...rest } = document;
+  return rest;
 }
 
 /**
