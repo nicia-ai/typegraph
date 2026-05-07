@@ -68,6 +68,11 @@ export type {
   NodeIndexConfig,
   NodeIndexDeclaration,
   NodeIndexWhereBuilder,
+  RelationalIndexDeclaration,
   SystemColumnName,
+  VectorIndexDeclaration,
+  VectorIndexImplementation,
+  VectorIndexMetric,
+  VectorIndexParams,
 } from "./types";
 export { andWhere, notWhere, orWhere } from "./where";

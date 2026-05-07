@@ -94,8 +94,13 @@ export type IndexChange = Readonly<{
   type: ChangeType;
   /** Index name (the diffing identity key). */
   name: string;
-  /** Whether this index is on a node or edge kind. */
-  entity: "node" | "edge";
+  /**
+   * Whether this index is on a node, edge, or vector field. Mirrors
+   * `IndexDeclaration.entity` — `"vector"` was added with vector index
+   * unification so vector changes flow through the same diff
+   * classification as relational ones.
+   */
+  entity: "node" | "edge" | "vector";
   severity: ChangeSeverity;
   details: string;
   before?: IndexDeclaration | undefined;

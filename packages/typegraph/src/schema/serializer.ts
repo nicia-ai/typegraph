@@ -21,6 +21,7 @@ import {
   type EdgeIndexDeclaration,
   type IndexDeclaration,
   type NodeIndexDeclaration,
+  type VectorIndexDeclaration,
 } from "../indexes/types";
 import {
   getTypeName,
@@ -154,7 +155,26 @@ function serializeIndexDeclaration(
   if (declaration.entity === "node") {
     return serializeNodeIndexDeclaration(declaration);
   }
-  return serializeEdgeIndexDeclaration(declaration);
+  if (declaration.entity === "edge") {
+    return serializeEdgeIndexDeclaration(declaration);
+  }
+  return serializeVectorIndexDeclaration(declaration);
+}
+
+function serializeVectorIndexDeclaration(
+  declaration: VectorIndexDeclaration,
+): VectorIndexDeclaration {
+  return {
+    entity: "vector",
+    kind: declaration.kind,
+    name: declaration.name,
+    fieldPath: declaration.fieldPath,
+    dimensions: declaration.dimensions,
+    metric: declaration.metric,
+    indexType: declaration.indexType,
+    indexParams: declaration.indexParams,
+    ...(declaration.origin === "runtime" ? { origin: "runtime" as const } : {}),
+  };
 }
 
 function serializeNodeIndexDeclaration(

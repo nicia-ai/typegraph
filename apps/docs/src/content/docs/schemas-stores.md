@@ -231,25 +231,48 @@ const incidentMeta = stored?.nodes.Incident?.annotations;
   `Readonly<Record<string, JsonValue>>`. Wrap reads in your own typed
   accessors at consumer boundaries if you need stronger guarantees.
 
-### `embedding(dimensions)`
+### `embedding(dimensions, options?)`
 
 Creates a Zod schema for vector embeddings with dimension validation.
+Carries optional vector-index configuration that the auto-derivation
+pass at `defineGraph()` time reads to produce
+`VectorIndexDeclaration` entries — see [Runtime Extensions →
+Vector indexes](/runtime-extensions#vector-indexes) for the full
+materialization flow.
 
 ```typescript
 import { embedding } from "@nicia-ai/typegraph";
 
-function embedding<D extends number>(dimensions: D): EmbeddingSchema<D>;
+function embedding<D extends number>(
+  dimensions: D,
+  options?: EmbeddingIndexOptions,
+): EmbeddingSchema<D>;
+
+type EmbeddingIndexOptions = Readonly<{
+  /** Distance metric. Default `"cosine"`. */
+  metric?: "cosine" | "l2" | "inner_product";
+  /** Vector index implementation. Default `"hnsw"`. */
+  indexType?: "hnsw" | "ivfflat" | "none";
+  /** HNSW: max connections per layer. Default `16`. */
+  m?: number;
+  /** HNSW: build-time search depth. Default `64`. */
+  efConstruction?: number;
+  /** IVFFlat: number of inverted-list partitions. */
+  lists?: number;
+}>;
 ```
 
 **Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `dimensions` | `number` | The number of dimensions (e.g., 384, 512, 768, 1536, 3072) |
+| `dimensions` | `number` | Number of dimensions (e.g., 384, 512, 768, 1536, 3072) |
+| `options` | `EmbeddingIndexOptions?` | Optional index configuration. Defaults match pgvector recommendations. Pass `{ indexType: "none" }` to opt out of automatic materialization while keeping the embedding column. |
 
 **Example:**
 
 ```typescript
+// Defaults: cosine similarity, HNSW index, m=16, ef_construction=64.
 const Document = defineNode("Document", {
   schema: z.object({
     title: z.string(),
@@ -258,7 +281,24 @@ const Document = defineNode("Document", {
   }),
 });
 
-// Optional embeddings
+// Override at the brand site — this is the load-bearing place to
+// signal index intent because the metric usually reflects model
+// output (cosine-normalized vs. raw inner-product).
+const Image = defineNode("Image", {
+  schema: z.object({
+    embedding: embedding(512, { metric: "l2", m: 32, efConstruction: 100 }),
+  }),
+});
+
+// Opt out of automatic materialization while keeping the embedding column.
+const Manual = defineNode("Manual", {
+  schema: z.object({
+    embedding: embedding(384, { indexType: "none" }),
+  }),
+});
+
+// Optional embeddings work as before — the brand survives `.optional()` /
+// `.nullable()` wrappers and auto-derivation walks through them.
 const Article = defineNode("Article", {
   schema: z.object({
     content: z.string(),
@@ -267,7 +307,9 @@ const Article = defineNode("Article", {
 });
 ```
 
-See [Semantic Search](/semantic-search) for query usage.
+See [Semantic Search](/semantic-search) for query usage and
+[Runtime Extensions](/runtime-extensions#vector-indexes) for how the
+auto-derived index flows through `materializeIndexes()`.
 
 ### `externalRef(table)`
 

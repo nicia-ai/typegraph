@@ -365,6 +365,14 @@ export type DropVectorIndexParams = Readonly<{
  *
  * One row per node. Callers concatenate the searchable fields into
  * `content` so a single MATCH query can find terms spread across fields.
+ *
+ * Note: `createFulltextIndex` / `dropFulltextIndex` were removed as
+ * dead code in #PR_E. The fulltext table's canonical index (Postgres
+ * GIN on `tsv`, SQLite FTS5 virtual table) is created with the table
+ * itself by `bootstrapTables` per the active `FulltextStrategy`;
+ * per-kind fulltext indexes are an "advanced strategy" surface that
+ * doesn't fit the relational-style declaration model and is reserved
+ * for future work.
  */
 export type UpsertFulltextParams = Readonly<{
   graphId: string;
@@ -467,19 +475,6 @@ export type FulltextSearchResult = Readonly<{
  * is created when the fulltext table itself is created. This is reserved
  * for advanced per-kind specializations.
  */
-type CreateFulltextIndexParams = Readonly<{
-  graphId: string;
-  nodeKind: string;
-  language: string;
-}>;
-
-/**
- * Parameters for dropping a fulltext index created via createFulltextIndex.
- */
-type DropFulltextIndexParams = Readonly<{
-  graphId: string;
-  nodeKind: string;
-}>;
 
 // ============================================================
 // Index Materialization Status
@@ -496,7 +491,7 @@ type DropFulltextIndexParams = Readonly<{
 export type IndexMaterializationRow = Readonly<{
   indexName: string;
   graphId: string;
-  entity: "node" | "edge";
+  entity: "node" | "edge" | "vector";
   kind: string;
   signature: string;
   schemaVersion: number;
@@ -515,7 +510,7 @@ export type IndexMaterializationRow = Readonly<{
 export type RecordIndexMaterializationParams = Readonly<{
   indexName: string;
   graphId: string;
-  entity: "node" | "edge";
+  entity: "node" | "edge" | "vector";
   kind: string;
   signature: string;
   schemaVersion: number;
@@ -726,8 +721,6 @@ export type GraphBackend = Readonly<{
   fulltextSearch?: (
     params: FulltextSearchParams,
   ) => Promise<readonly FulltextSearchResult[]>;
-  createFulltextIndex?: (params: CreateFulltextIndexParams) => Promise<void>;
-  dropFulltextIndex?: (params: DropFulltextIndexParams) => Promise<void>;
 
   // === Index Materialization (used by store.materializeIndexes) ===
   /**
