@@ -59,7 +59,7 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
-import { generateSqliteDDL } from "./ddl";
+import { generateSqliteCreateTableSQL, generateSqliteDDL } from "./ddl";
 import {
   type CommonOperationBackend,
   createCommonOperationBackend,
@@ -665,6 +665,12 @@ export function createSqliteBackend(
 
     async executeDdl(ddl: string): Promise<void> {
       await db.run(sql.raw(ddl));
+    },
+
+    async ensureIndexMaterializationsTable(): Promise<void> {
+      await db.run(
+        sql.raw(generateSqliteCreateTableSQL(tables.indexMaterializations)),
+      );
     },
 
     async getIndexMaterialization(

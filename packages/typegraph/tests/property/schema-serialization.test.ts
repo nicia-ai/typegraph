@@ -607,14 +607,17 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    // Pins the load-bearing invariant from the issue: graphs that never set
-    // annotations produce identical canonical-form hashes to today, but an
-    // explicit empty object {} is a structural opt-in and bumps the hash.
+    // Pins the omit-when-empty invariant for annotations. Mirrors the
+    // same rule applied to `indexes`: absent, explicit-undefined, AND
+    // explicit-empty `{}` all hash byte-identically. The unified rule
+    // means no consumer ever pays a hash penalty for declaring
+    // `annotations: {}` (a common output of spread-based builders or
+    // codegen).
     //
     // The "explicit-undefined" case uses a runtime cast to bypass
     // exactOptionalPropertyTypes — that path can only originate from
     // untyped JS callers or spread merges, but consumers can still hit it.
-    it("hash is invariant for absent vs explicit-undefined node annotations; differs for {}", async () => {
+    it("hash is invariant for absent / explicit-undefined / empty {} node annotations", async () => {
       const baseSchema = z.object({ name: z.string() });
       const withoutAnnotations = defineNode("Item", { schema: baseSchema });
       const withUndefinedAnnotations = defineNode("Item", {
@@ -644,10 +647,10 @@ describe("Schema Serialization Properties", () => {
       );
 
       expect(hashUndefined).toBe(hashAbsent);
-      expect(hashEmpty).not.toBe(hashAbsent);
+      expect(hashEmpty).toBe(hashAbsent);
     });
 
-    it("hash is invariant for absent vs explicit-undefined edge annotations; differs for {}", async () => {
+    it("hash is invariant for absent / explicit-undefined / empty {} edge annotations", async () => {
       const Source = defineNode("Source", {
         schema: z.object({ name: z.string() }),
       });
@@ -684,7 +687,32 @@ describe("Schema Serialization Properties", () => {
       );
 
       expect(hashUndefined).toBe(hashAbsent);
-      expect(hashEmpty).not.toBe(hashAbsent);
+      expect(hashEmpty).toBe(hashAbsent);
+    });
+
+    it("hash differs for absent vs non-empty annotations", async () => {
+      const baseSchema = z.object({ name: z.string() });
+      const withoutAnnotations = defineNode("Item", { schema: baseSchema });
+      const withAnnotations = defineNode("Item", {
+        schema: baseSchema,
+        annotations: { ui: "hidden" },
+      });
+
+      const buildGraph = (node: typeof withoutAnnotations) =>
+        defineGraph({
+          id: "annotations_nonempty_diff",
+          nodes: { Item: { type: node } },
+          edges: {},
+        });
+
+      const hashAbsent = await computeSchemaHash(
+        serializeSchema(buildGraph(withoutAnnotations), 1),
+      );
+      const hashSet = await computeSchemaHash(
+        serializeSchema(buildGraph(withAnnotations), 1),
+      );
+
+      expect(hashSet).not.toBe(hashAbsent);
     });
 
     // Hash compatibility for any deployment that existed before this field

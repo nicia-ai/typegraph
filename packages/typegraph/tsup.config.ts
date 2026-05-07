@@ -7,6 +7,7 @@ export default defineConfig({
     "profiler/index": "src/profiler/index.ts",
     "schema/index": "src/schema/index.ts",
     "indexes/index": "src/indexes/index.ts",
+    "runtime/index": "src/runtime/index.ts",
     "backend/sqlite/index": "src/backend/sqlite/index.ts",
     "backend/sqlite/local": "src/backend/sqlite/local.ts",
     "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",

@@ -57,6 +57,16 @@
         "default": "./dist/indexes/index.cjs"
       }
     },
+    "./runtime": {
+      "import": {
+        "types": "./dist/runtime/index.d.ts",
+        "default": "./dist/runtime/index.js"
+      },
+      "require": {
+        "types": "./dist/runtime/index.d.cts",
+        "default": "./dist/runtime/index.cjs"
+      }
+    },
     "./sqlite": {
       "import": {
         "types": "./dist/backend/sqlite/index.d.ts",

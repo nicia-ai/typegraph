@@ -459,9 +459,7 @@ export type {
   RuntimeUniqueWhere,
 } from "./runtime";
 export {
-  compileRuntimeExtension,
   defineRuntimeExtension,
-  mergeRuntimeExtension,
   RuntimeExtensionValidationError,
   validateRuntimeExtension,
 } from "./runtime";

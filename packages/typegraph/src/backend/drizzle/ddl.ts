@@ -74,7 +74,7 @@ function formatDefaultValue(value: unknown): string {
 /**
  * Generates CREATE TABLE SQL from a Drizzle SQLite table definition.
  */
-function generateSqliteCreateTableSQL(
+export function generateSqliteCreateTableSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: SQLiteTableWithColumns<any>,
 ): string {
@@ -341,7 +341,7 @@ function formatPgDefaultValue(value: unknown): string {
 /**
  * Generates CREATE TABLE SQL from a Drizzle PostgreSQL table definition.
  */
-function generatePgCreateTableSQL(
+export function generatePgCreateTableSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: PgTableWithColumns<any>,
 ): string {
