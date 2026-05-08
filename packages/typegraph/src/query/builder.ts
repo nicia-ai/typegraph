@@ -49,6 +49,13 @@ export type {
   AliasMap,
   BatchableQuery,
   BatchResults,
+  DynamicEdgeAccessor,
+  DynamicEdgeType,
+  DynamicFieldBuilder,
+  DynamicNodeAccessor,
+  DynamicNodeType,
+  DynamicSelectableEdge,
+  DynamicSelectableNode,
   EdgeAccessor,
   FieldAccessor,
   NodeAccessor,
@@ -125,6 +132,8 @@ export function createQueryBuilder<G extends GraphDef>(
     groupBy: undefined,
     having: undefined,
     fusion: undefined,
+    dynamicNodeAliases: new Set(),
+    dynamicEdgeAliases: new Set(),
   };
 
   return new QueryBuilder(config, initialState);

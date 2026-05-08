@@ -280,6 +280,106 @@ from your ontology. To opt out for a single traversal, pass `expand: "none"`. To
 for all traversals, set `queryDefaults.traversalExpansion` in `createStore` options.
 :::
 
+## Runtime-declared kinds
+
+For kinds and edges added at runtime via [graph
+extensions](/graph-extensions), use the string-keyed siblings
+`fromDynamic` (covered on [Source](/queries/source#runtime-declared-kinds)),
+`traverseDynamic`, `optionalTraverseDynamic`, and `toDynamic`:
+
+```typescript
+const rows = await store
+  .query()
+  .fromDynamic("Paper", "p")
+  .traverseDynamic("authoredBy", "a")
+  .toDynamic("Author", "u")
+  .whereNode("p", (p) => p.field("year").number().gte(2020))
+  .select((ctx) => ({ paper: ctx.p, author: ctx.u, edge: ctx.a }))
+  .execute();
+```
+
+Each method runtime-validates against the registry — typos throw
+`KindNotFoundError`, and a `toDynamic` target that isn't a valid
+endpoint for the current edge / direction throws `EndpointError`.
+
+### The `.field()` discriminator
+
+Predicate accessors on dynamic-declared aliases expose schema properties
+through a `.field(name)` discriminator. `BaseFieldAccessor` methods
+(`eq`, `isNull`, `in`, `notIn`) work directly. Type-specific predicates
+sit behind one of:
+
+| Discriminator | Returns |
+| --- | --- |
+| `.string()` | `StringFieldAccessor` (`gte`, `contains`, `like`, …) |
+| `.number()` | `NumberFieldAccessor` (`gte`, `between`, …) |
+| `.date()` | `DateFieldAccessor` |
+| `.array()` | `ArrayFieldAccessor<unknown>` |
+| `.object()` | `ObjectFieldAccessor<...>` |
+| `.embedding()` | `EmbeddingFieldAccessor` (`similarTo`) |
+
+Each discriminator validates against the registered Zod schema at
+query-build time and throws `TypeError` on mismatch:
+
+```typescript
+.whereNode("p", (p) => p.field("year").number().gte(2020))   // ✓
+.whereNode("p", (p) => p.field("year").string().eq("2020"))  // throws TypeError
+.whereNode("p", (p) => p.field("yera").number().gte(2020))   // throws (unknown property)
+
+// BaseFieldAccessor methods don't need a discriminator.
+.whereNode("p", (p) => p.field("year").isNotNull())          // ✓
+```
+
+The same `.field()` API is available on edge accessors:
+
+```typescript
+.whereEdge("a", (e) => e.field("order").number().eq(1))
+```
+
+### Mixed typed and dynamic aliases
+
+Typed and dynamic aliases interleave in one query. Each alias's
+predicate accessor is resolved independently — typed aliases keep their
+narrow accessors, dynamic aliases get `.field()`:
+
+```typescript
+const rows = await store
+  .query()
+  .from("Document", "d")              // compile-time kind
+  .traverseDynamic("taggedWith", "e") // runtime edge
+  .toDynamic("Tag", "n")              // runtime target
+  .whereNode("d", (d) => d.title.eq("the doc"))                    // typed: direct
+  .whereNode("n", (n) => n.field("label").string().eq("research")) // dynamic
+  .select((ctx) => ({ doc: ctx.d, tag: ctx.n }))
+  .execute();
+```
+
+A typed `traverse("knownEdge", "e")` followed by `toDynamic(target, "n")`
+keeps `e` typed — `e.role.eq(...)` works without `.field()` because the
+edge schema is known at compile time. Only aliases declared via
+`fromDynamic` / `traverseDynamic` / `optionalTraverseDynamic` /
+`toDynamic` go through the discriminator.
+
+### Optional dynamic traversal
+
+`optionalTraverseDynamic` is the LEFT-JOIN sibling. Source nodes
+without a matching edge still surface, with the edge and target aliases
+as `undefined`:
+
+```typescript
+const papersWithOptionalAuthor = await store
+  .query()
+  .fromDynamic("Paper", "p")
+  .optionalTraverseDynamic("authoredBy", "a")
+  .toDynamic("Author", "u")
+  .select((ctx) => ({
+    paperTitle: ctx.p.title,
+    authorName: ctx.u?.name, // undefined for orphan papers
+    order: ctx.a?.order,
+  }))
+  .execute();
+```
+
 ## Real-World Examples
 
 ### Organizational Hierarchy

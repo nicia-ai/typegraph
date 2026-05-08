@@ -21,15 +21,22 @@
  * 4. Ingest data (nodes + edges) via the dynamic-collection escape
  *    hatch and run a fulltext search over an extension kind — the
  *    `searchable` brand on the JSON-side flows through to BM25.
- * 5. A follow-up agent proposes a destructive change (TYPE_CHANGE on a
+ * 5. Multi-hop traversal across runtime kinds via `fromDynamic` /
+ *    `traverseDynamic` / `optionalTraverseDynamic` / `toDynamic`. The
+ *    typed `from` / `traverse` / `to` require compile-time kind
+ *    literals; the dynamic siblings accept arbitrary strings, validate
+ *    them against the registry, and surface a
+ *    `.field("name").number().gte(...)` predicate API so an MCP server
+ *    can traverse `Paper -[authoredBy]-> Author` without `as any`.
+ * 6. A follow-up agent proposes a destructive change (TYPE_CHANGE on a
  *    populated kind). `evolve()` rejects with `IncompatibleChangeError`
  *    so a misbehaving agent can't corrupt the database.
- * 6. Soft-deprecate the legacy compile-time kind (Document) — a signal
+ * 7. Soft-deprecate the legacy compile-time kind (Document) — a signal
  *    for codegen / UI tooling, not a gate on reads or writes.
- * 7. Remove an extension kind with `removeKinds(["Author"], { eager: {} })`.
+ * 8. Remove an extension kind with `removeKinds(["Author"], { eager: {} })`.
  *    The schema commit drops the kind and any edges that depended on
  *    it; eager mode also runs the data-cleanup phase inline.
- * 8. Restart parity: a fresh Store reading the same database sees
+ * 9. Restart parity: a fresh Store reading the same database sees
  *    every approved kind, the deprecation flag, and materialized
  *    indexes — without re-running any of the verbs above.
  */
@@ -229,7 +236,37 @@ async function main() {
   console.log("    Duplicate doi rejected:", duplicate instanceof Error);
 
   // ============================================================
-  // Step 5: A follow-up agent proposes an incompatible change
+  // Step 5: Multi-hop traversal across runtime kinds
+  // ============================================================
+
+  // `fromDynamic` / `traverseDynamic` / `optionalTraverseDynamic` /
+  // `toDynamic` are string-keyed siblings of the typed builder methods.
+  // They validate the kind against the registry (typo →
+  // KindNotFoundError) and expose a `.field(name).number().gte(...)`
+  // discriminator on the predicate accessor. Dynamic aliases mix freely
+  // with typed ones — see the unit tests for a
+  // `from("Document", ...).traverseDynamic(...)` example.
+  const traversalRows = await evolved
+    .query()
+    .fromDynamic("Paper", "p")
+    .traverseDynamic("authoredBy", "a")
+    .toDynamic("Author", "u")
+    .whereNode("p", (p) => p.field("year").number().gte(2018))
+    .select((ctx) => ({
+      paperTitle: ctx.p.title,
+      authorName: ctx.u.name,
+      order: ctx.a.order,
+    }))
+    .execute();
+  console.log("\n[5] Dynamic multi-hop traversal Paper -> Author:");
+  for (const row of traversalRows) {
+    console.log(
+      `    ${String(row.paperTitle)} (#${String(row.order)}) by ${String(row.authorName)}`,
+    );
+  }
+
+  // ============================================================
+  // Step 6: A follow-up agent proposes an incompatible change
   // ============================================================
 
   // The agent (or a less-careful caller) returns a re-proposal that
@@ -255,7 +292,7 @@ async function main() {
     .evolve(breakingProposal)
     .catch((error: unknown) => error);
   if (rejection instanceof IncompatibleChangeError) {
-    console.log("\n[5] Incompatible re-proposal rejected:");
+    console.log("\n[6] Incompatible re-proposal rejected:");
     for (const change of rejection.changes) {
       console.log(
         `    ${change.kind}.${change.field ?? "(kind)"}: ${change.type}` +
@@ -267,12 +304,12 @@ async function main() {
   }
 
   // ============================================================
-  // Step 6: Soft-deprecate the legacy compile-time kind
+  // Step 7: Soft-deprecate the legacy compile-time kind
   // ============================================================
 
   const deprecated = await evolved.deprecateKinds(["Document"]);
   console.log(
-    "\n[6] Deprecated kinds:",
+    "\n[7] Deprecated kinds:",
     [...deprecated.introspect().deprecatedKinds],
   );
   // Deprecation is a signal, not a gate — reads/writes still work.
@@ -282,7 +319,7 @@ async function main() {
   });
 
   // ============================================================
-  // Step 7: Remove an extension kind (cascade + eager cleanup)
+  // Step 8: Remove an extension kind (cascade + eager cleanup)
   // ============================================================
 
   // After running the experiment, the operator decides Author should
@@ -292,7 +329,7 @@ async function main() {
   // `eager: {}` the data-cleanup phase runs inline — Author rows AND
   // authoredBy edges are deleted before the verb returns.
   const trimmed = await deprecated.removeKinds(["Author"], { eager: {} });
-  console.log("\n[7] removeKinds(['Author']) — cascading edge cleanup");
+  console.log("\n[8] removeKinds(['Author']) — cascading edge cleanup");
   console.log(
     "    registry.hasNodeType('Author'):",
     trimmed.registry.hasNodeType("Author"),
@@ -304,11 +341,11 @@ async function main() {
   console.log("    Active schema version:", await activeVersion(backend));
 
   // ============================================================
-  // Step 8: Restart parity
+  // Step 9: Restart parity
   // ============================================================
 
   const [restored, validation] = await createStoreWithSchema(baseGraph, backend);
-  console.log("\n[8] Restart parity:");
+  console.log("\n[9] Restart parity:");
   console.log("    validation.status:", validation.status);
   console.log(
     "    registry.hasNodeType('Paper'):",

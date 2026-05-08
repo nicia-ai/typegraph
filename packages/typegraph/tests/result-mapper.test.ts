@@ -33,6 +33,8 @@ describe("transformPathColumns", () => {
     groupBy: undefined,
     having: undefined,
     fusion: undefined,
+    dynamicNodeAliases: new Set(),
+    dynamicEdgeAliases: new Set(),
   };
 
   describe("dialect handling", () => {

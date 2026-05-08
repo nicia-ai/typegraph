@@ -3,6 +3,7 @@
  */
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
+import { EndpointError, KindNotFoundError } from "../../errors";
 import {
   type NodePredicate,
   type RecursiveCyclePolicy,
@@ -22,6 +23,11 @@ import {
   stringField,
 } from "../predicates";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
+import {
+  createDynamicFieldBuilder,
+  type DynamicEdgeType,
+  type DynamicNodeType,
+} from "./dynamic";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
@@ -39,6 +45,19 @@ import {
   type ValidEdgeTargets,
 } from "./types";
 import { validateSqlIdentifier } from "./validation";
+
+/**
+ * Resolves the edge type for an edge alias based on its kind type parameter.
+ *
+ * For `traverse(...)`, `EK` is a literal like `"authoredBy"` and the
+ * type comes from the typed graph. For `traverseDynamic(...)`, `EK` is
+ * widened to `string` — `string extends EK` distinguishes that case and
+ * resolves to `DynamicEdgeType`, so the conditional accessor types fire.
+ */
+type EdgeTypeForKey<G extends GraphDef, EK> =
+  string extends EK ? DynamicEdgeType
+  : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"]
+  : DynamicEdgeType;
 
 // Forward declaration - actual import would cause circular dependency
 type QueryBuilderConstructor = new (
@@ -248,9 +267,7 @@ export class TraversalBuilder<
    */
   whereEdge(
     alias: EA,
-    predicateFunction: (
-      edge: EdgeAccessor<G["edges"][EK]["type"]>,
-    ) => Predicate,
+    predicateFunction: (edge: EdgeAccessor<EdgeTypeForKey<G, EK>>) => Predicate,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -265,7 +282,7 @@ export class TraversalBuilder<
   > {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
-      accessor as EdgeAccessor<G["edges"][EK]["type"]>,
+      accessor as EdgeAccessor<EdgeTypeForKey<G, EK>>,
     );
 
     const newPredicate: NodePredicate = {
@@ -358,6 +375,23 @@ export class TraversalBuilder<
       }
     };
 
+    if (this.#state.dynamicEdgeAliases.has(alias)) {
+      return {
+        id: idAccessor,
+        kind: kindAccessor,
+        fromId: fromIdAccessor,
+        toId: toIdAccessor,
+        field: (name: string) =>
+          createDynamicFieldBuilder(
+            this.#config.schemaIntrospector,
+            alias,
+            name,
+            allEdgeKinds,
+            "edge",
+          ),
+      } as unknown as EdgeAccessor<AnyEdgeType>;
+    }
+
     // Use a Proxy to provide flattened property access
     return new Proxy({} as EdgeAccessor<AnyEdgeType>, {
       get: (_, property: string | symbol) => {
@@ -420,14 +454,72 @@ export class TraversalBuilder<
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A>
   > {
-    // Validate node alias to prevent SQL injection
     validateSqlIdentifier(alias);
 
     const includeSubClasses = options?.includeSubClasses ?? false;
     const kinds =
       includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
 
-    // Build base traversal
+    const newState = this.#stateWithTraversal(alias, kinds);
+
+    // Cast is safe because the overloads provide compile-time type safety
+    // The runtime QueryBuilderClass is the correct implementation
+    return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
+      G,
+      Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A>
+    >;
+  }
+
+  /**
+   * String-keyed sibling of `to` for runtime-declared target kinds.
+   * Throws `KindNotFoundError` if the kind is not registered.
+   */
+  toDynamic<A extends string>(
+    kind: string,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { includeSubClasses?: boolean },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>
+  > {
+    validateSqlIdentifier(alias);
+    if (!this.#config.registry.hasNodeType(kind)) {
+      throw new KindNotFoundError(kind, "node", {
+        graphId: this.#config.graphId,
+      });
+    }
+    this.#assertValidEndpoint(kind);
+
+    const includeSubClasses = options?.includeSubClasses ?? false;
+    const kinds =
+      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+
+    const baseState = this.#stateWithTraversal(alias, kinds);
+    const newState: QueryBuilderState = {
+      ...baseState,
+      dynamicNodeAliases: new Set([...baseState.dynamicNodeAliases, alias]),
+    };
+
+    return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
+      G,
+      Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
+      RecAliases & BuildRecursiveAliases<DC, PC, A>
+    >;
+  }
+
+  /**
+   * Builds the next `QueryBuilderState` after appending a traversal
+   * targeting `alias` with `kinds`. Shared by `to` and `toDynamic`.
+   */
+  #stateWithTraversal(
+    alias: string,
+    kinds: readonly string[],
+  ): QueryBuilderState {
     const traversalBase: Traversal = {
       edgeAlias: this.#edgeAlias,
       edgeKinds: this.#edgeKinds,
@@ -444,7 +536,6 @@ export class TraversalBuilder<
         { ...traversalBase, inverseEdgeKinds: this.#inverseEdgeKinds }
       : traversalBase;
 
-    // Add variable-length spec if enabled
     const traversal: Traversal =
       this.#variableLength.enabled ?
         {
@@ -463,20 +554,58 @@ export class TraversalBuilder<
         }
       : baseTraversal;
 
-    const newState: QueryBuilderState = {
+    return {
       ...this.#state,
       traversals: [...this.#state.traversals, traversal],
       predicates: [...this.#state.predicates, ...this.#pendingEdgePredicates],
-      currentAlias: alias, // Update current alias to this traversal's target
+      currentAlias: alias,
     };
+  }
 
-    // Cast is safe because the overloads provide compile-time type safety
-    // The runtime QueryBuilderClass is the correct implementation
-    return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
-      G,
-      Aliases & Record<A, NodeAlias<NodeType, Optional>>,
-      EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>
-    >;
+  /**
+   * Asserts a runtime-declared target kind is a valid endpoint for the
+   * current traversal. Mirrors the compile-time `ValidEdgeTargets`
+   * constraint enforced by `to(...)` — without this check `toDynamic`
+   * would silently accept e.g. `traverseDynamic("authoredBy") +
+   * toDynamic("Document")` where authoredBy.to=[Author] and produce an
+   * empty result set.
+   *
+   * Permissive on unions: if the target is assignable to any valid
+   * endpoint across the edges being traversed, accept. Subclass
+   * relationships are honored via `registry.isAssignableTo`.
+   */
+  #assertValidEndpoint(targetKind: string): void {
+    const expectedKinds = new Set<string>();
+    const collectFromEdge = (edgeName: string, side: "to" | "from"): void => {
+      const edgeType = this.#config.registry.getEdgeType(edgeName);
+      const endpoints = edgeType?.[side];
+      if (!endpoints) return;
+      for (const endpoint of endpoints) {
+        expectedKinds.add(endpoint.kind);
+      }
+    };
+    const forwardSide = this.#direction === "out" ? "to" : "from";
+    const inverseSide = this.#direction === "out" ? "from" : "to";
+    for (const edgeName of this.#edgeKinds) {
+      collectFromEdge(edgeName, forwardSide);
+    }
+    for (const edgeName of this.#inverseEdgeKinds) {
+      collectFromEdge(edgeName, inverseSide);
+    }
+
+    // No declared endpoints anywhere — edge kinds in the registry can
+    // legally have undefined `to` / `from`; nothing to validate against.
+    if (expectedKinds.size === 0) return;
+
+    for (const expected of expectedKinds) {
+      if (this.#config.registry.isAssignableTo(targetKind, expected)) return;
+    }
+
+    throw new EndpointError({
+      edgeKind: this.#edgeKinds[0] ?? "(unknown)",
+      endpoint: forwardSide,
+      actualKind: targetKind,
+      expectedKinds: [...expectedKinds],
+    });
   }
 }

@@ -89,6 +89,37 @@ When `includeSubClasses: true`:
 - The `kind` field in results reflects the actual node kind
 - All properties common to the parent kind are accessible
 
+## Runtime-declared kinds
+
+`from()` requires `kind` to be a compile-time literal in your graph
+definition. For kinds added at runtime via [graph
+extensions](/graph-extensions), use `fromDynamic()`:
+
+```typescript
+// "Paper" was added by store.evolve(extension), so it isn't in the
+// compile-time graph type. fromDynamic accepts arbitrary string kinds.
+const recent = await store
+  .query()
+  .fromDynamic("Paper", "p")
+  .whereNode("p", (p) => p.field("year").number().gte(2020))
+  .select((ctx) => ctx.p)
+  .execute();
+```
+
+The kind is validated against the registry — typos throw
+`KindNotFoundError` instead of silently producing an empty query.
+The alias's predicate accessor is `DynamicNodeAccessor`, which exposes
+schema properties through a `.field(name)` discriminator —
+`.field("year").number().gte(2020)` for type-narrow predicates,
+`.field("year").eq(...)` directly for `BaseFieldAccessor` methods. See
+[Traverse ▸ The `.field()`
+discriminator](/queries/traverse#the-field-discriminator) for the full
+surface.
+
+`fromDynamic` mixes freely with typed `traverse` / `to` and the dynamic
+siblings. See [graph extensions ▸ Querying extension
+kinds](/graph-extensions#querying-extension-kinds) for the full story.
+
 ## Return Type
 
 `from()` returns a `QueryBuilder` that provides access to all query methods:

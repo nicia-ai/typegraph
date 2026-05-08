@@ -59,6 +59,8 @@ function createTestState(): QueryBuilderState {
     groupBy: undefined,
     having: undefined,
     fusion: undefined,
+    dynamicNodeAliases: new Set(),
+    dynamicEdgeAliases: new Set(),
   };
 }
 

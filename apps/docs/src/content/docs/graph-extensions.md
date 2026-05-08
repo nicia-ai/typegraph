@@ -358,6 +358,81 @@ const personType = store.registry.getNodeType("Person"); // NodeType | undefined
 `KindRegistry` also exposes `hasNodeType(name)` / `hasEdgeType(name)`
 for existence checks.
 
+### Querying extension kinds
+
+`store.query()` requires every `from` / `traverse` / `to` kind to be a
+compile-time literal in `Store<G>`. The string-keyed siblings
+`fromDynamic` / `traverseDynamic` / `optionalTraverseDynamic` /
+`toDynamic` admit kinds added via `evolve()` so an MCP server (or any
+caller working from kind names in a string variable) can build typed
+multi-hop traversals without `as any`:
+
+```ts
+const rows = await store.query()
+  .fromDynamic("Paper", "p")
+  .traverseDynamic("authoredBy", "a")
+  .toDynamic("Author", "u")
+  .whereNode("p", (p) => p.field("year").number().gte(2020))
+  .select((ctx) => ({ paper: ctx.p, author: ctx.u, edge: ctx.a }))
+  .execute();
+```
+
+Each method runtime-validates against the registry: a typo throws
+`KindNotFoundError`, and a `toDynamic` target that isn't a valid
+endpoint for the current edge / direction throws `EndpointError`.
+Compile-time `from` / `traverse` / `to` are unchanged.
+
+Predicate accessors on dynamic aliases use a `.field(name)`
+discriminator:
+
+- `BaseFieldAccessor` methods (`eq`, `isNull`, `in`, `notIn`) are
+  available directly on `field("name")`.
+- Type-specific predicates sit behind a discriminator method that
+  asserts the field's type — `.string()` / `.number()` / `.date()` /
+  `.array()` / `.object()` / `.embedding()`. Each validates against the
+  registered Zod schema and throws `TypeError` on mismatch, so
+  `field("year").string()` against a number field is caught at
+  query-build time, not as a silent "method is undefined" later.
+- `.field("missing")` throws when the property isn't on the schema.
+
+#### Mixed typed and dynamic aliases
+
+Typed and dynamic aliases interleave freely in one query. The
+predicate accessor is resolved per alias — a typed alias keeps its
+narrow `StringFieldAccessor` etc., while a dynamic alias gets `.field()`:
+
+```ts
+const rows = await store.query()
+  .from("Document", "d")              // typed compile-time kind
+  .traverseDynamic("taggedWith", "e") // runtime edge
+  .toDynamic("Tag", "n")              // runtime target
+  .whereNode("d", (d) => d.title.eq("the doc"))                    // typed: direct
+  .whereNode("n", (n) => n.field("label").string().eq("research")) // dynamic: discriminator
+  .select((ctx) => ({ doc: ctx.d, tag: ctx.n }))
+  .execute();
+```
+
+A typed `traverse("typedEdge", "e")` followed by `.toDynamic(target, "n")`
+keeps the edge alias `e` typed — `e.role.eq(...)` works directly, no
+discriminator needed. Only the dynamic-declared aliases use `.field()`.
+
+#### Optional dynamic traversal
+
+`optionalTraverseDynamic` is the LEFT-JOIN sibling — papers without
+authors still surface, with the edge and target aliases as `undefined`:
+
+```ts
+const rows = await store.query()
+  .fromDynamic("Paper", "p")
+  .optionalTraverseDynamic("authoredBy", "a")
+  .toDynamic("Author", "u")
+  .select((ctx) => ({ paper: ctx.p, author: ctx.u, edge: ctx.a }))
+  .execute();
+// row.author and row.edge are undefined for papers without an authoredBy edge.
+```
+
+### Search facade
+
 The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
 `rebuildFulltext` — accepts any registered kind, compile-time or
 runtime, with no type cast. The hit's `node` type narrows to the

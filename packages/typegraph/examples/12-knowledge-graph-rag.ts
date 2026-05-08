@@ -359,7 +359,7 @@ export async function main() {
     .select((ctx) => ({ text: ctx.c.text, source: ctx.d.title }))
     .execute();
 
-  // Get entity relationships (note: edge properties not yet accessible in select)
+  // Get entity relationships, including the edge property.
   const entityRelations = await store
     .query()
     .from("Entity", "e")
@@ -369,6 +369,7 @@ export async function main() {
     .select((ctx) => ({
       from: ctx.e.name,
       to: ctx.target.name,
+      relationship: ctx.r.relationship,
     }))
     .execute();
 

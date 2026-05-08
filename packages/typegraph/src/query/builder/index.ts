@@ -89,7 +89,9 @@ export {
   type RecursiveAliasValue,
   type RecursiveTraversalOptions,
   type SelectableEdge,
+  type SelectableEdgeMeta,
   type SelectableNode,
+  type SelectableNodeMeta,
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
@@ -97,6 +99,17 @@ export {
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";
+
+// Dynamic (string-keyed) builder types
+export {
+  type DynamicEdgeAccessor,
+  type DynamicEdgeType,
+  type DynamicFieldBuilder,
+  type DynamicNodeAccessor,
+  type DynamicNodeType,
+  type DynamicSelectableEdge,
+  type DynamicSelectableNode,
+} from "./dynamic";
 
 // Validation utilities
 export { validateSqlIdentifier } from "./validation";

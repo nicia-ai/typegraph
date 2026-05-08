@@ -41,6 +41,14 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import {
+  type DynamicEdgeAccessor,
+  type DynamicNodeAccessor,
+  type DynamicSelectableEdge,
+  type DynamicSelectableNode,
+  type IsDynamicEdgeType,
+  type IsDynamicNodeType,
+} from "./dynamic";
 
 export type { TraversalExpansion } from "../ast";
 
@@ -339,13 +347,19 @@ export type ObjectFieldAccessor<T> = BaseFieldAccessor &
  *   the node kind has no `searchable()` fields. Exposed at the type
  *   level on every accessor so refinements like
  *   `searchable().min(1)` do not make it disappear.
+ *
+ * For aliases declared via `fromDynamic` / `toDynamic`, `N` carries the
+ * dynamic brand and this resolves to `DynamicNodeAccessor` — schema
+ * properties go through a `.field(name)` discriminator.
  */
-export type NodeAccessor<N extends NodeType> = Readonly<{
-  id: StringFieldAccessor;
-  kind: StringFieldAccessor;
-  $fulltext: FulltextAccessor;
-}> &
-  PropsAccessor<N>;
+export type NodeAccessor<N extends NodeType> =
+  IsDynamicNodeType<N> extends true ? DynamicNodeAccessor
+  : Readonly<{
+      id: StringFieldAccessor;
+      kind: StringFieldAccessor;
+      $fulltext: FulltextAccessor;
+    }> &
+      PropsAccessor<N>;
 
 /**
  * Creates typed field accessors for an edge kind's properties.
@@ -361,14 +375,19 @@ type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
  * Properties are available at the top level for ergonomic access:
  * - `e.role` instead of `e.props.role`
  * - System fields: `e.id`, `e.kind`, `e.fromId`, `e.toId`
+ *
+ * Dynamic-mode counterpart: see `NodeAccessor` for the brand-detection
+ * pattern.
  */
-export type EdgeAccessor<E extends AnyEdgeType> = Readonly<{
-  id: StringFieldAccessor;
-  kind: StringFieldAccessor;
-  fromId: StringFieldAccessor;
-  toId: StringFieldAccessor;
-}> &
-  EdgePropsAccessor<E>;
+export type EdgeAccessor<E extends AnyEdgeType> =
+  IsDynamicEdgeType<E> extends true ? DynamicEdgeAccessor
+  : Readonly<{
+      id: StringFieldAccessor;
+      kind: StringFieldAccessor;
+      fromId: StringFieldAccessor;
+      toId: StringFieldAccessor;
+    }> &
+      EdgePropsAccessor<E>;
 
 // ============================================================
 // Selection Types
@@ -377,7 +396,7 @@ export type EdgeAccessor<E extends AnyEdgeType> = Readonly<{
 /**
  * Metadata for a selectable node result.
  */
-type SelectableNodeMeta = Readonly<{
+export type SelectableNodeMeta = Readonly<{
   version: number;
   validFrom: string | undefined;
   validTo: string | undefined;
@@ -392,18 +411,24 @@ type SelectableNodeMeta = Readonly<{
  * Properties from the schema are spread at the top level for ergonomic access:
  * - `node.name` instead of `node.props.name`
  * - System metadata is under `node.meta.*`
+ *
+ * For aliases declared via `fromDynamic` / `toDynamic` this resolves to
+ * `DynamicSelectableNode` — same wire shape, schema properties typed
+ * `unknown` for narrowing at the call site.
  */
-export type SelectableNode<N extends NodeType> = Readonly<{
-  id: string;
-  kind: N["kind"];
-  meta: SelectableNodeMeta;
-}> &
-  Readonly<z.infer<N["schema"]>>;
+export type SelectableNode<N extends NodeType> =
+  IsDynamicNodeType<N> extends true ? DynamicSelectableNode
+  : Readonly<{
+      id: string;
+      kind: N["kind"];
+      meta: SelectableNodeMeta;
+    }> &
+      Readonly<z.infer<N["schema"]>>;
 
 /**
  * Metadata for a selectable edge result.
  */
-type SelectableEdgeMeta = Readonly<{
+export type SelectableEdgeMeta = Readonly<{
   validFrom: string | undefined;
   validTo: string | undefined;
   createdAt: string;
@@ -417,15 +442,19 @@ type SelectableEdgeMeta = Readonly<{
  * Properties from the schema are spread at the top level for ergonomic access:
  * - `edge.role` instead of `edge.props.role`
  * - System metadata is under `edge.meta.*`
+ *
+ * Dynamic-mode counterpart: see `SelectableNode`.
  */
-export type SelectableEdge<E extends AnyEdgeType = EdgeType> = Readonly<{
-  id: string;
-  kind: E["kind"];
-  fromId: string;
-  toId: string;
-  meta: SelectableEdgeMeta;
-}> &
-  Readonly<z.infer<E["schema"]>>;
+export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
+  IsDynamicEdgeType<E> extends true ? DynamicSelectableEdge
+  : Readonly<{
+      id: string;
+      kind: E["kind"];
+      fromId: string;
+      toId: string;
+      meta: SelectableEdgeMeta;
+    }> &
+      Readonly<z.infer<E["schema"]>>;
 
 /**
  * Selection context passed to select callback.
@@ -552,6 +581,14 @@ export type QueryBuilderState = Readonly<{
   groupBy: GroupBySpec | undefined;
   having: PredicateExpression | undefined;
   fusion: HybridFusionOptions | undefined;
+  /**
+   * Aliases declared via `fromDynamic` / `toDynamic`. The accessor
+   * factories check membership to decide between typed and dynamic
+   * predicate surfaces.
+   */
+  dynamicNodeAliases: ReadonlySet<string>;
+  /** Edge aliases declared via `traverseDynamic` / `optionalTraverseDynamic`. */
+  dynamicEdgeAliases: ReadonlySet<string>;
 }>;
 
 /**

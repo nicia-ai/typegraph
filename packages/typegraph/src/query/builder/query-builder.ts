@@ -7,7 +7,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ValidationError } from "../../errors";
+import { KindNotFoundError, ValidationError } from "../../errors";
 import {
   type AggregateExpr,
   type FieldRef,
@@ -30,6 +30,11 @@ import {
   stringField,
 } from "../predicates";
 import { type FieldTypeInfo } from "../schema-introspector";
+import {
+  createDynamicFieldBuilder,
+  type DynamicEdgeType,
+  type DynamicNodeType,
+} from "./dynamic";
 import { ExecutableAggregateQuery } from "./executable-aggregate-query";
 import { ExecutableQuery } from "./executable-query";
 import { TraversalBuilder } from "./traversal-builder";
@@ -37,6 +42,7 @@ import {
   type AliasMap,
   type BaseFieldAccessor,
   type EdgeAccessor,
+  type EdgeAlias,
   type EdgeAliasMap,
   type NodeAccessor,
   type NodeAlias,
@@ -244,6 +250,44 @@ export class QueryBuilder<
   }
 
   /**
+   * String-keyed sibling of `from` for runtime-declared kinds. Throws
+   * `KindNotFoundError` if the kind is not registered. Predicates use
+   * the `n.field("name").number().gte(...)` discriminator.
+   */
+  fromDynamic<A extends string>(
+    kind: string,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { includeSubClasses?: boolean },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<DynamicNodeType>>,
+    EdgeAliases,
+    RecursiveAliases
+  > {
+    validateSqlIdentifier(alias);
+    if (!this.#config.registry.hasNodeType(kind)) {
+      throw new KindNotFoundError(kind, "node", {
+        graphId: this.#config.graphId,
+      });
+    }
+
+    const includeSubClasses = options?.includeSubClasses ?? false;
+    const kinds =
+      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+
+    const newState: QueryBuilderState = {
+      ...this.#state,
+      startAlias: alias,
+      currentAlias: alias,
+      startKinds: kinds,
+      includeSubClasses,
+      dynamicNodeAliases: new Set([...this.#state.dynamicNodeAliases, alias]),
+    };
+
+    return new QueryBuilder(this.#config, newState);
+  }
+
+  /**
    * Adds a WHERE clause for a node.
    */
   whereNode<A extends keyof Aliases & string>(
@@ -416,6 +460,33 @@ export class QueryBuilder<
   }
 
   /**
+   * String-keyed sibling of `traverse` for runtime-declared edge kinds.
+   * Throws `KindNotFoundError` if the edge kind is not registered.
+   */
+  traverseDynamic<EA extends string>(
+    edgeKind: string,
+    edgeAlias: EA,
+    options?: {
+      direction?: TraversalDirection;
+      expand?: TraversalExpansion;
+      from?: keyof Aliases & string;
+    },
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType>>,
+    string,
+    EA,
+    TraversalDirection,
+    false,
+    false,
+    false,
+    RecursiveAliases
+  > {
+    return this.#beginDynamicTraversal(edgeKind, edgeAlias, false, options);
+  }
+
+  /**
    * Optionally traverses an edge to another node (LEFT JOIN semantics).
    * If no matching edge/node exists, the result will include null values.
    *
@@ -518,6 +589,106 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       true,
+    );
+  }
+
+  /**
+   * String-keyed sibling of `optionalTraverse` for runtime-declared edge
+   * kinds. LEFT JOIN semantics — non-matching rows produce a null edge
+   * alias instead of dropping. Throws `KindNotFoundError` if the edge
+   * kind is not registered.
+   */
+  optionalTraverseDynamic<EA extends string>(
+    edgeKind: string,
+    edgeAlias: EA,
+    options?: {
+      direction?: TraversalDirection;
+      expand?: TraversalExpansion;
+      from?: keyof Aliases & string;
+    },
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, true>>,
+    string,
+    EA,
+    TraversalDirection,
+    true,
+    false,
+    false,
+    RecursiveAliases
+  > {
+    return this.#beginDynamicTraversal(edgeKind, edgeAlias, true, options);
+  }
+
+  /**
+   * Shared body for `traverseDynamic` and `optionalTraverseDynamic`.
+   * The only difference is the `optional` flag passed to the
+   * `TraversalBuilder` constructor.
+   */
+  #beginDynamicTraversal<EA extends string, Optional extends boolean>(
+    edgeKind: string,
+    edgeAlias: EA,
+    optional: Optional,
+    options:
+      | {
+          direction?: TraversalDirection;
+          expand?: TraversalExpansion;
+          from?: keyof Aliases & string;
+        }
+      | undefined,
+  ): TraversalBuilder<
+    G,
+    Aliases,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, Optional>>,
+    string,
+    EA,
+    TraversalDirection,
+    Optional,
+    false,
+    false,
+    RecursiveAliases
+  > {
+    validateSqlIdentifier(edgeAlias);
+    if (!this.#config.registry.hasEdgeType(edgeKind)) {
+      throw new KindNotFoundError(edgeKind, "edge", {
+        graphId: this.#config.graphId,
+      });
+    }
+
+    const direction = options?.direction ?? "out";
+    const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    const includeImplyingEdges =
+      expansion === "implying" || expansion === "all";
+    const includeInverseEdges = expansion === "inverse" || expansion === "all";
+    const fromAlias = options?.from ?? this.#state.currentAlias;
+
+    const edgeKinds = this.#expandTraversalEdgeKinds(
+      edgeKind,
+      includeImplyingEdges,
+    );
+    const inverseEdgeKinds =
+      includeInverseEdges ?
+        this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
+      : [];
+
+    const newState: QueryBuilderState = {
+      ...this.#state,
+      dynamicEdgeAliases: new Set([
+        ...this.#state.dynamicEdgeAliases,
+        edgeAlias,
+      ]),
+    };
+
+    return new TraversalBuilder(
+      this.#config,
+      newState,
+      edgeKinds,
+      edgeAlias,
+      direction,
+      fromAlias,
+      inverseEdgeKinds,
+      optional,
     );
   }
 
@@ -936,6 +1107,22 @@ export class QueryBuilder<
       this.#hasSearchableField(kindNames),
     );
 
+    if (this.#state.dynamicNodeAliases.has(alias)) {
+      return {
+        id: idAccessor,
+        kind: kindAccessor,
+        $fulltext: fulltextAccessor,
+        field: (name: string) =>
+          createDynamicFieldBuilder(
+            this.#config.schemaIntrospector,
+            alias,
+            name,
+            kindNames,
+            "node",
+          ),
+      } as unknown as NodeAccessor<NodeType>;
+    }
+
     // Use a Proxy to provide flattened property access
     return new Proxy({} as NodeAccessor<NodeType>, {
       get: (_, property: string | symbol) => {
@@ -961,7 +1148,7 @@ export class QueryBuilder<
   }
 
   #expandTraversalEdgeKinds(
-    edgeKind: keyof G["edges"] & string,
+    edgeKind: string,
     includeImplyingEdges: boolean,
   ): readonly string[] {
     return includeImplyingEdges ?
@@ -1048,6 +1235,23 @@ export class QueryBuilder<
     const toIdAccessor = stringField(
       fieldRef(alias, ["to_id"], { valueType: "string" }),
     );
+
+    if (this.#state.dynamicEdgeAliases.has(alias)) {
+      return {
+        id: idAccessor,
+        kind: kindAccessor,
+        fromId: fromIdAccessor,
+        toId: toIdAccessor,
+        field: (name: string) =>
+          createDynamicFieldBuilder(
+            this.#config.schemaIntrospector,
+            alias,
+            name,
+            edgeKindNames,
+            "edge",
+          ),
+      } as unknown as EdgeAccessor<EdgeType>;
+    }
 
     // Use a Proxy to provide flattened property access
     return new Proxy({} as EdgeAccessor<EdgeType>, {

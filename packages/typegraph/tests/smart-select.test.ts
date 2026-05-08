@@ -216,6 +216,8 @@ describe("createTrackingContext", () => {
     groupBy: undefined,
     having: undefined,
     fusion: undefined,
+    dynamicNodeAliases: new Set(),
+    dynamicEdgeAliases: new Set(),
   };
 
   it("records node props, system fields, and meta access", () => {

@@ -3,5 +3,5 @@
 import { createLibraryConfig } from "@typegraph/eslint-config/library";
 
 export default createLibraryConfig(import.meta.dirname, {
-  ignores: ["examples/**", "test-d/**", "type-smoke/**"],
+  ignores: ["examples/**", "test-d/**", "type-smoke/**", "tmp/**"],
 });
