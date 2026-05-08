@@ -372,13 +372,13 @@ expectAssignable<IndexDeclaration>(edgeIndex);
 expectType<"edge">(edgeIndex.entity);
 
 // ============================================================
-// Search facade — runtime-kind ergonomics
+// Search facade — graph-extension-kind ergonomics
 // ============================================================
 
 // `store.search.{fulltext,vector,hybrid,rebuildFulltext}` accepts
 // any string for the kind argument. The hit's `node` type narrows
 // to the concrete typed node when the literal is a compile-time
-// kind, and widens to the base `Node` for runtime kinds (no cast
+// kind, and widens to the base `Node` for graph-extension kinds (no cast
 // required).
 
 import { type Node } from "..";
@@ -393,7 +393,7 @@ declare const runtimeHits: Awaited<
 // Compile-time kind narrows to Node<typeof Person>.
 expectAssignable<Node<typeof Person>>(personHits[0]!.node);
 
-// Runtime kind widens to base Node — assignable to Node, not narrowed.
+// Graph-extension kind widens to base Node — assignable to Node, not narrowed.
 expectAssignable<Node>(runtimeHits[0]!.node);
 
 // vector + hybrid follow the same pattern.

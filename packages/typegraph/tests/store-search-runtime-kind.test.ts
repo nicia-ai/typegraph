@@ -1,11 +1,11 @@
 /**
- * `store.search` widening: runtime-extended kinds work without a type
+ * `store.search` widening: graph-extension kinds work without a type
  * cast.
  *
  * Before this change the kind argument was bounded by `NodeKinds<G>`,
- * which excludes runtime kinds added via `store.evolve()` and forced
+ * which excludes graph-extension kinds added via `store.evolve()` and forced
  * consumers to write `store.search.fulltext("Paper" as never, …)` —
- * the only place in the runtime-extension surface still requiring a
+ * the only place in the graph-extension surface still requiring a
  * cast (`getNodeCollection` / `getEdgeCollection` already solved the
  * same problem). The constraint relaxed to `K extends string` with a
  * runtime registry guard for misspelling protection.
@@ -29,8 +29,8 @@ const baseGraph = defineGraph({
   edges: {},
 });
 
-describe("store.search.fulltext on runtime kinds", () => {
-  it("accepts a runtime kind name without a type cast", async () => {
+describe("store.search.fulltext on graph-extension kinds", () => {
+  it("accepts a graph-extension kind name without a type cast", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -69,7 +69,7 @@ describe("store.search.fulltext on runtime kinds", () => {
     expect(top.title).toBe("Attention is all you need");
   });
 
-  it("misspelled runtime kind throws ConfigurationError at the call site", async () => {
+  it("misspelled graph-extension kind throws ConfigurationError at the call site", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -104,7 +104,7 @@ describe("store.search.fulltext on runtime kinds", () => {
 });
 
 describe("store.search.vector", () => {
-  it("runs vector-only similarity against a runtime kind without a type cast", async () => {
+  it("runs vector-only similarity against a graph-extension kind without a type cast", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -139,7 +139,7 @@ describe("store.search.vector", () => {
       queryEmbedding: [1, 0, 0, 0],
       limit: 5,
     });
-    // The runtime kind's auto-derived embedding flowed through the
+    // The graph-extension kind's auto-derived embedding flowed through the
     // backend's vector search path. Either we get hits ranked by
     // similarity, or we get an empty array (the backend honored the
     // call but the embedding column wasn't populated). Both are
@@ -163,8 +163,8 @@ describe("store.search.vector", () => {
   });
 });
 
-describe("store.search.hybrid on runtime kinds", () => {
-  it("accepts a runtime kind name without a type cast", async () => {
+describe("store.search.hybrid on graph-extension kinds", () => {
+  it("accepts a graph-extension kind name without a type cast", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -204,13 +204,13 @@ describe("store.search.hybrid on runtime kinds", () => {
     });
     // RRF fuses the two halves; we don't assert ordering (depends on
     // backend ranking deterministically), only that the call accepted
-    // a runtime kind without a cast.
+    // a graph-extension kind without a cast.
     expect(Array.isArray(results)).toBe(true);
   });
 });
 
-describe("store.search.rebuildFulltext on runtime kinds", () => {
-  it("accepts a runtime kind name without a type cast", async () => {
+describe("store.search.rebuildFulltext on graph-extension kinds", () => {
+  it("accepts a graph-extension kind name without a type cast", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(

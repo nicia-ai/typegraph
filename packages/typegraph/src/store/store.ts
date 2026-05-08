@@ -34,7 +34,7 @@ import {
 import { IncompatibleChangeError } from "../graph-extension/errors";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
-import { planRemovals, stripRuntime } from "../graph-extension/remove";
+import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -342,7 +342,7 @@ export class Store<G extends GraphDef> {
    * Returns the node collection for the given kind. Throws
    * `KindNotFoundError` when the kind is not registered.
    *
-   * The dominant runtime-kind access pattern: `await store.evolve(...)`
+   * The dominant graph-extension-kind access pattern: `await store.evolve(...)`
    * returns a new store, the caller immediately operates on the new
    * kind, and the null-check the optional variant requires is busywork.
    */
@@ -386,12 +386,12 @@ export class Store<G extends GraphDef> {
 
   /**
    * Returns a unified read of the merged schema — every compile-time
-   * and runtime-extended kind, every edge, every ontology relation,
+   * and graph-extension kind, every edge, every ontology relation,
    * with explicit `origin: "compile-time" | "runtime"` markers — plus
    * the persisted `extension` for round-tripping.
    *
    * Pure synchronous read built from the in-memory graph and the
-   * already-merged runtime document. `schemaVersion` and `schemaHash`
+   * already-merged graph-extension document. `schemaVersion` and `schemaHash`
    * are populated when the loader cached them at construction or after
    * `evolve` returns; consumers needing a fresh read should call
    * `backend.getActiveSchema(graphId)`.
@@ -864,7 +864,7 @@ export class Store<G extends GraphDef> {
    *
    * **Cost for purely additive extensions is proportional to schema
    * document size, not row count.** The commit is a single CAS write.
-   * Tightening changes against existing runtime-declared kinds run
+   * Tightening changes against existing graph-extension-declared kinds run
    * row-count probes for those affected kinds so populated kinds can
    * be rejected without a backfill.
    *
@@ -937,17 +937,35 @@ export class Store<G extends GraphDef> {
     // and returns the input graph unchanged for no-op re-evolves.
     const merged = mergeGraphExtension(baseline, extension);
 
-    // No-op evolve (extension already applied): reuse `this` so the
-    // agent loop's repeated `evolve(sameExt)` keeps warm registry,
-    // collection, and query caches instead of discarding them on every
-    // call. Eager still runs because the contract is "schema committed
-    // AND indexes materialized" — the local DB may have unmaterialized
-    // indexes even when the local graph hasn't changed (restart-parity
-    // flow, prior failed materialize).
-    if (merged === this.#graph) {
-      if (options?.ref !== undefined) options.ref.current = this;
-      if (options?.eager) await this.#runEagerOrThrow(this, options.eager);
-      return this;
+    // No-op evolve (extension already applied to the persisted state):
+    // skip the schema commit. We compare against `baseline` (the
+    // caught-up graph), not `this.#graph` (the local one). When
+    // another writer has just committed the same extension, the local
+    // store is stale — `baseline !== this.#graph` — but the merge is
+    // still a structural no-op, so re-committing would only churn the
+    // schema version. When the local store is also fresh
+    // (`baseline === this.#graph`) we return `this` so the agent
+    // loop's repeated `evolve(sameExt)` keeps warm registry,
+    // collection, and query caches; otherwise we return a clone
+    // wrapping the caught-up baseline so `introspect()` reflects the
+    // persisted version. Eager still runs in either case because the
+    // contract is "schema committed AND indexes materialized" — the
+    // local DB may have unmaterialized indexes even when the local
+    // graph hasn't changed (restart-parity flow, prior failed
+    // materialize).
+    if (merged === baseline) {
+      if (baseline === this.#graph) {
+        if (options?.ref !== undefined) options.ref.current = this;
+        if (options?.eager) await this.#runEagerOrThrow(this, options.eager);
+        return this;
+      }
+      const caughtUp = this.#cloneWithGraph(
+        baseline,
+        options?.ref,
+        schemaMetadataFromRow(activeRow),
+      );
+      if (options?.eager) await this.#runEagerOrThrow(caughtUp, options.eager);
+      return caughtUp;
     }
 
     // Classification gates the schema commit. Same-shape re-evolves
@@ -1162,7 +1180,7 @@ export class Store<G extends GraphDef> {
     // graph's compile-time slice. Take the host's compile-time
     // graph (the `Store<G>`'s original `#graph` minus extension
     // kinds) and merge the planned extension on top of it.
-    const compileTimeGraph = stripRuntime(this.#graph);
+    const compileTimeGraph = stripGraphExtension(this.#graph);
     const merged =
       plan.document === undefined ?
         compileTimeGraph
@@ -1310,11 +1328,14 @@ export class Store<G extends GraphDef> {
   }
 
   #catchUpToStored(storedSchema: SerializedSchema): G {
-    const withRuntime =
+    const withGraphExtension =
       storedSchema.extension === undefined ?
         this.#graph
       : mergeGraphExtension(this.#graph, storedSchema.extension);
-    return applyDeprecatedKinds(withRuntime, storedSchema.deprecatedKinds);
+    return applyDeprecatedKinds(
+      withGraphExtension,
+      storedSchema.deprecatedKinds,
+    );
   }
 
   /**
@@ -1324,7 +1345,7 @@ export class Store<G extends GraphDef> {
    *
    * Throws `ConfigurationError` with a verb-specific code when the
    * graph has not been initialized yet. The catch-up step replays the
-   * persisted runtime document and deprecation set on top of the
+   * persisted graph-extension document and deprecation set on top of the
    * compile-time graph so we diff against the same baseline another
    * writer would; the CAS guard inside `commitSchemaVersion` still
    * serializes the actual commit.
@@ -1642,7 +1663,7 @@ export type {
 
 import {
   ensureSchema as ensureSchemaImpl,
-  loadAndMergeRuntimeDocument,
+  loadAndMergeGraphExtensionDocument,
   migrateSchema as migrateSchemaImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
@@ -1691,7 +1712,7 @@ export async function createStoreWithSchema<G extends GraphDef>(
     graph: merged,
     activeRow,
     storedSchema,
-  } = await loadAndMergeRuntimeDocument(backend, graph);
+  } = await loadAndMergeGraphExtensionDocument(backend, graph);
 
   const result = await ensureSchemaImpl(backend, merged, {
     ...options,

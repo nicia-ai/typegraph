@@ -219,7 +219,7 @@ const nodeArb: fc.Arbitrary<NodeAndExample> = fc
 // Property tests
 // ============================================================
 
-describe("runtime extension property tests", () => {
+describe("graph extension property tests", () => {
   it("compiles every well-formed document and accepts the example payload", () => {
     fc.assert(
       fc.property(nodeArb, ({ kindName, properties, example }) => {

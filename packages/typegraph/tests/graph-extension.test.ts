@@ -14,7 +14,7 @@
  * results, and identical unique-constraint extraction.
  *
  * The compiler being one-way is what lets us hold this invariant: once a
- * runtime-declared kind goes through the document → Zod path it must be
+ * graph-extension-declared kind goes through the document → Zod path it must be
  * indistinguishable from a compile-time declaration, since downstream
  * code (introspection, fulltext sync, vector search, constraint
  * enforcement) doesn't know — and shouldn't care — which declaration
@@ -901,31 +901,31 @@ describe("validation failures", () => {
     );
   });
 
-  it("silently accepts refinements that don't apply to a property type (forward-compat)", () => {
-    // Behavior change pinned: per the format-versioning policy,
-    // unknown refinement keys ride forward — they're silently
-    // ignored at the validator boundary so a future v1.x.y can
-    // introduce new modifiers without breaking older readers. The
+  it("loose mode silently accepts refinements that don't apply to a property type (forward-compat)", () => {
+    // Per the format-versioning policy, the persistence-load path is
+    // loose: unknown refinement keys ride forward so a future v1.x.y
+    // writer's additive modifiers don't break an older v1 reader. The
     // misapplied refinement (e.g. `pattern` on a number) is dropped
     // from the compiled schema; the Zod schema for `score` remains a
-    // plain `z.number()` with no pattern check.
-    const document = defineGraphExtension({
+    // plain `z.number()` with no pattern check. Strict (authoring)
+    // mode rejects the same input — see the UNKNOWN_PROPERTY_KEY
+    // tests below.
+    const result = validateGraphExtension({
       nodes: {
         N: {
           properties: {
             score: {
               type: "number",
-              // `pattern` belongs on string, not number. Older
-              // behavior rejected this; new behavior silently drops
-              // the unknown refinement.
+              // `pattern` belongs on string, not number.
               pattern: "abc",
-            } as never,
+            },
           },
         },
       },
     });
-    // The document is accepted and the property compiles.
-    const compiled = compileSingleNode(document);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const compiled = compileSingleNode(result.data);
     const parsed = compiled.schema.safeParse({ score: 5 });
     expect(parsed.success).toBe(true);
     // Misapplied refinement does not gate the value — `5` matches
@@ -1289,6 +1289,62 @@ describe("validation failures", () => {
         N: {
           properties: {
             at: { type: "string", format: "date-time" },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects unknown property refinement keys in strict mode", () => {
+    // The LLM-trust-boundary case: a typo like `minLenght` on a string
+    // property used to silently compile to `z.string()` with no length
+    // constraint. Strict mode surfaces it with UNKNOWN_PROPERTY_KEY so
+    // a reviewer can catch agent-induced typos before commit.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            N: {
+              properties: {
+                title: { type: "string", minLenght: 5 } as never,
+              },
+            },
+          },
+        }),
+      "UNKNOWN_PROPERTY_KEY",
+      "/nodes/N/properties/title/minLenght",
+    );
+  });
+
+  it("rejects per-type-mismatched refinement keys in strict mode", () => {
+    // `min` is a number-property key; on a string it's a typo for
+    // `minLength` and silently compiled to a constraint-less schema.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            N: {
+              properties: {
+                title: { type: "string", min: 1 } as never,
+              },
+            },
+          },
+        }),
+      "UNKNOWN_PROPERTY_KEY",
+      "/nodes/N/properties/title/min",
+    );
+  });
+
+  it("accepts unknown property refinement keys in loose (persistence-load) mode", () => {
+    // Forward-compat: a future v1.x writer may add a new refinement; an
+    // older v1 reader still parses the document. The load path leaves
+    // strict off so the unknown key is ignored rather than rejected.
+    const result = validateGraphExtension({
+      nodes: {
+        N: {
+          properties: {
+            title: { type: "string", futureRefinement: 42 },
           },
         },
       },

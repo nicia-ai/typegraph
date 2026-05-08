@@ -31,7 +31,7 @@ import {
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
-  buildRuntimeOntologyKeySet,
+  buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
@@ -156,7 +156,7 @@ export function introspectSchema<G extends GraphDef>(
     });
   }
 
-  const runtimeOntologyKeys = buildRuntimeOntologyKeySet(extension);
+  const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(extension);
   const ontology: OntologyIntrospection[] = graph.ontology.map((relation) => ({
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),

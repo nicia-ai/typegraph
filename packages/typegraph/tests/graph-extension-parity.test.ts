@@ -1,5 +1,5 @@
 /**
- * Runtime extension — public-Store-API parity matrix.
+ * Graph extension — public-Store-API parity matrix.
  *
  * Issue 101's acceptance gate: every public Store API path must work
  * when the kind is declared via `evolve(extension)`. The basic CRUD
@@ -8,20 +8,20 @@
  *
  *   - Query predicates (`.find({ where })`, `.count({ where })`)
  *   - Subgraphs (`store.subgraph(...)`)
- *   - Fulltext (`store.search.fulltext` against a runtime kind whose
+ *   - Fulltext (`store.search.fulltext` against a graph-extension kind whose
  *     property carries the `searchable` modifier)
- *   - Ontology (subClassOf inference across runtime kinds)
+ *   - Ontology (subClassOf inference across graph-extension kinds)
  *   - Graph algorithms (`store.algorithms.neighbors` / `shortestPath`)
  *
  * The static type system narrows `Store<G>` to compile-time kinds, so
- * reaching a runtime kind through a typed API requires the documented
+ * reaching a graph-extension kind through a typed API requires the documented
  * `"<kind>" as never` cast — same pattern the example file uses. That
- * is the runtime-extension contract: the dynamic CRUD accessor (
+ * is the graph-extension contract: the dynamic CRUD accessor (
  * `getNodeCollection`) is fully widened, and the few generically-typed
  * facades (`search.fulltext`, `algorithms.*`, `subgraph`) accept a
  * cast at the kind/edge name parameter.
  *
- * SQLite-only here (the bundled test backend). The runtime-extension
+ * SQLite-only here (the bundled test backend). The graph-extension
  * code path is dialect-agnostic — kind resolution and merge happen in
  * dialect-neutral code, and the dialect-specific tests
  * (`tests/backends/postgres/`) already verify the same operations
@@ -55,7 +55,7 @@ const baseGraph = defineGraph({
 // ============================================================
 
 describe("Store.evolve — query predicate parity", () => {
-  it("collection.find with where + limit works on a runtime kind", async () => {
+  it("collection.find with where + limit works on a graph-extension kind", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -79,10 +79,10 @@ describe("Store.evolve — query predicate parity", () => {
     type Article = Readonly<{ id: string; title: string; wordCount: number }>;
 
     // The dynamic-collection `find({ where })` accepts an accessor-
-    // backed predicate just like the typed collection. Runtime
+    // backed predicate just like the typed collection. Graph-extension
     // kinds participate in predicate compilation through the same
     // path. The `as never` on the callback bypasses the static
-    // schema-shape type — runtime kinds aren't reflected in the
+    // schema-shape type — graph-extension kinds aren't reflected in the
     // generic, but the AST is built dynamically at runtime.
     const longArticles = (await articles.find({
       where: ((props: { wordCount: { gte: (n: number) => unknown } }) =>
@@ -100,7 +100,7 @@ describe("Store.evolve — query predicate parity", () => {
     expect(firstTwo).toHaveLength(2);
   });
 
-  it("count with where filters runtime-kind rows correctly", async () => {
+  it("count with where filters graph-extension-kind rows correctly", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -136,7 +136,7 @@ describe("Store.evolve — query predicate parity", () => {
 // ============================================================
 
 describe("Store.evolve — subgraph parity", () => {
-  it("store.subgraph traverses through runtime edges from a compile-time root", async () => {
+  it("store.subgraph traverses through graph-extension edges from a compile-time root", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -151,13 +151,13 @@ describe("Store.evolve — subgraph parity", () => {
     // Seed: one Person, two Tags, one edge from each Tag to Person.
     const alice = await evolved.nodes.Person.create({ name: "alice" });
     const tags = evolved.getNodeCollection("Tag")!;
-    type RuntimeTag = Readonly<{ id: string; kind: string; label: string }>;
+    type ExtensionTag = Readonly<{ id: string; kind: string; label: string }>;
     const featured = (await tags.create({
       label: "featured",
-    })) as unknown as RuntimeTag;
+    })) as unknown as ExtensionTag;
     const archived = (await tags.create({
       label: "archived",
-    })) as unknown as RuntimeTag;
+    })) as unknown as ExtensionTag;
     const appliesTo = evolved.getEdgeCollection("appliesTo")!;
     await appliesTo.create({ kind: "Tag", id: featured.id }, alice, {});
     await appliesTo.create({ kind: "Tag", id: archived.id }, alice, {});
@@ -166,7 +166,7 @@ describe("Store.evolve — subgraph parity", () => {
     // edge. `direction: "both"` lets the traversal reach Tag nodes
     // via the incoming edge — `appliesTo` is declared `Tag → Person`,
     // so the default outward-only direction wouldn't pick them up.
-    // The edge name is a runtime kind, so it requires the `as never`
+    // The edge name is a graph-extension kind, so it requires the `as never`
     // cast — same pattern as `store.search.fulltext("Paper" as never)`
     // shown in the runnable example.
     const result = await evolved.subgraph(alice.id, {
@@ -176,7 +176,7 @@ describe("Store.evolve — subgraph parity", () => {
     });
 
     // The two Tag nodes were reached via the appliesTo edges.
-    // `node.kind` is typed against compile-time kinds; runtime kind
+    // `node.kind` is typed against compile-time kinds; graph-extension kind
     // comparison goes through an `unknown` cast.
     const tagIds = [...result.nodes.values()]
       .filter((node) => (node.kind as unknown as string) === "Tag")
@@ -191,7 +191,7 @@ describe("Store.evolve — subgraph parity", () => {
 // ============================================================
 
 describe("Store.evolve — fulltext parity", () => {
-  it("searchable() modifier on a runtime kind feeds store.search.fulltext", async () => {
+  it("searchable() modifier on a graph-extension kind feeds store.search.fulltext", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -218,8 +218,8 @@ describe("Store.evolve — fulltext parity", () => {
     });
 
     // No cast: `store.search.fulltext` accepts any registered kind
-    // — compile-time or runtime. The hit's `node` type widens to the
-    // base `Node` for runtime kinds since the literal isn't in
+    // — compile-time or graph-extension. The hit's `node` type widens to the
+    // base `Node` for graph-extension kinds since the literal isn't in
     // `Store<G>`'s static type.
     const results = await evolved.search.fulltext("Note", {
       query: "climate temperatures",
@@ -257,15 +257,15 @@ describe("Store.evolve — fulltext parity", () => {
       limit: 10,
     });
 
-    // Runtime equivalent.
+    // Graph-extension equivalent.
     const runtimeBackend = createTestBackend();
-    const baseForRuntime = defineGraph({
+    const baseForExtension = defineGraph({
       id: "runtime_parity_fulltext_runtime",
       nodes: { Person: { type: Person } },
       edges: {},
     });
     const [runtimeBase] = await createStoreWithSchema(
-      baseForRuntime,
+      baseForExtension,
       runtimeBackend,
     );
     const evolved = await runtimeBase.evolve(
@@ -310,7 +310,7 @@ describe("Store.evolve — fulltext parity", () => {
 // ============================================================
 
 describe("Store.evolve — ontology parity", () => {
-  it("subClassOf relations across runtime kinds participate in registry closures", async () => {
+  it("subClassOf relations across graph-extension kinds participate in registry closures", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -338,8 +338,8 @@ describe("Store.evolve — ontology parity", () => {
     );
   });
 
-  it("subClassOf bridges runtime kind to compile-time kind", async () => {
-    // A runtime kind can be declared as a subclass of a compile-time
+  it("subClassOf bridges graph-extension kind to compile-time kind", async () => {
+    // A graph-extension kind can be declared as a subclass of a compile-time
     // kind. The ontology closure must pick up the relation.
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
@@ -362,7 +362,7 @@ describe("Store.evolve — ontology parity", () => {
 // ============================================================
 
 describe("Store.evolve — algorithm parity", () => {
-  it("neighbors traverses through runtime edges between runtime kinds", async () => {
+  it("neighbors traverses through graph-extension edges between graph-extension kinds", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -406,7 +406,7 @@ describe("Store.evolve — algorithm parity", () => {
     );
   });
 
-  it("shortestPath traverses runtime edges to compile-time targets", async () => {
+  it("shortestPath traverses graph-extension edges to compile-time targets", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -419,11 +419,11 @@ describe("Store.evolve — algorithm parity", () => {
     );
 
     const alice = await evolved.nodes.Person.create({ name: "alice" });
-    type RuntimeTag = Readonly<{ id: string; kind: string; label: string }>;
+    type ExtensionTag = Readonly<{ id: string; kind: string; label: string }>;
     const tags = evolved.getNodeCollection("Tag")!;
     const featured = (await tags.create({
       label: "featured",
-    })) as unknown as RuntimeTag;
+    })) as unknown as ExtensionTag;
     const appliesTo = evolved.getEdgeCollection("appliesTo")!;
     await appliesTo.create({ kind: "Tag", id: featured.id }, alice, {});
 

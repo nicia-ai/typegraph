@@ -18,8 +18,8 @@ This guide covers the core verbs:
 | `store.evolve(extension)`                        | Atomically commit a new schema version with the extension applied |
 | `store.materializeIndexes()`                     | Run declared `CREATE INDEX` DDL against the live database         |
 | `store.deprecateKinds(...)` / `undeprecateKinds` | Soft-deprecate kinds for codegen / lint signaling                 |
-| `store.removeKinds(...)`                         | Remove runtime-declared kinds from the active schema              |
-| `store.materializeRemovals()`                    | Delete rows queued by runtime-kind removal                        |
+| `store.removeKinds(...)`                         | Remove graph-extension-declared kinds from the active schema      |
+| `store.materializeRemovals()`                    | Delete rows queued by graph-extension-kind removal                |
 
 For the schema-management primitives that graph extensions ride on top
 of, see [Schema Migrations](/schema-management) and [Evolving
@@ -189,7 +189,7 @@ the persisted form).
 ### Relational indexes
 
 Pass `indexes: [...]` at the document top level to declare relational
-indexes for runtime or compile-time host kinds:
+indexes for graph-extension or compile-time host kinds:
 
 ```ts
 const proposal = defineGraphExtension({
@@ -213,15 +213,15 @@ const proposal = defineGraphExtension({
 });
 ```
 
-Index `name`s are unique across the merged graph. A runtime index that
+Index `name`s are unique across the merged graph. A graph-extension index that
 reuses a compile-time index name, or a later extension that reuses an
-earlier runtime index name for a different declaration, is rejected.
+earlier graph-extension index name for a different declaration, is rejected.
 
 ### Edges
 
 Edges follow the same shape as nodes but add `from: [...]` and `to:
 [...]` listing the kind names they connect. Both endpoint kinds must
-already exist (compile-time or runtime) when `evolve()` runs.
+already exist (compile-time or graph-extension) when `evolve()` runs.
 
 ### Ontology
 
@@ -402,7 +402,7 @@ vector indexes against SQLite without the `sqlite-vec` extension, or
 `embedding(dims, { indexType: "none" })` opting out of automatic
 materialization.
 
-Runtime-declared relational indexes use the same declaration shape as
+Graph-extension-declared relational indexes use the same declaration shape as
 compile-time `defineNodeIndex` / `defineEdgeIndex`, but in a
 JSON-serializable form. They are persisted in `schema_doc.extension`,
 re-derived on restart, and surface in `store.graph.indexes` with
@@ -513,11 +513,11 @@ Use cases:
 
 ## `store.removeKinds(...)` / `materializeRemovals()`
 
-`removeKinds()` removes runtime-declared kinds from the active schema.
+`removeKinds()` removes graph-extension-declared kinds from the active schema.
 It is intentionally two-phase:
 
 1. **Schema commit.** `removeKinds(names)` rewrites the persisted graph
-   extension without the named runtime kinds, cascades extension edges
+   extension without the named graph-extension kinds, cascades extension edges
    and ontology relations that can no longer resolve, and commits a
    new schema version with CAS.
 2. **Data cleanup.** `materializeRemovals()` deletes rows for removed
@@ -534,9 +534,9 @@ Pass `{ eager: true }` to run cleanup inline after the schema commit:
 const withoutPaper = await evolved.removeKinds(["Paper"], { eager: true });
 ```
 
-Removal only applies to runtime-declared kinds. Removing a compile-time
+Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code
-for compile-time schema removal. Removing a runtime kind that is still
+for compile-time schema removal. Removing a graph-extension kind that is still
 referenced by a compile-time edge or ontology relation throws
 `KindHasReferentsError`, because TypeGraph cannot rewrite your
 compiled graph for you.
@@ -607,7 +607,7 @@ async function evolveWithRetry<G extends GraphDef>(
 ```
 
 The internal `#catchUpToStored` step inside `evolve()` (and
-`deprecateKinds`, `materializeIndexes`) folds the persisted runtime
+`deprecateKinds`, `materializeIndexes`) folds the persisted graph-extension
 document and deprecation set into the local baseline before computing
 the next state, so a stale store applying an extension on top of an
 out-of-date baseline doesn't trample another writer's progress.

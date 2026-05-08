@@ -285,9 +285,15 @@ export function createSqliteTables(
   /**
    * Per-deployment record of extension kinds removed via
    * `store.removeKinds()` whose data has not yet been cleaned up by
-   * `store.materializeRemovals()`. Keyed on `(graph_id, kind_name)`.
-   * `removed_at` is null until the data-cleanup pass succeeds; the
-   * pending set is "rows where removed_at IS NULL".
+   * `store.materializeRemovals()`. Keyed on `(graph_id, kind_name,
+   * entity, schema_version)` — each remove operation is its own row.
+   * `entity` separates a node and an edge that share a kind name; the
+   * `schema_version` discriminator keeps a re-add-then-re-remove cycle
+   * (Foo removed at v=N, re-added, then removed again at v=N+2) from
+   * collapsing onto the prior row, where the COALESCE-on-failure rule
+   * would preserve the earlier `removed_at` and silently skip the new
+   * pending cleanup. `removed_at` is null until the data-cleanup pass
+   * succeeds; the pending set is "rows where removed_at IS NULL".
    */
   const kindRemovals = sqliteTable(
     n.kindRemovals,
@@ -300,7 +306,11 @@ export function createSqliteTables(
       lastAttemptedAt: text("last_attempted_at").notNull(),
       lastError: text("last_error"),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.kindName] })],
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+      }),
+    ],
   );
 
   return {

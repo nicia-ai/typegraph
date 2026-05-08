@@ -527,7 +527,7 @@ export type RecordIndexMaterializationParams = Readonly<{
 
 /**
  * One row of the per-deployment `typegraph_kind_removals` table:
- * a runtime kind that has been removed from the schema and whose
+ * a graph-extension kind that has been removed from the schema and whose
  * data may or may not have been cleaned up yet.
  */
 export type KindRemovalRow = Readonly<{
@@ -809,7 +809,7 @@ export type GraphBackend = Readonly<{
   ensureKindRemovalsTable?: () => Promise<void>;
 
   /**
-   * List runtime kind removals whose data-cleanup pass has not yet
+   * List graph-extension kind removals whose data-cleanup pass has not yet
    * succeeded for this `graphId`. Returns rows with
    * `removedAt: undefined`. Order is unspecified; callers materialize
    * one-at-a-time and don't depend on it.

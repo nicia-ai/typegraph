@@ -301,7 +301,13 @@ export function createPostgresTables(
    * `store.removeKinds()` whose data has not yet been cleaned up by
    * `store.materializeRemovals()`. Same per-deployment rationale as
    * `indexMaterializations`: two replicas of the same `schema_doc` may
-   * be at different stages of the data-cleanup phase.
+   * be at different stages of the data-cleanup phase. Keyed on
+   * `(graph_id, kind_name, entity, schema_version)` — each remove
+   * operation is its own row. `entity` separates a node and an edge
+   * that share a kind name; the `schema_version` discriminator keeps a
+   * re-add-then-re-remove cycle from collapsing onto the prior row,
+   * where the COALESCE-on-failure rule would preserve the earlier
+   * `removed_at` and silently skip the new pending cleanup.
    */
   const kindRemovals = pgTable(
     n.kindRemovals,
@@ -316,7 +322,11 @@ export function createPostgresTables(
       }).notNull(),
       lastError: text("last_error"),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.kindName] })],
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+      }),
+    ],
   );
 
   return {

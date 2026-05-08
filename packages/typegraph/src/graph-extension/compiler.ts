@@ -45,7 +45,7 @@ import { compactUndefined } from "./internal";
 // ============================================================
 
 /**
- * Compiled output of a runtime extension document, ready to merge into a
+ * Compiled output of a graph-extension document, ready to merge into a
  * host `GraphDef`. Each `OntologyRelation`'s `from` / `to` is a `NodeType`
  * when the document name matches a declared kind, or the raw string
  * (treated as an external IRI by downstream code) otherwise.
@@ -92,7 +92,7 @@ type CompiledEdge = Readonly<{
 // ============================================================
 
 /**
- * Compiles a validated runtime extension document into Zod-bearing kinds.
+ * Compiles a validated graph-extension document into Zod-bearing kinds.
  *
  * Pure function with no I/O. Assumes the input has already passed
  * `validateGraphExtension(...)` — invariant violations (e.g. unknown
@@ -126,7 +126,7 @@ export function compileGraphExtension(
     edges: Object.freeze(edges),
     ontology: Object.freeze(ontology),
     // Indexes pass through — the merge step resolves the kind name
-    // against runtime-or-compile-time NodeType / EdgeType and builds
+    // against graph-extension-or-compile-time NodeType / EdgeType and builds
     // the final `IndexDeclaration` via `defineNodeIndex` /
     // `defineEdgeIndex`.
     indexes: Object.freeze([...(document.indexes ?? [])]),

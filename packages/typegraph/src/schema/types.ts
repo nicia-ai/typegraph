@@ -249,7 +249,7 @@ const indexDeclarationZod = z.discriminatedUnion("entity", [
 // ============================================================
 
 // Boundary parser for the persisted graph extension. The pure-value
-// validator in `runtime/validation.ts` is the authoritative shape
+// validator in `graph-extension/validation.ts` is the authoritative shape
 // check (re-run on every load via the extension compiler); this
 // schema's job is only to confirm the JSON shape is round-trippable
 // and to keep `SerializedSchema.extension` typed.
@@ -286,7 +286,7 @@ const runtimeOntologyRelationZod = z
   })
   .loose();
 
-// Runtime-declared relational indexes (analogue of compile-time
+// Graph-extension-declared relational indexes (analogue of compile-time
 // `defineNodeIndex` / `defineEdgeIndex` passed to defineGraph).
 // Persisted with `.loose()` so future v1.x.y additive fields ride
 // forward without a major bump.

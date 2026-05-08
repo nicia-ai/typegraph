@@ -70,7 +70,57 @@ const SUPPORTED_STRING_FORMATS = new Set([
 ]);
 
 /**
- * Top-level keys recognized by the v1 runtime document. New additive
+ * Recognized keys shared by every property-type descriptor. The strict
+ * authoring path rejects unknown sibling keys against the union of this
+ * set and the per-type allowlist below; the loose persistence-load path
+ * passes them through untouched (a future v1.x.y writer may emit
+ * additive keys an older v1 reader doesn't recognize).
+ */
+const COMMON_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  "type",
+  "optional",
+  "description",
+  "searchable",
+  "embedding",
+]);
+
+const PROPERTY_TYPE_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  string: new Set(["minLength", "maxLength", "pattern", "format"]),
+  number: new Set(["min", "max", "int"]),
+  boolean: new Set(),
+  enum: new Set(["values"]),
+  array: new Set(["items"]),
+  object: new Set(["properties"]),
+};
+
+/**
+ * In strict mode, surface an `UNKNOWN_PROPERTY_KEY` issue for every
+ * key on `raw` that's not in either allowlist. This is the LLM /
+ * agent-trust-boundary check: a typo like `minLenght: 5` on a string
+ * field, or a refinement key from a future v1.x that this library
+ * doesn't recognize, would otherwise compile to a weaker schema with
+ * no signal to the reviewer.
+ */
+function rejectUnknownPropertyKeys(
+  raw: Record<string, unknown>,
+  type: string,
+  path: string,
+  issues: GraphExtensionIssue[],
+): void {
+  const typeKeys = PROPERTY_TYPE_KEYS[type] ?? new Set<string>();
+  const recognized = [...COMMON_PROPERTY_KEYS, ...typeKeys];
+  for (const key of Object.keys(raw)) {
+    if (COMMON_PROPERTY_KEYS.has(key) || typeKeys.has(key)) continue;
+    issues.push({
+      path: `${path}/${escapePointerSegment(key)}`,
+      message: `Unknown property key "${key}" for type "${type}". Recognized keys: ${recognized.join(", ")}.`,
+      code: "UNKNOWN_PROPERTY_KEY",
+    });
+  }
+}
+
+/**
+ * Top-level keys recognized by the v1 graph-extension document. New additive
  * keys land here as the document format grows. Used by the strict
  * authoring path (`defineGraphExtension`) to surface typos like
  * `node` instead of `nodes`; the loose persistence-load path ignores
@@ -610,7 +660,7 @@ function validateOntology(
 
   // Cycle detection on transitive hierarchical relations declared *within*
   // this document. Cross-document cycles will be caught at evolve() time
-  // when the runtime extension is merged with the existing graph.
+  // when the graph extension is merged with the existing graph.
   detectHierarchicalCycles(ontology, issues);
 
   // disjointWith ↔ subClassOf contradictions: declaring two kinds as
@@ -916,7 +966,11 @@ function validateIndexEntry(
     scope = raw.scope as ExtensionIndex["scope"];
   }
 
-  const where = validateRuntimeIndexWhere(raw.where, `${path}/where`, issues);
+  const where = validateGraphExtensionIndexWhere(
+    raw.where,
+    `${path}/where`,
+    issues,
+  );
 
   if (entity === "node") {
     return compactUndefined<ExtensionIndex>({
@@ -1020,7 +1074,7 @@ function validateStringList(
   return result;
 }
 
-function validateRuntimeIndexWhere(
+function validateGraphExtensionIndexWhere(
   raw: unknown,
   path: string,
   issues: GraphExtensionIssue[],
@@ -1138,6 +1192,14 @@ function validateProperty(
     });
     return undefined;
   }
+
+  // Strict authoring mode: reject unknown sibling keys against the
+  // per-type allowlist BEFORE dispatch. A typo like `minLenght` on a
+  // string property would otherwise compile to a `z.string()` with no
+  // length constraint and ship through to ingest. Persistence-load
+  // mode skips this so a future v1.x.y writer's additive keys ride
+  // forward.
+  if (strict) rejectUnknownPropertyKeys(property, type, path, issues);
 
   switch (type) {
     case "string": {
@@ -1999,20 +2061,21 @@ function validateAnnotations(
 // Helpers
 // ============================================================
 
-// `rejectUnknownRefinements` was removed to match the documented
-// format-versioning policy: additive minor changes (new optional
-// property modifiers in a future v1.x.y) ride forward. Older runtimes
-// silently ignore unknown refinement keys — the older compiler builds
-// a Zod schema from the refinements it recognizes, and the new
-// modifier's behavior simply isn't applied. Rejecting unknown keys
-// here would have made forward-compat impossible.
-//
-// Trade-off: typos (`displayName` instead of `description`) will not
-// be caught at the validator boundary anymore. They're caught at the
-// `defineGraphExtension` call site by TypeScript when the consumer
-// uses the typed API; only untyped JSON-shaped input slips through.
-// `ExtensionPropertyType` is exported so consumers writing runtime-shape
-// generators can add their own strict-key check if needed.
+// Two-mode unknown-key handling — see `rejectUnknownPropertyKeys`
+// above. Strict authoring (`defineGraphExtension`,
+// `validateGraphExtension(_, { strict: true })`) rejects unknown
+// sibling keys at every property level so a `minLenght`-style typo
+// from an LLM proposal surfaces with a JSON-pointer path instead of
+// silently compiling to a weaker schema. Persistence load
+// (`validateGraphExtension(_, { strict: false })`, used by the
+// `createStoreWithSchema` reader) ignores unknown keys so a future
+// v1.x.y writer with additive refinements still parses on an older
+// v1 reader — the older compiler builds the Zod schema from the
+// refinements it recognizes, and the new modifier's behavior simply
+// isn't applied. `ExtensionPropertyType` is exported so consumers
+// writing runtime-shape generators can add their own strict-key check
+// if needed for additional validation slots beyond what this
+// validator covers.
 
 function validateNonNegativeInteger(
   value: unknown,

@@ -1,6 +1,6 @@
 /**
- * Runtime-extension removal: mutate a `GraphExtension` to drop a
- * set of runtime kinds with cascading edge / ontology cleanup.
+ * Graph-extension removal: mutate a `GraphExtension` to drop a
+ * set of graph-extension kinds with cascading edge / ontology cleanup.
  *
  * Pure function — no I/O, no compilation. The caller (`store.removeKinds`)
  * handles persistence (CAS commit of the resulting document) and the
@@ -10,7 +10,7 @@
  *   1. Is it valid to remove these names? Compile-time kinds are
  *      rejected (compile-time kinds are removed by recompiling and
  *      redeploying — persisting "removed-compile-time-kind" state in
- *      `schema_doc` is incoherent). Runtime kinds referenced by a
+ *      `schema_doc` is incoherent). Graph-extension kinds referenced by a
  *      compile-time edge or ontology relation are also rejected
  *      (removing them would orphan compile-time references at the
  *      next deploy).
@@ -36,7 +36,7 @@ import {
   type GraphExtension,
 } from "./extension-types";
 import {
-  buildRuntimeOntologyKeySet,
+  buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
 } from "./ontology-keys";
 
@@ -57,10 +57,10 @@ type RemovalPlan = Readonly<{
 /**
  * Plans the removal of a set of names from a host graph's
  * extension, validating against the host graph's compile-time
- * kinds and runtime kinds. Throws on the rejection cases:
+ * kinds and graph-extension kinds. Throws on the rejection cases:
  *
  *   - `RemoveCompileTimeKindError` if any name is a compile-time kind.
- *   - `KindHasReferentsError` if a runtime kind is referenced
+ *   - `KindHasReferentsError` if a graph-extension kind is referenced
  *     by a compile-time edge endpoint or ontology relation.
  *
  * Returns a plan describing the new document and which kinds will be
@@ -103,7 +103,7 @@ export function planRemovals<G extends GraphDef>(
     runtimeEdgeNames.has(name),
   );
 
-  // Compile-time-edge referent check: a runtime kind being removed
+  // Compile-time-edge referent check: a graph-extension kind being removed
   // cannot remain a target of any compile-time edge or ontology
   // relation, because the compile-time declaration would resurrect
   // the reference on the next deploy.
@@ -126,7 +126,7 @@ export function planRemovals<G extends GraphDef>(
     };
   }
 
-  // Build the cascading-edges set: any runtime edge whose `from` or
+  // Build the cascading-edges set: any graph-extension edge whose `from` or
   // `to` becomes empty after removal is also removed; edges with
   // surviving endpoints are retained with the removed name pruned.
   const removedNodeKindsSet = new Set(removedNodeKinds);
@@ -175,9 +175,9 @@ export function planRemovals<G extends GraphDef>(
       !removedNodeKindsSet.has(relation.to),
   );
 
-  // Drop runtime indexes referencing removed kinds (relational + edge
-  // entries; the auto-derived vector indexes follow the runtime nodes
-  // they were derived from, so dropping the runtime node implicitly
+  // Drop graph-extension indexes referencing removed kinds (relational + edge
+  // entries; the auto-derived vector indexes follow the graph-extension nodes
+  // they were derived from, so dropping the graph-extension node implicitly
   // drops the index when `mergeGraphExtension` re-runs auto-derive
   // against the smaller node set).
   const allRemovedKinds = new Set([
@@ -210,21 +210,21 @@ export function planRemovals<G extends GraphDef>(
 }
 
 /**
- * Returns a graph with the runtime slice stripped: nodes and edges
+ * Returns a graph with the graph-extension slice stripped: nodes and edges
  * registered by `mergeGraphExtension` are dropped along with the
  * `extension` itself, leaving the compile-time-only graph.
  *
  * Used by `removeKinds` as the base for re-merging the post-removal
- * runtime document — the alternative (mutating `graph.nodes` /
+ * graph-extension document — the alternative (mutating `graph.nodes` /
  * `graph.edges` in-place) would skip the merge step's validation
  * (collision checks, endpoint resolution).
  */
-export function stripRuntime<G extends GraphDef>(graph: G): G {
+export function stripGraphExtension<G extends GraphDef>(graph: G): G {
   const document = graph.extension;
   if (document === undefined) return graph;
   const runtimeNodeNames = new Set(Object.keys(document.nodes ?? {}));
   const runtimeEdgeNames = new Set(Object.keys(document.edges ?? {}));
-  const runtimeOntologyKeys = buildRuntimeOntologyKeySet(document);
+  const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(document);
 
   const compileNodes: Record<string, (typeof graph.nodes)[string]> = {};
   for (const [name, registration] of Object.entries(graph.nodes)) {
@@ -240,7 +240,7 @@ export function stripRuntime<G extends GraphDef>(graph: G): G {
     (relation) => !runtimeOntologyKeys.has(compileTimeOntologyKey(relation)),
   );
   // Drop runtime-origin indexes too — `mergeGraphExtension` re-runs
-  // auto-derivation against the new (smaller) runtime kind set.
+  // auto-derivation against the new (smaller) graph-extension kind set.
   const compileIndexes = (graph.indexes ?? []).filter(
     (index) => index.origin !== "runtime",
   );
@@ -277,7 +277,9 @@ function findCompileTimeReferents<G extends GraphDef>(
     }
   }
 
-  const runtimeOntologyKeys = buildRuntimeOntologyKeySet(graph.extension);
+  const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(
+    graph.extension,
+  );
   for (const relation of graph.ontology) {
     if (runtimeOntologyKeys.has(compileTimeOntologyKey(relation))) continue;
     const fromName = getTypeName(relation.from);

@@ -1217,7 +1217,7 @@ describe("computeSchemaDiff", () => {
       expect(diff.summary).toContain("0 removed");
     });
 
-    it("includes runtime document in the summary when only it changed", () => {
+    it("includes graph-extension document in the summary when only it changed", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
@@ -1229,7 +1229,7 @@ describe("computeSchemaDiff", () => {
       const diff = computeSchemaDiff(before, after);
 
       expect(diff.hasChanges).toBe(true);
-      expect(diff.summary).toContain("Runtime document");
+      expect(diff.summary).toContain("Graph extension document");
     });
   });
 

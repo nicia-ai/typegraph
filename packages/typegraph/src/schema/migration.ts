@@ -108,14 +108,14 @@ export type IndexChange = Readonly<{
 }>;
 
 // ============================================================
-// Runtime Document Changes
+// Graph Extension Document Changes
 // ============================================================
 
 /**
  * A change to the persisted graph-extension document.
  *
  * Graph-extension document changes are committed only through the
- * runtime lifecycle verbs (`evolve` and `removeKinds`), so the
+ * graph-extension lifecycle verbs (`evolve` and `removeKinds`), so the
  * extension-slice change itself is `safe`-severity. The detailed
  * per-kind effect is captured in the corresponding node/edge/ontology
  * changes the merged document produced.
@@ -721,7 +721,7 @@ function diffIndexes(
 }
 
 // ============================================================
-// Runtime Document Diff
+// Graph Extension Document Diff
 // ============================================================
 
 /**
@@ -862,7 +862,7 @@ function generateSummary(
   }
 
   if (extensionChange !== undefined) {
-    parts.push(`Runtime document: ${extensionChange.type}`);
+    parts.push(`Graph extension document: ${extensionChange.type}`);
   }
 
   if (deprecatedKindsChange !== undefined) {

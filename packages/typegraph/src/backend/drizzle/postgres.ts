@@ -461,7 +461,7 @@ export function createPostgresBackend(
           ),
         )
         .onConflictDoUpdate({
-          target: [t.graphId, t.kindName],
+          target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
           set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
         });
     },

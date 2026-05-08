@@ -822,9 +822,9 @@ describe("Schema Serialization Properties", () => {
       expect(hashAB).toBe(hashBA);
     });
 
-    // The persisted runtime extension document is the durable source the
-    // loader uses to rebuild runtime Zod validators. Graphs that have
-    // never been runtime-extended must omit the slice entirely so legacy
+    // The persisted graph-extension document is the durable source the
+    // loader uses to rebuild graph-extension Zod validators. Graphs that have
+    // never had a graph extension must omit the slice entirely so legacy
     // schemas hash byte-identically.
     it("graphs without extension omit the field from canonical serialization", () => {
       const Person = defineNode("Person", {
@@ -916,7 +916,7 @@ describe("Schema Serialization Properties", () => {
 
     // Conversely, `origin: "runtime"` is emitted explicitly so the
     // restart loader can route it through the runtime compiler.
-    it('runtime indexes emit `origin: "runtime"` in canonical serialization', () => {
+    it('graph-extension indexes emit `origin: "runtime"` in canonical serialization', () => {
       const Person = defineNode("Person", {
         schema: z.object({ email: z.string() }),
       });

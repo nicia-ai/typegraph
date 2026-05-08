@@ -2,7 +2,7 @@
  * Tests for `store.removeKinds()` and `store.materializeRemovals()`.
  *
  * The two-phase contract:
- *   1. removeKinds: atomic schema commit removing the runtime kinds
+ *   1. removeKinds: atomic schema commit removing the graph-extension kinds
  *      (cascading-remove edges that lose their last endpoint, drop
  *      ontology references). Millisecond-budget.
  *   2. materializeRemovals: data cleanup against the
@@ -10,7 +10,7 @@
  *      idempotent.
  *
  * Compile-time kinds are rejected — they're removed by recompiling
- * and redeploying without them. Runtime kinds referenced by
+ * and redeploying without them. Graph-extension kinds referenced by
  * compile-time edges or ontology relations are also rejected, since
  * the compile-time reference would resurrect the orphan on the next
  * deploy.
@@ -38,7 +38,7 @@ const baseGraph = defineGraph({
 });
 
 describe("Store.removeKinds — schema commit", () => {
-  it("removes a runtime kind and bumps schema version", async () => {
+  it("removes a graph-extension kind and bumps schema version", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -83,7 +83,7 @@ describe("Store.removeKinds — schema commit", () => {
     expect((caught as RemoveCompileTimeKindError).entity).toBe("node");
   });
 
-  it("cascading-removes a runtime edge whose only endpoint was removed", async () => {
+  it("cascading-removes a graph-extension edge whose only endpoint was removed", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -109,7 +109,7 @@ describe("Store.removeKinds — schema commit", () => {
     ).toBeUndefined();
   });
 
-  it("retains a runtime edge whose endpoint list survives the removal", async () => {
+  it("retains a graph-extension edge whose endpoint list survives the removal", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -163,21 +163,21 @@ describe("Store.removeKinds — schema commit", () => {
     ).toBeUndefined();
   });
 
-  it("rejects removing a runtime kind referenced by a compile-time edge", async () => {
-    // Compile-time edge whose `to` references the runtime kind would
+  it("rejects removing a graph-extension kind referenced by a compile-time edge", async () => {
+    // Compile-time edge whose `to` references the graph-extension kind would
     // resurrect at the next deploy with no target — incoherent.
-    const RuntimeAuthor = defineNode("RuntimeAuthor", {
+    const ExtensionAuthor = defineNode("ExtensionAuthor", {
       schema: z.object({ name: z.string() }),
     });
     const writtenBy = defineEdge("writtenBy", {
       schema: z.object({ at: z.string() }),
     });
-    // Compile-time edge declares Person → RuntimeAuthor, but
-    // RuntimeAuthor isn't registered as a compile-time kind in the
+    // Compile-time edge declares Person → ExtensionAuthor, but
+    // ExtensionAuthor isn't registered as a compile-time kind in the
     // graph nodes set. (Synthetic test: in real code this would be a
     // configuration mistake; here it's the cleanest way to set up a
     // compile-time-edge-referent scenario.)
-    void RuntimeAuthor;
+    void ExtensionAuthor;
     void writtenBy;
 
     // For a realistic scenario: two stores, A defines Tag at runtime,
@@ -304,6 +304,72 @@ describe("Store.materializeRemovals", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const result = await store.materializeRemovals();
     expect(result.results).toEqual([]);
+  });
+});
+
+describe("Store.removeKinds — re-add and re-remove cycle", () => {
+  it("queues a fresh pending row when a kind is removed, re-added via evolve, then removed again", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const tagExtension = defineGraphExtension({
+      nodes: { Tag: { properties: { label: { type: "string" } } } },
+    });
+
+    const v1 = await store.evolve(tagExtension);
+    const tags1 = v1.getNodeCollectionOrThrow("Tag");
+    await tags1.create({ label: "alpha" });
+
+    const removed1 = await v1.removeKinds(["Tag"]);
+    const cleanup1 = await removed1.materializeRemovals();
+    expect(cleanup1.results[0]?.status).toBe("removed");
+    expect(await backend.getPendingKindRemovals!(baseGraph.id)).toHaveLength(0);
+
+    // Re-add the same kind, write data, then remove again. The
+    // status table is keyed on (graph_id, kind_name, entity,
+    // schema_version) — without `schema_version` in the key, the
+    // second queue write would overwrite the first row's
+    // `removed_at` via COALESCE and silently leave alpha2 orphaned.
+    const v2 = await removed1.evolve(tagExtension);
+    const tags2 = v2.getNodeCollectionOrThrow("Tag");
+    await tags2.create({ label: "alpha2" });
+    const removed2 = await v2.removeKinds(["Tag"]);
+
+    const stillPending = await backend.getPendingKindRemovals!(baseGraph.id);
+    expect(stillPending.find((row) => row.kindName === "Tag")).toBeDefined();
+
+    const cleanup2 = await removed2.materializeRemovals();
+    expect(cleanup2.results.find((entry) => entry.kind === "Tag")?.status).toBe(
+      "removed",
+    );
+  });
+
+  it("queues node and edge removals separately when they share a kind name", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          Tag: {
+            from: ["Person"],
+            to: ["Tag"],
+            properties: { since: { type: "string" } },
+          },
+        },
+      }),
+    );
+
+    await evolved.removeKinds(["Tag"]);
+
+    const pending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const tagRows = pending.filter((row) => row.kindName === "Tag");
+    // Without `entity` in the PK, the second upsert collapses onto
+    // the first, dropping one of the two pending rows.
+    expect(tagRows).toHaveLength(2);
+    expect(tagRows.map((row) => row.entity).toSorted()).toEqual([
+      "edge",
+      "node",
+    ]);
   });
 });
 

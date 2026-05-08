@@ -49,7 +49,7 @@ describe("Store.deprecateKinds — basic flow", () => {
     expect(active?.schema_doc).toContain('"deprecatedKinds"');
   });
 
-  it("marks runtime kinds deprecated alongside compile-time kinds", async () => {
+  it("marks graph-extension kinds deprecated alongside compile-time kinds", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
@@ -183,7 +183,7 @@ describe("Store.deprecateKinds — concurrency + StoreRef", () => {
 describe("Cross-flow safety: deprecate × evolve", () => {
   // The bug this guards against: a stale store's evolve dropped
   // another writer's deprecation set because evolve's catch-up only
-  // merged the runtime document, not the deprecated set. Without the
+  // merged the graph-extension document, not the deprecated set. Without the
   // fix, this test would commit a v3 schema with deprecatedKinds
   // empty — silently rolling back B's deprecation.
   it("stale evolve preserves another writer's persisted deprecations", async () => {
@@ -212,10 +212,10 @@ describe("Cross-flow safety: deprecate × evolve", () => {
     expect(restored.registry.hasNodeType("Tag")).toBe(true);
   });
 
-  it("idempotent deprecate against an already-persisted set still surfaces stored runtime kinds", async () => {
+  it("idempotent deprecate against an already-persisted set still surfaces stored graph-extension kinds", async () => {
     // Bug guarded: a stale store calling deprecateKinds with a name
     // that's already in the persisted set was returning `this`
-    // unchanged, so the caller never saw runtime kinds another writer
+    // unchanged, so the caller never saw graph-extension kinds another writer
     // had added. The fix returns a clone of the caught-up baseline
     // even on the no-op path.
     const backend = createTestBackend();
@@ -249,7 +249,7 @@ describe("Persistence + restart parity", () => {
     await store.deprecateKinds(["Person"]);
 
     // Different process / store instance reads the schema back. The
-    // loader (`loadAndMergeRuntimeDocument`) applies persisted
+    // loader (`loadAndMergeGraphExtensionDocument`) applies persisted
     // deprecations to the merged graph.
     const [restored, restoredResult] = await createStoreWithSchema(
       baseGraph,

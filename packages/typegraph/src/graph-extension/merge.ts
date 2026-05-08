@@ -31,7 +31,7 @@ import {
   type GraphExtension,
 } from "./extension-types";
 import {
-  buildRuntimeOntologyKeySet,
+  buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
 } from "./ontology-keys";
 import { validateGraphExtension } from "./validation";
@@ -87,7 +87,7 @@ export function mergeGraphExtension<G extends GraphDef>(
   const validatedUnion = unwrap(validateGraphExtension(unionDocument));
 
   // Fast path: when the new extension is structurally a subset of the
-  // existing runtime document (the agent-loop "I evolved with the same
+  // existing graph-extension document (the agent-loop "I evolved with the same
   // extension again" case), the union equals existing and there's no
   // work to do. Skip the compile + filter + merge pipeline entirely.
   if (
@@ -155,7 +155,7 @@ export function mergeGraphExtension<G extends GraphDef>(
       side: "to",
     });
     // Rebuild the EdgeType with the cross-graph-resolved endpoints —
-    // the compiler only saw the runtime document, so its
+    // the compiler only saw the graph-extension document, so its
     // `edge.type.from/to` covers in-document kinds only. Registry
     // introspection (`registry.getEdgeType(name).to`) reads off the
     // EdgeType, not the registration's parallel arrays, so the two
@@ -168,12 +168,13 @@ export function mergeGraphExtension<G extends GraphDef>(
     mergedEdges[edge.type.kind] = { type: resolvedType, from, to };
   }
 
-  // Drop ontology relations that came from the previous runtime
+  // Drop ontology relations that came from the previous graph-extension
   // document — `compiled.ontology` reproduces them from the union, so
   // keeping the originals would double-stack. Pre-build a Set of
   // canonical keys for O(1) lookup; the naive per-relation `.some`
   // scan was O(N×M).
-  const runtimeOntologyKeys = buildRuntimeOntologyKeySet(existingDocument);
+  const runtimeOntologyKeys =
+    buildGraphExtensionOntologyKeySet(existingDocument);
   const compileTimeOntology = graph.ontology.filter(
     (relation) => !runtimeOntologyKeys.has(compileTimeOntologyKey(relation)),
   );
@@ -185,33 +186,33 @@ export function mergeGraphExtension<G extends GraphDef>(
   ];
 
   // Auto-derive vector indexes from `embedding()` brands on the
-  // runtime kinds in the union document. Compile-time vector indexes
+  // graph-extension kinds in the union document. Compile-time vector indexes
   // already live on `graph.indexes` from `defineGraph`; we drop any
   // prior runtime-origin entries (the union document is the source of
-  // truth) and re-derive against the current runtime nodes so the
+  // truth) and re-derive against the current graph-extension nodes so the
   // result is correct after add / replace cycles. Explicit compile-
   // time indexes win on (kind, fieldPath) collisions per the
   // `mergeVectorIndexes` contract.
   const runtimeVectorIndexes: readonly VectorIndexDeclaration[] =
-    deriveRuntimeVectorIndexes(compiled.nodes);
+    deriveGraphExtensionVectorIndexes(compiled.nodes);
   // Document-declared relational indexes (analogue of compile-time
   // `defineNodeIndex` / `defineEdgeIndex` passed to defineGraph).
   // Resolved here because schema introspection requires the merged
-  // NodeType / EdgeType — runtime-declared kinds AND compile-time
+  // NodeType / EdgeType — graph-extension-declared kinds AND compile-time
   // host kinds are both reachable as targets.
-  const runtimeRelationalIndexes = compileRuntimeRelationalIndexes(
+  const runtimeRelationalIndexes = compileGraphExtensionRelationalIndexes(
     compiled.indexes,
     nodeKinds,
     mergedEdges,
     graph.id,
   );
-  const mergedIndexes = mergeIndexesWithRuntime(
+  const mergedIndexes = mergeIndexesWithGraphExtension(
     graph.indexes,
     [...runtimeVectorIndexes, ...runtimeRelationalIndexes],
     graph.id,
   );
 
-  // Returned as `G` even though runtime kinds aren't in the static
+  // Returned as `G` even though graph-extension kinds aren't in the static
   // type — consumers reach them via the registry.
   return Object.freeze({
     ...graph,
@@ -223,7 +224,7 @@ export function mergeGraphExtension<G extends GraphDef>(
   });
 }
 
-function deriveRuntimeVectorIndexes(
+function deriveGraphExtensionVectorIndexes(
   compiledNodes: ReturnType<typeof compileGraphExtension>["nodes"],
 ): readonly VectorIndexDeclaration[] {
   if (compiledNodes.length === 0) return [];
@@ -239,7 +240,7 @@ function deriveRuntimeVectorIndexes(
   );
 }
 
-function mergeIndexesWithRuntime(
+function mergeIndexesWithGraphExtension(
   existing: readonly IndexDeclaration[] | undefined,
   runtimeIndexes: readonly IndexDeclaration[],
   graphId: string,
@@ -287,13 +288,13 @@ function assertUniqueIndexNames(
       { graphId, indexName: index.name, code: "DUPLICATE_INDEX_NAME" },
       {
         suggestion:
-          "Give the runtime index a unique `name`, or remove the duplicate declaration.",
+          "Give the graph-extension index a unique `name`, or remove the duplicate declaration.",
       },
     );
   }
 }
 
-function compileRuntimeRelationalIndexes(
+function compileGraphExtensionRelationalIndexes(
   documents: readonly ExtensionIndex[],
   nodeKinds: ReadonlyMap<string, NodeType>,
   mergedEdges: Readonly<Record<string, EdgeRegistration>>,
@@ -348,7 +349,7 @@ function buildWhereCallback(where: NonNullable<ExtensionIndex["where"]>) {
     const builder = props[where.field];
     if (builder === undefined) {
       throw new ConfigurationError(
-        `Runtime index \`where\` references unknown field "${where.field}".`,
+        `Graph-extension index \`where\` references unknown field "${where.field}".`,
         { field: where.field, code: "EXTENSION_INDEX_WHERE_UNKNOWN_FIELD" },
       );
     }

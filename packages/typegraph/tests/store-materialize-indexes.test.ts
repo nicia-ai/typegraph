@@ -2,7 +2,7 @@
  * Tests for `store.materializeIndexes()`.
  *
  * The verb runs `CREATE INDEX` DDL declared via `defineGraph({ indexes })`
- * (and, transitively, runtime-declared indexes once they flow into the
+ * (and, transitively, graph-extension-declared indexes once they flow into the
  * channel). Status is recorded per-database in
  * `typegraph_index_materializations`.
  *
@@ -277,8 +277,8 @@ describe("Store.materializeIndexes — empty / no-op cases", () => {
   });
 });
 
-describe("runtime-declared relational indexes flow through materializeIndexes", () => {
-  it("materializes a node index declared in a runtime extension", async () => {
+describe("graph-extension-declared relational indexes flow through materializeIndexes", () => {
+  it("materializes a node index declared in a graph extension", async () => {
     const backend = createTestBackend();
     const baseGraph = defineGraph({
       id: "runtime_index_materialize",
@@ -309,7 +309,7 @@ describe("runtime-declared relational indexes flow through materializeIndexes", 
     expect(paperIndex).toBeDefined();
     expect(paperIndex?.kind).toBe("Paper");
     expect(paperIndex?.entity).toBe("node");
-    // Runtime-declared relational indexes go through the same DDL
+    // Graph-extension-declared relational indexes go through the same DDL
     // path as compile-time ones — `created` confirms the SQL ran.
     expect(paperIndex?.status).toBe("created");
   });

@@ -1,8 +1,8 @@
 /**
  * Restart parity, cross-process visibility, and startup-conflict tests
- * for the persisted runtime extension document.
+ * for the persisted graph-extension document.
  *
- * Simulates "an earlier process persisted a runtime extension" by
+ * Simulates "an earlier process persisted a graph extension" by
  * composing `mergeGraphExtension(...)` + `serializeSchema(...)` +
  * `backend.commitSchemaVersion(...)` directly, then verifies that a
  * fresh `createStoreWithSchema(graph, backend)` reconstructs an
@@ -36,7 +36,7 @@ async function persistEvolvedSchema(
   document: Parameters<typeof mergeGraphExtension>[1],
 ): Promise<void> {
   // Bring the backend to a baseline at version 1 with the unmerged
-  // graph, then commit a v2 carrying the merged runtime document.
+  // graph, then commit a v2 carrying the merged graph-extension document.
   const [, initial] = await createStoreWithSchema(baseGraph, backend);
   expect(initial.status).toBe("initialized");
 
@@ -52,8 +52,8 @@ async function persistEvolvedSchema(
   });
 }
 
-describe("runtime document persistence — loader rewire", () => {
-  it("restart parity: a fresh Store sees runtime kinds persisted by an earlier process", async () => {
+describe("graph-extension persistence — loader rewire", () => {
+  it("restart parity: a fresh Store sees graph-extension kinds persisted by an earlier process", async () => {
     const backend = createTestBackend();
     const tagExtension = defineGraphExtension({
       nodes: {
@@ -100,7 +100,7 @@ describe("runtime document persistence — loader rewire", () => {
     expect(reHash).toBe(persistedRow!.schema_hash);
   });
 
-  it("runtime edges referencing host kinds expose resolved endpoints through the registry", async () => {
+  it("graph-extension edges referencing host kinds expose resolved endpoints through the registry", async () => {
     const backend = createTestBackend();
     const extension = defineGraphExtension({
       nodes: {
@@ -126,7 +126,7 @@ describe("runtime document persistence — loader rewire", () => {
   it("startup conflict: missing compile-time kind referenced by an edge endpoint fails store construction", async () => {
     const backend = createTestBackend();
 
-    // Persist an extension whose runtime edge points at a host kind
+    // Persist an extension whose graph-extension edge points at a host kind
     // that DOES exist at extension time — succeeds.
     const extension = defineGraphExtension({
       nodes: {
@@ -143,7 +143,7 @@ describe("runtime document persistence — loader rewire", () => {
     await persistEvolvedSchema(backend, extension);
 
     // Now "Process C" boots with a graph that no longer declares Person
-    // — the runtime extension's edge endpoint is unresolvable. Store
+    // — the graph extension's edge endpoint is unresolvable. Store
     // construction must fail with a clear error rather than silently
     // dropping the reference.
     const Other = defineNode("Other", {
@@ -211,7 +211,7 @@ describe("runtime document persistence — loader rewire", () => {
     const [, initial] = await createStoreWithSchema(baseGraph, backend);
     expect(initial.status).toBe("initialized");
 
-    // Re-boot — no runtime extension was ever persisted, so the loader's
+    // Re-boot — no graph extension was ever persisted, so the loader's
     // fast path should return the original graph reference unchanged.
     const [restored, restoredResult] = await createStoreWithSchema(
       baseGraph,

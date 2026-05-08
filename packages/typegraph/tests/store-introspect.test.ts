@@ -46,7 +46,7 @@ describe("Store.introspect", () => {
     expect(result.deprecatedKinds.size).toBe(0);
   });
 
-  it("includes runtime kinds with origin: runtime after evolve", async () => {
+  it("includes graph-extension kinds with origin: runtime after evolve", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -79,7 +79,7 @@ describe("Store.introspect", () => {
     expect(result.deprecatedKinds.has("Person")).toBe(true);
   });
 
-  it("includes runtime edges with origin: runtime", async () => {
+  it("includes graph-extension edges with origin: runtime", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -149,7 +149,7 @@ describe("Store.getNodeCollectionOrThrow", () => {
     expect(collection).toBeDefined();
   });
 
-  it("returns the collection for a runtime kind after evolve", async () => {
+  it("returns the collection for a graph-extension kind after evolve", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -174,7 +174,7 @@ describe("Store.getNodeCollectionOrThrow", () => {
 });
 
 describe("Store.getEdgeCollectionOrThrow", () => {
-  it("returns the collection for a runtime edge after evolve", async () => {
+  it("returns the collection for a graph-extension edge after evolve", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(

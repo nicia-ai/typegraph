@@ -84,7 +84,8 @@ export type GraphExtensionIssueCode =
   | "UNSUPPORTED_STRING_FORMAT"
   | "INVALID_INDEX_DECLARATION"
   | "DUPLICATE_INDEX_NAME"
-  | "EMPTY_INDEX_FIELDS";
+  | "EMPTY_INDEX_FIELDS"
+  | "UNKNOWN_PROPERTY_KEY";
 
 // ============================================================
 // Operation errors (typed, single-error throws)
@@ -168,7 +169,7 @@ function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
 /**
  * Thrown when an extension declares a kind whose name collides with an
  * existing compile-time kind. The graph-extension contract is
- * additive: runtime-declared kinds cannot shadow compile-time kinds.
+ * additive: graph-extension-declared kinds cannot shadow compile-time kinds.
  */
 export class KindCollisionError extends GraphExtensionError {
   readonly code = "KIND_COLLISION" as const;
@@ -177,11 +178,11 @@ export class KindCollisionError extends GraphExtensionError {
 
   constructor(kindName: string, entity: "node" | "edge", graphId: string) {
     super({
-      message: `Graph extension declares ${entity} kind "${kindName}" which already exists as a compile-time kind on graph "${graphId}". Runtime-declared kinds cannot collide with compile-time kinds.`,
+      message: `Graph extension declares ${entity} kind "${kindName}" which already exists as a compile-time kind on graph "${graphId}". Graph-extension-declared kinds cannot collide with compile-time kinds.`,
       code: "KIND_COLLISION",
       details: { kindName, entity, graphId },
       suggestion:
-        "Pick a different runtime-declared kind name, or remove the compile-time declaration.",
+        "Pick a different graph-extension-declared kind name, or remove the compile-time declaration.",
     });
     this.kindName = kindName;
     this.entity = entity;
@@ -231,7 +232,7 @@ export class IncompatibleChangeError extends GraphExtensionError {
     super({
       message: `Graph extension contains ${changes.length} incompatible change${
         changes.length === 1 ? "" : "s"
-      } against existing runtime kinds on graph "${graphId}": ${summarizeChanges(changes)}`,
+      } against existing graph-extension kinds on graph "${graphId}": ${summarizeChanges(changes)}`,
       code: "INCOMPATIBLE_CHANGE",
       details: { graphId, changes: frozenChanges },
       suggestion:
@@ -280,7 +281,7 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
       code: "GRAPH_EXTENSION_UNRESOLVED_ENDPOINT",
       details: { edgeKind, side, endpoint, graphId },
       suggestion:
-        "Restore the compile-time kind, or remove the runtime-declared kind via store.removeKinds before redeploying without it.",
+        "Restore the compile-time kind, or remove the graph-extension-declared kind via store.removeKinds before redeploying without it.",
     });
     this.edgeKind = edgeKind;
     this.side = side;
@@ -306,7 +307,7 @@ export class RemoveCompileTimeKindError extends GraphExtensionError {
       code: "REMOVE_COMPILE_TIME_KIND",
       details: { kindName, entity, graphId },
       suggestion:
-        "Drop the kind from your defineGraph call and redeploy. Only runtime-extended kinds (added via store.evolve) are removable through removeKinds.",
+        "Drop the kind from your defineGraph call and redeploy. Only graph-extension kinds (added via store.evolve) are removable through removeKinds.",
     });
     this.kindName = kindName;
     this.entity = entity;
@@ -315,7 +316,7 @@ export class RemoveCompileTimeKindError extends GraphExtensionError {
 
 /**
  * Thrown by `removeKinds` when a compile-time edge or ontology
- * relation references the runtime kind being removed. Removing the
+ * relation references the graph-extension kind being removed. Removing the
  * kind would orphan compile-time references — incoherent at the next
  * deploy.
  */
@@ -334,7 +335,7 @@ export class KindHasReferentsError extends GraphExtensionError {
       .join(", ");
     const frozenReferents = Object.freeze([...referents]);
     super({
-      message: `Cannot remove runtime kind "${kindName}" on graph "${graphId}" — it is referenced by compile-time declarations: ${summary}.`,
+      message: `Cannot remove graph-extension kind "${kindName}" on graph "${graphId}" — it is referenced by compile-time declarations: ${summary}.`,
       code: "KIND_HAS_REFERENTS",
       details: { kindName, graphId, referents: frozenReferents },
       suggestion:

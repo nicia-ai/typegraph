@@ -135,7 +135,7 @@ describe("Store.evolve — eager materialization", () => {
 
   it("eager: true still materializes when the merge is a no-op (restart-parity contract)", async () => {
     // A second store wraps a database whose schema already includes
-    // the runtime kind (e.g. another writer committed it, or this
+    // the graph-extension kind (e.g. another writer committed it, or this
     // process restarted from a persisted extension). Evolving
     // with the same extension produces a no-op merge — but the local
     // database may still have unmaterialized indexes (the prior
@@ -149,7 +149,7 @@ describe("Store.evolve — eager materialization", () => {
       nodes: { Tag: { properties: { label: { type: "string" } } } },
     });
 
-    // First writer commits the runtime extension WITHOUT materializing
+    // First writer commits the graph extension WITHOUT materializing
     // (no eager, no explicit materializeIndexes).
     const [storeA] = await createStoreWithSchema(graph, backend);
     await storeA.evolve(extension);
@@ -235,7 +235,7 @@ describe("Store.evolve — eager materialization", () => {
       )
       .catch((error: unknown) => error);
 
-    // A fresh restart sees the runtime kind at version 2 despite the
+    // A fresh restart sees the graph-extension kind at version 2 despite the
     // materialization throw — proving the schema commit survived.
     const [restored] = await createStoreWithSchema(graph, backend);
     expect(restored.registry.hasNodeType("Tag")).toBe(true);

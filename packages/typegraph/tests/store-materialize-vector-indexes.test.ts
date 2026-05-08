@@ -307,8 +307,8 @@ describe("cross-graph vector status disambiguation (compound key)", () => {
   });
 });
 
-describe("runtime-extension embedding modifiers flow through materializeIndexes", () => {
-  it("auto-derives a vector index from a runtime kind's embedding modifier", async () => {
+describe("graph-extension embedding modifiers flow through materializeIndexes", () => {
+  it("auto-derives a vector index from a graph-extension kind's embedding modifier", async () => {
     const backend = createTestBackend();
     const baseGraph = defineGraph({
       id: "vector_runtime_extension",
@@ -340,7 +340,7 @@ describe("runtime-extension embedding modifiers flow through materializeIndexes"
     );
     expect(articleVector).toBeDefined();
     // Test backend lacks sqlite-vec, so the entry surfaces as skipped
-    // — but it surfaces, which proves the runtime kind's embedding
+    // — but it surfaces, which proves the graph-extension kind's embedding
     // brand auto-derived a `VectorIndexDeclaration` and the
     // materializer dispatched on it.
     expect(articleVector?.status).toBe("skipped");

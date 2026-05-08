@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Bring compile-time indexes into `defineGraph` and `SerializedSchema` so they flow through the canonical schema document uniformly with future runtime-declared indexes.
+Bring compile-time indexes into `defineGraph` and `SerializedSchema` so they flow through the canonical schema document uniformly with future graph-extension-declared indexes.
 
 ```typescript
 const personEmail = defineNodeIndex(Person, {

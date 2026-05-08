@@ -25,7 +25,7 @@ import {
 } from "./extension-types";
 
 /**
- * Result of classifying every delta between two runtime documents.
+ * Result of classifying every delta between two graph-extension documents.
  *
  * `incompatible` collects rejections that the caller throws as a
  * single `IncompatibleChangeError`. `requireEmpty`
@@ -62,7 +62,7 @@ function requireEmptyKey(entity: "node" | "edge", kindName: string): string {
 }
 
 /**
- * Classifies every delta between an existing and proposed runtime
+ * Classifies every delta between an existing and proposed graph-extension
  * document. Same-shape kinds produce no entries; new-kind additions
  * produce no entries (handled by the union spread upstream).
  *

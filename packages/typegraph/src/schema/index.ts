@@ -42,7 +42,7 @@ export {
   initializeSchema,
   isSchemaInitialized,
   loadActiveSchemaWithBootstrap,
-  loadAndMergeRuntimeDocument,
+  loadAndMergeGraphExtensionDocument,
   migrateSchema,
   type MigrationHookContext,
   parseSerializedSchema,

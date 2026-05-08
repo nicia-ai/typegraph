@@ -1,5 +1,5 @@
 /**
- * Pure-value document format for runtime graph extensions.
+ * Pure-value document format for graph extensions.
  *
  * A `GraphExtension` is a plain JSON-serializable description of
  * additional node kinds, edge kinds, and ontology relations that should
@@ -40,14 +40,14 @@ export type ExtensionEmbeddingModifier = Readonly<{
 }>;
 
 /**
- * Modifiers shared by every runtime property type.
+ * Modifiers shared by every graph-extension property type.
  *
- * `optional: true` flips the field from required-with-runtime-validation
+ * `optional: true` flips the field from required-with-graph-extension-validation
  * to `.optional()` and removes it from the parent object's `required`
  * list. `searchable` and `embedding` only apply to specific underlying
  * types — see the per-modifier docs.
  */
-type RuntimePropertyModifiers = Readonly<{
+type ExtensionPropertyModifiers = Readonly<{
   optional?: boolean;
   searchable?: ExtensionSearchableModifier;
   embedding?: ExtensionEmbeddingModifier;
@@ -70,7 +70,7 @@ export type ExtensionStringProperty = Readonly<{
   pattern?: string;
   format?: "datetime" | "uri" | "email" | "uuid" | "date";
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Number property. `int: true` requires whole numbers; `min` / `max` are
@@ -82,7 +82,7 @@ export type ExtensionNumberProperty = Readonly<{
   max?: number;
   int?: boolean;
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Boolean property. Compiles to `z.boolean()`.
@@ -90,7 +90,7 @@ export type ExtensionNumberProperty = Readonly<{
 export type ExtensionBooleanProperty = Readonly<{
   type: "boolean";
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Closed-set string enum. Compiles to `z.enum([...values])`. Must contain
@@ -100,7 +100,7 @@ export type ExtensionEnumProperty = Readonly<{
   type: "enum";
   values: readonly string[];
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Array property. `items` is any of the scalar property types or an
@@ -112,7 +112,7 @@ export type ExtensionArrayProperty = Readonly<{
   type: "array";
   items: ExtensionArrayItemType;
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Element types allowed inside an array — every leaf property type plus
@@ -135,7 +135,7 @@ export type ExtensionObjectProperty = Readonly<{
   type: "object";
   properties: Readonly<Record<string, ExtensionObjectFieldProperty>>;
 }> &
-  RuntimePropertyModifiers;
+  ExtensionPropertyModifiers;
 
 /**
  * Property types allowed inside an `object`'s `properties` — leaf scalars
@@ -198,7 +198,7 @@ export type ExtensionUniqueConstraint = Readonly<{
 // ============================================================
 
 /**
- * Runtime declaration of a node kind.
+ * Graph-extension declaration of a node kind.
  *
  * Property names follow the same reserved-key rules as compile-time
  * `defineNode` (`id`, `kind`, `meta`, and the `$`-prefix accessor
@@ -212,7 +212,7 @@ export type ExtensionNodeDef = Readonly<{
 }>;
 
 /**
- * Runtime declaration of an edge kind.
+ * Graph-extension declaration of an edge kind.
  *
  * `from` / `to` reference node kind names — either kinds declared in this
  * same document or compile-time kinds the document is being merged into.
@@ -245,7 +245,7 @@ export type ExtensionIndexWhere = Readonly<{
 }>;
 
 /**
- * Runtime-declared node index. `kind` references either a kind
+ * Graph-extension-declared node index. `kind` references either a kind
  * declared in this same document or a compile-time host kind resolved
  * at merge time. `fields` and `coveringFields` are top-level property
  * names — JSON-pointer paths are not supported in v1, matching the
@@ -263,8 +263,8 @@ export type ExtensionNodeIndex = Readonly<{
 }>;
 
 /**
- * Runtime-declared edge index. `direction` mirrors
- * `EdgeIndexDirection`; `kind` references a runtime or compile-time
+ * Graph-extension-declared edge index. `direction` mirrors
+ * `EdgeIndexDirection`; `kind` references a graph-extension or compile-time
  * edge kind.
  */
 export type ExtensionEdgeIndex = Readonly<{
@@ -286,7 +286,7 @@ export type ExtensionIndex = ExtensionNodeIndex | ExtensionEdgeIndex;
 // ============================================================
 
 /**
- * Runtime ontology relation. `metaEdge` is one of the built-in
+ * Graph-extension ontology relation. `metaEdge` is one of the built-in
  * meta-edge names (subClassOf, broader, disjointWith, etc.).
  *
  * `from` / `to` are either node-kind names declared in this document or
@@ -336,10 +336,10 @@ export const CURRENT_GRAPH_EXTENSION_VERSION = 1 as const;
  * rather than `typeof CURRENT_GRAPH_EXTENSION_VERSION` because the
  * field can carry any major across the library version range a
  * stored document might have been written by — the
- * runtime-vs-supported check happens in the validator, not at the
+ * document-vs-supported check happens in the validator, not at the
  * type level. Pinning to the current literal would prevent a v1
- * runtime from typing a v2 document at all, which is the wrong
- * relationship: we WANT a v1 runtime to receive v2 documents and
+ * v1 library from typing a v2 document at all, which is the wrong
+ * relationship: we WANT a v1 library to receive v2 documents and
  * report `GRAPH_EXTENSION_VERSION_UNSUPPORTED` cleanly.
  */
 export type GraphExtensionVersion = number;
@@ -350,7 +350,7 @@ export type GraphExtensionVersion = number;
  * Frozen at construction. Round-trips losslessly through `JSON.stringify`
  * / `JSON.parse`; the `GraphExtension → CompiledExtension` direction
  * is provided by `compileGraphExtension(...)`. There is no
- * `Zod → GraphExtension` direction because runtime kinds always
+ * `Zod → GraphExtension` direction because graph-extension kinds always
  * originate as documents.
  *
  * `version` is the major-version tag for the document format. The
@@ -369,11 +369,11 @@ export type GraphExtension = Readonly<{
   edges?: Readonly<Record<string, ExtensionEdgeDef>>;
   ontology?: readonly ExtensionOntologyRelation[];
   /**
-   * Runtime-declared relational indexes. Each entry references a
+   * Graph-extension-declared relational indexes. Each entry references a
    * node or edge kind by name — either declared in this document or
    * a compile-time host kind that the document is being merged into.
    * Vector indexes auto-derive from `embedding()` modifiers on
-   * runtime kinds; this slot is for explicit relational indexes
+   * graph-extension kinds; this slot is for explicit relational indexes
    * (analogue of compile-time `defineGraph({ indexes: [...] })`).
    */
   indexes?: readonly ExtensionIndex[];

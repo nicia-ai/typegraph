@@ -1,5 +1,5 @@
 /**
- * Runtime graph extension — pure-value document layer + public errors.
+ * Graph extension — pure-value document layer + public errors.
  *
  * The Zod compiler (`compileGraphExtension`) and host-graph merge
  * (`mergeGraphExtension`) live in this directory but are NOT

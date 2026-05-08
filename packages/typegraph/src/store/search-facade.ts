@@ -6,7 +6,7 @@
  * traversal. The methods delegate to their respective execution
  * modules; this class exists to shape the surface and to gate kind
  * names through the registry — the kind argument is `string` so
- * runtime-extended kinds (added via `store.evolve()`) work without a
+ * graph-extension kinds (added via `store.evolve()`) work without a
  * type cast, with a runtime guard rejecting misspellings at the call
  * site.
  */
@@ -35,7 +35,7 @@ import { type Node } from "./types";
 
 /**
  * Resolves the hit's `node` type. Compile-time kinds keep their
- * narrowed `Node<N>`; kinds outside `G` (runtime-extended via
+ * narrowed `Node<N>`; kinds outside `G` (added via graph extension through
  * `store.evolve()`, or string variables the type system can't see)
  * widen to the base `Node` so callers don't need a cast.
  *
