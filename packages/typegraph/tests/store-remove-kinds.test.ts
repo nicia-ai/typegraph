@@ -24,6 +24,7 @@ import {
   KindHasReferentsError,
   RemoveCompileTimeKindError,
 } from "../src/graph-extension";
+import { migrateSchema } from "../src/schema/manager";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
@@ -304,6 +305,75 @@ describe("Store.materializeRemovals", () => {
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const result = await store.materializeRemovals();
     expect(result.results).toEqual([]);
+  });
+
+  it("recovers from a removeKinds() crash window: schema committed, queue write missing", async () => {
+    // `removeKinds()` commits the schema diff before recording the
+    // cleanup queue. If the queue write fails between those steps the
+    // schema is durable but the queue lacks the rows the cleanup pass
+    // needs — and a retry of `removeKinds()` short-circuits on the
+    // no-op path because the kind is already absent. Reconciliation
+    // recovers by diffing the active schema against its predecessor.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const tags = evolved.getNodeCollectionOrThrow("Tag");
+    await tags.create({ label: "alpha" });
+    await tags.create({ label: "beta" });
+
+    expect(
+      await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
+    ).toBe(2);
+
+    // Simulate the crash window: commit the schema diff (Tag removed)
+    // through `migrateSchema` directly, bypassing `removeKinds` and
+    // its queue write. baseGraph's compile-time slice has Person only;
+    // committing it as the new active schema is structurally
+    // equivalent to a successful Tag removal that crashed before the
+    // queue insert.
+    const evolvedVersion = (await backend.getActiveSchema(baseGraph.id))!
+      .version;
+    await migrateSchema(backend, baseGraph, evolvedVersion);
+
+    // The queue is empty (the crash window). Tag rows are orphaned
+    // because the schema doesn't reference Tag any more.
+    const pendingAfterCrash = await backend.getPendingKindRemovals!(
+      baseGraph.id,
+    );
+    expect(pendingAfterCrash).toHaveLength(0);
+    expect(
+      await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
+    ).toBe(2);
+
+    // A fresh store reading the same database. `materializeRemovals()`
+    // walks active-vs-prior, finds Tag missing in active, reconciles
+    // the queue, then runs cleanup.
+    const [recovered] = await createStoreWithSchema(baseGraph, backend);
+    const result = await recovered.materializeRemovals();
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]?.kind).toBe("Tag");
+    expect(result.results[0]?.entity).toBe("node");
+    expect(result.results[0]?.status).toBe("removed");
+    expect(
+      await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
+    ).toBe(0);
+
+    // After cleanup, the queue is empty (rows are completed, not pending).
+    const pendingAfterRecover = await backend.getPendingKindRemovals!(
+      baseGraph.id,
+    );
+    expect(pendingAfterRecover).toHaveLength(0);
+
+    // A second materializeRemovals() is a no-op — reconciliation
+    // re-records the row idempotently (COALESCE preserves the prior
+    // success), so nothing surfaces as new work.
+    const second = await recovered.materializeRemovals();
+    expect(second.results).toHaveLength(0);
   });
 });
 

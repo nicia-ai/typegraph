@@ -10,6 +10,7 @@
  */
 import { type GraphBackend, type KindRemovalRow } from "../backend/types";
 import { ConfigurationError } from "../errors";
+import { parseSerializedSchema } from "../schema/manager";
 import { nowIso } from "../utils/date";
 
 export type MaterializeRemovalsOptions = Readonly<{
@@ -62,7 +63,30 @@ export async function materializeRemovals(
     backend.bootstrapTables?.()
   : backend.ensureKindRemovalsTable());
 
-  const pending = await backend.getPendingKindRemovals(graphId);
+  const initialPending = await backend.getPendingKindRemovals(graphId);
+
+  // Recovery path: `removeKinds()` commits the schema-version diff
+  // (kind dropped from `nodes`/`edges`) BEFORE recording the cleanup
+  // queue rows. If the queue write fails between those two steps the
+  // schema is durable but the queue is missing rows — and a retry of
+  // `removeKinds()` short-circuits on the no-op path because the kind
+  // is already absent. Rather than require atomicity across the schema
+  // commit and the per-deployment status table (the schema-commit path
+  // takes dialect-specific advisory locks that we cannot extend across
+  // the status-table write), reconcile here against schema history:
+  // diff the active schema against its predecessor and re-record any
+  // kind whose removal isn't reflected in the queue. The COALESCE rule
+  // on `recordKindRemoval` preserves any prior successful timestamp,
+  // so re-recording an already-completed kind is a no-op.
+  const upsertedReconciliations = await reconcilePendingRemovals(
+    context,
+    initialPending,
+  );
+  const pending =
+    upsertedReconciliations ?
+      await backend.getPendingKindRemovals(graphId)
+    : initialPending;
+
   const kindFilter =
     options.kinds === undefined ? undefined : new Set(options.kinds);
   const candidates = pending.filter((row) =>
@@ -98,6 +122,85 @@ export async function materializeRemovals(
       candidates.map((removal) => materializeOne(removal, ctx)),
     ),
   };
+}
+
+/**
+ * Compares the active schema's kind set against its immediate
+ * predecessor and re-records any removed kind whose queue row is
+ * missing. Returns `true` when at least one upsert was issued so the
+ * caller knows to refresh its pending snapshot.
+ *
+ * Walks one step (active vs. active-1) only. The much-rarer multi-step
+ * crash case (two consecutive `removeKinds` calls each crashing on the
+ * queue write, never reconciled in between) is recoverable by calling
+ * `materializeRemovals()` again — each call advances reconciliation by
+ * one transition's worth of recovery.
+ */
+async function reconcilePendingRemovals(
+  context: MaterializeRemovalsContext,
+  pending: readonly KindRemovalRow[],
+): Promise<boolean> {
+  const { backend, graphId } = context;
+  const recordKindRemoval = backend.recordKindRemoval;
+  if (recordKindRemoval === undefined) return false;
+
+  const activeRow = await backend.getActiveSchema(graphId);
+  if (activeRow === undefined || activeRow.version <= 1) return false;
+
+  const priorRow = await backend.getSchemaVersion(
+    graphId,
+    activeRow.version - 1,
+  );
+  if (priorRow === undefined) return false;
+
+  const activeSchema = parseSerializedSchema(activeRow.schema_doc);
+  const priorSchema = parseSerializedSchema(priorRow.schema_doc);
+
+  const removedNodeKinds = Object.keys(priorSchema.nodes).filter(
+    (kind) => !(kind in activeSchema.nodes),
+  );
+  const removedEdgeKinds = Object.keys(priorSchema.edges).filter(
+    (kind) => !(kind in activeSchema.edges),
+  );
+  if (removedNodeKinds.length === 0 && removedEdgeKinds.length === 0) {
+    return false;
+  }
+
+  const activeVersion = activeRow.version;
+  const pendingAtActive = new Set(
+    pending
+      .filter((row) => row.schemaVersion === activeVersion)
+      .map((row) => `${row.entity}|${row.kindName}`),
+  );
+
+  const reconciliations: { kindName: string; entity: "node" | "edge" }[] = [];
+  for (const kindName of removedNodeKinds) {
+    if (!pendingAtActive.has(`node|${kindName}`)) {
+      reconciliations.push({ kindName, entity: "node" });
+    }
+  }
+  for (const kindName of removedEdgeKinds) {
+    if (!pendingAtActive.has(`edge|${kindName}`)) {
+      reconciliations.push({ kindName, entity: "edge" });
+    }
+  }
+  if (reconciliations.length === 0) return false;
+
+  const attemptedAt = nowIso();
+  await Promise.all(
+    reconciliations.map((r) =>
+      recordKindRemoval({
+        graphId,
+        kindName: r.kindName,
+        entity: r.entity,
+        schemaVersion: activeVersion,
+        attemptedAt,
+        removedAt: undefined,
+        error: undefined,
+      }),
+    ),
+  );
+  return true;
 }
 
 async function materializeOne(
