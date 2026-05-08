@@ -24,6 +24,7 @@ import {
   KindHasReferentsError,
   RemoveCompileTimeKindError,
 } from "../src/graph-extension";
+import { planRemovals } from "../src/graph-extension/remove";
 import { migrateSchema } from "../src/schema/manager";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
@@ -164,52 +165,62 @@ describe("Store.removeKinds — schema commit", () => {
     ).toBeUndefined();
   });
 
-  it("rejects removing a graph-extension kind referenced by a compile-time edge", async () => {
-    // Compile-time edge whose `to` references the graph-extension kind would
-    // resurrect at the next deploy with no target — incoherent.
-    const ExtensionAuthor = defineNode("ExtensionAuthor", {
-      schema: z.object({ name: z.string() }),
+  it("rejects removing a graph-extension kind referenced by a compile-time edge", () => {
+    // Construct the post-evolve scenario through `planRemovals` directly.
+    // The real-world shape this guards against: a developer adds a
+    // compile-time edge whose endpoint name overlaps with a graph-
+    // extension kind (the type system rejects the natural construction,
+    // but a hand-rolled GraphDef or a cast can bypass that). If the
+    // referent check is wrong, removing the extension kind would orphan
+    // the compile-time edge's `to` endpoint at the next deploy.
+    const Document = defineNode("Document", {
+      schema: z.object({ title: z.string() }),
     });
-    const writtenBy = defineEdge("writtenBy", {
-      schema: z.object({ at: z.string() }),
+    const tagged = defineEdge("tagged", {
+      schema: z.object({}),
     });
-    // Compile-time edge declares Person → ExtensionAuthor, but
-    // ExtensionAuthor isn't registered as a compile-time kind in the
-    // graph nodes set. (Synthetic test: in real code this would be a
-    // configuration mistake; here it's the cleanest way to set up a
-    // compile-time-edge-referent scenario.)
-    void ExtensionAuthor;
-    void writtenBy;
+    const seedGraph = defineGraph({
+      id: "remove_kinds_referent_test",
+      nodes: { Document: { type: Document } },
+      edges: { tagged: { type: tagged, from: [Document], to: [Document] } },
+    });
 
-    // For a realistic scenario: two stores, A defines Tag at runtime,
-    // B's compile-time graph adds an edge referencing Tag (operator
-    // updated source code referencing Tag's current name). When B
-    // tries to remove Tag, it should refuse.
-    const backend = createTestBackend();
-    const [store] = await createStoreWithSchema(baseGraph, backend);
-    const evolved = await store.evolve(
-      defineGraphExtension({
-        nodes: { Tag: { properties: { label: { type: "string" } } } },
-      }),
+    // Cast-mutate `tagged.to` to reference an extension kind `Tag` that
+    // isn't a compile-time node. `planRemovals` walks `graph.edges`
+    // through this exact shape (`{ kind: string }` records) — see
+    // `findCompileTimeReferents` in `graph-extension/remove.ts`.
+    const syntheticGraph = {
+      ...seedGraph,
+      edges: {
+        tagged: {
+          ...seedGraph.edges.tagged,
+          to: [{ kind: "Tag" }],
+        },
+      },
+      extension: {
+        version: 1,
+        nodes: { Tag: { properties: { label: { type: "string" as const } } } },
+      },
+    } as unknown as typeof seedGraph;
+
+    expect(() => planRemovals(syntheticGraph, ["Tag"])).toThrow(
+      KindHasReferentsError,
     );
 
-    // Now simulate a follow-up deploy where the compile-time graph
-    // adds an edge referencing Tag. This triggers the unresolved-
-    // endpoint check at evolve-time normally; but for the removal-
-    // referent test we need a compile-time edge live in the host
-    // graph. The simplest way: build a graph that already has Tag as
-    // a "future" compile-time kind.
-    void evolved;
-
-    // The clean test: a NEW compile-time graph with the edge
-    // declaration that references Tag. We can't do that against the
-    // existing baseGraph without editing source — skip the synthetic
-    // scenario and test the simpler case: try to remove a runtime
-    // kind from a graph where a compile-time edge declared in
-    // baseGraph happens to reference it. In our baseGraph there's no
-    // such edge, so this test is structural: the helper rejects with
-    // KindHasReferentsError when found.
-    expect(KindHasReferentsError).toBeDefined();
+    const error = (() => {
+      try {
+        planRemovals(syntheticGraph, ["Tag"]);
+        return;
+      } catch (error_) {
+        return error_;
+      }
+    })();
+    if (!(error instanceof KindHasReferentsError)) {
+      throw new Error("expected KindHasReferentsError");
+    }
+    expect(error.referents).toEqual([
+      { type: "compile-time-edge", name: "tagged" },
+    ]);
   });
 
   it("idempotent removal: removing the same kind twice is a no-op the second time", async () => {
