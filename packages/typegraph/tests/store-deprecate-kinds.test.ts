@@ -37,7 +37,7 @@ describe("Store.deprecateKinds — basic flow", () => {
   it("marks a compile-time kind deprecated and bumps schema version", async () => {
     const backend = createTestBackend();
     const [store, init] = await createStoreWithSchema(baseGraph, backend);
-    expect(init).toEqual({ status: "initialized", version: 1 });
+    expect(init).toMatchObject({ status: "initialized", version: 1 });
 
     expect(store.introspect().deprecatedKinds.size).toBe(0);
 

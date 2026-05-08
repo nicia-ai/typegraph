@@ -428,7 +428,7 @@ describe("graph extension — algebraic invariants", () => {
         // The merge short-circuits when the union equals the existing
         // document — same reference returned, not just structurally
         // equal. That's the contract `Store.evolve`'s no-op fast path
-        // depends on for the agent-loop hot path.
+        // depends on for repeated same-extension evolves.
         expect(twice).toBe(once);
       }),
       { numRuns: 40 },

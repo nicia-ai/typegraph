@@ -27,11 +27,7 @@ import { defineEdge } from "../src/core/edge";
 import { embedding, getEmbeddingDimensions } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
 import { getSearchableMetadata, searchable } from "../src/core/searchable";
-import {
-  type EdgeType,
-  type NodeType,
-  type UniqueConstraint,
-} from "../src/core/types";
+import { type NodeType, type UniqueConstraint } from "../src/core/types";
 import {
   defineGraphExtension,
   type GraphExtension,
@@ -54,10 +50,16 @@ function compileSingleNode(document: GraphExtension): NodeType {
   return compiled.nodes[0]!.type;
 }
 
-function compileSingleEdge(document: GraphExtension): EdgeType {
+// Returns the compiled-edge metadata shape directly (the helper used to
+// return an EdgeType, but the compiler now defers EdgeType construction
+// to merge time because cross-graph endpoint resolution lives there).
+// Tests that need an EdgeType call `defineEdge` with these fields; tests
+// that only need `schema` / `annotations` / `from` / `to` use them
+// directly.
+function compileSingleEdge(document: GraphExtension) {
   const compiled = compileGraphExtension(document);
   expect(compiled.edges).toHaveLength(1);
-  return compiled.edges[0]!.type;
+  return compiled.edges[0]!;
 }
 
 function endpointKind(endpoint: NodeType | string): string {
