@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Bring compile-time indexes into `defineGraph` and `SerializedSchema` so they flow through the canonical schema document uniformly with future graph-extension-declared indexes.
+Bring compile-time indexes into `defineGraph` and `SerializedSchema` so they flow through the canonical schema document uniformly with graph-extension-declared indexes.
 
 ```typescript
 const personEmail = defineNodeIndex(Person, {
@@ -37,6 +37,6 @@ const graph = defineGraph({
 - Graphs that never declare indexes produce identical canonical-form hashes to today — adoption requires no migration.
 - The serialized slice is order-canonicalized (sorted by `name`) and treats `undefined` and `[]` as the same "no slice" form. Indexes are an unordered set keyed by name; an empty list carries no semantic meaning that an absent slice doesn't, so the hash and the diff agree on both points (reorders are a no-op, opting in with `[]` doesn't bump the hash). The in-memory `GraphDef.indexes` still preserves whatever the caller passed for introspection.
 - A populated `indexes` array bumps the hash. Round-trip (`serialize → JSON → serializedSchemaZod.parse → JSON`) is byte-identical after the canonical sort.
-- `origin: "compile-time"` is the default and is omitted from canonical form. Only `origin: "runtime"` is emitted explicitly. Absence-as-default keeps compile-only graphs hashing identically while leaving the discriminator ready for graph extensions.
+- `origin: "compile-time"` is the default and is omitted from canonical form. Only `origin: "runtime"` is emitted explicitly. Absence-as-default keeps compile-only graphs hashing identically; the graph-extension loader emits the explicit `"runtime"` discriminator on extension-declared indexes.
 
 **Forward compatibility.** `serializedSchemaZod` parses both old (no `indexes`) and new documents, with extras-allowed (`.loose()`) on each declaration so future fields don't break older readers.

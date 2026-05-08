@@ -116,6 +116,3 @@ Pre-1.0 acceptable.
   `bootstrapTables` time.
 - **Multiple vector indexes per (kind, field).** v1 allows at most
   one. Use a different field name for now.
-- **Vector indexes for graph-extension-declared kinds.** Auto-derivation
-  walks compile-time node schemas. Graph-extension documents can't
-  yet declare embeddings — coming in a follow-up.
