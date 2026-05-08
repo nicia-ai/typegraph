@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Unify vector indexes through the same declaration channel as relational indexes. Vector indexes are now auto-derived from `embedding()` brands at `defineGraph()` time and flow through `Store.materializeIndexes()` like any other index. Closes the second of two PRs needed to ship #101 properly.
+Unify vector indexes through the same declaration channel as relational indexes. Vector indexes are auto-derived from `embedding()` brands at `defineGraph()` time and flow through `Store.materializeIndexes()` like any other index.
 
 ## What changed
 

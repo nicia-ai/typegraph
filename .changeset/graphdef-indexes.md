@@ -24,7 +24,7 @@ const graph = defineGraph({
 **Public API additions:**
 
 - `defineNodeIndex`, `defineEdgeIndex`, `andWhere`, `orWhere`, and `notWhere` now ship from the main `@nicia-ai/typegraph` entry point. The `@nicia-ai/typegraph/indexes` subpath remains for advanced consumers (Drizzle schema integration, `generateIndexDDL`, `toDeclaredIndex` for the profiler).
-- `defineNodeIndex` / `defineEdgeIndex` now return `NodeIndexDeclaration` / `EdgeIndexDeclaration` directly — the same JSON-serializable shape that flows through `SerializedSchema.indexes`. There is no separate "live" index value; the previous `NodeIndex` / `EdgeIndex` / `TypeGraphIndex` types and the `toIndexDeclaration` adapter have been removed.
+- `defineNodeIndex` / `defineEdgeIndex` now return `NodeIndexDeclaration` / `EdgeIndexDeclaration` directly — the same JSON-serializable shape that flows through `SerializedSchema.indexes`. There is no separate "live" index value; the previous `NodeIndex` / `EdgeIndex` / `TypeGraphIndex` types have been removed from `@nicia-ai/typegraph/indexes`. Consumers using those types should switch to the declaration types.
 - `defineGraph({ ..., indexes: [...] })` accepts those declarations directly (whether produced by the typed builders or reconstructed from a stored schema document). Validated at definition time: every index must reference a registered `kind`, and index `name`s must be unique within a graph. Throws `ConfigurationError` otherwise.
 - New types: `IndexDeclaration` (discriminated union of `NodeIndexDeclaration` / `EdgeIndexDeclaration`), `IndexOrigin`.
 
