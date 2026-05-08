@@ -55,6 +55,7 @@ export type PostgresTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  kindRemovals: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -75,6 +76,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  kindRemovals: "typegraph_kind_removals",
 };
 
 /**
@@ -294,6 +296,39 @@ export function createPostgresTables(
     (t) => [primaryKey({ columns: [t.indexName] })],
   );
 
+  /**
+   * Per-deployment record of extension kinds removed via
+   * `store.removeKinds()` whose data has not yet been cleaned up by
+   * `store.materializeRemovals()`. Same per-deployment rationale as
+   * `indexMaterializations`: two replicas of the same `schema_doc` may
+   * be at different stages of the data-cleanup phase. Keyed on
+   * `(graph_id, kind_name, entity, schema_version)` — each remove
+   * operation is its own row. `entity` separates a node and an edge
+   * that share a kind name; the `schema_version` discriminator keeps a
+   * re-add-then-re-remove cycle from collapsing onto the prior row,
+   * where the COALESCE-on-failure rule would preserve the earlier
+   * `removed_at` and silently skip the new pending cleanup.
+   */
+  const kindRemovals = pgTable(
+    n.kindRemovals,
+    {
+      graphId: text("graph_id").notNull(),
+      kindName: text("kind_name").notNull(),
+      entity: text("entity").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      removedAt: timestamp("removed_at", { withTimezone: true }),
+      lastAttemptedAt: timestamp("last_attempted_at", {
+        withTimezone: true,
+      }).notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+      }),
+    ],
+  );
+
   return {
     nodes,
     edges,
@@ -301,6 +336,7 @@ export function createPostgresTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    kindRemovals,
     /**
      * The fulltext storage table is owned by the active `FulltextStrategy`,
      * not Drizzle. Shapes vary across strategies — the default `tsvectorStrategy`

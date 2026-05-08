@@ -245,3 +245,286 @@ expectAssignable<DynamicNodeCollection | undefined>(
 expectAssignable<DynamicEdgeCollection | undefined>(
   store.getEdgeCollection("worksAt"),
 );
+
+// ============================================================
+// Graph extension — public surface published in 0.25
+// ============================================================
+
+import {
+  defineGraphExtension,
+  defineEdgeIndex,
+  defineNodeIndex,
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type MaterializeIndexesEntry,
+  type MaterializeIndexesResult,
+  type NodeIndexDeclaration,
+  type GraphExtensionIssue,
+  type GraphExtensionIssueCode,
+  type GraphExtension,
+  type IncompatibleChange,
+  type StoreRef,
+  validateGraphExtension,
+  GraphExtensionError,
+  GraphExtensionUnresolvedEndpointError,
+  GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
+  IncompatibleChangeError,
+  KindCollisionError,
+  KindHasReferentsError,
+  KindNotFoundError,
+  RemoveCompileTimeKindError,
+  TypeGraphError,
+} from "..";
+// Per-shape document types live behind the `graph-extension` subpath —
+// agent-prompt builders and codegen tools reach for them explicitly.
+import type {
+  ExtensionArrayProperty,
+  ExtensionEdgeDef,
+  ExtensionNodeDef,
+  ExtensionOntologyRelation,
+  ExtensionPropertyType,
+  ExtensionStringProperty,
+  ExtensionUniqueConstraint,
+} from "../src/graph-extension";
+
+// defineGraphExtension accepts a typed GraphExtension.
+const extension = defineGraphExtension({
+  nodes: {
+    Paper: {
+      properties: {
+        doi: {
+          type: "string",
+          format: "uri",
+        } satisfies ExtensionStringProperty,
+        embedding: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 384 },
+        } satisfies ExtensionArrayProperty,
+      },
+    } satisfies ExtensionNodeDef,
+  },
+});
+expectType<GraphExtension>(extension);
+
+// Top-level key typo `node` should be a TypeScript error — the public
+// type signature now catches it at the call site instead of letting
+// the runtime silently produce an empty extension.
+expectError(
+  defineGraphExtension({
+    node: { Paper: { properties: { doi: { type: "string" } } } },
+  }),
+);
+
+// validateGraphExtension keeps `unknown` input + Result return for
+// callers feeding LLM-authored JSON.
+declare const llmJson: unknown;
+const validateResult = validateGraphExtension(llmJson, { strict: true });
+expectAssignable<
+  | { success: true; data: GraphExtension }
+  | { success: false; error: GraphExtensionValidationError }
+>(validateResult);
+
+// GraphExtensionIssue / IssueCode shapes.
+declare const issue: GraphExtensionIssue;
+expectType<string>(issue.path);
+expectType<string>(issue.message);
+expectAssignable<GraphExtensionIssueCode>(issue.code);
+expectAssignable<GraphExtensionIssueCode>("UNKNOWN_DOCUMENT_KEY" as const);
+expectAssignable<GraphExtensionIssueCode>("UNSUPPORTED_STRING_FORMAT" as const);
+
+// Edge / ontology / unique runtime types.
+declare const runtimeEdge: ExtensionEdgeDef;
+expectType<readonly string[]>(runtimeEdge.from);
+declare const runtimeOntology: ExtensionOntologyRelation;
+expectType<string>(runtimeOntology.from);
+declare const runtimeUnique: ExtensionUniqueConstraint;
+expectType<readonly string[]>(runtimeUnique.fields);
+declare const runtimeProperty: ExtensionPropertyType;
+expectAssignable<"string" | "number" | "boolean" | "enum" | "array" | "object">(
+  runtimeProperty.type,
+);
+
+// StoreRef is a plain mutable handle. Compose, then evolve.
+declare const evolveStore: Store<typeof graph>;
+const ref: StoreRef<typeof evolveStore> = { current: evolveStore };
+expectType<typeof evolveStore>(ref.current);
+
+// Materialize-indexes result types.
+declare const materializeResult: MaterializeIndexesResult;
+expectType<readonly MaterializeIndexesEntry[]>(materializeResult.results);
+declare const materializeEntry: MaterializeIndexesEntry;
+expectAssignable<"created" | "alreadyMaterialized" | "failed" | "skipped">(
+  materializeEntry.status,
+);
+expectAssignable<"node" | "edge" | "vector">(materializeEntry.entity);
+
+// defineNodeIndex / defineEdgeIndex are the current 1.0 surface — the
+// `(Type, { fields: [...] })` config shape, not the legacy
+// `(name, fields[])` positional shape.
+const nodeIndex: NodeIndexDeclaration = defineNodeIndex(Person, {
+  fields: ["name"],
+});
+expectAssignable<IndexDeclaration>(nodeIndex);
+expectType<"node">(nodeIndex.entity);
+
+const edgeIndex: EdgeIndexDeclaration = defineEdgeIndex(worksAt, {
+  fields: ["role"],
+});
+expectAssignable<IndexDeclaration>(edgeIndex);
+expectType<"edge">(edgeIndex.entity);
+
+// ============================================================
+// Search facade — graph-extension-kind ergonomics
+// ============================================================
+
+// `store.search.{fulltext,vector,hybrid,rebuildFulltext}` accepts
+// any string for the kind argument. The hit's `node` type narrows
+// to the concrete typed node when the literal is a compile-time
+// kind, and widens to the base `Node` for graph-extension kinds (no cast
+// required).
+
+import { type Node } from "..";
+
+declare const personHits: Awaited<
+  ReturnType<typeof store.search.fulltext<"Person">>
+>;
+declare const runtimeHits: Awaited<
+  ReturnType<typeof store.search.fulltext<"Paper">>
+>;
+
+// Compile-time kind narrows to Node<typeof Person>.
+expectAssignable<Node<typeof Person>>(personHits[0]!.node);
+
+// Graph-extension kind widens to base Node — assignable to Node, not narrowed.
+expectAssignable<Node>(runtimeHits[0]!.node);
+
+// vector + hybrid follow the same pattern.
+declare const vectorHits: Awaited<
+  ReturnType<typeof store.search.vector<"Paper">>
+>;
+expectAssignable<Node>(vectorHits[0]!.node);
+
+declare const hybridHits: Awaited<
+  ReturnType<typeof store.search.hybrid<"Paper">>
+>;
+expectAssignable<Node>(hybridHits[0]!.node);
+
+// Compile-time hybrid narrows.
+declare const compileTimeHybrid: Awaited<
+  ReturnType<typeof store.search.hybrid<"Person">>
+>;
+expectAssignable<Node<typeof Person>>(compileTimeHybrid[0]!.node);
+
+// ============================================================
+// Error class hierarchy — every public error is reachable as
+// TypeGraphError, and the GraphExtension family is reachable as
+// GraphExtensionError. Pinning these guards against an accidental
+// inheritance flip during refactors.
+// ============================================================
+
+declare const graphExtensionError: GraphExtensionError;
+expectAssignable<TypeGraphError>(graphExtensionError);
+expectType<string>(graphExtensionError.code);
+
+// Validation error: structured `issues` list with frozen entries.
+declare const validationError: GraphExtensionValidationError;
+expectAssignable<GraphExtensionError>(validationError);
+expectType<readonly GraphExtensionIssue[]>(validationError.issues);
+expectType<"GRAPH_EXTENSION_INVALID">(validationError.code);
+
+// Version-unsupported error: persisted/current numeric majors.
+declare const versionError: GraphExtensionVersionUnsupportedError;
+expectAssignable<GraphExtensionError>(versionError);
+expectType<number>(versionError.persistedVersion);
+expectType<number>(versionError.currentVersion);
+expectType<"GRAPH_EXTENSION_VERSION_UNSUPPORTED">(versionError.code);
+
+// Unresolved endpoint: edge + side + endpoint kind name.
+declare const unresolvedEndpointError: GraphExtensionUnresolvedEndpointError;
+expectAssignable<GraphExtensionError>(unresolvedEndpointError);
+expectType<string>(unresolvedEndpointError.edgeKind);
+expectType<"from" | "to">(unresolvedEndpointError.side);
+expectType<string>(unresolvedEndpointError.endpoint);
+expectType<"GRAPH_EXTENSION_UNRESOLVED_ENDPOINT">(unresolvedEndpointError.code);
+
+// Kind-collision: declared kind name shadows a compile-time kind.
+declare const kindCollisionError: KindCollisionError;
+expectAssignable<GraphExtensionError>(kindCollisionError);
+expectType<string>(kindCollisionError.kindName);
+expectType<"node" | "edge">(kindCollisionError.entity);
+expectType<"KIND_COLLISION">(kindCollisionError.code);
+
+// Incompatible-change: structured `changes` list (one entry per delta).
+declare const incompatibleError: IncompatibleChangeError;
+expectAssignable<GraphExtensionError>(incompatibleError);
+expectType<readonly IncompatibleChange[]>(incompatibleError.changes);
+expectType<"INCOMPATIBLE_CHANGE">(incompatibleError.code);
+
+// Kind-has-referents: removeKinds blocked by a referent declaration.
+// Carries the structured `referents` list so a UI can show every
+// compile-time edge / ontology declaration that points at the kind.
+declare const referentsError: KindHasReferentsError;
+expectAssignable<GraphExtensionError>(referentsError);
+expectType<string>(referentsError.kindName);
+expectType<"KIND_HAS_REFERENTS">(referentsError.code);
+expectAssignable<
+  readonly Readonly<{
+    type: "compile-time-edge" | "compile-time-ontology";
+    name: string;
+  }>[]
+>(referentsError.referents);
+
+// Remove-compile-time-kind: removeKinds attempted against a static kind.
+declare const removeCompileTimeError: RemoveCompileTimeKindError;
+expectAssignable<GraphExtensionError>(removeCompileTimeError);
+expectType<string>(removeCompileTimeError.kindName);
+expectType<"node" | "edge">(removeCompileTimeError.entity);
+expectType<"REMOVE_COMPILE_TIME_KIND">(removeCompileTimeError.code);
+
+// Kind-not-found is general (not in the GraphExtension hierarchy)
+// but carries the same kindName / entity discriminators.
+declare const notFoundError: KindNotFoundError;
+expectAssignable<TypeGraphError>(notFoundError);
+expectType<string>(notFoundError.kindName);
+expectType<"node" | "edge">(notFoundError.entity);
+
+// `instanceof` checks narrow to the concrete subclass — the abstract
+// base's `code: string` widens to `string`, but each concrete class
+// pins its `code` as a literal, so the narrowed branch can branch on
+// the field. A consumer can catch the family with one
+// `instanceof GraphExtensionError`, then switch on `error.code` for
+// per-subclass handling.
+function classifyExtensionError(error: GraphExtensionError): string {
+  if (error instanceof GraphExtensionValidationError) {
+    expectType<"GRAPH_EXTENSION_INVALID">(error.code);
+    return error.issues.length.toString();
+  }
+  if (error instanceof GraphExtensionVersionUnsupportedError) {
+    expectType<"GRAPH_EXTENSION_VERSION_UNSUPPORTED">(error.code);
+    return `v${error.persistedVersion}`;
+  }
+  if (error instanceof GraphExtensionUnresolvedEndpointError) {
+    expectType<"GRAPH_EXTENSION_UNRESOLVED_ENDPOINT">(error.code);
+    return error.edgeKind;
+  }
+  if (error instanceof KindCollisionError) {
+    expectType<"KIND_COLLISION">(error.code);
+    return error.kindName;
+  }
+  if (error instanceof KindHasReferentsError) {
+    expectType<"KIND_HAS_REFERENTS">(error.code);
+    return `${error.kindName} (${error.referents.length} referents)`;
+  }
+  if (error instanceof IncompatibleChangeError) {
+    expectType<"INCOMPATIBLE_CHANGE">(error.code);
+    return error.changes.length.toString();
+  }
+  if (error instanceof RemoveCompileTimeKindError) {
+    expectType<"REMOVE_COMPILE_TIME_KIND">(error.code);
+    return error.kindName;
+  }
+  return "unknown";
+}
+expectType<(error: GraphExtensionError) => string>(classifyExtensionError);

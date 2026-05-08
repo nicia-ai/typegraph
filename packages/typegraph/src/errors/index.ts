@@ -272,25 +272,50 @@ export class EdgeNotFoundError extends TypeGraphError {
 }
 
 /**
- * Thrown when a kind is not found in the graph registry.
+ * Thrown when an operation references a kind that isn't registered on
+ * the graph — `getNodeCollectionOrThrow` against an unknown kind, a
+ * `materializeIndexes({ kinds })` filter naming a missing kind, an
+ * extension referencing an unresolved endpoint, search facade typos,
+ * etc. Carries the offending `kindName` and `entity` plus the host
+ * `graphId` so logs are unambiguous when multiple stores share a
+ * process.
  */
 export class KindNotFoundError extends TypeGraphError {
+  readonly kindName: string;
+  readonly entity: "node" | "edge";
+
   constructor(
-    kind: string,
-    type: "node" | "edge",
-    options?: { cause?: unknown },
+    kindName: string,
+    entity: "node" | "edge",
+    options?: Readonly<{
+      graphId?: string;
+      suggestion?: string;
+      cause?: unknown;
+    }>,
   ) {
+    const where =
+      options?.graphId === undefined ? "" : ` on graph "${options.graphId}"`;
     super(
-      `${type === "node" ? "Node" : "Edge"} kind not found: ${kind}`,
+      `${entity === "node" ? "Node" : "Edge"} kind "${kindName}" is not registered${where}.`,
       "KIND_NOT_FOUND",
       {
-        details: { kind, type },
+        details: {
+          kindName,
+          entity,
+          ...(options?.graphId === undefined ?
+            {}
+          : { graphId: options.graphId }),
+        },
         category: "user",
-        suggestion: `Verify "${kind}" is defined in your graph schema and spelled correctly.`,
+        suggestion:
+          options?.suggestion ??
+          "Compile-time kinds come from defineGraph; extension kinds appear after store.evolve() returns. Check store.introspect() for the registered set.",
         cause: options?.cause,
       },
     );
     this.name = "KindNotFoundError";
+    this.kindName = kindName;
+    this.entity = entity;
   }
 }
 
@@ -582,7 +607,7 @@ export class MigrationError extends TypeGraphError {
 }
 
 /**
- * Thrown by `Store.evolve(extension, { eager: true })` when the schema
+ * Thrown by `Store.evolve(extension, { eager })` when the schema
  * commit succeeded but the follow-on `materializeIndexes()` produced
  * one or more failed entries.
  *
@@ -596,7 +621,7 @@ export class MigrationError extends TypeGraphError {
  * ```ts
  * const ref = { current: store };
  * try {
- *   await store.evolve(extension, { ref, eager: true });
+ *   await store.evolve(extension, { ref, eager: {} });
  * } catch (error) {
  *   if (error instanceof EagerMaterializationError) {
  *     // schema is committed; ref.current is the new store

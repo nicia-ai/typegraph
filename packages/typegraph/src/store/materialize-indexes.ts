@@ -31,8 +31,8 @@ import {
   type GraphBackend,
   type RecordIndexMaterializationParams,
 } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
-import { ConfigurationError } from "../errors";
+import { type GraphDef, isKnownKind } from "../core/define-graph";
+import { ConfigurationError, KindNotFoundError } from "../errors";
 import {
   generateIndexDDL,
   type IndexDeclaration,
@@ -122,9 +122,14 @@ export async function materializeIndexes(
   if (kindFilter !== undefined) {
     for (const name of kindFilter) {
       if (!isKnownKind(graph, name)) {
-        throw new ConfigurationError(
-          `Cannot materialize indexes for unknown kind "${name}" on graph "${graphId}". Only kinds declared on the graph (compile-time or runtime) can be passed to materializeIndexes.`,
-          { code: "MATERIALIZE_UNKNOWN_KIND" },
+        throw new KindNotFoundError(
+          name,
+          Object.hasOwn(graph.edges, name) ? "edge" : "node",
+          {
+            graphId,
+            suggestion:
+              "Only kinds declared on the graph (compile-time or runtime) can be passed to materializeIndexes.",
+          },
         );
       }
     }
@@ -137,7 +142,7 @@ export async function materializeIndexes(
   // Short-circuit before any I/O when there's nothing to do. The
   // ensure-step below issues a CREATE TABLE statement — paying that
   // cost only to return an empty result is wasteful, especially on
-  // the agent-loop pattern where `evolve(sameExt, { eager: true })`
+  // the agent-loop pattern where `evolve(sameExt, { eager: {} })`
   // is repeated.
   if (candidates.length === 0) {
     return { results: [] };
@@ -170,29 +175,79 @@ export async function materializeIndexes(
     : { edgesTableName: tableNames.edges }),
   } as const;
 
-  const results: MaterializeIndexesEntry[] = [];
-  for (const declaration of candidates) {
-    const entry =
-      declaration.entity === "vector" ?
-        await materializeVectorIndex(
-          declaration,
-          backend,
-          graphId,
-          schemaVersion,
-        )
-      : await materializeRelationalIndex(
-          declaration,
-          backend,
-          dialect,
-          ddlOptions,
-          graphId,
-          schemaVersion,
-        );
-    results.push(entry);
-    if (entry.status === "failed" && options.stopOnError === true) break;
+  const materializeEntry = (
+    declaration: IndexDeclaration,
+  ): Promise<MaterializeIndexesEntry> =>
+    declaration.entity === "vector" ?
+      materializeVectorIndex(declaration, backend, graphId, schemaVersion)
+    : materializeRelationalIndex(
+        declaration,
+        backend,
+        dialect,
+        ddlOptions,
+        graphId,
+        schemaVersion,
+      );
+
+  if (options.stopOnError === true) {
+    const results: MaterializeIndexesEntry[] = [];
+    for (const declaration of candidates) {
+      const entry = await materializeEntry(declaration);
+      results.push(entry);
+      if (entry.status === "failed") break;
+    }
+    return { results };
   }
 
-  return { results };
+  // Postgres restricts `CREATE INDEX CONCURRENTLY` to one in-flight
+  // build per relation, so we group declarations by target table and
+  // run each group sequentially while running the groups in parallel.
+  // Typical schemas land in three buckets (nodes, edges, vector
+  // embeddings), giving a ~3× round-trip win over fully sequential
+  // without ever issuing two CONCURRENTLY builds against the same
+  // relation. SQLite ignores the grouping (writes serialize at the
+  // engine level either way).
+  const buckets = new Map<string, IndexDeclaration[]>();
+  for (const declaration of candidates) {
+    const key = parallelBucketKey(declaration);
+    const list = buckets.get(key);
+    if (list === undefined) buckets.set(key, [declaration]);
+    else list.push(declaration);
+  }
+
+  const bucketResults = await Promise.all(
+    [...buckets.values()].map(async (group) => {
+      const out: MaterializeIndexesEntry[] = [];
+      for (const declaration of group) {
+        out.push(await materializeEntry(declaration));
+      }
+      return out;
+    }),
+  );
+
+  // Flatten in declaration order so callers see a stable result shape
+  // regardless of how the buckets resolved.
+  const byDeclaration = new Map<IndexDeclaration, MaterializeIndexesEntry>();
+  let bucketIndex = 0;
+  for (const group of buckets.values()) {
+    const entries = bucketResults[bucketIndex]!;
+    for (const [declarationIndex, declaration] of group.entries()) {
+      byDeclaration.set(declaration, entries[declarationIndex]!);
+    }
+    bucketIndex += 1;
+  }
+  return {
+    results: candidates.map((declaration) => byDeclaration.get(declaration)!),
+  };
+}
+
+function parallelBucketKey(declaration: IndexDeclaration): string {
+  // Vector indexes all target the same physical embeddings table, so
+  // they share one bucket. Relational node and edge indexes split into
+  // two buckets keyed by entity (graphs override their physical table
+  // names but every declaration with the same entity still lands on
+  // the same physical table within a given graph).
+  return declaration.entity === "vector" ? "vector" : declaration.entity;
 }
 
 async function materializeRelationalIndex(
@@ -208,12 +263,6 @@ async function materializeRelationalIndex(
   graphId: string,
   schemaVersion: number,
 ): Promise<MaterializeIndexesEntry> {
-  // Narrowed by callsite — these are guaranteed defined when this is
-  // reached (validated above).
-  const executeDdl = backend.executeDdl!;
-  const recordIndexMaterialization = backend.recordIndexMaterialization!;
-  const getIndexMaterialization = backend.getIndexMaterialization!;
-
   const ddl = generateIndexDDL(declaration, dialect, ddlOptions);
   const targetTable =
     declaration.entity === "node" ?
@@ -224,79 +273,12 @@ async function materializeRelationalIndex(
     targetTable,
     declaration,
   );
-
-  const existing = await getIndexMaterialization(declaration.name);
-  if (existing?.materializedAt !== undefined) {
-    if (existing.signature === signature) {
-      return {
-        indexName: declaration.name,
-        entity: declaration.entity,
-        kind: declaration.kind,
-        status: "alreadyMaterialized",
-      };
-    }
-    const error = new Error(
-      `Index "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
-    );
-    await recordIndexMaterialization(
-      buildAttempt({
-        declaration,
-        graphId,
-        signature,
-        schemaVersion,
-        materializedAt: undefined,
-        error,
-      }),
-    );
-    return {
-      indexName: declaration.name,
-      entity: declaration.entity,
-      kind: declaration.kind,
-      status: "failed",
-      error,
-    };
-  }
-
-  try {
-    await executeDdl(ddl);
-    const attemptedAt = nowIso();
-    await recordIndexMaterialization(
-      buildAttempt({
-        declaration,
-        graphId,
-        signature,
-        schemaVersion,
-        materializedAt: attemptedAt,
-        error: undefined,
-        attemptedAt,
-      }),
-    );
-    return {
-      indexName: declaration.name,
-      entity: declaration.entity,
-      kind: declaration.kind,
-      status: "created",
-    };
-  } catch (error_) {
-    const error = error_ instanceof Error ? error_ : new Error(String(error_));
-    await recordIndexMaterialization(
-      buildAttempt({
-        declaration,
-        graphId,
-        signature,
-        schemaVersion,
-        materializedAt: undefined,
-        error,
-      }),
-    );
-    return {
-      indexName: declaration.name,
-      entity: declaration.entity,
-      kind: declaration.kind,
-      status: "failed",
-      error,
-    };
-  }
+  return materializeOne(declaration, backend, graphId, schemaVersion, {
+    statusKey: declaration.name,
+    signature,
+    driftLabel: "Index",
+    run: () => backend.executeDdl!(ddl),
+  });
 }
 
 async function materializeVectorIndex(
@@ -309,13 +291,10 @@ async function materializeVectorIndex(
   // carries shape metadata (dimensions, metric) for tooling but the
   // operator has signaled "no automatic index". Surface as `skipped`.
   if (declaration.indexType === "none") {
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "skipped",
-      reason: "indexType: 'none' opts out of automatic materialization",
-    };
+    return skippedEntry(
+      declaration,
+      "indexType: 'none' opts out of automatic materialization",
+    );
   }
 
   // Capability check: backends declare vector support via
@@ -328,13 +307,10 @@ async function materializeVectorIndex(
     vectorCapability?.supported !== true ||
     backend.createVectorIndex === undefined
   ) {
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "skipped",
-      reason: `Backend (${backend.dialect}) does not support vector indexes in its current configuration`,
-    };
+    return skippedEntry(
+      declaration,
+      `Backend (${backend.dialect}) does not support vector indexes in its current configuration`,
+    );
   }
   // Capability check (per index type): backends advertise the specific
   // index implementations they support (e.g. SQLite + sqlite-vec
@@ -343,47 +319,81 @@ async function materializeVectorIndex(
   // clear "this backend can't materialize this declaration" signal
   // instead of a silent no-op masquerading as `created`.
   if (!vectorCapability.indexTypes.includes(declaration.indexType)) {
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "skipped",
-      reason: `Backend (${backend.dialect}) does not support index type "${declaration.indexType}" for vector indexes; supported: ${vectorCapability.indexTypes.join(", ") || "(none)"}`,
-    };
+    return skippedEntry(
+      declaration,
+      `Backend (${backend.dialect}) does not support index type "${declaration.indexType}" for vector indexes; supported: ${vectorCapability.indexTypes.join(", ") || "(none)"}`,
+    );
   }
-
-  const recordIndexMaterialization = backend.recordIndexMaterialization!;
-  const getIndexMaterialization = backend.getIndexMaterialization!;
 
   const signature = await computeIndexSignature(
     backend.dialect,
     "typegraph_node_embeddings",
     declaration,
   );
+  const params: CreateVectorIndexParams = {
+    graphId,
+    nodeKind: declaration.kind,
+    fieldPath: declaration.fieldPath,
+    dimensions: declaration.dimensions,
+    metric: declaration.metric,
+    indexType: declaration.indexType,
+    indexParams: {
+      m: declaration.indexParams.m,
+      efConstruction: declaration.indexParams.efConstruction,
+      ...(declaration.indexParams.lists === undefined ?
+        {}
+      : { lists: declaration.indexParams.lists }),
+    },
+  };
+  return materializeOne(declaration, backend, graphId, schemaVersion, {
+    // Compound status-table key for vector entries. Pgvector creates
+    // one physical index per (graphId, kind, field) — so the
+    // per-deployment status table needs to disambiguate entries that
+    // SHARE a declaration name but belong to different graphs.
+    // Applied uniformly to auto-derived AND explicit declarations.
+    statusKey: vectorStatusKey(graphId, declaration.name),
+    signature,
+    driftLabel: "Vector index",
+    run: () => backend.createVectorIndex!(params),
+  });
+}
 
-  // Compound status-table key for vector entries. Pgvector creates
-  // one physical index per (graphId, kind, field) — so the
-  // per-deployment status table needs to disambiguate entries that
-  // SHARE a declaration name but belong to different graphs.
-  // Applied uniformly to auto-derived AND explicit declarations: the
-  // declaration name stays clean for inspection, the status key gets
-  // the graph scope. Without this, two graphs reusing the same
-  // explicit declaration name would collide — the second would
-  // falsely report `alreadyMaterialized` from the first's row.
-  const statusKey = vectorStatusKey(graphId, declaration.name);
+/**
+ * Shared "check existing → run → record" frame for both relational and
+ * vector materialization. Both paths track a per-deployment status row
+ * keyed by `statusKey`, short-circuit on a matching signature, surface
+ * signature drift as a recorded failure, and execute `run()` on first
+ * materialization. Differences live entirely in the `MaterializeAction`
+ * the caller passes.
+ */
+async function materializeOne(
+  declaration: IndexDeclaration,
+  backend: GraphBackend,
+  graphId: string,
+  schemaVersion: number,
+  action: Readonly<{
+    statusKey: string;
+    signature: string;
+    driftLabel: string;
+    run: () => Promise<void>;
+  }>,
+): Promise<MaterializeIndexesEntry> {
+  // Narrowed by callsite — these are guaranteed defined when this is
+  // reached (validated in `materializeIndexes`).
+  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const getIndexMaterialization = backend.getIndexMaterialization!;
+
+  const { statusKey, signature, driftLabel, run } = action;
+  const statusOverride =
+    statusKey === declaration.name ? undefined : { statusName: statusKey };
 
   const existing = await getIndexMaterialization(statusKey);
   if (existing?.materializedAt !== undefined) {
     if (existing.signature === signature) {
-      return {
-        indexName: declaration.name,
-        entity: "vector",
-        kind: declaration.kind,
-        status: "alreadyMaterialized",
-      };
+      return entry(declaration, "alreadyMaterialized");
     }
     const error = new Error(
-      `Vector index "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
+      `${driftLabel} "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
     );
     await recordIndexMaterialization(
       buildAttempt({
@@ -393,35 +403,14 @@ async function materializeVectorIndex(
         schemaVersion,
         materializedAt: undefined,
         error,
-        statusName: statusKey,
+        ...statusOverride,
       }),
     );
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "failed",
-      error,
-    };
+    return entry(declaration, "failed", error);
   }
 
   try {
-    const params: CreateVectorIndexParams = {
-      graphId,
-      nodeKind: declaration.kind,
-      fieldPath: declaration.fieldPath,
-      dimensions: declaration.dimensions,
-      metric: declaration.metric,
-      indexType: declaration.indexType,
-      indexParams: {
-        m: declaration.indexParams.m,
-        efConstruction: declaration.indexParams.efConstruction,
-        ...(declaration.indexParams.lists === undefined ?
-          {}
-        : { lists: declaration.indexParams.lists }),
-      },
-    };
-    await backend.createVectorIndex(params);
+    await run();
     const attemptedAt = nowIso();
     await recordIndexMaterialization(
       buildAttempt({
@@ -432,15 +421,10 @@ async function materializeVectorIndex(
         materializedAt: attemptedAt,
         error: undefined,
         attemptedAt,
-        statusName: statusKey,
+        ...statusOverride,
       }),
     );
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "created",
-    };
+    return entry(declaration, "created");
   } catch (error_) {
     const error = error_ instanceof Error ? error_ : new Error(String(error_));
     await recordIndexMaterialization(
@@ -451,17 +435,38 @@ async function materializeVectorIndex(
         schemaVersion,
         materializedAt: undefined,
         error,
-        statusName: statusKey,
+        ...statusOverride,
       }),
     );
-    return {
-      indexName: declaration.name,
-      entity: "vector",
-      kind: declaration.kind,
-      status: "failed",
-      error,
-    };
+    return entry(declaration, "failed", error);
   }
+}
+
+function entry(
+  declaration: IndexDeclaration,
+  status: MaterializeIndexesEntry["status"],
+  error?: Error,
+): MaterializeIndexesEntry {
+  return {
+    indexName: declaration.name,
+    entity: declaration.entity,
+    kind: declaration.kind,
+    status,
+    ...(error === undefined ? {} : { error }),
+  };
+}
+
+function skippedEntry(
+  declaration: VectorIndexDeclaration,
+  reason: string,
+): MaterializeIndexesEntry {
+  return {
+    indexName: declaration.name,
+    entity: "vector",
+    kind: declaration.kind,
+    status: "skipped",
+    reason,
+  };
 }
 
 /**
@@ -532,8 +537,4 @@ async function computeIndexSignature(
     hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
-}
-
-function isKnownKind(graph: GraphDef, name: string): boolean {
-  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
 }

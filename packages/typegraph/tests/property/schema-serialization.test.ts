@@ -13,6 +13,8 @@ import {
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
+import { defineGraphExtension } from "../../src/graph-extension";
+import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import {
   defineEdgeIndex,
   defineNodeIndex,
@@ -27,8 +29,6 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
-import { defineRuntimeExtension } from "../../src/runtime";
-import { mergeRuntimeExtension } from "../../src/runtime/merge";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
 import {
@@ -822,11 +822,11 @@ describe("Schema Serialization Properties", () => {
       expect(hashAB).toBe(hashBA);
     });
 
-    // The persisted runtime extension document is the durable source the
-    // loader uses to rebuild runtime Zod validators. Graphs that have
-    // never been runtime-extended must omit the slice entirely so legacy
+    // The persisted graph-extension document is the durable source the
+    // loader uses to rebuild graph-extension Zod validators. Graphs that have
+    // never had a graph extension must omit the slice entirely so legacy
     // schemas hash byte-identically.
-    it("graphs without runtimeDocument omit the field from canonical serialization", () => {
+    it("graphs without extension omit the field from canonical serialization", () => {
       const Person = defineNode("Person", {
         schema: z.object({ name: z.string() }),
       });
@@ -838,13 +838,13 @@ describe("Schema Serialization Properties", () => {
       });
 
       const serialized = serializeSchema(graph, 1);
-      expect("runtimeDocument" in serialized).toBe(false);
+      expect("extension" in serialized).toBe(false);
 
       const canonical = JSON.stringify(serialized, sortedReplacer);
-      expect(canonical).not.toContain('"runtimeDocument"');
+      expect(canonical).not.toContain('"extension"');
     });
 
-    it("hash differs when a runtimeDocument is present", async () => {
+    it("hash differs when a extension is present", async () => {
       const Person = defineNode("Person", {
         schema: z.object({ name: z.string() }),
       });
@@ -857,12 +857,12 @@ describe("Schema Serialization Properties", () => {
 
       const baseHash = await computeSchemaHash(serializeSchema(baseGraph, 1));
 
-      const extension = defineRuntimeExtension({
+      const extension = defineGraphExtension({
         nodes: {
           Tag: { properties: { name: { type: "string" } } },
         },
       });
-      const extendedGraph = mergeRuntimeExtension(baseGraph, extension);
+      const extendedGraph = mergeGraphExtension(baseGraph, extension);
       const extendedHash = await computeSchemaHash(
         serializeSchema(extendedGraph, 1),
       );
@@ -916,7 +916,7 @@ describe("Schema Serialization Properties", () => {
 
     // Conversely, `origin: "runtime"` is emitted explicitly so the
     // restart loader can route it through the runtime compiler.
-    it('runtime indexes emit `origin: "runtime"` in canonical serialization', () => {
+    it('graph-extension indexes emit `origin: "runtime"` in canonical serialization', () => {
       const Person = defineNode("Person", {
         schema: z.object({ email: z.string() }),
       });

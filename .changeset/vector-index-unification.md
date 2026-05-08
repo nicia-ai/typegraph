@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Unify vector indexes through the same declaration channel as relational indexes. Vector indexes are now auto-derived from `embedding()` brands at `defineGraph()` time and flow through `Store.materializeIndexes()` like any other index. Closes the second of two PRs needed to ship #101 properly.
+Unify vector indexes through the same declaration channel as relational indexes. Vector indexes are auto-derived from `embedding()` brands at `defineGraph()` time and flow through `Store.materializeIndexes()` like any other index.
 
 ## What changed
 
@@ -116,6 +116,6 @@ Pre-1.0 acceptable.
   `bootstrapTables` time.
 - **Multiple vector indexes per (kind, field).** v1 allows at most
   one. Use a different field name for now.
-- **Vector indexes for runtime-declared kinds.** Auto-derivation
-  walks compile-time node schemas. Runtime-extension documents can't
+- **Vector indexes for graph-extension-declared kinds.** Auto-derivation
+  walks compile-time node schemas. Graph-extension documents can't
   yet declare embeddings — coming in a follow-up.

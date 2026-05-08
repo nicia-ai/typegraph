@@ -2,7 +2,7 @@
  * Tests for `store.materializeIndexes()`.
  *
  * The verb runs `CREATE INDEX` DDL declared via `defineGraph({ indexes })`
- * (and, transitively, runtime-declared indexes once they flow into the
+ * (and, transitively, graph-extension-declared indexes once they flow into the
  * channel). Status is recorded per-database in
  * `typegraph_index_materializations`.
  *
@@ -14,6 +14,7 @@ import { eq, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { KindNotFoundError } from "../src";
 import { tables as defaultSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraph } from "../src/core/define-graph";
@@ -89,7 +90,7 @@ describe("Store.materializeIndexes — basic flow", () => {
     }
   });
 
-  it("throws MATERIALIZE_UNKNOWN_KIND for an unknown kind name", async () => {
+  it("throws KindNotFoundError for an unknown kind name", async () => {
     const backend = createTestBackend();
     const graph = buildGraph();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -97,10 +98,8 @@ describe("Store.materializeIndexes — basic flow", () => {
     const caught = await store
       .materializeIndexes({ kinds: ["NotARealKind"] })
       .catch((error: unknown) => error);
-    expect(caught).toBeInstanceOf(ConfigurationError);
-    expect((caught as ConfigurationError).details).toMatchObject({
-      code: "MATERIALIZE_UNKNOWN_KIND",
-    });
+    expect(caught).toBeInstanceOf(KindNotFoundError);
+    expect((caught as KindNotFoundError).kindName).toBe("NotARealKind");
   });
 
   it("throws MATERIALIZE_BEFORE_INITIALIZE if the store has no schema yet", async () => {
@@ -275,5 +274,43 @@ describe("Store.materializeIndexes — empty / no-op cases", () => {
     const [store] = await createStoreWithSchema(graph, backend);
     const result = await store.materializeIndexes();
     expect(result.results).toEqual([]);
+  });
+});
+
+describe("graph-extension-declared relational indexes flow through materializeIndexes", () => {
+  it("materializes a node index declared in a graph extension", async () => {
+    const backend = createTestBackend();
+    const baseGraph = defineGraph({
+      id: "runtime_index_materialize",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    const { defineGraphExtension } = await import("../src/graph-extension");
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Paper: { properties: { doi: { type: "string" } } } },
+        indexes: [
+          {
+            entity: "node",
+            kind: "Paper",
+            name: "paper_by_doi",
+            fields: ["doi"],
+          },
+        ],
+      }),
+    );
+
+    const result = await evolved.materializeIndexes();
+    const paperIndex = result.results.find(
+      (entry) => entry.indexName === "paper_by_doi",
+    );
+    expect(paperIndex).toBeDefined();
+    expect(paperIndex?.kind).toBe("Paper");
+    expect(paperIndex?.entity).toBe("node");
+    // Graph-extension-declared relational indexes go through the same DDL
+    // path as compile-time ones — `created` confirms the SQL ran.
+    expect(paperIndex?.status).toBe("created");
   });
 });

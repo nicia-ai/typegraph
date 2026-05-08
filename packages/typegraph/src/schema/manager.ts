@@ -10,7 +10,7 @@
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { DatabaseOperationError, MigrationError } from "../errors";
-import { mergeRuntimeExtension } from "../runtime/merge";
+import { mergeGraphExtension } from "../graph-extension/merge";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -91,18 +91,18 @@ export async function loadActiveSchemaWithBootstrap(
 }
 
 /**
- * Reads the active schema, parses it, and folds any persisted runtime
- * extension document into the supplied compile-time graph. Returns the
+ * Reads the active schema, parses it, and folds any persisted graph-extension
+ * document into the supplied compile-time graph. Returns the
  * merged graph alongside the prefetched row + parsed schema so the
  * caller can pass them through to `ensureSchema` without paying for a
  * second `getActiveSchema` round trip or a second
  * `serializedSchemaZod` walk.
  *
- * Throws `ConfigurationError` if the persisted runtime document
+ * Throws `ConfigurationError` if the persisted graph-extension document
  * references a compile-time kind that no longer exists (the
  * startup-conflict case).
  */
-export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
+export async function loadAndMergeGraphExtensionDocument<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
 ): Promise<
@@ -118,9 +118,9 @@ export async function loadAndMergeRuntimeDocument<G extends GraphDef>(
   }
   const storedSchema = parseSerializedSchema(activeRow.schema_doc);
   const merged =
-    storedSchema.runtimeDocument === undefined ?
+    storedSchema.extension === undefined ?
       graph
-    : mergeRuntimeExtension(graph, storedSchema.runtimeDocument);
+    : mergeGraphExtension(graph, storedSchema.extension);
   return {
     graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
     activeRow,
@@ -232,7 +232,7 @@ export async function ensureSchema<G extends GraphDef>(
     /**
      * Pre-fetched active row + parsed stored schema. When the loader
      * (`createStoreWithSchema`) has already paid for `getActiveSchema`
-     * and `parseSerializedSchema` to peek at `runtimeDocument`, it
+     * and `parseSerializedSchema` to peek at `extension`, it
      * passes the results through here so `ensureSchema` doesn't repeat
      * the round trip + Zod walk on every Store boot.
      */
@@ -250,7 +250,7 @@ export async function ensureSchema<G extends GraphDef>(
   // checked and saw no schema yet. Falling back to `??` would refetch
   // and could observe a row that another process committed in the
   // race window between the loader's read and this point; ensureSchema
-  // would then diff a runtime-extended persisted schema against the
+  // would then diff a persisted schema with graph extensions against the
   // unmerged graph and throw a misleading MigrationError. With the
   // sentinel check the race surfaces as a clean `StaleVersionError`
   // from `commitSchemaVersion` inside `initializeSchema` instead.

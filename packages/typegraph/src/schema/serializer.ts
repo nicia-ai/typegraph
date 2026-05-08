@@ -18,6 +18,10 @@ import {
   type UniqueConstraint,
 } from "../core/types";
 import {
+  type GraphExtension,
+  LEGACY_GRAPH_EXTENSION_VERSION,
+} from "../graph-extension/extension-types";
+import {
   type EdgeIndexDeclaration,
   type IndexDeclaration,
   type NodeIndexDeclaration,
@@ -29,10 +33,6 @@ import {
   type OntologyRelation,
 } from "../ontology/types";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
-import {
-  LEGACY_RUNTIME_DOCUMENT_VERSION,
-  type RuntimeGraphDocument,
-} from "../runtime/document-types";
 import { nowIso } from "../utils/date";
 import { sortedReplacer } from "./canonical";
 import {
@@ -67,7 +67,7 @@ export function serializeSchema<G extends GraphDef>(
   const edges = serializeEdges(graph);
   const ontology = serializeOntology(graph.ontology);
   const indexes = serializeIndexes(graph.indexes);
-  const runtimeDocument = canonicalRuntimeDocument(graph.runtimeDocument);
+  const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
 
   return {
@@ -86,11 +86,11 @@ export function serializeSchema<G extends GraphDef>(
     // in that case so legacy graphs hash byte-identically to the
     // pre-`indexes` form.
     ...(indexes === undefined ? {} : { indexes }),
-    // The runtime extension document is the durable source the loader
-    // uses to rebuild runtime Zod validators on restart. Omitted on
-    // graphs that have never been runtime-extended so legacy schemas
-    // hash byte-identically.
-    ...(runtimeDocument === undefined ? {} : { runtimeDocument }),
+    // The graph extension is the durable source the loader uses to
+    // rebuild extension-kind Zod validators on restart. Omitted on
+    // graphs that have never been extended so legacy schemas hash
+    // byte-identically.
+    ...(extension === undefined ? {} : { extension }),
     // Soft-deprecated kind names. Omitted when empty so legacy
     // schemas hash byte-identically; sorted for canonical-form
     // stability across insertion-order differences.
@@ -106,27 +106,27 @@ function serializeDeprecatedKinds(
 }
 
 /**
- * Strips `version` from the persisted runtimeDocument when it equals
+ * Strips `version` from the persisted extension when it equals
  * the legacy default (a stable `1`). The version is metadata about
  * the document format, not semantic schema content; omitting the
  * default value from the canonical form means documents persisted
  * before the version field existed (no `version`) hash byte-identically
  * with documents persisted after (`version: 1`).
  *
- * Pinned to `LEGACY_RUNTIME_DOCUMENT_VERSION` rather than
- * `CURRENT_RUNTIME_DOCUMENT_VERSION` so future major bumps don't
+ * Pinned to `LEGACY_GRAPH_EXTENSION_VERSION` rather than
+ * `CURRENT_GRAPH_EXTENSION_VERSION` so future major bumps don't
  * silently re-classify already-stored documents — when v2 ships,
  * v1 documents continue to omit `version` (because `1 ===
  * LEGACY`), and v2 documents emit `version: 2` explicitly. The
  * canonical-form rule stays stable across library versions.
  */
-function canonicalRuntimeDocument(
-  document: RuntimeGraphDocument | undefined,
-): RuntimeGraphDocument | undefined {
+function canonicalExtension(
+  document: GraphExtension | undefined,
+): GraphExtension | undefined {
   if (document === undefined) return undefined;
   if (document.version === undefined) return document;
 
-  if (document.version !== LEGACY_RUNTIME_DOCUMENT_VERSION) return document;
+  if (document.version !== LEGACY_GRAPH_EXTENSION_VERSION) return document;
   const { version: _omit, ...rest } = document;
   return rest;
 }
@@ -583,10 +583,35 @@ function mapToSimpleRecord(
 // ============================================================
 
 /**
- * Serializes a Zod schema to JSON Schema.
- *
- * Uses Zod 4's toJSONSchema() method for conversion.
+ * Memoizes `z.toJSONSchema` results keyed by Zod schema identity.
+ * `z.toJSONSchema` walks the entire schema tree on every call;
+ * `Store.introspect()` and any poll-driven UI built on top of it
+ * runs the conversion per kind per call. Schemas are immutable for
+ * the lifetime of a `NodeType` / `EdgeType`, so the cache is sound;
+ * `WeakMap` follows the schema's lifetime so there's no memory leak
+ * when the registry is rebuilt by `evolve` / `removeKinds` /
+ * `deprecateKinds` (the old registry's schemas are unreferenced and
+ * the cache entries become eligible for GC alongside them).
  */
+const SCHEMA_PROPERTIES_CACHE = new WeakMap<z.ZodType, JsonSchema>();
+
+/**
+ * Serializes a Zod schema to JSON Schema. Memoized — repeated calls
+ * with the same schema reference return the cached output without
+ * re-walking the tree.
+ *
+ * Uses Zod 4's toJSONSchema() method for conversion. Re-exported for
+ * `store.introspect()` so the in-memory graph can produce the same
+ * JSON-Schema view of properties that the persisted form carries.
+ */
+export function serializeSchemaProperties(schema: z.ZodType): JsonSchema {
+  const cached = SCHEMA_PROPERTIES_CACHE.get(schema);
+  if (cached !== undefined) return cached;
+  const computed = serializeZodSchema(schema);
+  SCHEMA_PROPERTIES_CACHE.set(schema, computed);
+  return computed;
+}
+
 function serializeZodSchema(schema: z.ZodType): JsonSchema {
   try {
     // Zod 4 has toJSONSchema as a standard export
@@ -622,9 +647,7 @@ export async function computeSchemaHash(
     ontology: schema.ontology,
     defaults: schema.defaults,
     ...(schema.indexes === undefined ? {} : { indexes: schema.indexes }),
-    ...(schema.runtimeDocument === undefined ?
-      {}
-    : { runtimeDocument: schema.runtimeDocument }),
+    ...(schema.extension === undefined ? {} : { extension: schema.extension }),
     ...(schema.deprecatedKinds === undefined ?
       {}
     : { deprecatedKinds: schema.deprecatedKinds }),

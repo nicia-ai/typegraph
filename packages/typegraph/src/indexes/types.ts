@@ -210,8 +210,8 @@ export type EdgeIndexConfig<E extends AnyEdgeType> = Readonly<{
  *   threaded through `defineGraph({ indexes })`. This is the default and is
  *   omitted from the canonical schema document so legacy graphs hash
  *   byte-identically.
- * - `runtime`: produced by a runtime extension. Always emitted explicitly
- *   so the loader can re-route the declaration through the runtime
+ * - `runtime`: produced by a graph extension. Always emitted explicitly
+ *   so the loader can re-route the declaration through the extension
  *   compiler on restart.
  */
 export type IndexOrigin = "compile-time" | "runtime";
@@ -228,8 +228,8 @@ export type IndexOrigin = "compile-time" | "runtime";
  * `SerializedSchema.indexes`. It carries everything the DDL compiler and
  * the Drizzle schema factories need to generate index SQL — the same
  * value can come from a typed builder (`defineNodeIndex` /
- * `defineEdgeIndex`) or be reconstructed from a runtime extension
- * document on restart.
+ * `defineEdgeIndex`) or be reconstructed from a graph extension on
+ * restart.
  */
 type IndexDeclarationBase = Readonly<{
   /** Unique index name (used in DDL and as the diffing identity key). */

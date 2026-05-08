@@ -19,7 +19,7 @@
  * const backend = createSqliteBackend(db, { tables });
  * ```
  */
-import { eq, getTableName, type SQL, sql } from "drizzle-orm";
+import { and, eq, getTableName, isNull, type SQL, sql } from "drizzle-orm";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -40,7 +40,9 @@ import {
   type FulltextSearchResult,
   type GraphBackend,
   type IndexMaterializationRow,
+  type KindRemovalRow,
   type RecordIndexMaterializationParams,
+  type RecordKindRemovalParams,
   type SchemaVersionRow,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
@@ -60,6 +62,18 @@ import {
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import { generateSqliteCreateTableSQL, generateSqliteDDL } from "./ddl";
+import {
+  buildMaterializationInsertValues,
+  buildMaterializationOnConflictSet,
+  mapMaterializationRow,
+  SQLITE_INDEX_MAT_TIMESTAMPS,
+} from "./index-materializations";
+import {
+  buildKindRemovalInsertValues,
+  buildKindRemovalOnConflictSet,
+  mapKindRemovalRow,
+  SQLITE_KIND_REMOVAL_TIMESTAMPS,
+} from "./kind-removals";
 import {
   type CommonOperationBackend,
   createCommonOperationBackend,
@@ -680,55 +694,70 @@ export function createSqliteBackend(
       const rows = await db.select().from(t).where(eq(t.indexName, indexName));
       const row = rows[0];
       if (row === undefined) return undefined;
-      return {
-        indexName: row.indexName,
-        graphId: row.graphId,
-        entity: row.entity as "node" | "edge" | "vector",
-        kind: row.kind,
-        signature: row.signature,
-        schemaVersion: row.schemaVersion,
-        materializedAt: row.materializedAt ?? undefined,
-        lastAttemptedAt: row.lastAttemptedAt,
-        lastError: row.lastError ?? undefined,
-      };
+      return mapMaterializationRow(row, SQLITE_INDEX_MAT_TIMESTAMPS.decode);
     },
 
     async recordIndexMaterialization(
       params: RecordIndexMaterializationParams,
     ): Promise<void> {
       const t = tables.indexMaterializations;
-      // Preserve any prior successful `materializedAt` when this attempt
-      // failed (params.materializedAt === undefined). On success, the
-      // new timestamp overwrites.
-      const materializedAtSet =
-        params.materializedAt === undefined
-          ? sql`COALESCE(excluded.${sql.identifier("materialized_at")}, ${t.materializedAt})`
-          : sql`excluded.${sql.identifier("materialized_at")}`;
       await db
         .insert(t)
-        .values({
-          indexName: params.indexName,
-          graphId: params.graphId,
-          entity: params.entity,
-          kind: params.kind,
-          signature: params.signature,
-          schemaVersion: params.schemaVersion,
-          materializedAt: params.materializedAt,
-          lastAttemptedAt: params.attemptedAt,
-          lastError: params.error,
-        })
+        .values(
+          buildMaterializationInsertValues(
+            params,
+            SQLITE_INDEX_MAT_TIMESTAMPS.encode,
+          ),
+        )
         .onConflictDoUpdate({
           target: t.indexName,
-          set: {
-            graphId: sql`excluded.${sql.identifier("graph_id")}`,
-            entity: sql`excluded.${sql.identifier("entity")}`,
-            kind: sql`excluded.${sql.identifier("kind")}`,
-            signature: sql`excluded.${sql.identifier("signature")}`,
-            schemaVersion: sql`excluded.${sql.identifier("schema_version")}`,
-            materializedAt: materializedAtSet,
-            lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
-            lastError: sql`excluded.${sql.identifier("last_error")}`,
-          },
+          set: buildMaterializationOnConflictSet(
+            t.materializedAt,
+            params.materializedAt,
+          ),
+        });
+    },
+
+    async ensureKindRemovalsTable(): Promise<void> {
+      await db.run(sql.raw(generateSqliteCreateTableSQL(tables.kindRemovals)));
+    },
+
+    async getPendingKindRemovals(
+      graphId: string,
+    ): Promise<readonly KindRemovalRow[]> {
+      const t = tables.kindRemovals;
+      const rows = await db
+        .select()
+        .from(t)
+        .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+      return rows.map((row) =>
+        mapKindRemovalRow(row, SQLITE_KIND_REMOVAL_TIMESTAMPS.decode),
+      );
+    },
+
+    async getAllKindRemovals(
+      graphId: string,
+    ): Promise<readonly KindRemovalRow[]> {
+      const t = tables.kindRemovals;
+      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
+      return rows.map((row) =>
+        mapKindRemovalRow(row, SQLITE_KIND_REMOVAL_TIMESTAMPS.decode),
+      );
+    },
+
+    async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
+      const t = tables.kindRemovals;
+      await db
+        .insert(t)
+        .values(
+          buildKindRemovalInsertValues(
+            params,
+            SQLITE_KIND_REMOVAL_TIMESTAMPS.encode,
+          ),
+        )
+        .onConflictDoUpdate({
+          target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+          set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
         });
     },
 

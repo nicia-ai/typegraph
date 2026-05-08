@@ -7,7 +7,7 @@
  * The recommended way to attach indexes to a graph is to pass them through
  * `defineGraph({ ..., indexes: [...] })`. They flow into
  * `SerializedSchema.indexes` and can be materialized via the same code
- * path as runtime-declared indexes.
+ * path as graph-extension-declared indexes.
  *
  * @example Indexes via defineGraph
  * ```ts

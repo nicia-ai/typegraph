@@ -409,20 +409,34 @@ describe("ConfigurationError", () => {
 describe("KindNotFoundError", () => {
   it("formats message for node kind", () => {
     const error = new KindNotFoundError("User", "node");
-    expect(error.message).toBe("Node kind not found: User");
+    expect(error.message).toBe('Node kind "User" is not registered.');
     expect(error.code).toBe("KIND_NOT_FOUND");
     expect(error.name).toBe("KindNotFoundError");
     expect(error.category).toBe("user");
+    expect(error.kindName).toBe("User");
+    expect(error.entity).toBe("node");
   });
 
   it("formats message for edge kind", () => {
     const error = new KindNotFoundError("Follows", "edge");
-    expect(error.message).toBe("Edge kind not found: Follows");
+    expect(error.message).toBe('Edge kind "Follows" is not registered.');
   });
 
-  it("stores kind and type", () => {
+  it("stores kind and entity in details", () => {
     const error = new KindNotFoundError("Post", "node");
-    expect(error.details).toEqual({ kind: "Post", type: "node" });
+    expect(error.details).toEqual({ kindName: "Post", entity: "node" });
+  });
+
+  it("includes graphId in message and details when supplied", () => {
+    const error = new KindNotFoundError("Paper", "node", { graphId: "lib" });
+    expect(error.message).toBe(
+      'Node kind "Paper" is not registered on graph "lib".',
+    );
+    expect(error.details).toEqual({
+      kindName: "Paper",
+      entity: "node",
+      graphId: "lib",
+    });
   });
 });
 

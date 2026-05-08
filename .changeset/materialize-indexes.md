@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Add `store.materializeIndexes(options?)` — runs `CREATE INDEX` DDL for the indexes declared on a graph and tracks per-deployment status in a new `typegraph_index_materializations` table. Closes the runtime-extension PR series for #101.
+Add `store.materializeIndexes(options?)` — runs `CREATE INDEX` DDL for the indexes declared on a graph and tracks per-deployment status in a new `typegraph_index_materializations` table.
 
 ```typescript
 const [store] = await createStoreWithSchema(graph, backend);
@@ -22,7 +22,7 @@ await store.materializeIndexes({ stopOnError: true });
 ## Public API
 
 - `Store.materializeIndexes(options?: { kinds?: readonly string[]; stopOnError?: boolean })` — async; returns `MaterializeIndexesResult`.
-- `MaterializeIndexesResult.results: readonly MaterializeIndexesEntry[]` — one entry per declared index with `status: "created" | "alreadyMaterialized" | "failed"`.
+- `MaterializeIndexesResult.results: readonly MaterializeIndexesEntry[]` — one entry per declared index with `status: "created" | "alreadyMaterialized" | "failed" | "skipped"`.
 - New backend primitives on `GraphBackend`: `executeDdl(sql)`, `getIndexMaterialization(indexName)`, `recordIndexMaterialization(params)`. Bundled SQLite + Postgres backends implement all three.
 - `GenerateIndexDdlOptions.concurrent` — Postgres-only flag for `CREATE INDEX CONCURRENTLY`. SQLite ignores. Set automatically by `materializeIndexes`.
 
@@ -39,9 +39,8 @@ await store.materializeIndexes({ stopOnError: true });
 - `IF NOT EXISTS` does not validate shape on Postgres — only that something with that name exists. Drift detection here uses TypeGraph's recorded `signature`, not PG metadata. Signature mismatch surfaces as `failed` with a `different signature` message; v1 does not auto drop+recreate.
 - Failed `CONCURRENTLY` builds leave invalid indexes (`pg_index.indisvalid = false`). v1 surfaces this as a `failed` result; the operator drops the invalid index manually before retry.
 
-## Out of scope (deferred follow-ups)
+## Deferred follow-ups
 
-- **Vector + fulltext index unification.** PR 6 covers only relational indexes. Vector / fulltext continue to use the existing per-kind imperative APIs (`createVectorIndex`, `createFulltextIndex`); lifting them into the unified declaration channel is a future PR.
-- **`evolve(extension, { eager: true })`.** Convenience flag to auto-materialize after `evolve()` deferred to its own small PR — changes `evolve()` semantics on a hot path and benefits from separate review.
+- **Fulltext index unification.** Fulltext remains owned by the backend fulltext strategy; relational and vector indexes flow through the unified declaration channel.
 - **Public status-reader API.** The returned `MaterializeIndexesResult` plus the table itself is enough for v1; consumers query the table directly if they need monitoring. Will add `Store.getIndexMaterializationStatus()` only if usage demands it.
 - **Auto drop+recreate on signature drift.** v1 surfaces drift; auto-cleanup is risky enough to defer.

@@ -26,7 +26,6 @@
 import { type z } from "zod";
 
 import {
-  EMBEDDING_INDEX_KEY,
   getEmbeddingIndex,
   isEmbeddingSchema,
   type ResolvedEmbeddingIndex,
@@ -186,8 +185,3 @@ function unwrapOnce(schema: z.ZodType): z.ZodType | undefined {
   return (schema as unknown as { def?: { innerType?: z.ZodType } }).def
     ?.innerType;
 }
-
-// Suppress "unused" lint if EMBEDDING_INDEX_KEY isn't directly referenced
-// after the helpers above; it's part of the brand contract this module
-// reads through `getEmbeddingIndex`.
-void EMBEDDING_INDEX_KEY;

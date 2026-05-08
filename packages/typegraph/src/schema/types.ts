@@ -18,10 +18,10 @@ import {
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
+import { type GraphExtension } from "../graph-extension/extension-types";
 import { type IndexDeclaration } from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
-import { type RuntimeGraphDocument } from "../runtime/document-types";
 
 // ============================================================
 // Enum Zod Schemas
@@ -245,14 +245,14 @@ const indexDeclarationZod = z.discriminatedUnion("entity", [
 ]);
 
 // ============================================================
-// RuntimeGraphDocument Zod schema
+// GraphExtension Zod schema
 // ============================================================
 
-// Boundary parser for the persisted runtime extension document. The
-// pure-value validator in `runtime/validation.ts` is the authoritative
-// shape check (re-run on every load via the runtime compiler); this
+// Boundary parser for the persisted graph extension. The pure-value
+// validator in `graph-extension/validation.ts` is the authoritative shape
+// check (re-run on every load via the extension compiler); this
 // schema's job is only to confirm the JSON shape is round-trippable
-// and to keep `SerializedSchema.runtimeDocument` typed.
+// and to keep `SerializedSchema.extension` typed.
 //
 // `.loose()` on every nested object accepts forward-compatible
 // extensions without breaking older readers — same posture as the rest
@@ -286,7 +286,25 @@ const runtimeOntologyRelationZod = z
   })
   .loose();
 
-const runtimeGraphDocumentZod = z
+// Graph-extension-declared relational indexes (analogue of compile-time
+// `defineNodeIndex` / `defineEdgeIndex` passed to defineGraph).
+// Persisted with `.loose()` so future v1.x.y additive fields ride
+// forward without a major bump.
+const runtimeIndexDocumentZod = z
+  .object({
+    entity: z.string(),
+    kind: z.string(),
+    name: z.string().optional(),
+    fields: z.array(z.string()).optional(),
+    coveringFields: z.array(z.string()).optional(),
+    unique: z.boolean().optional(),
+    scope: z.string().optional(),
+    direction: z.string().optional(),
+    where: z.object({ field: z.string(), op: z.string() }).loose().optional(),
+  })
+  .loose();
+
+const graphExtensionZod = z
   .object({
     // Version is parsed loosely here so the persistence boundary
     // never rejects a stored document — the runtime validator owns
@@ -296,8 +314,9 @@ const runtimeGraphDocumentZod = z
     nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
     edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
     ontology: z.array(runtimeOntologyRelationZod).optional(),
+    indexes: z.array(runtimeIndexDocumentZod).optional(),
   })
-  .loose() as unknown as z.ZodType<RuntimeGraphDocument>;
+  .loose() as unknown as z.ZodType<GraphExtension>;
 
 // ============================================================
 // JSON Schema Types (from Zod)
@@ -592,16 +611,16 @@ export const serializedSchemaZod = z.object({
    */
   indexes: z.array(indexDeclarationZod).optional(),
   /**
-   * Runtime extension document persisted alongside the compiled
-   * `nodes` / `edges` / `ontology` slices. The loader rebuilds runtime
-   * Zod validators from this document (the only durable source);
-   * legacy graphs omit the field and hash byte-identically to before
-   * runtime extensions existed.
+   * Graph extension persisted alongside the compiled `nodes` / `edges`
+   * / `ontology` slices. The loader rebuilds extension-kind Zod
+   * validators from this value (the only durable source); legacy
+   * graphs omit the field and hash byte-identically to before
+   * extensions existed.
    *
-   * `.loose()` on the inner shape accepts forward-compatible extensions
+   * `.loose()` on the inner shape accepts forward-compatible additions
    * without breaking older readers.
    */
-  runtimeDocument: runtimeGraphDocumentZod.optional(),
+  extension: graphExtensionZod.optional(),
   /**
    * Names of node and edge kinds the operator has soft-deprecated via
    * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
@@ -644,18 +663,17 @@ export type SerializedSchema = Readonly<{
    */
   indexes?: readonly IndexDeclaration[];
   /**
-   * Runtime extension document, when this schema was produced from a
-   * graph that had been merged with a runtime extension. The loader
-   * uses this document (and only this document) to rebuild runtime
-   * Zod validators on restart — the merged `nodes` / `edges` /
-   * `ontology` maps above carry the JSON-Schema-shaped views for diff
-   * machinery and human-readable reporting, but they cannot
-   * reconstruct Zod alone.
+   * Graph extension, when this schema was produced from a graph that
+   * had been merged with one. The loader uses this value (and only
+   * this value) to rebuild extension-kind Zod validators on restart —
+   * the merged `nodes` / `edges` / `ontology` maps above carry the
+   * JSON-Schema-shaped views for diff machinery and human-readable
+   * reporting, but they cannot reconstruct Zod alone.
    *
-   * Omitted entirely on graphs that have never been runtime-extended
-   * — legacy schemas hash byte-identically.
+   * Omitted entirely on graphs that have never been extended — legacy
+   * schemas hash byte-identically.
    */
-  runtimeDocument?: RuntimeGraphDocument;
+  extension?: GraphExtension;
   /**
    * Soft-deprecated node and edge kind names. Set by
    * `store.deprecateKinds(...)`; cleared by `store.undeprecateKinds(...)`.

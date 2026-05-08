@@ -42,7 +42,7 @@ export {
   initializeSchema,
   isSchemaInitialized,
   loadActiveSchemaWithBootstrap,
-  loadAndMergeRuntimeDocument,
+  loadAndMergeGraphExtensionDocument,
   migrateSchema,
   type MigrationHookContext,
   parseSerializedSchema,
@@ -61,12 +61,12 @@ export {
   computeSchemaDiff,
   type DeprecatedKindsChange,
   type EdgeChange,
+  type ExtensionChange,
   getMigrationActions,
   type IndexChange,
   isBackwardsCompatible,
   type NodeChange,
   type OntologyChange,
-  type RuntimeDocumentChange,
   type SchemaDiff,
 } from "./migration";
 

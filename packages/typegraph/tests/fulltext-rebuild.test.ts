@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, searchable } from "../src";
+import { KindNotFoundError } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { ConfigurationError, ValidationError } from "../src/errors";
@@ -184,7 +185,7 @@ describe("store.search.rebuildFulltext", () => {
   it("throws on an unknown nodeKind", async () => {
     await expect(
       store.search.rebuildFulltext("NotARealKind" as never),
-    ).rejects.toThrow(ConfigurationError);
+    ).rejects.toThrow(KindNotFoundError);
   });
 
   it("rejects pageSize values that are not positive integers", async () => {

@@ -1,9 +1,9 @@
 /**
  * Restart parity, cross-process visibility, and startup-conflict tests
- * for the persisted runtime extension document.
+ * for the persisted graph-extension document.
  *
- * Simulates "an earlier process persisted a runtime extension" by
- * composing `mergeRuntimeExtension(...)` + `serializeSchema(...)` +
+ * Simulates "an earlier process persisted a graph extension" by
+ * composing `mergeGraphExtension(...)` + `serializeSchema(...)` +
  * `backend.commitSchemaVersion(...)` directly, then verifies that a
  * fresh `createStoreWithSchema(graph, backend)` reconstructs an
  * identical `Store` — same kinds, same query behavior.
@@ -13,9 +13,9 @@ import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
-import { ConfigurationError } from "../src/errors";
-import { defineRuntimeExtension } from "../src/runtime";
-import { mergeRuntimeExtension } from "../src/runtime/merge";
+import { GraphExtensionUnresolvedEndpointError } from "../src/graph-extension";
+import { defineGraphExtension } from "../src/graph-extension";
+import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { ensureSchema } from "../src/schema/manager";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createStoreWithSchema } from "../src/store/store";
@@ -33,14 +33,14 @@ const baseGraph = defineGraph({
 
 async function persistEvolvedSchema(
   backend: ReturnType<typeof createTestBackend>,
-  document: Parameters<typeof mergeRuntimeExtension>[1],
+  document: Parameters<typeof mergeGraphExtension>[1],
 ): Promise<void> {
   // Bring the backend to a baseline at version 1 with the unmerged
-  // graph, then commit a v2 carrying the merged runtime document.
+  // graph, then commit a v2 carrying the merged graph-extension document.
   const [, initial] = await createStoreWithSchema(baseGraph, backend);
   expect(initial.status).toBe("initialized");
 
-  const merged = mergeRuntimeExtension(baseGraph, document);
+  const merged = mergeGraphExtension(baseGraph, document);
   const evolvedSchema = serializeSchema(merged, 2);
   const evolvedHash = await computeSchemaHash(evolvedSchema);
   await backend.commitSchemaVersion({
@@ -52,10 +52,10 @@ async function persistEvolvedSchema(
   });
 }
 
-describe("runtime document persistence — loader rewire", () => {
-  it("restart parity: a fresh Store sees runtime kinds persisted by an earlier process", async () => {
+describe("graph-extension persistence — loader rewire", () => {
+  it("restart parity: a fresh Store sees graph-extension kinds persisted by an earlier process", async () => {
     const backend = createTestBackend();
-    const tagExtension = defineRuntimeExtension({
+    const tagExtension = defineGraphExtension({
       nodes: {
         Tag: { properties: { name: { type: "string" } } },
       },
@@ -64,7 +64,7 @@ describe("runtime document persistence — loader rewire", () => {
 
     // "Process B" boots against the same backend with the original
     // compile-time graph; the loader must read the persisted
-    // runtimeDocument and merge it before constructing the Store.
+    // extension and merge it before constructing the Store.
     const [restoredStore, restoredResult] = await createStoreWithSchema(
       baseGraph,
       backend,
@@ -80,7 +80,7 @@ describe("runtime document persistence — loader rewire", () => {
 
   it("re-serializing the merged graph reproduces the same canonical hash", async () => {
     const backend = createTestBackend();
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: {
         Tag: { properties: { name: { type: "string" } } },
       },
@@ -94,15 +94,15 @@ describe("runtime document persistence — loader rewire", () => {
     // same hash that was persisted — this is what makes ensureSchema's
     // hash-equality check return "unchanged" rather than triggering a
     // spurious migration on every boot.
-    const merged = mergeRuntimeExtension(baseGraph, extension);
+    const merged = mergeGraphExtension(baseGraph, extension);
     const reSerialized = serializeSchema(merged, persistedRow!.version);
     const reHash = await computeSchemaHash(reSerialized);
     expect(reHash).toBe(persistedRow!.schema_hash);
   });
 
-  it("runtime edges referencing host kinds expose resolved endpoints through the registry", async () => {
+  it("graph-extension edges referencing host kinds expose resolved endpoints through the registry", async () => {
     const backend = createTestBackend();
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: {
         Tag: { properties: { name: { type: "string" } } },
       },
@@ -126,9 +126,9 @@ describe("runtime document persistence — loader rewire", () => {
   it("startup conflict: missing compile-time kind referenced by an edge endpoint fails store construction", async () => {
     const backend = createTestBackend();
 
-    // Persist an extension whose runtime edge points at a host kind
+    // Persist an extension whose graph-extension edge points at a host kind
     // that DOES exist at extension time — succeeds.
-    const extension = defineRuntimeExtension({
+    const extension = defineGraphExtension({
       nodes: {
         Tag: { properties: { name: { type: "string" } } },
       },
@@ -143,7 +143,7 @@ describe("runtime document persistence — loader rewire", () => {
     await persistEvolvedSchema(backend, extension);
 
     // Now "Process C" boots with a graph that no longer declares Person
-    // — the runtime extension's edge endpoint is unresolvable. Store
+    // — the graph extension's edge endpoint is unresolvable. Store
     // construction must fail with a clear error rather than silently
     // dropping the reference.
     const Other = defineNode("Other", {
@@ -157,7 +157,7 @@ describe("runtime document persistence — loader rewire", () => {
 
     await expect(
       createStoreWithSchema(conflictingGraph, backend),
-    ).rejects.toBeInstanceOf(ConfigurationError);
+    ).rejects.toBeInstanceOf(GraphExtensionUnresolvedEndpointError);
   });
 
   it("ensureSchema's preloaded option is respected even when activeRow is undefined", async () => {
@@ -206,12 +206,12 @@ describe("runtime document persistence — loader rewire", () => {
     ).rejects.toThrow();
   });
 
-  it("legacy graphs (no runtimeDocument persisted) load without invoking the merge path", async () => {
+  it("legacy graphs (no extension persisted) load without invoking the merge path", async () => {
     const backend = createTestBackend();
     const [, initial] = await createStoreWithSchema(baseGraph, backend);
     expect(initial.status).toBe("initialized");
 
-    // Re-boot — no runtime extension was ever persisted, so the loader's
+    // Re-boot — no graph extension was ever persisted, so the loader's
     // fast path should return the original graph reference unchanged.
     const [restored, restoredResult] = await createStoreWithSchema(
       baseGraph,
@@ -221,29 +221,29 @@ describe("runtime document persistence — loader rewire", () => {
     expect(restored.registry.hasNodeType("Person")).toBe(true);
   });
 
-  it("loads a persisted runtimeDocument that was committed before the version field existed", async () => {
-    // Back-compat regression: a runtimeDocument committed by an older
-    // library version has no `version` field. The loader must treat
-    // it as version 1 (the current major) and reconstruct the merged
-    // graph without throwing.
+  it("loads a persisted extension whose `version` field has been omitted (canonical form)", async () => {
+    // The canonical persisted form drops `version` when it equals the
+    // legacy default, so on-disk extensions are version-less in v1.
+    // The loader must treat the absent field as version 1 and
+    // reconstruct the merged graph without throwing.
     const backend = createTestBackend();
     const [, initial] = await createStoreWithSchema(baseGraph, backend);
     expect(initial.status).toBe("initialized");
 
-    const merged = mergeRuntimeExtension(
+    const merged = mergeGraphExtension(
       baseGraph,
-      defineRuntimeExtension({
+      defineGraphExtension({
         nodes: { Tag: { properties: { name: { type: "string" } } } },
       }),
     );
-    // Strip `version` from the runtimeDocument to simulate a pre-versioning
+    // Strip `version` from the extension to simulate a pre-versioning
     // stored document.
     const evolvedSchema = serializeSchema(merged, 2);
-    const { version: _stripVersion, ...legacyRuntimeDocument } =
-      evolvedSchema.runtimeDocument!;
+    const { version: _stripVersion, ...legacyExtension } =
+      evolvedSchema.extension!;
     const legacyEvolvedSchema = {
       ...evolvedSchema,
-      runtimeDocument: legacyRuntimeDocument,
+      extension: legacyExtension,
     };
     const legacyHash = await computeSchemaHash(legacyEvolvedSchema);
     await backend.commitSchemaVersion({

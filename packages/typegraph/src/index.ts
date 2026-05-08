@@ -228,6 +228,7 @@ export {
 // ============================================================
 
 export type {
+  EdgeIntrospection,
   FulltextSearchHit,
   FulltextSearchOptions,
   HybridFulltextOptions,
@@ -235,15 +236,23 @@ export type {
   HybridSearchHit,
   HybridSearchOptions,
   HybridVectorOptions,
+  KindIntrospection,
   MaterializeIndexesEntry,
   MaterializeIndexesOptions,
   MaterializeIndexesResult,
+  MaterializeRemovalsEntry,
+  MaterializeRemovalsOptions,
+  MaterializeRemovalsResult,
+  OntologyIntrospection,
   RebuildFulltextOptions,
   RebuildFulltextResult,
+  SchemaIntrospection,
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
+  UniqueIntrospection,
   VectorSearchHit,
+  VectorSearchOptions,
 } from "./store";
 export { createStore, createStoreWithSchema, StoreSearch } from "./store";
 export type {
@@ -432,41 +441,42 @@ export {
 } from "./indexes";
 
 // ============================================================
-// Runtime Extension
+// Graph Extension
 // ============================================================
+//
+// The root surface intentionally keeps only the entry points, the
+// top-level document type, version constants, error classes, and the
+// types you need to inspect a validation/incompatibility error. The
+// per-property / per-shape document types
+// (`Extension*Property`, `ExtensionNodeDef`, `ExtensionEdgeDef`,
+// `Extension*Index`, etc.) live behind
+// `@nicia-ai/typegraph/graph-extension` — agent-prompt builders and
+// codegen tools reach for them explicitly so the root surface stays
+// small. Adding to this list later is a non-breaking change; removing
+// from it is not.
 
 export type {
-  CompiledEdge,
-  CompiledExtension,
-  CompiledNode,
-  RuntimeArrayItemType,
-  RuntimeArrayProperty,
-  RuntimeBooleanProperty,
-  RuntimeDocumentVersion,
-  RuntimeEdgeDocument,
-  RuntimeEmbeddingModifier,
-  RuntimeEnumProperty,
-  RuntimeExtensionIssue,
-  RuntimeExtensionIssueCode,
-  RuntimeGraphDocument,
-  RuntimeNodeDocument,
-  RuntimeNumberProperty,
-  RuntimeObjectFieldProperty,
-  RuntimeObjectProperty,
-  RuntimeOntologyRelation,
-  RuntimePropertyType,
-  RuntimeSearchableModifier,
-  RuntimeStringProperty,
-  RuntimeUniqueConstraint,
-  RuntimeUniqueWhere,
-} from "./runtime";
+  GraphExtension,
+  GraphExtensionIssue,
+  GraphExtensionIssueCode,
+  GraphExtensionVersion,
+  IncompatibleChange,
+  KindReferent,
+} from "./graph-extension";
 export {
-  CURRENT_RUNTIME_DOCUMENT_VERSION,
-  defineRuntimeExtension,
-  LEGACY_RUNTIME_DOCUMENT_VERSION,
-  RuntimeExtensionValidationError,
-  validateRuntimeExtension,
-} from "./runtime";
+  CURRENT_GRAPH_EXTENSION_VERSION,
+  defineGraphExtension,
+  GraphExtensionError,
+  GraphExtensionUnresolvedEndpointError,
+  GraphExtensionValidationError,
+  GraphExtensionVersionUnsupportedError,
+  IncompatibleChangeError,
+  KindCollisionError,
+  KindHasReferentsError,
+  LEGACY_GRAPH_EXTENSION_VERSION,
+  RemoveCompileTimeKindError,
+  validateGraphExtension,
+} from "./graph-extension";
 
 // ============================================================
 // Utilities

@@ -11,16 +11,31 @@
 import {
   type GraphBackend,
   runOptionallyInTransaction,
+  type SchemaVersionRow,
   type TransactionBackend,
 } from "../backend/types";
 import {
   type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
+  isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
 import type { NodeId } from "../core/types";
-import { ConfigurationError, EagerMaterializationError } from "../errors";
+import {
+  ConfigurationError,
+  EagerMaterializationError,
+  KindNotFoundError,
+} from "../errors";
+import {
+  buildIncompatibleChangeError,
+  classifyModifications,
+  type RequireEmptyEntry,
+} from "../graph-extension/classify";
+import { IncompatibleChangeError } from "../graph-extension/errors";
+import { type GraphExtension } from "../graph-extension/extension-types";
+import { mergeGraphExtension } from "../graph-extension/merge";
+import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -31,8 +46,6 @@ import {
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
-import { type RuntimeGraphDocument } from "../runtime/document-types";
-import { mergeRuntimeExtension } from "../runtime/merge";
 import {
   applyDeprecatedKinds,
   loadActiveSchemaWithBootstrap,
@@ -48,11 +61,17 @@ import {
   type EdgeOperations,
   type NodeOperations,
 } from "./collection-factory";
+import { introspectSchema, type SchemaIntrospection } from "./introspect";
 import {
   materializeIndexes as materializeIndexesImpl,
   type MaterializeIndexesOptions,
   type MaterializeIndexesResult,
 } from "./materialize-indexes";
+import {
+  materializeRemovals as materializeRemovalsImpl,
+  type MaterializeRemovalsOptions,
+  type MaterializeRemovalsResult,
+} from "./materialize-removals";
 import {
   type EdgeOperationContext,
   executeEdgeBulkGetOrCreateByEndpoints,
@@ -100,6 +119,42 @@ import {
   type TransactionContext,
 } from "./types";
 
+type StoreSchemaMetadata = Readonly<{
+  schemaVersion: number | undefined;
+  schemaHash: string | undefined;
+}>;
+
+const UNKNOWN_SCHEMA_METADATA: StoreSchemaMetadata = Object.freeze({
+  schemaVersion: undefined,
+  schemaHash: undefined,
+});
+
+type CaughtUpVerb =
+  | "evolve"
+  | "materialize"
+  | "deprecate"
+  | "undeprecate"
+  | "remove";
+
+const CAUGHT_UP_VERB_DETAILS: Readonly<
+  Record<CaughtUpVerb, Readonly<{ phrase: string; code: string }>>
+> = {
+  evolve: { phrase: "evolve", code: "EVOLVE_BEFORE_INITIALIZE" },
+  materialize: {
+    phrase: "materialize indexes on",
+    code: "MATERIALIZE_BEFORE_INITIALIZE",
+  },
+  remove: { phrase: "remove kinds on", code: "REMOVE_BEFORE_INITIALIZE" },
+  deprecate: {
+    phrase: "deprecate kinds on",
+    code: "DEPRECATE_BEFORE_INITIALIZE",
+  },
+  undeprecate: {
+    phrase: "undeprecate kinds on",
+    code: "DEPRECATE_BEFORE_INITIALIZE",
+  },
+};
+
 // ============================================================
 // Store Class
 // ============================================================
@@ -143,6 +198,7 @@ export class Store<G extends GraphDef> {
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
+  readonly #schemaMetadata: StoreSchemaMetadata;
   readonly #defaultTraversalExpansion: TraversalExpansion;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
@@ -154,7 +210,12 @@ export class Store<G extends GraphDef> {
   #algorithms: GraphAlgorithms<G> | undefined;
   #search: StoreSearch<G> | undefined;
 
-  constructor(graph: G, backend: GraphBackend, options?: StoreOptions) {
+  constructor(
+    graph: G,
+    backend: GraphBackend,
+    options?: StoreOptions,
+    schemaMetadata?: StoreSchemaMetadata,
+  ) {
     this.#graph = graph;
     this.#backend = backend;
     this.#registry = buildKindRegistry(graph);
@@ -165,6 +226,7 @@ export class Store<G extends GraphDef> {
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
     this.#options = options;
+    this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
   }
 
   // === Accessors ===
@@ -182,16 +244,6 @@ export class Store<G extends GraphDef> {
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
-  }
-
-  /**
-   * Names of node and edge kinds the operator has soft-deprecated via
-   * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
-   * (codegen, UI tooling, lints) can route around them. Reads, writes,
-   * and queries are unaffected — deprecation is a signal, not a gate.
-   */
-  get deprecatedKinds(): ReadonlySet<string> {
-    return this.#graph.deprecatedKinds;
   }
 
   /** The database backend */
@@ -302,7 +354,9 @@ export class Store<G extends GraphDef> {
    *
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time (e.g., iterating all kinds, resolving from edge metadata,
-   * dynamic admin UIs).
+   * dynamic admin UIs). For the post-evolve "I just added this kind, give
+   * me the collection" pattern, prefer `getNodeCollectionOrThrow` — it
+   * throws `KindNotFoundError` instead of forcing a null-check.
    */
   getNodeCollection(kind: string): DynamicNodeCollection | undefined {
     if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
@@ -312,17 +366,73 @@ export class Store<G extends GraphDef> {
   }
 
   /**
+   * Returns the node collection for the given kind. Throws
+   * `KindNotFoundError` when the kind is not registered.
+   *
+   * The dominant graph-extension-kind access pattern: `await store.evolve(...)`
+   * returns a new store, the caller immediately operates on the new
+   * kind, and the null-check the optional variant requires is busywork.
+   */
+  getNodeCollectionOrThrow(kind: string): DynamicNodeCollection {
+    const collection = this.getNodeCollection(kind);
+    if (collection === undefined) {
+      throw new KindNotFoundError(kind, "node", {
+        graphId: this.graphId,
+      });
+    }
+    return collection;
+  }
+
+  /**
    * Returns the edge collection for the given kind, or undefined if the kind
    * is not registered in this graph.
    *
    * Use this for runtime string-keyed access when the kind is not known at
-   * compile time.
+   * compile time. For post-evolve access, prefer `getEdgeCollectionOrThrow`.
    */
   getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
     if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
     return this.edges[
       kind as keyof G["edges"] & string
     ] as unknown as DynamicEdgeCollection;
+  }
+
+  /**
+   * Returns the edge collection for the given kind. Throws
+   * `KindNotFoundError` when the kind is not registered.
+   */
+  getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection {
+    const collection = this.getEdgeCollection(kind);
+    if (collection === undefined) {
+      throw new KindNotFoundError(kind, "edge", {
+        graphId: this.graphId,
+      });
+    }
+    return collection;
+  }
+
+  /**
+   * Returns a unified read of the merged schema — every compile-time
+   * and graph-extension kind, every edge, every ontology relation,
+   * with explicit `origin: "compile-time" | "runtime"` markers — plus
+   * the persisted `extension` for round-tripping.
+   *
+   * Pure synchronous read built from the in-memory graph and the
+   * already-merged graph-extension document. `schemaVersion` and `schemaHash`
+   * are populated when the loader cached them at construction or after
+   * `evolve` returns; consumers needing a fresh read should call
+   * `backend.getActiveSchema(graphId)`.
+   *
+   * The return shape is the canonical schema-introspection surface:
+   * the prior standalone `store.deprecatedKinds` accessor is replaced
+   * by `introspect().deprecatedKinds`.
+   */
+  introspect(): SchemaIntrospection {
+    return introspectSchema(this.#graph, {
+      graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
+      schemaHash: this.#schemaMetadata.schemaHash,
+    });
   }
 
   /**
@@ -770,18 +880,20 @@ export class Store<G extends GraphDef> {
   }
 
   /**
-   * Evolves the graph at runtime by merging a runtime extension document
-   * into the current schema, atomically committing a new schema version,
-   * and returning a fresh `Store` constructed against the merged graph.
+   * Evolves the graph at runtime by merging a graph extension into the
+   * current schema, atomically committing a new schema version, and
+   * returning a fresh `Store` constructed against the merged graph.
    *
    * The `Store` is immutable — its registry, collections, and operation
    * contexts close over the graph at construction time — so callers
    * must use the returned store (or pass a `ref` to be re-pointed) for
    * any work involving the new kinds.
    *
-   * **Cost is proportional to schema document size, not row count.** The
-   * commit is a single CAS write; `evolve()` never reads or scans data
-   * rows, so the runtime is independent of the table's row count.
+   * **Cost for purely additive extensions is proportional to schema
+   * document size, not row count.** The commit is a single CAS write.
+   * Tightening changes against existing graph-extension-declared kinds run
+   * row-count probes for those affected kinds so populated kinds can
+   * be rejected without a backfill.
    *
    * **Concurrent evolve recovery.** On `StaleVersionError`, refetch the
    * current active schema (or dereference your `StoreRef`),
@@ -791,105 +903,152 @@ export class Store<G extends GraphDef> {
    * or redeclared one of yours with a different shape). Don't loop
    * blindly — surface the error.
    *
-   * @param extension - Runtime extension document produced by
-   *   `defineRuntimeExtension(...)`.
+   * @param extension - Graph extension produced by
+   *   `defineGraphExtension(...)`.
    * @param options.ref - Optional handle whose `current` is overwritten
    *   atomically with the schema commit. Long-lived consumers
    *   (request handlers, background workers) that dereference through
    *   the ref see the new kinds on the *next* call.
    *
-   * @throws {RuntimeExtensionValidationError} when the document is
+   * @throws {GraphExtensionValidationError} when the extension is
    *   structurally invalid.
-   * @throws {ConfigurationError} on kind-name collisions with
-   *   compile-time kinds (`RUNTIME_KIND_NAME_COLLISION`),
-   *   redefinitions of existing runtime kinds with a different shape
-   *   (`RUNTIME_KIND_REDEFINITION`), or unresolvable edge endpoints
-   *   (`RUNTIME_EXTENSION_UNRESOLVED_ENDPOINT`).
+   * @throws {KindCollisionError} when an extension kind shadows a
+   *   compile-time kind (code `KIND_COLLISION`).
+   * @throws {IncompatibleChangeError} when a redeclared kind narrows
+   *   in a way the existing rows can't satisfy
+   *   (code `INCOMPATIBLE_CHANGE`).
+   * @throws {GraphExtensionUnresolvedEndpointError} when an edge
+   *   endpoint references a kind that exists in neither the extension
+   *   nor the host graph
+   *   (code `GRAPH_EXTENSION_UNRESOLVED_ENDPOINT`).
    * @throws {StaleVersionError} when another writer has advanced the
    *   schema since this store was constructed; recovery as above.
    * @throws {SchemaContentConflictError} when a row already exists at
    *   the target version with a different content hash.
    */
   async evolve(
-    extension: RuntimeGraphDocument,
+    extension: GraphExtension,
     options?: Readonly<{
       ref?: StoreRef<Store<G>>;
       /**
-       * After the schema commit succeeds, automatically run
-       * `materializeIndexes()` on the new Store. The schema-version
-       * write is NOT rolled back if materialization produces failed
-       * entries — failure surfaces as `EagerMaterializationError` thrown
-       * AFTER the new Store is constructed and `ref.current` is updated,
-       * so the caller can recover via the ref handle.
+       * When set, automatically run `materializeIndexes()` on the new
+       * Store after the schema commit succeeds. Pass `{}` for default
+       * behavior (all declared indexes, best-effort) or a populated
+       * options object for finer control. Omit to defer materialization
+       * to a later `materializeIndexes()` call.
        *
-       * Pass `true` for default behavior (all declared indexes,
-       * best-effort) or an options object for finer control.
+       * The schema-version write is NOT rolled back if materialization
+       * produces failed entries — failure surfaces as
+       * `EagerMaterializationError` thrown AFTER the new Store is
+       * constructed and `ref.current` is updated, so the caller can
+       * recover via the ref handle.
        */
-      eager?: boolean | MaterializeIndexesOptions;
+      eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<Store<G>> {
-    const activeRow = await loadActiveSchemaWithBootstrap(
-      this.#backend,
-      this.graphId,
-    );
-    if (activeRow === undefined) {
-      throw new ConfigurationError(
-        `Cannot evolve graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
-        { code: "EVOLVE_BEFORE_INITIALIZE" },
+    // Catch up to the persisted state first (extension AND deprecated
+    // set). Without this, a stale store applying an extension on top
+    // of an out-of-date baseline would make ensureSchema diff against
+    // the persisted schema and either treat missing-locally kinds as
+    // removed (breaking MigrationError) or silently drop another
+    // writer's deprecation flags. The CAS guard inside
+    // commitSchemaVersion still serializes the actual commit. If the
+    // stored extension redefines a local extension kind with a
+    // different shape, classifyModifications throws
+    // IncompatibleChangeError here — surfacing the divergence rather
+    // than overwriting.
+    const { activeRow, baseline } = await this.#loadCaughtUp("evolve");
+
+    // Merge first so the agent-loop "I evolved with the same extension
+    // again" hot path short-circuits before we walk every property in
+    // `classifyModifications`. The merge itself canonicalEqual-checks
+    // and returns the input graph unchanged for no-op re-evolves.
+    const merged = mergeGraphExtension(baseline, extension);
+
+    // No-op evolve (extension already applied to the persisted state):
+    // skip the schema commit. We compare against `baseline` (the
+    // caught-up graph), not `this.#graph` (the local one). When
+    // another writer has just committed the same extension, the local
+    // store is stale — `baseline !== this.#graph` — but the merge is
+    // still a structural no-op, so re-committing would only churn the
+    // schema version. When the local store is also fresh
+    // (`baseline === this.#graph`) we return `this` so the agent
+    // loop's repeated `evolve(sameExt)` keeps warm registry,
+    // collection, and query caches; otherwise we return a clone
+    // wrapping the caught-up baseline so `introspect()` reflects the
+    // persisted version. Eager still runs in either case because the
+    // contract is "schema committed AND indexes materialized" — the
+    // local DB may have unmaterialized indexes even when the local
+    // graph hasn't changed (restart-parity flow, prior failed
+    // materialize).
+    if (merged === baseline) {
+      if (baseline === this.#graph) {
+        if (options?.ref !== undefined) options.ref.current = this;
+        if (options?.eager !== undefined) {
+          await this.#runEagerOrThrow(this, options.eager);
+        }
+        return this;
+      }
+      const caughtUp = this.#cloneWithGraph(
+        baseline,
+        options?.ref,
+        schemaMetadataFromRow(activeRow),
+      );
+      if (options?.eager !== undefined) {
+        await this.#runEagerOrThrow(caughtUp, options.eager);
+      }
+      return caughtUp;
+    }
+
+    // Classification gates the schema commit. Same-shape re-evolves
+    // already short-circuited above; here we know there's at least
+    // one delta. Additive changes produce `allowed` deltas (no entry);
+    // tightening changes produce `requireEmpty` entries that we
+    // promote to incompatible only when the kind has rows; genuinely
+    // incompatible changes (REMOVE_PROPERTY, TYPE_CHANGE) are
+    // rejected unconditionally.
+    const baselineDocument = baseline.extension ?? Object.freeze({});
+    const classification = classifyModifications(baselineDocument, extension);
+    if (classification.incompatible.length > 0) {
+      throw new IncompatibleChangeError(
+        classification.incompatible,
+        this.graphId,
       );
     }
-
-    // Catch up to the persisted state first (runtime document AND
-    // deprecated set). Without this, a stale store applying an
-    // extension on top of an out-of-date baseline would make
-    // ensureSchema diff against the persisted schema and either treat
-    // missing-locally kinds as removed (breaking MigrationError) or
-    // silently drop another writer's deprecation flags. The CAS guard
-    // inside commitSchemaVersion still serializes the actual commit.
-    // If the stored doc redefines a local runtime kind with a
-    // different shape, the runtime merge throws
-    // RUNTIME_KIND_REDEFINITION here — surfacing the divergence
-    // rather than overwriting.
-    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
-    const baselineGraph = this.#catchUpToStored(storedSchema);
-    const merged = mergeRuntimeExtension(baselineGraph, extension);
-
-    // No-op evolve (extension already applied): reuse `this` so the
-    // agent loop's repeated `evolve(sameExt)` keeps warm registry,
-    // collection, and query caches instead of discarding them on every
-    // call. The reference comparison only holds when both merges
-    // (stored + extension) returned their input unchanged. Eager still
-    // runs because the contract is "schema committed AND indexes
-    // materialized" — the local DB may have unmaterialized indexes
-    // even when the local graph hasn't changed (restart-parity flow,
-    // prior failed materialize). `materializeIndexes` is idempotent
-    // so the verification is cheap.
-    if (merged === this.#graph) {
-      if (options?.ref !== undefined) options.ref.current = this;
-      if (options?.eager) await this.#runEagerOrThrow(this, options.eager);
-      return this;
+    if (classification.requireEmpty.size > 0) {
+      const nonEmptyKeys = await this.#probeEmptyKinds(
+        classification.requireEmpty,
+      );
+      const error = buildIncompatibleChangeError(
+        classification,
+        nonEmptyKeys,
+        this.graphId,
+      );
+      if (error !== undefined) throw error;
     }
 
-    // Delegate the serialize → hash → diff → commit dance to
-    // `ensureSchema`. It already implements the same-hash short-circuit
-    // and the migrate-via-CAS commit; reusing it avoids computing
-    // serializeSchema + computeSchemaHash twice (once here, once in
-    // migrateSchema). Runtime extensions are additive only, so the
-    // diff is always backwards-compatible — autoMigrate succeeds.
-    await ensureSchemaImpl(this.#backend, merged, {
-      preloaded: { activeRow, storedSchema },
-      autoMigrate: true,
-    });
-    const evolved = this.#cloneWithGraph(merged, options?.ref);
-    if (options?.eager) await this.#runEagerOrThrow(evolved, options.eager);
+    // Commit via `migrateSchema` directly. The classification step
+    // above is the authoritative compatibility gate — `ensureSchema`'s
+    // `isBackwardsCompatible` check would over-restrict ADD-required-
+    // on-empty / TIGHTEN-on-empty modifications that the classifier
+    // already approved.
+    await migrateSchemaImpl(this.#backend, merged, activeRow.version);
+    const evolved = this.#cloneWithGraph(
+      merged,
+      options?.ref,
+      await this.#loadSchemaMetadata(),
+    );
+    if (options?.eager !== undefined) {
+      await this.#runEagerOrThrow(evolved, options.eager);
+    }
     return evolved;
   }
 
   async #runEagerOrThrow(
     store: Store<G>,
-    eager: true | MaterializeIndexesOptions,
+    eager: MaterializeIndexesOptions,
   ): Promise<void> {
-    const result = await store.materializeIndexes(eager === true ? {} : eager);
+    const result = await store.materializeIndexes(eager);
     if (result.results.some((entry) => entry.status === "failed")) {
       throw new EagerMaterializationError(result, this.graphId);
     }
@@ -897,9 +1056,9 @@ export class Store<G extends GraphDef> {
 
   /**
    * Marks the named node and edge kinds as soft-deprecated. Surfaces in
-   * `store.deprecatedKinds` for introspection (codegen, UI tooling,
-   * lints) but does not gate reads, writes, or queries — deprecation
-   * is a signal, not a removal.
+   * `store.introspect().deprecatedKinds` for introspection (codegen,
+   * UI tooling, lints) but does not gate reads, writes, or queries —
+   * deprecation is a signal, not a removal.
    *
    * Atomically commits a new schema version through the same primitive
    * `evolve()` uses, so concurrent deprecate/evolve calls produce
@@ -968,7 +1127,7 @@ export class Store<G extends GraphDef> {
    * @param options.kinds - Restrict to indexes whose `kind` is in this
    *   set. Throws `ConfigurationError` (`code:
    *   "MATERIALIZE_UNKNOWN_KIND"`) if any name doesn't match a known
-   *   compile-time or runtime kind.
+   *   compile-time or extension kind.
    * @param options.stopOnError - Halt on first failure. Default false.
    *
    * @throws {ConfigurationError} `MATERIALIZE_BACKEND_UNSUPPORTED` if
@@ -980,18 +1139,7 @@ export class Store<G extends GraphDef> {
   async materializeIndexes(
     options?: MaterializeIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
-    const activeRow = await loadActiveSchemaWithBootstrap(
-      this.#backend,
-      this.graphId,
-    );
-    if (activeRow === undefined) {
-      throw new ConfigurationError(
-        `Cannot materialize indexes on graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
-        { code: "MATERIALIZE_BEFORE_INITIALIZE" },
-      );
-    }
-    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
-    const baseline = this.#catchUpToStored(storedSchema);
+    const { activeRow, baseline } = await this.#loadCaughtUp("materialize");
     return materializeIndexesImpl(
       {
         graph: baseline,
@@ -1003,33 +1151,175 @@ export class Store<G extends GraphDef> {
     );
   }
 
+  /**
+   * Removes extension kinds from the schema with cascading edge and
+   * ontology cleanup. Two-phase by design:
+   *
+   *   1. **Schema commit (this method).** Validates the removal,
+   *      rebuilds the persisted extension without the named kinds
+   *      (and without extension edges that lose their last endpoint),
+   *      CAS-commits the new schema version, and queues
+   *      per-deployment data-cleanup status. Millisecond budget.
+   *   2. **Data cleanup (`materializeRemovals`).** Deletes the orphan
+   *      rows from the nodes/edges tables. Bounded by row count.
+   *
+   * Pass `{ eager: {} }` to run the data-cleanup pass inline with
+   * default options, or `{ eager: { ... } }` to scope it; otherwise
+   * call `materializeRemovals()` later.
+   *
+   * Idempotent: removing a name that doesn't exist is a no-op (no
+   * version bump). Removing an extension kind referenced by a compile-
+   * time edge or ontology relation throws `KindHasReferentsError`.
+   * Removing a compile-time kind throws `RemoveCompileTimeKindError` —
+   * compile-time kinds are removed by recompiling and redeploying.
+   *
+   * @throws {RemoveCompileTimeKindError} when `names` includes a
+   *   compile-time kind.
+   * @throws {KindHasReferentsError} when an extension kind being
+   *   removed is referenced by a compile-time declaration.
+   * @throws {StaleVersionError} on a CAS race with another writer.
+   * @throws {SchemaContentConflictError} on a same-version content
+   *   conflict.
+   */
+  async removeKinds(
+    names: readonly string[],
+    options?: Readonly<{
+      ref?: StoreRef<Store<G>>;
+      eager?: MaterializeRemovalsOptions;
+    }>,
+  ): Promise<Store<G>> {
+    const { activeRow, baseline } = await this.#loadCaughtUp("remove");
+    const plan = planRemovals(baseline, names);
+
+    // True no-op: every name was either absent or already removed.
+    // Mirrors the (un)deprecateKinds same-set short-circuit.
+    if (
+      plan.removedNodeKinds.length === 0 &&
+      plan.removedEdgeKinds.length === 0
+    ) {
+      if (baseline === this.#graph) {
+        if (options?.ref !== undefined) options.ref.current = this;
+        return this;
+      }
+      return this.#cloneWithGraph(
+        baseline,
+        options?.ref,
+        schemaMetadataFromRow(activeRow),
+      );
+    }
+
+    // Build the post-removal graph: rebuild from the new
+    // extension by re-applying the merge against the host
+    // graph's compile-time slice. Take the host's compile-time
+    // graph (the `Store<G>`'s original `#graph` minus extension
+    // kinds) and merge the planned extension on top of it.
+    const compileTimeGraph = stripGraphExtension(this.#graph);
+    const merged =
+      plan.document === undefined ?
+        compileTimeGraph
+      : mergeGraphExtension(compileTimeGraph, plan.document);
+    const finalGraph = applyDeprecatedKinds(merged, [
+      ...baseline.deprecatedKinds,
+    ]);
+
+    // Atomic schema commit via the lower-level `migrateSchema`
+    // primitive — `ensureSchema`'s breaking-change check would
+    // reject the kind removal as a destructive diff. The removal IS
+    // destructive by design; that's why removeKinds is a separate
+    // verb. Concurrent commits surface as `StaleVersionError` from
+    // `commitSchemaVersion` (CAS check).
+    await migrateSchemaImpl(this.#backend, finalGraph, activeRow.version);
+
+    // Queue per-deployment data-cleanup status — one row per removed
+    // kind. The status table is best-effort: if recordKindRemoval
+    // throws, the schema commit is already done and the rows just
+    // become invisible (queries against the kind go through the new
+    // store). Operators reconcile via materializeRemovals later.
+    const recordKindRemoval = this.#backend.recordKindRemoval;
+    if (recordKindRemoval !== undefined) {
+      if (this.#backend.ensureKindRemovalsTable !== undefined) {
+        await this.#backend.ensureKindRemovalsTable();
+      }
+      const attemptedAt = nowIso();
+      const newSchemaVersion = activeRow.version + 1;
+      const queue = (
+        kindName: string,
+        entity: "node" | "edge",
+      ): Promise<void> =>
+        recordKindRemoval({
+          graphId: this.graphId,
+          kindName,
+          entity,
+          schemaVersion: newSchemaVersion,
+          attemptedAt,
+          removedAt: undefined,
+          error: undefined,
+        });
+      // Independent rows on independent primary keys — issue in parallel.
+      // For typical cascades (one kind + a few edges) this drops the
+      // schema-commit budget by 30-100ms on Postgres.
+      await Promise.all([
+        ...plan.removedNodeKinds.map((name) => queue(name, "node")),
+        ...plan.removedEdgeKinds.map((name) => queue(name, "edge")),
+      ]);
+    }
+
+    const evolved = this.#cloneWithGraph(
+      finalGraph,
+      options?.ref,
+      await this.#loadSchemaMetadata(),
+    );
+    if (options?.eager !== undefined) {
+      // Scope to just the kinds removed by THIS call (other pending
+      // removals from prior calls aren't this caller's concern).
+      const kinds = [...plan.removedNodeKinds, ...plan.removedEdgeKinds];
+      await evolved.materializeRemovals({
+        ...options.eager,
+        kinds: options.eager.kinds ?? kinds,
+      });
+    }
+    return evolved;
+  }
+
+  /**
+   * Runs the data-cleanup phase for any kinds removed via
+   * `removeKinds()` whose data has not yet been deleted on this
+   * deployment. Safe to call repeatedly; idempotent.
+   */
+  async materializeRemovals(
+    options?: MaterializeRemovalsOptions,
+  ): Promise<MaterializeRemovalsResult> {
+    return materializeRemovalsImpl(
+      { graphId: this.graphId, backend: this.#backend },
+      options ?? {},
+    );
+  }
+
   async #updateDeprecatedKinds(
     direction: "add" | "remove",
     names: readonly string[],
     options: Readonly<{ ref?: StoreRef<Store<G>> }> | undefined,
   ): Promise<Store<G>> {
     const verb = direction === "add" ? "deprecate" : "undeprecate";
-    const activeRow = await loadActiveSchemaWithBootstrap(
-      this.#backend,
-      this.graphId,
-    );
-    if (activeRow === undefined) {
-      throw new ConfigurationError(
-        `Cannot ${verb} kinds on graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
-        { code: "DEPRECATE_BEFORE_INITIALIZE" },
-      );
-    }
-
-    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
-    const baseline = this.#catchUpToStored(storedSchema);
+    const { activeRow, storedSchema, baseline } =
+      await this.#loadCaughtUp(verb);
     const nextSet = new Set(baseline.deprecatedKinds);
 
     if (direction === "add") {
       for (const name of names) {
         if (!isKnownKind(baseline, name)) {
-          throw new ConfigurationError(
-            `Cannot deprecate unknown kind "${name}" on graph "${this.graphId}". Only kinds declared on the graph (compile-time or runtime) can be deprecated.`,
-            { code: "DEPRECATE_UNKNOWN_KIND" },
+          // Deprecate accepts either node OR edge kinds — the runtime
+          // kind type is reported as "node" here for the error
+          // message default; consumers branch on `kindName` not
+          // `entity` for this code path.
+          throw new KindNotFoundError(
+            name,
+            isKnownEdgeKind(baseline, name) ? "edge" : "node",
+            {
+              graphId: this.graphId,
+              suggestion:
+                "Only kinds declared on the graph (compile-time or runtime) can be deprecated.",
+            },
           );
         }
         nextSet.add(name);
@@ -1043,12 +1333,16 @@ export class Store<G extends GraphDef> {
       // either. Otherwise the caller's `this` reference is stale
       // relative to the persisted state — return a clone of the
       // caught-up baseline so they pick up another writer's
-      // runtime kinds and deprecation flags.
+      // extension kinds and deprecation flags.
       if (baseline === this.#graph) {
         if (options?.ref !== undefined) options.ref.current = this;
         return this;
       }
-      return this.#cloneWithGraph(baseline, options?.ref);
+      return this.#cloneWithGraph(
+        baseline,
+        options?.ref,
+        schemaMetadataFromRow(activeRow),
+      );
     }
 
     const merged = applyDeprecatedKinds(baseline, [...nextSet]);
@@ -1056,19 +1350,112 @@ export class Store<G extends GraphDef> {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
     });
-    return this.#cloneWithGraph(merged, options?.ref);
+    return this.#cloneWithGraph(
+      merged,
+      options?.ref,
+      await this.#loadSchemaMetadata(),
+    );
   }
 
   #catchUpToStored(storedSchema: SerializedSchema): G {
-    const withRuntime =
-      storedSchema.runtimeDocument === undefined ?
+    const withGraphExtension =
+      storedSchema.extension === undefined ?
         this.#graph
-      : mergeRuntimeExtension(this.#graph, storedSchema.runtimeDocument);
-    return applyDeprecatedKinds(withRuntime, storedSchema.deprecatedKinds);
+      : mergeGraphExtension(this.#graph, storedSchema.extension);
+    return applyDeprecatedKinds(
+      withGraphExtension,
+      storedSchema.deprecatedKinds,
+    );
   }
 
-  #cloneWithGraph(graph: G, ref: StoreRef<Store<G>> | undefined): Store<G> {
-    const next = createStore(graph, this.#backend, this.#options);
+  /**
+   * Loads the active schema row, parses it, and catches the in-memory
+   * graph up to the persisted state — the shared preamble for
+   * `evolve`, `materializeIndexes`, and `(un)deprecateKinds`.
+   *
+   * Throws `ConfigurationError` with a verb-specific code when the
+   * graph has not been initialized yet. The catch-up step replays the
+   * persisted graph-extension document and deprecation set on top of the
+   * compile-time graph so we diff against the same baseline another
+   * writer would; the CAS guard inside `commitSchemaVersion` still
+   * serializes the actual commit.
+   */
+  async #loadCaughtUp(verb: CaughtUpVerb): Promise<{
+    activeRow: SchemaVersionRow;
+    storedSchema: SerializedSchema;
+    baseline: G;
+  }> {
+    const activeRow = await loadActiveSchemaWithBootstrap(
+      this.#backend,
+      this.graphId,
+    );
+    if (activeRow === undefined) {
+      const { phrase, code } = CAUGHT_UP_VERB_DETAILS[verb];
+      throw new ConfigurationError(
+        `Cannot ${phrase} graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
+        { code },
+      );
+    }
+    const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+    const baseline = this.#catchUpToStored(storedSchema);
+    return { activeRow, storedSchema, baseline };
+  }
+
+  /**
+   * Probes each `requireEmpty` entry for any rows. Returns the set of
+   * composite keys (`${entity}:${kindName}`) that have at least one
+   * row — those entries need to be promoted from "allowed-on-empty"
+   * to incompatible. Dispatches to `countNodesByKind` for `node`
+   * entries and `countEdgesByKind` for `edge` entries (a single-
+   * primitive probe would always return 0 for the wrong-entity case
+   * and silently bypass the gate).
+   *
+   * Probes run in parallel; each entry is independent. Race window
+   * (probe → CAS commit): another writer can insert a row into a
+   * previously-empty kind. The schema commit still succeeds (CAS
+   * guards on schema version, not row count); the new schema rejects
+   * the inserted row at next read, which the operator inspects and
+   * either deletes or reverts. Rare in practice; tighter elimination
+   * would require `SELECT FOR UPDATE` on the rows table, too
+   * heavyweight for a millisecond-budget operation.
+   */
+  async #probeEmptyKinds(
+    requireEmpty: ReadonlyMap<string, RequireEmptyEntry>,
+  ): Promise<Set<string>> {
+    const probes = [...requireEmpty.entries()].map(
+      async ([key, entry]): Promise<readonly [string, number]> => {
+        const count =
+          entry.entity === "node" ?
+            await this.#backend.countNodesByKind({
+              graphId: this.graphId,
+              kind: entry.kindName,
+            })
+          : await this.#backend.countEdgesByKind({
+              graphId: this.graphId,
+              kind: entry.kindName,
+            });
+        return [key, count];
+      },
+    );
+    const results = await Promise.all(probes);
+    const nonEmpty = new Set<string>();
+    for (const [key, count] of results) {
+      if (count > 0) nonEmpty.add(key);
+    }
+    return nonEmpty;
+  }
+
+  async #loadSchemaMetadata(): Promise<StoreSchemaMetadata> {
+    const row = await this.#backend.getActiveSchema(this.graphId);
+    return schemaMetadataFromRow(row);
+  }
+
+  #cloneWithGraph(
+    graph: G,
+    ref: StoreRef<Store<G>> | undefined,
+    schemaMetadata: StoreSchemaMetadata = this.#schemaMetadata,
+  ): Store<G> {
+    const next = new Store(graph, this.#backend, this.#options, schemaMetadata);
     if (ref !== undefined) ref.current = next;
     return next;
   }
@@ -1246,14 +1633,36 @@ export function createStore<G extends GraphDef>(
   return new Store(graph, backend, options);
 }
 
-function isKnownKind(graph: GraphDef, name: string): boolean {
-  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
+function isKnownEdgeKind(graph: GraphDef, name: string): boolean {
+  return Object.hasOwn(graph.edges, name);
 }
 
 function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
   for (const value of a) if (!b.has(value)) return false;
   return true;
+}
+
+function schemaMetadataFromRow(
+  row: SchemaVersionRow | undefined,
+): StoreSchemaMetadata {
+  if (row === undefined) return UNKNOWN_SCHEMA_METADATA;
+  return Object.freeze({
+    schemaVersion: row.version,
+    schemaHash: row.schema_hash,
+  });
+}
+
+async function schemaMetadataForResult(
+  backend: GraphBackend,
+  graphId: string,
+  activeRow: SchemaVersionRow | undefined,
+  result: SchemaValidationResult,
+): Promise<StoreSchemaMetadata> {
+  if (result.status === "initialized" || result.status === "migrated") {
+    return schemaMetadataFromRow(await backend.getActiveSchema(graphId));
+  }
+  return schemaMetadataFromRow(activeRow);
 }
 
 // ============================================================
@@ -1268,7 +1677,8 @@ export type {
 
 import {
   ensureSchema as ensureSchemaImpl,
-  loadAndMergeRuntimeDocument,
+  loadAndMergeGraphExtensionDocument,
+  migrateSchema as migrateSchemaImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
@@ -1306,22 +1716,27 @@ export async function createStoreWithSchema<G extends GraphDef>(
   backend: GraphBackend,
   options?: StoreOptions & SchemaManagerOptions,
 ): Promise<[Store<G>, SchemaValidationResult]> {
-  // Fold any persisted runtime extension document into the graph
-  // BEFORE constructing the Store. The prefetched row + parsed schema
-  // thread through to ensureSchema so each Store boot pays for one DB
-  // round trip and one Zod parse, not two. Additional runtime kinds
-  // are reachable through the registry but invisible to the type
-  // system — see `mergeRuntimeExtension`.
+  // Fold any persisted graph extension into the graph BEFORE
+  // constructing the Store. The prefetched row + parsed schema thread
+  // through to ensureSchema so each Store boot pays for one DB round
+  // trip and one Zod parse, not two. Additional extension kinds are
+  // reachable through the registry but invisible to the type system —
+  // see `mergeGraphExtension`.
   const {
     graph: merged,
     activeRow,
     storedSchema,
-  } = await loadAndMergeRuntimeDocument(backend, graph);
+  } = await loadAndMergeGraphExtensionDocument(backend, graph);
 
-  const store = createStore(merged, backend, options);
   const result = await ensureSchemaImpl(backend, merged, {
     ...options,
     preloaded: { activeRow, storedSchema },
   });
+  const store = new Store(
+    merged,
+    backend,
+    options,
+    await schemaMetadataForResult(backend, graph.id, activeRow, result),
+  );
   return [store, result];
 }

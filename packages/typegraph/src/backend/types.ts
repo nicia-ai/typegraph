@@ -522,6 +522,46 @@ export type RecordIndexMaterializationParams = Readonly<{
 }>;
 
 // ============================================================
+// Kind Removals (data-cleanup status)
+// ============================================================
+
+/**
+ * One row of the per-deployment `typegraph_kind_removals` table:
+ * a graph-extension kind that has been removed from the schema and whose
+ * data may or may not have been cleaned up yet.
+ */
+export type KindRemovalRow = Readonly<{
+  graphId: string;
+  kindName: string;
+  entity: "node" | "edge";
+  schemaVersion: number;
+  /** ISO timestamp when the data-cleanup pass succeeded; undefined while pending. */
+  removedAt: string | undefined;
+  lastAttemptedAt: string;
+  lastError: string | undefined;
+}>;
+
+/**
+ * Upsert payload for a kind-removal status row. On removal-commit:
+ * pass `removedAt: undefined` (the pending state). On successful
+ * data-cleanup: pass `removedAt` set and `error: undefined`. On
+ * cleanup failure: pass `removedAt: undefined` (preserves any prior
+ * timestamp from a partial success on a different replica) and the
+ * error message.
+ */
+export type RecordKindRemovalParams = Readonly<{
+  graphId: string;
+  kindName: string;
+  entity: "node" | "edge";
+  schemaVersion: number;
+  attemptedAt: string;
+  /** ISO timestamp on success; undefined while pending or on failure. */
+  removedAt: string | undefined;
+  /** Error message on failure; undefined on success or while pending. */
+  error: string | undefined;
+}>;
+
+// ============================================================
 // Query Types
 // ============================================================
 
@@ -755,6 +795,48 @@ export type GraphBackend = Readonly<{
   recordIndexMaterialization?: (
     params: RecordIndexMaterializationParams,
   ) => Promise<void>;
+
+  // === Kind Removal Status ===
+
+  /**
+   * Bootstraps the per-deployment `typegraph_kind_removals` table so
+   * `store.removeKinds()` and `store.materializeRemovals()` can persist
+   * removal status. Mirrors the focused-bootstrap rationale documented
+   * on `ensureIndexMaterializationsTable` — the full `bootstrapTables`
+   * touches every base table and risks Postgres SHARE-lock deadlock
+   * under concurrent replica startup.
+   */
+  ensureKindRemovalsTable?: () => Promise<void>;
+
+  /**
+   * List graph-extension kind removals whose data-cleanup pass has not yet
+   * succeeded for this `graphId`. Returns rows with
+   * `removedAt: undefined`. Order is unspecified; callers materialize
+   * one-at-a-time and don't depend on it.
+   */
+  getPendingKindRemovals?: (
+    graphId: string,
+  ) => Promise<readonly KindRemovalRow[]>;
+
+  /**
+   * List ALL kind-removal rows for a `graphId` — pending and completed.
+   * Used by `materializeRemovals()` reconciliation to detect rows that
+   * are missing entirely (the `removeKinds()` crash window) versus
+   * already completed. Without this distinction the reconciler would
+   * have to upsert every expected historical removal on every call,
+   * churning `last_attempted_at` on rows that long since succeeded.
+   * Order is unspecified.
+   */
+  getAllKindRemovals?: (graphId: string) => Promise<readonly KindRemovalRow[]>;
+
+  /**
+   * Upsert a kind-removal status row. `removedAt: undefined` records
+   * the pending state at schema-commit time; `removedAt: <iso>`
+   * marks the data cleanup successful. The COALESCE rule on `removedAt`
+   * mirrors `recordIndexMaterialization` so a later failure doesn't
+   * clobber the historical successful timestamp from another replica.
+   */
+  recordKindRemoval?: (params: RecordKindRemovalParams) => Promise<void>;
 
   // === Graph Lifecycle ===
   /**

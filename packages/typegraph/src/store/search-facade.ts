@@ -1,15 +1,19 @@
 /**
  * StoreSearch — store.search facade.
  *
- * Groups fulltext, hybrid, and maintenance operations under one
+ * Groups fulltext, vector, hybrid, and maintenance operations under one
  * namespace so the top-level Store API stays focused on CRUD + graph
- * traversal. The three methods delegate to their respective execution
- * modules; this class exists purely to shape the surface, not to add
- * behavior.
+ * traversal. The methods delegate to their respective execution
+ * modules; this class exists to shape the surface and to gate kind
+ * names through the registry — the kind argument is `string` so
+ * graph-extension kinds (added via `store.evolve()`) work without a
+ * type cast, with a runtime guard rejecting misspellings at the call
+ * site.
  */
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef, type NodeKinds } from "../core/define-graph";
 import { type NodeRegistration, type NodeType } from "../core/types";
+import { KindNotFoundError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   rebuildFulltextIndex,
@@ -19,18 +23,31 @@ import {
 import {
   executeFulltextSearch,
   executeHybridSearch,
+  executeVectorSearch,
   type FulltextSearchHit,
   type FulltextSearchOptions,
   type HybridSearchHit,
   type HybridSearchOptions,
+  type VectorSearchHit,
+  type VectorSearchOptions,
 } from "./search";
 import { type Node } from "./types";
 
 /**
- * Narrows `Node` to the concrete typed node for a given kind in the graph.
+ * Resolves the hit's `node` type. Compile-time kinds keep their
+ * narrowed `Node<N>`; kinds outside `G` (added via graph extension through
+ * `store.evolve()`, or string variables the type system can't see)
+ * widen to the base `Node` so callers don't need a cast.
+ *
+ * This is the same shape as `getNodeCollection` — the dynamic form
+ * works for any registered kind, and the type narrows when (and only
+ * when) the literal is statically known.
  */
-type NodeOfKind<G extends GraphDef, K extends NodeKinds<G>> =
-  G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<N>
+type ResolveNode<G extends GraphDef, K extends string> =
+  K extends NodeKinds<G> ?
+    G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
+      Node<N>
+    : Node
   : Node;
 
 type StoreSearchContext = Readonly<{
@@ -51,6 +68,14 @@ type StoreSearchContext = Readonly<{
  *   includeSnippets: true,
  * });
  *
+ * // Vector only — for extension kinds with embedding() modifiers,
+ * // the auto-derived index serves this query.
+ * const nearest = await store.search.vector("Document", {
+ *   fieldPath: "embedding",
+ *   queryEmbedding: vec,
+ *   limit: 10,
+ * });
+ *
  * // Hybrid: vector + fulltext, fused with RRF
  * const ranked = await store.search.hybrid("Document", {
  *   limit: 10,
@@ -61,6 +86,10 @@ type StoreSearchContext = Readonly<{
  * // Rebuild after backfill / schema change
  * const stats = await store.search.rebuildFulltext();
  * ```
+ *
+ * Extension kinds added via `store.evolve(...)` work with all four
+ * methods without a type cast — the kind argument is `string` and a
+ * registry check rejects misspellings at the call site.
  */
 export class StoreSearch<G extends GraphDef> {
   readonly #context: StoreSearchContext;
@@ -78,11 +107,35 @@ export class StoreSearch<G extends GraphDef> {
    * configured with) and resolves the matching node IDs back to typed
    * `Node` objects.
    */
-  async fulltext<K extends NodeKinds<G>>(
+  async fulltext<K extends string>(
     nodeKind: K,
     options: FulltextSearchOptions,
-  ): Promise<readonly FulltextSearchHit<NodeOfKind<G, K>>[]> {
-    return executeFulltextSearch<NodeOfKind<G, K>>(
+  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K>>[]> {
+    this.#assertKindRegistered(nodeKind);
+    return executeFulltextSearch<ResolveNode<G, K>>(
+      { graphId: this.#context.graphId, backend: this.#context.backend },
+      nodeKind,
+      options,
+    );
+  }
+
+  /**
+   * Runs a vector similarity search against nodes of the given kind.
+   *
+   * Requires a field on the node schema declared with `embedding()`,
+   * either at compile time or via a graph extension (the auto-derived
+   * `VectorIndexDeclaration` flows through `materializeIndexes()` on
+   * the same path either way).
+   *
+   * Pure vector — no fulltext leg, no fusion. For combined
+   * vector+fulltext ranking, use `hybrid`.
+   */
+  async vector<K extends string>(
+    nodeKind: K,
+    options: VectorSearchOptions,
+  ): Promise<readonly VectorSearchHit<ResolveNode<G, K>>[]> {
+    this.#assertKindRegistered(nodeKind);
+    return executeVectorSearch<ResolveNode<G, K>>(
       { graphId: this.#context.graphId, backend: this.#context.backend },
       nodeKind,
       options,
@@ -98,11 +151,12 @@ export class StoreSearch<G extends GraphDef> {
    * over-fetch is 4× `limit` from each source — tune via `vector.k` /
    * `fulltext.k` for higher-recall corpora.
    */
-  async hybrid<K extends NodeKinds<G>>(
+  async hybrid<K extends string>(
     nodeKind: K,
     options: HybridSearchOptions,
-  ): Promise<readonly HybridSearchHit<NodeOfKind<G, K>>[]> {
-    return executeHybridSearch<NodeOfKind<G, K>>(
+  ): Promise<readonly HybridSearchHit<ResolveNode<G, K>>[]> {
+    this.#assertKindRegistered(nodeKind);
+    return executeHybridSearch<ResolveNode<G, K>>(
       { graphId: this.#context.graphId, backend: this.#context.backend },
       nodeKind,
       options,
@@ -127,10 +181,11 @@ export class StoreSearch<G extends GraphDef> {
    * be missed by a single pass — run during a maintenance window for
    * full consistency.
    */
-  async rebuildFulltext<K extends NodeKinds<G>>(
+  async rebuildFulltext<K extends string>(
     nodeKind?: K,
     options: RebuildFulltextOptions = {},
   ): Promise<RebuildFulltextResult> {
+    if (nodeKind !== undefined) this.#assertKindRegistered(nodeKind);
     return rebuildFulltextIndex(
       {
         graphId: this.#context.graphId,
@@ -140,5 +195,14 @@ export class StoreSearch<G extends GraphDef> {
       nodeKind,
       options,
     );
+  }
+
+  #assertKindRegistered(kind: string): void {
+    if (this.#context.registry.hasNodeType(kind)) return;
+    throw new KindNotFoundError(kind, "node", {
+      graphId: this.#context.graphId,
+      suggestion:
+        "Compile-time kinds come from defineGraph; extension kinds appear after store.evolve() returns. Check store.introspect() for the registered set.",
+    });
   }
 }

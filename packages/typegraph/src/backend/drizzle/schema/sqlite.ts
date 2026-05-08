@@ -46,6 +46,7 @@ export type SqliteTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  kindRemovals: string;
 }>;
 
 export type CreateSqliteTablesOptions = Readonly<{
@@ -66,6 +67,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  kindRemovals: "typegraph_kind_removals",
 };
 
 /**
@@ -280,6 +282,37 @@ export function createSqliteTables(
     (t) => [primaryKey({ columns: [t.indexName] })],
   );
 
+  /**
+   * Per-deployment record of extension kinds removed via
+   * `store.removeKinds()` whose data has not yet been cleaned up by
+   * `store.materializeRemovals()`. Keyed on `(graph_id, kind_name,
+   * entity, schema_version)` — each remove operation is its own row.
+   * `entity` separates a node and an edge that share a kind name; the
+   * `schema_version` discriminator keeps a re-add-then-re-remove cycle
+   * (Foo removed at v=N, re-added, then removed again at v=N+2) from
+   * collapsing onto the prior row, where the COALESCE-on-failure rule
+   * would preserve the earlier `removed_at` and silently skip the new
+   * pending cleanup. `removed_at` is null until the data-cleanup pass
+   * succeeds; the pending set is "rows where removed_at IS NULL".
+   */
+  const kindRemovals = sqliteTable(
+    n.kindRemovals,
+    {
+      graphId: text("graph_id").notNull(),
+      kindName: text("kind_name").notNull(),
+      entity: text("entity").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      removedAt: text("removed_at"),
+      lastAttemptedAt: text("last_attempted_at").notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+      }),
+    ],
+  );
+
   return {
     nodes,
     edges,
@@ -287,6 +320,7 @@ export function createSqliteTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    kindRemovals,
     /**
      * The fulltext storage is a FTS5 virtual table which Drizzle cannot
      * represent. DDL is emitted as raw SQL and operations query it via
