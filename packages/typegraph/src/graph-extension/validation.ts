@@ -207,7 +207,11 @@ export function validateGraphExtension(
   // IRIs. The cross-graph resolution check happens at merge time, not
   // here.
 
-  const ontology = validateOntologySection(documentRecord.ontology, issues);
+  const ontology = validateOntologySection(
+    documentRecord.ontology,
+    issues,
+    strict,
+  );
   if (ontology !== undefined) {
     validateOntology(ontology, nodes, issues);
   }
@@ -333,19 +337,21 @@ function validateNodeDocument(
     return undefined;
   }
 
-  const allowed = new Set([
-    "description",
-    "annotations",
-    "properties",
-    "unique",
-  ]);
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      issues.push({
-        path: `${path}/${escapePointerSegment(key)}`,
-        message: `Unknown node-level key "${key}". Allowed: description, annotations, properties, unique.`,
-        code: "INVALID_DOCUMENT_SHAPE",
-      });
+  if (strict) {
+    const allowed = new Set([
+      "description",
+      "annotations",
+      "properties",
+      "unique",
+    ]);
+    for (const key of Object.keys(raw)) {
+      if (!allowed.has(key)) {
+        issues.push({
+          path: `${path}/${escapePointerSegment(key)}`,
+          message: `Unknown node-level key "${key}". Allowed: description, annotations, properties, unique.`,
+          code: "INVALID_DOCUMENT_SHAPE",
+        });
+      }
     }
   }
 
@@ -379,6 +385,7 @@ function validateNodeDocument(
     `${path}/unique`,
     properties,
     issues,
+    strict,
   );
 
   return compactUndefined<ExtensionNodeDef>({
@@ -458,20 +465,22 @@ function validateEdgeDocument(
     return undefined;
   }
 
-  const allowed = new Set([
-    "description",
-    "annotations",
-    "from",
-    "to",
-    "properties",
-  ]);
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      issues.push({
-        path: `${path}/${escapePointerSegment(key)}`,
-        message: `Unknown edge-level key "${key}". Allowed: description, annotations, from, to, properties.`,
-        code: "INVALID_DOCUMENT_SHAPE",
-      });
+  if (strict) {
+    const allowed = new Set([
+      "description",
+      "annotations",
+      "from",
+      "to",
+      "properties",
+    ]);
+    for (const key of Object.keys(raw)) {
+      if (!allowed.has(key)) {
+        issues.push({
+          path: `${path}/${escapePointerSegment(key)}`,
+          message: `Unknown edge-level key "${key}". Allowed: description, annotations, from, to, properties.`,
+          code: "INVALID_DOCUMENT_SHAPE",
+        });
+      }
     }
   }
 
@@ -558,6 +567,7 @@ function validateEndpointList(
 function validateOntologySection(
   raw: unknown,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): ExtensionOntologyRelation[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
@@ -580,14 +590,16 @@ function validateOntologySection(
       });
       continue;
     }
-    const allowed = new Set(["metaEdge", "from", "to"]);
-    for (const key of Object.keys(entry)) {
-      if (!allowed.has(key)) {
-        issues.push({
-          path: `${path}/${escapePointerSegment(key)}`,
-          message: `Unknown ontology-entry key "${key}". Allowed: metaEdge, from, to.`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
+    if (strict) {
+      const allowed = new Set(["metaEdge", "from", "to"]);
+      for (const key of Object.keys(entry)) {
+        if (!allowed.has(key)) {
+          issues.push({
+            path: `${path}/${escapePointerSegment(key)}`,
+            message: `Unknown ontology-entry key "${key}". Allowed: metaEdge, from, to.`,
+            code: "INVALID_DOCUMENT_SHAPE",
+          });
+        }
       }
     }
 
@@ -1756,6 +1768,7 @@ function validateUniqueConstraints(
   path: string,
   properties: Record<string, ExtensionPropertyType>,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): readonly ExtensionUniqueConstraint[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) {
@@ -1780,14 +1793,22 @@ function validateUniqueConstraints(
       continue;
     }
 
-    const allowed = new Set(["name", "fields", "scope", "collation", "where"]);
-    for (const key of Object.keys(entry)) {
-      if (!allowed.has(key)) {
-        issues.push({
-          path: `${constraintPath}/${escapePointerSegment(key)}`,
-          message: `Unknown unique-constraint key "${key}". Allowed: name, fields, scope, collation, where.`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
+    if (strict) {
+      const allowed = new Set([
+        "name",
+        "fields",
+        "scope",
+        "collation",
+        "where",
+      ]);
+      for (const key of Object.keys(entry)) {
+        if (!allowed.has(key)) {
+          issues.push({
+            path: `${constraintPath}/${escapePointerSegment(key)}`,
+            message: `Unknown unique-constraint key "${key}". Allowed: name, fields, scope, collation, where.`,
+            code: "INVALID_DOCUMENT_SHAPE",
+          });
+        }
       }
     }
 
@@ -1887,6 +1908,7 @@ function validateUniqueConstraints(
         `${constraintPath}/where`,
         properties,
         issues,
+        strict,
       );
       if (whereResult === undefined) continue;
       where = whereResult;
@@ -1911,6 +1933,7 @@ function validateUniqueWhere(
   path: string,
   properties: Record<string, ExtensionPropertyType>,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): { field: string; op: "isNull" | "isNotNull" } | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
@@ -1920,14 +1943,16 @@ function validateUniqueWhere(
     });
     return undefined;
   }
-  const allowed = new Set(["field", "op"]);
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      issues.push({
-        path: `${path}/${escapePointerSegment(key)}`,
-        message: `Unknown where-clause key "${key}". Allowed: field, op.`,
-        code: "INVALID_DOCUMENT_SHAPE",
-      });
+  if (strict) {
+    const allowed = new Set(["field", "op"]);
+    for (const key of Object.keys(raw)) {
+      if (!allowed.has(key)) {
+        issues.push({
+          path: `${path}/${escapePointerSegment(key)}`,
+          message: `Unknown where-clause key "${key}". Allowed: field, op.`,
+          code: "INVALID_DOCUMENT_SHAPE",
+        });
+      }
     }
   }
   const field = raw.field;

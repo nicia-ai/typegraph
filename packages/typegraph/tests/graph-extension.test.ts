@@ -1473,6 +1473,93 @@ describe("document format versioning", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts unknown node-level keys in loose mode (forward-compat)", () => {
+    // A future v1.x.y writer could add a sibling like `displayName`
+    // alongside `properties`; older v1 readers must parse that
+    // document without rejecting it. Strict mode (the LLM/agent
+    // boundary) catches typos like `propertyies` — the loose path
+    // (persistence-load) must stay forgiving.
+    const result = validateGraphExtension({
+      nodes: {
+        N: {
+          properties: { x: { type: "string" } },
+          displayName: "N",
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects unknown node-level keys in strict mode", () => {
+    const result = validateGraphExtension(
+      {
+        nodes: {
+          N: {
+            properties: { x: { type: "string" } },
+            displayName: "N",
+          },
+        },
+      },
+      { strict: true },
+    );
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error.issues).toContainEqual(
+      expect.objectContaining({
+        path: "/nodes/N/displayName",
+        code: "INVALID_DOCUMENT_SHAPE",
+      }),
+    );
+  });
+
+  it("accepts unknown edge-level keys in loose mode (forward-compat)", () => {
+    const result = validateGraphExtension({
+      nodes: {
+        Person: { properties: { name: { type: "string" } } },
+      },
+      edges: {
+        knows: {
+          from: ["Person"],
+          to: ["Person"],
+          properties: {},
+          uiHint: "social",
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts unknown ontology-entry keys in loose mode (forward-compat)", () => {
+    const result = validateGraphExtension({
+      nodes: {
+        A: { properties: { x: { type: "string" } } },
+        B: { properties: { x: { type: "string" } } },
+      },
+      ontology: [
+        // Hypothetical future sibling like `confidence` riding alongside
+        // `metaEdge` / `from` / `to`.
+        { metaEdge: "subClassOf", from: "A", to: "B", confidence: 0.9 },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts unknown unique-constraint keys in loose mode (forward-compat)", () => {
+    const result = validateGraphExtension({
+      nodes: {
+        N: {
+          properties: { email: { type: "string" } },
+          unique: [
+            // Hypothetical future sibling like `comment` riding alongside
+            // `name` / `fields`.
+            { name: "n_email", fields: ["email"], comment: "primary id" },
+          ],
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("accepts unknown string format values for forward-compat", () => {
     // Regression for the previously-strict format check. New format
     // identifiers (e.g. `"uri-reference"`) in a future v1.x.y must
