@@ -8,6 +8,8 @@
  * - Schema management
  * - Transaction handling
  */
+import type { z } from "zod";
+
 import {
   type GraphBackend,
   runOptionallyInTransaction,
@@ -409,6 +411,58 @@ export class Store<G extends GraphDef> {
       });
     }
     return collection;
+  }
+
+  // === Dynamic Props Schema Access ===
+
+  /**
+   * Returns the Zod props schema for the given node kind, or `undefined`
+   * if the kind is not registered. Identity-preserving: returns the
+   * exact instance used by `.create()` / `.update()`, so a `parse()`
+   * surfaces the same underlying Zod issues that `ValidationError`
+   * wraps (operation-level checks like uniqueness and endpoints stay
+   * in `collection.create`).
+   */
+  getNodePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined {
+    if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
+    return this.#graph.nodes[kind]!.type.schema;
+  }
+
+  /**
+   * Returns the Zod props schema for the given node kind. Throws
+   * `KindNotFoundError` when the kind is not registered.
+   */
+  getNodePropsSchemaOrThrow(kind: string): z.ZodObject<z.ZodRawShape> {
+    const schema = this.getNodePropsSchema(kind);
+    if (schema === undefined) {
+      throw new KindNotFoundError(kind, "node", {
+        graphId: this.graphId,
+      });
+    }
+    return schema;
+  }
+
+  /**
+   * Returns the Zod props schema for the given edge kind, or `undefined`
+   * if the kind is not registered. Symmetric with `getNodePropsSchema`.
+   */
+  getEdgePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined {
+    if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
+    return this.#graph.edges[kind]!.type.schema;
+  }
+
+  /**
+   * Returns the Zod props schema for the given edge kind. Throws
+   * `KindNotFoundError` when the kind is not registered.
+   */
+  getEdgePropsSchemaOrThrow(kind: string): z.ZodObject<z.ZodRawShape> {
+    const schema = this.getEdgePropsSchema(kind);
+    if (schema === undefined) {
+      throw new KindNotFoundError(kind, "edge", {
+        graphId: this.graphId,
+      });
+    }
+    return schema;
   }
 
   /**
