@@ -12,7 +12,7 @@ Public API:
 - `GraphExtension`, `ExtensionNodeDef`, `ExtensionEdgeDef`, `ExtensionPropertyType`, `ExtensionIndex`, version constants, and graph-extension error classes are exported for tool builders.
 - `Store.evolve(extension, { ref?, eager? })` atomically commits the merged schema with CAS and returns a fresh store carrying the graph-extension-declared kinds.
 - Graph-extension-declared kinds are reached through `getNodeCollection(kind)`, `getNodeCollectionOrThrow(kind)`, `getEdgeCollection(kind)`, and `getEdgeCollectionOrThrow(kind)`.
-- `store.introspect()` returns the merged schema, origin markers, persisted extension, deprecation set, and known schema version/hash.
+- `store.introspect()` returns the merged schema (`kinds`, `edges`, `ontology`), the persisted extension document on `extension`, the soft-deprecation set on `deprecatedKinds`, and the active schema version and hash on `schemaVersion` / `schemaHash` (both `undefined` until the first commit).
 - `store.materializeIndexes()` materializes compile-time and graph-extension relational/vector indexes per deployment.
 - `store.deprecateKinds()`, `store.undeprecateKinds()`, `store.removeKinds()`, and `store.materializeRemovals()` manage graph-extension-kind lifecycle after induction.
 
