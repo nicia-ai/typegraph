@@ -346,6 +346,29 @@ the call site rather than crashing later on `papers!.create(...)`.
 etc. — but with widened `Node<NodeType>` element types since the
 specific Zod schema isn't visible to TypeScript at the call site.
 
+For consumers that need the live Zod schema itself — MCP tool wrappers
+that validate inputs before forwarding to `collection.create`, or
+agent prompts that want richer JSON Schema than `introspect()`
+exposes — `store.getNodePropsSchema(kind)` /
+`getNodePropsSchemaOrThrow(kind)` (and the edge counterparts) return
+the exact `z.ZodObject` the store uses internally. Identity holds:
+`evolved.getNodePropsSchema("Paper")` is the same instance the store
+parses against on `papers.create(...)`.
+
+```ts
+import { z } from "zod";
+
+const schema = evolved.getNodePropsSchemaOrThrow("Paper");
+const parsed = schema.parse(input); // same Zod issues as papers.create surfaces
+const jsonSchema = z.toJSONSchema(schema); // for MCP tool descriptions
+```
+
+These accessors return only the props validator. Operation-level
+checks — uniqueness, endpoint resolution, temporal validity, backend
+constraints — still run only through `collection.create` / `update`.
+See [Dynamic Props Schema Access](/schemas-stores#dynamic-props-schema-access)
+for the full reference.
+
 For codegen consumers, the kind set is reachable by iterating the
 registry's `nodeKinds` and `edgeKinds` maps:
 

@@ -1733,6 +1733,45 @@ The returned collections expose the full API (`create`, `getById`, `find`, `coun
 [`DynamicNodeCollection`](/types#dynamicnodecollection) and
 [`DynamicEdgeCollection`](/types#dynamicedgecollection).
 
+### Dynamic Props Schema Access
+
+Returns the live `z.ZodObject` the store uses internally to validate `.create()` /
+`.update()` props. Same accessor for compile-time and graph-extension kinds. Useful
+for MCP tool wrappers that want to validate inputs against the same schema as the
+store, and for producing richer JSON Schema (refinements, formats, branded
+`searchable()` / `embedding()` types) than `introspect().properties` exposes.
+
+```typescript
+store.getNodePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined;
+store.getNodePropsSchemaOrThrow(kind: string): z.ZodObject<z.ZodRawShape>;
+store.getEdgePropsSchema(kind: string): z.ZodObject<z.ZodRawShape> | undefined;
+store.getEdgePropsSchemaOrThrow(kind: string): z.ZodObject<z.ZodRawShape>;
+```
+
+`Object.hasOwn`-gated lookup matches `getNodeCollection` (no prototype-name leakage).
+The `OrThrow` variants throw `KindNotFoundError` with `kindName`, `entity`, and host
+`graphId` when the kind is not registered. Identity holds for compile-time kinds:
+`store.getNodePropsSchema("Person") === Person.schema`.
+
+```typescript
+import { z } from "zod";
+
+const schema = store.getNodePropsSchemaOrThrow("Paper");
+
+// Validate tool input with the same schema the store uses.
+const parsed = schema.parse(input);
+await store.getNodeCollectionOrThrow("Paper").create(parsed);
+
+// Produce JSON Schema for an MCP tool description.
+const jsonSchema = z.toJSONSchema(schema);
+```
+
+**Props-only contract.** These accessors return only the props validator. Failed
+`schema.parse()` throws `ZodError`; failed `collection.create()` wraps the same
+underlying issues in `ValidationError`. Operation-level checks — uniqueness,
+endpoint resolution (edges validate endpoints before props), temporal validity,
+backend constraints — still run only through `collection.create` / `update`.
+
 ### Registry Access
 
 #### `store.registry`
