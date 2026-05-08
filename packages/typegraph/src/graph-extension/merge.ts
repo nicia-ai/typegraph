@@ -30,9 +30,11 @@ import {
   type ExtensionOntologyRelation,
   type GraphExtension,
 } from "./extension-types";
+import { compactUndefined } from "./internal";
 import {
   buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
+  graphExtensionOntologyKey,
 } from "./ontology-keys";
 import { validateGraphExtension } from "./validation";
 
@@ -360,7 +362,7 @@ function buildWhereCallback(where: NonNullable<ExtensionIndex["where"]>) {
 function toNodeIndexConfig(
   document: Extract<ExtensionIndex, { entity: "node" }>,
 ): Readonly<Record<string, unknown>> {
-  return compactConfig({
+  return compactUndefined<Record<string, unknown>>({
     fields: document.fields,
     coveringFields: document.coveringFields,
     unique: document.unique,
@@ -376,7 +378,7 @@ function toNodeIndexConfig(
 function toEdgeIndexConfig(
   document: Extract<ExtensionIndex, { entity: "edge" }>,
 ): Readonly<Record<string, unknown>> {
-  return compactConfig({
+  return compactUndefined<Record<string, unknown>>({
     fields: document.fields,
     coveringFields: document.coveringFields,
     unique: document.unique,
@@ -388,16 +390,6 @@ function toEdgeIndexConfig(
         undefined
       : buildWhereCallback(document.where),
   });
-}
-
-function compactConfig(
-  raw: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
 }
 
 /**
@@ -486,7 +478,7 @@ function dedupRelations(
   const seen = new Set<string>();
   const out: ExtensionOntologyRelation[] = [];
   for (const relation of relations) {
-    const key = `${relation.metaEdge}|${relation.from}|${relation.to}`;
+    const key = graphExtensionOntologyKey(relation);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(relation);

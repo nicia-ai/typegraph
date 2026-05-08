@@ -259,16 +259,9 @@ import {
   type MaterializeIndexesEntry,
   type MaterializeIndexesResult,
   type NodeIndexDeclaration,
-  type ExtensionArrayProperty,
-  type ExtensionEdgeDef,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   type GraphExtension,
-  type ExtensionNodeDef,
-  type ExtensionOntologyRelation,
-  type ExtensionPropertyType,
-  type ExtensionStringProperty,
-  type ExtensionUniqueConstraint,
   type IncompatibleChange,
   type StoreRef,
   validateGraphExtension,
@@ -283,6 +276,17 @@ import {
   RemoveCompileTimeKindError,
   TypeGraphError,
 } from "..";
+// Per-shape document types live behind the `graph-extension` subpath —
+// agent-prompt builders and codegen tools reach for them explicitly.
+import type {
+  ExtensionArrayProperty,
+  ExtensionEdgeDef,
+  ExtensionNodeDef,
+  ExtensionOntologyRelation,
+  ExtensionPropertyType,
+  ExtensionStringProperty,
+  ExtensionUniqueConstraint,
+} from "../src/graph-extension";
 
 // defineGraphExtension accepts a typed GraphExtension.
 const extension = defineGraphExtension({

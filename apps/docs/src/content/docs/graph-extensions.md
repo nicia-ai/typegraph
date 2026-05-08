@@ -234,7 +234,7 @@ must match a meta-edge known to the merged graph.
 ```ts
 const evolved = await store.evolve(extension);
 const evolved = await store.evolve(extension, { ref });
-const evolved = await store.evolve(extension, { eager: true });
+const evolved = await store.evolve(extension, { eager: {} });
 ```
 
 `evolve` is the consumer-facing primitive that drives extension. It:
@@ -271,14 +271,14 @@ themselves (could be a Vue ref, MobX observable, Zustand atom, etc.).
 
 ### Eager materialization
 
-Pass `eager: true` to materialize indexes immediately after the schema
+Pass `eager: {}` to materialize indexes immediately after the schema
 commit:
 
 ```ts
-const evolved = await store.evolve(extension, { eager: true });
+const evolved = await store.evolve(extension, { eager: {} });
 ```
 
-Or pass options:
+Or pass options for finer control:
 
 ```ts
 // Restrict to the extension kind whose index was declared in the
@@ -288,6 +288,9 @@ const evolved = await store.evolve(extension, {
 });
 ```
 
+Omit `eager` to skip materialization and run `materializeIndexes()`
+later.
+
 Per-index failures throw `EagerMaterializationError` AFTER the new
 `Store` is constructed and `ref.current` is updated, so the caller can
 recover via the ref handle. The schema commit is **not** rolled back
@@ -296,7 +299,7 @@ if materialization fails — eager is convenience, not a transaction.
 ```ts
 const ref = { current: store };
 try {
-  await store.evolve(extension, { ref, eager: true });
+  await store.evolve(extension, { ref, eager: {} });
 } catch (error) {
   if (error instanceof EagerMaterializationError) {
     // Schema is committed; ref.current is the new store.
@@ -528,10 +531,10 @@ const withoutPaper = await evolved.removeKinds(["Paper"]);
 await withoutPaper.materializeRemovals();
 ```
 
-Pass `{ eager: true }` to run cleanup inline after the schema commit:
+Pass `{ eager: {} }` to run cleanup inline after the schema commit:
 
 ```ts
-const withoutPaper = await evolved.removeKinds(["Paper"], { eager: true });
+const withoutPaper = await evolved.removeKinds(["Paper"], { eager: {} });
 ```
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time

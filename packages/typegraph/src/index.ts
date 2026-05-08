@@ -443,34 +443,26 @@ export {
 // ============================================================
 // Graph Extension
 // ============================================================
+//
+// The root surface intentionally keeps only the entry points, the
+// top-level document type, version constants, error classes, and the
+// types you need to inspect a validation/incompatibility error. The
+// per-property / per-shape document types
+// (`Extension*Property`, `ExtensionNodeDef`, `ExtensionEdgeDef`,
+// `Extension*Index`, etc.) live behind
+// `@nicia-ai/typegraph/graph-extension` — agent-prompt builders and
+// codegen tools reach for them explicitly so the root surface stays
+// small. Adding to this list later is a non-breaking change; removing
+// from it is not.
 
 export type {
-  ExtensionArrayItemType,
-  ExtensionArrayProperty,
-  ExtensionBooleanProperty,
-  ExtensionEdgeDef,
-  ExtensionEdgeIndex,
-  ExtensionEmbeddingModifier,
-  ExtensionEnumProperty,
-  ExtensionIndex,
-  ExtensionIndexWhere,
-  ExtensionNodeDef,
-  ExtensionNodeIndex,
-  ExtensionNumberProperty,
-  ExtensionObjectFieldProperty,
-  ExtensionObjectProperty,
-  ExtensionOntologyRelation,
-  ExtensionPropertyType,
-  ExtensionSearchableModifier,
-  ExtensionStringProperty,
-  ExtensionUniqueConstraint,
-  ExtensionUniqueWhere,
   GraphExtension,
   GraphExtensionIssue,
   GraphExtensionIssueCode,
   GraphExtensionVersion,
+  IncompatibleChange,
+  KindReferent,
 } from "./graph-extension";
-export type { IncompatibleChange, KindReferent } from "./graph-extension";
 export {
   CURRENT_GRAPH_EXTENSION_VERSION,
   defineGraphExtension,

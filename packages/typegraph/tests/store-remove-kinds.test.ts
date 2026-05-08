@@ -281,7 +281,7 @@ describe("Store.materializeRemovals", () => {
     expect(stillPending).toHaveLength(0);
   });
 
-  it("eager: true runs cleanup inline and removes data atomically with schema", async () => {
+  it("eager runs cleanup inline and removes data atomically with schema", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -292,7 +292,7 @@ describe("Store.materializeRemovals", () => {
     const tags = evolved.getNodeCollectionOrThrow("Tag");
     await tags.create({ label: "alpha" });
 
-    await evolved.removeKinds(["Tag"], { eager: true });
+    await evolved.removeKinds(["Tag"], { eager: {} });
 
     // Pending removals is empty after eager cleanup.
     const pending = await backend.getPendingKindRemovals!(baseGraph.id);

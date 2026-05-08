@@ -17,7 +17,9 @@ import {
   type GraphExtension,
 } from "./extension-types";
 
-function graphExtensionOntologyKey(entry: ExtensionOntologyRelation): string {
+export function graphExtensionOntologyKey(
+  entry: ExtensionOntologyRelation,
+): string {
   return `${entry.metaEdge}|${entry.from}|${entry.to}`;
 }
 

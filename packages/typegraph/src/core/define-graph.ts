@@ -507,3 +507,11 @@ export function getEdgeKinds<G extends GraphDef>(
 ): readonly (keyof G["edges"] & string)[] {
   return Object.keys(graph.edges);
 }
+
+/**
+ * Returns true when `name` is registered as either a node or edge kind
+ * on the given graph.
+ */
+export function isKnownKind(graph: GraphDef, name: string): boolean {
+  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
+}

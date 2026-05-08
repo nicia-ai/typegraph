@@ -827,17 +827,8 @@ function detectDisjointHierarchyContradictions(
 // Section: indexes
 // ============================================================
 
-const INDEX_SCOPE_VALUES: ReadonlySet<string> = new Set([
-  "graphAndKind",
-  "graph",
-  "none",
-]);
-
-const EDGE_INDEX_DIRECTION_VALUES: ReadonlySet<string> = new Set([
-  "out",
-  "in",
-  "none",
-]);
+const INDEX_SCOPE_VALUES = ["graphAndKind", "graph", "none"] as const;
+const EDGE_INDEX_DIRECTION_VALUES = ["out", "in", "none"] as const;
 
 const RUNTIME_INDEX_WHERE_OPS: ReadonlySet<string> = new Set([
   "isNull",
@@ -953,18 +944,16 @@ function validateIndexEntry(
     name = raw.name;
   }
 
-  let scope: ExtensionIndex["scope"];
-  if (raw.scope !== undefined) {
-    if (typeof raw.scope !== "string" || !INDEX_SCOPE_VALUES.has(raw.scope)) {
-      issues.push({
-        path: `${path}/scope`,
-        message: `Index \`scope\` must be one of: ${[...INDEX_SCOPE_VALUES].join(", ")}.`,
-        code: "INVALID_INDEX_DECLARATION",
-      });
-      return undefined;
-    }
-    scope = raw.scope as ExtensionIndex["scope"];
-  }
+  const scopeIssueCount = issues.length;
+  const scope = validateOptionalLiteral(
+    raw.scope,
+    INDEX_SCOPE_VALUES,
+    `${path}/scope`,
+    "Index `scope`",
+    "INVALID_INDEX_DECLARATION",
+    issues,
+  );
+  if (issues.length > scopeIssueCount) return undefined;
 
   const where = validateGraphExtensionIndexWhere(
     raw.where,
@@ -985,21 +974,16 @@ function validateIndexEntry(
     });
   }
 
-  let direction: "out" | "in" | "none" | undefined;
-  if (raw.direction !== undefined) {
-    if (
-      typeof raw.direction !== "string" ||
-      !EDGE_INDEX_DIRECTION_VALUES.has(raw.direction)
-    ) {
-      issues.push({
-        path: `${path}/direction`,
-        message: `Edge index \`direction\` must be one of: ${[...EDGE_INDEX_DIRECTION_VALUES].join(", ")}.`,
-        code: "INVALID_INDEX_DECLARATION",
-      });
-      return undefined;
-    }
-    direction = raw.direction as "out" | "in" | "none";
-  }
+  const directionIssueCount = issues.length;
+  const direction = validateOptionalLiteral(
+    raw.direction,
+    EDGE_INDEX_DIRECTION_VALUES,
+    `${path}/direction`,
+    "Edge index `direction`",
+    "INVALID_INDEX_DECLARATION",
+    issues,
+  );
+  if (issues.length > directionIssueCount) return undefined;
 
   return compactUndefined<ExtensionIndex>({
     entity: "edge",
@@ -1356,30 +1340,20 @@ function validateNumberProperty(
   issues: GraphExtensionIssue[],
 ): ExtensionNumberProperty | undefined {
   // Forward-compat: unknown refinement keys are silently accepted.
-  let min: number | undefined;
-  let max: number | undefined;
-  if (raw.min !== undefined) {
-    if (typeof raw.min !== "number" || !Number.isFinite(raw.min)) {
-      issues.push({
-        path: `${path}/min`,
-        message: "`min` must be a finite number.",
-        code: "INVALID_NUMBER_BOUNDS",
-      });
-    } else {
-      min = raw.min;
-    }
-  }
-  if (raw.max !== undefined) {
-    if (typeof raw.max !== "number" || !Number.isFinite(raw.max)) {
-      issues.push({
-        path: `${path}/max`,
-        message: "`max` must be a finite number.",
-        code: "INVALID_NUMBER_BOUNDS",
-      });
-    } else {
-      max = raw.max;
-    }
-  }
+  const min = validateOptionalFiniteNumber(
+    raw.min,
+    `${path}/min`,
+    "`min`",
+    "INVALID_NUMBER_BOUNDS",
+    issues,
+  );
+  const max = validateOptionalFiniteNumber(
+    raw.max,
+    `${path}/max`,
+    "`max`",
+    "INVALID_NUMBER_BOUNDS",
+    issues,
+  );
   if (min !== undefined && max !== undefined && min > max) {
     issues.push({
       path,
@@ -1388,18 +1362,13 @@ function validateNumberProperty(
     });
   }
 
-  let int: boolean | undefined;
-  if (raw.int !== undefined) {
-    if (typeof raw.int === "boolean") {
-      int = raw.int;
-    } else {
-      issues.push({
-        path: `${path}/int`,
-        message: "`int` must be a boolean.",
-        code: "INVALID_PROPERTY_REFINEMENT",
-      });
-    }
-  }
+  const int = validateOptionalBoolean(
+    raw.int,
+    `${path}/int`,
+    "`int`",
+    "INVALID_PROPERTY_REFINEMENT",
+    issues,
+  );
 
   // Integer + non-integer bounds: reject early so the compiled Zod schema
   // doesn't silently swallow values like `min: 1.5, int: true`.
@@ -1657,21 +1626,17 @@ function validatePropertyModifiers(
   propertyType: ExtensionPropertyType["type"],
   issues: GraphExtensionIssue[],
 ): NormalizedModifiers | undefined {
-  let valid = true;
+  // Mirrors `issues.length` rather than carrying its own boolean: any
+  // helper that pushes also signals failure here.
+  const issuesAtEntry = issues.length;
 
-  let optional: boolean | undefined;
-  if (raw.optional !== undefined) {
-    if (typeof raw.optional === "boolean") {
-      optional = raw.optional;
-    } else {
-      issues.push({
-        path: `${path}/optional`,
-        message: "`optional` must be a boolean.",
-        code: "INVALID_PROPERTY_REFINEMENT",
-      });
-      valid = false;
-    }
-  }
+  const optional = validateOptionalBoolean(
+    raw.optional,
+    `${path}/optional`,
+    "`optional`",
+    "INVALID_PROPERTY_REFINEMENT",
+    issues,
+  );
 
   let searchable: { language?: string } | undefined;
   if (raw.searchable !== undefined) {
@@ -1681,7 +1646,6 @@ function validatePropertyModifiers(
         message: `\`searchable\` is only valid on string properties (got "${propertyType}").`,
         code: "INVALID_MODIFIER_TARGET",
       });
-      valid = false;
     } else if (isPlainObject(raw.searchable)) {
       const searchableRaw = raw.searchable;
       const language = searchableRaw.language;
@@ -1694,7 +1658,6 @@ function validatePropertyModifiers(
             message: "`searchable.language` must be a non-empty string.",
             code: "INVALID_SEARCHABLE_LANGUAGE",
           });
-          valid = false;
         } else {
           searchable = { language };
         }
@@ -1705,7 +1668,6 @@ function validatePropertyModifiers(
         message: "`searchable` must be a plain object (use `{}` for defaults).",
         code: "INVALID_PROPERTY_REFINEMENT",
       });
-      valid = false;
     }
   }
 
@@ -1720,7 +1682,6 @@ function validatePropertyModifiers(
           message: '`embedding` requires `array.items.type === "number"`.',
           code: "INVALID_MODIFIER_TARGET",
         });
-        valid = false;
       } else if (isPlainObject(raw.embedding)) {
         const dim = raw.embedding.dimensions;
         if (typeof dim !== "number" || !Number.isInteger(dim) || dim <= 0) {
@@ -1729,7 +1690,6 @@ function validatePropertyModifiers(
             message: "`embedding.dimensions` must be a positive integer.",
             code: "INVALID_EMBEDDING_DIMENSIONS",
           });
-          valid = false;
         } else {
           // `embedding(dimensions)` replaces the array's item validator with a
           // length+finite-number check; any extra refinements on the items
@@ -1744,7 +1704,6 @@ function validatePropertyModifiers(
               message: `\`embedding\` arrays must declare items as \`{ type: "number" }\` only — additional refinements (${extraneous.join(", ")}) are silently dropped by the embedding schema. Drop the refinements, or drop \`embedding\` and use a plain array.`,
               code: "INVALID_PROPERTY_REFINEMENT",
             });
-            valid = false;
           } else {
             embedding = { dimensions: dim };
           }
@@ -1756,7 +1715,6 @@ function validatePropertyModifiers(
             "`embedding` must be a plain object with a `dimensions` field.",
           code: "INVALID_PROPERTY_REFINEMENT",
         });
-        valid = false;
       }
     } else {
       issues.push({
@@ -1764,7 +1722,6 @@ function validatePropertyModifiers(
         message: `\`embedding\` is only valid on array-of-number properties (got "${propertyType}").`,
         code: "INVALID_MODIFIER_TARGET",
       });
-      valid = false;
     }
   }
 
@@ -1778,11 +1735,10 @@ function validatePropertyModifiers(
         message: "`description` must be a string.",
         code: "INVALID_PROPERTY_REFINEMENT",
       });
-      valid = false;
     }
   }
 
-  if (!valid) return undefined;
+  if (issues.length > issuesAtEntry) return undefined;
   return compactUndefined<NormalizedModifiers>({
     optional,
     searchable,
@@ -1902,37 +1858,27 @@ function validateUniqueConstraints(
     }
     if (!fieldsValid) continue;
 
-    let scope: "kind" | "kindWithSubClasses" | undefined;
-    if (constraint.scope !== undefined) {
-      if (
-        constraint.scope !== "kind" &&
-        constraint.scope !== "kindWithSubClasses"
-      ) {
-        issues.push({
-          path: `${constraintPath}/scope`,
-          message: `Unique constraint scope must be "kind" or "kindWithSubClasses".`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
-        continue;
-      }
-      scope = constraint.scope;
-    }
+    const scopeIssueCount = issues.length;
+    const scope = validateOptionalLiteral(
+      constraint.scope,
+      ["kind", "kindWithSubClasses"] as const,
+      `${constraintPath}/scope`,
+      "Unique constraint `scope`",
+      "INVALID_DOCUMENT_SHAPE",
+      issues,
+    );
+    if (issues.length > scopeIssueCount) continue;
 
-    let collation: "binary" | "caseInsensitive" | undefined;
-    if (constraint.collation !== undefined) {
-      if (
-        constraint.collation !== "binary" &&
-        constraint.collation !== "caseInsensitive"
-      ) {
-        issues.push({
-          path: `${constraintPath}/collation`,
-          message: `Unique constraint collation must be "binary" or "caseInsensitive".`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
-        continue;
-      }
-      collation = constraint.collation;
-    }
+    const collationIssueCount = issues.length;
+    const collation = validateOptionalLiteral(
+      constraint.collation,
+      ["binary", "caseInsensitive"] as const,
+      `${constraintPath}/collation`,
+      "Unique constraint `collation`",
+      "INVALID_DOCUMENT_SHAPE",
+      issues,
+    );
+    if (issues.length > collationIssueCount) continue;
 
     let where: { field: string; op: "isNull" | "isNotNull" } | undefined;
     if (constraint.where !== undefined) {
@@ -2111,6 +2057,53 @@ function validateOptionalString(
     return undefined;
   }
   return value;
+}
+
+function validateOptionalBoolean(
+  value: unknown,
+  path: string,
+  label: string,
+  code: GraphExtensionIssueCode,
+  issues: GraphExtensionIssue[],
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    issues.push({ path, message: `${label} must be a boolean.`, code });
+    return undefined;
+  }
+  return value;
+}
+
+function validateOptionalFiniteNumber(
+  value: unknown,
+  path: string,
+  label: string,
+  code: GraphExtensionIssueCode,
+  issues: GraphExtensionIssue[],
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    issues.push({ path, message: `${label} must be a finite number.`, code });
+    return undefined;
+  }
+  return value;
+}
+
+function validateOptionalLiteral<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  path: string,
+  label: string,
+  code: GraphExtensionIssueCode,
+  issues: GraphExtensionIssue[],
+): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    const list = allowed.map((entry) => `"${entry}"`).join(", ");
+    issues.push({ path, message: `${label} must be one of: ${list}.`, code });
+    return undefined;
+  }
+  return value as T;
 }
 
 function isValidKindName(name: string): boolean {

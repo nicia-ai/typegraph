@@ -1,10 +1,12 @@
 /**
- * Tests for `Store.evolve(extension, { eager: true })`.
+ * Tests for `Store.evolve(extension, { eager })`.
  *
  * Eager mode runs `materializeIndexes()` immediately after the
- * schema commit succeeds. Failures throw `EagerMaterializationError`
- * AFTER the new Store is constructed and `ref.current` is updated, so
- * the caller can recover via the ref handle and retry.
+ * schema commit succeeds. Pass `{}` for default behavior or a populated
+ * options object for finer control; omit `eager` to skip. Failures
+ * throw `EagerMaterializationError` AFTER the new Store is constructed
+ * and `ref.current` is updated, so the caller can recover via the ref
+ * handle and retry.
  *
  * The schema commit is not rolled back on materialization failure —
  * that's a deliberate design choice (eager is a convenience, not a
@@ -47,7 +49,7 @@ function buildGraphWithoutIndexes() {
 /**
  * Pre-record a status row with a deliberately wrong signature so the
  * next materialize call surfaces signature drift as `failed`. With
- * eager: true on evolve, this becomes EagerMaterializationError.
+ * eager: {} on evolve, this becomes EagerMaterializationError.
  */
 async function forceSignatureDrift(
   backend: ReturnType<typeof createTestBackend>,
@@ -68,7 +70,7 @@ async function forceSignatureDrift(
 }
 
 describe("Store.evolve — eager materialization", () => {
-  it("eager: true materializes declared indexes after the schema commit", async () => {
+  it("eager: {} materializes declared indexes after the schema commit", async () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -79,7 +81,7 @@ describe("Store.evolve — eager materialization", () => {
       defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
-      { ref, eager: true },
+      { ref, eager: {} },
     );
 
     // The new Store is returned and the ref points to it.
@@ -94,7 +96,7 @@ describe("Store.evolve — eager materialization", () => {
     }
   });
 
-  it("eager: true on a graph with no declared indexes is a no-op", async () => {
+  it("eager: {} on a graph with no declared indexes is a no-op", async () => {
     const backend = createTestBackend();
     const graph = buildGraphWithoutIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -103,7 +105,7 @@ describe("Store.evolve — eager materialization", () => {
       defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
-      { eager: true },
+      { eager: {} },
     );
 
     expect(evolved.registry.hasNodeType("Tag")).toBe(true);
@@ -133,14 +135,14 @@ describe("Store.evolve — eager materialization", () => {
     }
   });
 
-  it("eager: true still materializes when the merge is a no-op (restart-parity contract)", async () => {
+  it("eager: {} still materializes when the merge is a no-op (restart-parity contract)", async () => {
     // A second store wraps a database whose schema already includes
     // the graph-extension kind (e.g. another writer committed it, or this
     // process restarted from a persisted extension). Evolving
     // with the same extension produces a no-op merge — but the local
     // database may still have unmaterialized indexes (the prior
     // writer never called materializeIndexes, or a previous attempt
-    // failed). The contract of `eager: true` is "schema committed AND
+    // failed). The contract of `eager: {}` is "schema committed AND
     // indexes materialized" — skipping materialize on the no-op
     // branch would return false success.
     const backend = createTestBackend();
@@ -161,7 +163,7 @@ describe("Store.evolve — eager materialization", () => {
     expect(storeB.registry.hasNodeType("Tag")).toBe(true);
 
     // Eager must materialize even though the merge is a no-op.
-    const evolved = await storeB.evolve(extension, { eager: true });
+    const evolved = await storeB.evolve(extension, { eager: {} });
     const result = await evolved.materializeIndexes();
     // After eager, every declared index reports alreadyMaterialized
     // — proving eager actually ran the DDL on the no-op branch.
@@ -171,7 +173,7 @@ describe("Store.evolve — eager materialization", () => {
     }
   });
 
-  it("eager: false (the default) does not materialize", async () => {
+  it("omitting eager (the default) does not materialize", async () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -180,7 +182,6 @@ describe("Store.evolve — eager materialization", () => {
       defineGraphExtension({
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
-      { eager: false },
     );
 
     // No prior materialize; first call should report `created` for the
@@ -190,7 +191,7 @@ describe("Store.evolve — eager materialization", () => {
     expect(personEmail?.status).toBe("created");
   });
 
-  it("eager: true throws EagerMaterializationError on per-index failure; ref is updated before throw", async () => {
+  it("eager: {} throws EagerMaterializationError on per-index failure; ref is updated before throw", async () => {
     const backend = createTestBackend();
     const graph = buildGraphWithIndexes();
     const [store] = await createStoreWithSchema(graph, backend);
@@ -203,7 +204,7 @@ describe("Store.evolve — eager materialization", () => {
         defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
-        { ref, eager: true },
+        { ref, eager: {} },
       )
       .catch((error: unknown) => error);
 
@@ -231,7 +232,7 @@ describe("Store.evolve — eager materialization", () => {
         defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
-        { eager: true },
+        { eager: {} },
       )
       .catch((error: unknown) => error);
 
@@ -254,7 +255,7 @@ describe("Store.evolve — eager materialization", () => {
         defineGraphExtension({
           nodes: { Tag: { properties: { label: { type: "string" } } } },
         }),
-        { eager: true },
+        { eager: {} },
       )
       .catch((error: unknown) => error);
 

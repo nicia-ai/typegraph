@@ -18,6 +18,7 @@ import {
   type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
+  isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
 import type { NodeId } from "../core/types";
@@ -127,6 +128,32 @@ const UNKNOWN_SCHEMA_METADATA: StoreSchemaMetadata = Object.freeze({
   schemaVersion: undefined,
   schemaHash: undefined,
 });
+
+type CaughtUpVerb =
+  | "evolve"
+  | "materialize"
+  | "deprecate"
+  | "undeprecate"
+  | "remove";
+
+const CAUGHT_UP_VERB_DETAILS: Readonly<
+  Record<CaughtUpVerb, Readonly<{ phrase: string; code: string }>>
+> = {
+  evolve: { phrase: "evolve", code: "EVOLVE_BEFORE_INITIALIZE" },
+  materialize: {
+    phrase: "materialize indexes on",
+    code: "MATERIALIZE_BEFORE_INITIALIZE",
+  },
+  remove: { phrase: "remove kinds on", code: "REMOVE_BEFORE_INITIALIZE" },
+  deprecate: {
+    phrase: "deprecate kinds on",
+    code: "DEPRECATE_BEFORE_INITIALIZE",
+  },
+  undeprecate: {
+    phrase: "undeprecate kinds on",
+    code: "DEPRECATE_BEFORE_INITIALIZE",
+  },
+};
 
 // ============================================================
 // Store Class
@@ -904,17 +931,19 @@ export class Store<G extends GraphDef> {
     options?: Readonly<{
       ref?: StoreRef<Store<G>>;
       /**
-       * After the schema commit succeeds, automatically run
-       * `materializeIndexes()` on the new Store. The schema-version
-       * write is NOT rolled back if materialization produces failed
-       * entries — failure surfaces as `EagerMaterializationError` thrown
-       * AFTER the new Store is constructed and `ref.current` is updated,
-       * so the caller can recover via the ref handle.
+       * When set, automatically run `materializeIndexes()` on the new
+       * Store after the schema commit succeeds. Pass `{}` for default
+       * behavior (all declared indexes, best-effort) or a populated
+       * options object for finer control. Omit to defer materialization
+       * to a later `materializeIndexes()` call.
        *
-       * Pass `true` for default behavior (all declared indexes,
-       * best-effort) or an options object for finer control.
+       * The schema-version write is NOT rolled back if materialization
+       * produces failed entries — failure surfaces as
+       * `EagerMaterializationError` thrown AFTER the new Store is
+       * constructed and `ref.current` is updated, so the caller can
+       * recover via the ref handle.
        */
-      eager?: boolean | MaterializeIndexesOptions;
+      eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<Store<G>> {
     // Catch up to the persisted state first (extension AND deprecated
@@ -928,8 +957,7 @@ export class Store<G extends GraphDef> {
     // different shape, classifyModifications throws
     // IncompatibleChangeError here — surfacing the divergence rather
     // than overwriting.
-    const { activeRow, storedSchema, baseline } =
-      await this.#loadCaughtUp("evolve");
+    const { activeRow, baseline } = await this.#loadCaughtUp("evolve");
 
     // Merge first so the agent-loop "I evolved with the same extension
     // again" hot path short-circuits before we walk every property in
@@ -956,7 +984,9 @@ export class Store<G extends GraphDef> {
     if (merged === baseline) {
       if (baseline === this.#graph) {
         if (options?.ref !== undefined) options.ref.current = this;
-        if (options?.eager) await this.#runEagerOrThrow(this, options.eager);
+        if (options?.eager !== undefined) {
+          await this.#runEagerOrThrow(this, options.eager);
+        }
         return this;
       }
       const caughtUp = this.#cloneWithGraph(
@@ -964,7 +994,9 @@ export class Store<G extends GraphDef> {
         options?.ref,
         schemaMetadataFromRow(activeRow),
       );
-      if (options?.eager) await this.#runEagerOrThrow(caughtUp, options.eager);
+      if (options?.eager !== undefined) {
+        await this.#runEagerOrThrow(caughtUp, options.eager);
+      }
       return caughtUp;
     }
 
@@ -1000,22 +1032,23 @@ export class Store<G extends GraphDef> {
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
-    void storedSchema;
     await migrateSchemaImpl(this.#backend, merged, activeRow.version);
     const evolved = this.#cloneWithGraph(
       merged,
       options?.ref,
       await this.#loadSchemaMetadata(),
     );
-    if (options?.eager) await this.#runEagerOrThrow(evolved, options.eager);
+    if (options?.eager !== undefined) {
+      await this.#runEagerOrThrow(evolved, options.eager);
+    }
     return evolved;
   }
 
   async #runEagerOrThrow(
     store: Store<G>,
-    eager: true | MaterializeIndexesOptions,
+    eager: MaterializeIndexesOptions,
   ): Promise<void> {
-    const result = await store.materializeIndexes(eager === true ? {} : eager);
+    const result = await store.materializeIndexes(eager);
     if (result.results.some((entry) => entry.status === "failed")) {
       throw new EagerMaterializationError(result, this.graphId);
     }
@@ -1130,8 +1163,9 @@ export class Store<G extends GraphDef> {
    *   2. **Data cleanup (`materializeRemovals`).** Deletes the orphan
    *      rows from the nodes/edges tables. Bounded by row count.
    *
-   * Pass `{ eager: true }` to run the data-cleanup pass inline;
-   * otherwise call `materializeRemovals()` later.
+   * Pass `{ eager: {} }` to run the data-cleanup pass inline with
+   * default options, or `{ eager: { ... } }` to scope it; otherwise
+   * call `materializeRemovals()` later.
    *
    * Idempotent: removing a name that doesn't exist is a no-op (no
    * version bump). Removing an extension kind referenced by a compile-
@@ -1151,11 +1185,10 @@ export class Store<G extends GraphDef> {
     names: readonly string[],
     options?: Readonly<{
       ref?: StoreRef<Store<G>>;
-      eager?: boolean | MaterializeRemovalsOptions;
+      eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<Store<G>> {
-    const { activeRow, storedSchema, baseline } =
-      await this.#loadCaughtUp("remove");
+    const { activeRow, baseline } = await this.#loadCaughtUp("remove");
     const plan = planRemovals(baseline, names);
 
     // True no-op: every name was either absent or already removed.
@@ -1195,7 +1228,6 @@ export class Store<G extends GraphDef> {
     // destructive by design; that's why removeKinds is a separate
     // verb. Concurrent commits surface as `StaleVersionError` from
     // `commitSchemaVersion` (CAS check).
-    void storedSchema;
     await migrateSchemaImpl(this.#backend, finalGraph, activeRow.version);
 
     // Queue per-deployment data-cleanup status — one row per removed
@@ -1237,15 +1269,13 @@ export class Store<G extends GraphDef> {
       options?.ref,
       await this.#loadSchemaMetadata(),
     );
-    if (options?.eager) {
-      const eagerOptions: MaterializeRemovalsOptions =
-        options.eager === true ? {} : options.eager;
+    if (options?.eager !== undefined) {
       // Scope to just the kinds removed by THIS call (other pending
       // removals from prior calls aren't this caller's concern).
       const kinds = [...plan.removedNodeKinds, ...plan.removedEdgeKinds];
       await evolved.materializeRemovals({
-        ...eagerOptions,
-        kinds: eagerOptions.kinds ?? kinds,
+        ...options.eager,
+        kinds: options.eager.kinds ?? kinds,
       });
     }
     return evolved;
@@ -1350,9 +1380,7 @@ export class Store<G extends GraphDef> {
    * writer would; the CAS guard inside `commitSchemaVersion` still
    * serializes the actual commit.
    */
-  async #loadCaughtUp(
-    verb: "evolve" | "materialize" | "deprecate" | "undeprecate" | "remove",
-  ): Promise<{
+  async #loadCaughtUp(verb: CaughtUpVerb): Promise<{
     activeRow: SchemaVersionRow;
     storedSchema: SerializedSchema;
     baseline: G;
@@ -1362,19 +1390,9 @@ export class Store<G extends GraphDef> {
       this.graphId,
     );
     if (activeRow === undefined) {
-      const phrase =
-        verb === "evolve" ? `evolve graph "${this.graphId}"`
-        : verb === "materialize" ?
-          `materialize indexes on graph "${this.graphId}"`
-        : verb === "remove" ? `remove kinds on graph "${this.graphId}"`
-        : `${verb} kinds on graph "${this.graphId}"`;
-      const code =
-        verb === "evolve" ? "EVOLVE_BEFORE_INITIALIZE"
-        : verb === "materialize" ? "MATERIALIZE_BEFORE_INITIALIZE"
-        : verb === "remove" ? "REMOVE_BEFORE_INITIALIZE"
-        : "DEPRECATE_BEFORE_INITIALIZE";
+      const { phrase, code } = CAUGHT_UP_VERB_DETAILS[verb];
       throw new ConfigurationError(
-        `Cannot ${phrase}: no schema has been initialized. Call createStoreWithSchema first.`,
+        `Cannot ${phrase} graph "${this.graphId}": no schema has been initialized. Call createStoreWithSchema first.`,
         { code },
       );
     }
@@ -1613,10 +1631,6 @@ export function createStore<G extends GraphDef>(
   options?: StoreOptions,
 ): Store<G> {
   return new Store(graph, backend, options);
-}
-
-function isKnownKind(graph: GraphDef, name: string): boolean {
-  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
 }
 
 function isKnownEdgeKind(graph: GraphDef, name: string): boolean {

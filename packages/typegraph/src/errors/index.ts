@@ -607,7 +607,7 @@ export class MigrationError extends TypeGraphError {
 }
 
 /**
- * Thrown by `Store.evolve(extension, { eager: true })` when the schema
+ * Thrown by `Store.evolve(extension, { eager })` when the schema
  * commit succeeded but the follow-on `materializeIndexes()` produced
  * one or more failed entries.
  *
@@ -621,7 +621,7 @@ export class MigrationError extends TypeGraphError {
  * ```ts
  * const ref = { current: store };
  * try {
- *   await store.evolve(extension, { ref, eager: true });
+ *   await store.evolve(extension, { ref, eager: {} });
  * } catch (error) {
  *   if (error instanceof EagerMaterializationError) {
  *     // schema is committed; ref.current is the new store
