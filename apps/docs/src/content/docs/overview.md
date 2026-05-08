@@ -116,6 +116,13 @@ Note: TypeGraph ships **Tier 1 graph algorithms** (shortest path, reachability,
 neighborhoods, and degree) on `store.algorithms.*`. Each call compiles to a
 single recursive CTE. See [Graph Algorithms](/graph-algorithms) for details.
 
+Note: TypeGraph supports **runtime schema induction** via graph
+extensions. An LLM or ingestion agent can propose a typed schema as a
+JSON-serializable document, an operator approves it, and `store.evolve()`
+atomically commits a new schema version — no redeploy, full Zod
+validation, restart parity. See [Graph Extensions](/graph-extensions)
+for the agent-driven workflow.
+
 ## Why TypeGraph?
 
 ### Compared to Graph Databases (Neo4j, Amazon Neptune)

@@ -16,6 +16,7 @@ This guide covers the core verbs:
 | ------------------------------------------------ | ----------------------------------------------------------------- |
 | `defineGraphExtension`                           | Build a typed extension (pure value, no I/O)                      |
 | `store.evolve(extension)`                        | Atomically commit a new schema version with the extension applied |
+| `store.introspect()`                             | Snapshot the merged schema, persisted extension, version, and hash |
 | `store.materializeIndexes()`                     | Run declared `CREATE INDEX` DDL against the live database         |
 | `store.deprecateKinds(...)` / `undeprecateKinds` | Soft-deprecate kinds for codegen / lint signaling                 |
 | `store.removeKinds(...)`                         | Remove graph-extension-declared kinds from the active schema      |
@@ -333,6 +334,13 @@ await papers.create({ title: "...", doi: "...", year: 2024 });
 const all = await papers.find({});
 ```
 
+The throwing variants `getNodeCollectionOrThrow(kind)` /
+`getEdgeCollectionOrThrow(kind)` are the right call when the caller
+already knows the kind has been evolved onto the store — they raise
+`KindNotFoundError` with the offending `kindName`, `entity`, and host
+`graphId` instead of returning `undefined`, so a typo fails loudly at
+the call site rather than crashing later on `papers!.create(...)`.
+
 `DynamicNodeCollection` exposes the same CRUD surface as
 `store.nodes.X` — `create`, `getById`, `find`, `update`, `delete`,
 etc. — but with widened `Node<NodeType>` element types since the
@@ -355,7 +363,7 @@ The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
 runtime, with no type cast. The hit's `node` type narrows to the
 concrete typed node only when the kind literal is statically known
 in `Store<G>`; extension kinds widen to the base `Node`. Misspelled
-kind names throw a `ConfigurationError` at the call site instead of
+kind names throw `KindNotFoundError` at the call site instead of
 returning empty results.
 
 ```ts
@@ -372,6 +380,33 @@ const runtimeHits = await store.search.fulltext("Paper", {
   limit: 10,
 });
 ```
+
+## `store.introspect()`
+
+`introspect()` returns a frozen snapshot of the merged schema and the
+durable-state metadata the store has loaded so far. Its shape:
+
+| Field                  | Type                                  | Notes                                                                                          |
+| ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `graphId`              | `string`                              | The graph's stable id.                                                                         |
+| `kinds`                | `readonly KindIntrospection[]`        | Merged node kinds with `origin: "compile-time" \| "runtime"`, description, annotations, etc.   |
+| `edges`                | `readonly EdgeIntrospection[]`        | Merged edge kinds with the same origin discriminator and endpoint information.                 |
+| `ontology`             | `readonly OntologyIntrospection[]`    | Ontology relations declared on either tier.                                                    |
+| `deprecatedKinds`      | `ReadonlySet<string>`                 | Kinds flagged via `deprecateKinds(...)`. Informational, not a gate.                            |
+| `extension`            | `GraphExtension \| undefined`         | The persisted graph-extension document, or `undefined` when no extensions have been committed. |
+| `schemaVersion`        | `number \| undefined`                 | Active schema version on the backend. `undefined` until the first commit.                      |
+| `schemaHash`           | `string \| undefined`                 | Hash of the active schema document. `undefined` under the same condition.                      |
+
+```ts
+const intro = store.introspect();
+console.log(intro.schemaVersion); // e.g. 2
+console.log(intro.extension?.nodes?.Paper); // ExtensionNodeDef or undefined
+console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
+```
+
+The `extension` field round-trips: passing it back through
+`defineGraphExtension(intro.extension!)` and `evolve()` against an
+empty graph reconstructs the same extension kinds.
 
 ## `store.materializeIndexes(options?)`
 
