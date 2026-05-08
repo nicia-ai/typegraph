@@ -519,6 +519,45 @@ describe("Store.removeKinds — re-add and re-remove cycle", () => {
   });
 });
 
+describe("Store.removeKinds — stale-store recovery", () => {
+  // Without stripping the local extension first, `#catchUpToStored`'s
+  // merge unions stale local extension nodes back on top of the
+  // persisted document, resurrecting kinds another writer has removed.
+  it("a stale store evolving with a new kind does NOT resurrect a removed kind", async () => {
+    const backend = createTestBackend();
+    const [storeA] = await createStoreWithSchema(baseGraph, backend);
+    const staleWithTag = await storeA.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+
+    const [storeB] = await createStoreWithSchema(baseGraph, backend);
+    const evolvedB = await storeB.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    await evolvedB.removeKinds(["Tag"]);
+
+    const evolved = await staleWithTag.evolve(
+      defineGraphExtension({
+        nodes: { Category: { properties: { name: { type: "string" } } } },
+      }),
+    );
+
+    expect(evolved.registry.hasNodeType("Tag")).toBe(false);
+    expect(
+      evolved.introspect().kinds.find((k) => k.name === "Tag"),
+    ).toBeUndefined();
+    expect(evolved.registry.hasNodeType("Category")).toBe(true);
+
+    const [restored] = await createStoreWithSchema(baseGraph, backend);
+    expect(restored.registry.hasNodeType("Tag")).toBe(false);
+    expect(restored.registry.hasNodeType("Category")).toBe(true);
+  });
+});
+
 describe("Store.removeKinds — restart parity", () => {
   it("a fresh store reading the same database does not see the removed kind", async () => {
     const backend = createTestBackend();

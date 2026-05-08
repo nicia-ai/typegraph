@@ -62,6 +62,8 @@ export type VectorIndexOptions = Readonly<{
   ivfflatLists?: number;
   /** Embeddings table name. Defaults to typegraph_node_embeddings. */
   embeddingsTableName?: string;
+  /** Emit `CREATE INDEX CONCURRENTLY`. See `CreateVectorIndexParams.concurrent`. */
+  concurrent?: boolean;
 }>;
 
 /**
@@ -237,13 +239,14 @@ export async function createPostgresVectorIndex(
 
   // Build the CREATE INDEX statement
   let indexSql: SQL;
+  const concurrentClause = options.concurrent === true ? "CONCURRENTLY " : "";
 
   if (indexType === "hnsw") {
     // HNSW index with optional parameters
     // Column is native VECTOR type, but we still specify dimensions in the
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
-      CREATE INDEX IF NOT EXISTS ${indexName}
+      CREATE INDEX ${concurrentClause}IF NOT EXISTS ${indexName}
       ON ${quotedEmbeddingsTableName}
       USING hnsw ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (m = ${hnswM}, ef_construction = ${hnswEfConstruction})
@@ -256,7 +259,7 @@ export async function createPostgresVectorIndex(
     // Column is native VECTOR type, but we still specify dimensions in the
     // index expression to ensure consistent index behavior
     indexSql = sql.raw(`
-      CREATE INDEX IF NOT EXISTS ${indexName}
+      CREATE INDEX ${concurrentClause}IF NOT EXISTS ${indexName}
       ON ${quotedEmbeddingsTableName}
       USING ivfflat ((embedding::vector(${dimensions})) ${operatorClass})
       WITH (lists = ${ivfflatLists})

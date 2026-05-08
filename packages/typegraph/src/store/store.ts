@@ -1358,10 +1358,18 @@ export class Store<G extends GraphDef> {
   }
 
   #catchUpToStored(storedSchema: SerializedSchema): G {
+    // Strip the local extension slice before re-applying the persisted
+    // extension. Otherwise a stale store whose `this.#graph` carries
+    // extension kinds another writer has since removed would resurrect
+    // them: `unionDocuments` unions local extension nodes/edges back in,
+    // and the absent-from-stored kinds win the spread. Stripping first
+    // makes the merge a function of the persisted document alone, so
+    // removeKinds on one store cannot be silently undone by a stale peer.
+    const compileTimeGraph = stripGraphExtension(this.#graph);
     const withGraphExtension =
       storedSchema.extension === undefined ?
-        this.#graph
-      : mergeGraphExtension(this.#graph, storedSchema.extension);
+        compileTimeGraph
+      : mergeGraphExtension(compileTimeGraph, storedSchema.extension);
     return applyDeprecatedKinds(
       withGraphExtension,
       storedSchema.deprecatedKinds,

@@ -345,6 +345,15 @@ export type CreateVectorIndexParams = Readonly<{
     /** IVFFlat: number of lists */
     lists?: number;
   }>;
+  /**
+   * Build the index without taking an `AccessExclusiveLock` on live
+   * tables (Postgres `CREATE INDEX CONCURRENTLY`). Mirrors the
+   * `concurrent` flag the relational DDL path uses inside
+   * `materializeIndexes()`. Cannot be set inside a transaction —
+   * callers (`materializeIndexes()`) run at top level. Backends that
+   * don't have a CONCURRENTLY equivalent (SQLite) ignore this flag.
+   */
+  concurrent?: boolean;
 }>;
 
 /**

@@ -344,6 +344,7 @@ async function materializeVectorIndex(
         {}
       : { lists: declaration.indexParams.lists }),
     },
+    concurrent: backend.dialect === "postgres",
   };
   return materializeOne(declaration, backend, graphId, schemaVersion, {
     // Compound status-table key for vector entries. Pgvector creates

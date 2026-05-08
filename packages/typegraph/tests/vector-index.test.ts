@@ -218,6 +218,57 @@ describe("createPostgresVectorIndex", () => {
     expect(sqlText).toContain('ON "custom_embeddings"');
     expect(sqlText).not.toContain("ON typegraph_node_embeddings");
   });
+
+  it("emits CREATE INDEX CONCURRENTLY when concurrent: true", async () => {
+    const execute = vi.fn((_query: unknown) =>
+      Promise.resolve({ rows: [] as const }),
+    );
+    const db = {
+      execute,
+    } as unknown as Parameters<typeof createPostgresVectorIndex>[0];
+
+    for (const indexType of ["hnsw", "ivfflat"] as const) {
+      execute.mockClear();
+      const result = await createPostgresVectorIndex(db, {
+        graphId: "g",
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        dimensions: 8,
+        indexType,
+        concurrent: true,
+      });
+      expect(result.success).toBe(true);
+      const sqlInput = execute.mock.calls[0]?.[0];
+      if (sqlInput === undefined) {
+        throw new Error("Expected SQL input to be captured");
+      }
+      const sqlText = flattenSql(sqlInput);
+      expect(sqlText).toMatch(/CREATE INDEX\s+CONCURRENTLY\s+IF NOT EXISTS/);
+    }
+  });
+
+  it("omits CONCURRENTLY by default to preserve transaction-safe callers", async () => {
+    const execute = vi.fn((_query: unknown) =>
+      Promise.resolve({ rows: [] as const }),
+    );
+    const db = {
+      execute,
+    } as unknown as Parameters<typeof createPostgresVectorIndex>[0];
+
+    const result = await createPostgresVectorIndex(db, {
+      graphId: "g",
+      nodeKind: "Doc",
+      fieldPath: "embedding",
+      dimensions: 8,
+    });
+    expect(result.success).toBe(true);
+    const sqlInput = execute.mock.calls[0]?.[0];
+    if (sqlInput === undefined) {
+      throw new Error("Expected SQL input to be captured");
+    }
+    const sqlText = flattenSql(sqlInput);
+    expect(sqlText).not.toMatch(/CONCURRENTLY/);
+  });
 });
 
 // ============================================================

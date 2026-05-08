@@ -684,6 +684,7 @@ function createPostgresOperationBackend(
         ...(params.indexParams?.lists === undefined
           ? {}
           : { ivfflatLists: params.indexParams.lists }),
+        ...(params.concurrent === true ? { concurrent: true } : {}),
       };
 
       const result = await createPostgresVectorIndex(db, indexOptions);
