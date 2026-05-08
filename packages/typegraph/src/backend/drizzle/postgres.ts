@@ -450,6 +450,16 @@ export function createPostgresBackend(
       );
     },
 
+    async getAllKindRemovals(
+      graphId: string,
+    ): Promise<readonly KindRemovalRow[]> {
+      const t = tables.kindRemovals;
+      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
+      return rows.map((row) =>
+        mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
+      );
+    },
+
     async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
       const t = tables.kindRemovals;
       await db

@@ -819,6 +819,17 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly KindRemovalRow[]>;
 
   /**
+   * List ALL kind-removal rows for a `graphId` — pending and completed.
+   * Used by `materializeRemovals()` reconciliation to detect rows that
+   * are missing entirely (the `removeKinds()` crash window) versus
+   * already completed. Without this distinction the reconciler would
+   * have to upsert every expected historical removal on every call,
+   * churning `last_attempted_at` on rows that long since succeeded.
+   * Order is unspecified.
+   */
+  getAllKindRemovals?: (graphId: string) => Promise<readonly KindRemovalRow[]>;
+
+  /**
    * Upsert a kind-removal status row. `removedAt: undefined` records
    * the pending state at schema-commit time; `removedAt: <iso>`
    * marks the data cleanup successful. The COALESCE rule on `removedAt`

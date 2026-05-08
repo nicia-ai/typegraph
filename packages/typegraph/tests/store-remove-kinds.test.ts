@@ -24,6 +24,7 @@ import {
   KindHasReferentsError,
   RemoveCompileTimeKindError,
 } from "../src/graph-extension";
+import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { planRemovals } from "../src/graph-extension/remove";
 import { migrateSchema } from "../src/schema/manager";
 import { createStoreWithSchema } from "../src/store/store";
@@ -324,7 +325,7 @@ describe("Store.materializeRemovals", () => {
     // schema is durable but the queue lacks the rows the cleanup pass
     // needs — and a retry of `removeKinds()` short-circuits on the
     // no-op path because the kind is already absent. Reconciliation
-    // recovers by diffing the active schema against its predecessor.
+    // recovers by walking schema history.
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
     const evolved = await store.evolve(
@@ -361,7 +362,7 @@ describe("Store.materializeRemovals", () => {
     ).toBe(2);
 
     // A fresh store reading the same database. `materializeRemovals()`
-    // walks active-vs-prior, finds Tag missing in active, reconciles
+    // walks schema history, finds Tag missing in active, reconciles
     // the queue, then runs cleanup.
     const [recovered] = await createStoreWithSchema(baseGraph, backend);
     const result = await recovered.materializeRemovals();
@@ -385,6 +386,70 @@ describe("Store.materializeRemovals", () => {
     // success), so nothing surfaces as new work.
     const second = await recovered.materializeRemovals();
     expect(second.results).toHaveLength(0);
+  });
+
+  it("recovers when additional schema commits happen after the crashed removeKinds()", async () => {
+    // The crash window from the previous test followed by additional
+    // schema transitions: an evolve adds a new kind at v3 while the
+    // crash-window queue gap is at v2. Active-vs-prior reconciliation
+    // would only inspect (v2, v3) — Tag is still gone in v3 but no
+    // KIND was removed at the v3 transition itself, so a single-step
+    // reconciler would conclude there's nothing to do and leave the
+    // v2 orphans behind. The fix walks history all the way back, so
+    // the v2 → v1 transition still surfaces Tag as a missing removal.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+
+    // v2 (evolve adds Tag).
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const tags = evolved.getNodeCollectionOrThrow("Tag");
+    await tags.create({ label: "alpha" });
+
+    // v3 (simulated crash-window removal — schema dropped, queue empty).
+    const versionBeforeRemoveCrash = (await backend.getActiveSchema(
+      baseGraph.id,
+    ))!.version;
+    await migrateSchema(backend, baseGraph, versionBeforeRemoveCrash);
+
+    const pendingAfterCrash = await backend.getPendingKindRemovals!(
+      baseGraph.id,
+    );
+    expect(
+      pendingAfterCrash.filter((row) => row.kindName === "Tag"),
+    ).toHaveLength(0);
+
+    // v4 (evolve adds an unrelated kind so the active version is no
+    // longer adjacent to the crash-window transition).
+    const versionBeforeReevolve = (await backend.getActiveSchema(baseGraph.id))!
+      .version;
+    const reevolveExtension = defineGraphExtension({
+      nodes: { Note: { properties: { body: { type: "string" } } } },
+    });
+    const merged = mergeGraphExtension(baseGraph, reevolveExtension);
+    await migrateSchema(backend, merged, versionBeforeReevolve);
+
+    expect(
+      await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
+    ).toBe(1);
+
+    // Reconciliation walks all the way back: active (Tag absent) →
+    // prior (Tag absent) → prior-prior (Tag present) — the diff at
+    // version (versionBeforeRemoveCrash + 1) surfaces Tag as a
+    // recovered removal even though the active transition had no
+    // removals at all.
+    const [recovered] = await createStoreWithSchema(merged, backend);
+    const result = await recovered.materializeRemovals();
+
+    expect(result.results.find((r) => r.kind === "Tag")?.status).toBe(
+      "removed",
+    );
+    expect(
+      await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
+    ).toBe(0);
   });
 });
 
