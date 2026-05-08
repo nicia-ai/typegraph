@@ -113,6 +113,12 @@ The validation result indicates what happened during store initialization:
 | `pending`     | Safe changes detected but `autoMigrate` is `false` |
 | `breaking`    | Breaking changes detected, action required         |
 
+The `initialized` and `migrated` results also include
+`committedRow: SchemaVersionRow`, the schema row that was just written. Most
+applications only need the version fields shown above, but integrations that
+build schema metadata can use `committedRow` without issuing another
+`getActiveSchema` read.
+
 ## Safe vs Breaking Changes
 
 ### Safe Changes (Auto-Migrated)

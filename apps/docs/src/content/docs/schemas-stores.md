@@ -497,6 +497,11 @@ The validation result indicates what happened:
 - `status: "pending"` - Safe changes detected but `autoMigrate` is `false`
 - `status: "breaking"` - Breaking changes detected, action required
 
+For `initialized` and `migrated`, the result also includes
+`committedRow: SchemaVersionRow`, which is the row TypeGraph just committed.
+Most callers can ignore it; it is useful when building schema metadata without
+performing another active-schema lookup.
+
 **Example:**
 
 ```typescript

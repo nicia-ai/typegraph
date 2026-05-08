@@ -142,6 +142,10 @@ export const typegraphTables = createSqliteTables({
   uniques: "myapp_graph_uniques",
   schemaVersions: "myapp_graph_schema_versions",
   embeddings: "myapp_graph_embeddings",
+  fulltext: "myapp_graph_fulltext",
+  indexMaterializations: "myapp_graph_index_materializations",
+  kindRemovals: "myapp_graph_kind_removals",
+  reconciliationMarkers: "myapp_graph_reconciliation_markers",
 });
 
 // Export individual tables for drizzle-kit
@@ -151,7 +155,13 @@ export const {
   uniques: myappGraphUniques,
   schemaVersions: myappGraphSchemaVersions,
   embeddings: myappGraphEmbeddings,
+  indexMaterializations: myappGraphIndexMaterializations,
+  kindRemovals: myappGraphKindRemovals,
+  reconciliationMarkers: myappGraphReconciliationMarkers,
 } = typegraphTables;
+
+export const myappGraphFulltextTableName =
+  typegraphTables.fulltextTableName;
 ```
 
 Then pass the same tables to the backend:
