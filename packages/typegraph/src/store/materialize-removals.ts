@@ -75,18 +75,29 @@ export async function materializeRemovals(
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
 
-  const results: MaterializeRemovalsEntry[] = [];
-  for (const removal of candidates) {
-    const entry = await materializeOne(removal, {
-      backend,
-      graphId,
-      nodesTable,
-      edgesTable,
-    });
-    results.push(entry);
-    if (entry.status === "failed" && options.stopOnError === true) break;
+  const ctx = { backend, graphId, nodesTable, edgesTable } as const;
+
+  // When `stopOnError` is set we honor strict sequential semantics; one
+  // failure short-circuits the rest. Otherwise each kind targets a
+  // disjoint row set (DELETEs filtered by kindName) so we can issue all
+  // cleanups concurrently — Postgres parallelizes the DELETE round-trips
+  // across pool connections; SQLite serializes writes at the engine
+  // level either way.
+  if (options.stopOnError === true) {
+    const results: MaterializeRemovalsEntry[] = [];
+    for (const removal of candidates) {
+      const entry = await materializeOne(removal, ctx);
+      results.push(entry);
+      if (entry.status === "failed") break;
+    }
+    return { results };
   }
-  return { results };
+
+  return {
+    results: await Promise.all(
+      candidates.map((removal) => materializeOne(removal, ctx)),
+    ),
+  };
 }
 
 async function materializeOne(

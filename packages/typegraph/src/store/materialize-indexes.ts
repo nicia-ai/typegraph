@@ -31,7 +31,7 @@ import {
   type GraphBackend,
   type RecordIndexMaterializationParams,
 } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import { type GraphDef, isKnownKind } from "../core/define-graph";
 import { ConfigurationError, KindNotFoundError } from "../errors";
 import {
   generateIndexDDL,
@@ -142,7 +142,7 @@ export async function materializeIndexes(
   // Short-circuit before any I/O when there's nothing to do. The
   // ensure-step below issues a CREATE TABLE statement — paying that
   // cost only to return an empty result is wasteful, especially on
-  // the agent-loop pattern where `evolve(sameExt, { eager: true })`
+  // the agent-loop pattern where `evolve(sameExt, { eager: {} })`
   // is repeated.
   if (candidates.length === 0) {
     return { results: [] };
@@ -175,29 +175,79 @@ export async function materializeIndexes(
     : { edgesTableName: tableNames.edges }),
   } as const;
 
-  const results: MaterializeIndexesEntry[] = [];
-  for (const declaration of candidates) {
-    const entry =
-      declaration.entity === "vector" ?
-        await materializeVectorIndex(
-          declaration,
-          backend,
-          graphId,
-          schemaVersion,
-        )
-      : await materializeRelationalIndex(
-          declaration,
-          backend,
-          dialect,
-          ddlOptions,
-          graphId,
-          schemaVersion,
-        );
-    results.push(entry);
-    if (entry.status === "failed" && options.stopOnError === true) break;
+  const materializeEntry = (
+    declaration: IndexDeclaration,
+  ): Promise<MaterializeIndexesEntry> =>
+    declaration.entity === "vector" ?
+      materializeVectorIndex(declaration, backend, graphId, schemaVersion)
+    : materializeRelationalIndex(
+        declaration,
+        backend,
+        dialect,
+        ddlOptions,
+        graphId,
+        schemaVersion,
+      );
+
+  if (options.stopOnError === true) {
+    const results: MaterializeIndexesEntry[] = [];
+    for (const declaration of candidates) {
+      const entry = await materializeEntry(declaration);
+      results.push(entry);
+      if (entry.status === "failed") break;
+    }
+    return { results };
   }
 
-  return { results };
+  // Postgres restricts `CREATE INDEX CONCURRENTLY` to one in-flight
+  // build per relation, so we group declarations by target table and
+  // run each group sequentially while running the groups in parallel.
+  // Typical schemas land in three buckets (nodes, edges, vector
+  // embeddings), giving a ~3× round-trip win over fully sequential
+  // without ever issuing two CONCURRENTLY builds against the same
+  // relation. SQLite ignores the grouping (writes serialize at the
+  // engine level either way).
+  const buckets = new Map<string, IndexDeclaration[]>();
+  for (const declaration of candidates) {
+    const key = parallelBucketKey(declaration);
+    const list = buckets.get(key);
+    if (list === undefined) buckets.set(key, [declaration]);
+    else list.push(declaration);
+  }
+
+  const bucketResults = await Promise.all(
+    [...buckets.values()].map(async (group) => {
+      const out: MaterializeIndexesEntry[] = [];
+      for (const declaration of group) {
+        out.push(await materializeEntry(declaration));
+      }
+      return out;
+    }),
+  );
+
+  // Flatten in declaration order so callers see a stable result shape
+  // regardless of how the buckets resolved.
+  const byDeclaration = new Map<IndexDeclaration, MaterializeIndexesEntry>();
+  let bucketIndex = 0;
+  for (const group of buckets.values()) {
+    const entries = bucketResults[bucketIndex]!;
+    for (const [declarationIndex, declaration] of group.entries()) {
+      byDeclaration.set(declaration, entries[declarationIndex]!);
+    }
+    bucketIndex += 1;
+  }
+  return {
+    results: candidates.map((declaration) => byDeclaration.get(declaration)!),
+  };
+}
+
+function parallelBucketKey(declaration: IndexDeclaration): string {
+  // Vector indexes all target the same physical embeddings table, so
+  // they share one bucket. Relational node and edge indexes split into
+  // two buckets keyed by entity (graphs override their physical table
+  // names but every declaration with the same entity still lands on
+  // the same physical table within a given graph).
+  return declaration.entity === "vector" ? "vector" : declaration.entity;
 }
 
 async function materializeRelationalIndex(
@@ -487,8 +537,4 @@ async function computeIndexSignature(
     hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
-}
-
-function isKnownKind(graph: GraphDef, name: string): boolean {
-  return Object.hasOwn(graph.nodes, name) || Object.hasOwn(graph.edges, name);
 }
