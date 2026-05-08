@@ -13,6 +13,10 @@
     "perf:postgres": "tsx src/main.ts --backend=postgres",
     "preperf:check:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "perf:check:postgres": "tsx src/main.ts --check --backend=postgres",
+    "prebench:maintenance": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:maintenance": "tsx src/maintenance-bench.ts",
+    "prebench:maintenance:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:maintenance:postgres": "tsx src/maintenance-bench.ts --backend=postgres",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

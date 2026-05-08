@@ -14,6 +14,7 @@ import {
   type GraphDefaults,
   isEdgeType,
   isEdgeTypeWithEndpoints,
+  type KindEntity,
   type NodeRegistration,
   type NodeType,
   type TemporalMode,
@@ -72,7 +73,7 @@ function validateConstraintNarrowing(
   edgeType: EdgeTypeWithEndpoints,
   registration: EdgeRegistration,
 ): void {
-  const builtInFromNames = new Set(edgeType.from.map((n) => n.kind));
+  const builtInFromNames = new Set(edgeType.from.map((node) => node.kind));
   for (const fromNode of registration.from) {
     if (!builtInFromNames.has(fromNode.kind)) {
       throw new ConfigurationError(
@@ -90,7 +91,7 @@ function validateConstraintNarrowing(
     }
   }
 
-  const builtInToNames = new Set(edgeType.to.map((n) => n.kind));
+  const builtInToNames = new Set(edgeType.to.map((node) => node.kind));
   for (const toNode of registration.to) {
     if (!builtInToNames.has(toNode.kind)) {
       throw new ConfigurationError(
@@ -451,7 +452,7 @@ function collectKinds(
 function assertKindRegistered(
   declaration: IndexDeclaration,
   registeredKinds: ReadonlySet<string>,
-  entity: "node" | "edge",
+  entity: KindEntity,
 ): void {
   if (registeredKinds.has(declaration.kind)) return;
 

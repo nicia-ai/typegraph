@@ -13,6 +13,7 @@
 
 import { sql } from "drizzle-orm";
 
+import type { KindEntity } from "../../core/types";
 import type { KindRemovalRow, RecordKindRemovalParams } from "../types";
 import { formatPostgresTimestamp } from "./row-mappers";
 
@@ -69,7 +70,7 @@ export function mapKindRemovalRow(
   return {
     graphId: row.graphId,
     kindName: row.kindName,
-    entity: row.entity as "node" | "edge",
+    entity: row.entity as KindEntity,
     schemaVersion: row.schemaVersion,
     removedAt: decode(row.removedAt),
     lastAttemptedAt,
@@ -88,7 +89,7 @@ export function buildKindRemovalInsertValues<TEncoded>(
 ): Readonly<{
   graphId: string;
   kindName: string;
-  entity: "node" | "edge";
+  entity: KindEntity;
   schemaVersion: number;
   removedAt: TEncoded | undefined;
   lastAttemptedAt: TEncoded;

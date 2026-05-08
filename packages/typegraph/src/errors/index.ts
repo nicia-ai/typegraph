@@ -22,6 +22,7 @@
  * ```
  */
 
+import type { KindEntity } from "../core/types";
 // Type-only import: `materialize-indexes.ts` value-imports
 // `ConfigurationError` from this file, but type-only imports are erased
 // at runtime so this back-edge does not create a value cycle.
@@ -175,7 +176,7 @@ export type ValidationIssue = Readonly<{
  */
 export type ValidationErrorDetails = Readonly<{
   /** Type of entity being validated */
-  entityType?: "node" | "edge";
+  entityType?: KindEntity;
   /** Kind/type name of the entity */
   kind?: string;
   /** Operation being performed */
@@ -282,11 +283,11 @@ export class EdgeNotFoundError extends TypeGraphError {
  */
 export class KindNotFoundError extends TypeGraphError {
   readonly kindName: string;
-  readonly entity: "node" | "edge";
+  readonly entity: KindEntity;
 
   constructor(
     kindName: string,
-    entity: "node" | "edge",
+    entity: KindEntity,
     options?: Readonly<{
       graphId?: string;
       suggestion?: string;

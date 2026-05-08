@@ -12,7 +12,7 @@
  * agent-induced schemas use in practice. Anything outside this set fails
  * loudly at `defineGraphExtension(...)`.
  */
-import { type KindAnnotations } from "../core/types";
+import { type KindAnnotations, type NullCheckOp } from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
 
 // ============================================================
@@ -177,7 +177,7 @@ export type ExtensionPropertyType =
  */
 export type ExtensionUniqueWhere = Readonly<{
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 /**
@@ -241,7 +241,7 @@ export type ExtensionEdgeDef = Readonly<{
  */
 export type ExtensionIndexWhere = Readonly<{
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 /**
@@ -378,3 +378,21 @@ export type GraphExtension = Readonly<{
    */
   indexes?: readonly ExtensionIndex[];
 }>;
+
+/**
+ * Top-level v1 slots a `GraphExtension` document may carry. Single
+ * source of truth for both the strict-authoring validator (typo rejection
+ * via `defineGraphExtension`) and the persistence Zod schema (which
+ * leaves the field set loose for forward compatibility but uses this
+ * list to drive the Zod object shape).
+ */
+export const GRAPH_EXTENSION_TOP_LEVEL_KEYS = [
+  "version",
+  "nodes",
+  "edges",
+  "ontology",
+  "indexes",
+] as const;
+
+export type GraphExtensionTopLevelKey =
+  (typeof GRAPH_EXTENSION_TOP_LEVEL_KEYS)[number];

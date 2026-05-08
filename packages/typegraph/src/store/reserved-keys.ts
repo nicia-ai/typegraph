@@ -4,6 +4,7 @@
  * Structural keys that cannot be overwritten by user-defined properties.
  * Shared across row-mappers, subgraph projection, and schema validation.
  */
+import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
 
 export const RESERVED_NODE_KEYS: ReadonlySet<string> = new Set([
@@ -101,7 +102,7 @@ export function assertSchemaKeysAreFree(
  */
 export function validateProjectionField(
   field: string,
-  entityType: "node" | "edge",
+  entityType: KindEntity,
   kind: string,
 ): void {
   const reserved =

@@ -40,3 +40,20 @@ export function buildGraphExtensionOntologyKeySet(
     (document?.ontology ?? []).map((entry) => graphExtensionOntologyKey(entry)),
   );
 }
+
+/**
+ * Sets of node and edge kind names declared in the extension document.
+ * Consumers use these to distinguish runtime-origin kinds from
+ * compile-time ones — re-applying the same runtime kind is a noop, not
+ * a collision; removing a runtime kind partitions the merged graph
+ * differently from removing a compile-time one. Used by `merge.ts`,
+ * `remove.ts`, and `store/introspect.ts`.
+ */
+export function extensionKindNames(
+  document: GraphExtension | undefined,
+): Readonly<{ nodes: ReadonlySet<string>; edges: ReadonlySet<string> }> {
+  return {
+    nodes: new Set(Object.keys(document?.nodes ?? {})),
+    edges: new Set(Object.keys(document?.edges ?? {})),
+  };
+}

@@ -47,6 +47,7 @@ export type SqliteTableNames = Readonly<{
   fulltext: string;
   indexMaterializations: string;
   kindRemovals: string;
+  reconciliationMarkers: string;
 }>;
 
 export type CreateSqliteTablesOptions = Readonly<{
@@ -68,6 +69,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   kindRemovals: "typegraph_kind_removals",
+  reconciliationMarkers: "typegraph_reconciliation_markers",
 };
 
 /**
@@ -313,6 +315,23 @@ export function createSqliteTables(
     ],
   );
 
+  /**
+   * Per-deployment high-water mark for the `materializeRemovals`
+   * reconciliation walk. One row per `graph_id` carrying the schema
+   * version up to which the historical "did every removal land in
+   * `kindRemovals`?" walk has been verified. Lets subsequent calls
+   * skip already-checked transitions instead of re-walking from
+   * version 1 every time.
+   */
+  const reconciliationMarkers = sqliteTable(
+    n.reconciliationMarkers,
+    {
+      graphId: text("graph_id").notNull(),
+      reconciledToVersion: integer("reconciled_to_version").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
   return {
     nodes,
     edges,
@@ -321,6 +340,7 @@ export function createSqliteTables(
     embeddings,
     indexMaterializations,
     kindRemovals,
+    reconciliationMarkers,
     /**
      * The fulltext storage is a FTS5 virtual table which Drizzle cannot
      * represent. DDL is emitted as raw SQL and operations query it via

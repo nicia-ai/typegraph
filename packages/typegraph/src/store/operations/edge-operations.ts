@@ -11,7 +11,7 @@ import {
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
-import { type Cardinality } from "../../core/types";
+import { type Cardinality, type KindEntity } from "../../core/types";
 import {
   DatabaseOperationError,
   EdgeNotFoundError,
@@ -49,7 +49,7 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   registry: KindRegistry;
   createOperationContext: (
     operation: "create" | "update" | "delete",
-    entity: "node" | "edge",
+    entity: KindEntity,
     kind: string,
     id: string,
   ) => OperationHookContext;

@@ -15,6 +15,7 @@
 
 import { type ZodError, type ZodType } from "zod";
 
+import type { KindEntity } from "../core/types";
 import { ValidationError, type ValidationIssue } from "./index";
 
 // ============================================================
@@ -26,7 +27,7 @@ import { ValidationError, type ValidationIssue } from "./index";
  */
 export type ValidationContext = Readonly<{
   /** Type of entity being validated */
-  entityType: "node" | "edge";
+  entityType: KindEntity;
   /** Kind/type name of the entity */
   kind: string;
   /** Operation being performed */

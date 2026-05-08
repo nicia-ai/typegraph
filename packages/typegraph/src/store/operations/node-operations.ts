@@ -16,7 +16,11 @@ import {
   getKindsForUniquenessCheck,
 } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
-import { type NodeType, type UniqueConstraint } from "../../core/types";
+import {
+  type KindEntity,
+  type NodeType,
+  type UniqueConstraint,
+} from "../../core/types";
 import {
   DatabaseOperationError,
   KindNotFoundError,
@@ -70,7 +74,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   registry: KindRegistry;
   createOperationContext: (
     operation: "create" | "update" | "delete",
-    entity: "node" | "edge",
+    entity: KindEntity,
     kind: string,
     id: string,
   ) => OperationHookContext;

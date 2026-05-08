@@ -33,6 +33,7 @@ import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
+  extensionKindNames,
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
 import { serializeSchemaProperties } from "../schema/serializer";
@@ -111,12 +112,8 @@ export function introspectSchema<G extends GraphDef>(
   context: IntrospectContext,
 ): SchemaIntrospection {
   const extension = graph.extension;
-  const runtimeNodeNames = new Set(
-    extension === undefined ? [] : Object.keys(extension.nodes ?? {}),
-  );
-  const runtimeEdgeNames = new Set(
-    extension === undefined ? [] : Object.keys(extension.edges ?? {}),
-  );
+  const { nodes: runtimeNodeNames, edges: runtimeEdgeNames } =
+    extensionKindNames(extension);
   const deprecated = graph.deprecatedKinds;
 
   const kinds: KindIntrospection[] = [];

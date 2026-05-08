@@ -9,12 +9,17 @@
  * document is merged into a host `GraphDef`.
  */
 import { assertJsonValue } from "../core/json-value";
-import { type KindAnnotations } from "../core/types";
+import {
+  type KindAnnotations,
+  type KindEntity,
+  type NullCheckOp,
+} from "../core/types";
 import { ConfigurationError } from "../errors";
 import { computeTransitiveClosure } from "../ontology/closures";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
+import { encodeJsonPointerSegment } from "../query/json-pointer";
 import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
-import { isPlainObject } from "../utils/object";
+import { compactUndefined, freezeDeep, isPlainObject } from "../utils/object";
 import { err, ok, type Result } from "../utils/result";
 import {
   type GraphExtensionIssue,
@@ -37,11 +42,11 @@ import {
   type ExtensionPropertyType,
   type ExtensionStringProperty,
   type ExtensionUniqueConstraint,
+  GRAPH_EXTENSION_TOP_LEVEL_KEYS,
   type GraphExtension,
   type GraphExtensionVersion,
   LEGACY_GRAPH_EXTENSION_VERSION,
 } from "./extension-types";
-import { compactUndefined } from "./internal";
 
 const META_EDGE_NAME_SET: ReadonlySet<string> = new Set(ALL_META_EDGE_NAMES);
 
@@ -54,12 +59,11 @@ const SUPPORTED_PROPERTY_TYPES = new Set([
   "object",
 ]);
 
-// Per-property-type refinement-key sets were removed in the
-// forward-compat pass — see the `rejectUnknownRefinements` removal
-// docstring near the bottom of this file. Recognized refinements are
-// still defined inline by the per-type validators that read them
-// (e.g. `minLength` in `validateStringProperty`); unknown keys are
-// silently passed through.
+// Unknown per-property-type refinement keys are intentionally accepted
+// for forward compatibility: a future v1.x.y writer may emit additive
+// refinements an older v1 reader doesn't recognize. Recognized
+// refinements are read inline by the per-type validators
+// (e.g. `minLength` in `validateStringProperty`).
 
 const SUPPORTED_STRING_FORMATS = new Set([
   "datetime",
@@ -112,7 +116,7 @@ function rejectUnknownPropertyKeys(
   for (const key of Object.keys(raw)) {
     if (COMMON_PROPERTY_KEYS.has(key) || typeKeys.has(key)) continue;
     issues.push({
-      path: `${path}/${escapePointerSegment(key)}`,
+      path: `${path}/${encodeJsonPointerSegment(key)}`,
       message: `Unknown property key "${key}" for type "${type}". Recognized keys: ${recognized.join(", ")}.`,
       code: "UNKNOWN_PROPERTY_KEY",
     });
@@ -120,18 +124,91 @@ function rejectUnknownPropertyKeys(
 }
 
 /**
- * Top-level keys recognized by the v1 graph-extension document. New additive
- * keys land here as the document format grows. Used by the strict
- * authoring path (`defineGraphExtension`) to surface typos like
- * `node` instead of `nodes`; the loose persistence-load path ignores
- * unknown keys for forward compatibility.
+ * Sibling of `rejectUnknownPropertyKeys` for the non-property strict-mode
+ * checks (top-level slots, node/edge/ontology body keys, unique constraint
+ * body, where-clause body, …). Each call site previously open-coded the
+ * same `for-key-of-Object.keys` walk — this helper consolidates them.
  */
-const KNOWN_DOCUMENT_KEYS = new Set([
-  "version",
-  "nodes",
-  "edges",
-  "ontology",
-  "indexes",
+function rejectUnknownObjectKeys(
+  raw: Readonly<Record<string, unknown>>,
+  allowed: ReadonlySet<string>,
+  label: string,
+  path: string,
+  code: GraphExtensionIssueCode,
+  issues: GraphExtensionIssue[],
+): void {
+  for (const key of Object.keys(raw)) {
+    if (allowed.has(key)) continue;
+    issues.push({
+      path: `${path}/${encodeJsonPointerSegment(key)}`,
+      message: `Unknown ${label} key "${key}". Allowed: ${[...allowed].join(", ")}.`,
+      code,
+    });
+  }
+}
+
+/**
+ * Top-level slots accepted in v1 documents. Strict-authoring callers
+ * reject unknown sibling keys to surface typos like `node` instead of
+ * `nodes`; the loose persistence-load path leaves unknowns untouched
+ * for forward compatibility.
+ */
+const KNOWN_DOCUMENT_KEYS: ReadonlySet<string> = new Set(
+  GRAPH_EXTENSION_TOP_LEVEL_KEYS,
+);
+
+/**
+ * Recognized body-level key sets — one per document-shape that the
+ * strict-authoring path validates. Drives both the per-shape allowlist
+ * check (`rejectUnknownObjectKeys`) and the human-readable "Allowed:"
+ * tail in the error messages.
+ */
+const NODE_BODY_KEYS: ReadonlySet<string> = new Set([
+  "description",
+  "annotations",
+  "properties",
+  "unique",
+]);
+const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
+  "description",
+  "annotations",
+  "from",
+  "to",
+  "properties",
+]);
+const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
+  "metaEdge",
+  "from",
+  "to",
+]);
+const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
+  "name",
+  "fields",
+  "scope",
+  "collation",
+  "where",
+]);
+const WHERE_CLAUSE_KEYS: ReadonlySet<string> = new Set(["field", "op"]);
+const NODE_INDEX_KEYS: ReadonlySet<string> = new Set([
+  "entity",
+  "kind",
+  "name",
+  "fields",
+  "coveringFields",
+  "unique",
+  "scope",
+  "where",
+]);
+const EDGE_INDEX_KEYS: ReadonlySet<string> = new Set([
+  "entity",
+  "kind",
+  "name",
+  "fields",
+  "coveringFields",
+  "unique",
+  "scope",
+  "direction",
+  "where",
 ]);
 
 type ValidateGraphExtensionOptions = Readonly<{
@@ -189,7 +266,7 @@ export function validateGraphExtension(
     for (const key of Object.keys(documentRecord)) {
       if (!KNOWN_DOCUMENT_KEYS.has(key)) {
         issues.push({
-          path: `/${escapePointerSegment(key)}`,
+          path: `/${encodeJsonPointerSegment(key)}`,
           message: `Unknown top-level key "${key}". Did you mean one of: ${[...KNOWN_DOCUMENT_KEYS].join(", ")}?`,
           code: "UNKNOWN_DOCUMENT_KEY",
         });
@@ -216,7 +293,11 @@ export function validateGraphExtension(
     validateOntology(ontology, nodes, issues);
   }
 
-  const indexes = validateIndexesSection(documentRecord.indexes, issues);
+  const indexes = validateIndexesSection(
+    documentRecord.indexes,
+    issues,
+    strict,
+  );
 
   if (issues.length > 0) {
     return err(new GraphExtensionValidationError(issues));
@@ -292,7 +373,7 @@ function validateNodesSection(
   const recorded = new Set<string>();
 
   for (const [kindName, rawNode] of Object.entries(rawNodes)) {
-    const path = `/nodes/${escapePointerSegment(kindName)}`;
+    const path = `/nodes/${encodeJsonPointerSegment(kindName)}`;
 
     if (!isValidKindName(kindName)) {
       issues.push({
@@ -338,26 +419,21 @@ function validateNodeDocument(
   }
 
   if (strict) {
-    const allowed = new Set([
-      "description",
-      "annotations",
-      "properties",
-      "unique",
-    ]);
-    for (const key of Object.keys(raw)) {
-      if (!allowed.has(key)) {
-        issues.push({
-          path: `${path}/${escapePointerSegment(key)}`,
-          message: `Unknown node-level key "${key}". Allowed: description, annotations, properties, unique.`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
-      }
-    }
+    rejectUnknownObjectKeys(
+      raw,
+      NODE_BODY_KEYS,
+      "node-level",
+      path,
+      "INVALID_DOCUMENT_SHAPE",
+      issues,
+    );
   }
 
   const description = validateOptionalString(
     raw.description,
     `${path}/description`,
+    "`description`",
+    "INVALID_DOCUMENT_SHAPE",
     issues,
   );
 
@@ -420,7 +496,7 @@ function validateEdgesSection(
   const recorded = new Set<string>();
 
   for (const [kindName, rawEdge] of Object.entries(rawEdges)) {
-    const path = `/edges/${escapePointerSegment(kindName)}`;
+    const path = `/edges/${encodeJsonPointerSegment(kindName)}`;
 
     if (!isValidKindName(kindName)) {
       issues.push({
@@ -466,27 +542,21 @@ function validateEdgeDocument(
   }
 
   if (strict) {
-    const allowed = new Set([
-      "description",
-      "annotations",
-      "from",
-      "to",
-      "properties",
-    ]);
-    for (const key of Object.keys(raw)) {
-      if (!allowed.has(key)) {
-        issues.push({
-          path: `${path}/${escapePointerSegment(key)}`,
-          message: `Unknown edge-level key "${key}". Allowed: description, annotations, from, to, properties.`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
-      }
-    }
+    rejectUnknownObjectKeys(
+      raw,
+      EDGE_BODY_KEYS,
+      "edge-level",
+      path,
+      "INVALID_DOCUMENT_SHAPE",
+      issues,
+    );
   }
 
   const description = validateOptionalString(
     raw.description,
     `${path}/description`,
+    "`description`",
+    "INVALID_DOCUMENT_SHAPE",
     issues,
   );
 
@@ -591,16 +661,14 @@ function validateOntologySection(
       continue;
     }
     if (strict) {
-      const allowed = new Set(["metaEdge", "from", "to"]);
-      for (const key of Object.keys(entry)) {
-        if (!allowed.has(key)) {
-          issues.push({
-            path: `${path}/${escapePointerSegment(key)}`,
-            message: `Unknown ontology-entry key "${key}". Allowed: metaEdge, from, to.`,
-            code: "INVALID_DOCUMENT_SHAPE",
-          });
-        }
-      }
+      rejectUnknownObjectKeys(
+        entry,
+        ONTOLOGY_ENTRY_KEYS,
+        "ontology-entry",
+        path,
+        "INVALID_DOCUMENT_SHAPE",
+        issues,
+      );
     }
 
     const metaEdge = entry.metaEdge;
@@ -716,21 +784,31 @@ const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   ["hasPart", { canonical: "partOf", flip: true }],
 ]);
 
-function detectHierarchicalCycles(
-  ontology: readonly ExtensionOntologyRelation[],
-  issues: GraphExtensionIssue[],
-): void {
-  type NormalizedEdge = Readonly<{
-    from: string;
-    to: string;
-    originalIndex: number;
-  }>;
+type NormalizedHierarchicalEdge = Readonly<{
+  from: string;
+  to: string;
+  originalIndex: number;
+}>;
 
-  const groups = new Map<MetaEdgeName, NormalizedEdge[]>();
+/**
+ * Group ontology relations by their canonical hierarchical meta-edge,
+ * flipping `narrower` / `hasPart` entries into their canonical direction.
+ * Mirrors `computeClosuresFromOntology`'s flattening so cycle and
+ * disjoint-contradiction detection see the same edge set the registry
+ * will. `skipSelfLoops` is set by the cycle detector (self-loops are
+ * already reported by `detectOntologySelfLoops`) and unset by the
+ * disjoint-contradiction detector (which still wants `(A, A)` in the
+ * closure for a `disjointWith(A, A)` check).
+ */
+function buildHierarchicalGroups(
+  ontology: readonly ExtensionOntologyRelation[],
+  options: Readonly<{ skipSelfLoops: boolean }>,
+): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
+  const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
   for (const [index, relation] of ontology.entries()) {
     const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
     if (normalization === undefined) continue;
-    if (relation.from === relation.to) continue; // already reported as self-loop
+    if (options.skipSelfLoops && relation.from === relation.to) continue;
 
     const from = normalization.flip ? relation.to : relation.from;
     const to = normalization.flip ? relation.from : relation.to;
@@ -739,6 +817,14 @@ function detectHierarchicalCycles(
     list.push({ from, to, originalIndex: index });
     groups.set(normalization.canonical, list);
   }
+  return groups;
+}
+
+function detectHierarchicalCycles(
+  ontology: readonly ExtensionOntologyRelation[],
+  issues: GraphExtensionIssue[],
+): void {
+  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: true });
 
   for (const [name, edges] of groups) {
     const closure = computeTransitiveClosure(
@@ -799,21 +885,7 @@ function detectDisjointHierarchyContradictions(
 
   // Walk the closure of every hierarchical group; any (from, reachable)
   // pair that also appears in `disjointPairs` is a contradiction.
-  type NormalizedEdge = Readonly<{
-    from: string;
-    to: string;
-    originalIndex: number;
-  }>;
-  const groups = new Map<MetaEdgeName, NormalizedEdge[]>();
-  for (const [index, relation] of ontology.entries()) {
-    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
-    if (normalization === undefined) continue;
-    const from = normalization.flip ? relation.to : relation.from;
-    const to = normalization.flip ? relation.from : relation.to;
-    const list = groups.get(normalization.canonical) ?? [];
-    list.push({ from, to, originalIndex: index });
-    groups.set(normalization.canonical, list);
-  }
+  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: false });
   const reported = new Set<string>();
   for (const [name, edges] of groups) {
     const closure = computeTransitiveClosure(
@@ -850,6 +922,7 @@ const RUNTIME_INDEX_WHERE_OPS: ReadonlySet<string> = new Set([
 function validateIndexesSection(
   rawIndexes: unknown,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): readonly ExtensionIndex[] | undefined {
   if (rawIndexes === undefined) return undefined;
   if (!Array.isArray(rawIndexes)) {
@@ -866,7 +939,7 @@ function validateIndexesSection(
 
   for (const [arrayIndex, entry] of rawIndexes.entries()) {
     const path = `/indexes/${arrayIndex}`;
-    const validated = validateIndexEntry(entry, path, issues);
+    const validated = validateIndexEntry(entry, path, issues, strict);
     if (validated === undefined) continue;
 
     if (validated.name !== undefined) {
@@ -890,6 +963,7 @@ function validateIndexEntry(
   raw: unknown,
   path: string,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): ExtensionIndex | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
@@ -908,6 +982,21 @@ function validateIndexEntry(
       code: "INVALID_INDEX_DECLARATION",
     });
     return undefined;
+  }
+
+  // Strict-authoring typo check: `coveringField` (singular), `wheres`,
+  // etc. would otherwise compile to a weaker index with no signal.
+  // Allowlist switches on `entity` so edge-only `direction` is valid
+  // on edges but flagged on nodes.
+  if (strict) {
+    rejectUnknownObjectKeys(
+      raw,
+      entity === "node" ? NODE_INDEX_KEYS : EDGE_INDEX_KEYS,
+      `${entity}-index`,
+      path,
+      "INVALID_INDEX_DECLARATION",
+      issues,
+    );
   }
 
   if (typeof raw.kind !== "string" || !isValidKindName(raw.kind)) {
@@ -956,8 +1045,7 @@ function validateIndexEntry(
     name = raw.name;
   }
 
-  const scopeIssueCount = issues.length;
-  const scope = validateOptionalLiteral(
+  const scopeResult = validateOptionalLiteral(
     raw.scope,
     INDEX_SCOPE_VALUES,
     `${path}/scope`,
@@ -965,12 +1053,14 @@ function validateIndexEntry(
     "INVALID_INDEX_DECLARATION",
     issues,
   );
-  if (issues.length > scopeIssueCount) return undefined;
+  if (!scopeResult.ok) return undefined;
+  const scope = scopeResult.value;
 
   const where = validateGraphExtensionIndexWhere(
     raw.where,
     `${path}/where`,
     issues,
+    strict,
   );
 
   if (entity === "node") {
@@ -986,8 +1076,7 @@ function validateIndexEntry(
     });
   }
 
-  const directionIssueCount = issues.length;
-  const direction = validateOptionalLiteral(
+  const directionResult = validateOptionalLiteral(
     raw.direction,
     EDGE_INDEX_DIRECTION_VALUES,
     `${path}/direction`,
@@ -995,7 +1084,8 @@ function validateIndexEntry(
     "INVALID_INDEX_DECLARATION",
     issues,
   );
-  if (issues.length > directionIssueCount) return undefined;
+  if (!directionResult.ok) return undefined;
+  const direction = directionResult.value;
 
   return compactUndefined<ExtensionIndex>({
     entity: "edge",
@@ -1074,6 +1164,7 @@ function validateGraphExtensionIndexWhere(
   raw: unknown,
   path: string,
   issues: GraphExtensionIssue[],
+  strict: boolean,
 ): ExtensionIndex["where"] {
   if (raw === undefined) return undefined;
   if (!isPlainObject(raw)) {
@@ -1083,6 +1174,16 @@ function validateGraphExtensionIndexWhere(
       code: "INVALID_INDEX_DECLARATION",
     });
     return undefined;
+  }
+  if (strict) {
+    rejectUnknownObjectKeys(
+      raw,
+      WHERE_CLAUSE_KEYS,
+      "where-clause",
+      path,
+      "INVALID_INDEX_DECLARATION",
+      issues,
+    );
   }
   if (typeof raw.field !== "string" || raw.field.length === 0) {
     issues.push({
@@ -1102,7 +1203,7 @@ function validateGraphExtensionIndexWhere(
   }
   return Object.freeze({
     field: raw.field,
-    op: raw.op as "isNull" | "isNotNull",
+    op: raw.op as NullCheckOp,
   });
 }
 
@@ -1113,7 +1214,7 @@ function validateGraphExtensionIndexWhere(
 function validatePropertiesMap(
   raw: unknown,
   path: string,
-  ownerType: "node" | "edge",
+  ownerType: KindEntity,
   ownerName: string,
   issues: GraphExtensionIssue[],
   strict: boolean,
@@ -1131,7 +1232,7 @@ function validatePropertiesMap(
     ownerType === "node" ? RESERVED_NODE_KEYS : RESERVED_EDGE_KEYS;
   const result: Record<string, ExtensionPropertyType> = {};
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
-    const propertyPath = `${path}/${escapePointerSegment(propertyName)}`;
+    const propertyPath = `${path}/${encodeJsonPointerSegment(propertyName)}`;
     if (reserved.has(propertyName)) {
       issues.push({
         path: propertyPath,
@@ -1226,8 +1327,6 @@ function validateStringProperty(
   issues: GraphExtensionIssue[],
   strict: boolean,
 ): ExtensionStringProperty | undefined {
-  // Forward-compat: unknown refinement keys are silently accepted.
-  // See `rejectUnknownRefinements` removal docstring for details.
   const minLength = validateNonNegativeInteger(
     raw.minLength,
     `${path}/minLength`,
@@ -1333,17 +1432,11 @@ function validateStringProperty(
     return undefined;
   }
 
-  return compactUndefined<ExtensionStringProperty>({
-    type: "string",
-    minLength,
-    maxLength,
-    pattern,
-    format,
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionStringProperty>(
+    "string",
+    { minLength, maxLength, pattern, format },
+    modifiers,
+  );
 }
 
 function validateNumberProperty(
@@ -1404,16 +1497,11 @@ function validateNumberProperty(
   const modifiers = validatePropertyModifiers(raw, path, "number", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<ExtensionNumberProperty>({
-    type: "number",
-    min,
-    max,
-    int,
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionNumberProperty>(
+    "number",
+    { min, max, int },
+    modifiers,
+  );
 }
 
 function validateBooleanProperty(
@@ -1421,16 +1509,9 @@ function validateBooleanProperty(
   path: string,
   issues: GraphExtensionIssue[],
 ): ExtensionBooleanProperty | undefined {
-  // Forward-compat: unknown refinement keys are silently accepted.
   const modifiers = validatePropertyModifiers(raw, path, "boolean", issues);
   if (modifiers === undefined) return undefined;
-  return compactUndefined<ExtensionBooleanProperty>({
-    type: "boolean",
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionBooleanProperty>("boolean", {}, modifiers);
 }
 
 function validateEnumProperty(
@@ -1475,14 +1556,7 @@ function validateEnumProperty(
   const modifiers = validatePropertyModifiers(raw, path, "enum", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<ExtensionEnumProperty>({
-    type: "enum",
-    values,
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionEnumProperty>("enum", { values }, modifiers);
 }
 
 function validateArrayProperty(
@@ -1528,22 +1602,22 @@ function validateArrayProperty(
   );
   if (items === undefined) return undefined;
   if (items.type === "array") {
-    // Defensive: shouldn't be reachable because we checked above, but keeps
-    // the cast tight.
+    // Type-narrow only: `validateProperty` returns the wider
+    // `ExtensionPropertyType`, but `ExtensionArrayItemType` excludes
+    // nested arrays. The earlier `itemType === "array"` check above
+    // already rejected this at the raw-shape level, so this branch
+    // is unreachable at runtime.
     return undefined;
   }
 
   const modifiers = validatePropertyModifiers(raw, path, "array", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<ExtensionArrayProperty>({
-    type: "array",
-    items: items,
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionArrayProperty>(
+    "array",
+    { items },
+    modifiers,
+  );
 }
 
 function validateObjectProperty(
@@ -1585,7 +1659,7 @@ function validateObjectProperty(
 
   const fields: Record<string, ExtensionObjectFieldProperty> = {};
   for (const [name, value] of propertiesEntries) {
-    const fieldPath = `${path}/properties/${escapePointerSegment(name)}`;
+    const fieldPath = `${path}/properties/${encodeJsonPointerSegment(name)}`;
     if (!isPlainObject(value)) {
       issues.push({
         path: fieldPath,
@@ -1611,14 +1685,11 @@ function validateObjectProperty(
   const modifiers = validatePropertyModifiers(raw, path, "object", issues);
   if (modifiers === undefined) return undefined;
 
-  return compactUndefined<ExtensionObjectProperty>({
-    type: "object",
-    properties: fields,
-    optional: modifiers.optional,
-    searchable: modifiers.searchable,
-    embedding: modifiers.embedding,
-    description: modifiers.description,
-  });
+  return finalizeProperty<ExtensionObjectProperty>(
+    "object",
+    { properties: fields },
+    modifiers,
+  );
 }
 
 // ============================================================
@@ -1631,6 +1702,31 @@ type NormalizedModifiers = Readonly<{
   embedding?: { dimensions: number };
   description?: string;
 }>;
+
+/**
+ * Assemble a final property descriptor from a type-specific field map
+ * plus the already-validated modifiers. Centralizes the modifier-spread
+ * boilerplate so adding a new modifier slot (or tweaking how undefineds
+ * are pruned) touches one site instead of six.
+ *
+ * Callers run `validatePropertyModifiers` first because some types
+ * (`string`) need cross-modifier validation (e.g. `format` ↔ `searchable`)
+ * after the modifiers are known but before the final shape is built.
+ */
+function finalizeProperty<T extends ExtensionPropertyType>(
+  type: T["type"],
+  specific: Record<string, unknown>,
+  modifiers: NormalizedModifiers,
+): T {
+  return compactUndefined<Record<string, unknown>>({
+    type,
+    ...specific,
+    optional: modifiers.optional,
+    searchable: modifiers.searchable,
+    embedding: modifiers.embedding,
+    description: modifiers.description,
+  }) as T;
+}
 
 function validatePropertyModifiers(
   raw: Record<string, unknown>,
@@ -1794,22 +1890,14 @@ function validateUniqueConstraints(
     }
 
     if (strict) {
-      const allowed = new Set([
-        "name",
-        "fields",
-        "scope",
-        "collation",
-        "where",
-      ]);
-      for (const key of Object.keys(entry)) {
-        if (!allowed.has(key)) {
-          issues.push({
-            path: `${constraintPath}/${escapePointerSegment(key)}`,
-            message: `Unknown unique-constraint key "${key}". Allowed: name, fields, scope, collation, where.`,
-            code: "INVALID_DOCUMENT_SHAPE",
-          });
-        }
-      }
+      rejectUnknownObjectKeys(
+        entry,
+        UNIQUE_CONSTRAINT_KEYS,
+        "unique-constraint",
+        constraintPath,
+        "INVALID_DOCUMENT_SHAPE",
+        issues,
+      );
     }
 
     const constraint = entry;
@@ -1879,8 +1967,7 @@ function validateUniqueConstraints(
     }
     if (!fieldsValid) continue;
 
-    const scopeIssueCount = issues.length;
-    const scope = validateOptionalLiteral(
+    const scopeResult = validateOptionalLiteral(
       constraint.scope,
       ["kind", "kindWithSubClasses"] as const,
       `${constraintPath}/scope`,
@@ -1888,10 +1975,10 @@ function validateUniqueConstraints(
       "INVALID_DOCUMENT_SHAPE",
       issues,
     );
-    if (issues.length > scopeIssueCount) continue;
+    if (!scopeResult.ok) continue;
+    const scope = scopeResult.value;
 
-    const collationIssueCount = issues.length;
-    const collation = validateOptionalLiteral(
+    const collationResult = validateOptionalLiteral(
       constraint.collation,
       ["binary", "caseInsensitive"] as const,
       `${constraintPath}/collation`,
@@ -1899,20 +1986,20 @@ function validateUniqueConstraints(
       "INVALID_DOCUMENT_SHAPE",
       issues,
     );
-    if (issues.length > collationIssueCount) continue;
+    if (!collationResult.ok) continue;
+    const collation = collationResult.value;
 
-    let where: { field: string; op: "isNull" | "isNotNull" } | undefined;
-    if (constraint.where !== undefined) {
-      const whereResult = validateUniqueWhere(
-        constraint.where,
-        `${constraintPath}/where`,
-        properties,
-        issues,
-        strict,
-      );
-      if (whereResult === undefined) continue;
-      where = whereResult;
-    }
+    const where: { field: string; op: NullCheckOp } | undefined =
+      constraint.where === undefined ?
+        undefined
+      : validateUniqueWhere(
+          constraint.where,
+          `${constraintPath}/where`,
+          properties,
+          issues,
+          strict,
+        );
+    if (constraint.where !== undefined && where === undefined) continue;
 
     result.push(
       compactUndefined<ExtensionUniqueConstraint>({
@@ -1934,7 +2021,7 @@ function validateUniqueWhere(
   properties: Record<string, ExtensionPropertyType>,
   issues: GraphExtensionIssue[],
   strict: boolean,
-): { field: string; op: "isNull" | "isNotNull" } | undefined {
+): { field: string; op: NullCheckOp } | undefined {
   if (!isPlainObject(raw)) {
     issues.push({
       path,
@@ -1944,16 +2031,14 @@ function validateUniqueWhere(
     return undefined;
   }
   if (strict) {
-    const allowed = new Set(["field", "op"]);
-    for (const key of Object.keys(raw)) {
-      if (!allowed.has(key)) {
-        issues.push({
-          path: `${path}/${escapePointerSegment(key)}`,
-          message: `Unknown where-clause key "${key}". Allowed: field, op.`,
-          code: "INVALID_DOCUMENT_SHAPE",
-        });
-      }
-    }
+    rejectUnknownObjectKeys(
+      raw,
+      WHERE_CLAUSE_KEYS,
+      "where-clause",
+      path,
+      "INVALID_DOCUMENT_SHAPE",
+      issues,
+    );
   }
   const field = raw.field;
   const op = raw.op;
@@ -2070,15 +2155,13 @@ function validateNonNegativeInteger(
 function validateOptionalString(
   value: unknown,
   path: string,
+  label: string,
+  code: GraphExtensionIssueCode,
   issues: GraphExtensionIssue[],
 ): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") {
-    issues.push({
-      path,
-      message: "`description` must be a string.",
-      code: "INVALID_DOCUMENT_SHAPE",
-    });
+    issues.push({ path, message: `${label} must be a string.`, code });
     return undefined;
   }
   return value;
@@ -2114,6 +2197,18 @@ function validateOptionalFiniteNumber(
   return value;
 }
 
+/**
+ * Discriminated result for optional-literal validation: callers branch
+ * on `ok` so "absent" (`{ ok: true, value: undefined }`) is distinct from
+ * "invalid" (`{ ok: false }`). Replaces the prior issue-counter trick
+ * (`const before = issues.length; … if (issues.length > before) …`)
+ * which conflated those two outcomes when the underlying helper
+ * returned `T | undefined`.
+ */
+type OptionalLiteralResult<T> =
+  | Readonly<{ ok: true; value: T | undefined }>
+  | Readonly<{ ok: false }>;
+
 function validateOptionalLiteral<T extends string>(
   value: unknown,
   allowed: readonly T[],
@@ -2121,14 +2216,14 @@ function validateOptionalLiteral<T extends string>(
   label: string,
   code: GraphExtensionIssueCode,
   issues: GraphExtensionIssue[],
-): T | undefined {
-  if (value === undefined) return undefined;
+): OptionalLiteralResult<T> {
+  if (value === undefined) return { ok: true, value: undefined };
   if (typeof value !== "string" || !allowed.includes(value as T)) {
     const list = allowed.map((entry) => `"${entry}"`).join(", ");
     issues.push({ path, message: `${label} must be one of: ${list}.`, code });
-    return undefined;
+    return { ok: false };
   }
-  return value as T;
+  return { ok: true, value: value as T };
 }
 
 function isValidKindName(name: string): boolean {
@@ -2155,15 +2250,6 @@ function describeUnknownValue(value: unknown): string {
   } catch {
     return `(${typeof value})`;
   }
-}
-
-/**
- * Escapes a JSON-pointer reference segment per RFC 6901. `~` becomes
- * `~0`, `/` becomes `~1`. The resulting segment is appended after the
- * leading `/` separator.
- */
-function escapePointerSegment(segment: string): string {
-  return segment.replaceAll("~", "~0").replaceAll("/", "~1");
 }
 
 // ============================================================
@@ -2200,13 +2286,4 @@ function freezeDocument(input: {
         : Object.freeze(input.indexes.map((entry) => freezeDeep({ ...entry }))),
     }),
   );
-}
-
-function freezeDeep<T>(value: T): T {
-  if (value === null || typeof value !== "object") return value;
-  if (Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value as Record<string, unknown>)) {
-    freezeDeep(nested);
-  }
-  return Object.freeze(value);
 }

@@ -11,14 +11,30 @@ import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { DatabaseOperationError, MigrationError } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
+import { freezeDeep } from "../utils/object";
 import {
   computeSchemaDiff,
   getMigrationActions,
   isBackwardsCompatible,
   type SchemaDiff,
 } from "./migration";
-import { computeSchemaHash, serializeSchema } from "./serializer";
+import {
+  computeSchemaHash,
+  getSchemaHash,
+  serializeSchema,
+} from "./serializer";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
+
+/**
+ * Bounded LRU cache for `parseSerializedSchema` results, keyed on the
+ * raw schema_doc string. Multi-tenant servers re-read the same row
+ * across tenants on every store boot, and the full Zod parse + JSON
+ * walk is ~0.5ms on a 50KB schema. Capped at 100 entries (~5MB worst
+ * case) so a long-running process holding many distinct schemas
+ * doesn't grow the cache unbounded.
+ */
+const PARSE_CACHE_LIMIT = 100;
+const PARSE_CACHE = new Map<string, SerializedSchema>();
 
 /**
  * Parses and validates a serialized schema document from the database.
@@ -28,6 +44,14 @@ import { type SerializedSchema, serializedSchemaZod } from "./types";
  * parse boundary rather than letting invalid data propagate silently.
  */
 export function parseSerializedSchema(json: string): SerializedSchema {
+  const cached = PARSE_CACHE.get(json);
+  if (cached !== undefined) {
+    // LRU touch: re-insert to mark as most-recently-used.
+    PARSE_CACHE.delete(json);
+    PARSE_CACHE.set(json, cached);
+    return cached;
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -53,7 +77,16 @@ export function parseSerializedSchema(json: string): SerializedSchema {
   // against the real literal unions. The cast is sound — the only
   // broadening is `.loose()` on objects (extra fields), not on enum
   // values.
-  return result.data as SerializedSchema;
+  const validated = freezeDeep(result.data as SerializedSchema);
+
+  if (PARSE_CACHE.size >= PARSE_CACHE_LIMIT) {
+    // Drop the oldest entry. JS Map iteration is insertion-ordered, so
+    // the first key is the least-recently-used.
+    const oldest = PARSE_CACHE.keys().next().value;
+    if (oldest !== undefined) PARSE_CACHE.delete(oldest);
+  }
+  PARSE_CACHE.set(json, validated);
+  return validated;
 }
 
 // ============================================================
@@ -141,21 +174,28 @@ export async function loadAndMergeGraphExtensionDocument<G extends GraphDef>(
  */
 export function applyDeprecatedKinds<G extends GraphDef>(
   graph: G,
-  names: readonly string[] | undefined,
+  names: Iterable<string> | undefined,
 ): G {
-  const empty = names === undefined || names.length === 0;
   const current = graph.deprecatedKinds;
-  if (empty && current.size === 0) return graph;
+  // Identity short-circuit: callers commonly pass `graph.deprecatedKinds`
+  // directly (or another graph's set that was carried through unchanged).
+  if (names === current) return graph;
+
+  const nextSet: ReadonlySet<string> =
+    names === undefined ? new Set<string>()
+    : names instanceof Set ? (names as ReadonlySet<string>)
+    : new Set<string>(names);
+
+  if (nextSet.size === 0 && current.size === 0) return graph;
   if (
-    !empty &&
-    names.length === current.size &&
-    names.every((name) => current.has(name))
+    nextSet.size === current.size &&
+    [...nextSet].every((name) => current.has(name))
   ) {
     return graph;
   }
   return Object.freeze({
     ...graph,
-    deprecatedKinds: Object.freeze(empty ? new Set<string>() : new Set(names)),
+    deprecatedKinds: Object.freeze(new Set(nextSet)),
   });
 }
 
@@ -165,15 +205,24 @@ export function applyDeprecatedKinds<G extends GraphDef>(
 
 /**
  * Result of schema validation.
+ *
+ * The `initialized` and `migrated` statuses carry the committed
+ * `SchemaVersionRow` directly so callers building post-commit metadata
+ * (e.g. `Store.deprecateKinds`) can skip a `getActiveSchema` round-trip.
  */
 export type SchemaValidationResult =
-  | { status: "initialized"; version: number }
+  | {
+      status: "initialized";
+      version: number;
+      committedRow: SchemaVersionRow;
+    }
   | { status: "unchanged"; version: number }
   | {
       status: "migrated";
       fromVersion: number;
       toVersion: number;
       diff: SchemaDiff;
+      committedRow: SchemaVersionRow;
     }
   | { status: "pending"; version: number; diff: SchemaDiff }
   | { status: "breaking"; diff: SchemaDiff; actions: readonly string[] };
@@ -260,28 +309,32 @@ export async function ensureSchema<G extends GraphDef>(
       await loadActiveSchemaWithBootstrap(backend, graph.id)
     : preloaded.activeRow;
 
-  if (!activeSchema) {
+  if (activeSchema === undefined) {
     // No schema exists - initialize with version 1
     const result = await initializeSchema(backend, graph);
-    return { status: "initialized", version: result.version };
+    return {
+      status: "initialized",
+      version: result.version,
+      committedRow: result,
+    };
   }
 
-  // Reuse the loader's parsed schema when supplied; otherwise parse now.
-  const storedSchema =
-    preloaded?.storedSchema ?? parseSerializedSchema(activeSchema.schema_doc);
-
-  // Serialize the current graph for comparison
-  const currentSchema = serializeSchema(graph, activeSchema.version + 1);
-
-  // Quick hash check - if hashes match, schemas are identical
+  // Quick hash check first — uses the per-graph hash cache so repeated
+  // boots against the same graph reference skip the full serialize +
+  // SHA-256 walk. When the hash matches, we never need the
+  // `currentSchema` or the `storedSchema` (no diff is computed), so
+  // defer those allocations until they're actually needed.
   const storedHash = activeSchema.schema_hash;
-  const currentHash = await computeSchemaHash(currentSchema);
+  const currentHash = await getSchemaHash(graph, activeSchema.version + 1);
 
   if (storedHash === currentHash) {
     return { status: "unchanged", version: activeSchema.version };
   }
 
-  // Hashes differ - compute the diff
+  // Hashes differ - serialize both sides to compute the diff.
+  const storedSchema =
+    preloaded?.storedSchema ?? parseSerializedSchema(activeSchema.schema_doc);
+  const currentSchema = serializeSchema(graph, activeSchema.version + 1);
   const diff = computeSchemaDiff(storedSchema, currentSchema);
 
   if (!diff.hasChanges) {
@@ -300,7 +353,7 @@ export async function ensureSchema<G extends GraphDef>(
         diff,
       };
       await options?.onBeforeMigrate?.(hookContext);
-      const newVersion = await migrateSchema(
+      const committedRow = await commitNewSchemaVersion(
         backend,
         graph,
         activeSchema.version,
@@ -309,8 +362,9 @@ export async function ensureSchema<G extends GraphDef>(
       return {
         status: "migrated",
         fromVersion: activeSchema.version,
-        toVersion: newVersion,
+        toVersion: committedRow.version,
         diff,
+        committedRow,
       };
     }
     // Auto-migrate disabled but changes are safe
@@ -389,19 +443,37 @@ export async function migrateSchema<G extends GraphDef>(
   graph: G,
   currentVersion: number,
 ): Promise<number> {
+  const committed = await commitNewSchemaVersion(
+    backend,
+    graph,
+    currentVersion,
+  );
+  return committed.version;
+}
+
+/**
+ * Internal sibling of `migrateSchema` that surfaces the committed
+ * `SchemaVersionRow` directly. The public `migrateSchema` keeps its
+ * `number`-returning signature for API stability; callers that already
+ * own the row (`Store.evolve`, `Store.removeKinds`) use this to skip a
+ * post-commit `getActiveSchema` round-trip.
+ */
+export async function commitNewSchemaVersion<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+): Promise<SchemaVersionRow> {
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
 
-  await backend.commitSchemaVersion({
+  return backend.commitSchemaVersion({
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
     version: newVersion,
     schemaHash: hash,
     schemaDoc: schema,
   });
-
-  return newVersion;
 }
 
 /**
@@ -427,7 +499,7 @@ export async function rollbackSchema(
   targetVersion: number,
 ): Promise<void> {
   const activeRow = await backend.getActiveSchema(graphId);
-  if (!activeRow) {
+  if (activeRow === undefined) {
     throw new MigrationError(
       `Cannot rollback graph "${graphId}": no active schema version exists.`,
       { graphId, fromVersion: 0, toVersion: targetVersion },
@@ -452,7 +524,7 @@ export async function getActiveSchema(
   graphId: string,
 ): Promise<SerializedSchema | undefined> {
   const row = await backend.getActiveSchema(graphId);
-  if (!row) return undefined;
+  if (row === undefined) return undefined;
   return parseSerializedSchema(row.schema_doc);
 }
 
@@ -483,7 +555,7 @@ export async function getSchemaChanges<G extends GraphDef>(
   graph: G,
 ): Promise<SchemaDiff | undefined> {
   const activeSchema = await backend.getActiveSchema(graph.id);
-  if (!activeSchema) return undefined;
+  if (activeSchema === undefined) return undefined;
 
   const storedSchema = parseSerializedSchema(activeSchema.schema_doc);
   const currentSchema = serializeSchema(graph, activeSchema.version + 1);

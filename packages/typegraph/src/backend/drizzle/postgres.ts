@@ -24,7 +24,15 @@
  * const backend = createPostgresBackend(db, { tables });
  * ```
  */
-import { and, eq, getTableName, isNull, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  getTableName,
+  inArray,
+  isNull,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 
 import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -300,6 +308,7 @@ export function createPostgresBackend(
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
     fulltext: tables.fulltextTableName,
+    uniques: getTableName(tables.uniques),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statement on every call.
@@ -410,6 +419,20 @@ export function createPostgresBackend(
       return mapMaterializationRow(row, POSTGRES_INDEX_MAT_TIMESTAMPS.decode);
     },
 
+    async getIndexMaterializations(
+      statusKeys: readonly string[],
+    ): Promise<readonly IndexMaterializationRow[]> {
+      if (statusKeys.length === 0) return [];
+      const t = tables.indexMaterializations;
+      const rows = await db
+        .select()
+        .from(t)
+        .where(inArray(t.indexName, [...statusKeys]));
+      return rows.map((row) =>
+        mapMaterializationRow(row, POSTGRES_INDEX_MAT_TIMESTAMPS.decode),
+      );
+    },
+
     async recordIndexMaterialization(
       params: RecordIndexMaterializationParams,
     ): Promise<void> {
@@ -473,6 +496,34 @@ export function createPostgresBackend(
         .onConflictDoUpdate({
           target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
           set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+        });
+    },
+
+    async ensureReconciliationMarkersTable(): Promise<void> {
+      await db.execute(
+        sql.raw(generatePgCreateTableSQL(tables.reconciliationMarkers)),
+      );
+    },
+
+    async getReconciliationMarker(
+      graphId: string,
+    ): Promise<number | undefined> {
+      const t = tables.reconciliationMarkers;
+      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
+      return rows[0]?.reconciledToVersion;
+    },
+
+    async setReconciliationMarker(
+      graphId: string,
+      version: number,
+    ): Promise<void> {
+      const t = tables.reconciliationMarkers;
+      await db
+        .insert(t)
+        .values({ graphId, reconciledToVersion: version })
+        .onConflictDoUpdate({
+          target: t.graphId,
+          set: { reconciledToVersion: version },
         });
     },
 
@@ -762,20 +813,23 @@ function createPostgresOperationBackend(
     async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
       const metrics = capabilities.vector?.metrics ?? (["cosine"] as const);
 
-      for (const metric of metrics) {
-        const indexName = generateVectorIndexName(
-          params.graphId,
-          params.nodeKind,
-          params.fieldPath,
-          metric,
-        );
-        const result = await dropPostgresVectorIndex(db, indexName);
-        if (!result.success) {
-          throw new Error(
-            result.message ?? "Failed to drop PostgreSQL vector index",
+      // Per-metric DROP statements are independent; run them concurrently.
+      await Promise.all(
+        metrics.map(async (metric) => {
+          const indexName = generateVectorIndexName(
+            params.graphId,
+            params.nodeKind,
+            params.fieldPath,
+            metric,
           );
-        }
-      }
+          const result = await dropPostgresVectorIndex(db, indexName);
+          if (!result.success) {
+            throw new Error(
+              result.message ?? "Failed to drop PostgreSQL vector index",
+            );
+          }
+        }),
+      );
     },
 
     // === Query Execution ===

@@ -5,7 +5,11 @@ import {
   MAX_PG_IDENTIFIER_LENGTH,
   TRUNCATED_IDENTIFIER_MAX_LENGTH,
 } from "../constants";
-import { type AnyEdgeType, type NodeType } from "../core/types";
+import {
+  type AnyEdgeType,
+  type KindEntity,
+  type NodeType,
+} from "../core/types";
 import { type ValueType } from "../query/ast";
 import { resolveFieldTypeInfoAtJsonPointer } from "../query/field-type-info";
 import {
@@ -680,7 +684,7 @@ function resolveEdgeFieldTypeInfoOrThrow(
 // ============================================================
 
 type DefaultNameParts = Readonly<{
-  kind: "node" | "edge";
+  kind: KindEntity;
   kindName: string;
   unique: boolean;
   scope: IndexScope;

@@ -14,6 +14,7 @@
  *   stable string `code` for logging / serialization PLUS a typed
  *   shape so consumers can `instanceof` for control flow.
  */
+import type { KindEntity } from "../core/types";
 import { type ErrorCategory, TypeGraphError } from "../errors";
 
 // ============================================================
@@ -50,42 +51,51 @@ export type GraphExtensionIssue = Readonly<{
  * compile-time-kind removal, etc.) surface as typed Error subclasses
  * exported below — not as issue codes.
  */
+/**
+ * Every issue code emitted by `validateGraphExtension`. Const-array form
+ * so tests, codegen, and runtime introspection can iterate the full set
+ * without restating it.
+ */
+export const GRAPH_EXTENSION_ISSUE_CODES = [
+  "UNSUPPORTED_PROPERTY_TYPE",
+  "INVALID_PROPERTY_REFINEMENT",
+  "NESTED_ARRAY",
+  "NESTED_OBJECT_TOO_DEEP",
+  "INVALID_MODIFIER_TARGET",
+  "INVALID_ENUM_VALUES",
+  "INVALID_NUMBER_BOUNDS",
+  "INVALID_LENGTH_BOUNDS",
+  "INVALID_PATTERN",
+  "INVALID_EMBEDDING_DIMENSIONS",
+  "INVALID_SEARCHABLE_LANGUAGE",
+  "RESERVED_PROPERTY_NAME",
+  "INVALID_KIND_NAME",
+  "DUPLICATE_KIND_NAME",
+  "EMPTY_PROPERTIES",
+  "EMPTY_FROM_OR_TO",
+  "DUPLICATE_UNIQUE_CONSTRAINT",
+  "EMPTY_UNIQUE_FIELDS",
+  "DUPLICATE_UNIQUE_FIELD",
+  "UNKNOWN_UNIQUE_FIELD",
+  "INVALID_UNIQUE_WHERE_OP",
+  "UNKNOWN_UNIQUE_WHERE_FIELD",
+  "INVALID_ANNOTATION",
+  "UNKNOWN_META_EDGE",
+  "ONTOLOGY_CYCLE",
+  "ONTOLOGY_SELF_LOOP",
+  "ONTOLOGY_DISJOINT_CONFLICT",
+  "DUPLICATE_ONTOLOGY_RELATION",
+  "INVALID_DOCUMENT_SHAPE",
+  "UNKNOWN_DOCUMENT_KEY",
+  "UNSUPPORTED_STRING_FORMAT",
+  "INVALID_INDEX_DECLARATION",
+  "DUPLICATE_INDEX_NAME",
+  "EMPTY_INDEX_FIELDS",
+  "UNKNOWN_PROPERTY_KEY",
+] as const;
+
 export type GraphExtensionIssueCode =
-  | "UNSUPPORTED_PROPERTY_TYPE"
-  | "INVALID_PROPERTY_REFINEMENT"
-  | "NESTED_ARRAY"
-  | "NESTED_OBJECT_TOO_DEEP"
-  | "INVALID_MODIFIER_TARGET"
-  | "INVALID_ENUM_VALUES"
-  | "INVALID_NUMBER_BOUNDS"
-  | "INVALID_LENGTH_BOUNDS"
-  | "INVALID_PATTERN"
-  | "INVALID_EMBEDDING_DIMENSIONS"
-  | "INVALID_SEARCHABLE_LANGUAGE"
-  | "RESERVED_PROPERTY_NAME"
-  | "INVALID_KIND_NAME"
-  | "DUPLICATE_KIND_NAME"
-  | "EMPTY_PROPERTIES"
-  | "EMPTY_FROM_OR_TO"
-  | "DUPLICATE_UNIQUE_CONSTRAINT"
-  | "EMPTY_UNIQUE_FIELDS"
-  | "DUPLICATE_UNIQUE_FIELD"
-  | "UNKNOWN_UNIQUE_FIELD"
-  | "INVALID_UNIQUE_WHERE_OP"
-  | "UNKNOWN_UNIQUE_WHERE_FIELD"
-  | "INVALID_ANNOTATION"
-  | "UNKNOWN_META_EDGE"
-  | "ONTOLOGY_CYCLE"
-  | "ONTOLOGY_SELF_LOOP"
-  | "ONTOLOGY_DISJOINT_CONFLICT"
-  | "DUPLICATE_ONTOLOGY_RELATION"
-  | "INVALID_DOCUMENT_SHAPE"
-  | "UNKNOWN_DOCUMENT_KEY"
-  | "UNSUPPORTED_STRING_FORMAT"
-  | "INVALID_INDEX_DECLARATION"
-  | "DUPLICATE_INDEX_NAME"
-  | "EMPTY_INDEX_FIELDS"
-  | "UNKNOWN_PROPERTY_KEY";
+  (typeof GRAPH_EXTENSION_ISSUE_CODES)[number];
 
 // ============================================================
 // Operation errors (typed, single-error throws)
@@ -154,16 +164,31 @@ export class GraphExtensionValidationError extends GraphExtensionError {
 }
 
 /**
- * Builds the one-line summary the base `Error.message` shows.
+ * Generic "first N items + overflow tail" summary for inclusion in an
+ * Error message. Shared by `summarizeIssues` and `summarizeChanges`
+ * because the overflow shape is identical; only the per-item
+ * formatting differs.
  */
-function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
-  if (issues.length === 0) return "no specific issues recorded";
-  const head = issues
+function summarizeWithOverflow<T>(
+  items: readonly T[],
+  formatItem: (item: T) => string,
+  emptyMessage: string,
+): string {
+  if (items.length === 0) return emptyMessage;
+  const head = items
     .slice(0, 3)
-    .map((issue) => `${issue.path || "(root)"} — ${issue.message}`)
+    .map((item) => formatItem(item))
     .join("; ");
-  const overflow = issues.length > 3 ? ` (+${issues.length - 3} more)` : "";
+  const overflow = items.length > 3 ? ` (+${items.length - 3} more)` : "";
   return `${head}${overflow}`;
+}
+
+function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
+  return summarizeWithOverflow(
+    issues,
+    (issue) => `${issue.path || "(root)"} — ${issue.message}`,
+    "no specific issues recorded",
+  );
 }
 
 /**
@@ -174,9 +199,9 @@ function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
 export class KindCollisionError extends GraphExtensionError {
   readonly code = "KIND_COLLISION" as const;
   readonly kindName: string;
-  readonly entity: "node" | "edge";
+  readonly entity: KindEntity;
 
-  constructor(kindName: string, entity: "node" | "edge", graphId: string) {
+  constructor(kindName: string, entity: KindEntity, graphId: string) {
     super({
       message: `Graph extension declares ${entity} kind "${kindName}" which already exists as a compile-time kind on graph "${graphId}". Graph-extension-declared kinds cannot collide with compile-time kinds.`,
       code: "KIND_COLLISION",
@@ -197,23 +222,33 @@ export class KindCollisionError extends GraphExtensionError {
  * is human-readable and intended for surfaces showing the change to a
  * reviewer (e.g. `"minLength: 5 → 10"`).
  */
+/**
+ * Every incompatible-change classification produced by `evolve`'s
+ * delta classifier. Const-array form so tests and reviewer UIs can
+ * enumerate the set without restating it.
+ */
+export const INCOMPATIBLE_CHANGE_TYPES = [
+  "REMOVE_PROPERTY",
+  "ADD_REQUIRED_PROPERTY",
+  "TIGHTEN_OPTIONALITY",
+  "TIGHTEN_CONSTRAINT",
+  "ADD_PATTERN",
+  "CHANGE_PATTERN",
+  "ADD_FORMAT",
+  "CHANGE_FORMAT",
+  "TIGHTEN_INT",
+  "TIGHTEN_ENUM",
+  "TYPE_CHANGE",
+  "ADD_UNIQUE_ON_POPULATED",
+  "TIGHTEN_EDGE_ENDPOINTS",
+] as const;
+
+export type IncompatibleChangeType = (typeof INCOMPATIBLE_CHANGE_TYPES)[number];
+
 export type IncompatibleChange = Readonly<{
   kind: string;
   field?: string;
-  type:
-    | "REMOVE_PROPERTY"
-    | "ADD_REQUIRED_PROPERTY"
-    | "TIGHTEN_OPTIONALITY"
-    | "TIGHTEN_CONSTRAINT"
-    | "ADD_PATTERN"
-    | "CHANGE_PATTERN"
-    | "ADD_FORMAT"
-    | "CHANGE_FORMAT"
-    | "TIGHTEN_INT"
-    | "TIGHTEN_ENUM"
-    | "TYPE_CHANGE"
-    | "ADD_UNIQUE_ON_POPULATED"
-    | "TIGHTEN_EDGE_ENDPOINTS";
+  type: IncompatibleChangeType;
   detail?: string;
 }>;
 
@@ -243,17 +278,15 @@ export class IncompatibleChangeError extends GraphExtensionError {
 }
 
 function summarizeChanges(changes: readonly IncompatibleChange[]): string {
-  if (changes.length === 0) return "(no specific changes recorded)";
-  const head = changes
-    .slice(0, 3)
-    .map((change) => {
+  return summarizeWithOverflow(
+    changes,
+    (change) => {
       const field = change.field === undefined ? "" : `.${change.field}`;
       const detail = change.detail === undefined ? "" : ` (${change.detail})`;
       return `${change.kind}${field}: ${change.type}${detail}`;
-    })
-    .join("; ");
-  const overflow = changes.length > 3 ? ` (+${changes.length - 3} more)` : "";
-  return `${head}${overflow}`;
+    },
+    "(no specific changes recorded)",
+  );
 }
 
 /**
@@ -299,9 +332,9 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
 export class RemoveCompileTimeKindError extends GraphExtensionError {
   readonly code = "REMOVE_COMPILE_TIME_KIND" as const;
   readonly kindName: string;
-  readonly entity: "node" | "edge";
+  readonly entity: KindEntity;
 
-  constructor(kindName: string, entity: "node" | "edge", graphId: string) {
+  constructor(kindName: string, entity: KindEntity, graphId: string) {
     super({
       message: `Cannot remove compile-time ${entity} kind "${kindName}" via store.removeKinds. Compile-time kinds are removed by recompiling and redeploying without them on graph "${graphId}".`,
       code: "REMOVE_COMPILE_TIME_KIND",

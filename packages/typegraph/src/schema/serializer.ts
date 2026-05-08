@@ -15,6 +15,7 @@ import {
   type EdgeRegistration,
   type KindAnnotations,
   type NodeRegistration,
+  type NullCheckOp,
   type UniqueConstraint,
 } from "../core/types";
 import {
@@ -34,6 +35,7 @@ import {
 } from "../ontology/types";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
+import { sha256Hex } from "../utils/hash";
 import { sortedReplacer } from "./canonical";
 import {
   type JsonSchema,
@@ -308,7 +310,7 @@ function serializeUniqueConstraints(
 type SerializedPredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 /**
@@ -376,7 +378,7 @@ function serializeWherePredicate(
 type UniquePredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 export function deserializeWherePredicate(
@@ -384,7 +386,7 @@ export function deserializeWherePredicate(
 ): (builder: PredicateBuilder) => UniquePredicate {
   const parsed = JSON.parse(serialized) as {
     field: string;
-    op: "isNull" | "isNotNull";
+    op: NullCheckOp;
   };
 
   return (builder: PredicateBuilder): UniquePredicate => {
@@ -628,6 +630,44 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
 // ============================================================
 
 /**
+ * Per-graph schema-hash cache. Keyed on the frozen `GraphDef` reference
+ * (identity-stable across calls because `defineGraph` freezes its
+ * output). Inner Map carries one entry per `version` ever computed for
+ * that graph — typically 1-2 entries per graph (current + next-pending).
+ *
+ * Cache hit skips both `serializeSchema` (the per-kind walk is cached
+ * separately by `SCHEMA_PROPERTIES_CACHE`, but the top-level assembly +
+ * `JSON.stringify(sortedReplacer)` walk is not) and the SHA-256 hash —
+ * the dominant cost on `ensureSchema` boots that observe an unchanged
+ * schema. The cache lives on a `WeakMap` so retired graphs (after
+ * `evolve`/`removeKinds` produce a new one) become eligible for GC
+ * alongside their entries.
+ */
+const SCHEMA_HASH_CACHE = new WeakMap<GraphDef, Map<number, SchemaHash>>();
+
+/**
+ * Cached `(graph, version) → SchemaHash` lookup. Use this when the hash
+ * is the only thing the caller needs (the most common case in
+ * `ensureSchema`'s "are we up to date?" path). On cache miss, this
+ * serializes and hashes once, populates the cache, and returns.
+ */
+export async function getSchemaHash(
+  graph: GraphDef,
+  version: number,
+): Promise<SchemaHash> {
+  const perGraph = SCHEMA_HASH_CACHE.get(graph);
+  const cached = perGraph?.get(version);
+  if (cached !== undefined) return cached;
+  const hash = await computeSchemaHash(serializeSchema(graph, version));
+  if (perGraph === undefined) {
+    SCHEMA_HASH_CACHE.set(graph, new Map([[version, hash]]));
+  } else {
+    perGraph.set(version, hash);
+  }
+  return hash;
+}
+
+/**
  * Computes a hash of the schema content for change detection.
  *
  * Excludes version and generatedAt since those change on every save.
@@ -655,25 +695,5 @@ export async function computeSchemaHash(
 
   // Serialize with sorted keys for deterministic output
   const json = JSON.stringify(hashable, sortedReplacer);
-  return sha256Hash(json);
-}
-
-/**
- * Computes SHA-256 hash of a string using the Web Crypto API.
- *
- * Works in Node.js 16+, Cloudflare Workers, Deno, and browsers.
- * Returns first 16 hex characters (64 bits) for a compact but collision-resistant hash.
- */
-async function sha256Hash(input: string): Promise<string> {
-  const encoded = new TextEncoder().encode(input);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
-  const bytes = new Uint8Array(digest);
-  // Only need 8 bytes (16 hex chars) — avoid converting the full 32-byte digest
-  let hex = "";
-  for (let index = 0; index < 8; index++) {
-    const byte = bytes[index];
-    if (byte === undefined) break;
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
+  return sha256Hex(json);
 }

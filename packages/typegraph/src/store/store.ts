@@ -23,7 +23,7 @@ import {
   isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
-import type { NodeId } from "../core/types";
+import type { KindEntity, NodeId } from "../core/types";
 import {
   ConfigurationError,
   EagerMaterializationError,
@@ -50,8 +50,13 @@ import { getDialect } from "../query/dialect";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
+  commitNewSchemaVersion,
+  ensureSchema as ensureSchemaImpl,
   loadActiveSchemaWithBootstrap,
+  loadAndMergeGraphExtensionDocument,
   parseSerializedSchema,
+  type SchemaManagerOptions,
+  type SchemaValidationResult,
 } from "../schema/manager";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
@@ -70,6 +75,7 @@ import {
   type MaterializeIndexesResult,
 } from "./materialize-indexes";
 import {
+  buildPendingKindRemoval,
   materializeRemovals as materializeRemovalsImpl,
   type MaterializeRemovalsOptions,
   type MaterializeRemovalsResult,
@@ -1013,8 +1019,8 @@ export class Store<G extends GraphDef> {
     // than overwriting.
     const { activeRow, baseline } = await this.#loadCaughtUp("evolve");
 
-    // Merge first so the agent-loop "I evolved with the same extension
-    // again" hot path short-circuits before we walk every property in
+    // Merge first so the "I evolved with the same extension again"
+    // hot path short-circuits before we walk every property in
     // `classifyModifications`. The merge itself canonicalEqual-checks
     // and returns the input graph unchanged for no-op re-evolves.
     const merged = mergeGraphExtension(baseline, extension);
@@ -1026,8 +1032,8 @@ export class Store<G extends GraphDef> {
     // store is stale — `baseline !== this.#graph` — but the merge is
     // still a structural no-op, so re-committing would only churn the
     // schema version. When the local store is also fresh
-    // (`baseline === this.#graph`) we return `this` so the agent
-    // loop's repeated `evolve(sameExt)` keeps warm registry,
+    // (`baseline === this.#graph`) we return `this` so repeated
+    // `evolve(sameExt)` calls keep warm registry,
     // collection, and query caches; otherwise we return a clone
     // wrapping the caught-up baseline so `introspect()` reflects the
     // persisted version. Eager still runs in either case because the
@@ -1069,28 +1075,31 @@ export class Store<G extends GraphDef> {
         this.graphId,
       );
     }
-    if (classification.requireEmpty.size > 0) {
-      const nonEmptyKeys = await this.#probeEmptyKinds(
-        classification.requireEmpty,
-      );
+    if (classification.requireEmpty.length > 0) {
+      const nonEmpty = await this.#probeEmptyKinds(classification.requireEmpty);
       const error = buildIncompatibleChangeError(
         classification,
-        nonEmptyKeys,
+        nonEmpty,
         this.graphId,
       );
       if (error !== undefined) throw error;
     }
 
-    // Commit via `migrateSchema` directly. The classification step
-    // above is the authoritative compatibility gate — `ensureSchema`'s
+    // Commit via `commitNewSchemaVersion` directly (the row-returning
+    // sibling of `migrateSchema`). The classification step above is the
+    // authoritative compatibility gate — `ensureSchema`'s
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
-    await migrateSchemaImpl(this.#backend, merged, activeRow.version);
+    const committed = await commitNewSchemaVersion(
+      this.#backend,
+      merged,
+      activeRow.version,
+    );
     const evolved = this.#cloneWithGraph(
       merged,
       options?.ref,
-      await this.#loadSchemaMetadata(),
+      schemaMetadataFromRow(committed),
     );
     if (options?.eager !== undefined) {
       await this.#runEagerOrThrow(evolved, options.eager);
@@ -1272,9 +1281,7 @@ export class Store<G extends GraphDef> {
       plan.document === undefined ?
         compileTimeGraph
       : mergeGraphExtension(compileTimeGraph, plan.document);
-    const finalGraph = applyDeprecatedKinds(merged, [
-      ...baseline.deprecatedKinds,
-    ]);
+    const finalGraph = applyDeprecatedKinds(merged, baseline.deprecatedKinds);
 
     // Atomic schema commit via the lower-level `migrateSchema`
     // primitive — `ensureSchema`'s breaking-change check would
@@ -1282,7 +1289,11 @@ export class Store<G extends GraphDef> {
     // destructive by design; that's why removeKinds is a separate
     // verb. Concurrent commits surface as `StaleVersionError` from
     // `commitSchemaVersion` (CAS check).
-    await migrateSchemaImpl(this.#backend, finalGraph, activeRow.version);
+    const committedRow = await commitNewSchemaVersion(
+      this.#backend,
+      finalGraph,
+      activeRow.version,
+    );
 
     // Queue per-deployment data-cleanup status — one row per removed
     // kind. The status table is best-effort: if recordKindRemoval
@@ -1295,20 +1306,17 @@ export class Store<G extends GraphDef> {
         await this.#backend.ensureKindRemovalsTable();
       }
       const attemptedAt = nowIso();
-      const newSchemaVersion = activeRow.version + 1;
-      const queue = (
-        kindName: string,
-        entity: "node" | "edge",
-      ): Promise<void> =>
-        recordKindRemoval({
-          graphId: this.graphId,
-          kindName,
-          entity,
-          schemaVersion: newSchemaVersion,
-          attemptedAt,
-          removedAt: undefined,
-          error: undefined,
-        });
+      const newSchemaVersion = committedRow.version;
+      const queue = (kindName: string, entity: KindEntity): Promise<void> =>
+        recordKindRemoval(
+          buildPendingKindRemoval({
+            graphId: this.graphId,
+            kindName,
+            entity,
+            schemaVersion: newSchemaVersion,
+            attemptedAt,
+          }),
+        );
       // Independent rows on independent primary keys — issue in parallel.
       // For typical cascades (one kind + a few edges) this drops the
       // schema-commit budget by 30-100ms on Postgres.
@@ -1321,7 +1329,7 @@ export class Store<G extends GraphDef> {
     const evolved = this.#cloneWithGraph(
       finalGraph,
       options?.ref,
-      await this.#loadSchemaMetadata(),
+      schemaMetadataFromRow(committedRow),
     );
     if (options?.eager !== undefined) {
       // Scope to just the kinds removed by THIS call (other pending
@@ -1399,16 +1407,20 @@ export class Store<G extends GraphDef> {
       );
     }
 
-    const merged = applyDeprecatedKinds(baseline, [...nextSet]);
-    await ensureSchemaImpl(this.#backend, merged, {
+    const merged = applyDeprecatedKinds(baseline, nextSet);
+    const result = await ensureSchemaImpl(this.#backend, merged, {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
     });
-    return this.#cloneWithGraph(
-      merged,
-      options?.ref,
-      await this.#loadSchemaMetadata(),
-    );
+    // Use the committed row from the migration result when available,
+    // skipping the post-commit `getActiveSchema` round-trip. The
+    // `unchanged` / `pending` / `breaking` branches don't write a new
+    // version, so the existing `activeRow` metadata is still authoritative.
+    const metadata =
+      result.status === "migrated" || result.status === "initialized" ?
+        schemaMetadataFromRow(result.committedRow)
+      : schemaMetadataFromRow(activeRow);
+    return this.#cloneWithGraph(merged, options?.ref, metadata);
   }
 
   #catchUpToStored(storedSchema: SerializedSchema): G {
@@ -1482,10 +1494,10 @@ export class Store<G extends GraphDef> {
    * heavyweight for a millisecond-budget operation.
    */
   async #probeEmptyKinds(
-    requireEmpty: ReadonlyMap<string, RequireEmptyEntry>,
-  ): Promise<Set<string>> {
-    const probes = [...requireEmpty.entries()].map(
-      async ([key, entry]): Promise<readonly [string, number]> => {
+    requireEmpty: readonly RequireEmptyEntry[],
+  ): Promise<Set<RequireEmptyEntry>> {
+    const probes = requireEmpty.map(
+      async (entry): Promise<readonly [RequireEmptyEntry, number]> => {
         const count =
           entry.entity === "node" ?
             await this.#backend.countNodesByKind({
@@ -1496,20 +1508,15 @@ export class Store<G extends GraphDef> {
               graphId: this.graphId,
               kind: entry.kindName,
             });
-        return [key, count];
+        return [entry, count];
       },
     );
     const results = await Promise.all(probes);
-    const nonEmpty = new Set<string>();
-    for (const [key, count] of results) {
-      if (count > 0) nonEmpty.add(key);
+    const nonEmpty = new Set<RequireEmptyEntry>();
+    for (const [entry, count] of results) {
+      if (count > 0) nonEmpty.add(entry);
     }
     return nonEmpty;
-  }
-
-  async #loadSchemaMetadata(): Promise<StoreSchemaMetadata> {
-    const row = await this.#backend.getActiveSchema(this.graphId);
-    return schemaMetadataFromRow(row);
   }
 
   #cloneWithGraph(
@@ -1576,7 +1583,7 @@ export class Store<G extends GraphDef> {
 
   #createOperationContext(
     operation: "create" | "update" | "delete",
-    entity: "node" | "edge",
+    entity: KindEntity,
     kind: string,
     id: string,
   ): OperationHookContext {
@@ -1715,14 +1722,12 @@ function schemaMetadataFromRow(
   });
 }
 
-async function schemaMetadataForResult(
-  backend: GraphBackend,
-  graphId: string,
+function schemaMetadataForResult(
   activeRow: SchemaVersionRow | undefined,
   result: SchemaValidationResult,
-): Promise<StoreSchemaMetadata> {
+): StoreSchemaMetadata {
   if (result.status === "initialized" || result.status === "migrated") {
-    return schemaMetadataFromRow(await backend.getActiveSchema(graphId));
+    return schemaMetadataFromRow(result.committedRow);
   }
   return schemaMetadataFromRow(activeRow);
 }
@@ -1735,14 +1740,6 @@ async function schemaMetadataForResult(
 export type {
   SchemaManagerOptions,
   SchemaValidationResult,
-} from "../schema/manager";
-
-import {
-  ensureSchema as ensureSchemaImpl,
-  loadAndMergeGraphExtensionDocument,
-  migrateSchema as migrateSchemaImpl,
-  type SchemaManagerOptions,
-  type SchemaValidationResult,
 } from "../schema/manager";
 
 /**
@@ -1798,7 +1795,7 @@ export async function createStoreWithSchema<G extends GraphDef>(
     merged,
     backend,
     options,
-    await schemaMetadataForResult(backend, graph.id, activeRow, result),
+    schemaMetadataForResult(activeRow, result),
   );
   return [store, result];
 }

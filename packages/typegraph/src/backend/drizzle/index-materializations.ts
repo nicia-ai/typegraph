@@ -15,6 +15,7 @@
 
 import { sql } from "drizzle-orm";
 
+import type { IndexEntity } from "../../core/types";
 import type {
   IndexMaterializationRow,
   RecordIndexMaterializationParams,
@@ -78,7 +79,7 @@ export function mapMaterializationRow(
   return {
     indexName: row.indexName,
     graphId: row.graphId,
-    entity: row.entity as "node" | "edge" | "vector",
+    entity: row.entity as IndexEntity,
     kind: row.kind,
     signature: row.signature,
     schemaVersion: row.schemaVersion,
@@ -99,7 +100,7 @@ export function buildMaterializationInsertValues<TEncoded>(
 ): Readonly<{
   indexName: string;
   graphId: string;
-  entity: "node" | "edge" | "vector";
+  entity: IndexEntity;
   kind: string;
   signature: string;
   schemaVersion: number;

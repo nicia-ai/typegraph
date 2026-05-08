@@ -172,7 +172,7 @@ export async function executeFulltextSearch<N = Node>(
   const rows = await backend.fulltextSearch(params);
   if (rows.length === 0) return [];
 
-  const ids = rows.map((r) => r.nodeId);
+  const ids = rows.map((row) => row.nodeId);
   const nodeMap = await fetchNodesByIds(backend, graphId, nodeKind, ids);
 
   const hits: FulltextSearchHit<N>[] = [];

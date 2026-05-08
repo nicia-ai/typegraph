@@ -12,6 +12,14 @@ import { ConfigurationError } from "../../errors";
 
 /**
  * Table names for TypeGraph SQL schema.
+ *
+ * Carries every customizable physical-table name the backend exposes,
+ * including the secondary tables (`uniques`) that the query compiler
+ * itself doesn't reference but `materializeRemovals` and other
+ * cleanup paths need to address by name. Backends without a
+ * `uniques` table (custom embeddings-only stores) leave it as the
+ * default — the cleanup path is a no-op for kinds with no unique
+ * rows.
  */
 export type SqlTableNames = Readonly<{
   /** Nodes table name (default: "typegraph_nodes") */
@@ -22,6 +30,8 @@ export type SqlTableNames = Readonly<{
   embeddings: string;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
+  /** Node uniques table name (default: "typegraph_node_uniques") */
+  uniques: string;
 }>;
 
 /**
@@ -49,6 +59,7 @@ const DEFAULT_TABLE_NAMES: SqlTableNames = {
   edges: "typegraph_edges",
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
+  uniques: "typegraph_node_uniques",
 };
 
 /**
@@ -122,6 +133,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.edges, "edges");
   validateTableName(tables.embeddings, "embeddings");
   validateTableName(tables.fulltext, "fulltext");
+  validateTableName(tables.uniques, "uniques");
 
   return {
     tables,

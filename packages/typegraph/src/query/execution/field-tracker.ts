@@ -6,6 +6,7 @@
  * only those fields instead of fetching the full props blob.
  */
 
+import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
@@ -282,7 +283,7 @@ export function buildSelectiveFields(
     });
 }
 
-type AliasKind = "node" | "edge";
+type AliasKind = KindEntity;
 
 type AliasKindInfo = Readonly<{
   kind: AliasKind;

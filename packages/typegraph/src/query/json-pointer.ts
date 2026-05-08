@@ -234,7 +234,11 @@ function assertJsonPointer(pointer: string): JsonPointer {
   return pointer as JsonPointer;
 }
 
-function encodeJsonPointerSegment(segment: string): string {
+/**
+ * Escape a single JSON Pointer reference segment per RFC 6901: `~`
+ * becomes `~0`, `/` becomes `~1`. Callers join the result with `/`.
+ */
+export function encodeJsonPointerSegment(segment: string): string {
   return segment.replaceAll("~", "~0").replaceAll("/", "~1");
 }
 

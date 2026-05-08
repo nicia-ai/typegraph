@@ -1,6 +1,33 @@
 import { type z } from "zod";
 
 // ============================================================
+// Cross-cutting Discriminators
+// ============================================================
+
+/**
+ * Which side of the bipartite graph a kind lives on. Used everywhere a
+ * function takes "the entity that owns a kind" — error metadata,
+ * extension classifiers, removal queues, schema diffs.
+ */
+export type KindEntity = "node" | "edge";
+
+/**
+ * Which physical surface an index targets. Vector indexes don't own a
+ * kind directly (they're partial indexes on `typegraph_node_embeddings`
+ * scoped by node-kind), but they participate in the same materialization
+ * and diff pipelines, so they share this discriminator.
+ */
+export type IndexEntity = "node" | "edge" | "vector";
+
+/**
+ * Field-level null-check operations that round-trip through persisted
+ * documents (unique-constraint where clauses, index where clauses,
+ * graph-extension where clauses, IsNullPredicate). Consolidated so a
+ * single rename or extension touches one site.
+ */
+export type NullCheckOp = "isNull" | "isNotNull";
+
+// ============================================================
 // Brand Keys for Nominal Typing
 // ============================================================
 
@@ -243,7 +270,7 @@ type UniqueConstraintField = Readonly<{
 type UniqueConstraintPredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 // ============================================================

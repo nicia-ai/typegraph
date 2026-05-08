@@ -8,10 +8,41 @@
  * commits are atomic and fast, data work is bounded by row count and
  * deferrable / parallelizable.
  */
-import { type GraphBackend, type KindRemovalRow } from "../backend/types";
+import {
+  type GraphBackend,
+  type KindRemovalRow,
+  type RecordKindRemovalParams,
+} from "../backend/types";
+import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
 import { parseSerializedSchema } from "../schema/manager";
 import { nowIso } from "../utils/date";
+import {
+  ensureFocusedStatusTable,
+  runMaterialization,
+} from "./materialize-shared";
+
+const ENTITY_KINDS: readonly KindEntity[] = ["node", "edge"];
+
+/**
+ * Build the "pending" `recordKindRemoval` payload shared by
+ * `Store.removeKinds` (the original commit-time write) and
+ * `materializeRemovals` reconciliation (the catch-up write for kinds
+ * that crashed before their queue row landed). Centralizes the
+ * `removedAt: undefined, error: undefined` constants so a future
+ * status-table column expansion has one site to update.
+ */
+export function buildPendingKindRemoval(
+  args: Readonly<{
+    graphId: string;
+    kindName: string;
+    entity: KindEntity;
+    schemaVersion: number;
+    attemptedAt: string;
+  }>,
+): RecordKindRemovalParams {
+  return { ...args, removedAt: undefined, error: undefined };
+}
 
 export type MaterializeRemovalsOptions = Readonly<{
   /** Restrict to specific kind names. */
@@ -22,7 +53,7 @@ export type MaterializeRemovalsOptions = Readonly<{
 
 export type MaterializeRemovalsEntry = Readonly<{
   kind: string;
-  entity: "node" | "edge";
+  entity: KindEntity;
   status: "removed" | "failed";
   error?: Error;
 }>;
@@ -55,13 +86,7 @@ export async function materializeRemovals(
     );
   }
 
-  // Ensure the status table exists for legacy DBs whose base tables
-  // predate this slot. Same focused-bootstrap rationale as the
-  // materializations table — full bootstrapTables can deadlock on
-  // Postgres SHARE locks under concurrent replica startup.
-  await (backend.ensureKindRemovalsTable === undefined ?
-    backend.bootstrapTables?.()
-  : backend.ensureKindRemovalsTable());
+  await ensureFocusedStatusTable(backend, backend.ensureKindRemovalsTable);
 
   // Recovery path: `removeKinds()` commits the schema-version diff
   // (kind dropped from `nodes`/`edges`) BEFORE recording the cleanup
@@ -87,28 +112,28 @@ export async function materializeRemovals(
   const tableNames = backend.tableNames;
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
+  const embeddingsTable = tableNames?.embeddings ?? "typegraph_node_embeddings";
+  const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
+  const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
 
-  const ctx = { backend, graphId, nodesTable, edgesTable } as const;
+  const ctx = {
+    backend,
+    graphId,
+    nodesTable,
+    edgesTable,
+    embeddingsTable,
+    fulltextTable,
+    uniquesTable,
+  } as const;
 
-  // When `stopOnError` is set we honor strict sequential semantics; one
-  // failure short-circuits the rest. Otherwise each kind targets a
-  // disjoint row set (DELETEs filtered by kindName) so we can issue all
-  // cleanups concurrently — Postgres parallelizes the DELETE round-trips
-  // across pool connections; SQLite serializes writes at the engine
-  // level either way.
-  if (options.stopOnError === true) {
-    const results: MaterializeRemovalsEntry[] = [];
-    for (const removal of candidates) {
-      const entry = await materializeOne(removal, ctx);
-      results.push(entry);
-      if (entry.status === "failed") break;
-    }
-    return { results };
-  }
-
+  // Each kind targets a disjoint row set (DELETEs filtered by kindName),
+  // so the default best-effort path runs them concurrently — Postgres
+  // parallelizes round-trips across pool connections, SQLite serializes
+  // writes at the engine level either way. `stopOnError` honors strict
+  // sequential semantics; the first failure short-circuits the rest.
   return {
-    results: await Promise.all(
-      candidates.map((removal) => materializeOne(removal, ctx)),
+    results: await runMaterialization(candidates, options, (removal) =>
+      materializeOne(removal, ctx),
     ),
   };
 }
@@ -144,6 +169,27 @@ async function reconcilePendingRemovals(
   const activeRow = await backend.getActiveSchema(graphId);
   if (activeRow === undefined || activeRow.version <= 1) return;
 
+  // Watermark short-circuit: when a previous reconciliation pass
+  // verified history through some version M, only walk transitions
+  // newer than M. Without the watermark this loop walked from active
+  // down to version 1 on every call — N round-trips + N Zod parses
+  // per call — and re-verified already-good history every time.
+  // Backends without the marker primitives fall back to walking from
+  // version 1 (the legacy behavior) so existing custom backends
+  // keep working.
+  //
+  // Bootstrap the marker table BEFORE the read — DBs that pre-date
+  // this slice would otherwise SELECT from a missing table and throw
+  // before they got the chance to create it.
+  if (backend.ensureReconciliationMarkersTable !== undefined) {
+    await backend.ensureReconciliationMarkersTable();
+  }
+  const marker =
+    backend.getReconciliationMarker === undefined ?
+      undefined
+    : await backend.getReconciliationMarker(graphId);
+  if (marker !== undefined && marker >= activeRow.version) return;
+
   // Existence map: a (entity, kindName, schemaVersion) is recorded if
   // a row exists in any state (pending or completed). The rows we want
   // to reconcile are the ones missing from this set entirely.
@@ -158,22 +204,20 @@ async function reconcilePendingRemovals(
 
   const reconciliations: {
     kindName: string;
-    entity: "node" | "edge";
+    entity: KindEntity;
     schemaVersion: number;
   }[] = [];
 
-  // Walk backward through transitions. At each pair (priorRow, currentRow)
-  // we compute "kinds removed at currentRow.version" and check the
-  // existence map — any missing entry needs an idempotent upsert.
-  // Walking all the way back is necessary: a crash window at version V
-  // may have been followed by additional schema commits, so the active
-  // version's predecessor is no longer V. The cost is bounded by the
-  // total number of schema versions, which is small for typical
-  // schemas; the existence check keeps us from churning successfully-
-  // completed historical removals.
+  // Walk backward through transitions, stopping at the watermark.
+  // At each pair (priorRow, currentRow) we compute "kinds removed at
+  // currentRow.version" and check the existence map — any missing
+  // entry needs an idempotent upsert. The marker bounds the walk so
+  // long-running deployments with hundreds of schema versions skip
+  // the bulk of the round-trips after their first reconciliation.
+  const stopAtVersion = marker ?? 1;
   let currentRow = activeRow;
   let currentSchema = parseSerializedSchema(activeRow.schema_doc);
-  while (currentRow.version > 1) {
+  while (currentRow.version > stopAtVersion) {
     const priorRow = await backend.getSchemaVersion(
       graphId,
       currentRow.version - 1,
@@ -181,53 +225,58 @@ async function reconcilePendingRemovals(
     if (priorRow === undefined) break;
     const priorSchema = parseSerializedSchema(priorRow.schema_doc);
 
-    for (const kindName of Object.keys(priorSchema.nodes)) {
-      if (kindName in currentSchema.nodes) continue;
-      if (recorded.has(kindRemovalKey("node", kindName, currentRow.version))) {
-        continue;
+    for (const entity of ENTITY_KINDS) {
+      const priorEntries = priorSchema[entity === "node" ? "nodes" : "edges"];
+      const currentEntries =
+        currentSchema[entity === "node" ? "nodes" : "edges"];
+      for (const kindName of Object.keys(priorEntries)) {
+        if (kindName in currentEntries) continue;
+        if (
+          recorded.has(kindRemovalKey(entity, kindName, currentRow.version))
+        ) {
+          continue;
+        }
+        reconciliations.push({
+          kindName,
+          entity,
+          schemaVersion: currentRow.version,
+        });
       }
-      reconciliations.push({
-        kindName,
-        entity: "node",
-        schemaVersion: currentRow.version,
-      });
-    }
-    for (const kindName of Object.keys(priorSchema.edges)) {
-      if (kindName in currentSchema.edges) continue;
-      if (recorded.has(kindRemovalKey("edge", kindName, currentRow.version))) {
-        continue;
-      }
-      reconciliations.push({
-        kindName,
-        entity: "edge",
-        schemaVersion: currentRow.version,
-      });
     }
 
     currentRow = priorRow;
     currentSchema = priorSchema;
   }
 
-  if (reconciliations.length === 0) return;
+  if (reconciliations.length > 0) {
+    const attemptedAt = nowIso();
+    await Promise.all(
+      reconciliations.map((entry) =>
+        recordKindRemoval(
+          buildPendingKindRemoval({
+            graphId,
+            kindName: entry.kindName,
+            entity: entry.entity,
+            schemaVersion: entry.schemaVersion,
+            attemptedAt,
+          }),
+        ),
+      ),
+    );
+  }
 
-  const attemptedAt = nowIso();
-  await Promise.all(
-    reconciliations.map((r) =>
-      recordKindRemoval({
-        graphId,
-        kindName: r.kindName,
-        entity: r.entity,
-        schemaVersion: r.schemaVersion,
-        attemptedAt,
-        removedAt: undefined,
-        error: undefined,
-      }),
-    ),
-  );
+  // Persist the new high-water mark so the next call walks only
+  // versions newer than this one. Done after the reconciliation
+  // upserts succeed — a crash before this point leaves the marker
+  // unchanged, so the next call re-walks (idempotent — recorded
+  // rows skip via the existence-map check above).
+  if (backend.setReconciliationMarker !== undefined) {
+    await backend.setReconciliationMarker(graphId, activeRow.version);
+  }
 }
 
 function kindRemovalKey(
-  entity: "node" | "edge",
+  entity: KindEntity,
   kindName: string,
   version: number,
 ): string {
@@ -241,30 +290,47 @@ async function materializeOne(
     graphId: string;
     nodesTable: string;
     edgesTable: string;
+    embeddingsTable: string;
+    fulltextTable: string;
+    uniquesTable: string;
   }>,
 ): Promise<MaterializeRemovalsEntry> {
   const executeDdl = ctx.backend.executeDdl!;
   const recordKindRemoval = ctx.backend.recordKindRemoval!;
   try {
-    // Build the per-row DELETEs. Nodes-of-this-kind plus the edges
-    // table cleanup (edges referencing the kind via from_kind /
-    // to_kind become orphans once the node is gone). Edge-kind
-    // removal is the simpler single-table case. Independent
-    // statements — issued in parallel.
+    // Build the per-row DELETEs. For a removed node kind: drop the
+    // primary rows, every edge referencing it (via from_kind / to_kind
+    // — those would otherwise dangle), plus the secondary tables that
+    // partition by node_kind (embeddings, fulltext, uniques). Without
+    // the secondary cleanup, repeated remove/re-add cycles accumulate
+    // dead rows that vector / fulltext / unique lookups still scan.
+    // For a removed edge kind: only the edges table needs cleanup.
+    // All statements target disjoint row sets — issued in parallel.
     const deletes: Promise<void>[] = [];
+    const graphLit = literal(ctx.graphId);
+    const kindLit = literal(row.kindName);
     if (row.entity === "node") {
       deletes.push(
         executeDdl(
-          `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${literal(ctx.graphId)} AND kind = ${literal(row.kindName)}`,
+          `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
         ),
         executeDdl(
-          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${literal(ctx.graphId)} AND (from_kind = ${literal(row.kindName)} OR to_kind = ${literal(row.kindName)})`,
+          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
+        ),
+        executeDdl(
+          `DELETE FROM ${quote(ctx.embeddingsTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+        ),
+        executeDdl(
+          `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+        ),
+        executeDdl(
+          `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
         ),
       );
     } else {
       deletes.push(
         executeDdl(
-          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${literal(ctx.graphId)} AND kind = ${literal(row.kindName)}`,
+          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
         ),
       );
     }
