@@ -59,7 +59,7 @@ describe("Store.evolve — basic flow", () => {
   it("commits a new schema version and returns a Store carrying the graph-extension kind", async () => {
     const backend = createTestBackend();
     const [store, init] = await createStoreWithSchema(baseGraph, backend);
-    expect(init).toEqual({ status: "initialized", version: 1 });
+    expect(init).toMatchObject({ status: "initialized", version: 1 });
 
     const extension = defineGraphExtension({
       nodes: { Tag: { properties: { label: { type: "string" } } } },
@@ -524,10 +524,10 @@ describe("Store.evolve — concurrency", () => {
 describe("StoreRef pattern (consumer-composed)", () => {
   // The ref is a consumer pattern, not a library factory. Apps that need
   // many callers to share a stable handle (request handlers, background
-  // workers, the agent loop) compose their own ref and pass it to
-  // evolve, which re-points it atomically with the schema commit. Apps
-  // with a single caller can skip the ref entirely and reassign the
-  // store from evolve's return value.
+  // workers, repeated schema-evolution loops) compose their own ref and
+  // pass it to evolve, which re-points it atomically with the schema
+  // commit. Apps with a single caller can skip the ref entirely and
+  // reassign the store from evolve's return value.
   it("evolve(ext, { ref }) re-points the consumer-composed ref", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);

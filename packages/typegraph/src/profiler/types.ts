@@ -5,13 +5,14 @@
  * property access patterns and generates index recommendations.
  */
 
+import type { KindEntity } from "../core/types";
 import { type JsonPointer } from "../query/json-pointer";
 
 // ============================================================
 // Property Access Types
 // ============================================================
 
-export type ProfileEntityType = "node" | "edge";
+export type ProfileEntityType = KindEntity;
 
 export type PropertyTarget =
   | Readonly<{

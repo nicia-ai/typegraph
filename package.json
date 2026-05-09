@@ -14,6 +14,8 @@
     "test:property": "turbo run test:property",
     "test:postgres": "pnpm --filter @nicia-ai/typegraph test:postgres",
     "bench": "turbo run bench",
+    "bench:maintenance": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:maintenance",
+    "bench:maintenance:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:maintenance:postgres",
     "fix": "run-s fix:*",
     "fix:prettier": "prettier --write .",
     "fix:lint": "turbo run lint -- --fix",

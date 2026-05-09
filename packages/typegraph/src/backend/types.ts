@@ -6,7 +6,11 @@
  */
 import { type SQL } from "drizzle-orm";
 
-import { type TemporalMode } from "../core/types";
+import {
+  type IndexEntity,
+  type KindEntity,
+  type TemporalMode,
+} from "../core/types";
 import { type SqlTableNames } from "../query/compiler/schema";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { type SerializedSchema } from "../schema/types";
@@ -500,7 +504,7 @@ export type FulltextSearchResult = Readonly<{
 export type IndexMaterializationRow = Readonly<{
   indexName: string;
   graphId: string;
-  entity: "node" | "edge" | "vector";
+  entity: IndexEntity;
   kind: string;
   signature: string;
   schemaVersion: number;
@@ -519,7 +523,7 @@ export type IndexMaterializationRow = Readonly<{
 export type RecordIndexMaterializationParams = Readonly<{
   indexName: string;
   graphId: string;
-  entity: "node" | "edge" | "vector";
+  entity: IndexEntity;
   kind: string;
   signature: string;
   schemaVersion: number;
@@ -542,7 +546,7 @@ export type RecordIndexMaterializationParams = Readonly<{
 export type KindRemovalRow = Readonly<{
   graphId: string;
   kindName: string;
-  entity: "node" | "edge";
+  entity: KindEntity;
   schemaVersion: number;
   /** ISO timestamp when the data-cleanup pass succeeded; undefined while pending. */
   removedAt: string | undefined;
@@ -561,7 +565,7 @@ export type KindRemovalRow = Readonly<{
 export type RecordKindRemovalParams = Readonly<{
   graphId: string;
   kindName: string;
-  entity: "node" | "edge";
+  entity: KindEntity;
   schemaVersion: number;
   attemptedAt: string;
   /** ISO timestamp on success; undefined while pending or on failure. */
@@ -797,6 +801,16 @@ export type GraphBackend = Readonly<{
     indexName: string,
   ) => Promise<IndexMaterializationRow | undefined>;
   /**
+   * Bulk variant of `getIndexMaterialization`: load every recorded
+   * materialization whose `indexName` (status key) is in `statusKeys`,
+   * in a single round-trip. Returned rows are unordered — callers index
+   * by `indexName`. Optional; consumers fall back to per-key
+   * `getIndexMaterialization` when unset.
+   */
+  getIndexMaterializations?: (
+    statusKeys: readonly string[],
+  ) => Promise<readonly IndexMaterializationRow[]>;
+  /**
    * Upsert a materialization attempt — success or failure. Failure rows
    * preserve any prior `materializedAt` so the historical successful
    * timestamp survives across error windows.
@@ -846,6 +860,34 @@ export type GraphBackend = Readonly<{
    * clobber the historical successful timestamp from another replica.
    */
   recordKindRemoval?: (params: RecordKindRemovalParams) => Promise<void>;
+
+  // === Reconciliation Watermark ===
+
+  /**
+   * Bootstraps the per-deployment `typegraph_reconciliation_markers`
+   * table so `materializeRemovals()` can persist reconciliation
+   * progress. Same focused-bootstrap rationale as the other status
+   * tables — full `bootstrapTables` risks Postgres SHARE-lock
+   * deadlock under concurrent replica startup.
+   */
+  ensureReconciliationMarkersTable?: () => Promise<void>;
+
+  /**
+   * Read the high-water mark schema version for which
+   * `materializeRemovals` reconciliation has already verified history
+   * for `graphId`. Returns `undefined` when no marker has been
+   * recorded yet. Used to skip already-checked transitions in the
+   * recovery walk.
+   */
+  getReconciliationMarker?: (graphId: string) => Promise<number | undefined>;
+
+  /**
+   * Persist the reconciliation high-water mark for `graphId`. Called
+   * after `materializeRemovals` completes a clean walk; subsequent
+   * calls walk only versions newer than this marker. Idempotent
+   * upsert by `graphId`.
+   */
+  setReconciliationMarker?: (graphId: string, version: number) => Promise<void>;
 
   // === Graph Lifecycle ===
   /**

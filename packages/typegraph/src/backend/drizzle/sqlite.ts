@@ -19,7 +19,15 @@
  * const backend = createSqliteBackend(db, { tables });
  * ```
  */
-import { and, eq, getTableName, isNull, type SQL, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  getTableName,
+  inArray,
+  isNull,
+  type SQL,
+  sql,
+} from "drizzle-orm";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -573,6 +581,7 @@ export function createSqliteBackend(
     edges: getTableName(tables.edges),
     embeddings: getTableName(tables.embeddings),
     fulltext: tables.fulltextTableName,
+    uniques: getTableName(tables.uniques),
   };
   const operationStrategy = createSqliteOperationStrategy(
     tables,
@@ -697,6 +706,20 @@ export function createSqliteBackend(
       return mapMaterializationRow(row, SQLITE_INDEX_MAT_TIMESTAMPS.decode);
     },
 
+    async getIndexMaterializations(
+      statusKeys: readonly string[],
+    ): Promise<readonly IndexMaterializationRow[]> {
+      if (statusKeys.length === 0) return [];
+      const t = tables.indexMaterializations;
+      const rows = await db
+        .select()
+        .from(t)
+        .where(inArray(t.indexName, [...statusKeys]));
+      return rows.map((row) =>
+        mapMaterializationRow(row, SQLITE_INDEX_MAT_TIMESTAMPS.decode),
+      );
+    },
+
     async recordIndexMaterialization(
       params: RecordIndexMaterializationParams,
     ): Promise<void> {
@@ -758,6 +781,34 @@ export function createSqliteBackend(
         .onConflictDoUpdate({
           target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
           set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+        });
+    },
+
+    async ensureReconciliationMarkersTable(): Promise<void> {
+      await db.run(
+        sql.raw(generateSqliteCreateTableSQL(tables.reconciliationMarkers)),
+      );
+    },
+
+    async getReconciliationMarker(
+      graphId: string,
+    ): Promise<number | undefined> {
+      const t = tables.reconciliationMarkers;
+      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
+      return rows[0]?.reconciledToVersion;
+    },
+
+    async setReconciliationMarker(
+      graphId: string,
+      version: number,
+    ): Promise<void> {
+      const t = tables.reconciliationMarkers;
+      await db
+        .insert(t)
+        .values({ graphId, reconciledToVersion: version })
+        .onConflictDoUpdate({
+          target: t.graphId,
+          set: { reconciledToVersion: version },
         });
     },
 

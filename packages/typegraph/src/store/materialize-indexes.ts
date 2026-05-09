@@ -29,9 +29,11 @@
 import {
   type CreateVectorIndexParams,
   type GraphBackend,
+  type IndexMaterializationRow,
   type RecordIndexMaterializationParams,
 } from "../backend/types";
 import { type GraphDef, isKnownKind } from "../core/define-graph";
+import type { IndexEntity } from "../core/types";
 import { ConfigurationError, KindNotFoundError } from "../errors";
 import {
   generateIndexDDL,
@@ -39,8 +41,11 @@ import {
   type RelationalIndexDeclaration,
   type VectorIndexDeclaration,
 } from "../indexes";
+import { type SqlDialect } from "../query/dialect";
 import { sortedReplacer } from "../schema/canonical";
 import { nowIso } from "../utils/date";
+import { sha256Hex } from "../utils/hash";
+import { ensureFocusedStatusTable } from "./materialize-shared";
 
 export type MaterializeIndexesOptions = Readonly<{
   /** Restrict to indexes whose `kind` is in this set. */
@@ -67,7 +72,7 @@ export type MaterializeIndexesOptions = Readonly<{
  */
 export type MaterializeIndexesEntry = Readonly<{
   indexName: string;
-  entity: "node" | "edge" | "vector";
+  entity: IndexEntity;
   kind: string;
   status: "created" | "alreadyMaterialized" | "failed" | "skipped";
   error?: Error;
@@ -142,25 +147,15 @@ export async function materializeIndexes(
   // Short-circuit before any I/O when there's nothing to do. The
   // ensure-step below issues a CREATE TABLE statement — paying that
   // cost only to return an empty result is wasteful, especially on
-  // the agent-loop pattern where `evolve(sameExt, { eager: {} })`
-  // is repeated.
+  // repeated `evolve(sameExt, { eager: {} })` calls.
   if (candidates.length === 0) {
     return { results: [] };
   }
 
-  // Ensure ONLY the materializations status table exists for legacy
-  // DBs whose base tables predate this slot. Deliberately scoped to
-  // one table — `bootstrapTables` issues 20+ CREATE TABLE / CREATE
-  // INDEX statements covering every base table, and two concurrent
-  // calls (e.g. two replicas starting up and calling
-  // `materializeIndexes`) deadlock on Postgres SHARE locks.
-  // `ensureIndexMaterializationsTable` is the focused alternative
-  // that the bundled backends provide; legacy custom backends without
-  // it fall back to `bootstrapTables` (retains the deadlock risk under
-  // concurrent callers but preserves backward compatibility).
-  await (backend.ensureIndexMaterializationsTable === undefined ?
-    backend.bootstrapTables?.()
-  : backend.ensureIndexMaterializationsTable());
+  await ensureFocusedStatusTable(
+    backend,
+    backend.ensureIndexMaterializationsTable,
+  );
 
   const dialect = backend.dialect;
   const tableNames = backend.tableNames;
@@ -175,11 +170,29 @@ export async function materializeIndexes(
     : { edgesTableName: tableNames.edges }),
   } as const;
 
+  // Bulk-preload existing materialization rows for every candidate's
+  // status key in one round-trip. With 30 declared indexes this drops 30
+  // sequential SELECTs to one. Backends without the bulk primitive fall
+  // back to per-key lookups inside `materializeOne`.
+  const statusKeys = candidates.map((declaration) =>
+    statusKeyFor(declaration, graphId),
+  );
+  const existingByStatusKey = await preloadMaterializations(
+    backend,
+    statusKeys,
+  );
+
   const materializeEntry = (
     declaration: IndexDeclaration,
   ): Promise<MaterializeIndexesEntry> =>
     declaration.entity === "vector" ?
-      materializeVectorIndex(declaration, backend, graphId, schemaVersion)
+      materializeVectorIndex(
+        declaration,
+        backend,
+        graphId,
+        schemaVersion,
+        existingByStatusKey,
+      )
     : materializeRelationalIndex(
         declaration,
         backend,
@@ -187,6 +200,7 @@ export async function materializeIndexes(
         ddlOptions,
         graphId,
         schemaVersion,
+        existingByStatusKey,
       );
 
   if (options.stopOnError === true) {
@@ -207,7 +221,7 @@ export async function materializeIndexes(
   // without ever issuing two CONCURRENTLY builds against the same
   // relation. SQLite ignores the grouping (writes serialize at the
   // engine level either way).
-  const buckets = new Map<string, IndexDeclaration[]>();
+  const buckets = new Map<IndexEntity, IndexDeclaration[]>();
   for (const declaration of candidates) {
     const key = parallelBucketKey(declaration);
     const list = buckets.get(key);
@@ -241,19 +255,20 @@ export async function materializeIndexes(
   };
 }
 
-function parallelBucketKey(declaration: IndexDeclaration): string {
+function parallelBucketKey(declaration: IndexDeclaration): IndexEntity {
   // Vector indexes all target the same physical embeddings table, so
   // they share one bucket. Relational node and edge indexes split into
   // two buckets keyed by entity (graphs override their physical table
   // names but every declaration with the same entity still lands on
-  // the same physical table within a given graph).
-  return declaration.entity === "vector" ? "vector" : declaration.entity;
+  // the same physical table within a given graph). Postgres CIC's
+  // "one in-flight build per relation" rule maps to this bucketing.
+  return declaration.entity;
 }
 
 async function materializeRelationalIndex(
   declaration: RelationalIndexDeclaration,
   backend: GraphBackend,
-  dialect: "sqlite" | "postgres",
+  dialect: SqlDialect,
   ddlOptions: Readonly<{
     ifNotExists: boolean;
     concurrent: boolean;
@@ -262,6 +277,7 @@ async function materializeRelationalIndex(
   }>,
   graphId: string,
   schemaVersion: number,
+  existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
 ): Promise<MaterializeIndexesEntry> {
   const ddl = generateIndexDDL(declaration, dialect, ddlOptions);
   const targetTable =
@@ -278,6 +294,7 @@ async function materializeRelationalIndex(
     signature,
     driftLabel: "Index",
     run: () => backend.executeDdl!(ddl),
+    existingByStatusKey,
   });
 }
 
@@ -286,6 +303,7 @@ async function materializeVectorIndex(
   backend: GraphBackend,
   graphId: string,
   schemaVersion: number,
+  existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
 ): Promise<MaterializeIndexesEntry> {
   // `indexType: "none"` is a declarative opt-out — the declaration
   // carries shape metadata (dimensions, metric) for tooling but the
@@ -325,9 +343,15 @@ async function materializeVectorIndex(
     );
   }
 
+  // Hash against the actual physical embeddings table the backend
+  // targets — custom `tableNames.embeddings` would otherwise produce
+  // false drift detection (the recorded signature would mismatch the
+  // signature computed against the renamed table on every call).
+  const embeddingsTable =
+    backend.tableNames?.embeddings ?? "typegraph_node_embeddings";
   const signature = await computeIndexSignature(
     backend.dialect,
-    "typegraph_node_embeddings",
+    embeddingsTable,
     declaration,
   );
   const params: CreateVectorIndexParams = {
@@ -356,6 +380,7 @@ async function materializeVectorIndex(
     signature,
     driftLabel: "Vector index",
     run: () => backend.createVectorIndex!(params),
+    existingByStatusKey,
   });
 }
 
@@ -377,18 +402,18 @@ async function materializeOne(
     signature: string;
     driftLabel: string;
     run: () => Promise<void>;
+    existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>;
   }>,
 ): Promise<MaterializeIndexesEntry> {
-  // Narrowed by callsite — these are guaranteed defined when this is
-  // reached (validated in `materializeIndexes`).
+  // Narrowed by callsite — guaranteed defined when this is reached
+  // (validated in `materializeIndexes`).
   const recordIndexMaterialization = backend.recordIndexMaterialization!;
-  const getIndexMaterialization = backend.getIndexMaterialization!;
 
-  const { statusKey, signature, driftLabel, run } = action;
+  const { statusKey, signature, driftLabel, run, existingByStatusKey } = action;
   const statusOverride =
     statusKey === declaration.name ? undefined : { statusName: statusKey };
 
-  const existing = await getIndexMaterialization(statusKey);
+  const existing = existingByStatusKey.get(statusKey);
   if (existing?.materializedAt !== undefined) {
     if (existing.signature === signature) {
       return entry(declaration, "alreadyMaterialized");
@@ -481,6 +506,38 @@ function vectorStatusKey(graphId: string, declarationName: string): string {
   return `${graphId}::${declarationName}`;
 }
 
+function statusKeyFor(declaration: IndexDeclaration, graphId: string): string {
+  return declaration.entity === "vector" ?
+      vectorStatusKey(graphId, declaration.name)
+    : declaration.name;
+}
+
+/**
+ * Bulk-load the recorded materialization rows for `statusKeys` into a
+ * Map keyed by status key. Backends that implement
+ * `getIndexMaterializations` return everything in one round-trip;
+ * legacy backends fall back to per-key parallel `getIndexMaterialization`
+ * calls. Missing rows are simply absent from the map.
+ */
+async function preloadMaterializations(
+  backend: GraphBackend,
+  statusKeys: readonly string[],
+): Promise<ReadonlyMap<string, IndexMaterializationRow>> {
+  const map = new Map<string, IndexMaterializationRow>();
+  if (statusKeys.length === 0) return map;
+  if (backend.getIndexMaterializations !== undefined) {
+    const rows = await backend.getIndexMaterializations(statusKeys);
+    for (const row of rows) map.set(row.indexName, row);
+    return map;
+  }
+  const getOne = backend.getIndexMaterialization!;
+  const rows = await Promise.all(statusKeys.map((key) => getOne(key)));
+  for (const [index, row] of rows.entries()) {
+    if (row !== undefined) map.set(statusKeys[index]!, row);
+  }
+  return map;
+}
+
 function buildAttempt(
   args: Readonly<{
     declaration: IndexDeclaration;
@@ -522,20 +579,11 @@ function buildAttempt(
  * because those are runtime modifiers, not shape.
  */
 async function computeIndexSignature(
-  dialect: string,
+  dialect: SqlDialect,
   targetTableName: string,
   declaration: IndexDeclaration,
 ): Promise<string> {
   const hashable = { dialect, targetTableName, declaration };
   const json = JSON.stringify(hashable, sortedReplacer);
-  const encoded = new TextEncoder().encode(json);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
-  const bytes = new Uint8Array(digest);
-  let hex = "";
-  for (let index = 0; index < 16; index++) {
-    const byte = bytes[index];
-    if (byte === undefined) break;
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
+  return sha256Hex(json, 16);
 }

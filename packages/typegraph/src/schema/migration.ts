@@ -4,6 +4,7 @@
  * Provides diff detection between schema versions to identify
  * what has changed and what migrations might be needed.
  */
+import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
 import { canonicalEqual } from "./canonical";
 import {
@@ -95,12 +96,11 @@ export type IndexChange = Readonly<{
   /** Index name (the diffing identity key). */
   name: string;
   /**
-   * Whether this index is on a node, edge, or vector field. Mirrors
-   * `IndexDeclaration.entity` — `"vector"` was added with vector index
-   * unification so vector changes flow through the same diff
-   * classification as relational ones.
+   * Whether this index is on a node, edge, or vector field. Vector
+   * index changes flow through the same diff classification as
+   * relational ones.
    */
-  entity: "node" | "edge" | "vector";
+  entity: IndexEntity;
   severity: ChangeSeverity;
   details: string;
   before?: IndexDeclaration | undefined;
@@ -322,9 +322,7 @@ function diffNodeDef(
   const changes: NodeChange[] = [];
 
   // Check property schema changes
-  const propsBefore = JSON.stringify(before.properties);
-  const propsAfter = JSON.stringify(after.properties);
-  if (propsBefore !== propsAfter) {
+  if (!canonicalEqual(before.properties, after.properties)) {
     // Determine if properties were added or removed
     const beforeProps = before.properties.properties ?? {};
     const afterProps = after.properties.properties ?? {};
@@ -371,9 +369,7 @@ function diffNodeDef(
   }
 
   // Check unique constraints
-  const constraintsBefore = JSON.stringify(before.uniqueConstraints);
-  const constraintsAfter = JSON.stringify(after.uniqueConstraints);
-  if (constraintsBefore !== constraintsAfter) {
+  if (!canonicalEqual(before.uniqueConstraints, after.uniqueConstraints)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -496,9 +492,7 @@ function diffEdgeDef(
   const changes: EdgeChange[] = [];
 
   // Check endpoint kinds
-  const fromBefore = JSON.stringify(before.fromKinds);
-  const fromAfter = JSON.stringify(after.fromKinds);
-  if (fromBefore !== fromAfter) {
+  if (!canonicalEqual(before.fromKinds, after.fromKinds)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -509,9 +503,7 @@ function diffEdgeDef(
     });
   }
 
-  const toBefore = JSON.stringify(before.toKinds);
-  const toAfter = JSON.stringify(after.toKinds);
-  if (toBefore !== toAfter) {
+  if (!canonicalEqual(before.toKinds, after.toKinds)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -535,9 +527,7 @@ function diffEdgeDef(
   }
 
   // Check properties
-  const propsBefore = JSON.stringify(before.properties);
-  const propsAfter = JSON.stringify(after.properties);
-  if (propsBefore !== propsAfter) {
+  if (!canonicalEqual(before.properties, after.properties)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -774,9 +764,9 @@ function diffDeprecatedKinds(
   before: SerializedSchema["deprecatedKinds"],
   after: SerializedSchema["deprecatedKinds"],
 ): DeprecatedKindsChange | undefined {
-  // Both inputs come from independent `parseSerializedSchema` calls,
-  // so reference equality only fires for the `undefined`/`undefined`
-  // case — covered by the empty-set comparison below.
+  // Compare by value. The parse cache may share array identity between
+  // repeated reads of the same row, but schema diffs still need to be
+  // independent of object identity.
   const beforeSet = new Set(before);
   const afterSet = new Set(after);
   const added: string[] = [];

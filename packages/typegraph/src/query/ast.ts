@@ -5,7 +5,11 @@
  * This portable representation can be compiled to SQL (today)
  * or other query languages (Cypher, SPARQL) in the future.
  */
-import { type TemporalMode } from "../core/types";
+import {
+  type KindEntity,
+  type NullCheckOp,
+  type TemporalMode,
+} from "../core/types";
 import { type JsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -106,7 +110,7 @@ export type StringPredicate = Readonly<{
  */
 export type NullPredicate = Readonly<{
   __type: "null_check";
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
   field: FieldRef;
 }>;
 
@@ -564,7 +568,7 @@ export type OrderSpec = Readonly<{
 export type NodePredicate = Readonly<{
   targetAlias: string;
   /** Whether this predicate targets a node or edge. Defaults to "node". */
-  targetType?: "node" | "edge";
+  targetType?: KindEntity;
   expression: PredicateExpression;
 }>;
 

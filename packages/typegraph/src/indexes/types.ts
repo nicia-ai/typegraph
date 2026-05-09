@@ -1,6 +1,10 @@
 import { type z } from "zod";
 
-import { type AnyEdgeType, type NodeType } from "../core/types";
+import {
+  type AnyEdgeType,
+  type NodeType,
+  type NullCheckOp,
+} from "../core/types";
 import { type ValueType } from "../query/ast";
 import {
   type JsonPointer,
@@ -65,7 +69,7 @@ export type IndexWhereExpression =
   | Readonly<{
       __type: "index_where_null_check";
       operand: IndexWhereOperand;
-      op: "isNull" | "isNotNull";
+      op: NullCheckOp;
     }>;
 
 export type IndexWhereOperand =

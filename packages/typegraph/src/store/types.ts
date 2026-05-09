@@ -10,6 +10,7 @@ import {
   type EdgeId,
   type EdgeRegistration,
   type EdgeType,
+  type KindEntity,
   type NodeId,
   type NodeRegistration,
   type NodeType,
@@ -210,7 +211,7 @@ export type OperationHookContext = HookContext &
     /** Operation type */
     operation: "create" | "update" | "delete";
     /** Entity type */
-    entity: "node" | "edge";
+    entity: KindEntity;
     /** Kind of node or edge */
     kind: string;
     /** Entity ID */

@@ -13,7 +13,11 @@
  * `StringFieldAccessor`, etc., while a dynamic alias gets
  * `DynamicNodeAccessor` with a `.field(name)` discriminator.
  */
-import { type AnyEdgeType, type NodeType } from "../../core/types";
+import {
+  type AnyEdgeType,
+  type KindEntity,
+  type NodeType,
+} from "../../core/types";
 import { jsonPointer } from "../json-pointer";
 import {
   buildFieldBuilderForTypeInfo,
@@ -120,7 +124,7 @@ export type DynamicSelectableEdge = Readonly<{
  * or `edge kinds "knows" | "follows"`.
  */
 function describeKindContext(
-  entity: "node" | "edge",
+  entity: KindEntity,
   kindNames: readonly string[] | undefined,
 ): string {
   if (kindNames === undefined || kindNames.length === 0) {
@@ -146,7 +150,7 @@ export function createDynamicFieldBuilder(
   alias: string,
   name: string,
   kindNames: readonly string[] | undefined,
-  entity: "node" | "edge",
+  entity: KindEntity,
 ): BaseFieldAccessor {
   const typeInfo =
     kindNames === undefined ? undefined

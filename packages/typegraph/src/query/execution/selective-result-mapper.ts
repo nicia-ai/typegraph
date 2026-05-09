@@ -6,6 +6,7 @@
  * missing fields and unsupported "return whole node/edge" selections.
  */
 
+import type { KindEntity } from "../../core/types";
 import { normalizePath } from "../../utils";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
@@ -39,7 +40,7 @@ export class MissingSelectiveFieldError extends Error {
 // Internal Types
 // ============================================================
 
-type AliasKind = "node" | "edge";
+type AliasKind = KindEntity;
 
 type SystemFieldPlan = Readonly<{
   field: string;

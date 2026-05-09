@@ -11,18 +11,19 @@
  */
 import { z, type ZodObject, type ZodRawShape, type ZodType } from "zod";
 
-import { defineEdge } from "../core/edge";
 import { embedding } from "../core/embedding";
 import { defineNode } from "../core/node";
 import { searchable } from "../core/searchable";
 import {
-  type EdgeType,
+  type KindAnnotations,
   type NodeType,
+  type NullCheckOp,
   type UniqueConstraint,
 } from "../core/types";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { core as coreOntology } from "../ontology/core-meta-edges";
 import { type MetaEdge, type OntologyRelation } from "../ontology/types";
+import { compactUndefined } from "../utils/object";
 import {
   type ExtensionArrayItemType,
   type ExtensionArrayProperty,
@@ -38,7 +39,6 @@ import {
   type ExtensionUniqueConstraint,
   type GraphExtension,
 } from "./extension-types";
-import { compactUndefined } from "./internal";
 
 // ============================================================
 // Public types
@@ -71,18 +71,24 @@ type CompiledNode = Readonly<{
 }>;
 
 /**
- * `from` / `to` carry one entry per endpoint name from the document — a
+ * Compiled edge — schema and metadata, with raw endpoints. `from` / `to`
+ * each carry one entry per endpoint name from the document: a
  * `NodeType` when the name resolves to a kind declared in this same
  * extension, or the raw string otherwise. Unresolved strings are
  * preserved (not dropped) so the host-graph merge step can resolve them
  * against compile-time kinds or treat them as external IRIs.
  *
- * The `type: EdgeType` is built with only the resolved `NodeType`
- * references; merge-time reconstructs it once the full endpoint set is
- * known.
+ * The compiler does NOT build an `EdgeType` here — that needs the full
+ * cross-graph endpoint resolution and is built once at merge time.
+ * The earlier "build a throwaway EdgeType, then rebuild at merge"
+ * pattern was unnecessary work and required a parallel
+ * `resolvedFrom` / `resolvedTo` filtered copy.
  */
 type CompiledEdge = Readonly<{
-  type: EdgeType;
+  kindName: string;
+  schema: ZodObject<ZodRawShape>;
+  description?: string;
+  annotations?: KindAnnotations;
   from: readonly (NodeType | string)[];
   to: readonly (NodeType | string)[];
 }>;
@@ -90,6 +96,29 @@ type CompiledEdge = Readonly<{
 // ============================================================
 // Compilation entry point
 // ============================================================
+
+/**
+ * Per-kind compile caches. Validated `ExtensionNodeDef` /
+ * `ExtensionEdgeDef` values are frozen by the validator, so identical
+ * unchanged kinds flow through `unionDocuments` with stable references.
+ * The outer `Map<kindName, ...>` exists because the same doc reference
+ * could in principle appear under a different kindName across calls
+ * (rare, but the kindName is bound into `defineNode`'s output, so
+ * cache identity needs both); the inner `WeakMap` lets entries GC when
+ * the doc itself is dropped.
+ *
+ * Hits the "evolve, then evolve again with one kind added" pattern,
+ * where N-1 kinds in the union are reference-identical to the
+ * prior call's compiled output.
+ */
+const COMPILE_NODE_CACHE = new Map<
+  string,
+  WeakMap<ExtensionNodeDef, CompiledNode>
+>();
+const COMPILE_EDGE_SCHEMA_CACHE = new WeakMap<
+  ExtensionEdgeDef,
+  ZodObject<ZodRawShape>
+>();
 
 /**
  * Compiles a validated graph-extension document into Zod-bearing kinds.
@@ -105,7 +134,7 @@ export function compileGraphExtension(
   const nodeTypeByName = new Map<string, NodeType>();
 
   for (const [kindName, nodeDocument] of Object.entries(document.nodes ?? {})) {
-    const compiled = compileNode(kindName, nodeDocument);
+    const compiled = compileNodeCached(kindName, nodeDocument);
     nodes.push(compiled);
     nodeTypeByName.set(kindName, compiled.type);
   }
@@ -136,6 +165,22 @@ export function compileGraphExtension(
 // ============================================================
 // Node compilation
 // ============================================================
+
+function compileNodeCached(
+  kindName: string,
+  document: ExtensionNodeDef,
+): CompiledNode {
+  const perName = COMPILE_NODE_CACHE.get(kindName);
+  const cached = perName?.get(document);
+  if (cached !== undefined) return cached;
+  const computed = compileNode(kindName, document);
+  if (perName === undefined) {
+    COMPILE_NODE_CACHE.set(kindName, new WeakMap([[document, computed]]));
+  } else {
+    perName.set(document, computed);
+  }
+  return computed;
+}
 
 function compileNode(
   kindName: string,
@@ -168,7 +213,16 @@ function compileEdge(
   document: ExtensionEdgeDef,
   nodeTypeByName: ReadonlyMap<string, NodeType>,
 ): CompiledEdge {
-  const schema = buildObjectSchema(document.properties ?? {});
+  // The schema-build step is the expensive part of edge compilation
+  // (the resolved-endpoint arrays are O(N) string lookups); cache it
+  // per-document so unchanged edges across evolves skip the rebuild.
+  // The from/to resolution can't be cached at this level because it
+  // depends on the per-call `nodeTypeByName`.
+  let schema = COMPILE_EDGE_SCHEMA_CACHE.get(document);
+  if (schema === undefined) {
+    schema = buildObjectSchema(document.properties ?? {});
+    COMPILE_EDGE_SCHEMA_CACHE.set(document, schema);
+  }
 
   const from = document.from.map(
     (name): NodeType | string => nodeTypeByName.get(name) ?? name,
@@ -177,32 +231,16 @@ function compileEdge(
     (name): NodeType | string => nodeTypeByName.get(name) ?? name,
   );
 
-  const resolvedFrom = from.filter(
-    (entry): entry is NodeType => typeof entry !== "string",
-  );
-  const resolvedTo = to.filter(
-    (entry): entry is NodeType => typeof entry !== "string",
-  );
-
-  // Cast widens `defineEdge`'s narrowed overload return back to the
-  // generic public `EdgeType`. The constructed EdgeType only sees the
-  // resolved endpoints; merge-time rebuilds it with the full set.
-  const type = defineEdge(
-    kindName,
-    compactUndefined({
+  return Object.freeze(
+    compactUndefined<CompiledEdge>({
+      kindName,
       schema,
       description: document.description,
       annotations: document.annotations,
-      from: resolvedFrom,
-      to: resolvedTo,
+      from: Object.freeze(from),
+      to: Object.freeze(to),
     }),
-  ) as unknown as EdgeType;
-
-  return Object.freeze({
-    type,
-    from: Object.freeze(from),
-    to: Object.freeze(to),
-  });
+  );
 }
 
 function buildObjectSchema(
@@ -370,7 +408,7 @@ type UniqueWhereCallback = (
 ) => Readonly<{
   __type: "unique_predicate";
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 /**
@@ -381,7 +419,7 @@ type UniqueWhereCallback = (
  */
 function makeWherePredicate(
   field: string,
-  op: "isNull" | "isNotNull",
+  op: NullCheckOp,
 ): UniqueWhereCallback {
   return (props) => {
     const builder = props[field];

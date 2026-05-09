@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { parseSerializedSchema } from "../src/schema/manager";
 import { serializedSchemaZod } from "../src/schema/types";
 
 // ============================================================
@@ -560,6 +561,24 @@ describe("serializedSchemaZod", () => {
         };
         expect(serializedSchemaZod.safeParse(document).success).toBe(false);
       }
+    });
+  });
+
+  describe("parseSerializedSchema cache", () => {
+    it("returns frozen schema documents so callers cannot mutate shared cache state", () => {
+      const json = JSON.stringify(createValidSchemaDocument());
+      const first = parseSerializedSchema(json);
+
+      expect(Object.isFrozen(first)).toBe(true);
+      expect(Object.isFrozen(first.defaults)).toBe(true);
+      expect(Object.isFrozen(first.ontology.closures.disjointPairs)).toBe(true);
+
+      const mutableFirst = first as unknown as { graphId: string };
+      expect(() => {
+        mutableFirst.graphId = "mutated";
+      }).toThrow(TypeError);
+
+      expect(parseSerializedSchema(json).graphId).toBe("test");
     });
   });
 });

@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import type { KindEntity } from "../../core/types";
 import { CompilerInvariantError } from "../../errors";
 import {
   type FulltextMatchPredicate,
@@ -18,14 +19,11 @@ export type PredicateIndex = Readonly<{
   byAliasAndType: ReadonlyMap<string, readonly NodePredicate[]>;
 }>;
 
-function buildPredicateIndexKey(
-  alias: string,
-  targetType: "node" | "edge",
-): string {
+function buildPredicateIndexKey(alias: string, targetType: KindEntity): string {
   return `${alias}\u0000${targetType}`;
 }
 
-function resolvePredicateTargetType(predicate: NodePredicate): "node" | "edge" {
+function resolvePredicateTargetType(predicate: NodePredicate): KindEntity {
   return predicate.targetType === "edge" ? "edge" : "node";
 }
 
@@ -49,7 +47,7 @@ export function buildPredicateIndex(ast: QueryAst): PredicateIndex {
 export function getPredicatesForAlias(
   predicateIndex: PredicateIndex,
   alias: string,
-  targetType: "node" | "edge",
+  targetType: KindEntity,
 ): readonly NodePredicate[] {
   return (
     predicateIndex.byAliasAndType.get(

@@ -4,6 +4,7 @@
  * Provides a fluent API for building type-safe predicates.
  */
 import { type FulltextQueryMode } from "../backend/types";
+import { type NullCheckOp } from "../core/types";
 import { UnsupportedPredicateError } from "../errors";
 import {
   type ArrayOp,
@@ -508,7 +509,7 @@ function stringOp(
 /**
  * Creates a null check predicate.
  */
-function nullCheck(op: "isNull" | "isNotNull", field: FieldRef): Predicate {
+function nullCheck(op: NullCheckOp, field: FieldRef): Predicate {
   const expr: NullPredicate = {
     __type: "null_check",
     op,

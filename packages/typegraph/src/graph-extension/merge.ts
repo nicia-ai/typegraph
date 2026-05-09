@@ -1,7 +1,10 @@
 import { type GraphDef } from "../core/define-graph";
+import { defineEdge } from "../core/edge";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
+  type EdgeType,
+  type KindEntity,
   type NodeRegistration,
   type NodeType,
 } from "../core/types";
@@ -19,21 +22,18 @@ import {
 } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
+import { compactUndefined } from "../utils/object";
 import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
 import {
   GraphExtensionUnresolvedEndpointError,
   KindCollisionError,
 } from "./errors";
-import {
-  type ExtensionIndex,
-  type ExtensionOntologyRelation,
-  type GraphExtension,
-} from "./extension-types";
-import { compactUndefined } from "./internal";
+import { type ExtensionIndex, type GraphExtension } from "./extension-types";
 import {
   buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
+  extensionKindNames,
   graphExtensionOntologyKey,
 } from "./ontology-keys";
 import { validateGraphExtension } from "./validation";
@@ -45,7 +45,7 @@ import { validateGraphExtension } from "./validation";
  * - New kinds, new edges referencing existing kinds (compile-time or
  *   extension), and new ontology relations are allowed.
  * - Re-declaring an existing extension kind with the **same shape** is a
- *   no-op (idempotent re-evolve, the agent-loop hot path).
+ *   no-op (the idempotent re-evolve hot path).
  * - Re-declaring an existing extension kind with a **narrowing change**
  *   that existing rows can't satisfy is classified at the call site
  *   (`Store.evolve` / `Store.removeKinds`) and surfaces as
@@ -64,16 +64,19 @@ import { validateGraphExtension } from "./validation";
  * existing document, the host graph is returned unchanged so no-op
  * evolves skip the compile + filter + merge work entirely.
  *
- * Validates the document structurally before compiling — every load
- * path goes through here, so persisted documents that drift from the
- * v1 subset surface as `GraphExtensionValidationError` rather than
- * raw compiler crashes.
+ * Validates the merged union before compiling — every load path goes
+ * through here, so persisted documents that drift from the v1 subset
+ * surface as `GraphExtensionValidationError` rather than raw compiler
+ * crashes. Callers that want input-only error precision (e.g. the
+ * `defineGraphExtension` authoring path) call `validateGraphExtension`
+ * themselves first; the merge runs the validator only against the
+ * union so a single walk covers both cross-document invariants and the
+ * input's own shape.
  */
 export function mergeGraphExtension<G extends GraphDef>(
   graph: G,
   document: GraphExtension,
 ): G {
-  const validated = unwrap(validateGraphExtension(document));
   const existingDocument: GraphExtension = graph.extension ?? Object.freeze({});
 
   // Modification compatibility (REMOVE_PROPERTY, TYPE_CHANGE,
@@ -85,27 +88,37 @@ export function mergeGraphExtension<G extends GraphDef>(
   // canonicalEqual short-circuit below; truly incompatible deltas
   // would never reach the merge in production code paths.
 
-  const unionDocument = unionDocuments(existingDocument, validated);
-  const validatedUnion = unwrap(validateGraphExtension(unionDocument));
+  const unionDocument = unionDocuments(existingDocument, document);
 
-  // Fast path: when the new extension is structurally a subset of the
-  // existing graph-extension document (the agent-loop "I evolved with the same
-  // extension again" case), the union equals existing and there's no
-  // work to do. Skip the compile + filter + merge pipeline entirely.
+  // Fast path: when the union is structurally equal to the existing
+  // graph-extension document (the "I evolved with the same extension
+  // again" case, plus any subset-of-existing case), there's
+  // no work to do. The existing document was already validated by the
+  // upstream merge that installed it, so we skip the validation walk
+  // (which would otherwise repeat the 2200-line validator over a
+  // known-good document) AND the compile + filter pipeline.
   if (
     graph.extension !== undefined &&
-    canonicalEqual(validatedUnion, existingDocument)
+    canonicalEqual(unionDocument, existingDocument)
   ) {
     return graph;
   }
+
+  // Single validate covers both the input's shape and cross-document
+  // invariants (ontology cycles, index-name uniqueness across docs,
+  // etc.). The input doc's invariants are a subset of the union's, so
+  // bad input still surfaces here — error paths just refer to union
+  // pointers rather than input pointers. Callers wanting input-precise
+  // errors call `validateGraphExtension(document)` themselves first.
+  const validatedUnion = unwrap(validateGraphExtension(unionDocument));
 
   const compiled = compileGraphExtension(validatedUnion);
 
   // Existing runtime-origin kind names — these aren't compile-time
   // collisions when re-applied, so we skip the collision check for them
   // and let the union document overwrite the previous compiled form.
-  const runtimeNodeNames = new Set(Object.keys(existingDocument.nodes ?? {}));
-  const runtimeEdgeNames = new Set(Object.keys(existingDocument.edges ?? {}));
+  const { nodes: runtimeNodeNames, edges: runtimeEdgeNames } =
+    extensionKindNames(existingDocument);
 
   const nodeKinds = new Map<string, NodeType>();
   for (const registration of Object.values(graph.nodes)) {
@@ -141,33 +154,36 @@ export function mergeGraphExtension<G extends GraphDef>(
   }
   for (const edge of compiled.edges) {
     assertNoCollision(
-      edge.type.kind,
+      edge.kindName,
       "edge",
-      mergedEdges[edge.type.kind] !== undefined,
+      mergedEdges[edge.kindName] !== undefined,
       graph.id,
     );
     const from = resolveEndpoints(edge.from, nodeKinds, {
       graphId: graph.id,
-      edgeKind: edge.type.kind,
+      edgeKind: edge.kindName,
       side: "from",
     });
     const to = resolveEndpoints(edge.to, nodeKinds, {
       graphId: graph.id,
-      edgeKind: edge.type.kind,
+      edgeKind: edge.kindName,
       side: "to",
     });
-    // Rebuild the EdgeType with the cross-graph-resolved endpoints —
-    // the compiler only saw the graph-extension document, so its
-    // `edge.type.from/to` covers in-document kinds only. Registry
-    // introspection (`registry.getEdgeType(name).to`) reads off the
-    // EdgeType, not the registration's parallel arrays, so the two
-    // must agree.
-    const resolvedType = Object.freeze({
-      ...edge.type,
-      from,
-      to,
-    }) as unknown as typeof edge.type;
-    mergedEdges[edge.type.kind] = { type: resolvedType, from, to };
+    // Build the EdgeType once with the cross-graph-resolved endpoints.
+    // The compiler intentionally doesn't construct an EdgeType — its
+    // view is graph-extension-only, so endpoint resolution against
+    // compile-time host kinds isn't possible there.
+    const type = defineEdge(
+      edge.kindName,
+      compactUndefined({
+        schema: edge.schema,
+        description: edge.description,
+        annotations: edge.annotations,
+        from,
+        to,
+      }),
+    ) as unknown as EdgeType;
+    mergedEdges[edge.kindName] = { type, from, to };
   }
 
   // Drop ontology relations that came from the previous graph-extension
@@ -409,12 +425,7 @@ function unionDocuments(
   // First-evolve fast path: when there's no existing document, the
   // already-frozen `next` IS the union. Skips four object spreads and
   // a freeze on the cold path.
-  if (
-    existing.nodes === undefined &&
-    existing.edges === undefined &&
-    existing.ontology === undefined &&
-    existing.indexes === undefined
-  ) {
+  if (isEmptyExtension(existing)) {
     return next;
   }
 
@@ -429,11 +440,18 @@ function unionDocuments(
   const ontology =
     existing.ontology === undefined && next.ontology === undefined ?
       undefined
-    : dedupRelations([...(existing.ontology ?? []), ...(next.ontology ?? [])]);
+    : dedupBy(
+        [...(existing.ontology ?? []), ...(next.ontology ?? [])],
+        graphExtensionOntologyKey,
+      );
   const indexes =
     existing.indexes === undefined && next.indexes === undefined ?
       undefined
-    : dedupIndexes([...(existing.indexes ?? []), ...(next.indexes ?? [])]);
+    : dedupBy(
+        [...(existing.indexes ?? []), ...(next.indexes ?? [])],
+        indexCompositeKey,
+        "last",
+      );
 
   // Both inputs come through the validator, so `version` is always
   // populated. Forward it on the merged document so the canonical-form
@@ -451,44 +469,58 @@ function unionDocuments(
 }
 
 /**
- * Dedupe `indexes` by composite key (entity, kind, generated/declared
- * name). Re-applying the same extension produces an identical entry
- * via the spread; without dedup, the merged document would carry two
- * copies and the next restart's validator would reject as
- * `DUPLICATE_INDEX_NAME`. Last-write-wins on collision: the agent-loop
- * idempotent re-evolve relies on `canonicalEqual` between merged and
- * existing being true, which is preserved when next mirrors existing.
+ * Dedupe `items` by `keyFn`, preserving first-seen order. `strategy`
+ * controls which entry survives a key collision:
+ *
+ * - `"first"` (default): drop later duplicates. Used for ontology
+ *   relations — re-applying the same relation in a later evolve is a
+ *   no-op, not a redefinition.
+ * - `"last"`: keep the most-recent value. Used for indexes — declared
+ *   indexes don't carry independent identity beyond the composite key,
+ *   so the most recent declaration wins. Idempotent re-evolve relies
+ *   on `canonicalEqual(merged, existing)`, which is
+ *   preserved as long as `next` carries an identical entry.
  */
-function dedupIndexes(
-  indexes: readonly ExtensionIndex[],
-): readonly ExtensionIndex[] {
-  const seen = new Map<string, ExtensionIndex>();
+function dedupBy<T>(
+  items: readonly T[],
+  keyFunction: (item: T) => string,
+  strategy: "first" | "last" = "first",
+): readonly T[] {
+  const seen = new Map<string, T>();
   const order: string[] = [];
-  for (const entry of indexes) {
-    const key = `${entry.entity}|${entry.kind}|${entry.name ?? ""}|${entry.fields.join(",")}`;
-    if (!seen.has(key)) order.push(key);
-    seen.set(key, entry);
+  for (const item of items) {
+    const key = keyFunction(item);
+    if (!seen.has(key)) {
+      order.push(key);
+      seen.set(key, item);
+    } else if (strategy === "last") {
+      seen.set(key, item);
+    }
   }
   return order.map((key) => seen.get(key)!);
 }
 
-function dedupRelations(
-  relations: readonly ExtensionOntologyRelation[],
-): readonly ExtensionOntologyRelation[] {
-  const seen = new Set<string>();
-  const out: ExtensionOntologyRelation[] = [];
-  for (const relation of relations) {
-    const key = graphExtensionOntologyKey(relation);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(relation);
-  }
-  return out;
+function indexCompositeKey(entry: ExtensionIndex): string {
+  return `${entry.entity}|${entry.kind}|${entry.name ?? ""}|${entry.fields.join(",")}`;
+}
+
+/**
+ * `true` when none of the v1 content slots carry data. Drives the
+ * first-evolve fast path in `unionDocuments`, and any future caller
+ * that needs to short-circuit on a "nothing to merge" document.
+ */
+function isEmptyExtension(extension: GraphExtension): boolean {
+  return (
+    extension.nodes === undefined &&
+    extension.edges === undefined &&
+    extension.ontology === undefined &&
+    extension.indexes === undefined
+  );
 }
 
 function assertNoCollision(
   kindName: string,
-  entity: "node" | "edge",
+  entity: KindEntity,
   collides: boolean,
   graphId: string,
 ): void {

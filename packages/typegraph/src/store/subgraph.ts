@@ -15,6 +15,7 @@ import type {
   GraphDef,
   NodeKinds,
 } from "../core/define-graph";
+import type { KindEntity } from "../core/types";
 import type {
   AnyEdgeType,
   NodeId,
@@ -87,7 +88,7 @@ function truncateToBytes(value: string, maxBytes: number): string {
  * even with multibyte characters.
  */
 function projectionAlias(
-  entityPrefix: "node" | "edge",
+  entityPrefix: KindEntity,
   kind: string,
   field: string,
 ): string {
@@ -584,7 +585,7 @@ function buildProjectionPlan(
     | Readonly<Record<string, readonly string[] | undefined>>
     | undefined,
   resolveFieldType: FieldTypeResolver,
-  entityPrefix: "node" | "edge",
+  entityPrefix: KindEntity,
 ): ProjectionPlan {
   const projectedKinds = new Map<string, KindProjectionPlan>();
   const fullKinds: string[] = [];
@@ -609,7 +610,7 @@ function buildKindProjectionPlan(
   kind: string,
   selection: readonly string[],
   resolveFieldType: FieldTypeResolver,
-  entityPrefix: "node" | "edge",
+  entityPrefix: KindEntity,
 ): KindProjectionPlan {
   const propertyFields = new Map<string, ProjectionPropertyFieldPlan>();
   let includeMeta = false;

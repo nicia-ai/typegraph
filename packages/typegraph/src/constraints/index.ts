@@ -21,6 +21,7 @@ import {
   type Cardinality,
   type Collation,
   type EdgeRegistration,
+  type NullCheckOp,
   type UniqueConstraint,
   type UniquenessScope,
 } from "../core/types";
@@ -87,7 +88,7 @@ export function checkWherePredicate(
 type UniquePredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
-  op: "isNull" | "isNotNull";
+  op: NullCheckOp;
 }>;
 
 type PredicateContext = Readonly<
@@ -147,7 +148,7 @@ function evaluatePredicate(
   const pred = predicate as {
     __type: string;
     field: string;
-    op: "isNull" | "isNotNull";
+    op: NullCheckOp;
   };
 
   if (pred.__type !== "unique_predicate") {

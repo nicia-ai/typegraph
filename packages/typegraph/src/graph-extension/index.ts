@@ -37,21 +37,26 @@ export {
   type ExtensionStringProperty,
   type ExtensionUniqueConstraint,
   type ExtensionUniqueWhere,
+  GRAPH_EXTENSION_TOP_LEVEL_KEYS,
   type GraphExtension,
+  type GraphExtensionTopLevelKey,
   type GraphExtensionVersion,
   LEGACY_GRAPH_EXTENSION_VERSION,
 } from "./extension-types";
 
 // Errors
 export {
+  GRAPH_EXTENSION_ISSUE_CODES,
   GraphExtensionError,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   GraphExtensionUnresolvedEndpointError,
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
+  INCOMPATIBLE_CHANGE_TYPES,
   type IncompatibleChange,
   IncompatibleChangeError,
+  type IncompatibleChangeType,
   KindCollisionError,
   KindHasReferentsError,
   type KindReferent,

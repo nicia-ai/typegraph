@@ -38,6 +38,7 @@ import {
 import {
   buildGraphExtensionOntologyKeySet,
   compileTimeOntologyKey,
+  extensionKindNames,
 } from "./ontology-keys";
 
 type RemovalPlan = Readonly<{
@@ -76,8 +77,8 @@ export function planRemovals<G extends GraphDef>(
     return { document, removedNodeKinds: [], removedEdgeKinds: [] };
   }
 
-  const runtimeNodeNames = new Set(Object.keys(document?.nodes ?? {}));
-  const runtimeEdgeNames = new Set(Object.keys(document?.edges ?? {}));
+  const { nodes: runtimeNodeNames, edges: runtimeEdgeNames } =
+    extensionKindNames(document);
   const compileTimeNodeNames = new Set(
     Object.keys(graph.nodes).filter((name) => !runtimeNodeNames.has(name)),
   );
@@ -103,17 +104,19 @@ export function planRemovals<G extends GraphDef>(
     runtimeEdgeNames.has(name),
   );
 
-  // Compile-time-edge referent check: a graph-extension kind being removed
-  // cannot remain a target of any compile-time edge or ontology
-  // relation, because the compile-time declaration would resurrect
-  // the reference on the next deploy.
+  // Compile-time-edge referent check: a graph-extension kind being
+  // removed cannot remain a target of any compile-time edge or ontology
+  // relation, because the compile-time declaration would resurrect the
+  // reference on the next deploy. Pre-build an inverted index of
+  // `kindName → referents` once so the per-kind check is O(1) instead
+  // of walking all edges + ontology per removed kind.
+  const referentsByKind = buildCompileTimeReferentIndex(
+    graph,
+    runtimeEdgeNames,
+  );
   for (const kindName of removedNodeKinds) {
-    const referents = findCompileTimeReferents(
-      graph,
-      kindName,
-      runtimeEdgeNames,
-    );
-    if (referents.length > 0) {
+    const referents = referentsByKind.get(kindName);
+    if (referents !== undefined && referents.length > 0) {
       throw new KindHasReferentsError(kindName, referents, graph.id);
     }
   }
@@ -222,8 +225,8 @@ export function planRemovals<G extends GraphDef>(
 export function stripGraphExtension<G extends GraphDef>(graph: G): G {
   const document = graph.extension;
   if (document === undefined) return graph;
-  const runtimeNodeNames = new Set(Object.keys(document.nodes ?? {}));
-  const runtimeEdgeNames = new Set(Object.keys(document.edges ?? {}));
+  const { nodes: runtimeNodeNames, edges: runtimeEdgeNames } =
+    extensionKindNames(document);
   const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(document);
 
   const compileNodes: Record<string, (typeof graph.nodes)[string]> = {};
@@ -255,12 +258,22 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
   });
 }
 
-function findCompileTimeReferents<G extends GraphDef>(
+/**
+ * Builds an inverted index `kindName → KindReferent[]` over the
+ * compile-time edges and ontology relations of `graph`. One walk per
+ * graph instead of one walk per removed kind, dropping the cost of the
+ * referent check from O(K × (E + O)) to O(K + E + O).
+ */
+function buildCompileTimeReferentIndex<G extends GraphDef>(
   graph: G,
-  kindName: string,
   runtimeEdgeNames: ReadonlySet<string>,
-): readonly KindReferent[] {
-  const referents: KindReferent[] = [];
+): ReadonlyMap<string, readonly KindReferent[]> {
+  const index = new Map<string, KindReferent[]>();
+  const append = (kindName: string, referent: KindReferent): void => {
+    const existing = index.get(kindName);
+    if (existing === undefined) index.set(kindName, [referent]);
+    else existing.push(referent);
+  };
 
   for (const [edgeName, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(edgeName)) continue;
@@ -268,12 +281,20 @@ function findCompileTimeReferents<G extends GraphDef>(
       from?: readonly { kind: string }[];
       to?: readonly { kind: string }[];
     };
-    const fromHas =
-      reg.from?.some((endpoint) => endpoint.kind === kindName) ?? false;
-    const toHas =
-      reg.to?.some((endpoint) => endpoint.kind === kindName) ?? false;
-    if (fromHas || toHas) {
-      referents.push({ type: "compile-time-edge", name: edgeName });
+    const referent: KindReferent = {
+      type: "compile-time-edge",
+      name: edgeName,
+    };
+    const seen = new Set<string>();
+    for (const endpoint of reg.from ?? []) {
+      if (seen.has(endpoint.kind)) continue;
+      seen.add(endpoint.kind);
+      append(endpoint.kind, referent);
+    }
+    for (const endpoint of reg.to ?? []) {
+      if (seen.has(endpoint.kind)) continue;
+      seen.add(endpoint.kind);
+      append(endpoint.kind, referent);
     }
   }
 
@@ -284,13 +305,13 @@ function findCompileTimeReferents<G extends GraphDef>(
     if (runtimeOntologyKeys.has(compileTimeOntologyKey(relation))) continue;
     const fromName = getTypeName(relation.from);
     const toName = getTypeName(relation.to);
-    if (fromName === kindName || toName === kindName) {
-      referents.push({
-        type: "compile-time-ontology",
-        name: `${relation.metaEdge.name}(${fromName}, ${toName})`,
-      });
-    }
+    const referent: KindReferent = {
+      type: "compile-time-ontology",
+      name: `${relation.metaEdge.name}(${fromName}, ${toName})`,
+    };
+    append(fromName, referent);
+    if (toName !== fromName) append(toName, referent);
   }
 
-  return referents;
+  return index;
 }

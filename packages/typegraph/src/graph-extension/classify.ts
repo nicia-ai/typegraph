@@ -9,6 +9,7 @@
  * `requireEmpty` candidate list and runs the existence probes before
  * committing.
  */
+import type { KindEntity } from "../core/types";
 import { canonicalEqual } from "../schema/canonical";
 import { type IncompatibleChange, IncompatibleChangeError } from "./errors";
 import {
@@ -44,22 +45,19 @@ type ModificationClassification = Readonly<{
   /** Deltas that always reject. */
   incompatible: readonly IncompatibleChange[];
   /**
-   * Deltas allowed only when the kind has zero rows. Keyed by
-   * `${entity}:${kind}`; each entry carries the per-delta detail to
-   * promote to `incompatible` if the empty-probe shows rows.
+   * Deltas allowed only when the kind has zero rows. One entry per
+   * `(entity, kindName)`; each carries the per-delta detail to promote
+   * to `incompatible` if the empty-probe shows rows. Caller looks up
+   * by entry identity (frozen reference) — no string-key encoding.
    */
-  requireEmpty: ReadonlyMap<string, RequireEmptyEntry>;
+  requireEmpty: readonly RequireEmptyEntry[];
 }>;
 
 export type RequireEmptyEntry = Readonly<{
-  entity: "node" | "edge";
+  entity: KindEntity;
   kindName: string;
   changes: readonly IncompatibleChange[];
 }>;
-
-function requireEmptyKey(entity: "node" | "edge", kindName: string): string {
-  return `${entity}:${kindName}`;
-}
 
 /**
  * Classifies every delta between an existing and proposed graph-extension
@@ -76,19 +74,22 @@ export function classifyModifications(
   next: GraphExtension,
 ): ModificationClassification {
   const incompatible: IncompatibleChange[] = [];
+  // Aggregate by (entity, kindName) using a temporary string-keyed Map
+  // — the encoding is private to this function. The Map's values are
+  // returned as a plain array; the caller never sees the key.
   const requireEmptyMutable = new Map<
     string,
-    { entity: "node" | "edge"; kindName: string; changes: IncompatibleChange[] }
+    { entity: KindEntity; kindName: string; changes: IncompatibleChange[] }
   >();
 
   const recordIncompatible = (entry: IncompatibleChange): void => {
     incompatible.push(entry);
   };
   const recordRequireEmpty = (
-    entity: "node" | "edge",
+    entity: KindEntity,
     entry: IncompatibleChange,
   ): void => {
-    const key = requireEmptyKey(entity, entry.kind);
+    const key = `${entity}:${entry.kind}`;
     const existingEntry = requireEmptyMutable.get(key);
     if (existingEntry === undefined) {
       requireEmptyMutable.set(key, {
@@ -122,44 +123,35 @@ export function classifyModifications(
     });
   }
 
-  const requireEmpty = new Map<string, RequireEmptyEntry>();
-  for (const [key, value] of requireEmptyMutable) {
-    requireEmpty.set(key, {
-      entity: value.entity,
-      kindName: value.kindName,
-      changes: Object.freeze([...value.changes]),
-    });
+  const requireEmpty: RequireEmptyEntry[] = [];
+  for (const value of requireEmptyMutable.values()) {
+    requireEmpty.push(
+      Object.freeze({
+        entity: value.entity,
+        kindName: value.kindName,
+        changes: Object.freeze([...value.changes]),
+      }),
+    );
   }
 
   return { incompatible, requireEmpty };
 }
 
 /**
- * Throws a `IncompatibleChangeError` carrying the merged
- * incompatible set when the empty-probe results promote
- * `requireEmpty` deltas to rejections. The caller passes the set of
- * kind names that turned out non-empty; the helper looks them up in
- * `requireEmpty` and concatenates with the always-incompatible list.
- */
-/**
- * Promotes the `requireEmpty` entries whose composite keys appear in
- * `nonEmptyKeys` to incompatible, returning a single
- * `IncompatibleChangeError` covering everything (empty
- * = OK).
- *
- * The keys are `${entity}:${kindName}`-shaped (see `requireEmptyKey`)
- * so the caller's probe-result set must use the same encoding —
- * mixing nodes and edges of the same name is fine.
+ * Promotes the `requireEmpty` entries whose probe came back non-empty
+ * to incompatible, returning a single `IncompatibleChangeError`
+ * covering both the always-incompatible deltas and the promoted ones.
+ * Returns `undefined` when nothing rejects (probe came back empty for
+ * every entry and `incompatible` is empty).
  */
 export function buildIncompatibleChangeError(
   classification: ModificationClassification,
-  nonEmptyKeys: ReadonlySet<string>,
+  nonEmpty: ReadonlySet<RequireEmptyEntry>,
   graphId: string,
 ): IncompatibleChangeError | undefined {
   const promoted: IncompatibleChange[] = [];
-  for (const key of nonEmptyKeys) {
-    const entry = classification.requireEmpty.get(key);
-    if (entry !== undefined) promoted.push(...entry.changes);
+  for (const entry of nonEmpty) {
+    promoted.push(...entry.changes);
   }
   const all = [...classification.incompatible, ...promoted];
   if (all.length === 0) return undefined;
@@ -210,9 +202,8 @@ function classifyEdgeEndpoints(
   // Adding kinds to from/to is broadening — always allowed.
   // Removing kinds with no existing edges of that endpoint would be
   // allowed in the spec, but TypeGraph doesn't have a per-(edge,
-  // endpoint-kind) row probe today; v1 conservative: removing a kind
-  // from from/to is allowed-on-empty against the WHOLE edge kind.
-  // Add a tighter row-counting probe in a follow-up.
+  // endpoint-kind) row probe today; v1 stays conservative by treating
+  // endpoint-kind removal as allowed-on-empty for the whole edge kind.
   const fromExisting = new Set(existing.from);
   const toExisting = new Set(existing.to);
   const fromNext = new Set(next.from);
