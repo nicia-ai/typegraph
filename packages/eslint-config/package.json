@@ -13,7 +13,7 @@
   ],
   "dependencies": {
     "@eslint/js": "^10.0.1",
-    "@vitest/eslint-plugin": "^1.6.16",
+    "@vitest/eslint-plugin": "^1.6.17",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-functional": "^9.0.4",
     "eslint-plugin-simple-import-sort": "^13.0.0",
