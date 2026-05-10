@@ -66,6 +66,7 @@ export {
   type CreatePostgresTablesOptions,
   edges,
   embeddings,
+  fulltext,
   nodes,
   schemaVersions,
   uniques,

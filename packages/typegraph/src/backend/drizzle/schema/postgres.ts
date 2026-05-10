@@ -42,6 +42,7 @@ import {
   buildPostgresNodeIndexBuilders,
   type IndexDeclaration,
 } from "../../../indexes";
+import { regconfig, tsvector } from "../columns/fulltext";
 import { vector } from "../columns/vector";
 
 /**
@@ -347,6 +348,44 @@ export function createPostgresTables(
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
+  /**
+   * Drizzle pg-core table for the default `tsvectorStrategy` so
+   * drizzle-kit can introspect the fulltext table alongside the
+   * others. Mirrors `tsvectorStrategy.generateDdl()` — the typed
+   * shape and the strategy DDL must stay in sync (drift sentinel
+   * lives in `tests/typed-fulltext-table.test.ts`).
+   *
+   * Why `regconfig` + GENERATED: `to_tsvector("language", "content")`
+   * needs an immutable language to qualify for use inside a
+   * `STORED` generated column, so Postgres can own the
+   * `content → tsv` invariant.
+   *
+   * Alternate strategies (pg_trgm, ParadeDB, pgroonga) bring their
+   * own DDL; `generatePostgresDDL` skips this typed table for them
+   * and defers to `FulltextStrategy.generateDdl()`. Drizzle-kit
+   * consumers on non-default strategies must override
+   * `tables.fulltext` in their schema barrel.
+   */
+  const fulltext = pgTable(
+    n.fulltext,
+    {
+      graphId: text("graph_id").notNull(),
+      nodeKind: text("node_kind").notNull(),
+      nodeId: text("node_id").notNull(),
+      content: text("content").notNull(),
+      language: regconfig("language").notNull(),
+      tsv: tsvector("tsv")
+        .generatedAlwaysAs(sql`to_tsvector("language", "content")`)
+        .notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.nodeKind, t.nodeId] }),
+      index(`${n.fulltext}_tsv_idx`).using("gin", t.tsv),
+      index(`${n.fulltext}_kind_idx`).on(t.graphId, t.nodeKind),
+    ],
+  );
+
   return {
     nodes,
     edges,
@@ -356,15 +395,7 @@ export function createPostgresTables(
     indexMaterializations,
     kindRemovals,
     reconciliationMarkers,
-    /**
-     * The fulltext storage table is owned by the active `FulltextStrategy`,
-     * not Drizzle. Shapes vary across strategies — the default `tsvectorStrategy`
-     * uses a `regconfig` language column, a GENERATED STORED `tsv` column,
-     * and a GIN index; alternate strategies (ParadeDB, pg_trgm, pgroonga)
-     * pick their own column types and index methods. DDL is emitted as
-     * raw SQL via `strategy.generateDdl()`; reads and writes are composed
-     * from the strategy's fragment helpers.
-     */
+    fulltext,
     fulltextTableName: n.fulltext,
   } as const;
 }
@@ -377,7 +408,14 @@ export const tables = createPostgresTables();
 /**
  * Convenience exports for default tables.
  */
-export const { nodes, edges, uniques, schemaVersions, embeddings } = tables;
+export const {
+  nodes,
+  edges,
+  uniques,
+  schemaVersions,
+  embeddings,
+  fulltext,
+} = tables;
 
 /**
  * Type representing the tables object returned by createPostgresTables.

@@ -160,9 +160,45 @@ export const {
   reconciliationMarkers: myappGraphReconciliationMarkers,
 } = typegraphTables;
 
+// SQLite fulltext is an FTS5 virtual table — drizzle-kit can't model
+// virtual tables, so this name is exposed as a string. The backend
+// creates the FTS5 table on first store boot via a focused
+// `ensureFulltextTable()` ensure (idempotent CREATE VIRTUAL TABLE
+// IF NOT EXISTS), so drizzle-kit-managed setups work without an
+// extra manual step.
 export const myappGraphFulltextTableName =
   typegraphTables.fulltextTableName;
 ```
+
+For PostgreSQL with the default `tsvectorStrategy`, the factory
+**does** return a typed Drizzle table — `tables.fulltext` — alongside
+the others, so drizzle-kit-managed setups pick up the fulltext table
+automatically:
+
+```typescript
+// schema.ts (PostgreSQL)
+import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+
+export const typegraphTables = createPostgresTables({
+  // …same names as above…
+});
+
+export const {
+  nodes: myappGraphNodes,
+  edges: myappGraphEdges,
+  // …
+  fulltext: myappGraphFulltext,
+  indexMaterializations: myappGraphIndexMaterializations,
+  // …
+} = typegraphTables;
+```
+
+If you swap in an alternate Postgres fulltext strategy (pg_trgm,
+ParadeDB / pg_search, pgroonga), the typed `tsvector`-shaped table
+won't match what your strategy needs. Override `tables.fulltext` in
+your schema barrel with your strategy's own Drizzle table, or skip
+the typed export and rely on the backend's runtime
+`ensureFulltextTable()` ensure to bootstrap your strategy's DDL.
 
 Then pass the same tables to the backend:
 

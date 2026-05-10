@@ -422,6 +422,10 @@ function isPgTable(
 
 /**
  * Generates all DDL statements for the given PostgreSQL tables.
+ *
+ * The typed `tables.fulltext` is excluded from the column-walker
+ * pass (it can't reproduce `GENERATED ALWAYS AS … STORED`); the
+ * strategy emits the canonical fulltext DDL last.
  */
 export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
@@ -429,14 +433,16 @@ export function generatePostgresDDL(
 ): string[] {
   const statements: string[] = [];
 
-  // Generate in dependency order (tables first, then indexes)
+  // Reference identity sidesteps the per-iter `getPgTableConfig` walk
+  // a name lookup would add, and stays correct under custom names.
   for (const table of Object.values(tables)) {
     if (!isPgTable(table)) continue;
+    if (table === tables.fulltext) continue;
     statements.push(generatePgCreateTableSQL(table));
   }
-
   for (const table of Object.values(tables)) {
     if (!isPgTable(table)) continue;
+    if (table === tables.fulltext) continue;
     statements.push(...generatePgCreateIndexSQL(table));
   }
 

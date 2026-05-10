@@ -676,6 +676,22 @@ export function createSqliteBackend(
     );
   }
 
+  // Per-backend latch for fulltext-table DDL. The wrappers below
+  // guard every method that touches the fulltext table — fulltext
+  // writes can fire from any code path (sync `createStore`, hard-
+  // delete cascade, batched index sync), so the bootstrap-load
+  // probe alone doesn't cover all surfaces.
+  let fulltextEnsured = false;
+  async function ensureFulltextDdl(): Promise<void> {
+    if (fulltextEnsured) return;
+    for (const statement of fulltextStrategy.generateDdl(
+      tables.fulltextTableName,
+    )) {
+      await db.run(sql.raw(statement));
+    }
+    fulltextEnsured = true;
+  }
+
   const backend: GraphBackend = {
     ...operations,
 
@@ -684,6 +700,39 @@ export function createSqliteBackend(
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
+      fulltextEnsured = true;
+    },
+
+    async upsertFulltext(params): Promise<void> {
+      await ensureFulltextDdl();
+      await operations.upsertFulltext!(params);
+    },
+    async deleteFulltext(params): Promise<void> {
+      await ensureFulltextDdl();
+      await operations.deleteFulltext!(params);
+    },
+    async upsertFulltextBatch(params): Promise<void> {
+      // Mirror the inner-method empty-input guard so a no-op call
+      // on a cold backend doesn't materialize the table.
+      if (params.rows.length === 0) return;
+      await ensureFulltextDdl();
+      await operations.upsertFulltextBatch!(params);
+    },
+    async deleteFulltextBatch(params): Promise<void> {
+      if (params.nodeIds.length === 0) return;
+      await ensureFulltextDdl();
+      await operations.deleteFulltextBatch!(params);
+    },
+    async fulltextSearch(params) {
+      await ensureFulltextDdl();
+      return operations.fulltextSearch!(params);
+    },
+    // hardDeleteNode is wrapped because the operation-backend-core
+    // cascade unconditionally deletes from the fulltext table — it
+    // would fail even on graphs that declare no searchable() fields.
+    async hardDeleteNode(params): Promise<void> {
+      await ensureFulltextDdl();
+      await operations.hardDeleteNode(params);
     },
 
     async executeDdl(ddl: string): Promise<void> {
@@ -790,6 +839,10 @@ export function createSqliteBackend(
       );
     },
 
+    async ensureFulltextTable(): Promise<void> {
+      await ensureFulltextDdl();
+    },
+
     async getReconciliationMarker(
       graphId: string,
     ): Promise<number | undefined> {
@@ -852,6 +905,13 @@ export function createSqliteBackend(
           },
         );
       }
+
+      // The tx-scoped backend exposes raw fulltext methods without
+      // the outer self-ensure wrappers — so we do the ensure here,
+      // before BEGIN runs. Outside-the-tx avoids
+      // CREATE-INDEX-inside-tx lock contention and keeps the DDL
+      // durable if the user's tx rolls back.
+      await ensureFulltextDdl();
 
       if (transactionMode === "sql") {
         return runWithSerializedQueue(serializedQueue, async () => {

@@ -872,6 +872,18 @@ export type GraphBackend = Readonly<{
    */
   ensureReconciliationMarkersTable?: () => Promise<void>;
 
+  // === Fulltext Storage ===
+
+  /**
+   * Bootstraps the fulltext storage table the active `FulltextStrategy`
+   * owns — the strategy owns this DDL because shapes diverge across
+   * stacks (`tsvector` + GIN, FTS5 virtual table, pg_trgm, …) and
+   * the SQLite case can't be Drizzle-modeled at all. Same focused-
+   * bootstrap rationale as the other `ensure*Table` methods:
+   * idempotent and concurrency-safe under replica startup.
+   */
+  ensureFulltextTable?: () => Promise<void>;
+
   /**
    * Read the high-water mark schema version for which
    * `materializeRemovals` reconciliation has already verified history
