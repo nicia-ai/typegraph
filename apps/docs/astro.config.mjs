@@ -124,6 +124,10 @@ const sidebar = [
     label: "Ejecting",
     slug: "ejecting",
   },
+  {
+    label: "Changelog",
+    slug: "changelog",
+  },
 ];
 
 function extractSlugs(items) {

@@ -1,8 +1,11 @@
 ---
+import package_ from "../../../../packages/typegraph/package.json";
 import FeatureIcon from "../components/landing/FeatureIcon.astro";
 import HeroIllustration from "../components/landing/HeroIllustration.astro";
 import NewsletterSignup from "../components/landing/NewsletterSignup.astro";
 import Layout from "../layouts/Landing.astro";
+
+const version = package_.version;
 ---
 
 <Layout title="TypeGraph - The Knowledge Graph for TypeScript">
@@ -11,6 +14,17 @@ import Layout from "../layouts/Landing.astro";
       class="grid grid-cols-1 md:grid-cols-[1.2fr_1fr] gap-16 items-center py-24 md:py-32"
     >
       <div class="text-left">
+        <a
+          href="/changelog"
+          class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full border border-primary/30 bg-primary/10 text-sm font-mono text-primary hover:bg-primary/15 hover:border-primary/50 transition-colors no-underline"
+          aria-label={`Version ${version} — Runtime schema evolution. See changelog.`}
+        >
+          <span
+            class="inline-block w-2 h-2 rounded-full bg-primary"
+            aria-hidden="true"></span>
+          v{version} · Runtime schema evolution
+          <span class="opacity-70" aria-hidden="true">→</span>
+        </a>
         <h1 class="text-5xl font-extrabold leading-[1.1] mb-6 tracking-tight">
           The Knowledge Graph for <span
             class="bg-linear-to-br from-primary to-accent bg-clip-text text-transparent"
@@ -18,8 +32,8 @@ import Layout from "../layouts/Landing.astro";
           >
         </h1>
         <p class="text-xl text-text-muted mb-10 max-w-[500px]">
-          Define your ontology with Zod. Query with a fluent builder. Embedded,
-          type-safe, and built for intelligent applications.
+          Define your ontology with Zod. Query with a fluent builder. Extend it
+          at runtime when your agents need more.
         </p>
         <div class="flex flex-wrap gap-4">
           <a
@@ -40,48 +54,113 @@ import Layout from "../layouts/Landing.astro";
     </section>
 
     <section class="py-16 text-center">
-      <h2 class="text-4xl font-extrabold mb-4">Define. Connect. Query.</h2>
+      <h2 class="text-4xl font-extrabold mb-4">Define. Connect. Query. Evolve.</h2>
       <p class="text-xl text-text-muted mb-12">
         Your schema is your database. Your types are your queries.
       </p>
 
-      <div
-        class="bg-[#1e1e1e] rounded-xl shadow-2xl overflow-hidden text-left max-w-[900px] mx-auto border border-[#333]"
-      >
-        <div class="bg-[#252526] px-4 py-3 flex gap-2 border-b border-[#333]">
-          <div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div>
-          <div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div>
-          <div class="w-3 h-3 rounded-full bg-[#27c93f]"></div>
-          <span class="ml-4 text-[#888] text-sm font-mono">schema.ts</span>
+      <div class="code-tabs max-w-[900px] mx-auto text-left">
+        <input type="radio" name="ctab" id="ctab-basic" checked aria-label="Basic example" />
+        <input type="radio" name="ctab" id="ctab-hybrid" aria-label="Hybrid search example" />
+        <input type="radio" name="ctab" id="ctab-evolve" aria-label="Runtime evolution example" />
+
+        <div
+          class="code-tab-labels flex gap-1 border-b border-[#333] bg-[#252526] rounded-t-xl overflow-x-auto"
+          role="tablist"
+        >
+          <label for="ctab-basic">Basic</label>
+          <label for="ctab-hybrid">Hybrid Search</label>
+          <label for="ctab-evolve">Runtime Evolution</label>
         </div>
-        <div class="p-6 overflow-x-auto">
-          <pre
-              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code><span class="keyword">import</span> &#123; defineNode, defineEdge, defineGraph, createStore &#125; <span class="keyword">from</span> <span class="string">"@nicia-ai/typegraph"</span>;
-<span class="keyword">import</span> &#123; z &#125; <span class="keyword">from</span> <span class="string">"zod"</span>;
 
-<span class="comment">// 1. Define your ontology</span>
-<span class="keyword">const</span> <span class="type">Person</span> = defineNode(<span class="string">"Person"</span>, &#123;
-  schema: z.object(&#123; name: z.string(), role: z.string() &#125;)
-&#125;);
-<span class="keyword">const</span> <span class="type">Project</span> = defineNode(<span class="string">"Project"</span>, &#123;
-  schema: z.object(&#123; name: z.string(), status: z.string() &#125;)
-&#125;);
-<span class="keyword">const</span> <span class="type">worksOn</span> = defineEdge(<span class="string">"worksOn"</span>);
+        <div class="code-tab-panels bg-[#1e1e1e] border border-t-0 border-[#333] rounded-b-xl shadow-2xl overflow-hidden">
+          <div class="code-panel code-panel-basic p-6 overflow-x-auto">
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, defineEdge, defineGraph, createStore } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+<span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
 
-<span class="keyword">const</span> <span class="type">graph</span> = defineGraph(&#123;
-  id: <span class="string">"my_app"</span>,
-  nodes: &#123; Person: &#123; type: Person &#125;, Project: &#123; type: Project &#125; &#125;,
-  edges: &#123; worksOn: &#123; type: worksOn, from: [Person], to: [Project] &#125; &#125;
-&#125;);
+<span class="hl-comment">// 1. Define your ontology</span>
+<span class="hl-keyword">const</span> <span class="hl-type">Person</span> = defineNode(<span class="hl-string">"Person"</span>, {
+  schema: z.object({ name: z.string(), role: z.string() })
+});
+<span class="hl-keyword">const</span> <span class="hl-type">Project</span> = defineNode(<span class="hl-string">"Project"</span>, {
+  schema: z.object({ name: z.string(), status: z.string() })
+});
+<span class="hl-keyword">const</span> <span class="hl-type">worksOn</span> = defineEdge(<span class="hl-string">"worksOn"</span>);
 
-<span class="comment">// 2. Query with full type safety</span>
-<span class="keyword">const</span> <span class="type">results</span> = <span class="keyword">await</span> store.query()
-  .from(<span class="string">"Person"</span>, <span class="string">"p"</span>)
-  .whereNode(<span class="string">"p"</span>, p =&gt; p.role.eq(<span class="string">"Engineer"</span>))
-  .traverse(<span class="string">"worksOn"</span>, <span class="string">"e"</span>)
-  .to(<span class="string">"Project"</span>, <span class="string">"proj"</span>)
-  .select(ctx =&gt; (&#123; person: ctx.p.name, project: ctx.proj.name &#125;))
+<span class="hl-keyword">const</span> <span class="hl-type">graph</span> = defineGraph({
+  id: <span class="hl-string">"my_app"</span>,
+  nodes: { Person: { type: Person }, Project: { type: Project } },
+  edges: { worksOn: { type: worksOn, from: [Person], to: [Project] } }
+});
+
+<span class="hl-comment">// 2. Query with full type safety</span>
+<span class="hl-keyword">const</span> <span class="hl-type">results</span> = <span class="hl-keyword">await</span> store.query()
+  .from(<span class="hl-string">"Person"</span>, <span class="hl-string">"p"</span>)
+  .whereNode(<span class="hl-string">"p"</span>, p =&gt; p.role.eq(<span class="hl-string">"Engineer"</span>))
+  .traverse(<span class="hl-string">"worksOn"</span>, <span class="hl-string">"e"</span>)
+  .to(<span class="hl-string">"Project"</span>, <span class="hl-string">"proj"</span>)
+  .select(ctx =&gt; ({ person: ctx.p.name, project: ctx.proj.name }))
   .execute();</code></pre>
+          </div>
+
+          <div class="code-panel code-panel-hybrid p-6 overflow-x-auto">
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, searchable, embedding } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+<span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
+
+<span class="hl-comment">// 1. Declare semantic + fulltext fields right in the Zod schema</span>
+<span class="hl-keyword">const</span> <span class="hl-type">Document</span> = defineNode(<span class="hl-string">"Document"</span>, {
+  schema: z.object({
+    title: searchable({ language: <span class="hl-string">"english"</span> }),
+    body:  searchable({ language: <span class="hl-string">"english"</span> }),
+    embedding: embedding(1536),
+  })
+});
+
+<span class="hl-comment">// 2. Hybrid retrieval: BM25 fulltext + vector similarity, fused with RRF</span>
+<span class="hl-keyword">const</span> <span class="hl-type">hits</span> = <span class="hl-keyword">await</span> store.search.hybrid(<span class="hl-string">"Document"</span>, {
+  limit: 10,
+  vector:   { fieldPath: <span class="hl-string">"embedding"</span>, queryEmbedding: <span class="hl-keyword">await</span> embed(q) },
+  fulltext: { query: q },
+});
+
+<span class="hl-comment">// 3. Or compose fulltext into any graph traversal — authorised search,</span>
+<span class="hl-comment">//    multi-tenant filters, anything you can already express in a query.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">scoped</span> = <span class="hl-keyword">await</span> store.query()
+  .from(<span class="hl-string">"User"</span>, <span class="hl-string">"u"</span>).whereNode(<span class="hl-string">"u"</span>, u =&gt; u.id.eq(currentUserId))
+  .traverse(<span class="hl-string">"canRead"</span>, <span class="hl-string">"e"</span>).to(<span class="hl-string">"Document"</span>, <span class="hl-string">"d"</span>)
+  .whereNode(<span class="hl-string">"d"</span>, d =&gt; d.$fulltext.matches(query, 10))
+  .select(ctx =&gt; ctx.d).execute();</code></pre>
+          </div>
+
+          <div class="code-panel code-panel-evolve p-6 overflow-x-auto">
+            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineGraphExtension } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+
+<span class="hl-comment">// 1. An agent proposes a typed kind from observed data.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">proposal</span> = defineGraphExtension({
+  nodes: {
+    Paper: {
+      description: <span class="hl-string">"An academic paper inferred from the corpus"</span>,
+      properties: {
+        title: { type: <span class="hl-string">"string"</span>, minLength: 1 },
+        doi:   { type: <span class="hl-string">"string"</span>, minLength: 1 },
+        year:  { type: <span class="hl-string">"number"</span>, int: <span class="hl-keyword">true</span>, min: 1900, max: 2100 },
+      },
+      unique: [{ name: <span class="hl-string">"paper_doi_unique"</span>, fields: [<span class="hl-string">"doi"</span>] }],
+    },
+  },
+});
+
+<span class="hl-comment">// 2. Operator approves; commit atomically as a new schema version.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">evolved</span> = <span class="hl-keyword">await</span> store.evolve(proposal);
+
+<span class="hl-comment">// 3. Read and write the new kind dynamically — no codegen, no redeploy.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">papers</span> = evolved.getNodeCollection(<span class="hl-string">"Paper"</span>)!;
+<span class="hl-keyword">await</span> papers.create({
+  title: <span class="hl-string">"Attention Is All You Need"</span>,
+  doi:   <span class="hl-string">"10.5555/3295222.3295349"</span>,
+  year:  2017,
+});</code></pre>
+          </div>
         </div>
       </div>
     </section>
@@ -116,8 +195,24 @@ import Layout from "../layouts/Landing.astro";
             AI-Native Structure
           </h3>
           <p class="text-text-muted">
-            Give LLMs what they crave: structured, semantic context. Feed your
-            ontology directly to agents for higher-accuracy RAG and reasoning.
+            Built for RAG and agentic systems. Hybrid retrieval blends BM25
+            fulltext with vector similarity in a single query, and your
+            ontology gives LLMs the structured context they need.
+          </p>
+        </div>
+        <div
+          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
+        >
+          <FeatureIcon icon="branch" />
+          <h3 class="text-xl font-bold mb-3 text-text-main">
+            Runtime Schema Evolution
+          </h3>
+          <p class="text-text-muted">
+            Let agents propose new kinds and edges. <code
+              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
+              >store.evolve()</code
+            > commits reviewed extensions as durable schema versions — no codegen,
+            no redeploy.
           </p>
         </div>
         <div
@@ -163,19 +258,6 @@ import Layout from "../layouts/Landing.astro";
             code.
           </p>
         </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="lock" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Enforced Integrity
-          </h3>
-          <p class="text-text-muted">
-            Declaratively enforce constraints like disjoint sets ("a User cannot
-            be an Admin and a Guest") and cardinality limits directly at the
-            schema level.
-          </p>
-        </div>
       </div>
     </section>
 
@@ -196,8 +278,9 @@ import Layout from "../layouts/Landing.astro";
             </h3>
             <p class="text-text-muted mb-6 grow">
               Feed your LLMs high-fidelity, structured context. Map documents to
-              concepts, authors, and entities to reduce hallucinations and
-              improve retrieval accuracy.
+              concepts, authors, and entities — then retrieve with hybrid
+              search (vector + fulltext) and let agents extend the ontology
+              when they encounter new types.
             </p>
             <a
               href="/examples/knowledge-graph-rag/"
@@ -260,23 +343,75 @@ import Layout from "../layouts/Landing.astro";
   </main>
 </Layout>
 
+<style is:global>
+  @reference "tailwindcss";
+
+  /* Syntax highlighting for hand-marked code samples on the homepage.
+     Global so the rules match spans inside `<code is:raw>`, which are
+     inserted verbatim and don't carry Astro's scoped-style attribute.
+     `hl-` prefix avoids clashing with Starlight's Shiki output. */
+  .hl-keyword {
+    @apply text-blue-400;
+  }
+  .hl-string {
+    @apply text-amber-300;
+  }
+  .hl-function {
+    @apply text-yellow-300;
+  }
+  .hl-comment {
+    @apply text-green-500;
+  }
+  .hl-type {
+    @apply text-cyan-400;
+  }
+</style>
+
 <style>
   @reference "tailwindcss";
 
-  /* Syntax Highlighting */
-  .keyword {
-    @apply text-blue-400;
+  /* CSS-only tabs: hide radios, toggle panels by `:checked` sibling. */
+  .code-tabs > input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
   }
-  .string {
-    @apply text-amber-300;
+
+  .code-tab-labels label {
+    @apply cursor-pointer px-5 py-3 text-sm font-mono text-[#888] border-b-2 border-transparent transition-colors whitespace-nowrap;
   }
-  .function {
-    @apply text-yellow-300;
+  .code-tab-labels label:hover {
+    @apply text-[#d4d4d4];
   }
-  .comment {
-    @apply text-green-500;
+
+  .code-panel {
+    display: none;
   }
-  .type {
-    @apply text-cyan-400;
+
+  /* Active panel + active label per radio. Order matters: inputs must
+     precede the labels/panels they style for sibling selectors to work. */
+  #ctab-basic:checked ~ .code-tab-panels .code-panel-basic,
+  #ctab-hybrid:checked ~ .code-tab-panels .code-panel-hybrid,
+  #ctab-evolve:checked ~ .code-tab-panels .code-panel-evolve {
+    display: block;
+  }
+  #ctab-basic:checked ~ .code-tab-labels label[for="ctab-basic"],
+  #ctab-hybrid:checked ~ .code-tab-labels label[for="ctab-hybrid"],
+  #ctab-evolve:checked ~ .code-tab-labels label[for="ctab-evolve"] {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  /* Keyboard focus ring on labels when the underlying radio is focused. */
+  .code-tabs > input[type="radio"]:focus-visible + .code-tab-labels label,
+  .code-tabs > input[type="radio"]:focus-visible ~ .code-tab-labels label {
+    outline: none;
+  }
+  #ctab-basic:focus-visible ~ .code-tab-labels label[for="ctab-basic"],
+  #ctab-hybrid:focus-visible ~ .code-tab-labels label[for="ctab-hybrid"],
+  #ctab-evolve:focus-visible ~ .code-tab-labels label[for="ctab-evolve"] {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 </style>

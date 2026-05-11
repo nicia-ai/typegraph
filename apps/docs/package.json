@@ -4,13 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/sync-changelog.mjs",
     "dev": "astro dev",
+    "prebuild": "node scripts/sync-changelog.mjs",
     "build": "astro build",
     "preview": "astro preview",
     "preview:cf": "wrangler dev",
     "deploy": "astro build && wrangler deploy",
+    "pretypecheck": "node scripts/sync-changelog.mjs",
     "typecheck": "astro check",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "sync:changelog": "node scripts/sync-changelog.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",

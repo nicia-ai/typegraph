@@ -10,13 +10,13 @@ interface Props {
 
 const {
   title,
-  description = "TypeScript-first embedded knowledge graph library with reasoning. Define with Zod, query with a fluent builder, embedded on SQLite or Postgres.",
+  description = "Embedded knowledge graph for TypeScript. Define your ontology with Zod, query with a fluent builder, blend BM25 fulltext with vector similarity, and extend the schema at runtime when your agents need more. Runs on SQLite or PostgreSQL.",
 } = Astro.props;
 
 const canonicalUrl = new URL(Astro.url.pathname, Astro.site).href;
 const ogImageUrl = new URL("/og-image.png", Astro.site).href;
 const ogImageAlt =
-  "TypeGraph — The Knowledge Graph for TypeScript. Define with Zod, query with a fluent builder, embedded on SQLite or Postgres.";
+  "TypeGraph — The Knowledge Graph for TypeScript. Zod-defined ontologies, hybrid search, runtime schema evolution, on SQLite or PostgreSQL.";
 ---
 
 <!doctype html>
