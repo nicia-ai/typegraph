@@ -10,6 +10,14 @@ compile-time `defineNode` / `defineEdge`. The motivating use case:
 from a corpus, an operator approves it, and the live graph immediately
 ingests under the new schema with no code change or restart.
 
+:::note[See it end-to-end]
+For a runnable scenario with an operator-approved agent in TypeScript,
+see [Agent-Driven Schema](/examples/agent-driven-schema). For the same
+loop driven by an open-weight LLM against public-record clinical data —
+with a repair loop and smoke-test pattern — see
+[`pdlug/typegraph-clinical-demo`](https://github.com/pdlug/typegraph-clinical-demo).
+:::
+
 This guide covers the core verbs:
 
 | Verb                                             | Purpose                                                           |
