@@ -98,8 +98,11 @@
     ```ts
     await store.transaction(async (tx) => {
       await tx.nodes.Document.update(documentId, props);
-      await tx.sql.insert(documentVersions).values(versionRow);
-      await tx.sql.insert(changeEvents).values(eventRow);
+      // tx.sql is the AdoptedTransaction union — cast to your concrete
+      // Drizzle database type at the call site.
+      const sqlTx = tx.sql as NodePgDatabase;
+      await sqlTx.insert(documentVersions).values(versionRow);
+      await sqlTx.insert(changeEvents).values(eventRow);
     });
     ```
 
