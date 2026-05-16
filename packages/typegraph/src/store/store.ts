@@ -906,6 +906,11 @@ export class Store<G extends GraphDef> {
    *   `transactionMode: "none"`). A non-atomic fallback is deliberately
    *   not offered here: the caller's relational write *would* still
    *   commit, defeating the purpose of cross-store atomicity.
+   * @throws {StoreNotInitializedError} at point of use, when a fulltext
+   *   operation on the returned context observes a missing/stale/failed
+   *   durable materialization marker (parent store not booted via
+   *   `createStoreWithSchema`). Rolls back the caller's transaction
+   *   without emitting any DDL.
    */
   withTransaction(externalTx: AdoptedTransaction): TransactionContext<G> {
     const adopt = this.#backend.adoptTransaction;

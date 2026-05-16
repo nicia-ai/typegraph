@@ -40,8 +40,8 @@ relying on lazy fulltext creation via bare `createStore()` must add a
 - New backend primitives (SQLite + Postgres):
   `ensureContributionMaterializationsTable`, `getContributionMaterialization`,
   `recordContributionMaterialization`, and
-  `assertRuntimeContributionsInitialized`. `ensureRuntimeContributions`,
-  `ensureContribution`, and `ensureFulltextTable` now take a `graphId` and
+  `assertRuntimeContributionsInitialized`. `ensureRuntimeContributions`
+  and `ensureFulltextTable` now take a `graphId` and
   route through the durable-marker writer (short-circuiting when the recorded
   signature already matches). `createStoreWithSchema` records the marker after
   the schema version is resolved, covering the cold-initialize path.

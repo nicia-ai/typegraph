@@ -822,6 +822,9 @@ const STORE_NOT_INITIALIZED_REASON_PHRASE: Readonly<
  * loudly here instead of lazily emitting DDL on the hot path.
  */
 export class StoreNotInitializedError extends TypeGraphError {
+  // `graphId`/`reason` are positional and required: both are
+  // load-bearing for the message and for programmatic handling via
+  // `details.reason`. Caller `details` merge on top.
   constructor(
     graphId: string,
     reason: StoreNotInitializedReason,

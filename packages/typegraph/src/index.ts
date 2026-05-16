@@ -98,12 +98,9 @@ export {
 // ============================================================
 
 export type {
-  StrategyDrizzleModel,
   StrategyTableContribution,
   TableContribution,
-  TableContributionSource,
 } from "./backend/table-contribution";
-export { isDrizzleContribution } from "./backend/table-contribution";
 export type {
   AdoptedTransaction,
   BackendCapabilities,

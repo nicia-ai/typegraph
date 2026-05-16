@@ -647,12 +647,12 @@ export const pgTrgmStrategy: FulltextStrategy = {
     return sql`NULL`;
   },
 
-  // Declares the table(s) this strategy owns. The schema factory
-  // resolves these into TableContributions. `drizzleModel: "raw-ddl"`
-  // because pg_trgm brings its own table (not the typed Drizzle
-  // `tables.fulltext`), so it is emitted verbatim and is invisible to
-  // drizzle-kit. `runtimeEnsure: true` because no drizzle-kit-managed
-  // setup can create it.
+  // Declares the table(s) this strategy owns as authoritative
+  // TableContributions. pg_trgm brings its own table (not the typed
+  // Drizzle `tables.fulltext`), so it is emitted verbatim from
+  // `createDdl` and is invisible to drizzle-kit unless you export your
+  // own table object. `runtimeEnsure: true` because no
+  // drizzle-kit-managed setup can create it.
   ownedTables(primaryTableName) {
     return [
       {
@@ -674,7 +674,6 @@ export const pgTrgmStrategy: FulltextStrategy = {
              ON "${primaryTableName}" USING GIN ("content" gin_trgm_ops);`,
         ],
         runtimeEnsure: true,
-        drizzleModel: "raw-ddl",
       },
     ];
   },

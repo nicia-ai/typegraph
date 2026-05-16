@@ -33,6 +33,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
+import { PgDatabase } from "drizzle-orm/pg-core";
 
 import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -78,6 +79,7 @@ import {
   buildContributionOnConflictSet,
   createContributionMaterializer,
   gateFulltext,
+  gateFulltextMethods,
   mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
@@ -102,11 +104,14 @@ import {
   POSTGRES_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
+  assertAdoptedDialect,
   type CommonOperationBackend,
   createCommonOperationBackend,
+  type InternalOperationBackend,
 } from "./operation-backend-core";
 import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
+  coerceNumericScore,
   createEdgeRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
@@ -249,16 +254,6 @@ function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {
   };
 }
 
-function coerceNumericScore(value: number | string): number {
-  if (typeof value === "number") return value;
-  const parsed = Number.parseFloat(value);
-  if (Number.isNaN(parsed)) {
-    throw new TypeError(
-      `Backend returned non-numeric fulltext score: ${JSON.stringify(value)}`,
-    );
-  }
-  return parsed;
-}
 
 function buildPostgresCapabilities(
   strategy: FulltextStrategy,
@@ -384,11 +379,8 @@ export function createPostgresBackend(
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
       );
-      // The runtime object always implements commitSchemaVersion /
-      // setActiveVersion (they live in operation-backend-core); the
-      // public TransactionBackend type omits them so user-supplied
-      // transaction() callbacks can't bypass the advisory lock. Cast
-      // back to the wider internal shape here, where the lock IS held.
+      // Advisory lock is held here, so the schema-write-capable
+      // InternalOperationBackend is used intentionally (see its type).
       const txBackend = createTransactionBackend({
         db: tx,
         adapterOptions,
@@ -396,7 +388,7 @@ export function createPostgresBackend(
         tableNames,
         capabilities,
         fulltextStrategy,
-      }) as unknown as CommonOperationBackend;
+      });
       return fn(txBackend);
     });
   }
@@ -495,41 +487,15 @@ export function createPostgresBackend(
       }
     },
 
-    // Every fulltext-touching method now asserts the durable marker
-    // instead of lazily emitting DDL. Steady state performs zero
-    // ensure; an uninitialized database throws `StoreNotInitializedError`
-    // loudly rather than self-healing on a read/write path (#135).
-    async upsertFulltext(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.upsertFulltext!(params);
-    },
-    async deleteFulltext(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.deleteFulltext!(params);
-    },
-    async upsertFulltextBatch(params): Promise<void> {
-      // A genuine no-op call asserts nothing — preserves the prior
-      // "empty input on any backend is harmless" contract.
-      if (params.rows.length === 0) return;
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.upsertFulltextBatch!(params);
-    },
-    async deleteFulltextBatch(params): Promise<void> {
-      if (params.nodeIds.length === 0) return;
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.deleteFulltextBatch!(params);
-    },
-    async fulltextSearch(params) {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      return operations.fulltextSearch!(params);
-    },
-    // hardDeleteNode is wrapped because the operation-backend-core
-    // cascade unconditionally deletes from the fulltext table — it
-    // would fail even on graphs that declare no searchable() fields.
-    async hardDeleteNode(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.hardDeleteNode(params);
-    },
+    // Every fulltext-touching method asserts the durable marker instead
+    // of lazily emitting DDL. Steady state performs zero ensure; an
+    // uninitialized database throws `StoreNotInitializedError` loudly
+    // rather than self-healing on a read/write path (#135). Shared
+    // verbatim with the tx-scoped gate via `gateFulltextMethods`.
+    ...gateFulltextMethods(
+      operations,
+      contributionMaterializer.assertInitialized,
+    ),
 
     async executeDdl(ddl: string): Promise<void> {
       await db.execute(sql.raw(ddl));
@@ -659,22 +625,14 @@ export function createPostgresBackend(
       );
     },
 
-    async ensureContribution(
-      logicalName: string,
-      graphId: string,
-    ): Promise<void> {
-      await contributionMaterializer.ensureContribution(logicalName, graphId);
-    },
-
     async ensureRuntimeContributions(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
     /**
-     * Superseded by `ensureContribution("fulltext", graphId)` /
-     * `ensureRuntimeContributions(graphId)` (#129). Retained as a thin
-     * back-compat wrapper for callers predating #129; #135 routed it
-     * through the durable-marker writer.
+     * Superseded by `ensureRuntimeContributions(graphId)` (#129).
+     * Retained as a thin back-compat wrapper for callers predating
+     * #129; #135 routed it through the durable-marker writer.
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
@@ -772,11 +730,12 @@ export function createPostgresBackend(
           },
         );
       }
+      assertAdoptedDialect<AnyPgDatabase>(externalTx, PgDatabase, "postgres");
       // The caller owns BEGIN/COMMIT/ROLLBACK via its own
       // `db.transaction(...)`. We adopt the literal `tx` client and run
       // pure DML on it — no transaction is opened or closed here, and no
       // DDL is emitted inside the caller's business transaction.
-      return bindTransactionBackend(externalTx as AnyPgDatabase);
+      return bindTransactionBackend(externalTx);
     },
 
     async close(): Promise<void> {
@@ -809,7 +768,7 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
 
 function createPostgresOperationBackend(
   options: CreatePostgresOperationBackendOptions,
-): TransactionBackend {
+): InternalOperationBackend {
   const {
     db,
     executionAdapter,
@@ -871,7 +830,7 @@ function createPostgresOperationBackend(
         },
       };
 
-  const operationBackend: TransactionBackend = {
+  const operationBackend: InternalOperationBackend = {
     ...commonBackend,
     ...executeRawMethod,
     capabilities,
@@ -1050,7 +1009,7 @@ function createPostgresOperationBackend(
 
 function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
-): TransactionBackend {
+): InternalOperationBackend {
   const txExecutionAdapter =
     options.executionAdapter ??
     createPostgresExecutionAdapter(options.db, options.adapterOptions);
