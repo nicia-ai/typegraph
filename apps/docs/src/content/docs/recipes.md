@@ -574,6 +574,84 @@ async function cascadeDelete(documentId: string): Promise<void> {
 }
 ```
 
+### Cross-Store Transactions (Drizzle + TypeGraph)
+
+When your app writes to the **same database** through both a directly-owned
+Drizzle connection (relational rows) and a TypeGraph `Store`, use
+`store.withTransaction(sqlTx)` to enlist both layers in **one** transaction.
+The caller owns the transaction boundary; TypeGraph adopts that exact
+connection, so a failure rolls back both layers — no stray relational row, no
+graph node with a dangling foreign reference.
+
+How you open the transaction depends on whether your driver is async or
+synchronous. `withTransaction` itself is driver-agnostic — it adopts whatever
+connection you hand it.
+
+**Async drivers** — node-postgres, `neon-serverless` (Pool/WebSocket), libsql.
+Use Drizzle's `db.transaction(async …)`:
+
+```typescript
+await db.transaction(async (sqlTx) => {
+  const [connector] = await sqlTx
+    .insert(connectors)
+    .values({ name: "github" })
+    .returning({ id: connectors.id });
+
+  const txStore = store.withTransaction(sqlTx);
+  await txStore.nodes.ArtifactSource.create({
+    connectorId: connector.id,
+    label: "primary",
+  });
+}); // one COMMIT / ROLLBACK across both layers
+```
+
+**Synchronous `better-sqlite3`.** better-sqlite3 is a synchronous driver:
+Drizzle's `db.transaction()` rejects an `async` callback (`Transaction
+function cannot return a promise`), and the async continuation would then run
+*outside* the rolled-back transaction. Open the transaction with explicit
+`BEGIN`/`COMMIT`/`ROLLBACK` on the single connection instead, and pass that
+connection to `withTransaction`:
+
+```typescript
+db.run(sql`BEGIN`);
+try {
+  const [connector] = db
+    .insert(connectors)
+    .values({ name: "github" })
+    .returning({ id: connectors.id })
+    .all();
+
+  const txStore = store.withTransaction(db);
+  await txStore.nodes.ArtifactSource.create({
+    connectorId: connector.id,
+    label: "primary",
+  });
+  db.run(sql`COMMIT`);
+} catch (error) {
+  db.run(sql`ROLLBACK`);
+  throw error;
+}
+```
+
+This is safe because better-sqlite3 is a single, single-threaded connection:
+the `await` between statements only yields the microtask queue, and nothing
+else touches the connection between `BEGIN` and `COMMIT`/`ROLLBACK`. Do not
+interleave other async work that writes to the same connection inside the
+`try`.
+
+The adopted context exposes the `{ nodes, edges }` surface (same as
+`store.transaction`) and reuses the parent store's resolved schema — it runs
+no migration and emits no DDL inside your transaction. Boot the parent store
+once at startup with `createStoreWithSchema(graph, backend)` so fulltext-backed
+writes find their durable materialization marker; an uninitialized store
+throws `StoreNotInitializedError` instead of migrating mid-transaction.
+
+`withTransaction` throws `ConfigurationError` on backends that cannot provide
+real rollback (`backend.capabilities.transactions === false`:
+`drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`) —
+it never silently degrades to a non-atomic fallback, because the relational
+write would still commit.
+
 ## Enforcing Unique Constraints
 
 Prevent duplicate nodes or relationships.

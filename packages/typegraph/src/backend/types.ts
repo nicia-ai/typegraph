@@ -14,6 +14,10 @@ import {
 import { type SqlTableNames } from "../query/compiler/schema";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { type SerializedSchema } from "../schema/types";
+import {
+  type AnyPgDatabase,
+  type AnySqliteDatabase,
+} from "./drizzle/execution";
 
 // ============================================================
 // Vector Search Types
@@ -655,6 +659,22 @@ export type TransactionOptions = Readonly<{
     | "serializable";
 }>;
 
+/**
+ * A caller-owned, already-open Drizzle transaction handle that a
+ * TypeGraph store can adopt so both layers commit/rollback together.
+ *
+ * The literal client the caller's transaction runs on — a `PgDatabase`
+ * transaction (node-postgres / `neon-serverless` Pool) or a
+ * `BaseSQLiteDatabase` connection. Async drivers obtain it from
+ * `db.transaction(async (tx) => …)`; synchronous `better-sqlite3` (whose
+ * driver rejects an `async` transaction callback) passes the connection
+ * itself under an explicit `BEGIN`/`COMMIT`/`ROLLBACK`. Passing it to
+ * {@link GraphBackend.adoptTransaction} threads that *literal* client
+ * through TypeGraph's SQL, so graph writes and the caller's own
+ * relational writes share one Postgres/SQLite transaction (#134).
+ */
+export type AdoptedTransaction = AnyPgDatabase | AnySqliteDatabase;
+
 // ============================================================
 // Backend Interface
 // ============================================================
@@ -675,6 +695,7 @@ export type TransactionOptions = Readonly<{
 export type TransactionBackend = Omit<
   GraphBackend,
   | "transaction"
+  | "adoptTransaction"
   | "close"
   | "refreshStatistics"
   | "commitSchemaVersion"
@@ -1119,6 +1140,36 @@ export type GraphBackend = Readonly<{
     fn: (tx: TransactionBackend) => Promise<T>,
     options?: TransactionOptions,
   ) => Promise<T>;
+
+  /**
+   * Adopt a caller-owned, already-open transaction (#134).
+   *
+   * Returns a transaction-scoped backend bound to the *exact*
+   * `externalTx` client, reusing this backend's already-resolved
+   * schema/strategy config — no `createStoreWithSchema` / `evolve` /
+   * `migrateSchema`, and **no DDL inside the caller's business
+   * transaction**. The caller owns `BEGIN`/`COMMIT`/`ROLLBACK`; this
+   * method neither opens nor closes a transaction. Async drivers
+   * (node-postgres, `neon-serverless` Pool, libsql) wrap with
+   * `db.transaction(async …)`; synchronous `better-sqlite3` must instead
+   * issue explicit `BEGIN`/`COMMIT`/`ROLLBACK` (its driver rejects an
+   * `async` transaction callback).
+   *
+   * Optional and presence-detected like the other capability-scoped
+   * members: only the Drizzle Postgres/SQLite backends provide it.
+   * Implementations MUST throw (not silently degrade) when
+   * `capabilities.transactions` is `false` — a non-atomic fallback is
+   * safe for graph-only writes but dangerous for cross-store flows,
+   * where the caller's relational write *would* still commit.
+   *
+   * Fulltext stays safe by construction: the returned backend's
+   * fulltext methods assert the durable materialization marker (a
+   * cached SELECT, never DDL) at point of use and throw
+   * `StoreNotInitializedError` on a missing/stale/failed marker rather
+   * than migrating mid-transaction. Prefer booting the parent store via
+   * `createStoreWithSchema` so that assertion is a warm-cache no-op.
+   */
+  adoptTransaction?: (externalTx: AdoptedTransaction) => TransactionBackend;
 
   // === Lifecycle ===
   close: () => Promise<void>;

@@ -59,3 +59,4 @@ yarn-error.log
 # Stryker mutation testing
 .stryker-cache/
 reports/
+.gstack/

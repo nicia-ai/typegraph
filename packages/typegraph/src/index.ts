@@ -105,6 +105,7 @@ export type {
 } from "./backend/table-contribution";
 export { isDrizzleContribution } from "./backend/table-contribution";
 export type {
+  AdoptedTransaction,
   BackendCapabilities,
   CommitSchemaVersionExpected,
   CommitSchemaVersionParams,

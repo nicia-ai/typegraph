@@ -43,6 +43,7 @@ import {
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  type AdoptedTransaction,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
   type ContributionMaterializationIdentity,
@@ -468,6 +469,22 @@ export function createPostgresBackend(
     recordMarker: recordContributionMaterializationRow,
   });
 
+  // Shared by `transaction()` (TypeGraph opens the tx) and
+  // `adoptTransaction()` (#134 — the caller already opened it): bind a
+  // tx-scoped backend to the *literal* `tx` client and gate fulltext on
+  // the durable marker (a cached SELECT, never DDL).
+  function bindTransactionBackend(tx: AnyPgDatabase): TransactionBackend {
+    const txBackend = createTransactionBackend({
+      db: tx,
+      adapterOptions,
+      operationStrategy,
+      tableNames,
+      capabilities,
+      fulltextStrategy,
+    });
+    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+  }
+
   const backend: GraphBackend = {
     ...operations,
 
@@ -729,17 +746,37 @@ export function createPostgresBackend(
           }
         : undefined;
 
-      return db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend({
-          db: tx,
-          adapterOptions,
-          operationStrategy,
-          tableNames,
-          capabilities,
-          fulltextStrategy,
-        });
-        return fn(gateFulltext(txBackend, contributionMaterializer.assertInitialized));
-      }, txConfig);
+      return db.transaction(
+        async (tx) => fn(bindTransactionBackend(tx)),
+        txConfig,
+      );
+    },
+
+    adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
+      // #134: cross-store atomicity is unsafe without real rollback —
+      // the caller's relational write on `externalTx` *would* still
+      // commit even though the graph write could not be undone. Refuse
+      // loudly rather than silently degrade.
+      if (!capabilities.transactions) {
+        throw new ConfigurationError(
+          "Cross-store atomicity is unavailable on this Postgres backend: " +
+            "its driver does not support transactions (drizzle-orm/neon-http, " +
+            "Cloudflare D1). Adopting an external transaction here would let " +
+            "the caller's relational write commit with no way to roll back " +
+            "the graph write. Use a node-postgres or neon-serverless " +
+            "(Pool/WebSocket) connection for cross-store transactions.",
+          {
+            backend: "postgres",
+            capability: "transactions",
+            supportsTransactions: false,
+          },
+        );
+      }
+      // The caller owns BEGIN/COMMIT/ROLLBACK via its own
+      // `db.transaction(...)`. We adopt the literal `tx` client and run
+      // pure DML on it — no transaction is opened or closed here, and no
+      // DDL is emitted inside the caller's business transaction.
+      return bindTransactionBackend(externalTx as AnyPgDatabase);
     },
 
     async close(): Promise<void> {

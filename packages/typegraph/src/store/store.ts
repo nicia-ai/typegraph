@@ -11,6 +11,7 @@
 import type { z } from "zod";
 
 import {
+  type AdoptedTransaction,
   type GraphBackend,
   runOptionallyInTransaction,
   type SchemaVersionRow,
@@ -851,34 +852,112 @@ export class Store<G extends GraphDef> {
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
-    return this.#backend.transaction(async (txBackend) => {
-      const txNodeOperations: NodeOperations = {
-        ...this.#nodeOperations,
-        createQuery: () => this.#createQueryForBackend(txBackend),
-      };
-      const txEdgeOperations: EdgeOperations = {
-        ...this.#edgeOperations,
-        createQuery: () => this.#createQueryForBackend(txBackend),
-      };
+    return this.#backend.transaction(async (txBackend) =>
+      fn(this.#buildTransactionContext(txBackend)),
+    );
+  }
 
-      const nodes = createNodeCollectionsProxy(
-        this.#graph,
-        this.graphId,
-        this.#registry,
-        txBackend,
-        txNodeOperations,
+  /**
+   * Adopts a caller-owned, already-open Drizzle transaction so the graph
+   * store and the caller's relational writes commit or roll back as one
+   * Postgres/SQLite transaction (#134).
+   *
+   * Use this when the **relational layer owns the transaction**: the
+   * caller has opened a transaction and needs TypeGraph writes enlisted
+   * on the *same* connection. Unlike {@link transaction}, this opens no
+   * transaction — the caller's transaction is the single commit/rollback
+   * boundary.
+   *
+   * `withTransaction` is driver-agnostic; how the caller opens the
+   * transaction is not. **Async drivers** (node-postgres,
+   * `neon-serverless` Pool, libsql) use `db.transaction(async …)`.
+   * **Synchronous `better-sqlite3`** cannot — its driver rejects an
+   * `async` transaction callback (`Transaction function cannot return a
+   * promise`) and the async continuation would run outside the
+   * rolled-back transaction — so the caller opens the transaction with
+   * explicit `BEGIN`/`COMMIT`/`ROLLBACK` on the single connection
+   * instead. See the "Cross-Store Transactions" recipe for both shapes.
+   *
+   * The returned context reuses this store's already-resolved
+   * schema/registry: it runs **no** schema bootstrap, `evolve`, or
+   * migration, and emits **no DDL** inside the caller's transaction.
+   * Fulltext operations assert the durable materialization marker (a
+   * cached SELECT) and throw {@link StoreNotInitializedError} on a
+   * missing/stale/failed marker rather than migrating mid-transaction —
+   * so boot the parent store via `createStoreWithSchema` once at
+   * startup.
+   *
+   * @example
+   * ```typescript
+   * // Async driver (Postgres / libsql):
+   * await db.transaction(async (sqlTx) => {
+   *   const connector = await createConnectorRow(sqlTx, input); // Drizzle
+   *   const txStore = store.withTransaction(sqlTx);
+   *   await txStore.nodes.ArtifactSource.create({              // TypeGraph
+   *     connectorId: connector.id,
+   *   });
+   * }); // one COMMIT / ROLLBACK across both layers
+   * ```
+   *
+   * @throws {ConfigurationError} when the backend cannot adopt an
+   *   external transaction — either it is not a Drizzle Postgres/SQLite
+   *   backend, or `backend.capabilities.transactions` is `false`
+   *   (`drizzle-orm/neon-http`, Cloudflare D1, SQLite
+   *   `transactionMode: "none"`). A non-atomic fallback is deliberately
+   *   not offered here: the caller's relational write *would* still
+   *   commit, defeating the purpose of cross-store atomicity.
+   */
+  withTransaction(externalTx: AdoptedTransaction): TransactionContext<G> {
+    const adopt = this.#backend.adoptTransaction;
+    if (!adopt) {
+      throw new ConfigurationError(
+        "This backend cannot adopt an external transaction for cross-store " +
+          "atomicity. adoptTransaction is provided only by the Drizzle " +
+          "Postgres/SQLite backends with transaction support. Check " +
+          "backend.capabilities.transactions, or run the relational and " +
+          "graph writes as separate transactions with manual compensation.",
+        { capability: "adoptTransaction" },
       );
+    }
+    return this.#buildTransactionContext(adopt(externalTx));
+  }
 
-      const edges = createEdgeCollectionsProxy(
-        this.#graph,
-        this.graphId,
-        this.#registry,
-        txBackend,
-        txEdgeOperations,
-      );
+  /**
+   * Builds the `{ nodes, edges }` projection bound to a transaction-
+   * scoped backend. Shared verbatim by {@link transaction} (TypeGraph
+   * opens the tx) and {@link withTransaction} (#134 — the caller opened
+   * it) so both surfaces resolve collections, query factories, and the
+   * reused graph/registry identically.
+   */
+  #buildTransactionContext(
+    txBackend: TransactionBackend,
+  ): TransactionContext<G> {
+    const txNodeOperations: NodeOperations = {
+      ...this.#nodeOperations,
+      createQuery: () => this.#createQueryForBackend(txBackend),
+    };
+    const txEdgeOperations: EdgeOperations = {
+      ...this.#edgeOperations,
+      createQuery: () => this.#createQueryForBackend(txBackend),
+    };
 
-      return fn({ nodes, edges });
-    });
+    const nodes = createNodeCollectionsProxy(
+      this.#graph,
+      this.graphId,
+      this.#registry,
+      txBackend,
+      txNodeOperations,
+    );
+
+    const edges = createEdgeCollectionsProxy(
+      this.#graph,
+      this.graphId,
+      this.#registry,
+      txBackend,
+      txEdgeOperations,
+    );
+
+    return { nodes, edges };
   }
 
   // === Graph Lifecycle ===

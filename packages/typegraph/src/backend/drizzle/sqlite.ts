@@ -37,6 +37,7 @@ import {
   type FulltextStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  type AdoptedTransaction,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
   type ContributionMaterializationIdentity,
@@ -755,6 +756,25 @@ export function createSqliteBackend(
     recordMarker: recordContributionMaterializationRow,
   });
 
+  // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
+  // the tx) and `adoptTransaction()` (#134 — the caller already opened
+  // it): bind a tx-scoped backend to the *literal* `tx` client and gate
+  // fulltext on the durable marker (a cached SELECT, never DDL).
+  function bindTransactionBackend(
+    tx: AnySqliteDatabase,
+  ): TransactionBackend {
+    const txBackend = createTransactionBackend({
+      capabilities,
+      db: tx,
+      operationStrategy,
+      profileHints: { isSync },
+      tableNames,
+      fulltextStrategy,
+      hasVectorEmbeddings,
+    });
+    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+  }
+
   const backend: GraphBackend = {
     ...operations,
 
@@ -1045,21 +1065,40 @@ export function createSqliteBackend(
 
       // transactionMode === "drizzle"
       return runWithSerializedQueue(serializedQueue, async () =>
-        db.transaction(async (tx) => {
-          const txBackend = createTransactionBackend({
-            capabilities,
-            db: tx,
-            operationStrategy,
-            profileHints: { isSync },
-            tableNames,
-            fulltextStrategy,
-            hasVectorEmbeddings,
-          });
-          return fn(
-            gateFulltext(txBackend, contributionMaterializer.assertInitialized),
-          );
-        }) as Promise<T>,
+        db.transaction(
+          async (tx) => fn(bindTransactionBackend(tx)),
+        ) as Promise<T>,
       );
+    },
+
+    adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
+      // #134: parity with Postgres. Cross-store atomicity needs real
+      // rollback; on a "none" driver the caller's relational write
+      // would commit with no way to undo the graph write. Refuse
+      // loudly rather than silently degrade.
+      if (transactionMode === "none") {
+        throw new ConfigurationError(
+          "Cross-store atomicity is unavailable on this SQLite backend: " +
+            "transactions are disabled (transactionMode: 'none'). Adopting " +
+            "an external transaction here would let the caller's relational " +
+            "write commit with no way to roll back the graph write. " +
+            "Configure a driver that supports transactions (better-sqlite3, " +
+            "libsql, bun:sqlite).",
+          {
+            backend: "sqlite",
+            capability: "transactions",
+            supportsTransactions: false,
+          },
+        );
+      }
+      // The caller owns the transaction *and* the connection's
+      // serialization: a sync better-sqlite3 driver runs the adopted
+      // statements on the caller's stack, so the backend's own
+      // `serializedQueue` is deliberately not applied here — wrapping a
+      // caller-driven tx in our queue could deadlock against the
+      // caller's outer `db.transaction(...)`. We bind the literal `tx`
+      // and run pure DML; no transaction is opened or closed here.
+      return bindTransactionBackend(externalTx as AnySqliteDatabase);
     },
 
     close(): Promise<void> {
