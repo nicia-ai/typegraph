@@ -96,7 +96,9 @@ describe("typed Drizzle fulltext table (tsvectorStrategy)", () => {
     // This sentinel just confirms the strategy still emits the table
     // shape we modeled in Drizzle — if either side diverges, this
     // test catches it before a consumer hits drizzle-kit drift.
-    const strategyDdl = tsvectorStrategy.generateDdl(tables.fulltextTableName);
+    const strategyDdl = tsvectorStrategy
+      .ownedTables(tables.fulltextTableName)
+      .flatMap((contribution) => contribution.createDdl);
     const ddlText = strategyDdl.join("\n");
 
     expect(ddlText).toContain(`"${tables.fulltextTableName}"`);

@@ -241,9 +241,9 @@ describe.runIf(process.env.POSTGRES_URL)(
       // GENERATED clause), so the strategy DDL should be the only
       // source of fulltext CREATE TABLE.
       const allDdl = generatePostgresDDL(defaultTables, tsvectorStrategy);
-      const strategyDdl = tsvectorStrategy.generateDdl(
-        defaultTables.fulltextTableName,
-      );
+      const strategyDdl = tsvectorStrategy
+        .ownedTables(defaultTables.fulltextTableName)
+        .flatMap((contribution) => contribution.createDdl);
       const tail = allDdl.slice(allDdl.length - strategyDdl.length);
       expect(tail).toEqual(strategyDdl);
     });

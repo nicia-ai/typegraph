@@ -13,6 +13,10 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { quotedTableName } from "../../backend/drizzle/operations/shared";
 import {
+  FULLTEXT_CONTRIBUTION_NAME,
+  type StrategyTableContribution,
+} from "../../backend/table-contribution";
+import {
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
   type FulltextBatchRow,
@@ -135,11 +139,19 @@ export interface FulltextStrategy {
   ): SQL;
 
   /**
-   * DDL statements to create the backing table and any supporting
-   * indexes. Idempotent (`CREATE ... IF NOT EXISTS`). Called once from
-   * `bootstrapTables()` on a fresh database.
+   * The tables this strategy owns, as Drizzle-free *declarations*
+   * (`logicalName`, `owner`, resolved `tableName`, idempotent
+   * `createDdl` for the table **and its supporting indexes**, and the
+   * `drizzleModel` telling the schema factory how to source it). The
+   * factory resolves these into authoritative `TableContribution`s,
+   * attaching the exact Drizzle table object for `drizzle-*` models —
+   * a strategy never constructs a Drizzle table itself.
+   *
+   * Replaces the former `generateDdl(tableName)`: DDL is now one field
+   * of a contribution rather than the strategy's whole storage
+   * surface. (Public API change — see #129.)
    */
-  generateDdl(tableName: string): readonly string[];
+  ownedTables(primaryTableName: string): readonly StrategyTableContribution[];
 
   /**
    * Emits the statements that upsert a single fulltext row. Returns one
@@ -311,17 +323,17 @@ export const tsvectorStrategy: FulltextStrategy = {
     return sql`ts_headline(${langExpr}, "content", ${q}, 'StartSel=<mark>,StopSel=</mark>,MaxFragments=1,MinWords=5,MaxWords=30,ShortWord=3')`;
   },
 
-  generateDdl(tableName) {
-    const name = quoteIdentifier(tableName);
-    const gin = quoteIdentifier(`${tableName}_tsv_idx`);
-    const kind = quoteIdentifier(`${tableName}_kind_idx`);
+  ownedTables(primaryTableName) {
+    const name = quoteIdentifier(primaryTableName);
+    const gin = quoteIdentifier(`${primaryTableName}_tsv_idx`);
+    const kind = quoteIdentifier(`${primaryTableName}_kind_idx`);
     // `language` is `regconfig` so `to_tsvector("language", "content")`
     // is an immutable expression — Postgres can then compute `tsv` as a
     // GENERATED STORED column and own the `content → tsv` invariant.
     // (The text→regconfig cast happens once at INSERT time against the
     // bound parameter, which is fine because it's not inside the
     // generated expression.)
-    return [
+    const createDdl = [
       `CREATE TABLE IF NOT EXISTS ${name} (
   "graph_id" TEXT NOT NULL,
   "node_kind" TEXT NOT NULL,
@@ -335,6 +347,20 @@ export const tsvectorStrategy: FulltextStrategy = {
 );`,
       `CREATE INDEX IF NOT EXISTS ${gin} ON ${name} USING GIN ("tsv");`,
       `CREATE INDEX IF NOT EXISTS ${kind} ON ${name} ("graph_id", "node_kind");`,
+    ];
+    // Drizzle-modelable on Postgres: the schema factory attaches the
+    // exact `tables.fulltext` pgTable object (no second object for the
+    // same physical table). `runtimeEnsure` because drizzle-kit-managed
+    // setups create every base table except this strategy-owned one.
+    return [
+      {
+        logicalName: FULLTEXT_CONTRIBUTION_NAME,
+        owner: "tsvector",
+        tableName: primaryTableName,
+        createDdl,
+        runtimeEnsure: true,
+        drizzleModel: "drizzle-pg",
+      },
     ];
   },
 
@@ -524,10 +550,19 @@ export const fts5Strategy: FulltextStrategy = {
     return sql`snippet(${quotedTableName(tableName)}, -1, '<mark>', '</mark>', '…', 20)`;
   },
 
-  generateDdl(tableName) {
-    const name = quoteIdentifier(tableName);
+  ownedTables(primaryTableName) {
+    const name = quoteIdentifier(primaryTableName);
+    // FTS5 virtual tables cannot be modeled as a Drizzle table, so this
+    // contribution is raw-ddl: emitted verbatim and invisible to
+    // drizzle-kit. `runtimeEnsure` because no drizzle-kit-managed setup
+    // can create it.
     return [
-      `CREATE VIRTUAL TABLE IF NOT EXISTS ${name} USING fts5(
+      {
+        logicalName: FULLTEXT_CONTRIBUTION_NAME,
+        owner: "fts5",
+        tableName: primaryTableName,
+        createDdl: [
+          `CREATE VIRTUAL TABLE IF NOT EXISTS ${name} USING fts5(
   graph_id UNINDEXED,
   node_kind UNINDEXED,
   node_id UNINDEXED,
@@ -536,6 +571,10 @@ export const fts5Strategy: FulltextStrategy = {
   content,
   tokenize='porter unicode61 remove_diacritics 2'
 );`,
+        ],
+        runtimeEnsure: true,
+        drizzleModel: "raw-ddl",
+      },
     ];
   },
 

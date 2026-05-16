@@ -106,12 +106,15 @@ function isMissingTableError(error: unknown): boolean {
 
 /**
  * Reads the active schema row, bootstrapping the base tables on the
- * first call against an empty database. Also runs
- * `ensureFulltextTable` on the success path: drizzle-kit-managed
- * setups create every base table EXCEPT the strategy-owned fulltext
- * table, and the missing-table-error fallback below doesn't trigger
- * once `schema_versions` exists. The focused ensure closes that gap
- * before any `searchable()` write runs.
+ * first call against an empty database. Also runs the focused
+ * runtime-contribution ensure on the success path: drizzle-kit-managed
+ * setups create every base table EXCEPT strategy-owned runtime tables
+ * (fulltext), and the missing-table-error fallback below doesn't
+ * trigger once `schema_versions` exists. `ensureRuntimeContributions`
+ * closes that gap before any `searchable()` write runs — scoped to
+ * `runtimeEnsure` contributions only, so this stays a focused ensure
+ * rather than broad startup DDL (#129). Falls back to the deprecated
+ * `ensureFulltextTable` for backends predating #129.
  */
 export async function loadActiveSchemaWithBootstrap(
   backend: GraphBackend,
@@ -119,7 +122,9 @@ export async function loadActiveSchemaWithBootstrap(
 ): Promise<SchemaVersionRow | undefined> {
   try {
     const row = await backend.getActiveSchema(graphId);
-    await backend.ensureFulltextTable?.();
+    await (backend.ensureRuntimeContributions ?
+      backend.ensureRuntimeContributions()
+    : backend.ensureFulltextTable?.());
     return row;
   } catch (error) {
     if (backend.bootstrapTables && isMissingTableError(error)) {

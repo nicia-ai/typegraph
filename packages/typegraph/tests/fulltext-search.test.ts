@@ -706,7 +706,7 @@ describe("custom FulltextStrategy plumbing", () => {
     const Database = betterSqlite3.default;
 
     const calls = {
-      generateDdl: 0,
+      ownedTables: 0,
       buildUpsert: 0,
       buildBatchUpsert: 0,
       buildDelete: 0,
@@ -717,9 +717,9 @@ describe("custom FulltextStrategy plumbing", () => {
     };
     const spyStrategy = {
       ...fts5Strategy,
-      generateDdl: (tableName: string) => {
-        calls.generateDdl += 1;
-        return fts5Strategy.generateDdl(tableName);
+      ownedTables: (tableName: string) => {
+        calls.ownedTables += 1;
+        return fts5Strategy.ownedTables(tableName);
       },
       buildUpsert: (...args: Parameters<typeof fts5Strategy.buildUpsert>) => {
         calls.buildUpsert += 1;
@@ -767,8 +767,8 @@ describe("custom FulltextStrategy plumbing", () => {
     await backend.bootstrapTables?.();
     const store = createStore(HybridGraph, backend);
 
-    // generateDdl called during bootstrap.
-    expect(calls.generateDdl).toBeGreaterThanOrEqual(1);
+    // ownedTables consulted during bootstrap (DDL derives from it).
+    expect(calls.ownedTables).toBeGreaterThanOrEqual(1);
 
     const node = await store.nodes.HybridDoc.create({
       title: "strategy plumbing",

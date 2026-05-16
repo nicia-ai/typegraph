@@ -626,20 +626,35 @@ export const pgTrgmStrategy: FulltextStrategy = {
     return sql`NULL`;
   },
 
-  generateDdl(table) {
+  // Declares the table(s) this strategy owns. The schema factory
+  // resolves these into TableContributions. `drizzleModel: "raw-ddl"`
+  // because pg_trgm brings its own table (not the typed Drizzle
+  // `tables.fulltext`), so it is emitted verbatim and is invisible to
+  // drizzle-kit. `runtimeEnsure: true` because no drizzle-kit-managed
+  // setup can create it.
+  ownedTables(primaryTableName) {
     return [
-      `CREATE EXTENSION IF NOT EXISTS pg_trgm;`,
-      `CREATE TABLE IF NOT EXISTS "${table}" (
-         "graph_id" TEXT NOT NULL,
-         "node_kind" TEXT NOT NULL,
-         "node_id" TEXT NOT NULL,
-         "content" TEXT NOT NULL,
-         "language" TEXT NOT NULL,
-         "updated_at" TIMESTAMPTZ NOT NULL,
-         PRIMARY KEY ("graph_id", "node_kind", "node_id")
-       );`,
-      `CREATE INDEX IF NOT EXISTS "${table}_trgm_idx"
-         ON "${table}" USING GIN ("content" gin_trgm_ops);`,
+      {
+        logicalName: "fulltext",
+        owner: "pg_trgm",
+        tableName: primaryTableName,
+        createDdl: [
+          `CREATE EXTENSION IF NOT EXISTS pg_trgm;`,
+          `CREATE TABLE IF NOT EXISTS "${primaryTableName}" (
+             "graph_id" TEXT NOT NULL,
+             "node_kind" TEXT NOT NULL,
+             "node_id" TEXT NOT NULL,
+             "content" TEXT NOT NULL,
+             "language" TEXT NOT NULL,
+             "updated_at" TIMESTAMPTZ NOT NULL,
+             PRIMARY KEY ("graph_id", "node_kind", "node_id")
+           );`,
+          `CREATE INDEX IF NOT EXISTS "${primaryTableName}_trgm_idx"
+             ON "${primaryTableName}" USING GIN ("content" gin_trgm_ops);`,
+        ],
+        runtimeEnsure: true,
+        drizzleModel: "raw-ddl",
+      },
     ];
   },
 

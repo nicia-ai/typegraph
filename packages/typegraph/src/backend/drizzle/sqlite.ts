@@ -69,7 +69,13 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
-import { generateSqliteCreateTableSQL, generateSqliteDDL } from "./ddl";
+import { FULLTEXT_CONTRIBUTION_NAME } from "../table-contribution";
+import {
+  generateSqliteCreateTableSQL,
+  generateSqliteDDL,
+  runtimeStrategyContributions,
+  strategyContributionDdl,
+} from "./ddl";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -680,13 +686,17 @@ export function createSqliteBackend(
   // guard every method that touches the fulltext table — fulltext
   // writes can fire from any code path (sync `createStore`, hard-
   // delete cascade, batched index sync), so the bootstrap-load
-  // probe alone doesn't cover all surfaces.
+  // probe alone doesn't cover all surfaces. (#135 replaces this
+  // in-memory latch with a durable materialization marker.)
   let fulltextEnsured = false;
   async function ensureFulltextDdl(): Promise<void> {
     if (fulltextEnsured) return;
-    for (const statement of fulltextStrategy.generateDdl(
+    const statements = strategyContributionDdl(
+      fulltextStrategy,
       tables.fulltextTableName,
-    )) {
+      FULLTEXT_CONTRIBUTION_NAME,
+    );
+    for (const statement of statements) {
       await db.run(sql.raw(statement));
     }
     fulltextEnsured = true;
@@ -839,6 +849,44 @@ export function createSqliteBackend(
       );
     },
 
+    async ensureContribution(logicalName: string): Promise<void> {
+      if (logicalName === FULLTEXT_CONTRIBUTION_NAME) {
+        await ensureFulltextDdl();
+        return;
+      }
+      const statements = strategyContributionDdl(
+        fulltextStrategy,
+        tables.fulltextTableName,
+        logicalName,
+      );
+      for (const statement of statements) {
+        await db.run(sql.raw(statement));
+      }
+    },
+
+    async ensureRuntimeContributions(): Promise<void> {
+      // Runtime contributions are strategy-owned by invariant (base
+      // tables are never `runtimeEnsure`), so this asks the strategy
+      // directly — no base-table walk on the per-boot path.
+      for (const contribution of runtimeStrategyContributions(
+        fulltextStrategy,
+        tables.fulltextTableName,
+      )) {
+        if (contribution.logicalName === FULLTEXT_CONTRIBUTION_NAME) {
+          await ensureFulltextDdl();
+          continue;
+        }
+        for (const statement of contribution.createDdl) {
+          await db.run(sql.raw(statement));
+        }
+      }
+    },
+
+    /**
+     * Superseded by `ensureContribution("fulltext")` /
+     * `ensureRuntimeContributions()` (#129). Retained as a thin
+     * back-compat wrapper; #135 removes the remaining hot-path callers.
+     */
     async ensureFulltextTable(): Promise<void> {
       await ensureFulltextDdl();
     },

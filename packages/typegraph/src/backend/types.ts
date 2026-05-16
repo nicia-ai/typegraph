@@ -872,15 +872,44 @@ export type GraphBackend = Readonly<{
    */
   ensureReconciliationMarkersTable?: () => Promise<void>;
 
-  // === Fulltext Storage ===
+  // === Table Contributions (#129) ===
+
+  /**
+   * Materializes a single **strategy-declared** contribution by
+   * `logicalName` (e.g. `"fulltext"`) — running its full idempotent
+   * `createDdl` (table + supporting indexes), so a partial state
+   * (table present, index missing) self-heals. Concurrency-safe under
+   * replica startup.
+   *
+   * Scope is intentionally the strategy-owned slots only (the set
+   * `FulltextStrategy.ownedTables` declares); it is **not** a generic
+   * "materialize any table" entrypoint. Base/core tables come from
+   * drizzle-kit or `bootstrapTables`, never here. Throws on a
+   * `logicalName` no active strategy declares, rather than silently
+   * doing nothing.
+   */
+  ensureContribution?: (logicalName: string) => Promise<void>;
+
+  /**
+   * Materializes every contribution flagged `runtimeEnsure` — the
+   * strategy-owned runtime tables (fulltext today) that drizzle-kit-
+   * managed setups don't create. Called once after a successful schema
+   * load. Deliberately scoped: base/drizzle-visible tables are
+   * `runtimeEnsure: false`, so this does not regress startup into
+   * broad DDL/probing across every table.
+   */
+  ensureRuntimeContributions?: () => Promise<void>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
-   * owns — the strategy owns this DDL because shapes diverge across
-   * stacks (`tsvector` + GIN, FTS5 virtual table, pg_trgm, …) and
-   * the SQLite case can't be Drizzle-modeled at all. Same focused-
-   * bootstrap rationale as the other `ensure*Table` methods:
-   * idempotent and concurrency-safe under replica startup.
+   * owns. Same focused-bootstrap rationale as the other `ensure*Table`
+   * methods: idempotent and concurrency-safe under replica startup.
+   *
+   * Superseded by `ensureContribution("fulltext")` /
+   * `ensureRuntimeContributions()` (#129); retained as a thin
+   * back-compat wrapper for backends/callers predating #129. Not
+   * machine-`@deprecated` because the manager still calls it as the
+   * pre-#129 fallback. #135 removes the remaining hot-path callers.
    */
   ensureFulltextTable?: () => Promise<void>;
 

@@ -20,6 +20,11 @@ import {
   type FulltextStrategy,
   tsvectorStrategy,
 } from "../../query/dialect";
+import {
+  BASE_CONTRIBUTION_OWNER,
+  type StrategyTableContribution,
+  type TableContribution,
+} from "../table-contribution";
 import { type PostgresTables, tables as postgresTables } from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
 
@@ -248,29 +253,132 @@ function isSqliteTable(
 }
 
 /**
+ * Resolves a strategy's Drizzle-free table *declarations* into
+ * authoritative {@link TableContribution}s, attaching the exact
+ * factory-built Drizzle table object for `drizzle-*` models. A strategy
+ * never constructs a Drizzle table itself, so there is never a second
+ * object for the same physical table (#129).
+ */
+function resolveStrategyContribution(
+  declared: StrategyTableContribution,
+  drizzleTable?: TableContribution["source"],
+): TableContribution {
+  const base = {
+    logicalName: declared.logicalName,
+    owner: declared.owner,
+    tableName: declared.tableName,
+    createDdl: declared.createDdl,
+    runtimeEnsure: declared.runtimeEnsure,
+  };
+  if (declared.drizzleModel === "raw-ddl") {
+    return { ...base, source: { kind: "raw-ddl" } };
+  }
+  if (drizzleTable?.kind !== declared.drizzleModel) {
+    throw new Error(
+      `Strategy declared drizzleModel "${declared.drizzleModel}" for ` +
+        `contribution "${declared.logicalName}" but the schema factory ` +
+        `did not supply a matching Drizzle table object.`,
+    );
+  }
+  return { ...base, source: drizzleTable };
+}
+
+/**
+ * The idempotent DDL a strategy declares for one logical slot (table +
+ * supporting indexes). O(1) in the number of base tables: it asks the
+ * strategy directly and never walks or regenerates base-table DDL —
+ * this is what keeps the latched fulltext ensure and the per-boot
+ * runtime ensure off the base-table DDL-generation path.
+ *
+ * Throws when the strategy declares no contribution under
+ * `logicalName` (caller typo / strategy↔backend disagreement) rather
+ * than silently emitting nothing.
+ */
+export function strategyContributionDdl(
+  fulltextStrategy: FulltextStrategy,
+  fulltextTableName: string,
+  logicalName: string,
+): readonly string[] {
+  const declared = fulltextStrategy
+    .ownedTables(fulltextTableName)
+    .find((contribution) => contribution.logicalName === logicalName);
+  if (declared === undefined) {
+    throw new Error(
+      `No strategy table contribution named "${logicalName}" ` +
+        `(strategy "${fulltextStrategy.name}").`,
+    );
+  }
+  return declared.createDdl;
+}
+
+/**
+ * Strategy-declared contributions flagged `runtimeEnsure`. Per the
+ * `runtimeEnsure` invariant only strategy contributions can be runtime
+ * (base tables never are), so this is the complete runtime set without
+ * walking base tables.
+ */
+export function runtimeStrategyContributions(
+  fulltextStrategy: FulltextStrategy,
+  fulltextTableName: string,
+): readonly StrategyTableContribution[] {
+  return fulltextStrategy
+    .ownedTables(fulltextTableName)
+    .filter((contribution) => contribution.runtimeEnsure);
+}
+
+/**
+ * The authoritative set of tables the SQLite backend owns: every
+ * base/status Drizzle table plus the resolved fulltext-strategy
+ * contribution(s). Single source of truth for DDL generation, the
+ * bootstrap ensure, and drizzle-kit visibility (#129).
+ */
+export function sqliteContributions(
+  tables: SqliteTables = sqliteTables,
+  fulltextStrategy: FulltextStrategy = fts5Strategy,
+): readonly TableContribution[] {
+  const contributions: TableContribution[] = [];
+  for (const [key, table] of Object.entries(tables)) {
+    if (!isSqliteTable(table)) continue;
+    // Stable factory key (`nodes`, `edges`, …) is the logicalName so
+    // the #135 materialization identity survives custom table-name
+    // overrides; the resolved SQL name is only the physical tableName.
+    contributions.push({
+      logicalName: key,
+      owner: BASE_CONTRIBUTION_OWNER,
+      tableName: getSqliteTableConfig(table).name,
+      createDdl: [
+        generateSqliteCreateTableSQL(table),
+        ...generateSqliteCreateIndexSQL(table),
+      ],
+      runtimeEnsure: false,
+      source: { kind: "drizzle-sqlite", table },
+    });
+  }
+  // FTS5 is raw-ddl (virtual table, not Drizzle-modelable) so no table
+  // object is supplied; emitted last (after base tables).
+  for (const declared of fulltextStrategy.ownedTables(
+    tables.fulltextTableName,
+  )) {
+    contributions.push(resolveStrategyContribution(declared));
+  }
+  return contributions;
+}
+
+/**
  * Generates all DDL statements for the given SQLite tables.
+ *
+ * Iterates the unified contribution set (#129) — base tables first,
+ * then strategy-owned tables. Per-contribution ordering is
+ * table-then-its-own-indexes; safe because TypeGraph's tables carry no
+ * cross-table foreign keys.
  */
 export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
   fulltextStrategy: FulltextStrategy = fts5Strategy,
 ): string[] {
-  const statements: string[] = [];
-
-  // Generate in dependency order (tables first, then indexes)
-  for (const table of Object.values(tables)) {
-    if (!isSqliteTable(table)) continue;
-    statements.push(generateSqliteCreateTableSQL(table));
-  }
-
-  for (const table of Object.values(tables)) {
-    if (!isSqliteTable(table)) continue;
-    statements.push(...generateSqliteCreateIndexSQL(table));
-  }
-
-  // Fulltext table is a virtual table; emit its DDL last.
-  statements.push(...fulltextStrategy.generateDdl(tables.fulltextTableName));
-
-  return statements;
+  return sqliteContributions(tables, fulltextStrategy).flatMap((
+    contribution,
+  ) => [...contribution.createDdl]);
 }
 
 /**
@@ -421,34 +529,73 @@ function isPgTable(
 }
 
 /**
+ * The authoritative set of tables the PostgreSQL backend owns: every
+ * base/status Drizzle table plus the resolved fulltext-strategy
+ * contribution(s). Single source of truth for DDL generation, the
+ * bootstrap ensure, and drizzle-kit visibility (#129).
+ *
+ * The typed `tables.fulltext` object is **not** emitted via the
+ * column-walker (it can't reproduce `GENERATED ALWAYS AS … STORED`);
+ * instead the strategy's canonical DDL is carried as the fulltext
+ * contribution's `createDdl`, while that same `tables.fulltext` object
+ * is attached as its `source` for drizzle-kit visibility — one object,
+ * not two.
+ */
+export function postgresContributions(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+): readonly TableContribution[] {
+  const contributions: TableContribution[] = [];
+  for (const [key, table] of Object.entries(tables)) {
+    if (!isPgTable(table)) continue;
+    // The strategy owns the fulltext slot's DDL; skip the typed object
+    // here and re-attach it to the strategy contribution below.
+    if (table === tables.fulltext) continue;
+    // Stable factory key (`nodes`, `edges`, …) is the logicalName so
+    // the #135 materialization identity survives custom table-name
+    // overrides; the resolved SQL name is only the physical tableName.
+    contributions.push({
+      logicalName: key,
+      owner: BASE_CONTRIBUTION_OWNER,
+      tableName: getPgTableConfig(table).name,
+      createDdl: [
+        generatePgCreateTableSQL(table),
+        ...generatePgCreateIndexSQL(table),
+      ],
+      runtimeEnsure: false,
+      source: { kind: "drizzle-pg", table },
+    });
+  }
+  for (const declared of fulltextStrategy.ownedTables(
+    tables.fulltextTableName,
+  )) {
+    contributions.push(
+      resolveStrategyContribution(
+        declared,
+        declared.drizzleModel === "drizzle-pg"
+          ? { kind: "drizzle-pg", table: tables.fulltext }
+          : undefined,
+      ),
+    );
+  }
+  return contributions;
+}
+
+/**
  * Generates all DDL statements for the given PostgreSQL tables.
  *
- * The typed `tables.fulltext` is excluded from the column-walker
- * pass (it can't reproduce `GENERATED ALWAYS AS … STORED`); the
- * strategy emits the canonical fulltext DDL last.
+ * Iterates the unified contribution set (#129) — base tables first,
+ * then strategy-owned tables. Per-contribution ordering is
+ * table-then-its-own-indexes; safe because TypeGraph's tables carry no
+ * cross-table foreign keys.
  */
 export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
   fulltextStrategy: FulltextStrategy = tsvectorStrategy,
 ): string[] {
-  const statements: string[] = [];
-
-  // Reference identity sidesteps the per-iter `getPgTableConfig` walk
-  // a name lookup would add, and stays correct under custom names.
-  for (const table of Object.values(tables)) {
-    if (!isPgTable(table)) continue;
-    if (table === tables.fulltext) continue;
-    statements.push(generatePgCreateTableSQL(table));
-  }
-  for (const table of Object.values(tables)) {
-    if (!isPgTable(table)) continue;
-    if (table === tables.fulltext) continue;
-    statements.push(...generatePgCreateIndexSQL(table));
-  }
-
-  statements.push(...fulltextStrategy.generateDdl(tables.fulltextTableName));
-
-  return statements;
+  return postgresContributions(tables, fulltextStrategy).flatMap((
+    contribution,
+  ) => [...contribution.createDdl]);
 }
 
 /**
