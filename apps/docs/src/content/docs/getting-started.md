@@ -274,6 +274,14 @@ const store = createStore(graph, backend);
 | `createStore` + manual migration | None | When you manage migrations externally |
 | `createStoreWithSchema` | Auto-creates tables, validates & auto-migrates | **Recommended for production** |
 
+:::caution[Fulltext requires `createStoreWithSchema`]
+If your graph has any `searchable()` fields, you must boot through
+`createStoreWithSchema` once at startup. It durably materializes the
+fulltext storage; bare `createStore()` is an attach-only path and throws
+`StoreNotInitializedError` on the first fulltext operation. Graphs
+without `searchable()` fields are unaffected.
+:::
+
 For production, use `createStoreWithSchema` to validate and auto-apply safe schema changes:
 
 ```typescript

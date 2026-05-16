@@ -6,6 +6,8 @@
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { afterEach } from "vitest";
 
+import type { GraphDef } from "../src";
+import { createStoreWithSchema, type Store } from "../src";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
@@ -41,6 +43,26 @@ export function createTestDatabase(
   const { backend, db } = createLocalSqliteBackend(options);
   backendsToClose.push(backend);
   return db;
+}
+
+/**
+ * Boots a store through the canonical async path
+ * (`createStoreWithSchema`) and returns just the `Store`.
+ *
+ * Post-#135 this is the test idiom for any suite exercising fulltext
+ * (or transactions that touch it): `createStoreWithSchema` is the
+ * single durable-materialization writer, so a sync `createStore`
+ * against an unmaterialized in-memory backend now (correctly) throws
+ * `StoreNotInitializedError` on the first fulltext op. Tests that are
+ * NOT asserting the init contract use this helper to get an
+ * already-initialized store with minimal call-site churn.
+ */
+export async function createInitializedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+): Promise<Store<G>> {
+  const [store] = await createStoreWithSchema(graph, backend);
+  return store;
 }
 
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";

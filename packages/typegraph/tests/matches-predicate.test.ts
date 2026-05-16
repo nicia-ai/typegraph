@@ -20,9 +20,9 @@ import { type PropsAccessor } from "../src/query/builder/types";
 import { compileQuery } from "../src/query/compiler";
 import { type FulltextAccessor } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
-import { createStore } from "../src/store";
+import type { createStore } from "../src/store";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
-import { createTestBackend } from "./test-utils";
+import { createInitializedStore, createTestBackend } from "./test-utils";
 
 // ============================================================
 // Fixture schemas
@@ -83,7 +83,7 @@ describe(".matches() predicate", () => {
   beforeEach(async () => {
     backend = createTestBackend();
     await backend.bootstrapTables?.();
-    store = createStore(DocumentGraph, backend);
+    store = await createInitializedStore(DocumentGraph, backend);
   });
 
   // ================================================================
@@ -365,7 +365,10 @@ describe(".matches() predicate", () => {
 
     const hybridBackend = createTestBackend();
     await hybridBackend.bootstrapTables?.();
-    const hybridStore = createStore(HybridGraph, hybridBackend);
+    const hybridStore = await createInitializedStore(
+      HybridGraph,
+      hybridBackend,
+    );
 
     const solar = await hybridStore.nodes.HybridDoc.create({
       title: "Solar power",
@@ -508,7 +511,7 @@ describe(".matches() with polymorphic alias", () => {
   beforeEach(async () => {
     backend = createTestBackend();
     await backend.bootstrapTables?.();
-    store = createStore(PolymorphicGraph, backend);
+    store = await createInitializedStore(PolymorphicGraph, backend);
   });
 
   it("searches every concrete kind that the alias resolves to via subClassOf", async () => {
@@ -571,7 +574,7 @@ describe(".matches() with polymorphic alias", () => {
 
     const mixedBackend = createTestBackend();
     await mixedBackend.bootstrapTables?.();
-    const mixedStore = createStore(MixedGraph, mixedBackend);
+    const mixedStore = await createInitializedStore(MixedGraph, mixedBackend);
 
     await mixedStore.nodes.TextMedia.create({ title: "searchable one" });
     await mixedStore.nodes.BinaryMedia.create({ title: "opaque one" });

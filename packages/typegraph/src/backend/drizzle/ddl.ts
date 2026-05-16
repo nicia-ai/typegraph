@@ -284,21 +284,20 @@ function resolveStrategyContribution(
 }
 
 /**
- * The idempotent DDL a strategy declares for one logical slot (table +
- * supporting indexes). O(1) in the number of base tables: it asks the
- * strategy directly and never walks or regenerates base-table DDL —
- * this is what keeps the latched fulltext ensure and the per-boot
- * runtime ensure off the base-table DDL-generation path.
+ * The strategy's declaration for one logical slot. O(1) in the number
+ * of base tables: it asks the strategy directly and never walks or
+ * regenerates base-table DDL — this is what keeps the per-boot runtime
+ * ensure off the base-table DDL-generation path.
  *
  * Throws when the strategy declares no contribution under
  * `logicalName` (caller typo / strategy↔backend disagreement) rather
- * than silently emitting nothing.
+ * than silently doing nothing.
  */
-export function strategyContributionDdl(
+export function findStrategyContribution(
   fulltextStrategy: FulltextStrategy,
   fulltextTableName: string,
   logicalName: string,
-): readonly string[] {
+): StrategyTableContribution {
   const declared = fulltextStrategy
     .ownedTables(fulltextTableName)
     .find((contribution) => contribution.logicalName === logicalName);
@@ -308,7 +307,7 @@ export function strategyContributionDdl(
         `(strategy "${fulltextStrategy.name}").`,
     );
   }
-  return declared.createDdl;
+  return declared;
 }
 
 /**

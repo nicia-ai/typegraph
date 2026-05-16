@@ -12,6 +12,7 @@ import { type GraphDef } from "../core/define-graph";
 import { DatabaseOperationError, MigrationError } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { freezeDeep } from "../utils/object";
+import { isMissingTableError } from "../utils/sql-errors";
 import {
   computeSchemaDiff,
   getMigrationActions,
@@ -93,17 +94,6 @@ export function parseSerializedSchema(json: string): SerializedSchema {
 // Helpers
 // ============================================================
 
-const MISSING_TABLE_PATTERNS = [
-  "no such table", // SQLite
-  "does not exist", // PostgreSQL ("relation ... does not exist")
-  "SQLITE_ERROR", // D1 / Durable Objects error code
-];
-
-function isMissingTableError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return MISSING_TABLE_PATTERNS.some((pattern) => message.includes(pattern));
-}
-
 /**
  * Reads the active schema row, bootstrapping the base tables on the
  * first call against an empty database. Also runs the focused
@@ -123,8 +113,8 @@ export async function loadActiveSchemaWithBootstrap(
   try {
     const row = await backend.getActiveSchema(graphId);
     await (backend.ensureRuntimeContributions ?
-      backend.ensureRuntimeContributions()
-    : backend.ensureFulltextTable?.());
+      backend.ensureRuntimeContributions(graphId)
+    : backend.ensureFulltextTable?.(graphId));
     return row;
   } catch (error) {
     if (backend.bootstrapTables && isMissingTableError(error)) {

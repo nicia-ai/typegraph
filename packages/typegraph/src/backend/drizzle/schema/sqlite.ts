@@ -46,6 +46,7 @@ export type SqliteTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
 }>;
@@ -68,6 +69,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
 };
@@ -332,6 +334,35 @@ export function createSqliteTables(
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
+  /**
+   * Per-deployment durable marker that a strategy-owned table
+   * contribution (#129 — the FTS5 virtual table today) has been
+   * materialized against this database (#135). Replaces the in-memory
+   * per-backend `fulltextEnsured` latch with a queryable database fact.
+   * Keyed on `(graph_id, logical_name, owner, table_name)`; `signature`
+   * stays out of the key so same-identity drift is a loud error, not a
+   * silent re-materialize. Same COALESCE-on-failure preservation rule
+   * as `indexMaterializations`.
+   */
+  const contributionMaterializations = sqliteTable(
+    n.contributionMaterializations,
+    {
+      graphId: text("graph_id").notNull(),
+      logicalName: text("logical_name").notNull(),
+      owner: text("owner").notNull(),
+      tableName: text("table_name").notNull(),
+      signature: text("signature").notNull(),
+      materializedAt: text("materialized_at"),
+      lastAttemptedAt: text("last_attempted_at").notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.logicalName, t.owner, t.tableName],
+      }),
+    ],
+  );
+
   return {
     nodes,
     edges,
@@ -339,6 +370,7 @@ export function createSqliteTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    contributionMaterializations,
     kindRemovals,
     reconciliationMarkers,
     /**

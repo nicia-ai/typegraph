@@ -42,10 +42,11 @@ import {
   type FulltextStrategy,
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
-import { FULLTEXT_CONTRIBUTION_NAME } from "../table-contribution";
 import {
   type BackendCapabilities,
   type CommitSchemaVersionParams,
+  type ContributionMaterializationIdentity,
+  type ContributionMaterializationRow,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -58,6 +59,7 @@ import {
   type IndexMaterializationRow,
   type KindRemovalRow,
   POSTGRES_CAPABILITIES,
+  type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaVersionRow,
@@ -71,11 +73,14 @@ import {
   type VectorSearchResult,
 } from "../types";
 import {
-  generatePgCreateTableSQL,
-  generatePostgresDDL,
-  runtimeStrategyContributions,
-  strategyContributionDdl,
-} from "./ddl";
+  buildContributionInsertValues,
+  buildContributionOnConflictSet,
+  createContributionMaterializer,
+  gateFulltext,
+  mapContributionMaterializationRow,
+  POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
+} from "./contribution-materializations";
+import { generatePgCreateTableSQL, generatePostgresDDL } from "./ddl";
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
@@ -395,25 +400,73 @@ export function createPostgresBackend(
     });
   }
 
-  // Per-backend latch for fulltext-table DDL. The wrappers below
-  // guard every method that touches the fulltext table — fulltext
-  // writes can fire from any code path (sync `createStore`, hard-
-  // delete cascade, batched index sync), so the bootstrap-load
-  // probe alone doesn't cover all surfaces. (#135 replaces this
-  // in-memory latch with a durable materialization marker.)
-  let fulltextEnsured = false;
-  async function ensureFulltextDdl(): Promise<void> {
-    if (fulltextEnsured) return;
-    const statements = strategyContributionDdl(
-      fulltextStrategy,
-      tables.fulltextTableName,
-      FULLTEXT_CONTRIBUTION_NAME,
-    );
-    for (const statement of statements) {
-      await db.execute(sql.raw(statement));
-    }
-    fulltextEnsured = true;
+  // Durable fulltext materialization (#135): the dialect-specific
+  // marker-table primitives. Orchestration (materialize / assert /
+  // per-instance cache) lives once in `createContributionMaterializer`.
+  const matTable = tables.contributionMaterializations;
+
+  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
+    await db.execute(sql.raw(generatePgCreateTableSQL(matTable)));
   }
+
+  async function getContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<ContributionMaterializationRow | undefined> {
+    const rows = await db
+      .select()
+      .from(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return mapContributionMaterializationRow(
+      row,
+      POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+    );
+  }
+
+  async function recordContributionMaterializationRow(
+    params: RecordContributionMaterializationParams,
+  ): Promise<void> {
+    await db
+      .insert(matTable)
+      .values(
+        buildContributionInsertValues(
+          params,
+          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+        ),
+      )
+      .onConflictDoUpdate({
+        target: [
+          matTable.graphId,
+          matTable.logicalName,
+          matTable.owner,
+          matTable.tableName,
+        ],
+        set: buildContributionOnConflictSet(
+          matTable.materializedAt,
+          params.materializedAt,
+        ),
+      });
+  }
+
+  const contributionMaterializer = createContributionMaterializer({
+    dialect: "postgres",
+    fulltextStrategy,
+    fulltextTableName: tables.fulltextTableName,
+    execDdl: async (statement) => {
+      await db.execute(sql.raw(statement));
+    },
+    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
+    getMarker: getContributionMaterializationRow,
+    recordMarker: recordContributionMaterializationRow,
+  });
 
   const backend: GraphBackend = {
     ...operations,
@@ -423,38 +476,41 @@ export function createPostgresBackend(
       for (const statement of statements) {
         await db.execute(sql.raw(statement));
       }
-      fulltextEnsured = true;
     },
 
+    // Every fulltext-touching method now asserts the durable marker
+    // instead of lazily emitting DDL. Steady state performs zero
+    // ensure; an uninitialized database throws `StoreNotInitializedError`
+    // loudly rather than self-healing on a read/write path (#135).
     async upsertFulltext(params): Promise<void> {
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       await operations.upsertFulltext!(params);
     },
     async deleteFulltext(params): Promise<void> {
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       await operations.deleteFulltext!(params);
     },
     async upsertFulltextBatch(params): Promise<void> {
-      // Mirror the inner-method empty-input guard so a no-op call
-      // on a cold backend doesn't materialize the table.
+      // A genuine no-op call asserts nothing — preserves the prior
+      // "empty input on any backend is harmless" contract.
       if (params.rows.length === 0) return;
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       await operations.upsertFulltextBatch!(params);
     },
     async deleteFulltextBatch(params): Promise<void> {
       if (params.nodeIds.length === 0) return;
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       await operations.deleteFulltextBatch!(params);
     },
     async fulltextSearch(params) {
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       return operations.fulltextSearch!(params);
     },
     // hardDeleteNode is wrapped because the operation-backend-core
     // cascade unconditionally deletes from the fulltext table — it
     // would fail even on graphs that declare no searchable() fields.
     async hardDeleteNode(params): Promise<void> {
-      await ensureFulltextDdl();
+      await contributionMaterializer.assertInitialized(params.graphId);
       await operations.hardDeleteNode(params);
     },
 
@@ -513,6 +569,28 @@ export function createPostgresBackend(
         });
     },
 
+    async ensureContributionMaterializationsTable(): Promise<void> {
+      await ensureContributionMaterializationsTableImpl();
+    },
+
+    async getContributionMaterialization(
+      identity: ContributionMaterializationIdentity,
+    ): Promise<ContributionMaterializationRow | undefined> {
+      return getContributionMaterializationRow(identity);
+    },
+
+    async recordContributionMaterialization(
+      params: RecordContributionMaterializationParams,
+    ): Promise<void> {
+      await recordContributionMaterializationRow(params);
+    },
+
+    async assertRuntimeContributionsInitialized(
+      graphId: string,
+    ): Promise<void> {
+      await contributionMaterializer.assertInitialized(graphId);
+    },
+
     async ensureKindRemovalsTable(): Promise<void> {
       await db.execute(
         sql.raw(generatePgCreateTableSQL(tables.kindRemovals)),
@@ -564,49 +642,25 @@ export function createPostgresBackend(
       );
     },
 
-    async ensureContribution(logicalName: string): Promise<void> {
-      if (logicalName === FULLTEXT_CONTRIBUTION_NAME) {
-        // Route the fulltext slot through the latched path so the
-        // in-memory short-circuit (and, post-#135, the durable marker)
-        // stays the single gate for it.
-        await ensureFulltextDdl();
-        return;
-      }
-      const statements = strategyContributionDdl(
-        fulltextStrategy,
-        tables.fulltextTableName,
-        logicalName,
-      );
-      for (const statement of statements) {
-        await db.execute(sql.raw(statement));
-      }
+    async ensureContribution(
+      logicalName: string,
+      graphId: string,
+    ): Promise<void> {
+      await contributionMaterializer.ensureContribution(logicalName, graphId);
     },
 
-    async ensureRuntimeContributions(): Promise<void> {
-      // Runtime contributions are strategy-owned by invariant (base
-      // tables are never `runtimeEnsure`), so this asks the strategy
-      // directly — no base-table walk on the per-boot path.
-      for (const contribution of runtimeStrategyContributions(
-        fulltextStrategy,
-        tables.fulltextTableName,
-      )) {
-        if (contribution.logicalName === FULLTEXT_CONTRIBUTION_NAME) {
-          await ensureFulltextDdl();
-          continue;
-        }
-        for (const statement of contribution.createDdl) {
-          await db.execute(sql.raw(statement));
-        }
-      }
+    async ensureRuntimeContributions(graphId: string): Promise<void> {
+      await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
     /**
-     * Superseded by `ensureContribution("fulltext")` /
-     * `ensureRuntimeContributions()` (#129). Retained as a thin
-     * back-compat wrapper; #135 removes the remaining hot-path callers.
+     * Superseded by `ensureContribution("fulltext", graphId)` /
+     * `ensureRuntimeContributions(graphId)` (#129). Retained as a thin
+     * back-compat wrapper for callers predating #129; #135 routed it
+     * through the durable-marker writer.
      */
-    async ensureFulltextTable(): Promise<void> {
-      await ensureFulltextDdl();
+    async ensureFulltextTable(graphId: string): Promise<void> {
+      await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
     async getReconciliationMarker(
@@ -658,14 +712,13 @@ export function createPostgresBackend(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
-      // The tx-scoped backend exposes raw fulltext methods without
-      // the outer self-ensure wrappers — so we do the ensure here,
-      // before db.transaction() opens BEGIN. Outside-the-tx avoids
-      // CREATE-INDEX-inside-tx SHARE-lock contention with concurrent
-      // replicas and keeps the DDL durable if the user's tx rolls
-      // back.
-      await ensureFulltextDdl();
-
+      // #134/#135: NO DDL or ensure here. The tx-scoped backend's
+      // fulltext-touching methods assert the durable contribution
+      // marker (one cached SELECT — never DDL) at point of use, exactly
+      // like the non-tx wrappers. A transaction that never touches
+      // fulltext never asserts; one that does runs pure DML against an
+      // already-materialized table, with the "no DDL in the business
+      // transaction" guarantee backed by the durable fact.
       const txConfig = options?.isolationLevel
         ? {
             isolationLevel: options.isolationLevel.replace("_", " ") as
@@ -685,7 +738,7 @@ export function createPostgresBackend(
           capabilities,
           fulltextStrategy,
         });
-        return fn(txBackend);
+        return fn(gateFulltext(txBackend, contributionMaterializer.assertInitialized));
       }, txConfig);
     },
 

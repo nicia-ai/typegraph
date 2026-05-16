@@ -193,6 +193,7 @@ export {
 
 export type {
   ErrorCategory,
+  StoreNotInitializedReason,
   TypeGraphErrorOptions,
   ValidationErrorDetails,
   ValidationIssue,
@@ -223,6 +224,7 @@ export {
   SchemaContentConflictError,
   SchemaMismatchError,
   StaleVersionError,
+  StoreNotInitializedError,
   TypeGraphError,
   UniquenessError,
   UnsupportedPredicateError,

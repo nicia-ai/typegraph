@@ -79,11 +79,15 @@ describe("Person", () => {
 
 | Factory | Sync? | Schema management | Use for |
 |---------|-------|-------------------|---------|
-| `createStore(graph, backend)` | Yes | None | Tests, local dev |
-| `createStoreWithSchema(graph, backend)` | No | Auto-init, auto-migrate | Production, schema evolution tests |
+| `createStore(graph, backend)` | Yes | None | Tests, local dev (no `searchable()` fields) |
+| `createStoreWithSchema(graph, backend)` | No | Auto-init, auto-migrate | Production, fulltext, schema evolution tests |
 
 Use `createStore` for most tests — it's synchronous and avoids async setup. Use
-`createStoreWithSchema` when you're specifically testing schema migrations or evolution:
+`createStoreWithSchema` when you're specifically testing schema migrations or
+evolution, **or whenever the graph under test has `searchable()` fields**: a
+fulltext write/search through a bare `createStore()` test throws
+`StoreNotInitializedError` because the durable fulltext marker was never
+written.
 
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";

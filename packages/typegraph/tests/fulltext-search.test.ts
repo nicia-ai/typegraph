@@ -23,10 +23,10 @@ import {
   searchable,
 } from "../src/core/searchable";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
-import { createStore } from "../src/store";
+import type { createStore } from "../src/store";
 import { getSearchableFields } from "../src/store/fulltext-sync";
 import { type FulltextSearchHit } from "../src/store/search";
-import { createTestBackend } from "./test-utils";
+import { createInitializedStore, createTestBackend } from "./test-utils";
 
 type DocumentProps = Readonly<{ title: string; body: string; plain?: string }>;
 function documentProps(hit: FulltextSearchHit): DocumentProps {
@@ -196,7 +196,7 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
   beforeEach(async () => {
     backend = createTestBackend();
     await backend.bootstrapTables?.();
-    store = createStore(SearchableGraph, backend);
+    store = await createInitializedStore(SearchableGraph, backend);
   });
 
   it("declares fulltext capability", () => {
@@ -473,7 +473,10 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
     });
     const chainedBackend = createTestBackend();
     await chainedBackend.bootstrapTables?.();
-    const chainedStore = createStore(ChainedGraph, chainedBackend);
+    const chainedStore = await createInitializedStore(
+      ChainedGraph,
+      chainedBackend,
+    );
 
     await chainedStore.nodes.ChainedDocument.create({
       title: "Climate report",
@@ -531,7 +534,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     });
     expect(backend.vectorSearch).toBeUndefined();
 
-    const store = createStore(HybridGraph, backend);
+    const store = await createInitializedStore(HybridGraph, backend);
     await store.nodes.HybridDoc.create({
       title: "doc",
       body: "body",
@@ -556,7 +559,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     const backend = createTestBackend();
     if (backend.vectorSearch === undefined) return;
     await backend.bootstrapTables?.();
-    const store = createStore(HybridGraph, backend);
+    const store = await createInitializedStore(HybridGraph, backend);
 
     const solar = await store.nodes.HybridDoc.create({
       title: "Solar power",
@@ -602,7 +605,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     const backend = createTestBackend();
     if (backend.vectorSearch === undefined) return;
     await backend.bootstrapTables?.();
-    const store = createStore(HybridGraph, backend);
+    const store = await createInitializedStore(HybridGraph, backend);
 
     for (let index = 0; index < 5; index++) {
       await store.nodes.HybridDoc.create({
@@ -630,7 +633,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     // tests. Here we exercise the RRF math by stubbing backend methods.
     const backend = createTestBackend();
     await backend.bootstrapTables?.();
-    const store = createStore(HybridGraph, backend);
+    const store = await createInitializedStore(HybridGraph, backend);
 
     // Insert three nodes so getNodes can resolve them by id.
     const a = await store.nodes.HybridDoc.create({
@@ -765,7 +768,7 @@ describe("custom FulltextStrategy plumbing", () => {
     const db = drizzle(sqlite);
     const backend = createSqliteBackend(db, { fulltext: spyStrategy });
     await backend.bootstrapTables?.();
-    const store = createStore(HybridGraph, backend);
+    const store = await createInitializedStore(HybridGraph, backend);
 
     // ownedTables consulted during bootstrap (DDL derives from it).
     expect(calls.ownedTables).toBeGreaterThanOrEqual(1);

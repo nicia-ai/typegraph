@@ -17,7 +17,6 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
-  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -27,7 +26,7 @@ import {
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
-import { createTestBackend } from "./test-utils";
+import { createInitializedStore, createTestBackend } from "./test-utils";
 
 const TRANSACTIONS_DISABLED_MESSAGE =
   "synthetic backend has transactions disabled";
@@ -101,7 +100,7 @@ describe("backends with transactions: false fall through to sequential execution
   // config.
 
   it("store.transaction(fn) executes fn against the main backend", async () => {
-    const store = createStore(graph, backend);
+    const store = await createInitializedStore(graph, backend);
 
     const result = await store.transaction(async (tx) => {
       const person = await tx.nodes.Person.create({ name: "Alice" });
@@ -120,7 +119,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 
   it("store.transaction errors propagate without rollback", async () => {
-    const store = createStore(graph, backend);
+    const store = await createInitializedStore(graph, backend);
     const persisted = await store.nodes.Person.create({ name: "Persisted" });
 
     await expect(
@@ -141,7 +140,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 
   it("store.batch returns per-query results without throwing", async () => {
-    const store = createStore(graph, backend);
+    const store = await createInitializedStore(graph, backend);
 
     await store.nodes.Person.create({ name: "Alice" });
     await store.nodes.Person.create({ name: "Bob" });
@@ -177,7 +176,7 @@ describe("backends with transactions: false fall through to sequential execution
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const store = createStore(documentGraph, backend);
+    const store = await createInitializedStore(documentGraph, backend);
 
     await store.nodes.Document.create({
       title: "First",
