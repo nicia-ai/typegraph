@@ -684,7 +684,7 @@ export function createPostgresBackend(
     },
 
     async transaction<T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
+      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
       // #134/#135: NO DDL or ensure here. The tx-scoped backend's
@@ -705,7 +705,7 @@ export function createPostgresBackend(
         : undefined;
 
       return db.transaction(
-        async (tx) => fn(bindTransactionBackend(tx)),
+        async (tx) => fn(bindTransactionBackend(tx), tx),
         txConfig,
       );
     },

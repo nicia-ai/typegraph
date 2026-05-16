@@ -43,10 +43,18 @@ type DatabaseWithSession = Readonly<{
  *                Default for sync drivers (better-sqlite3, bun:sqlite).
  * - `"drizzle"`: Delegates to Drizzle's `db.transaction()` method.
  *                Default for async drivers (libsql, sql.js).
- * - `"none"`:    Transactions disabled.
- *                Default for Cloudflare D1 and Durable Objects.
+ * - `"do-sqlite"`: Delegates to the Cloudflare Durable Objects async
+ *                storage transaction runner (`db.$client.transaction`,
+ *                i.e. `ctx.storage.transaction(async ...)`). Drizzle's
+ *                own `db.transaction()` on DO is
+ *                `ctx.storage.transactionSync` and cannot span `await`,
+ *                so it is deliberately not used. Auto-detected for
+ *                `drizzle(ctx.storage)` (#140).
+ * - `"none"`:    Transactions disabled. Default for Cloudflare D1
+ *                (`D1Database.batch` is transactional but not an
+ *                interactive runner — tracked separately).
  */
-export type SqliteTransactionMode = "sql" | "drizzle" | "none";
+export type SqliteTransactionMode = "sql" | "drizzle" | "none" | "do-sqlite";
 
 export type SqliteExecutionProfileHints = Readonly<{
   isSync?: boolean;
@@ -89,7 +97,13 @@ function isD1DatabaseBySessionName(db: AnySqliteDatabase): boolean {
 
 function isDurableObjectBySessionName(db: AnySqliteDatabase): boolean {
   const sessionName = getSessionName(db);
-  return sessionName === "SQLiteDurableObjectSession";
+  // drizzle-orm/durable-sqlite's session class is `SQLiteDOSession`
+  // (verified drizzle 0.45.x). `SQLiteDurableObjectSession` is kept as
+  // a defensive alias against future drizzle renames.
+  return (
+    sessionName === "SQLiteDOSession" ||
+    sessionName === "SQLiteDurableObjectSession"
+  );
 }
 
 function isSyncDatabaseBySessionName(db: AnySqliteDatabase): boolean {
@@ -109,6 +123,11 @@ function detectSyncProfile(
 
   const sessionName = getSessionName(db);
   if (sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession") {
+    return true;
+  }
+  // Durable Objects SQLite is synchronous (`ctx.storage` exec /
+  // `transactionSync`); detect it by name rather than the SQL probe.
+  if (isDurableObjectBySessionName(db)) {
     return true;
   }
   if (sessionName === "SQLiteD1Session") {
@@ -131,12 +150,18 @@ function detectTransactionMode(
   if (profileHints.transactionMode !== undefined) {
     return profileHints.transactionMode;
   }
-  // D1 and Durable Object SQLite do not support raw BEGIN/COMMIT SQL
-  // through Drizzle's db.run(). Default to "none" because async
-  // transaction callbacks are not reliably supported across sync
-  // Drizzle drivers. Users can opt in to "drizzle" mode explicitly if
-  // their runtime's db.transaction() handles async callbacks.
-  if (isD1DatabaseBySessionName(db) || isDurableObjectBySessionName(db)) {
+  // Neither D1 nor Durable Object SQLite supports raw BEGIN/COMMIT SQL
+  // through Drizzle's db.run(), and Drizzle's own db.transaction() on
+  // Durable Objects is `ctx.storage.transactionSync` (cannot span an
+  // await). Durable Objects expose an async storage transaction runner
+  // (`ctx.storage.transaction(async ...)`, surfaced by Drizzle as
+  // `db.$client.transaction`) — route those through "do-sqlite" (#140).
+  // D1 has no equivalent interactive runner (only batch); it stays
+  // "none" pending a separate batch-mode investigation.
+  if (isDurableObjectBySessionName(db)) {
+    return "do-sqlite";
+  }
+  if (isD1DatabaseBySessionName(db)) {
     return "none";
   }
   if (isSync) return "sql";

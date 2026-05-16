@@ -134,8 +134,9 @@ export type SqliteBackendOptions = Readonly<{
   tables?: SqliteTables;
   /**
    * Optional execution profile hints used to avoid runtime driver reflection.
-   * Set `transactionMode: "none"` for drivers that do not support transactions
-   * (e.g. Cloudflare D1, Durable Objects).
+   * Set `transactionMode: "none"` for drivers without transactions (e.g.
+   * Cloudflare D1). Durable Objects (`drizzle(ctx.storage)`) auto-detect
+   * `transactionMode: "do-sqlite"` and do not need a hint.
    */
   executionProfile?: SqliteExecutionProfileHints;
   /**
@@ -273,6 +274,24 @@ const SQLITE_VECTOR_INDEX_TYPES = ["none"] as const;
 // performance degrades well before pgvector's 16k limit. 8000 is a
 // conservative ceiling consistent with the extension's typical use.
 const SQLITE_VECTOR_MAX_DIMENSIONS = 8000;
+
+/**
+ * The async storage transaction runner Drizzle's durable-sqlite driver
+ * exposes as `db.$client` (`ctx.storage.transaction(async () => ...)`).
+ * Structural because drizzle-orm does not export the DO `$client` type.
+ */
+interface DurableObjectStorageClient {
+  transaction?: <R>(closure: () => Promise<R>) => Promise<R>;
+}
+
+/** Every SQLite "atomic transactions unavailable" refusal shares this shape. */
+function throwSqliteTransactionsDisabled(message: string): never {
+  throw new ConfigurationError(message, {
+    backend: "sqlite",
+    capability: "transactions",
+    supportsTransactions: false,
+  });
+}
 
 function buildSqliteCapabilities(
   options: Readonly<{
@@ -617,6 +636,38 @@ export function createSqliteBackend(
   });
 
   /**
+   * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
+   * Durable Objects expose an async storage transaction runner —
+   * `ctx.storage.transaction(async () => ...)`, surfaced by Drizzle as
+   * `db.$client.transaction` — that rolls back SQL writes across
+   * `await`. There is no Drizzle tx handle on DO: the storage
+   * transaction is ambient on the object, so callers bind the *outer*
+   * `db` (as the "sql" path binds the outer connection). Drizzle's own
+   * `db.transaction()` here is `ctx.storage.transactionSync` and cannot
+   * span an await, so it is deliberately not used. Shared by
+   * `transaction()` (business writes) and `runSchemaWriteTransaction()`
+   * (schema-version commits — data only, never DDL: the #135 invariant
+   * holds because `bootstrapTables` runs outside any transaction).
+   */
+  function runDoSqliteStorageTransaction<T>(
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const storage = (db as { $client?: DurableObjectStorageClient }).$client;
+    const storageTransaction = storage?.transaction;
+    if (typeof storageTransaction !== "function") {
+      throwSqliteTransactionsDisabled(
+        "transactionMode 'do-sqlite' requires a Drizzle Durable Objects " +
+          "database (drizzle(ctx.storage)) whose `$client` exposes the " +
+          "async storage `transaction(async () => ...)` runner.",
+      );
+    }
+    return runWithSerializedQueue(
+      serializedQueue,
+      async () => storageTransaction.call(storage, run) as Promise<T>,
+    );
+  }
+
+  /**
    * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
    * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
    * is serialized against concurrent writers — a deferred BEGIN would let
@@ -630,16 +681,11 @@ export function createSqliteBackend(
     fn: (tx: CommonOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (transactionMode === "none") {
-      throw new ConfigurationError(
+      throwSqliteTransactionsDisabled(
         "commitSchemaVersion and setActiveVersion require atomic transactions, " +
           "but this SQLite backend has transactions disabled. Configure a " +
           "driver that supports transactions (better-sqlite3, libsql, " +
           "bun:sqlite) to use schema commits.",
-        {
-          backend: "sqlite",
-          capability: "transactions",
-          supportsTransactions: false,
-        },
       );
     }
 
@@ -666,6 +712,28 @@ export function createSqliteBackend(
           db.run(sql`ROLLBACK`);
           throw error;
         }
+      });
+    }
+
+    if (transactionMode === "do-sqlite") {
+      // No interactive lock-mode control on the DO storage runner; the
+      // serialized queue (always present — DO is sync) provides the
+      // single-writer ordering that "immediate" gives the other paths.
+      // Raw txBackend (no `gateFulltext`, unlike the business
+      // `transaction()` do-sqlite branch): schema-version commits are
+      // data-only and never touch fulltext (#135), matching the "sql"
+      // and "drizzle" schema-write branches.
+      return runDoSqliteStorageTransaction(async () => {
+        const txBackend = createTransactionBackend({
+          capabilities,
+          db,
+          operationStrategy,
+          profileHints: { isSync },
+          tableNames,
+          fulltextStrategy,
+          hasVectorEmbeddings,
+        });
+        return fn(txBackend);
       });
     }
 
@@ -981,20 +1049,15 @@ export function createSqliteBackend(
     },
 
     async transaction<T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
+      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
       _options?: TransactionOptions,
     ): Promise<T> {
       if (transactionMode === "none") {
-        throw new ConfigurationError(
+        throwSqliteTransactionsDisabled(
           "This SQLite backend does not support atomic transactions. " +
             "Operations within a transaction are not rolled back on failure. " +
             "Use backend.capabilities.transactions to check for transaction support, " +
             "or use individual operations with manual error handling.",
-          {
-            backend: "sqlite",
-            capability: "transactions",
-            supportsTransactions: false,
-          },
         );
       }
 
@@ -1023,7 +1086,11 @@ export function createSqliteBackend(
 
           try {
             const result = await fn(
-              gateFulltext(txBackend, contributionMaterializer.assertInitialized),
+              gateFulltext(
+                txBackend,
+                contributionMaterializer.assertInitialized,
+              ),
+              db,
             );
             db.run(sql`COMMIT`);
             return result;
@@ -1034,10 +1101,16 @@ export function createSqliteBackend(
         });
       }
 
+      if (transactionMode === "do-sqlite") {
+        return runDoSqliteStorageTransaction(async () =>
+          fn(bindTransactionBackend(db), db),
+        );
+      }
+
       // transactionMode === "drizzle"
       return runWithSerializedQueue(serializedQueue, async () =>
         db.transaction(
-          async (tx) => fn(bindTransactionBackend(tx)),
+          async (tx) => fn(bindTransactionBackend(tx), tx),
         ) as Promise<T>,
       );
     },
@@ -1048,18 +1121,13 @@ export function createSqliteBackend(
       // would commit with no way to undo the graph write. Refuse
       // loudly rather than silently degrade.
       if (transactionMode === "none") {
-        throw new ConfigurationError(
+        throwSqliteTransactionsDisabled(
           "Cross-store atomicity is unavailable on this SQLite backend: " +
             "transactions are disabled (transactionMode: 'none'). Adopting " +
             "an external transaction here would let the caller's relational " +
             "write commit with no way to roll back the graph write. " +
             "Configure a driver that supports transactions (better-sqlite3, " +
             "libsql, bun:sqlite).",
-          {
-            backend: "sqlite",
-            capability: "transactions",
-            supportsTransactions: false,
-          },
         );
       }
       assertAdoptedDialect<AnySqliteDatabase>(

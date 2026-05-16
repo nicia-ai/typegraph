@@ -234,5 +234,52 @@ describe.runIf(process.env.POSTGRES_URL)(
         /Cross-store atomicity is unavailable/,
       );
     });
+
+    // #140 — graph-owned: TypeGraph opens the tx, `tx.sql` is
+    // the bound pg transaction handle. Using the outer `db` instead
+    // would write on a different connection and escape the tx, so
+    // `tx.sql` is a correctness requirement here.
+    it("commits a graph node and a tx.sql relational row in one store.transaction", async () => {
+      const backend = createPostgresBackend(db!);
+      const store = createStore(PlainGraph, backend);
+
+      const source = await store.transaction(async (tx) => {
+        const sqlTx = tx.sql as NodePgDatabase;
+        const inserted = await sqlTx
+          .insert(connectors)
+          .values({ name: "github" })
+          .returning({ id: connectors.id });
+        return tx.nodes.ArtifactSource.create({
+          connectorId: inserted[0]!.id,
+          label: "primary",
+        });
+      });
+
+      expect(await db!.select().from(connectors)).toEqual([
+        { id: 1, name: "github" },
+      ]);
+      const fetched = await store.nodes.ArtifactSource.getById(source.id);
+      expect(fetched?.connectorId).toBe(1);
+    });
+
+    it("rolls back BOTH the graph node and the tx.sql relational row when the callback throws", async () => {
+      const backend = createPostgresBackend(db!);
+      const store = createStore(PlainGraph, backend);
+
+      await expect(
+        store.transaction(async (tx) => {
+          const sqlTx = tx.sql as NodePgDatabase;
+          await sqlTx.insert(connectors).values({ name: "orphan" });
+          await tx.nodes.ArtifactSource.create({
+            connectorId: 999,
+            label: "doomed",
+          });
+          throw new Error("phase2-pg-rollback");
+        }),
+      ).rejects.toThrow("phase2-pg-rollback");
+
+      expect(await db!.select().from(connectors)).toEqual([]);
+      expect(await store.nodes.ArtifactSource.find()).toEqual([]);
+    });
   },
 );

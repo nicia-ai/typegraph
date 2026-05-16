@@ -85,6 +85,7 @@
     "test:perf:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres",
     "bench:perf:postgres": "pnpm --filter @nicia-ai/typegraph-benchmarks perf:postgres",
     "test:postgres": "./scripts/test-postgres.sh",
+    "test:do": "vitest run --config vitest.workers.config.ts",
     "test:coverage": "vitest run --coverage",
     "test:mutation": "stryker run"
   },
@@ -145,6 +146,7 @@
     "nanoid": "^5.1.11"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.6",
     "@libsql/client": "^0.17.3",
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",

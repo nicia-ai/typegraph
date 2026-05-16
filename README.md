@@ -48,7 +48,8 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 npm install -D @types/better-sqlite3
 ```
 
-For edge/serverless environments (D1, libsql, bun:sqlite), see the docs:
+For edge/serverless environments (Cloudflare Durable Objects, D1, libsql,
+bun:sqlite), see the docs:
 [Edge and Serverless](https://typegraph.dev/integration#edge-and-serverless).
 
 ## Quick Start

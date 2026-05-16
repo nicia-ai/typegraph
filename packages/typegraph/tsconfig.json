@@ -15,5 +15,6 @@
       "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"]
     }
   },
-  "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"]
+  "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"],
+  "exclude": ["tests/do-sqlite"]
 }

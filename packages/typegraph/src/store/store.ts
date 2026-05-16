@@ -809,6 +809,12 @@ export class Store<G extends GraphDef> {
    * The transaction context provides the same collection API as the Store:
    * - `tx.nodes.Person.create(...)` - Create a node
    * - `tx.edges.worksAt.create(...)` - Create an edge
+   * - `tx.sql` - the raw Drizzle handle **bound to this same
+   *   transaction**, for writing the caller's own relational tables in
+   *   the same atomic boundary (the graph-owned counterpart of
+   *   {@link Store.withTransaction}). See {@link TransactionContext}
+   *   for per-backend semantics; it is `undefined` only on the
+   *   non-transactional fallback.
    *
    * @example
    * ```typescript
@@ -820,6 +826,16 @@ export class Store<G extends GraphDef> {
    *     { kind: "Company", id: company.id },
    *     { role: "Engineer" }
    *   );
+   * });
+   * ```
+   *
+   * @example Cross-store write via `tx.sql` (graph-owned boundary):
+   * ```typescript
+   * await store.transaction(async (tx) => {
+   *   await tx.nodes.Document.update(documentId, props);
+   *   // cast `tx.sql` to your concrete Drizzle database type
+   *   const sqlTx = tx.sql as NodePgDatabase;
+   *   await sqlTx.insert(documentVersions).values(versionRow);
    * });
    * ```
    *
@@ -852,8 +868,8 @@ export class Store<G extends GraphDef> {
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
-    return this.#backend.transaction(async (txBackend) =>
-      fn(this.#buildTransactionContext(txBackend)),
+    return this.#backend.transaction(async (txBackend, sql) =>
+      fn(this.#buildTransactionContext(txBackend, sql)),
     );
   }
 
@@ -924,18 +940,24 @@ export class Store<G extends GraphDef> {
         { capability: "adoptTransaction" },
       );
     }
-    return this.#buildTransactionContext(adopt(externalTx));
+    // The caller already owns the boundary, so `externalTx` *is* the
+    // bound handle — surface it as `tx.sql` for symmetry with the
+    // graph-owned `transaction()` path.
+    return this.#buildTransactionContext(adopt(externalTx), externalTx);
   }
 
   /**
-   * Builds the `{ nodes, edges }` projection bound to a transaction-
-   * scoped backend. Shared verbatim by {@link transaction} (TypeGraph
-   * opens the tx) and {@link withTransaction} (#134 — the caller opened
-   * it) so both surfaces resolve collections, query factories, and the
-   * reused graph/registry identically.
+   * Builds the `{ nodes, edges, sql }` projection bound to a
+   * transaction-scoped backend. Shared verbatim by {@link transaction}
+   * (TypeGraph opens the tx) and {@link withTransaction} (#134 — the
+   * caller opened it) so both surfaces resolve collections, query
+   * factories, and the reused graph/registry identically. `sql` is the
+   * raw Drizzle handle bound to the same transaction (#140);
+   * `undefined` only on the non-transactional fallback.
    */
   #buildTransactionContext(
     txBackend: TransactionBackend,
+    sql?: AdoptedTransaction,
   ): TransactionContext<G> {
     const txNodeOperations: NodeOperations = {
       ...this.#nodeOperations,
@@ -962,7 +984,7 @@ export class Store<G extends GraphDef> {
       txEdgeOperations,
     );
 
-    return { nodes, edges };
+    return sql === undefined ? { nodes, edges } : { nodes, edges, sql };
   }
 
   // === Graph Lifecycle ===

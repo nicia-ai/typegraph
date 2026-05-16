@@ -10,9 +10,16 @@ This page documents TypeGraph's known limitations and constraints.
 Some runtimes cannot hold a multi-statement database session and therefore
 cannot offer atomic transactions:
 
-- **Cloudflare D1** — the D1 binding has no transaction primitive.
+- **Cloudflare D1** — the D1 binding has no interactive transaction
+  primitive (`D1Database.batch(...)` is transactional but batch-only).
 - **`drizzle-orm/neon-http`** — Neon's HTTP driver issues each statement as
   an independent request; there is no session to bind a transaction to.
+
+Cloudflare **Durable Objects** SQLite is *not* in this list: a store backed
+by `drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`,
+reports `capabilities.transactions: true`, and is fully atomic (including
+`store.withTransaction` and `tx.sql`). See
+[Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite).
 
 These backends report `capabilities.transactions: false`. On such backends,
 `store.transaction(fn)` and `store.batch(...)` still run — `fn` executes

@@ -248,3 +248,64 @@ describe("#134 cross-store atomicity (SQLite)", () => {
     sqlite.close();
   });
 });
+
+// #140: the graph-owned counterpart of withTransaction.
+// TypeGraph opens the transaction; `tx.sql` is the same connection,
+// so the caller's relational write joins the same atomic boundary.
+describe("#140 graph-owned cross-store via tx.sql (SQLite)", () => {
+  let sqlite: Database.Database;
+  let db: BetterSQLite3Database;
+
+  beforeEach(() => {
+    ({ sqlite, db } = createSqlite());
+  });
+
+  it("commits a graph node and a tx.sql relational row in one store.transaction", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(PlainGraph, backend);
+
+    const source = await store.transaction(async (tx) => {
+      const sqlTx = tx.sql as typeof db;
+      const connectorId = sqlTx
+        .insert(connectors)
+        .values({ name: "github" })
+        .returning({ id: connectors.id })
+        .all()[0]!.id;
+      return tx.nodes.ArtifactSource.create({ connectorId, label: "primary" });
+    });
+
+    expect(db.select().from(connectors).all()).toEqual([
+      { id: 1, name: "github" },
+    ]);
+    const fetched = await store.nodes.ArtifactSource.getById(source.id);
+    expect(fetched?.connectorId).toBe(1);
+    sqlite.close();
+  });
+
+  it("rolls back BOTH the graph node and the tx.sql relational row when the callback throws", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(PlainGraph, backend);
+
+    await expect(
+      store.transaction(async (tx) => {
+        const sqlTx = tx.sql as typeof db;
+        sqlTx.insert(connectors).values({ name: "orphan" }).run();
+        await tx.nodes.ArtifactSource.create({
+          connectorId: 1,
+          label: "doomed",
+        });
+        throw new Error("phase2-rollback");
+      }),
+    ).rejects.toThrow("phase2-rollback");
+
+    expect(db.select().from(connectors).all()).toEqual([]);
+    expect(await store.nodes.ArtifactSource.find()).toEqual([]);
+    sqlite.close();
+  });
+});

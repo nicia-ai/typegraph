@@ -3,7 +3,11 @@
  */
 import { type z } from "zod";
 
-import { type EdgeRow, type NodeRow } from "../backend/types";
+import {
+  type AdoptedTransaction,
+  type EdgeRow,
+  type NodeRow,
+} from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
   type AnyEdgeType,
@@ -946,6 +950,41 @@ export type GraphEdgeCollections<G extends GraphDef> = {
  * Provides the same `tx.nodes.*` and `tx.edges.*` API as the Store,
  * but operations are executed within the transaction scope.
  *
+ * `tx.sql` is the raw Drizzle handle **bound to this same
+ * transaction** — use it to write the caller's own relational tables
+ * inside the graph-owned transaction so both layers commit or roll
+ * back together (the graph-owned counterpart of
+ * {@link Store.withTransaction}, where the caller owns the boundary):
+ *
+ * ```typescript
+ * await store.transaction(async (tx) => {
+ *   await tx.nodes.Document.update(documentId, props);
+ *   // `tx.sql` is the `AdoptedTransaction` union — cast to your
+ *   // concrete Drizzle database type at the call site.
+ *   const sqlTx = tx.sql as NodePgDatabase;
+ *   await sqlTx.insert(documentVersions).values(versionRow);
+ *   await sqlTx.insert(changeEvents).values(eventRow);
+ * });
+ * ```
+ *
+ * Per-backend semantics:
+ * - **Postgres / libsql** (async drivers): `tx.sql` is the Drizzle
+ *   transaction handle. Using the outer `db` instead would write on a
+ *   *different* connection and silently escape the transaction — so
+ *   `tx.sql` is a correctness requirement there.
+ * - **better-sqlite3**: the single connection, framed by TypeGraph's
+ *   `BEGIN`/`COMMIT`/`ROLLBACK`.
+ * - **Durable Objects (`do-sqlite`)**: the bound Drizzle handle; the
+ *   storage transaction is ambient, so writing the outer `db` also
+ *   enlists — `tx.sql` is the explicit, portable form.
+ *
+ * It is `undefined` only on the non-transactional fallback
+ * (`backend.capabilities.transactions === false` — e.g. Cloudflare
+ * D1, `drizzle-orm/neon-http`), where `store.transaction()` runs the
+ * callback with no atomicity and there is no transaction to enlist.
+ * Its type is the `AdoptedTransaction` union; cast to your concrete
+ * Drizzle database type at the call site.
+ *
  * @example
  * ```typescript
  * await store.transaction(async (tx) => {
@@ -958,6 +997,7 @@ export type GraphEdgeCollections<G extends GraphDef> = {
 export type TransactionContext<G extends GraphDef> = Readonly<{
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
+  sql?: AdoptedTransaction;
 }>;
 
 // ============================================================

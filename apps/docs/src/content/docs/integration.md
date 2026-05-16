@@ -609,9 +609,43 @@ see the dedicated [Testing](/testing) guide.
 
 Deploy TypeGraph at the edge using SQLite-compatible runtimes.
 
-> **Note:** Edge environments cannot use `@nicia-ai/typegraph/sqlite` because it
-> depends on `better-sqlite3`, a native Node.js addon. Instead, use
+> **Note:** Edge environments cannot use `@nicia-ai/typegraph/sqlite/local`
+> because it depends on `better-sqlite3`, a native Node.js addon. Instead, use
 > `@nicia-ai/typegraph/sqlite` which is driver-agnostic.
+
+**Cloudflare Durable Objects (SQLite) — transactional:**
+
+```typescript
+import { drizzle } from "drizzle-orm/durable-sqlite";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+
+export class GraphObject {
+  constructor(private ctx: DurableObjectState) {}
+
+  async fetch(): Promise<Response> {
+    const db = drizzle(this.ctx.storage);
+    const backend = createSqliteBackend(db); // auto-detects "do-sqlite"
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    // Atomic across TypeGraph + the caller's own relational tables:
+    await store.transaction(async (tx) => {
+      await tx.nodes.Document.update(documentId, props);
+      // tx.sql is the AdoptedTransaction union — cast to your db type.
+      const sqlTx = tx.sql as typeof db;
+      await sqlTx.insert(documentVersions).values(versionRow);
+    });
+
+    return new Response("ok");
+  }
+}
+```
+
+Unlike D1, Durable Objects expose an interactive storage transaction runner,
+so `store.transaction()` / `store.withTransaction()` are fully atomic
+(`capabilities.transactions: true`). See
+[Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite) and the
+[Cross-Store Transactions recipe](/recipes#cross-store-transactions-drizzle--typegraph).
 
 **Cloudflare Workers with D1:**
 

@@ -9,7 +9,11 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, type EdgeId } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  AdoptedTransaction,
+  GraphBackend,
+  TransactionBackend,
+} from "../src/backend/types";
 import { createStore } from "../src/store";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
@@ -233,10 +237,10 @@ describe("Node Collections (SQLite)", () => {
           return baseBackend.execute<T>(query);
         },
         async transaction<T>(
-          fn: (tx: TransactionBackend) => Promise<T>,
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
           options?: Parameters<GraphBackend["transaction"]>[1],
         ): Promise<T> {
-          return baseBackend.transaction(async (txBackend) => {
+          return baseBackend.transaction(async (txBackend, sql) => {
             const observedTxBackend: TransactionBackend = {
               ...txBackend,
               async execute<T>(
@@ -246,7 +250,7 @@ describe("Node Collections (SQLite)", () => {
                 return txBackend.execute<T>(query);
               },
             };
-            return fn(observedTxBackend);
+            return fn(observedTxBackend, sql);
           }, options);
         },
       };
@@ -791,7 +795,7 @@ describe("Bulk Operations (SQLite)", () => {
           await insertNodesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx) => {
+          return baseBackend.transaction(async (tx, sql) => {
             const wrappedTx: TransactionBackend = {
               ...tx,
               async insertNodeNoReturn(params) {
@@ -803,7 +807,7 @@ describe("Bulk Operations (SQLite)", () => {
                 await insertNodesBatchWithFallback(tx, params);
               },
             };
-            return fn(wrappedTx);
+            return fn(wrappedTx, sql);
           }, options);
         },
       };
@@ -988,7 +992,7 @@ describe("Bulk Operations (SQLite)", () => {
           await insertEdgesBatchWithFallback(baseBackend, params);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx) => {
+          return baseBackend.transaction(async (tx, sql) => {
             const wrappedTx: TransactionBackend = {
               ...tx,
               async insertEdgeNoReturn(params) {
@@ -1000,7 +1004,7 @@ describe("Bulk Operations (SQLite)", () => {
                 await insertEdgesBatchWithFallback(tx, params);
               },
             };
-            return fn(wrappedTx);
+            return fn(wrappedTx, sql);
           }, options);
         },
       };
@@ -1053,7 +1057,7 @@ describe("Bulk Operations (SQLite)", () => {
           return baseBackend.getNode(graphId, kind, id);
         },
         async transaction(fn, options) {
-          return baseBackend.transaction(async (tx) => {
+          return baseBackend.transaction(async (tx, sql) => {
             const wrappedTx = {
               ...tx,
               async getNode(graphId: string, kind: string, id: string) {
@@ -1061,7 +1065,7 @@ describe("Bulk Operations (SQLite)", () => {
                 return tx.getNode(graphId, kind, id);
               },
             };
-            return fn(wrappedTx);
+            return fn(wrappedTx, sql);
           }, options);
         },
       };

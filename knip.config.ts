@@ -8,7 +8,13 @@ const config: KnipConfig = {
         "examples/*.ts",
         "test-d/**/*.test-d.ts",
         "type-smoke/**/*.ts",
+        // workerd entry for the do-sqlite test lane: its default export
+        // is loaded by @cloudflare/vitest-pool-workers, not imported.
+        "tests/do-sqlite/worker.ts",
       ],
+      // `cloudflare:test` / `cloudflare:workers` are workerd virtual
+      // modules provided by the pool at runtime, not npm packages.
+      ignoreDependencies: ["cloudflare"],
       project: [
         "src/**/*.ts",
         "tests/**/*.ts",

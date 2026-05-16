@@ -33,6 +33,9 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     exclude: [
       ...configDefaults.exclude,
+      // #140: workerd-only do-sqlite suite — runs via `test:do`
+      // (vitest.workers.config.ts), not the Node suite.
+      "tests/do-sqlite/**",
       "**/dist/**",
       "**/.{idea,git,cache,output,temp}/**",
       "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc}.config.*",

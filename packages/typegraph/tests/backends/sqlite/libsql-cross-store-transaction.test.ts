@@ -118,4 +118,52 @@ describe("#134 cross-store atomicity (libsql, documented async shape)", () => {
     expect(await store.nodes.ArtifactSource.find()).toEqual([]);
     client.close();
   });
+
+  // #140 — graph-owned: TypeGraph opens the tx, `tx.sql` is
+  // the bound libsql transaction handle (the "drizzle" SQLite mode).
+  it("commits/rolls back a tx.sql relational row with the graph node in one store.transaction", async () => {
+    const client = createClient({ url: `file:${createTemporaryDbPath()}` });
+    const { backend, db } = await createLibsqlBackend(client);
+    await client.execute(
+      "CREATE TABLE connectors (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+    );
+    const store = createStore(PlainGraph, backend);
+
+    const source = await store.transaction(async (tx) => {
+      const sqlTx = tx.sql as typeof db;
+      const inserted = await sqlTx
+        .insert(connectors)
+        .values({ name: "github" })
+        .returning({ id: connectors.id });
+      return tx.nodes.ArtifactSource.create({
+        connectorId: inserted[0]!.id,
+        label: "primary",
+      });
+    });
+
+    expect(await db.select().from(connectors)).toEqual([
+      { id: 1, name: "github" },
+    ]);
+    const fetched = await store.nodes.ArtifactSource.getById(source.id);
+    expect(fetched?.connectorId).toBe(1);
+
+    await expect(
+      store.transaction(async (tx) => {
+        const sqlTx = tx.sql as typeof db;
+        await sqlTx.insert(connectors).values({ name: "orphan" });
+        await tx.nodes.ArtifactSource.create({
+          connectorId: 999,
+          label: "doomed",
+        });
+        throw new Error("phase2-libsql-rollback");
+      }),
+    ).rejects.toThrow("phase2-libsql-rollback");
+
+    expect(await db.select().from(connectors)).toEqual([
+      { id: 1, name: "github" },
+    ]);
+    expect(await store.nodes.ArtifactSource.find()).toHaveLength(1);
+    client.close();
+  });
 });

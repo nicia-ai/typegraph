@@ -1114,8 +1114,18 @@ export type GraphBackend = Readonly<{
   executeDdl?: (ddl: string) => Promise<void>;
 
   // === Transaction ===
+  /**
+   * `fn` receives the tx-scoped backend and the raw Drizzle handle
+   * **bound to that same transaction** (`AdoptedTransaction`). The
+   * store surfaces the second argument as `TransactionContext.sql` so
+   * callers can write their own relational tables inside the
+   * graph-owned transaction. Implementations MUST pass the *exact*
+   * handle the tx-scoped backend writes through (the Postgres/libsql
+   * tx handle; for better-sqlite3 / do-sqlite the bound connection),
+   * never a fresh one.
+   */
   transaction: <T>(
-    fn: (tx: TransactionBackend) => Promise<T>,
+    fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
     options?: TransactionOptions,
   ) => Promise<T>;
 

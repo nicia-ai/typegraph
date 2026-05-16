@@ -539,7 +539,53 @@ export default {
 If you prefer to manage DDL yourself, use `createStore()` with manual migrations
 instead.
 
-**Important:** D1 does not support transactions. See [Limitations](/limitations) for details.
+**Important:** D1 has no interactive transaction primitive
+(`D1Database.batch(...)` is transactional, but batch-only — not an
+interactive runner), so `store.transaction()` is non-atomic on D1. See
+[Limitations](/limitations) for details. For a transactional Cloudflare
+SQLite store, use **Durable Objects** (below) instead.
+
+## Cloudflare Durable Objects (SQLite)
+
+A store backed by `drizzle(ctx.storage)` inside a Durable Object is
+**auto-detected** as `transactionMode: "do-sqlite"` and reports
+`capabilities.transactions: true` — no `executionProfile` hint needed.
+Unlike D1, Durable Objects expose an interactive storage transaction runner,
+so `store.transaction()` and `store.withTransaction()` are fully atomic.
+
+```typescript
+import { drizzle } from "drizzle-orm/durable-sqlite";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+
+export class MyObject {
+  constructor(private ctx: DurableObjectState) {}
+
+  async handle() {
+    const db = drizzle(this.ctx.storage);
+    const backend = createSqliteBackend(db);
+    // Boots schema/DDL outside any storage transaction (no DDL in the
+    // business transaction); the schema-version commit uses the
+    // do-sqlite runner.
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    // Atomic across TypeGraph + the product's own relational tables:
+    await store.transaction(async (tx) => {
+      await tx.nodes.Document.update(documentId, props);
+      // tx.sql is the AdoptedTransaction union — cast to your db type.
+      const sqlTx = tx.sql as typeof db;
+      await sqlTx.insert(documentVersions).values(versionRow);
+    });
+  }
+}
+```
+
+TypeGraph delegates to the async storage runner
+`ctx.storage.transaction(async …)` (Drizzle's own `db.transaction()` on
+Durable Objects is `ctx.storage.transactionSync` and cannot span an
+`await`, so it is not used). See the
+[Cross-Store Transactions recipe](/recipes#cross-store-transactions-drizzle--typegraph)
+for the caller-owned (`withTransaction`) and graph-owned (`tx.sql`) shapes.
 
 ## Backend Capabilities
 

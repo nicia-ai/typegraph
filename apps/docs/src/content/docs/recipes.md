@@ -639,6 +639,35 @@ else touches the connection between `BEGIN` and `COMMIT`/`ROLLBACK`. Do not
 interleave other async work that writes to the same connection inside the
 `try`.
 
+**Cloudflare Durable Objects (`do-sqlite`).** A store backed by
+`drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`
+and advertises `capabilities.transactions: true`. Drizzle's own
+`db.transaction()` here is `ctx.storage.transactionSync` and cannot span an
+`await`; TypeGraph instead delegates to the async storage runner
+`ctx.storage.transaction(async …)` (surfaced by Drizzle as
+`db.$client.transaction`), which rolls back SQL writes across `await`. There
+is no Drizzle transaction handle on Durable Objects — the storage
+transaction is ambient on the object — so the caller hands `withTransaction`
+the same `db`:
+
+```typescript
+await ctx.storage.transaction(async () => {
+  const txStore = store.withTransaction(db);
+  await txStore.nodes.Document.update(documentId, props);
+  await db.insert(documentVersions).values(versionRow);
+  await db.insert(changeEvents).values(eventRow);
+}); // one storage-transaction COMMIT / ROLLBACK across both layers
+```
+
+`store.transaction(async (tx) => …)` works the same way (TypeGraph opens the
+storage transaction for you). Boot the parent store with
+`createStoreWithSchema` at object startup: bootstrap DDL and the durable
+materialization marker run *outside* any storage transaction (no DDL is ever
+emitted inside the business transaction), while the schema-version commit
+uses the `do-sqlite` runner. Cloudflare D1 is **not** `do-sqlite`:
+`D1Database.batch(...)` is transactional but not an interactive runner, so
+D1-backed stores stay `transactionMode: "none"` pending separate work.
+
 The adopted context exposes the `{ nodes, edges }` surface (same as
 `store.transaction`) and reuses the parent store's resolved schema — it runs
 no migration and emits no DDL inside your transaction. Boot the parent store
@@ -651,6 +680,35 @@ real rollback (`backend.capabilities.transactions === false`:
 `drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`) —
 it never silently degrades to a non-atomic fallback, because the relational
 write would still commit.
+
+#### Graph-owned: `store.transaction` + `tx.sql`
+
+`withTransaction` is for when the **caller** owns the transaction boundary.
+When **TypeGraph** should own it, use `store.transaction(async (tx) => …)` and
+write your own relational tables through `tx.sql` — the raw Drizzle handle
+bound to that same transaction:
+
+```typescript
+await store.transaction(async (tx) => {
+  await tx.nodes.Document.update(documentId, props);
+  // tx.sql is the AdoptedTransaction union — cast to your concrete
+  // Drizzle database type at the call site.
+  const sqlTx = tx.sql as NodePgDatabase;
+  await sqlTx.insert(documentVersions).values(versionRow);
+  await sqlTx.insert(changeEvents).values(eventRow);
+}); // one COMMIT / ROLLBACK across both layers
+```
+
+`tx.sql`'s static type is the `AdoptedTransaction` union; cast it to your
+concrete Drizzle database type at the call site (as above).
+On **Postgres / libsql** this is mandatory for correctness — using the outer
+`db` would write on a *different* connection and silently escape the
+transaction. On **better-sqlite3** it is the single connection framed by
+TypeGraph's `BEGIN`/`COMMIT`/`ROLLBACK`; on **Durable Objects**
+(`do-sqlite`) it is the bound handle (the storage transaction is ambient).
+`tx.sql` is `undefined` only on the non-transactional fallback
+(`capabilities.transactions === false`), where `store.transaction` runs the
+callback with no atomicity and there is no transaction to join.
 
 ## Enforcing Unique Constraints
 

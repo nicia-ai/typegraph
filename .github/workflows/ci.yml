@@ -229,6 +229,28 @@ jobs:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
+  test-durable-objects:
+    name: Test (Durable Objects SQLite)
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Durable Objects SQLite tests (workerd)
+        run: pnpm --filter @nicia-ai/typegraph test:do
+
   build:
     name: Build
     runs-on: ubuntu-24.04
@@ -240,6 +262,7 @@ jobs:
       - test-coverage
       - test-typescript-compat
       - test-postgres
+      - test-durable-objects
     if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
     steps:
       - uses: actions/checkout@v6
