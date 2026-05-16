@@ -1,5 +1,233 @@
 # @nicia-ai/typegraph
 
+## 0.26.0
+
+### Minor Changes
+
+- [#139](https://github.com/nicia-ai/typegraph/pull/139) [`f1ea17c`](https://github.com/nicia-ai/typegraph/commit/f1ea17cafab281d61741b1d2ad0b26a769efaa5a) Thanks [@pdlug](https://github.com/pdlug)! - Cross-store atomicity: share one transaction across the TypeGraph store and an
+  external Drizzle connection ([#134](https://github.com/nicia-ai/typegraph/issues/134)).
+
+  Applications that persist into the same database through two layers — Drizzle
+  for relational rows and TypeGraph for graph nodes/edges — previously had no way
+  to make a write that spans both layers all-or-nothing. `store.transaction()`
+  and `db.transaction()` each opened a _separate_ transaction on a _separate_
+  connection, so a failure between the two writes left either a stray relational
+  row or a committed graph node with a dangling foreign reference.
+
+  **What ships (additive — no breaking changes):**
+  - New `Store.withTransaction(externalTx): TransactionContext<G>`. The caller
+    owns the transaction; `store.withTransaction(sqlTx)` returns a
+    transaction-scoped `{ nodes, edges }` bound to that _exact_ connection, so
+    both layers commit or roll back together. It is driver-agnostic; how you
+    open the transaction is not.
+
+    Async drivers (node-postgres, `neon-serverless` Pool, libsql):
+
+    ```ts
+    await db.transaction(async (sqlTx) => {
+      const connector = await createConnectorRow(sqlTx, input); // Drizzle
+      const txStore = store.withTransaction(sqlTx);
+      await txStore.nodes.ArtifactSource.create({
+        // TypeGraph
+        connectorId: connector.id,
+      });
+    }); // one COMMIT / ROLLBACK
+    ```
+
+    Synchronous `better-sqlite3` cannot use `db.transaction(async …)` (its
+    driver rejects an `async` callback); open the transaction with explicit
+    `BEGIN`/`COMMIT`/`ROLLBACK` instead and pass the connection to
+    `withTransaction`. See the "Cross-Store Transactions" recipe for both
+    shapes.
+
+  - New optional `GraphBackend.adoptTransaction(externalTx)` member, implemented
+    by the Drizzle Postgres and SQLite backends, plus the new `AdoptedTransaction`
+    type.
+
+  **Guarantees.** The adopted context reuses the parent store's already-resolved
+  schema: it runs no `createStoreWithSchema` / `evolve` / `migrateSchema` and
+  emits **no DDL inside the caller's business transaction**. Building on [#135](https://github.com/nicia-ai/typegraph/issues/135),
+  fulltext operations assert the durable materialization marker (a cached
+  `SELECT`, never DDL) and throw `StoreNotInitializedError` on a
+  missing/stale/failed marker rather than migrating mid-transaction — so boot the
+  parent store via `createStoreWithSchema` once at startup. When the backend
+  cannot provide real rollback (`backend.capabilities.transactions === false`:
+  `drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`),
+  `withTransaction` throws `ConfigurationError` rather than silently degrading —
+  a non-atomic fallback is safe for graph-only writes but dangerous for
+  cross-store flows, where the caller's relational write _would_ still commit.
+
+- [#142](https://github.com/nicia-ai/typegraph/pull/142) [`02c98a9`](https://github.com/nicia-ai/typegraph/commit/02c98a9933c888fcd732053e8cb47991614d2ec9) Thanks [@pdlug](https://github.com/pdlug)! - Transactional writes for Cloudflare Durable Objects SQLite (`do-sqlite`)
+  ([#140](https://github.com/nicia-ai/typegraph/issues/140)).
+
+  A store backed by `drizzle(ctx.storage)` previously fell back to
+  non-transactional behavior, so TypeGraph mutations could not be composed
+  atomically with a product's own relational ledger tables (e.g.
+  `document_versions`, `change_events`) inside a Durable Object.
+
+  **What ships (additive — no breaking changes):**
+  - New SQLite `transactionMode: "do-sqlite"`, **auto-detected** for
+    `drizzle(ctx.storage)`. Such backends now advertise
+    `capabilities.transactions: true`.
+  - `store.transaction(async (tx) => …)` and the caller-owned
+    `store.withTransaction(db)` shape both work on Durable Objects. TypeGraph
+    delegates to the async storage runner `ctx.storage.transaction(async …)`
+    (surfaced by Drizzle as `db.$client.transaction`), which rolls back SQL
+    writes across `await`. Drizzle's own `db.transaction()` on DO is
+    `ctx.storage.transactionSync` and cannot span an `await`, so it is
+    deliberately not used. There is no Drizzle transaction handle on DO — the
+    storage transaction is ambient on the object — so the tx-scoped backend
+    binds the outer `db`.
+
+    ```ts
+    await ctx.storage.transaction(async () => {
+      const txStore = store.withTransaction(db);
+      await txStore.nodes.Document.update(documentId, props);
+      await db.insert(documentVersions).values(versionRow);
+      await db.insert(changeEvents).values(eventRow);
+    }); // one storage-transaction COMMIT / ROLLBACK across both layers
+    ```
+
+  - A latent detection bug is fixed: drizzle's Durable Objects session class is
+    `SQLiteDOSession` (not the previously-checked `SQLiteDurableObjectSession`),
+    so a real `drizzle(ctx.storage)` store was misclassified.
+  - New `TransactionContext.sql` — the raw Drizzle handle bound to the same
+    transaction — for graph-owned cross-store writes across **all**
+    transactional backends (Postgres, libsql, better-sqlite3, do-sqlite):
+
+    ```ts
+    await store.transaction(async (tx) => {
+      await tx.nodes.Document.update(documentId, props);
+      await tx.sql.insert(documentVersions).values(versionRow);
+      await tx.sql.insert(changeEvents).values(eventRow);
+    });
+    ```
+
+    This is the graph-owned counterpart of `store.withTransaction` (where the
+    caller owns the boundary). On Postgres/libsql it is a correctness
+    requirement — the outer `db` would write on a different connection and
+    escape the transaction. `tx.sql` is `undefined` only on the
+    non-transactional fallback. Its static type is the `AdoptedTransaction`
+    union; cast to your concrete Drizzle database type at the call site.
+
+  **Guarantees.** Building on [#135](https://github.com/nicia-ai/typegraph/issues/135), no schema/bootstrap/fulltext DDL ever runs
+  inside the business transaction: `bootstrapTables` and the durable
+  materialization marker run outside any storage transaction, while the
+  schema-version commit uses the `do-sqlite` runner (data only). Boot the parent
+  store via `createStoreWithSchema` once at object startup.
+
+  **Out of scope.** Cloudflare D1 stays `transactionMode: "none"`:
+  `D1Database.batch(...)` is transactional but not an interactive runner. A
+  batch-only D1 mode is tracked separately.
+
+- [#138](https://github.com/nicia-ai/typegraph/pull/138) [`bcf1e48`](https://github.com/nicia-ai/typegraph/commit/bcf1e4819754f1839a236d350d70bab9103607ce) Thanks [@pdlug](https://github.com/pdlug)! - Durable, enforced fulltext materialization ([#135](https://github.com/nicia-ai/typegraph/issues/135)).
+
+  Strategy-owned fulltext table/index DDL was materialized lazily, guarded by an
+  **in-memory, per-backend-instance boolean latch** (`fulltextEnsured`), and
+  interleaved into the read/write data path. That was correct only by accident
+  (idempotent DDL + a warm process) and at the wrong durability scope; it was
+  inconsistent with how vector indexes are tracked and it blocked cross-store
+  transaction adoption ([#134](https://github.com/nicia-ai/typegraph/issues/134)). "Is this graph's fulltext storage materialized?"
+  is now a **durable, queryable database fact** instead of a process boolean.
+
+  **Breaking (behavioral): fulltext now requires an explicit boot step.**
+  `createStore()` is a synchronous, zero-I/O _attach_ — it never creates tables,
+  repairs DDL, or writes materialization markers. The durable marker is written
+  exclusively by the async boot path, `createStoreWithSchema(graph, backend)`,
+  which must run once at application startup (outside request handlers and
+  adopted transactions). A fulltext read/write — or a transaction that touches
+  fulltext — against a database with no valid marker now throws the new
+  `StoreNotInitializedError` instead of lazily emitting DDL on the hot path.
+  Consumers already using `createStoreWithSchema` need no changes; consumers
+  relying on lazy fulltext creation via bare `createStore()` must add a
+  `createStoreWithSchema` call at boot.
+
+  **What ships:**
+  - New `@nicia-ai/typegraph` exports: `StoreNotInitializedError` and the
+    `StoreNotInitializedReason` (`"missing" | "stale" | "failed"`) it carries in
+    `details.reason`.
+  - New per-deployment table `typegraph_contribution_materializations`, a
+    sibling of `typegraph_index_materializations` (the declared-index status
+    table is deliberately left unchanged). Keyed by [#129](https://github.com/nicia-ai/typegraph/issues/129) contribution identity
+    `(graph_id, logical_name, owner, table_name)`; `signature` is a separate
+    content-hash column, so a same-identity row with a drifted signature is a
+    loud error, never a silent re-materialize. Failed re-attempts preserve the
+    prior success timestamp via the same COALESCE rule as index
+    materializations.
+  - New backend primitives (SQLite + Postgres):
+    `ensureContributionMaterializationsTable`, `getContributionMaterialization`,
+    `recordContributionMaterialization`, and
+    `assertRuntimeContributionsInitialized`. `ensureRuntimeContributions`
+    and `ensureFulltextTable` now take a `graphId` and
+    route through the durable-marker writer (short-circuiting when the recorded
+    signature already matches). `createStoreWithSchema` records the marker after
+    the schema version is resolved, covering the cold-initialize path.
+  - The six fulltext-touching methods (`upsertFulltext`, `deleteFulltext`,
+    `upsertFulltextBatch`, `deleteFulltextBatch`, `fulltextSearch`,
+    `hardDeleteNode`) stop ensuring and instead assert the durable marker
+    (resolved once per backend instance, cached). The transaction path performs
+    zero DDL: the tx-scoped backend's fulltext methods assert the cached marker
+    at point of use (a `SELECT`, never `CREATE`), so a transaction that never
+    touches fulltext requires no fulltext initialization and one that does runs
+    pure DML on the adopted transaction.
+
+  This makes [#134](https://github.com/nicia-ai/typegraph/issues/134) (cross-store transaction adoption) sound by construction: a
+  transaction-adopting primitive consults the durable fact and refuses with a
+  clear `StoreNotInitializedError` if the store was never initialized, instead
+  of emitting `CREATE INDEX` inside the caller's business transaction.
+
+- [#136](https://github.com/nicia-ai/typegraph/pull/136) [`9aa2d31`](https://github.com/nicia-ai/typegraph/commit/9aa2d31b8beddbf8f0dea08c4d9435ab3255b580) Thanks [@pdlug](https://github.com/pdlug)! - Unified `TableContribution` contract for strategy-owned tables ([#129](https://github.com/nicia-ai/typegraph/issues/129)).
+
+  "What tables does TypeGraph own?" was previously split across four
+  uncoordinated surfaces (Drizzle named exports, tables-factory
+  recursion, strategy raw DDL, per-table `ensureXTable` methods). Adding
+  a new strategy- or backend-owned table without also wiring an
+  `ensureXTable` + bootstrap probe re-opened the gap [#128](https://github.com/nicia-ai/typegraph/issues/128) closed. This
+  refactor routes every owned table through one shape.
+
+  **Breaking (custom `FulltextStrategy` implementers only):**
+  `FulltextStrategy.generateDdl(tableName): string[]` is replaced by
+  `ownedTables(primaryTableName): readonly StrategyTableContribution[]`.
+  A strategy now _declares_ its tables, Drizzle-free, as already
+  authoritative contributions (`logicalName`, `owner`, resolved
+  `tableName`, idempotent `createDdl` for the table **and its supporting
+  indexes**, `runtimeEnsure`). The two shipped strategies
+  (`tsvectorStrategy`, `fts5Strategy`) and all internal callers are
+  migrated; consumers using only the shipped strategies need no changes.
+
+  **What ships:**
+  - New `@nicia-ai/typegraph` export: `TableContribution` and
+    `StrategyTableContribution` (its strategy-declaration alias). Each
+    contribution carries a stable, deployment-independent `logicalName`
+    plus the resolved physical `tableName` (distinct identity vs.
+    drift-signature inputs) — the prerequisite that lets [#135](https://github.com/nicia-ai/typegraph/issues/135) make
+    fulltext materialization a durable, decidable fact instead of an
+    in-memory per-backend latch.
+  - `postgresContributions()` / `sqliteContributions()` are the single
+    source of truth for DDL generation and the bootstrap ensure.
+    `generatePostgresDDL` / `generateSqliteDDL` iterate contributions;
+    the `table === tables.fulltext` reference-identity hack is gone from
+    DDL generation. drizzle-kit visibility for the default Postgres
+    strategy comes from the schema barrel exporting the matching
+    `tables.fulltext` object (one object, not two); a non-default
+    strategy exports its own.
+  - New backend method `ensureRuntimeContributions()`, which runs each
+    `runtimeEnsure` contribution's full idempotent `createDdl` (table +
+    supporting indexes) so a partial state (table present, index
+    missing) self-heals — not a probe-and-skip.
+    `loadActiveSchemaWithBootstrap` calls it scoped to `runtimeEnsure`
+    contributions only (the strategy-owned fulltext table today), so
+    startup does not regress into broad DDL/probing across every table.
+    `ensureFulltextTable` is retained as a thin back-compat wrapper.
+
+  DDL statement ordering changes from "all CREATE TABLE, then all CREATE
+  INDEX, then fulltext" to per-contribution "table then its own
+  indexes". Safe because TypeGraph's tables carry no cross-table foreign
+  keys; raw migration SQL byte output differs accordingly.
+
+  Prerequisite for [#135](https://github.com/nicia-ai/typegraph/issues/135) (durable fulltext materialization), which is in
+  turn the prerequisite for [#134](https://github.com/nicia-ai/typegraph/issues/134) (cross-store transaction adoption).
+
 ## 0.25.1
 
 ### Patch Changes
@@ -48,19 +276,20 @@
     for `nodes`/`edges`/etc. Custom `tsvector`/`regconfig` column
     types are exported alongside the existing `vector` column.
 
-    `generatePostgresDDL` deliberately skips the typed Drizzle table
-    (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
-STORED` clause) and continues to defer to
-    `tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
+        `generatePostgresDDL` deliberately skips the typed Drizzle table
+        (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
+
+    STORED`clause) and continues to defer to
+   `tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
     two paths agree byte-for-byte; a drift sentinel test catches any
     divergence.
 
-    Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
-    pgroonga) still own their own DDL via
-    `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
-    Drizzle-kit consumers using a non-default strategy must override
-    `tables.fulltext` in their schema barrel with their strategy's
-    own table.
+        Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
+        pgroonga) still own their own DDL via
+        `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
+        Drizzle-kit consumers using a non-default strategy must override
+        `tables.fulltext` in their schema barrel with their strategy's
+        own table.
 
   Documented the SQLite FTS5 virtual-table caveat and the new
   Postgres `tables.fulltext` export in
