@@ -393,9 +393,9 @@ export function createPostgresTables(
   /**
    * Drizzle pg-core table for the default `tsvectorStrategy` so
    * drizzle-kit can introspect the fulltext table alongside the
-   * others. Mirrors `tsvectorStrategy.generateDdl()` — the typed
-   * shape and the strategy DDL must stay in sync (drift sentinel
-   * lives in `tests/typed-fulltext-table.test.ts`).
+   * others. Mirrors `tsvectorStrategy.ownedTables(...).createDdl` —
+   * the typed shape and the strategy DDL must stay in sync (drift
+   * sentinel lives in `tests/typed-fulltext-table.test.ts`).
    *
    * Why `regconfig` + GENERATED: `to_tsvector("language", "content")`
    * needs an immutable language to qualify for use inside a
@@ -404,8 +404,8 @@ export function createPostgresTables(
    *
    * Alternate strategies (pg_trgm, ParadeDB, pgroonga) bring their
    * own DDL; `generatePostgresDDL` skips this typed table for them
-   * and defers to `FulltextStrategy.generateDdl()`. Drizzle-kit
-   * consumers on non-default strategies must override
+   * and defers to the active strategy's `ownedTables(...).createDdl`.
+   * Drizzle-kit consumers on non-default strategies must override
    * `tables.fulltext` in their schema barrel.
    */
   const fulltext = pgTable(

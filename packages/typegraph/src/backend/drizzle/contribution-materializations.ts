@@ -32,7 +32,7 @@ import type {
   RecordContributionMaterializationParams,
   TransactionBackend,
 } from "../types";
-import { findStrategyContribution, runtimeStrategyContributions } from "./ddl";
+import { runtimeStrategyContributions } from "./ddl";
 import { formatPostgresTimestamp, nowIso } from "./row-mappers";
 
 /**
@@ -234,67 +234,74 @@ function identityOf(
 }
 
 /**
- * Wrap a transaction-scoped backend so every fulltext-touching method
- * asserts the durable contribution marker before delegating — the
- * point-of-use gate (#135) for the transaction path, mirroring the
- * non-tx wrappers.
- *
- * The tx-scoped backend exposes RAW fulltext methods (no self-ensure);
- * `assert` is the outer backend's cached durable-marker resolver. A
- * transaction that never touches fulltext never asserts, so non-
- * fulltext transactions stay free of any fulltext-init requirement.
- * `assert` performs only a (cached) SELECT — never DDL — so it is safe
- * inside the caller's open transaction (#134).
- *
- * `hardDeleteNode` is gated because the cascade unconditionally deletes
- * from the fulltext table even for graphs with no `searchable()`
- * fields. Empty-input batch calls skip the assert, matching the
- * "a genuine no-op is harmless" contract of the non-tx wrappers.
+ * The fulltext-touching methods the durable-marker gate wraps. The five
+ * `upsert*`/`delete*`/`fulltextSearch` are optional (a graph with no
+ * `searchable()` fields has none); `hardDeleteNode` is always present
+ * because its cascade unconditionally deletes from the fulltext table.
  */
-export function gateFulltext(
-  tx: TransactionBackend,
-  assert: (graphId: string) => Promise<void>,
-): TransactionBackend {
-  // Mutable local so each override is only assigned when the raw method
-  // exists; the "only wrap when defined" rule stays obvious instead of
-  // hiding behind conditional spreads.
-  const gated: { -readonly [K in keyof TransactionBackend]: TransactionBackend[K] } =
-    { ...tx };
+export type GatableFulltextBackend = Pick<
+  TransactionBackend,
+  | "upsertFulltext"
+  | "deleteFulltext"
+  | "upsertFulltextBatch"
+  | "deleteFulltextBatch"
+  | "fulltextSearch"
+  | "hardDeleteNode"
+>;
 
-  if (tx.upsertFulltext) {
-    const raw = tx.upsertFulltext;
+/**
+ * The fulltext point-of-use gate, as the wrapped overrides only. Each
+ * method asserts the durable contribution marker before delegating; an
+ * optional method is wrapped only when present. `assert` performs only
+ * a (cached) SELECT — never DDL — so it is safe inside an open
+ * transaction. The single source of the gating contract: both the
+ * non-tx backend and the tx-scoped {@link gateFulltext} consume it.
+ */
+export function gateFulltextMethods(
+  source: GatableFulltextBackend,
+  assert: (graphId: string) => Promise<void>,
+): Partial<GatableFulltextBackend> {
+  // Only assign an override when the raw method exists, so the "wrap
+  // only what's defined" rule stays obvious instead of hiding behind
+  // conditional spreads.
+  const gated: {
+    -readonly [K in keyof GatableFulltextBackend]?: GatableFulltextBackend[K];
+  } = {};
+
+  if (source.upsertFulltext) {
+    const raw = source.upsertFulltext;
     gated.upsertFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
-  if (tx.deleteFulltext) {
-    const raw = tx.deleteFulltext;
+  if (source.deleteFulltext) {
+    const raw = source.deleteFulltext;
     gated.deleteFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
-  if (tx.upsertFulltextBatch) {
-    const raw = tx.upsertFulltextBatch;
+  if (source.upsertFulltextBatch) {
+    const raw = source.upsertFulltextBatch;
     gated.upsertFulltextBatch = async (params) => {
-      // A genuine no-op call asserts nothing, matching the non-tx
-      // wrappers' "empty input is harmless" contract.
+      // A genuine no-op call asserts nothing — the "empty input is
+      // harmless" contract.
       if (params.rows.length === 0) return;
       await assert(params.graphId);
       await raw(params);
     };
   }
-  if (tx.deleteFulltextBatch) {
-    const raw = tx.deleteFulltextBatch;
+  if (source.deleteFulltextBatch) {
+    const raw = source.deleteFulltextBatch;
     gated.deleteFulltextBatch = async (params) => {
       if (params.nodeIds.length === 0) return;
       await assert(params.graphId);
       await raw(params);
     };
   }
-  if (tx.fulltextSearch) {
-    const raw = tx.fulltextSearch;
+  if (source.fulltextSearch) {
+    const raw = source.fulltextSearch;
     gated.fulltextSearch = async (params) => {
       await assert(params.graphId);
       return raw(params);
@@ -302,12 +309,26 @@ export function gateFulltext(
   }
   // Unconditional: the hard-delete cascade deletes from the fulltext
   // table even for graphs that declare no `searchable()` fields.
-  const rawHardDelete = tx.hardDeleteNode;
+  const rawHardDelete = source.hardDeleteNode;
   gated.hardDeleteNode = async (params) => {
     await assert(params.graphId);
     await rawHardDelete(params);
   };
   return gated;
+}
+
+/**
+ * Tx-scoped variant: a {@link TransactionBackend} with its fulltext
+ * methods gated. The tx-scoped backend exposes RAW fulltext methods (no
+ * self-ensure); a transaction that never touches fulltext never
+ * asserts, so non-fulltext transactions stay free of any fulltext-init
+ * requirement.
+ */
+export function gateFulltext(
+  tx: TransactionBackend,
+  assert: (graphId: string) => Promise<void>,
+): TransactionBackend {
+  return { ...tx, ...gateFulltextMethods(tx, assert) };
 }
 
 // ============================================================
@@ -337,8 +358,6 @@ export type ContributionMaterializerDeps = Readonly<{
 }>;
 
 export type ContributionMaterializer = Readonly<{
-  /** Materialize one declared contribution by `logicalName` + record it. */
-  ensureContribution: (logicalName: string, graphId: string) => Promise<void>;
   /** Canonical durable-marker writer: every `runtimeEnsure` contribution. */
   ensureRuntimeContributions: (graphId: string) => Promise<void>;
   /**
@@ -375,16 +394,12 @@ export function createContributionMaterializer(
     );
     const identity = identityOf(graphId, contribution);
     const existing = await deps.getMarker(identity);
-    const priorSuccess = existing?.materializedAt !== undefined;
 
     // Already materialized at this exact shape — nothing to do.
-    if (
-      priorSuccess &&
-      existing.signature === signature &&
-      existing.lastError === undefined
-    ) {
+    if (evaluateContributionState(existing, signature) === "initialized") {
       return;
     }
+    const priorSuccess = existing?.materializedAt !== undefined;
 
     // Drift after a *recorded success*: the table physically exists with
     // the OLD shape, so the idempotent `CREATE ... IF NOT EXISTS` would
@@ -450,19 +465,6 @@ export function createContributionMaterializer(
     initializedGraphIds.add(graphId);
   }
 
-  async function ensureContribution(
-    logicalName: string,
-    graphId: string,
-  ): Promise<void> {
-    const declared = findStrategyContribution(
-      fulltextStrategy,
-      fulltextTableName,
-      logicalName,
-    );
-    await deps.ensureMarkerTable();
-    await materializeOne(graphId, declared);
-  }
-
   async function assertInitialized(graphId: string): Promise<void> {
     if (initializedGraphIds.has(graphId)) return;
     for (const contribution of runtimeContributions()) {
@@ -496,5 +498,5 @@ export function createContributionMaterializer(
     initializedGraphIds.add(graphId);
   }
 
-  return { ensureContribution, ensureRuntimeContributions, assertInitialized };
+  return { ensureRuntimeContributions, assertInitialized };
 }

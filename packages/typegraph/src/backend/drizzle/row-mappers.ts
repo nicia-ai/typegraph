@@ -60,6 +60,25 @@ export function formatPostgresTimestamp(value: unknown): string | undefined {
 }
 
 /**
+ * Coerce a fulltext relevance score to `number` at the backend
+ * boundary. Postgres returns `numeric` as a string to preserve
+ * precision; a custom `FulltextStrategy` on either dialect could
+ * likewise yield a string. Shared so both backends enforce the same
+ * `FulltextSearchResult.score: number` contract and reject garbage
+ * loudly instead of propagating `NaN`.
+ */
+export function coerceNumericScore(value: number | string): number {
+  if (typeof value === "number") return value;
+  const parsed = Number.parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    throw new TypeError(
+      `Backend returned non-numeric fulltext score: ${JSON.stringify(value)}`,
+    );
+  }
+  return parsed;
+}
+
+/**
  * Normalizes a JSON column that may be returned as a parsed object (JSONB) or string.
  */
 function normalizeJsonColumn(value: unknown): string {

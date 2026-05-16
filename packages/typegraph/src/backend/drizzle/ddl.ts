@@ -4,14 +4,17 @@
  * Provides utilities for generating DDL statements from Drizzle
  * table definitions. This ensures migrations match production schema.
  */
+import { is } from "drizzle-orm";
 import {
   getTableConfig as getPgTableConfig,
   type PgColumn,
+  PgTable,
   type PgTableWithColumns,
 } from "drizzle-orm/pg-core";
 import {
   getTableConfig as getSqliteTableConfig,
   type SQLiteColumn,
+  SQLiteTable,
   type SQLiteTableWithColumns,
 } from "drizzle-orm/sqlite-core";
 
@@ -236,78 +239,17 @@ function generateSqliteCreateIndexSQL(
 }
 
 /**
- * Returns true for a value that looks like a Drizzle SQLite table.
- * The schema module exposes non-table values (e.g. `fulltextTableName: string`)
- * alongside the Drizzle tables, and the DDL generators must skip them.
+ * Whether a schema-barrel value is a Drizzle SQLite table. The barrel
+ * exposes non-table values (e.g. `fulltextTableName: string`) the DDL
+ * generators must skip — and a contribution's barrel key is its
+ * materialization identity, so a misclassified non-table would corrupt
+ * that identity, not just emit stray DDL.
  */
 function isSqliteTable(
   value: unknown,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): value is SQLiteTableWithColumns<any> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    // Drizzle tables are always objects; strings are our escape hatch.
-    typeof value !== "string"
-  );
-}
-
-/**
- * Resolves a strategy's Drizzle-free table *declarations* into
- * authoritative {@link TableContribution}s, attaching the exact
- * factory-built Drizzle table object for `drizzle-*` models. A strategy
- * never constructs a Drizzle table itself, so there is never a second
- * object for the same physical table (#129).
- */
-function resolveStrategyContribution(
-  declared: StrategyTableContribution,
-  drizzleTable?: TableContribution["source"],
-): TableContribution {
-  const base = {
-    logicalName: declared.logicalName,
-    owner: declared.owner,
-    tableName: declared.tableName,
-    createDdl: declared.createDdl,
-    runtimeEnsure: declared.runtimeEnsure,
-  };
-  if (declared.drizzleModel === "raw-ddl") {
-    return { ...base, source: { kind: "raw-ddl" } };
-  }
-  if (drizzleTable?.kind !== declared.drizzleModel) {
-    throw new Error(
-      `Strategy declared drizzleModel "${declared.drizzleModel}" for ` +
-        `contribution "${declared.logicalName}" but the schema factory ` +
-        `did not supply a matching Drizzle table object.`,
-    );
-  }
-  return { ...base, source: drizzleTable };
-}
-
-/**
- * The strategy's declaration for one logical slot. O(1) in the number
- * of base tables: it asks the strategy directly and never walks or
- * regenerates base-table DDL — this is what keeps the per-boot runtime
- * ensure off the base-table DDL-generation path.
- *
- * Throws when the strategy declares no contribution under
- * `logicalName` (caller typo / strategy↔backend disagreement) rather
- * than silently doing nothing.
- */
-export function findStrategyContribution(
-  fulltextStrategy: FulltextStrategy,
-  fulltextTableName: string,
-  logicalName: string,
-): StrategyTableContribution {
-  const declared = fulltextStrategy
-    .ownedTables(fulltextTableName)
-    .find((contribution) => contribution.logicalName === logicalName);
-  if (declared === undefined) {
-    throw new Error(
-      `No strategy table contribution named "${logicalName}" ` +
-        `(strategy "${fulltextStrategy.name}").`,
-    );
-  }
-  return declared;
+  return is(value, SQLiteTable);
 }
 
 /**
@@ -350,15 +292,14 @@ export function sqliteContributions(
         ...generateSqliteCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
-      source: { kind: "drizzle-sqlite", table },
     });
   }
-  // FTS5 is raw-ddl (virtual table, not Drizzle-modelable) so no table
-  // object is supplied; emitted last (after base tables).
+  // Strategy declarations are already authoritative contributions;
+  // emitted last (after base tables).
   for (const declared of fulltextStrategy.ownedTables(
     tables.fulltextTableName,
   )) {
-    contributions.push(resolveStrategyContribution(declared));
+    contributions.push(declared);
   }
   return contributions;
 }
@@ -516,15 +457,15 @@ function generatePgCreateIndexSQL(
   return statements;
 }
 
+/**
+ * Whether a schema-barrel value is a Drizzle Postgres table. See
+ * {@link isSqliteTable} for why this uses Drizzle's brand check.
+ */
 function isPgTable(
   value: unknown,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): value is PgTableWithColumns<any> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof value !== "string"
-  );
+  return is(value, PgTable);
 }
 
 /**
@@ -536,9 +477,11 @@ function isPgTable(
  * The typed `tables.fulltext` object is **not** emitted via the
  * column-walker (it can't reproduce `GENERATED ALWAYS AS … STORED`);
  * instead the strategy's canonical DDL is carried as the fulltext
- * contribution's `createDdl`, while that same `tables.fulltext` object
- * is attached as its `source` for drizzle-kit visibility — one object,
- * not two.
+ * contribution's `createDdl`. drizzle-kit visibility for the default
+ * tsvector strategy comes from `schema/postgres.ts` exporting that
+ * same `tables.fulltext` object through the barrel — one object, not
+ * two. (Non-default Postgres strategies must export their own table
+ * for drizzle-kit; see `FulltextStrategy.ownedTables`.)
  */
 export function postgresContributions(
   tables: PostgresTables = postgresTables,
@@ -547,8 +490,9 @@ export function postgresContributions(
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
     if (!isPgTable(table)) continue;
-    // The strategy owns the fulltext slot's DDL; skip the typed object
-    // here and re-attach it to the strategy contribution below.
+    // The strategy owns the fulltext slot's DDL (the column-walker
+    // can't reproduce its generated tsvector column); the strategy
+    // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
@@ -562,20 +506,12 @@ export function postgresContributions(
         ...generatePgCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
-      source: { kind: "drizzle-pg", table },
     });
   }
   for (const declared of fulltextStrategy.ownedTables(
     tables.fulltextTableName,
   )) {
-    contributions.push(
-      resolveStrategyContribution(
-        declared,
-        declared.drizzleModel === "drizzle-pg"
-          ? { kind: "drizzle-pg", table: tables.fulltext }
-          : undefined,
-      ),
-    );
+    contributions.push(declared);
   }
   return contributions;
 }

@@ -112,9 +112,13 @@ export async function loadActiveSchemaWithBootstrap(
 ): Promise<SchemaVersionRow | undefined> {
   try {
     const row = await backend.getActiveSchema(graphId);
-    await (backend.ensureRuntimeContributions ?
-      backend.ensureRuntimeContributions(graphId)
-    : backend.ensureFulltextTable?.(graphId));
+    // Prefer the #129 contribution path; fall back to the pre-#129
+    // `ensureFulltextTable` for backends that predate it.
+    const ensureRuntime =
+      backend.ensureRuntimeContributions ?
+        backend.ensureRuntimeContributions(graphId)
+      : backend.ensureFulltextTable?.(graphId);
+    await ensureRuntime;
     return row;
   } catch (error) {
     if (backend.bootstrapTables && isMissingTableError(error)) {

@@ -1006,27 +1006,6 @@ export type GraphBackend = Readonly<{
   // === Table Contributions (#129) ===
 
   /**
-   * Materializes a single **strategy-declared** contribution by
-   * `logicalName` (e.g. `"fulltext"`) — running its full idempotent
-   * `createDdl` (table + supporting indexes), so a partial state
-   * (table present, index missing) self-heals. Concurrency-safe under
-   * replica startup.
-   *
-   * Scope is intentionally the strategy-owned slots only (the set
-   * `FulltextStrategy.ownedTables` declares); it is **not** a generic
-   * "materialize any table" entrypoint. Base/core tables come from
-   * drizzle-kit or `bootstrapTables`, never here. Throws on a
-   * `logicalName` no active strategy declares, rather than silently
-   * doing nothing.
-   *
-   * Writes the durable materialization marker for the contribution
-   * (success or failure) keyed by `graphId` + contribution identity
-   * (#135), so the hot-path gate can later answer "initialized?"
-   * without re-running DDL.
-   */
-  ensureContribution?: (logicalName: string, graphId: string) => Promise<void>;
-
-  /**
    * Materializes every contribution flagged `runtimeEnsure` — the
    * strategy-owned runtime tables (fulltext today) that drizzle-kit-
    * managed setups don't create. Called once after a successful schema
@@ -1046,9 +1025,8 @@ export type GraphBackend = Readonly<{
    * owns. Same focused-bootstrap rationale as the other `ensure*Table`
    * methods: idempotent and concurrency-safe under replica startup.
    *
-   * Superseded by `ensureContribution("fulltext")` /
-   * `ensureRuntimeContributions()` (#129); retained as a thin
-   * back-compat wrapper for backends/callers predating #129. Not
+   * Superseded by `ensureRuntimeContributions()` (#129); retained as
+   * a thin back-compat wrapper for backends/callers predating #129. Not
    * machine-`@deprecated` because the manager still calls it as the
    * pre-#129 fallback. #135 removed the remaining hot-path callers and
    * routed this through the durable-marker writer.

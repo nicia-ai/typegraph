@@ -1,6 +1,7 @@
-import { type SQL } from "drizzle-orm";
+import { is, type SQL } from "drizzle-orm";
 
 import {
+  ConfigurationError,
   DatabaseOperationError,
   MigrationError,
   SchemaContentConflictError,
@@ -87,6 +88,39 @@ export type CommonOperationBackend = Pick<
     ) => Promise<SchemaVersionRow>;
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
   }>;
+
+/**
+ * The full internal shape the dialect operation-backend factories
+ * build: a {@link TransactionBackend} that also exposes the schema-write
+ * methods ({@link CommonOperationBackend}). Internal callers holding the
+ * dialect's write-lock (`runSchemaWriteTransaction`) use it directly;
+ * the public `transaction()` / `adoptTransaction()` boundary narrows it
+ * to `TransactionBackend` so user callbacks can't reach
+ * `commitSchemaVersion` / `setActiveVersion` and bypass the lock.
+ */
+export type InternalOperationBackend = TransactionBackend &
+  CommonOperationBackend;
+
+/**
+ * Assert an externally-supplied transaction handle is the expected
+ * Drizzle dialect, narrowing it for `adoptTransaction`. A wrong-dialect
+ * handle would otherwise surface as an opaque driver error mid-
+ * transaction; this fails it loudly at the boundary instead.
+ */
+export function assertAdoptedDialect<T>(
+  externalTx: unknown,
+  brand: Parameters<typeof is>[1],
+  backend: "postgres" | "sqlite",
+): asserts externalTx is T {
+  if (is(externalTx, brand)) return;
+  const label = backend === "postgres" ? "Postgres" : "SQLite";
+  throw new ConfigurationError(
+    `adoptTransaction received a handle that is not a ${label} Drizzle ` +
+      `transaction. Pass the \`tx\` from a ${label} ` +
+      `\`db.transaction(...)\` opened on this backend's connection.`,
+    { backend, capability: "adoptTransaction" },
+  );
+}
 
 type OperationBackendExecution = Readonly<{
   execAll: <TRow>(query: SQL) => Promise<readonly TRow[]>;

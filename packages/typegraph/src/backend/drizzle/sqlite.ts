@@ -28,6 +28,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
+import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -78,6 +79,7 @@ import {
   buildContributionOnConflictSet,
   createContributionMaterializer,
   gateFulltext,
+  gateFulltextMethods,
   mapContributionMaterializationRow,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
@@ -95,11 +97,14 @@ import {
   SQLITE_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
+  assertAdoptedDialect,
   type CommonOperationBackend,
   createCommonOperationBackend,
+  type InternalOperationBackend,
 } from "./operation-backend-core";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
+  coerceNumericScore,
   createEdgeRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
@@ -339,7 +344,7 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
 
 function createSqliteOperationBackend(
   options: CreateSqliteOperationBackendOptions,
-): TransactionBackend {
+): InternalOperationBackend {
   const {
     capabilities,
     db,
@@ -443,7 +448,7 @@ function createSqliteOperationBackend(
         }
       : {};
 
-  const operationBackend: TransactionBackend = {
+  const operationBackend: InternalOperationBackend = {
     ...commonBackend,
     ...executeRawMethod,
     ...vectorEmbeddingMethods,
@@ -541,12 +546,12 @@ function createSqliteOperationBackend(
       const query = operationStrategy.buildFulltextSearch(params);
       const rows = await execAll<{
         node_id: string;
-        score: number;
+        score: number | string;
         snippet: string | null;
       }>(query);
       return rows.map((row, index) => ({
         nodeId: row.node_id,
-        score: row.score,
+        score: coerceNumericScore(row.score),
         rank: index + 1,
         ...(row.snippet === null ? {} : { snippet: row.snippet }),
       }));
@@ -640,12 +645,8 @@ export function createSqliteBackend(
 
     if (transactionMode === "sql") {
       return runWithSerializedQueue(serializedQueue, async () => {
-        // The runtime object returned by createTransactionBackend always
-        // implements commitSchemaVersion / setActiveVersion (they live in
-        // the operation-backend-core impl); the public TransactionBackend
-        // type omits them so user-supplied transaction() callbacks can't
-        // bypass the locking wrapper. Cast back to the wider internal
-        // shape here, where the locking IS being applied.
+        // Write-lock is held here, so the schema-write-capable
+        // InternalOperationBackend is used intentionally (see its type).
         const txBackend = createTransactionBackend({
           capabilities,
           db,
@@ -655,7 +656,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           hasVectorEmbeddings,
-        }) as unknown as CommonOperationBackend;
+        });
         db.run(sql`BEGIN IMMEDIATE`);
         try {
           const result = await fn(txBackend);
@@ -682,7 +683,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           hasVectorEmbeddings,
-        }) as unknown as CommonOperationBackend;
+        });
         return fn(txBackend);
       }, { behavior: "immediate" }) as Promise<T>,
     );
@@ -785,41 +786,15 @@ export function createSqliteBackend(
       }
     },
 
-    // Every fulltext-touching method asserts the durable marker
-    // instead of lazily emitting DDL. Steady state performs zero
-    // ensure; an uninitialized database throws
-    // `StoreNotInitializedError` rather than self-healing (#135).
-    async upsertFulltext(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.upsertFulltext!(params);
-    },
-    async deleteFulltext(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.deleteFulltext!(params);
-    },
-    async upsertFulltextBatch(params): Promise<void> {
-      // A genuine no-op call asserts nothing — preserves the prior
-      // "empty input on any backend is harmless" contract.
-      if (params.rows.length === 0) return;
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.upsertFulltextBatch!(params);
-    },
-    async deleteFulltextBatch(params): Promise<void> {
-      if (params.nodeIds.length === 0) return;
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.deleteFulltextBatch!(params);
-    },
-    async fulltextSearch(params) {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      return operations.fulltextSearch!(params);
-    },
-    // hardDeleteNode is wrapped because the operation-backend-core
-    // cascade unconditionally deletes from the fulltext table — it
-    // would fail even on graphs that declare no searchable() fields.
-    async hardDeleteNode(params): Promise<void> {
-      await contributionMaterializer.assertInitialized(params.graphId);
-      await operations.hardDeleteNode(params);
-    },
+    // Every fulltext-touching method asserts the durable marker instead
+    // of lazily emitting DDL. Steady state performs zero ensure; an
+    // uninitialized database throws `StoreNotInitializedError` rather
+    // than self-healing (#135). Shared verbatim with the tx-scoped gate
+    // via `gateFulltextMethods`.
+    ...gateFulltextMethods(
+      operations,
+      contributionMaterializer.assertInitialized,
+    ),
 
     async executeDdl(ddl: string): Promise<void> {
       await db.run(sql.raw(ddl));
@@ -947,22 +922,14 @@ export function createSqliteBackend(
       );
     },
 
-    async ensureContribution(
-      logicalName: string,
-      graphId: string,
-    ): Promise<void> {
-      await contributionMaterializer.ensureContribution(logicalName, graphId);
-    },
-
     async ensureRuntimeContributions(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
     /**
-     * Superseded by `ensureContribution("fulltext", graphId)` /
-     * `ensureRuntimeContributions(graphId)` (#129). Retained as a thin
-     * back-compat wrapper for callers predating #129; #135 routed it
-     * through the durable-marker writer.
+     * Superseded by `ensureRuntimeContributions(graphId)` (#129).
+     * Retained as a thin back-compat wrapper for callers predating
+     * #129; #135 routed it through the durable-marker writer.
      */
     async ensureFulltextTable(graphId: string): Promise<void> {
       await contributionMaterializer.ensureRuntimeContributions(graphId);
@@ -1038,6 +1005,10 @@ export function createSqliteBackend(
       // reached. The caller's BEGIN never carries CREATE statements.
       if (transactionMode === "sql") {
         return runWithSerializedQueue(serializedQueue, async () => {
+          // Not `bindTransactionBackend(...)`: this path frames the tx
+          // with manual BEGIN/COMMIT on the *outer* `db`, so it must
+          // reuse that connection's already-built `executionAdapter`
+          // rather than synthesize a fresh one for a distinct handle.
           const txBackend = createTransactionBackend({
             capabilities,
             db,
@@ -1091,14 +1062,16 @@ export function createSqliteBackend(
           },
         );
       }
-      // The caller owns the transaction *and* the connection's
-      // serialization: a sync better-sqlite3 driver runs the adopted
-      // statements on the caller's stack, so the backend's own
-      // `serializedQueue` is deliberately not applied here — wrapping a
-      // caller-driven tx in our queue could deadlock against the
-      // caller's outer `db.transaction(...)`. We bind the literal `tx`
-      // and run pure DML; no transaction is opened or closed here.
-      return bindTransactionBackend(externalTx as AnySqliteDatabase);
+      assertAdoptedDialect<AnySqliteDatabase>(
+        externalTx,
+        BaseSQLiteDatabase,
+        "sqlite",
+      );
+      // serializedQueue is deliberately NOT applied to an adopted tx: a
+      // sync better-sqlite3 driver runs the adopted statements on the
+      // caller's stack, so wrapping a caller-driven tx in our queue
+      // could deadlock against the caller's outer `db.transaction(...)`.
+      return bindTransactionBackend(externalTx);
     },
 
     close(): Promise<void> {
@@ -1112,7 +1085,7 @@ export function createSqliteBackend(
 
 function createTransactionBackend(
   options: CreateSqliteTransactionBackendOptions,
-): TransactionBackend {
+): InternalOperationBackend {
   const txExecutionAdapter =
     options.executionAdapter ??
     createSqliteExecutionAdapter(options.db, {

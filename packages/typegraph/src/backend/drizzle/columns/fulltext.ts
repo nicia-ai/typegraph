@@ -3,7 +3,7 @@
  * fulltext table (`tsvector` + `regconfig`). Lets drizzle-kit
  * introspect the typed fulltext table the same way it introspects
  * `nodes`, `edges`, etc. Alternate strategies (pg_trgm, ParadeDB,
- * pgroonga) carry their own DDL via `FulltextStrategy.generateDdl()`
+ * pgroonga) carry their own DDL via `FulltextStrategy.ownedTables()`
  * and don't use these columns.
  */
 import { customType } from "drizzle-orm/pg-core";

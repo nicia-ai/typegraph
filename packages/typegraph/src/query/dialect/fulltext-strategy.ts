@@ -139,13 +139,14 @@ export interface FulltextStrategy {
   ): SQL;
 
   /**
-   * The tables this strategy owns, as Drizzle-free *declarations*
-   * (`logicalName`, `owner`, resolved `tableName`, idempotent
-   * `createDdl` for the table **and its supporting indexes**, and the
-   * `drizzleModel` telling the schema factory how to source it). The
-   * factory resolves these into authoritative `TableContribution`s,
-   * attaching the exact Drizzle table object for `drizzle-*` models —
-   * a strategy never constructs a Drizzle table itself.
+   * The tables this strategy owns, as Drizzle-free, already
+   * authoritative `TableContribution`s (`logicalName`, `owner`,
+   * resolved `tableName`, idempotent `createDdl` for the table **and
+   * its supporting indexes**, `runtimeEnsure`). A strategy never
+   * constructs a Drizzle table itself; drizzle-kit visibility, when
+   * applicable, is the schema barrel's responsibility (the default
+   * Postgres strategy's `schema/postgres.ts` exports a matching
+   * `tables.fulltext` — a non-default strategy must export its own).
    *
    * Replaces the former `generateDdl(tableName)`: DDL is now one field
    * of a contribution rather than the strategy's whole storage
@@ -348,10 +349,11 @@ export const tsvectorStrategy: FulltextStrategy = {
       `CREATE INDEX IF NOT EXISTS ${gin} ON ${name} USING GIN ("tsv");`,
       `CREATE INDEX IF NOT EXISTS ${kind} ON ${name} ("graph_id", "node_kind");`,
     ];
-    // Drizzle-modelable on Postgres: the schema factory attaches the
-    // exact `tables.fulltext` pgTable object (no second object for the
-    // same physical table). `runtimeEnsure` because drizzle-kit-managed
-    // setups create every base table except this strategy-owned one.
+    // drizzle-kit visibility for this default strategy comes from
+    // `schema/postgres.ts` exporting the matching `tables.fulltext`
+    // pgTable through the barrel — one object, not two. `runtimeEnsure`
+    // because drizzle-kit-managed setups create every base table except
+    // this strategy-owned one.
     return [
       {
         logicalName: FULLTEXT_CONTRIBUTION_NAME,
@@ -359,7 +361,6 @@ export const tsvectorStrategy: FulltextStrategy = {
         tableName: primaryTableName,
         createDdl,
         runtimeEnsure: true,
-        drizzleModel: "drizzle-pg",
       },
     ];
   },
@@ -573,7 +574,6 @@ export const fts5Strategy: FulltextStrategy = {
 );`,
         ],
         runtimeEnsure: true,
-        drizzleModel: "raw-ddl",
       },
     ];
   },
