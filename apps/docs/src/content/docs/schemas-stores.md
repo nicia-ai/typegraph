@@ -475,7 +475,11 @@ const store = createStore(graph, backend, {
 ### `createStoreWithSchema(graph, backend, options?)`
 
 Creates a store and ensures the database schema is initialized or migrated.
-This is the recommended factory for production use.
+This is the recommended factory for production use, and it is **required**
+for any graph with `searchable()` fields: it durably materializes the
+fulltext storage. Bare `createStore()` does not, and the first fulltext
+operation against an uninitialized database throws
+`StoreNotInitializedError`.
 
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";

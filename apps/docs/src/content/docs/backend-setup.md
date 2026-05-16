@@ -32,6 +32,14 @@ const { backend, db } = createLocalSqliteBackend({ path: "./app.db" });
 const store = createStore(graph, backend);
 ```
 
+:::caution[Fulltext requires `createStoreWithSchema`]
+`createLocalSqliteBackend` creates the tables but does not durably
+materialize fulltext storage. If your graph has `searchable()` fields,
+boot with `const [store] = await createStoreWithSchema(graph, backend);`
+instead of bare `createStore()` — otherwise the first fulltext operation
+throws `StoreNotInitializedError`.
+:::
+
 ### Manual Setup
 
 For full control over the database connection:

@@ -32,7 +32,7 @@
 import { z } from "zod";
 
 import {
-  createStore,
+  createStoreWithSchema,
   defineGraph,
   defineNode,
   embedding,
@@ -247,10 +247,12 @@ export async function main(): Promise<void> {
   console.log("=== Fulltext & Hybrid Search Example ===");
 
   // Fulltext is backed by SQLite FTS5 — no extra extension required.
-  // `createExampleBackend()` runs the DDL on startup, so the fulltext
-  // virtual table is already in place.
+  // createStoreWithSchema is the canonical boot path: it materializes
+  // the fulltext storage and writes the durable marker. (Sync
+  // createStore() is an attach-only path and would throw
+  // StoreNotInitializedError on the first searchable write.)
   const backend = createExampleBackend();
-  const store = createStore(graph, backend);
+  const [store] = await createStoreWithSchema(graph, backend);
 
   // ============================================================
   // Part 1: Seed the catalog

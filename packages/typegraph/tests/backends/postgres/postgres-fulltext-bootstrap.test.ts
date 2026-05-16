@@ -1,13 +1,20 @@
 /**
- * Regression tests for the drizzle-kit-managed fulltext bootstrap
- * gap on PostgreSQL — SQLite mirror at
- * `tests/fulltext-bootstrap.test.ts`. The strategy owns the
- * fulltext DDL (alternate Postgres stacks carry incompatible
- * schemas), so the `bootstrapTables` shortcut bypasses it once
- * `schema_versions` exists. `ensureFulltextTable` closes the gap.
+ * #135: durable, enforced fulltext materialization on PostgreSQL —
+ * SQLite mirror at `tests/fulltext-bootstrap.test.ts`.
+ *
+ * `createStoreWithSchema` is the single canonical writer of the durable
+ * `typegraph_contribution_materializations` marker. The sync
+ * `createStore` path is attach-only: it never lazily materializes the
+ * strategy-owned fulltext table. A fulltext read/write — or an adopted
+ * transaction — against a database with no valid marker throws
+ * `StoreNotInitializedError` rather than emitting DDL on the hot path
+ * (the pre-#135 behavior). This also closes the drizzle-kit gap: the
+ * strategy owns the fulltext DDL, so `bootstrapTables` bypasses it once
+ * `schema_versions` exists; the durable boot step covers it.
  *
  * Skipped unless `POSTGRES_URL` is set (or `scripts/test-postgres.sh`).
  */
+import { getTableName } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -27,6 +34,7 @@ import {
   defineGraph,
   defineNode,
   searchable,
+  StoreNotInitializedError,
   tsvectorStrategy,
 } from "../../../src";
 import {
@@ -58,6 +66,10 @@ const FtGraph = defineGraph({
   nodes: { Doc: { type: Document } },
   edges: {},
 });
+
+const CONTRIB_MAT_TABLE = getTableName(
+  defaultTables.contributionMaterializations,
+);
 
 beforeAll(async () => {
   if (!process.env.POSTGRES_URL) return;
@@ -127,19 +139,15 @@ describe.runIf(process.env.POSTGRES_URL)(
       return createPostgresBackend(drizzle(transientPool));
     }
 
-    /**
-     * Bootstraps a real schema row (so `createStore` CRUD passes
-     * the no-schema gate) then drops the fulltext table again,
-     * restoring the drizzle-kit-only state.
-     */
-    async function seedSchemaThenDropFulltext(): Promise<void> {
-      await createStoreWithSchema(FtGraph, pooledBackend());
-      await dropFulltextTable(pool!);
-    }
-
     beforeEach(async () => {
       if (!postgresAvailable || !pool) return;
       await dropFulltextTable(pool);
+      // Each test starts genuinely uninitialized: drop the durable
+      // marker a prior test's createStoreWithSchema may have written.
+      await pool.query(
+        `DELETE FROM ${CONTRIB_MAT_TABLE} ` + `WHERE graph_id = $1`,
+        [FtGraph.id],
+      );
     });
 
     afterEach(async () => {
@@ -151,12 +159,12 @@ describe.runIf(process.env.POSTGRES_URL)(
       }
     });
 
-    it("createStoreWithSchema bootstrap restores the missing fulltext table", async () => {
+    it("createStoreWithSchema materializes the fulltext table and writes the durable marker", async () => {
       await expectFulltextTableMissing();
 
       const [store] = await createStoreWithSchema(FtGraph, pooledBackend());
 
-      // The bootstrap probe should have created the table.
+      // The canonical boot path created the table.
       const exists = await pool!.query<{ exists: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM pg_tables
@@ -165,6 +173,22 @@ describe.runIf(process.env.POSTGRES_URL)(
         [defaultTables.fulltextTableName],
       );
       expect(exists.rows[0]?.exists).toBe(true);
+
+      // The durable marker was recorded for this graph.
+      const markers = await pool!.query<{
+        owner: string;
+        materialized_at: string | null;
+        last_error: string | null;
+      }>(
+        `SELECT owner, materialized_at, last_error
+           FROM ${CONTRIB_MAT_TABLE}
+          WHERE graph_id = $1 AND logical_name = 'fulltext'`,
+        [FtGraph.id],
+      );
+      expect(markers.rows).toHaveLength(1);
+      expect(markers.rows[0]?.owner).toBe(tsvectorStrategy.name);
+      expect(markers.rows[0]?.materialized_at).not.toBeNull();
+      expect(markers.rows[0]?.last_error).toBeNull();
 
       await store.nodes.Doc.create({ title: "renewable energy" });
 
@@ -176,51 +200,69 @@ describe.runIf(process.env.POSTGRES_URL)(
       expect(rows.rows[0]?.content).toBe("renewable energy");
     });
 
-    it("sync createStore path materializes the fulltext table on first write", async () => {
-      // createStore is sync and skips loadActiveSchemaWithBootstrap,
-      // so the bootstrap-load probe can't help here — the backend's
-      // wrapped write methods must self-ensure.
-      await seedSchemaThenDropFulltext();
+    it("sync createStore path throws StoreNotInitializedError on a fulltext write", async () => {
+      // createStore is attach-only and skips
+      // loadActiveSchemaWithBootstrap. Against a database with no
+      // durable marker the fulltext write refuses loudly rather than
+      // self-healing.
       const store = createStore(FtGraph, pooledBackend());
-      await store.nodes.Doc.create({ title: "sync path works" });
+      await expect(
+        store.nodes.Doc.create({ title: "should not persist" }),
+      ).rejects.toBeInstanceOf(StoreNotInitializedError);
+
+      await expectFulltextTableMissing();
+    });
+
+    it("a fulltext write inside store.transaction() throws StoreNotInitializedError (no DDL in the business tx)", async () => {
+      // The tx-scoped backend's fulltext methods assert the durable
+      // marker at point of use — a cached SELECT, never DDL. The
+      // uninitialized database makes the write refuse and roll back.
+      const store = createStore(FtGraph, pooledBackend());
+      await expect(
+        store.transaction(async (tx) => {
+          await tx.nodes.Doc.create({ title: "tx" });
+        }),
+      ).rejects.toBeInstanceOf(StoreNotInitializedError);
+
+      await expectFulltextTableMissing();
+    });
+
+    it("createStore against an already-initialized database works without re-running boot", async () => {
+      await createStoreWithSchema(FtGraph, pooledBackend());
+
+      // A fresh backend instance (cold latch) attaches via the sync
+      // createStore — the durable marker, not an in-memory boolean, is
+      // what lets the hot path proceed DML-only.
+      const store = createStore(FtGraph, pooledBackend());
+      await store.nodes.Doc.create({ title: "attach path works" });
 
       const rows = await pool!.query<{ content: string }>(
         `SELECT content FROM ${defaultTables.fulltextTableName} WHERE graph_id = $1`,
         [FtGraph.id],
       );
       expect(rows.rows).toHaveLength(1);
-      expect(rows.rows[0]?.content).toBe("sync path works");
+      expect(rows.rows[0]?.content).toBe("attach path works");
     });
 
-    it("store.transaction() materializes the fulltext table before BEGIN", async () => {
-      // The tx-scoped backend exposes raw fulltext methods, so
-      // transaction() itself ensures the table BEFORE BEGIN runs
-      // (avoiding CREATE-INDEX-inside-tx SHARE-lock contention and
-      // keeping the table durable on rollback).
-      await seedSchemaThenDropFulltext();
-      const store = createStore(FtGraph, pooledBackend());
-      await store.transaction(async (tx) => {
-        await tx.nodes.Doc.create({ title: "tx path works" });
-      });
-
-      const rows = await pool!.query<{ content: string }>(
-        `SELECT content FROM ${defaultTables.fulltextTableName} WHERE graph_id = $1`,
-        [FtGraph.id],
-      );
-      expect(rows.rows).toHaveLength(1);
-      expect(rows.rows[0]?.content).toBe("tx path works");
-    });
-
-    it("ensureFulltextTable is idempotent across repeat calls", async () => {
+    it("ensureFulltextTable(graphId) is the durable-marker writer and is idempotent", async () => {
       await expectFulltextTableMissing();
 
       const backend = pooledBackend();
 
       expect(backend.ensureFulltextTable).toBeTypeOf("function");
 
-      await backend.ensureFulltextTable!();
-      await backend.ensureFulltextTable!();
-      await backend.ensureFulltextTable!();
+      await backend.ensureFulltextTable!(FtGraph.id);
+      await backend.ensureFulltextTable!(FtGraph.id);
+      await backend.ensureFulltextTable!(FtGraph.id);
+
+      // Exactly one durable marker row, no error recorded.
+      const markers = await pool!.query<{ last_error: string | null }>(
+        `SELECT last_error FROM ${CONTRIB_MAT_TABLE}
+          WHERE graph_id = $1`,
+        [FtGraph.id],
+      );
+      expect(markers.rows).toHaveLength(1);
+      expect(markers.rows[0]?.last_error).toBeNull();
 
       // Sanity: the GIN index the strategy declares is also present
       // and idempotent (CREATE INDEX IF NOT EXISTS).

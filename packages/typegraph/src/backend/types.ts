@@ -535,6 +535,71 @@ export type RecordIndexMaterializationParams = Readonly<{
 }>;
 
 // ============================================================
+// Contribution Materializations (#135 — durable strategy-owned
+// storage marker, sibling of index materializations)
+// ============================================================
+
+/**
+ * Durable identity of a strategy-owned table contribution (#129),
+ * scoped to a graph. This is the primary key of
+ * `typegraph_contribution_materializations`.
+ *
+ * `logicalName` is the stable slot ("fulltext"); `owner` is the
+ * producing strategy ("tsvector" / "fts5"); `tableName` is the resolved
+ * physical name (custom per-deployment names must be distinguishable).
+ * `graphId` is part of identity here — unlike the index status table
+ * where the physical index name is database-global, two graphs can each
+ * own a logically-identical fulltext contribution.
+ */
+export type ContributionMaterializationIdentity = Readonly<{
+  graphId: string;
+  logicalName: string;
+  owner: string;
+  tableName: string;
+}>;
+
+/**
+ * Per-deployment record that a strategy-owned contribution has been
+ * durably materialized against this database.
+ *
+ * `signature` is intentionally NOT part of the identity: a row with the
+ * same identity but a different signature means "materialized artifact
+ * is stale/drifted" — a loud error on the hot path, never a silent
+ * re-materialize. `materializedAt` is undefined until the first
+ * successful materialization; `lastAttemptedAt` is always set.
+ */
+export type ContributionMaterializationRow = Readonly<{
+  graphId: string;
+  logicalName: string;
+  owner: string;
+  tableName: string;
+  signature: string;
+  materializedAt: string | undefined;
+  lastAttemptedAt: string;
+  lastError: string | undefined;
+}>;
+
+/**
+ * Parameters for upserting a contribution-materialization attempt.
+ * Same success/failure contract as
+ * {@link RecordIndexMaterializationParams}: on failure pass undefined
+ * `materializedAt` so a prior successful timestamp is preserved via
+ * COALESCE, and the error message.
+ */
+export type RecordContributionMaterializationParams = Readonly<{
+  graphId: string;
+  logicalName: string;
+  owner: string;
+  tableName: string;
+  signature: string;
+  attemptedAt: string;
+  /** ISO timestamp on success; undefined on failure (preserves existing). */
+  materializedAt: string | undefined;
+  /** Error message on failure; undefined on success (clears existing). */
+  error: string | undefined;
+}>;
+
+// ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
 
@@ -819,6 +884,51 @@ export type GraphBackend = Readonly<{
     params: RecordIndexMaterializationParams,
   ) => Promise<void>;
 
+  // === Contribution Materialization (#135 — durable strategy-owned
+  // storage marker, sibling of the index status table) ===
+
+  /**
+   * Idempotently ensure ONLY the
+   * `typegraph_contribution_materializations` table exists. Same
+   * focused-bootstrap rationale as `ensureIndexMaterializationsTable`:
+   * a single `CREATE TABLE IF NOT EXISTS` is concurrency-safe under
+   * replica startup, where the full `bootstrapTables` set risks a
+   * Postgres SHARE-lock deadlock.
+   */
+  ensureContributionMaterializationsTable?: () => Promise<void>;
+
+  /**
+   * Look up the durable materialization marker for one strategy-owned
+   * contribution identity. Returns `undefined` when no row exists
+   * ("never initialized").
+   */
+  getContributionMaterialization?: (
+    identity: ContributionMaterializationIdentity,
+  ) => Promise<ContributionMaterializationRow | undefined>;
+
+  /**
+   * Upsert a contribution-materialization attempt — success or failure.
+   * Failure rows preserve any prior `materializedAt` via COALESCE so a
+   * later failed re-attempt doesn't erase the historical success.
+   */
+  recordContributionMaterialization?: (
+    params: RecordContributionMaterializationParams,
+  ) => Promise<void>;
+
+  /**
+   * Resolve (once per backend instance, cached) and assert the durable
+   * materialization markers for every `runtimeEnsure` contribution this
+   * backend's strategy declares, for `graphId`. Throws
+   * `StoreNotInitializedError` when a marker is missing, stale
+   * (signature drift), or recorded a failed last attempt.
+   *
+   * This is the single read-side gate the fulltext hot-path wrappers
+   * and `store.transaction()` consult. It performs ZERO DDL and ZERO
+   * marker writes — initialization is the exclusive job of the async
+   * boot path (`createStoreWithSchema` → `ensureRuntimeContributions`).
+   */
+  assertRuntimeContributionsInitialized?: (graphId: string) => Promise<void>;
+
   // === Kind Removal Status ===
 
   /**
@@ -887,8 +997,13 @@ export type GraphBackend = Readonly<{
    * drizzle-kit or `bootstrapTables`, never here. Throws on a
    * `logicalName` no active strategy declares, rather than silently
    * doing nothing.
+   *
+   * Writes the durable materialization marker for the contribution
+   * (success or failure) keyed by `graphId` + contribution identity
+   * (#135), so the hot-path gate can later answer "initialized?"
+   * without re-running DDL.
    */
-  ensureContribution?: (logicalName: string) => Promise<void>;
+  ensureContribution?: (logicalName: string, graphId: string) => Promise<void>;
 
   /**
    * Materializes every contribution flagged `runtimeEnsure` — the
@@ -897,8 +1012,13 @@ export type GraphBackend = Readonly<{
    * load. Deliberately scoped: base/drizzle-visible tables are
    * `runtimeEnsure: false`, so this does not regress startup into
    * broad DDL/probing across every table.
+   *
+   * The canonical durable-marker writer (#135): for each runtime
+   * contribution it short-circuits when the marker already records a
+   * matching signature, otherwise runs the idempotent `createDdl` and
+   * records the marker (success or failure) keyed by `graphId`.
    */
-  ensureRuntimeContributions?: () => Promise<void>;
+  ensureRuntimeContributions?: (graphId: string) => Promise<void>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
@@ -909,9 +1029,10 @@ export type GraphBackend = Readonly<{
    * `ensureRuntimeContributions()` (#129); retained as a thin
    * back-compat wrapper for backends/callers predating #129. Not
    * machine-`@deprecated` because the manager still calls it as the
-   * pre-#129 fallback. #135 removes the remaining hot-path callers.
+   * pre-#129 fallback. #135 removed the remaining hot-path callers and
+   * routed this through the durable-marker writer.
    */
-  ensureFulltextTable?: () => Promise<void>;
+  ensureFulltextTable?: (graphId: string) => Promise<void>;
 
   /**
    * Read the high-water mark schema version for which

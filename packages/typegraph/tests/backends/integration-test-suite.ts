@@ -17,7 +17,7 @@
  */
 import { afterEach, beforeEach, describe } from "vitest";
 
-import { createStore } from "../../src";
+import { createStoreWithSchema } from "../../src";
 import type { GraphBackend } from "../../src/backend/types";
 import type { IntegrationStore, IntegrationTestContext } from "./integration";
 import {
@@ -95,7 +95,13 @@ export function createIntegrationTestSuite(
 
     beforeEach(async () => {
       const result = await createBackend();
-      store = createStore(integrationTestGraph, result.backend);
+      // #135: createStoreWithSchema is the canonical durable-marker
+      // writer. The shared fulltext suite exercises fulltext ops, which
+      // now (correctly) require materialization at boot.
+      [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        result.backend,
+      );
       cleanup = result.cleanup;
     });
 

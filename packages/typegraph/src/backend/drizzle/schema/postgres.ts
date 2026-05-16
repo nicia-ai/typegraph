@@ -56,6 +56,7 @@ export type PostgresTableNames = Readonly<{
   embeddings: string;
   fulltext: string;
   indexMaterializations: string;
+  contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
 }>;
@@ -78,6 +79,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
+  contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
 };
@@ -349,6 +351,46 @@ export function createPostgresTables(
   );
 
   /**
+   * Per-deployment durable marker that a strategy-owned table
+   * contribution (#129 — fulltext today) has been materialized against
+   * this database (#135). The single source of truth replacing the old
+   * in-memory per-backend `fulltextEnsured` latch: "is fulltext storage
+   * materialized?" is now a queryable database fact, written only by
+   * the async boot path and read (cached) by the fulltext hot-path
+   * gate.
+   *
+   * Keyed on `(graph_id, logical_name, owner, table_name)` — unlike
+   * `indexMaterializations` (physical index name is database-global),
+   * a contribution's identity is graph-scoped: two graphs can each own
+   * a logically-identical fulltext table. `signature` is deliberately
+   * NOT in the key: a same-identity row with a different signature is
+   * detectable drift, surfaced as a loud error rather than a silent
+   * re-materialize. `materialized_at` is null until the first success;
+   * the COALESCE-on-failure rule preserves it across failed retries,
+   * mirroring `indexMaterializations`.
+   */
+  const contributionMaterializations = pgTable(
+    n.contributionMaterializations,
+    {
+      graphId: text("graph_id").notNull(),
+      logicalName: text("logical_name").notNull(),
+      owner: text("owner").notNull(),
+      tableName: text("table_name").notNull(),
+      signature: text("signature").notNull(),
+      materializedAt: timestamp("materialized_at", { withTimezone: true }),
+      lastAttemptedAt: timestamp("last_attempted_at", {
+        withTimezone: true,
+      }).notNull(),
+      lastError: text("last_error"),
+    },
+    (t) => [
+      primaryKey({
+        columns: [t.graphId, t.logicalName, t.owner, t.tableName],
+      }),
+    ],
+  );
+
+  /**
    * Drizzle pg-core table for the default `tsvectorStrategy` so
    * drizzle-kit can introspect the fulltext table alongside the
    * others. Mirrors `tsvectorStrategy.generateDdl()` — the typed
@@ -393,6 +435,7 @@ export function createPostgresTables(
     schemaVersions,
     embeddings,
     indexMaterializations,
+    contributionMaterializations,
     kindRemovals,
     reconciliationMarkers,
     fulltext,

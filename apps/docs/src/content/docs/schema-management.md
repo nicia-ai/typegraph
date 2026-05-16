@@ -82,6 +82,13 @@ const store = createStore(graph, backend);
 // No schema versioning - you handle migrations manually
 ```
 
+:::caution[Fulltext requires the managed store]
+`createStore()` is attach-only. If the graph has `searchable()` fields,
+use `createStoreWithSchema()` (below) at boot — it durably materializes
+the fulltext storage. Bare `createStore()` throws
+`StoreNotInitializedError` on the first fulltext operation.
+:::
+
 ### Managed Store (Automatic Schema Management)
 
 Use `createStoreWithSchema()` for automatic version tracking:

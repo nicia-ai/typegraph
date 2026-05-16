@@ -142,7 +142,7 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
-import { createStore } from "@nicia-ai/typegraph";
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 // Initialize database with vector extension
 const sqlite = new Database("documents.db");
@@ -151,7 +151,12 @@ sqlite.exec(generateSqliteMigrationSQL());
 
 const db = drizzle(sqlite);
 const backend = createSqliteBackend(db);
-const store = createStore(graph, backend);
+
+// `searchable()` fields require the durable fulltext-materialization
+// step that `createStoreWithSchema` performs at boot. Bare
+// `createStore()` is an attach-only path and would throw
+// `StoreNotInitializedError` on the first fulltext write.
+const [store] = await createStoreWithSchema(graph, backend);
 ```
 
 ## Core Operations

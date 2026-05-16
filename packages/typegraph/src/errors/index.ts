@@ -787,6 +787,65 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/**
+ * Why a store's strategy-owned storage is not usable on the current
+ * connection. Drives the {@link StoreNotInitializedError} message and
+ * is surfaced in `details.reason` for programmatic handling.
+ *
+ * - `missing`: no durable materialization marker exists — the database
+ *   was never initialized for this graph's runtime contributions.
+ * - `stale`: a marker exists but its recorded signature no longer
+ *   matches the resolved contribution DDL (strategy swap or DDL drift).
+ *   The hot path refuses rather than silently re-materializing.
+ * - `failed`: the most recent boot-time materialization attempt
+ *   recorded an error. Boot may retry; the hot path refuses.
+ */
+export type StoreNotInitializedReason = "missing" | "stale" | "failed";
+
+const STORE_NOT_INITIALIZED_REASON_PHRASE: Readonly<
+  Record<StoreNotInitializedReason, string>
+> = {
+  missing: "is not initialized",
+  stale: "is stale (recorded materialization signature no longer matches)",
+  failed: "failed its last initialization attempt",
+};
+
+/**
+ * Thrown when a fulltext-dependent operation runs against a connection
+ * whose strategy-owned storage has not been durably materialized.
+ *
+ * `createStore()` is a synchronous, zero-I/O attach: it never creates
+ * tables, repairs DDL, or writes materialization markers. The durable
+ * marker is written exclusively by the async boot path
+ * (`createStoreWithSchema`). When a fulltext read/write — or an
+ * adopted/business transaction — observes no valid marker, it refuses
+ * loudly here instead of lazily emitting DDL on the hot path.
+ */
+export class StoreNotInitializedError extends TypeGraphError {
+  constructor(
+    graphId: string,
+    reason: StoreNotInitializedReason,
+    options?: { cause?: unknown; details?: Record<string, unknown> },
+  ) {
+    super(
+      `fulltext storage for graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
+        `Run createStoreWithSchema(graph, backend) during application boot, ` +
+        `outside request handlers and adopted transactions, before using createStore().`,
+      "STORE_NOT_INITIALIZED",
+      {
+        details: { graphId, reason, ...options?.details },
+        category: "user",
+        suggestion:
+          "Call createStoreWithSchema(graph, backend) once at application " +
+          "startup. createStore() attaches to an already-initialized " +
+          "database and does not materialize storage itself.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "StoreNotInitializedError";
+  }
+}
+
 // ============================================================
 // Database Errors (category: "system")
 // ============================================================

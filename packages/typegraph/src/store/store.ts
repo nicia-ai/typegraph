@@ -847,6 +847,10 @@ export class Store<G extends GraphDef> {
       return fn({ nodes: this.nodes, edges: this.edges });
     }
 
+    // #134/#135: no gate here. The backend's transaction() wraps the
+    // tx-scoped fulltext methods so the durable-marker assert fires at
+    // point of use (a cached SELECT, never DDL). A transaction that
+    // never touches fulltext requires no fulltext initialization.
     return this.#backend.transaction(async (txBackend) => {
       const txNodeOperations: NodeOperations = {
         ...this.#nodeOperations,
@@ -1791,6 +1795,18 @@ export async function createStoreWithSchema<G extends GraphDef>(
     ...options,
     preloaded: { activeRow, storedSchema },
   });
+
+  // #135: createStoreWithSchema is the single canonical durable-marker
+  // writer. The warm path already materialized runtime contributions
+  // inside loadActiveSchemaWithBootstrap, but the COLD path returns
+  // before that success branch (bootstrapTables runs, no active schema
+  // yet) — ensureSchemaImpl then initializes the schema. This explicit
+  // post-init call closes that gap: it writes the durable contribution
+  // marker AFTER the schema version is resolved, for cold and warm
+  // boots alike. Idempotent and cheap (the per-instance cache and the
+  // recorded-signature short-circuit make a warm re-call a no-op).
+  await backend.ensureRuntimeContributions?.(merged.id);
+
   const store = new Store(
     merged,
     backend,

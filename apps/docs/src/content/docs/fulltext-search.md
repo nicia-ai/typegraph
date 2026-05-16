@@ -165,13 +165,34 @@ Also useful for:
 
 ## Database Setup
 
+### Initialization is required (boot via `createStoreWithSchema`)
+
+Fulltext storage is **durably materialized once, at application boot**,
+by `createStoreWithSchema`:
+
+```typescript
+// Run this once at startup — outside request handlers and transactions.
+const [store] = await createStoreWithSchema(graph, backend);
+```
+
+`createStore(graph, backend)` is a synchronous, zero-I/O *attach*: it
+does not create tables, repair DDL, or record that fulltext storage is
+materialized. A fulltext read or write — a `searchable()` field write,
+`store.search.fulltext()`, `store.search.hybrid()`,
+`n.$fulltext.matches()`, `store.search.rebuildFulltext()`, or a
+transaction that touches fulltext — against a database that was never
+initialized throws `StoreNotInitializedError`. Use `createStore()` only
+to attach to a database a prior `createStoreWithSchema` boot already
+initialized. Graphs with no `searchable()` fields are unaffected.
+
 ### PostgreSQL
 
 No extensions required. The built-in `tsvector` type and GIN indexes
 work on every managed Postgres (RDS, Supabase, Neon, Cloud SQL, Aiven).
 
-The fulltext table is created automatically by `bootstrapTables()` or the
-migration SQL:
+The fulltext table's DDL ships in `bootstrapTables()` and the migration
+SQL; `createStoreWithSchema` is what then records the durable
+materialization marker that fulltext operations check (see above):
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
@@ -715,6 +736,23 @@ Capabilities (`phraseQueries`, `prefixQueries`, `highlighting`,
 `supportedModes` is the source of truth.
 
 ## Troubleshooting
+
+### `StoreNotInitializedError: fulltext storage … is not initialized`
+
+The database was never booted through `createStoreWithSchema`, so the
+durable fulltext-materialization marker is missing (or it is `stale` —
+the strategy/DDL changed since it was recorded, or `failed` — the last
+boot-time attempt errored). Bare `createStore()` deliberately does **not**
+self-heal this on the hot path.
+
+Fix: call `createStoreWithSchema(graph, backend)` once at application
+startup — outside request handlers and adopted transactions — before any
+fulltext operation. If you previously relied on fulltext tables being
+created lazily on first write via `createStore()`, that path was removed;
+move the initialization to an explicit boot step. A `stale` reason means
+the recorded shape no longer matches the active strategy/DDL: migrate or
+drop the fulltext table and re-run the boot, or restore the original
+strategy.
 
 ### `Cannot call .$fulltext.matches() on alias "x"`
 

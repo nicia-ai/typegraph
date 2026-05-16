@@ -11,7 +11,8 @@ import { KindNotFoundError } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { ConfigurationError, ValidationError } from "../src/errors";
-import { createStore } from "../src/store";
+import type { createStore } from "../src/store";
+import { createInitializedStore } from "./test-utils";
 
 const Document = defineNode("Document", {
   schema: z.object({
@@ -46,7 +47,7 @@ describe("store.search.rebuildFulltext", () => {
     backend = result.backend;
     db = result.db;
     await backend.bootstrapTables?.();
-    store = createStore(TestGraph, backend);
+    store = await createInitializedStore(TestGraph, backend);
   });
 
   it("restores fulltext results after the fulltext table is truncated", async () => {
@@ -175,7 +176,10 @@ describe("store.search.rebuildFulltext", () => {
       ...rest
     } = backend;
     const backendNoFulltext = rest as GraphBackend;
-    const storeNoFulltext = createStore(TestGraph, backendNoFulltext);
+    const storeNoFulltext = await createInitializedStore(
+      TestGraph,
+      backendNoFulltext,
+    );
 
     await expect(storeNoFulltext.search.rebuildFulltext()).rejects.toThrow(
       ConfigurationError,

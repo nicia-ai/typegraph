@@ -16,3 +16,4 @@ export {
   unwrap,
   unwrapOr,
 } from "./result";
+export { isMissingTableError } from "./sql-errors";

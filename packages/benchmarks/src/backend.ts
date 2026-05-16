@@ -100,6 +100,10 @@ export async function createBackendResources(
       tables,
       hasVectorEmbeddings,
     });
+    // #135: the harness builds the schema via raw DDL and uses the sync
+    // createStore, so it writes the durable fulltext-materialization
+    // marker itself — the boot step createStoreWithSchema performs.
+    await sqliteBackend.ensureRuntimeContributions?.(perfGraph.id);
     return {
       store: createStore(perfGraph, sqliteBackend, {
         queryDefaults: { traversalExpansion: "none" },
@@ -134,6 +138,7 @@ export async function createBackendResources(
 
     const tables = createPostgresTables({}, { indexes: perfIndexes });
     const postgresBackend = createPostgresBackend(drizzleDb, { tables });
+    await postgresBackend.ensureRuntimeContributions?.(perfGraph.id);
     return {
       store: createStore(perfGraph, postgresBackend, {
         queryDefaults: { traversalExpansion: "none" },
@@ -174,6 +179,7 @@ export async function createBackendResources(
 
   const tables = createPostgresTables({}, { indexes: perfIndexes });
   const postgresBackend = createPostgresBackend(drizzleDb, { tables });
+  await postgresBackend.ensureRuntimeContributions?.(perfGraph.id);
   return {
     store: createStore(perfGraph, postgresBackend, {
       queryDefaults: { traversalExpansion: "none" },

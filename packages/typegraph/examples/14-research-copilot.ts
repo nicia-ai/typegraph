@@ -22,7 +22,7 @@
 import { z } from "zod";
 
 import {
-  createStore,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -388,7 +388,11 @@ const TOPIC_HIERARCHY: readonly (readonly [string, string])[] = [
 // ============================================================
 
 export async function main(): Promise<void> {
-  const store = createStore(graph, createExampleBackend());
+  // Fulltext storage is materialized once, at boot, via the async
+  // createStoreWithSchema path — the canonical, durable initialization
+  // step. (Sync createStore() is an attach-only, zero-I/O path and
+  // would throw StoreNotInitializedError on the first searchable write.)
+  const [store] = await createStoreWithSchema(graph, createExampleBackend());
 
   console.log("━".repeat(68));
   console.log(" Research Copilot — RAG + citation graph + graph algorithms");

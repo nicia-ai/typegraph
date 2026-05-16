@@ -329,7 +329,11 @@ async function getTenantStore(tenantId: string): Promise<Store> {
   const db = drizzle(client);
   const backend = createPostgresBackend(db);
 
-  return createStore(graph, backend);
+  // `searchable()` fields require the durable fulltext-materialization
+  // step `createStoreWithSchema` performs at boot; bare `createStore()`
+  // would throw `StoreNotInitializedError` on the first fulltext op.
+  const [store] = await createStoreWithSchema(graph, backend);
+  return store;
 }
 ```
 
@@ -451,7 +455,7 @@ class TenantDatabaseManager {
     const pool = new Pool({ connectionString: config.databaseUrl, max: 5 });
     const db = drizzle(pool);
     const backend = createPostgresBackend(db);
-    const store = createStore(graph, backend);
+    const [store] = await createStoreWithSchema(graph, backend);
 
     this.connections.set(tenantId, { pool, store });
 
@@ -519,7 +523,7 @@ async function provisionTenantDatabase(
   // Create initial data
   const db = drizzle(tenantPool);
   const backend = createPostgresBackend(db);
-  const store = createStore(graph, backend);
+  const [store] = await createStoreWithSchema(graph, backend);
 
   await store.nodes.User.create({
     email: ownerEmail,

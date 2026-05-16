@@ -12,7 +12,8 @@ import { z } from "zod";
 import { defineGraph, defineNode, embedding, searchable } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { createStore } from "../../../src/store";
+import type { createStore } from "../../../src/store";
+import { createStoreWithSchema } from "../../../src/store";
 import { type FulltextSearchHit } from "../../../src/store/search";
 
 const TEST_DATABASE_URL =
@@ -84,7 +85,9 @@ describe.runIf(process.env.POSTGRES_URL)("PostgreSQL fulltext search", () => {
     await pool.query("TRUNCATE typegraph_nodes CASCADE");
     const db = drizzle(new Pool({ connectionString: TEST_DATABASE_URL }));
     const backend = createPostgresBackend(db);
-    store = createStore(SearchGraph, backend);
+    // #135: createStoreWithSchema is the canonical durable-marker
+    // writer; fulltext ops require materialization at boot.
+    [store] = await createStoreWithSchema(SearchGraph, backend);
   });
 
   it("declares fulltext capability with stemmer languages", () => {
