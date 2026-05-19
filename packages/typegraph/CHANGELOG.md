@@ -1,5 +1,88 @@
 # @nicia-ai/typegraph
 
+## 0.27.0
+
+### Minor Changes
+
+- [#144](https://github.com/nicia-ai/typegraph/pull/144) [`30a1cfd`](https://github.com/nicia-ai/typegraph/commit/30a1cfdba6f55240f3251de1ebdb05d69a66ea4c) Thanks [@pdlug](https://github.com/pdlug)! - Add `createVerifiedStore` and `assertSchemaCurrent` — the runtime
+  counterparts of `createStoreWithSchema` for the least-privilege
+  deployment model.
+
+  `createStoreWithSchema()` runs DDL (bootstrap, safe auto-migrations,
+  durable contribution materialization) and must run under a role with
+  `CREATE` privileges. For applications that want their runtime under a
+  least-privilege, DML-only role, the previous options were `createStore`
+  (zero-DDL attach with no schema gate — drift goes undetected until a
+  hot-path operation trips) or hand-rolling a SELECT-only verification
+  dance from `getActiveSchema` + `getSchemaChanges`.
+
+  This release adds two cleanly named entrypoints that share the same
+  zero-DDL verification path:
+  - **`createVerifiedStore(graph, backend, options?)`** — a SELECT-only
+    attach (zero DDL) with a verification gate. Reads the active schema
+    row and contribution markers, folds the persisted graph extension,
+    and refuses to construct the Store unless the database is at the
+    same schema version as the code graph. Returns
+    `Promise<[Store<G>, SchemaValidationResult]>` mirroring
+    `createStoreWithSchema`. Throws `MigrationError` on any drift (safe
+    or breaking — the least-privilege runtime cannot migrate),
+    `ConfigurationError` when no schema has been initialized, and
+    `StoreNotInitializedError` when the schema is current but
+    runtime-contribution markers (e.g. fulltext) are missing/stale.
+  - **`assertSchemaCurrent(backend, graph)`** — the same verification gate
+    exposed as a standalone predicate for readiness probes / healthchecks.
+    Returns the `SchemaValidationResult` or throws the same errors.
+
+  The recommended deployment shape is now:
+  1. **Migration step** (privileged role with DDL/`CREATE`): run
+     `createStoreWithSchema()` once at startup, or apply
+     `generatePostgresMigrationSQL` / `generateSqliteMigrationSQL` plus a
+     one-shot `createStoreWithSchema()` to materialize runtime
+     contributions.
+  2. **Runtime** (least-privilege, DML-only role): attach with
+     `createVerifiedStore()`. Zero DDL on the runtime path; schema drift
+     fails fast with a clean `MigrationError` instead of leaking into
+     hot-path operations or 500ing on a permission error.
+
+  Internal: factored a pure `mergeStoredGraphExtension` helper out of
+  `loadAndMergeGraphExtensionDocument` so the SELECT-only verifier reuses
+  the same parse + extension-merge + deprecated-kind logic without going
+  through the bootstrap-capable loader. No behavior change for the
+  existing schema entrypoints.
+
+  Documentation: "Database roles & least privilege" in `backend-setup.md`
+  now folds in `createVerifiedStore` as the canonical runtime attach;
+  `schema-management.md` covers Basic / Managed / Verified stores side by
+  side; `troubleshooting.md` adds entries for `MigrationError` from a
+  verifying attach and `ConfigurationError` on uninitialized databases.
+
+### Patch Changes
+
+- [#144](https://github.com/nicia-ai/typegraph/pull/144) [`30a1cfd`](https://github.com/nicia-ai/typegraph/commit/30a1cfdba6f55240f3251de1ebdb05d69a66ea4c) Thanks [@pdlug](https://github.com/pdlug)! - Surface `MigrationError` before runtime-contribution DDL on a pending
+  breaking migration ([#143](https://github.com/nicia-ai/typegraph/issues/143)).
+
+  `loadActiveSchemaWithBootstrap` ran `ensureRuntimeContributions` (fulltext
+  contribution DDL) **before** `ensureSchema` computed the schema diff and
+  threw `MigrationError`. Contribution DDL is derived from the current code
+  graph, so against a database still on the old schema version it was applied
+  to a stale table shape. On Postgres the first failing statement aborts the
+  surrounding transaction, and the error that escaped was the idempotent
+  marker-table `CREATE TABLE IF NOT EXISTS
+"typegraph_contribution_materializations"` (collateral damage), not a clean
+  `MigrationError`. Consumers using the documented migrate-on-`MigrationError`
+  recovery pattern never saw a `MigrationError`, so the first request after
+  every breaking schema change 500'd until a concurrent boot won the migration
+  race.
+
+  `loadActiveSchemaWithBootstrap` no longer materializes runtime
+  contributions. `createStoreWithSchema` remains the single canonical
+  durable-marker writer and runs the materialization step **after**
+  `ensureSchema`, so the breaking-change gate is always reached first and a
+  pending breaking migration throws `MigrationError` on the first request —
+  making the migrate-then-retry recovery path work as documented. The pre-[#129](https://github.com/nicia-ai/typegraph/issues/129)
+  `ensureFulltextTable` fallback is preserved at the canonical writer. No API
+  changes.
+
 ## 0.26.0
 
 ### Minor Changes
@@ -279,20 +362,20 @@
     for `nodes`/`edges`/etc. Custom `tsvector`/`regconfig` column
     types are exported alongside the existing `vector` column.
 
-        `generatePostgresDDL` deliberately skips the typed Drizzle table
-        (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
+         `generatePostgresDDL` deliberately skips the typed Drizzle table
+         (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
 
     STORED`clause) and continues to defer to
-   `tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
+`tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
     two paths agree byte-for-byte; a drift sentinel test catches any
     divergence.
 
-        Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
-        pgroonga) still own their own DDL via
-        `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
-        Drizzle-kit consumers using a non-default strategy must override
-        `tables.fulltext` in their schema barrel with their strategy's
-        own table.
+         Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
+         pgroonga) still own their own DDL via
+         `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
+         Drizzle-kit consumers using a non-default strategy must override
+         `tables.fulltext` in their schema barrel with their strategy's
+         own table.
 
   Documented the SQLite FTS5 virtual-table caveat and the new
   Postgres `tables.fulltext` export in
