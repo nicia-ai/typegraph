@@ -30,12 +30,12 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.0",
-    "knip": "^6.12.2",
+    "knip": "^6.14.1",
     "markdownlint-cli2": "^0.22.1",
-    "npm-run-all2": "^8.0.4",
+    "npm-run-all2": "^9.0.0",
     "prettier": "^3.8.3",
-    "tsx": "^4.21.0",
-    "turbo": "^2.9.12",
+    "tsx": "^4.22.3",
+    "turbo": "^2.9.14",
     "typescript": "^5.9.3"
   }
 }

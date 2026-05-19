@@ -21,9 +21,9 @@
   },
   "dependencies": {
     "@nicia-ai/typegraph": "workspace:*",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
-    "pg": "^8.20.0",
+    "pg": "^8.21.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
     "zod": "^4.4.3"
@@ -32,7 +32,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.12.0",
     "@types/pg": "^8.20.0",
-    "tsx": "^4.21.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.9.3"
   }
 }
