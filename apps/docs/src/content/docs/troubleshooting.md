@@ -203,16 +203,10 @@ await store.nodes.Organization.create({ name: "Acme" });
 
 ```typescript
 // Bad
-store.query()
-  .from("Person", "p")
-  .traverse("knows", "e")
-  .to("Person", "p") // Error! 'p' already used
+store.query().from("Person", "p").traverse("knows", "e").to("Person", "p"); // Error! 'p' already used
 
 // Good
-store.query()
-  .from("Person", "p1")
-  .traverse("knows", "e")
-  .to("Person", "p2")
+store.query().from("Person", "p1").traverse("knows", "e").to("Person", "p2");
 ```
 
 ### Empty results when expecting data
@@ -236,7 +230,11 @@ store.query()
 
    ```typescript
    // Debug by removing filters temporarily
-   const all = await store.query().from("Person", "p").select((c) => c.p).execute();
+   const all = await store
+     .query()
+     .from("Person", "p")
+     .select((c) => c.p)
+     .execute();
    console.log(all.length); // How many total?
    ```
 
@@ -319,6 +317,65 @@ import { generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
 sqlite.exec(generateSqliteMigrationSQL());
 ```
 
+### "permission denied" / cannot create relation on boot
+
+**Cause:** `createStoreWithSchema()` runs DDL on every cold boot
+(bootstrap, safe auto-migrations, and the contribution-marker
+`CREATE TABLE IF NOT EXISTS`). If it runs under a least-privilege,
+DML-only database role, that DDL fails with a permission error.
+
+**Solution:** Run schema/DDL changes as a privileged one-time migration
+step, then attach at runtime with the zero-DDL
+`createVerifiedStore()` (or `createStore()`) under the least-privilege
+role. See
+[Database roles & least privilege](/backend-setup#database-roles--least-privilege).
+
+### `MigrationError` from `createVerifiedStore` / `assertSchemaCurrent`
+
+**Cause:** The runtime is using a code graph whose schema is ahead of
+the database. The least-privilege runtime cannot migrate — by design,
+it fails fast so requests don't run against a stale schema.
+
+**Solution:** Run `createStoreWithSchema(graph, adminBackend)` under
+the privileged role before promoting the new runtime build (apply any
+generated migration SQL first if you manage DDL externally), then
+restart the runtime. The thrown `MigrationError.message` includes the
+diff summary and migration actions to apply.
+
+### `ConfigurationError`: "no schema has been initialized"
+
+**Cause:** A verifying attach (`createVerifiedStore` /
+`assertSchemaCurrent`) ran before any privileged
+`createStoreWithSchema()` boot — the database has no `schema_versions`
+row (or no typegraph tables at all). The runtime deliberately refuses
+to bootstrap under a least-privilege role. **Note:** running only the
+generated migration SQL is not sufficient — it creates the tables but
+does not write the schema row or contribution markers.
+
+**Solution:** Run `createStoreWithSchema(graph, adminBackend)` once
+under the privileged role. If you manage DDL externally with
+drizzle-kit / `generatePostgresMigrationSQL()` /
+`generateSqliteMigrationSQL()`, apply that first, then still run
+`createStoreWithSchema()` to commit the schema row and contribution
+markers. See
+[Database roles & least privilege](/backend-setup#database-roles--least-privilege).
+
+### `StoreNotInitializedError` on the first operation
+
+**Cause:** The store was created with `createStore()` (a zero-I/O attach
+that never materializes runtime storage) against a database that no
+`createStoreWithSchema()` boot has initialized — commonly the runtime
+started before the privileged migration step ran, or the wrong role/
+database is configured. `createVerifiedStore()` catches this case at
+boot rather than at first hot-path operation.
+
+**Solution:** Run `createStoreWithSchema(graph, adminBackend)` once
+under the privileged role before the runtime attaches (it writes the
+contribution markers that `createStore` / `createVerifiedStore` only
+check), and prefer `createVerifiedStore()` over bare `createStore()` so
+drift fails fast. See
+[Database roles & least privilege](/backend-setup#database-roles--least-privilege).
+
 ## Semantic Search Issues
 
 ### "Extension not found" / "vector type not available"
@@ -365,10 +422,10 @@ console.log(queryEmbedding.length); // Should be 1536
 
 ```typescript
 // Instead of:
-d.embedding.similarTo(query, 10, { metric: "inner_product" })
+d.embedding.similarTo(query, 10, { metric: "inner_product" });
 
 // Use:
-d.embedding.similarTo(query, 10, { metric: "cosine" })
+d.embedding.similarTo(query, 10, { metric: "cosine" });
 ```
 
 ## TypeScript Issues
@@ -389,7 +446,7 @@ const Person = defineNode("Person", {
 
 // Now both properties are available with correct types
 const person = await store.nodes.Person.getById(id);
-person?.name;  // string
+person?.name; // string
 person?.email; // string | undefined
 ```
 

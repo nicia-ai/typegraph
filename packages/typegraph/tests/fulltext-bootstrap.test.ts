@@ -29,6 +29,7 @@ import {
   defineGraph,
   defineNode,
   fts5Strategy,
+  MigrationError,
   searchable,
   StoreNotInitializedError,
 } from "../src";
@@ -354,5 +355,60 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     });
 
     sqlite.close();
+  });
+});
+
+/**
+ * #143: `loadActiveSchemaWithBootstrap` used to materialize runtime
+ * contributions BEFORE `ensureSchema` computed the diff. On a database
+ * pending a breaking migration that applied vN+1 fulltext DDL against
+ * the vN table shape; on Postgres the aborted transaction surfaced as a
+ * wrapped `CREATE TABLE IF NOT EXISTS` query error instead of a clean
+ * `MigrationError`, breaking the documented migrate-on-`MigrationError`
+ * recovery path. The breaking-change gate must run first.
+ */
+describe("#143 breaking-change gate precedes contribution materialization", () => {
+  const DocumentV2Breaking = defineNode("Doc", {
+    schema: z.object({
+      // Required-field rename: a breaking change relative to `title`.
+      headline: searchable({ language: "english" }),
+    }),
+  });
+
+  const FtGraphV2Breaking = defineGraph({
+    id: FtGraph.id,
+    nodes: { Doc: { type: DocumentV2Breaking } },
+    edges: {},
+  });
+
+  it("throws MigrationError and never runs contribution DDL on a pending breaking migration", async () => {
+    const { sqlite: freshSqlite, db: freshDb } = createDrizzleKitOnlySqlite();
+
+    // v1 boots and materializes the fulltext contribution.
+    const v1Backend = createSqliteBackend(freshDb, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    await createStoreWithSchema(FtGraph, v1Backend);
+
+    // A second backend instance models a cold boot of the new code
+    // graph against the still-v1 database — its per-instance
+    // contribution cache is empty, so the pre-#143 loader would have
+    // emitted contribution DDL before the breaking-change check.
+    const coldBackend = createSqliteBackend(freshDb, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const ensureSpy = vi.spyOn(coldBackend, "ensureRuntimeContributions");
+
+    await expect(
+      createStoreWithSchema(FtGraphV2Breaking, coldBackend),
+    ).rejects.toThrow(MigrationError);
+
+    // The breaking-change gate ran first: no contribution DDL was
+    // attempted against the stale v1 table shape.
+    expect(ensureSpy).not.toHaveBeenCalled();
+
+    freshSqlite.close();
   });
 });

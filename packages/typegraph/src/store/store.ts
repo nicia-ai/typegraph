@@ -55,6 +55,7 @@ import {
   ensureSchema as ensureSchemaImpl,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
+  loadAndVerifyGraph,
   parseSerializedSchema,
   type SchemaManagerOptions,
   type SchemaValidationResult,
@@ -1842,6 +1843,23 @@ function schemaMetadataForResult(
   return schemaMetadataFromRow(activeRow);
 }
 
+/**
+ * Prefer the #129 contribution path; fall back to the pre-#129
+ * `ensureFulltextTable` for backends that predate it. Idempotent and
+ * cheap on a warm re-call (per-instance cache + recorded-signature
+ * short-circuit).
+ */
+async function materializeRuntimeContributions(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<void> {
+  if (backend.ensureRuntimeContributions) {
+    await backend.ensureRuntimeContributions(graphId);
+    return;
+  }
+  await backend.ensureFulltextTable?.(graphId);
+}
+
 // ============================================================
 // Async Factory with Schema Management
 // ============================================================
@@ -1902,22 +1920,77 @@ export async function createStoreWithSchema<G extends GraphDef>(
     preloaded: { activeRow, storedSchema },
   });
 
-  // #135: createStoreWithSchema is the single canonical durable-marker
-  // writer. The warm path already materialized runtime contributions
-  // inside loadActiveSchemaWithBootstrap, but the COLD path returns
-  // before that success branch (bootstrapTables runs, no active schema
-  // yet) — ensureSchemaImpl then initializes the schema. This explicit
-  // post-init call closes that gap: it writes the durable contribution
-  // marker AFTER the schema version is resolved, for cold and warm
-  // boots alike. Idempotent and cheap (the per-instance cache and the
-  // recorded-signature short-circuit make a warm re-call a no-op).
-  await backend.ensureRuntimeContributions?.(merged.id);
+  // #135/#143: this is the single durable-marker writer, and it MUST
+  // run after ensureSchemaImpl so the breaking-change gate is reached
+  // first — otherwise contribution DDL derived from the new code graph
+  // would hit a stale table shape and mask `MigrationError`.
+  await materializeRuntimeContributions(backend, merged.id);
 
   const store = new Store(
     merged,
     backend,
     options,
     schemaMetadataForResult(activeRow, result),
+  );
+  return [store, result];
+}
+
+/**
+ * Creates a Store after **verifying** that the database is at the same
+ * schema version as the code graph — without running any DDL, bootstrap,
+ * or marker writes. The runtime counterpart of `createStoreWithSchema`
+ * for the deployment model in "Database roles & least privilege":
+ *
+ * - **`createStoreWithSchema(graph, backend)`** runs DDL (bootstrap,
+ *   safe auto-migrations, durable contribution materialization). Run it
+ *   once at startup under a privileged role that holds `CREATE` / DDL.
+ * - **`createVerifiedStore(graph, backend)`** is the zero-DDL runtime
+ *   attach with a verification gate. Throws `MigrationError` when the
+ *   persisted schema is behind the code graph (any pending change, safe
+ *   or breaking), `ConfigurationError` when no schema has been
+ *   initialized, or `StoreNotInitializedError` when the schema is
+ *   current but the runtime-contribution markers are missing/stale.
+ *   The runtime can use a least-privilege, DML-only database role.
+ * - **`createStore(graph, backend)`** is the same zero-DDL attach
+ *   *without* the verification gate — fastest, but schema drift goes
+ *   undetected until a hot-path operation trips.
+ *
+ * Folds any persisted graph-extension document into the supplied graph
+ * before building the Store, just like `createStoreWithSchema`.
+ *
+ * @param graph - The graph definition
+ * @param backend - The database backend
+ * @param options - Optional store configuration
+ * @returns A tuple of [store, validationResult] — `result.status` is
+ *   always `"unchanged"` on success
+ *
+ * @example
+ * ```typescript
+ * // Runtime — least-privilege, DML-only role. Zero DDL.
+ * const [store, result] = await createVerifiedStore(graph, backend);
+ * // result.status === "unchanged" — the privileged migrator is current.
+ * ```
+ *
+ * @throws ConfigurationError if no schema has been initialized.
+ * @throws MigrationError if the persisted schema is behind the code graph.
+ * @throws StoreNotInitializedError if runtime-contribution markers are
+ *   missing/stale/failed for this graph on this connection.
+ */
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options?: StoreOptions,
+): Promise<[Store<G>, SchemaValidationResult]> {
+  const {
+    graph: merged,
+    activeRow,
+    result,
+  } = await loadAndVerifyGraph(backend, graph);
+  const store = new Store(
+    merged,
+    backend,
+    options,
+    schemaMetadataFromRow(activeRow),
   );
   return [store, result];
 }

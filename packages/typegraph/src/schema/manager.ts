@@ -9,7 +9,11 @@
  */
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { DatabaseOperationError, MigrationError } from "../errors";
+import {
+  ConfigurationError,
+  DatabaseOperationError,
+  MigrationError,
+} from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -96,30 +100,28 @@ export function parseSerializedSchema(json: string): SerializedSchema {
 
 /**
  * Reads the active schema row, bootstrapping the base tables on the
- * first call against an empty database. Also runs the focused
- * runtime-contribution ensure on the success path: drizzle-kit-managed
- * setups create every base table EXCEPT strategy-owned runtime tables
- * (fulltext), and the missing-table-error fallback below doesn't
- * trigger once `schema_versions` exists. `ensureRuntimeContributions`
- * closes that gap before any `searchable()` write runs — scoped to
- * `runtimeEnsure` contributions only, so this stays a focused ensure
- * rather than broad startup DDL (#129). Falls back to the deprecated
- * `ensureFulltextTable` for backends predating #129.
+ * first call against an empty database.
+ *
+ * Deliberately does NOT materialize runtime contributions (fulltext)
+ * here. Contribution DDL is derived from the *current code graph*; when
+ * the persisted schema is behind by a breaking change, running it here
+ * would apply vN+1 DDL against the vN table shape before `ensureSchema`
+ * computes the diff and throws `MigrationError`. On Postgres the first
+ * failing statement poisons the surrounding transaction, so the error
+ * that escapes is the idempotent marker-table
+ * `CREATE TABLE IF NOT EXISTS` (collateral damage) rather than a clean
+ * `MigrationError` — breaking the documented migrate-on-`MigrationError`
+ * recovery path (#143). `createStoreWithSchema` is the single canonical
+ * durable-marker writer (#135) and materializes runtime contributions
+ * only AFTER the schema gate has run, so the breaking-change check is
+ * always reached first.
  */
 export async function loadActiveSchemaWithBootstrap(
   backend: GraphBackend,
   graphId: string,
 ): Promise<SchemaVersionRow | undefined> {
   try {
-    const row = await backend.getActiveSchema(graphId);
-    // Prefer the #129 contribution path; fall back to the pre-#129
-    // `ensureFulltextTable` for backends that predate it.
-    const ensureRuntime =
-      backend.ensureRuntimeContributions ?
-        backend.ensureRuntimeContributions(graphId)
-      : backend.ensureFulltextTable?.(graphId);
-    await ensureRuntime;
-    return row;
+    return await backend.getActiveSchema(graphId);
   } catch (error) {
     if (backend.bootstrapTables && isMissingTableError(error)) {
       await backend.bootstrapTables();
@@ -155,6 +157,24 @@ export async function loadAndMergeGraphExtensionDocument<G extends GraphDef>(
   if (activeRow === undefined) {
     return { graph, activeRow: undefined, storedSchema: undefined };
   }
+  const { graph: merged, storedSchema } = mergeStoredGraphExtension(
+    graph,
+    activeRow,
+  );
+  return { graph: merged, activeRow, storedSchema };
+}
+
+/**
+ * Pure parse + extension-merge + deprecated-kind application. Factored
+ * out so the SELECT-only verifier (`assertSchemaCurrent`) can fold the
+ * persisted graph extension into the supplied graph without paying for a
+ * second `getActiveSchema` round trip or going through the
+ * bootstrap-capable loader.
+ */
+function mergeStoredGraphExtension<G extends GraphDef>(
+  graph: G,
+  activeRow: SchemaVersionRow,
+): Readonly<{ graph: G; storedSchema: SerializedSchema }> {
   const storedSchema = parseSerializedSchema(activeRow.schema_doc);
   const merged =
     storedSchema.extension === undefined ?
@@ -162,7 +182,6 @@ export async function loadAndMergeGraphExtensionDocument<G extends GraphDef>(
     : mergeGraphExtension(graph, storedSchema.extension);
   return {
     graph: applyDeprecatedKinds(merged, storedSchema.deprecatedKinds),
-    activeRow,
     storedSchema,
   };
 }
@@ -398,6 +417,164 @@ export async function ensureSchema<G extends GraphDef>(
   }
 
   return { status: "breaking", diff, actions };
+}
+
+// ============================================================
+// SELECT-only schema verification (least-privilege runtime)
+// ============================================================
+
+/**
+ * SELECT-only sibling of `loadAndMergeGraphExtensionDocument` for the
+ * least-privilege runtime path: reads the active schema row, folds any
+ * persisted graph extension into the supplied graph, and classifies
+ * whether the database is current relative to that merged graph — all
+ * **without DDL, bootstrap, or writes**. Returns the merged graph
+ * alongside the active row and the validation result so a caller can
+ * build a `Store` on the correct graph without paying for a second
+ * `getActiveSchema` round trip or re-merging.
+ *
+ * @throws ConfigurationError if no schema has been initialized for
+ *   `graph.id` (the privileged migration step has not run, or the base
+ *   tables do not exist on this connection).
+ * @throws MigrationError if the persisted schema is behind the code
+ *   graph — for **any** pending change, safe or breaking. The
+ *   least-privilege runtime cannot migrate; "behind" means the
+ *   privileged migrator has not yet caught up.
+ */
+export async function loadAndVerifyGraph<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+): Promise<
+  Readonly<{
+    graph: G;
+    activeRow: SchemaVersionRow;
+    result: SchemaValidationResult;
+  }>
+> {
+  const activeRow = await readActiveSchemaPure(backend, graph.id);
+  const { graph: merged, storedSchema } = mergeStoredGraphExtension(
+    graph,
+    activeRow,
+  );
+
+  // Hash short-circuit avoids the serialize + diff walk on the steady-
+  // state warm path. A semantic no-op (hash differs but `hasChanges` is
+  // false) takes the same return path.
+  const storedHash = activeRow.schema_hash;
+  const currentHash = await getSchemaHash(merged, activeRow.version + 1);
+  if (storedHash !== currentHash) {
+    const currentSchema = serializeSchema(merged, activeRow.version + 1);
+    const diff = computeSchemaDiff(storedSchema, currentSchema);
+    if (diff.hasChanges) {
+      throw schemaBehindError(merged.id, activeRow.version, diff);
+    }
+  }
+
+  await backend.assertRuntimeContributionsInitialized?.(merged.id);
+  return {
+    graph: merged,
+    activeRow,
+    result: { status: "unchanged", version: activeRow.version },
+  };
+}
+
+function schemaBehindError(
+  graphId: string,
+  fromVersion: number,
+  diff: SchemaDiff,
+): MigrationError {
+  const actions = getMigrationActions(diff);
+  const qualifier =
+    isBackwardsCompatible(diff) ? "safe auto-migration" : "breaking change";
+  return new MigrationError(
+    `Schema verification failed for graph "${graphId}": ${diff.summary} ` +
+      `(${qualifier}). ${actions.length} migration action(s) needed. ` +
+      `The least-privilege runtime cannot migrate — run ` +
+      `createStoreWithSchema(graph, adminBackend) under a privileged role ` +
+      `(after any generated migration SQL, if you manage DDL externally) ` +
+      `before attaching with createStore() / createVerifiedStore().`,
+    {
+      graphId,
+      fromVersion,
+      toVersion: fromVersion + 1,
+    },
+  );
+}
+
+/**
+ * Verifies the database is at the same schema version as the code
+ * graph, **without** running DDL, bootstrapping tables, or writing
+ * markers. The runtime-side counterpart of `ensureSchema` for the
+ * least-privilege deployment model documented in "Database roles &
+ * least privilege": `createStoreWithSchema` (run once under a privileged
+ * role, optionally after applying generated migration SQL externally) is
+ * responsible for advancing the schema; runtimes assert it.
+ *
+ * @throws ConfigurationError if no schema has been initialized.
+ * @throws MigrationError if the persisted schema is behind the code
+ *   graph by any change (safe or breaking).
+ * @throws StoreNotInitializedError if the schema is current but the
+ *   runtime-contribution markers are missing/stale/failed (the
+ *   privileged migrator has not materialized strategy-owned storage for
+ *   this graph on this connection).
+ */
+export async function assertSchemaCurrent<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+): Promise<SchemaValidationResult> {
+  const { result } = await loadAndVerifyGraph(backend, graph);
+  return result;
+}
+
+/**
+ * Strict SELECT-only read of the active schema row. Unlike
+ * `loadActiveSchemaWithBootstrap`, this never calls `bootstrapTables` —
+ * a missing-table error or an absent row both surface as
+ * `ConfigurationError` so a least-privilege runtime never attempts DDL
+ * it can't run. Real system faults (connection, permission, driver)
+ * still propagate as themselves.
+ */
+async function readActiveSchemaPure(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<SchemaVersionRow> {
+  let activeRow: SchemaVersionRow | undefined;
+  try {
+    activeRow = await backend.getActiveSchema(graphId);
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      throw schemaNotInitializedError(graphId, error);
+    }
+    throw error;
+  }
+  if (activeRow === undefined) {
+    throw schemaNotInitializedError(graphId);
+  }
+  return activeRow;
+}
+
+function schemaNotInitializedError(
+  graphId: string,
+  cause?: unknown,
+): ConfigurationError {
+  return new ConfigurationError(
+    `Cannot verify graph "${graphId}": no schema has been initialized. ` +
+      `Run createStoreWithSchema(graph, adminBackend) once under a ` +
+      `privileged role (which commits the schema_versions row and ` +
+      `materializes contribution markers) before attaching with ` +
+      `createStore() / createVerifiedStore(). Generated migration SQL ` +
+      `creates the tables but does not initialize the schema row.`,
+    { graphId },
+    {
+      cause,
+      suggestion:
+        "Run createStoreWithSchema(graph, adminBackend) once under a " +
+        "privileged role. If you manage DDL externally with drizzle-kit / " +
+        "generatePostgresMigrationSQL / generateSqliteMigrationSQL, apply " +
+        "that first, then still run createStoreWithSchema to commit the " +
+        "schema row and contribution markers.",
+    },
+  );
 }
 
 /**

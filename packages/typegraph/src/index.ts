@@ -261,7 +261,12 @@ export type {
   VectorSearchHit,
   VectorSearchOptions,
 } from "./store";
-export { createStore, createStoreWithSchema, StoreSearch } from "./store";
+export {
+  createStore,
+  createStoreWithSchema,
+  createVerifiedStore,
+  StoreSearch,
+} from "./store";
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,

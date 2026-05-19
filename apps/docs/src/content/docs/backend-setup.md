@@ -142,7 +142,7 @@ Creates a SQLite backend with automatic database and schema setup.
 
 ```typescript
 function createLocalSqliteBackend(options?: {
-  path?: string;       // Database path, defaults to ":memory:"
+  path?: string; // Database path, defaults to ":memory:"
   tables?: SqliteTables;
 }): { backend: GraphBackend; db: BetterSQLite3Database };
 ```
@@ -152,10 +152,7 @@ function createLocalSqliteBackend(options?: {
 Creates a SQLite backend from an existing Drizzle database instance.
 
 ```typescript
-function createSqliteBackend(
-  db: BetterSQLite3Database,
-  options?: { tables?: SqliteTables }
-): GraphBackend;
+function createSqliteBackend(db: BetterSQLite3Database, options?: { tables?: SqliteTables }): GraphBackend;
 ```
 
 #### `generateSqliteMigrationSQL()`
@@ -172,10 +169,7 @@ Creates a SQLite backend from a `@libsql/client` instance. Runs DDL automaticall
 The caller retains ownership of the client and is responsible for closing it.
 
 ```typescript
-async function createLibsqlBackend(
-  client: Client,
-  options?: { tables?: SqliteTables }
-): Promise<{ backend: GraphBackend; db: LibSQLDatabase }>;
+async function createLibsqlBackend(client: Client, options?: { tables?: SqliteTables }): Promise<{ backend: GraphBackend; db: LibSQLDatabase }>;
 ```
 
 ## PostgreSQL
@@ -188,14 +182,14 @@ runtime, and TypeGraph works the same way against each.
 
 ### Choosing a PostgreSQL driver
 
-| Runtime | Recommended driver | Drizzle adapter |
-|---|---|---|
-| Long-lived Node server (Fly, Render, Cloud Run, containers) | `pg` (node-postgres) or `postgres` (postgres-js) | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
-| Node serverless (Vercel Functions, AWS Lambda, Netlify Functions) | `postgres` (postgres-js) — faster cold start, lower per-query overhead | `drizzle-orm/postgres-js` |
-| Bun server | `postgres` (postgres-js) or Bun's built-in SQL | `drizzle-orm/postgres-js` or `drizzle-orm/bun-sql` |
-| Edge runtime (Cloudflare Workers, Vercel Edge, Netlify Edge) — needs transactions | `@neondatabase/serverless` Pool over WebSockets | `drizzle-orm/neon-serverless` |
-| Edge runtime — single-statement reads/writes only | `@neondatabase/serverless` `neon(url)` over HTTP | `drizzle-orm/neon-http` |
-| Cloudflare Hyperdrive | `pg` or `postgres` (through the Hyperdrive pooler) | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
+| Runtime                                                                           | Recommended driver                                                     | Drizzle adapter                                          |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- |
+| Long-lived Node server (Fly, Render, Cloud Run, containers)                       | `pg` (node-postgres) or `postgres` (postgres-js)                       | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
+| Node serverless (Vercel Functions, AWS Lambda, Netlify Functions)                 | `postgres` (postgres-js) — faster cold start, lower per-query overhead | `drizzle-orm/postgres-js`                                |
+| Bun server                                                                        | `postgres` (postgres-js) or Bun's built-in SQL                         | `drizzle-orm/postgres-js` or `drizzle-orm/bun-sql`       |
+| Edge runtime (Cloudflare Workers, Vercel Edge, Netlify Edge) — needs transactions | `@neondatabase/serverless` Pool over WebSockets                        | `drizzle-orm/neon-serverless`                            |
+| Edge runtime — single-statement reads/writes only                                 | `@neondatabase/serverless` `neon(url)` over HTTP                       | `drizzle-orm/neon-http`                                  |
+| Cloudflare Hyperdrive                                                             | `pg` or `postgres` (through the Hyperdrive pooler)                     | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
 
 :::note[Neon HTTP vs WebSocket]
 Both Neon drivers work with TypeGraph. They have different tradeoffs:
@@ -418,8 +412,8 @@ import { Pool } from "pg";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,                    // Maximum pool size
-  idleTimeoutMillis: 30000,   // Close idle connections after 30s
+  max: 20, // Maximum pool size
+  idleTimeoutMillis: 30000, // Close idle connections after 30s
   connectionTimeoutMillis: 2000, // Timeout for new connections
 });
 
@@ -473,7 +467,7 @@ function createPostgresBackend(
      * Ignored when `prepareStatements` is `false`.
      */
     preparedStatementCacheMax?: number;
-  }
+  },
 ): GraphBackend;
 ```
 
@@ -595,7 +589,9 @@ Check what features a backend supports:
 const backend = createSqliteBackend(db);
 
 if (backend.capabilities.transactions) {
-  await store.transaction(async (tx) => { /* ... */ });
+  await store.transaction(async (tx) => {
+    /* ... */
+  });
 } else {
   // Handle non-transactional execution
 }
@@ -628,6 +624,80 @@ process.on("exit", () => {
 
 The `store.close()` method is a no-op—cleanup is your responsibility.
 
+## Database roles & least privilege
+
+`createStoreWithSchema()` and `createStore()` divide cleanly along DDL
+privilege, so a production deployment can run its application under a
+least-privilege, DML-only database role.
+
+- **`createStoreWithSchema(graph, backend)` runs DDL.** It bootstraps the
+  base tables on a fresh database, applies safe auto-migrations, and
+  durably materializes strategy-owned runtime storage (e.g. fulltext). It
+  re-issues idempotent DDL on every cold boot — at minimum a
+  `CREATE TABLE IF NOT EXISTS` for the contribution-marker table — so the
+  role it runs under **must hold `CREATE` / DDL privileges**. Run it once
+  at startup, outside request handlers and transactions.
+
+- **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
+  It does not create tables, repair DDL, or record that runtime storage
+  is materialized — it issues **no DDL ever**. Use it only to attach to a
+  database a prior `createStoreWithSchema` boot already initialized. A
+  fulltext read or write against a database that was never initialized
+  throws `StoreNotInitializedError` rather than silently emitting DDL on
+  the hot path. Graphs with no `searchable()` fields are unaffected.
+
+- **`createVerifiedStore(graph, backend)` is the same zero-DDL attach
+  with a verification gate.** It reads the active schema row, folds the
+  persisted graph extension, and refuses to construct the Store unless
+  the database is at the same schema version as the code graph. Throws
+  `MigrationError` on drift (safe or breaking), `ConfigurationError`
+  when no schema has been initialized, and `StoreNotInitializedError`
+  when the schema is current but runtime-contribution markers are
+  missing. The runtime-side counterpart of `createStoreWithSchema` for
+  least-privilege deployments. If you only need the gate without
+  building a Store (e.g. a readiness probe), call `assertSchemaCurrent`.
+
+### Recommended deployment shape
+
+Run schema/DDL changes as a **privileged, one-time migration step**, then
+run the application under a **least-privilege runtime role** that holds
+only `SELECT` / `INSERT` / `UPDATE` / `DELETE`:
+
+```typescript
+// 1. Migration step — privileged role with DDL/CREATE.
+//
+//    createStoreWithSchema is mandatory here: it bootstraps tables,
+//    applies safe auto-migrations, commits the schema_versions row,
+//    and writes the durable contribution markers. The runtime gate
+//    checks all of those.
+const [
+  /* store */
+] = await createStoreWithSchema(graph, adminBackend);
+
+//    Optional prerequisite if you manage DDL externally with
+//    drizzle-kit. Generated SQL creates the tables but does NOT
+//    initialize the schema row or contribution markers — still run
+//    createStoreWithSchema afterwards (it skips bootstrap when tables
+//    already exist and commits the row + markers):
+//
+//    import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+//    await adminPool.query(generatePostgresMigrationSQL());
+//    await createStoreWithSchema(graph, adminBackend);
+```
+
+```typescript
+// 2. Runtime — least-privilege, DML-only role. Zero DDL.
+// createVerifiedStore fails fast if the privileged migrator is behind.
+const runtimePool = new Pool({ connectionString: process.env.APP_DATABASE_URL });
+const backend = createPostgresBackend(drizzle(runtimePool));
+const [store] = await createVerifiedStore(graph, backend);
+```
+
+If the runtime role has no DDL privileges and you boot it with
+`createStoreWithSchema()` anyway, the first cold boot fails with a
+permission error on the bootstrap or contribution-marker DDL — see
+[Troubleshooting](/troubleshooting).
+
 ## Environment-Specific Setup
 
 ### Development
@@ -652,6 +722,11 @@ beforeEach(() => {
 
 ### Production
 
+Single-role setup — `createStoreWithSchema` bootstraps and migrates on
+boot, so the role needs DDL privileges. To run the application under a
+least-privilege, DML-only role instead, split the migration step out as
+described in [Database roles & least privilege](#database-roles--least-privilege).
+
 ```typescript
 // PostgreSQL with pooling
 const pool = new Pool({
@@ -660,7 +735,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }, // For managed databases
 });
 
-await pool.query(generatePostgresMigrationSQL());
 const db = drizzle(pool);
 const backend = createPostgresBackend(db);
 const [store] = await createStoreWithSchema(graph, backend);

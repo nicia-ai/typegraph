@@ -67,9 +67,10 @@ switch (result.status) {
 }
 ```
 
-## Basic vs Managed Store
+## Basic vs Managed vs Verified Store
 
-TypeGraph provides two ways to create a store:
+TypeGraph provides three ways to create a store, each suited to a
+different deployment role:
 
 ### Basic Store (No Schema Management)
 
@@ -107,6 +108,49 @@ const [store, result] = await createStoreWithSchema(graph, backend, {
   },
 });
 ```
+
+### Verified Store (Zero-DDL Attach With Verification Gate)
+
+Use `createVerifiedStore()` at runtime when the application runs under a
+least-privilege, DML-only database role and a separate privileged step
+has already advanced the schema. It is the runtime counterpart of
+`createStoreWithSchema()`: a synchronous-semantics attach that **issues
+no DDL** and fails fast if the database is not at the same schema
+version as the code graph.
+
+```typescript
+import { createVerifiedStore } from "@nicia-ai/typegraph";
+
+// Runtime — least-privilege, DML-only role. Zero DDL.
+const [store, result] = await createVerifiedStore(graph, backend);
+// result.status === "unchanged" on success.
+```
+
+It throws:
+
+- `ConfigurationError` if no schema has been initialized (run the
+  privileged migration step first).
+- `MigrationError` if the persisted schema is behind the code graph by
+  **any** pending change (safe or breaking) — the least-privilege
+  runtime cannot migrate.
+- `StoreNotInitializedError` if the schema is current but the
+  runtime-contribution markers (e.g. fulltext) are missing/stale.
+
+If you only need the check without building a Store (e.g. a readiness
+probe), call `assertSchemaCurrent(backend, graph)` directly — it returns
+the same `SchemaValidationResult` or throws the same errors.
+
+:::note[Database privileges]
+Only `createStoreWithSchema()` runs DDL. `createStore()` is a
+synchronous zero-I/O attach; `createVerifiedStore()` is a SELECT-only
+attach (zero DDL — reads the active schema row and contribution
+markers, nothing else). To run the application under a least-privilege,
+DML-only role, do the privileged migration step once with
+`createStoreWithSchema(graph, adminBackend)` and use
+`createVerifiedStore()` at runtime. See
+[Database roles & least privilege](/backend-setup#database-roles--least-privilege)
+for the canonical breakdown.
+:::
 
 ## Schema Validation Results
 
@@ -204,12 +248,7 @@ if (diff?.hasChanges) {
 For full control over migrations:
 
 ```typescript
-import {
-  initializeSchema,
-  migrateSchema,
-  rollbackSchema,
-  ensureSchema,
-} from "@nicia-ai/typegraph/schema";
+import { initializeSchema, migrateSchema, rollbackSchema, ensureSchema } from "@nicia-ai/typegraph/schema";
 
 // Initialize schema (first run only)
 const row = await initializeSchema(backend, graph);

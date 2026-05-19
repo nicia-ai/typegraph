@@ -36,6 +36,7 @@ export {
 
 export {
   applyDeprecatedKinds,
+  assertSchemaCurrent,
   ensureSchema,
   getActiveSchema,
   getSchemaChanges,

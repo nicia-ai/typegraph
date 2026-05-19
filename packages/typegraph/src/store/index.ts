@@ -54,7 +54,11 @@ export type {
 } from "./materialize-removals";
 export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
 export type { Store } from "./store";
-export { createStore, createStoreWithSchema } from "./store";
+export {
+  createStore,
+  createStoreWithSchema,
+  createVerifiedStore,
+} from "./store";
 
 // Search facade and option / result types
 export type {
