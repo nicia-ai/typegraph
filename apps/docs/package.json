@@ -18,21 +18,21 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
-    "@astrojs/cloudflare": "^13.5.0",
+    "@astrojs/cloudflare": "13.5.1",
     "@astrojs/starlight": "^0.39.2",
     "@astrojs/starlight-tailwind": "^5.0.0",
-    "astro": "^6.3.1",
-    "starlight-llms-txt": "^0.9.0"
+    "astro": "^6.3.5",
+    "starlight-llms-txt": "^0.10.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",
     "@typegraph/eslint-config": "workspace:*",
     "@types/node": "^24.12.0",
     "astro-eslint-parser": "^1.4.0",
-    "eslint": "^10.3.0",
+    "eslint": "^10.4.0",
     "eslint-plugin-astro": "^1.7.0",
     "tailwindcss": "^4.3.0",
     "typescript": "^5.9.3",
-    "wrangler": "^4.90.0"
+    "wrangler": "^4.93.0"
   }
 }
