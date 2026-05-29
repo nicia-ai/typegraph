@@ -523,6 +523,62 @@ Vector indexes (HNSW, IVFFlat) trade accuracy for speed:
 
 TypeGraph creates HNSW indexes by default for optimal balance.
 
+### Tuning recall per query with `efSearch`
+
+pgvector's HNSW index searches a dynamic candidate list whose size is
+the `hnsw.ef_search` GUC — **default 40**. That frontier caps how many
+neighbors a single scan can surface, so on corpora past a few million
+vectors recall@k flattens well below 1.0 at the default. TypeGraph
+exposes it as a per-search `efSearch` knob on `store.search.vector` and
+the vector half of `store.search.hybrid`:
+
+```typescript
+const hits = await store.search.hybrid("Document", {
+  limit: 20,
+  vector: {
+    fieldPath: "embedding",
+    queryEmbedding,
+    k: 80, // over-fetch 80 candidates from the vector side
+    efSearch: 240, // ~3× k — high-recall frontier for this query
+  },
+  fulltext: { query: "renewable energy" },
+});
+```
+
+Sizing guidance:
+
+- **Floor — `efSearch >= k`.** Hybrid over-fetches `k` candidates from
+  the vector side (default `4 * limit`). If `efSearch` is below `k` the
+  scan can't fill the candidate set, so the over-fetch silently
+  under-delivers — RRF papers over this on head queries (the fulltext
+  half covers the miss) but drops tail queries only the vector side
+  knows about.
+- **Target — ~2–4× `k`.** On million-scale corpora this clears roughly
+  0.95 recall@10, versus ~0.82–0.85 at the default 40. Verify the curve
+  against your own corpus rather than hard-coding a multiplier.
+- **Ceiling — 1000.** pgvector caps `hnsw.ef_search` at 1000; TypeGraph
+  rejects a larger `efSearch` with a clear error.
+
+Because it's per-search, one connection pool can serve both a
+latency-sensitive interactive path (omit `efSearch`, inherit the session
+default) and a recall-sensitive batch/ETL path (raise it) — a session
+GUC can't, a per-call override can.
+
+**Mechanics and limits.** The override is applied transaction-locally
+(`SET LOCAL hnsw.ef_search`) around the vector `SELECT`, so it never
+leaks to the next query on a pooled connection. Omitting it preserves
+today's behavior exactly — no transaction is opened. It applies to the
+**Postgres HNSW** path only:
+
+- **sqlite-vec** has no equivalent frontier knob and ignores `efSearch`
+  (no-op).
+- **Transaction-less Postgres drivers** (`drizzle-orm/neon-http`) can't
+  scope `SET LOCAL`, so `efSearch` is ignored with a one-time warning —
+  use a transactional driver (`node-postgres` / `neon-serverless` /
+  `postgres-js`) to apply it.
+- It tunes HNSW only; IVFFlat's analogous knob (`ivfflat.probes`) is not
+  yet exposed.
+
 ## Troubleshooting
 
 ### "Extension not found" errors

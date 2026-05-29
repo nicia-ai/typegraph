@@ -320,6 +320,17 @@ export type VectorSearchParams = Readonly<{
   metric: VectorMetric;
   limit: number;
   minScore?: number;
+  /**
+   * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
+   * Sizes the dynamic candidate list the index scan maintains: higher
+   * trades latency for recall. The floor for the over-fetch to fill its
+   * candidate set is `efSearch >= limit`; ~2–4× is the high-recall
+   * target. Applied transaction-locally (`SET LOCAL`) on the Postgres
+   * HNSW path only. No-op on backends without an HNSW frontier knob
+   * (sqlite-vec) and ignored — with a one-time warning — on Postgres
+   * backends without transactions (e.g. `drizzle-orm/neon-http`).
+   */
+  efSearch?: number;
 }>;
 
 /**

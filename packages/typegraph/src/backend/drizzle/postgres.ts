@@ -33,7 +33,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
-import { PgDatabase } from "drizzle-orm/pg-core";
+import { PgDatabase, PgTransaction } from "drizzle-orm/pg-core";
 
 import { ConfigurationError } from "../../errors";
 import type { SqlTableNames } from "../../query/compiler/schema";
@@ -336,6 +336,7 @@ export function createPostgresBackend(
   const operations = createPostgresOperationBackend({
     db,
     executionAdapter,
+    adapterOptions,
     operationStrategy,
     tableNames,
     capabilities,
@@ -750,6 +751,12 @@ export function createPostgresBackend(
 type CreatePostgresOperationBackendOptions = Readonly<{
   db: AnyPgDatabase;
   executionAdapter: PostgresExecutionAdapter;
+  /**
+   * Adapter tuning (prepared-statement cache settings). Used to bind a
+   * fresh, equivalently-configured adapter to a transaction client when
+   * a per-search `efSearch` override opens its own transaction.
+   */
+  adapterOptions?: PostgresExecutionAdapterOptions | undefined;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: SqlTableNames;
   capabilities: BackendCapabilities;
@@ -772,6 +779,7 @@ function createPostgresOperationBackend(
   const {
     db,
     executionAdapter,
+    adapterOptions,
     operationStrategy,
     tableNames,
     capabilities,
@@ -792,6 +800,87 @@ function createPostgresOperationBackend(
 
   async function execRun(query: SQL): Promise<void> {
     await executionAdapter.execute(query);
+  }
+
+  type VectorSearchRow = Readonly<{ node_id: string; score: number }>;
+
+  // One warning per backend instance when `efSearch` is supplied but the
+  // driver can't hold a transaction to scope `SET LOCAL` to.
+  let efSearchUnsupportedWarned = false;
+  function warnEfSearchUnsupported(): void {
+    if (efSearchUnsupportedWarned) return;
+    efSearchUnsupportedWarned = true;
+    if (typeof console === "undefined" || typeof console.warn !== "function") {
+      return;
+    }
+    console.warn(
+      "[typegraph] efSearch (hnsw.ef_search override) was ignored: this " +
+        "Postgres backend has transactions disabled (e.g. drizzle-orm/neon-http), " +
+        "and SET LOCAL needs a transaction to scope the override. Use a " +
+        "transactional driver (node-postgres / neon-serverless / postgres-js) " +
+        "to apply efSearch.",
+    );
+  }
+
+  /**
+   * Runs the vector SELECT, applying `hnsw.ef_search` transaction-locally
+   * when requested. `SET LOCAL` only takes effect inside an explicit
+   * transaction — issued in autocommit it rolls off with the statement
+   * and the next pooled query (notably under transaction-mode pgbouncer)
+   * sees the session default again. So when `efSearch` is set we bundle
+   * `BEGIN; SET LOCAL …; SELECT …; COMMIT;` onto one connection. When
+   * absent we take the unchanged single-statement fast path and open no
+   * transaction.
+   */
+  async function runVectorSearch(
+    efSearch: number | undefined,
+    query: SQL,
+  ): Promise<readonly VectorSearchRow[]> {
+    if (efSearch === undefined) {
+      return execAll<VectorSearchRow>(query);
+    }
+    if (!capabilities.transactions) {
+      warnEfSearchUnsupported();
+      return execAll<VectorSearchRow>(query);
+    }
+    // `SET` cannot be parameterized; `efSearch` is validated as an
+    // integer in 1..MAX_HNSW_EF_SEARCH before we get here, so inlining
+    // it is injection-safe.
+    const setEfSearch = sql.raw(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+    if (db instanceof PgTransaction) {
+      // Already inside the caller's transaction (low-level
+      // backend.transaction / adoptTransaction). `executionAdapter` is
+      // bound to this tx client, but SET LOCAL persists to the end of the
+      // caller's transaction — leaking the override into their later
+      // vector searches and breaking the per-search contract. Snapshot
+      // the current frontier, apply the override, then restore it once
+      // the SELECT has materialized so the override stays scoped to this
+      // one search.
+      const [setting] = await execAll<{ ef_search: string }>(
+        sql`SELECT current_setting('hnsw.ef_search') AS ef_search`,
+      );
+      await execRun(setEfSearch);
+      const rows = await execAll<VectorSearchRow>(query);
+      // Restore only on success: a failed SELECT aborts the caller's
+      // transaction, so its rollback discards the SET LOCAL anyway and a
+      // restore here would just fail against the aborted tx, masking the
+      // real error. `set_config(_, _, true)` is the parameterizable form
+      // of SET LOCAL.
+      if (setting !== undefined) {
+        await execRun(
+          sql`SELECT set_config('hnsw.ef_search', ${setting.ef_search}, true)`,
+        );
+      }
+      return rows;
+    }
+    return db.transaction(async (tx) => {
+      // Bind an equivalently-configured adapter to the tx client so the
+      // SELECT keeps the server-side prepared-statement fast path and the
+      // driver result-shape normalization, rather than a bespoke execute.
+      const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
+      await txAdapter.execute(setEfSearch);
+      return txAdapter.execute<VectorSearchRow>(query);
+    });
   }
 
   const commonBackend = createCommonOperationBackend({
@@ -870,8 +959,11 @@ function createPostgresOperationBackend(
     async vectorSearch(
       params: VectorSearchParams,
     ): Promise<readonly VectorSearchResult[]> {
+      // Build first: `buildVectorSearch` validates `efSearch` (positive
+      // integer, ≤ pgvector's 1000 ceiling) before `runVectorSearch`
+      // inlines it into `SET LOCAL`.
       const query = operationStrategy.buildVectorSearch(params);
-      const rows = await execAll<{ node_id: string; score: number }>(query);
+      const rows = await runVectorSearch(params.efSearch, query);
       return rows.map((row) => ({
         nodeId: row.node_id,
         score: row.score,
@@ -1017,6 +1109,7 @@ function createTransactionBackend(
   return createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
+    adapterOptions: options.adapterOptions,
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
     capabilities: options.capabilities,

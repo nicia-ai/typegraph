@@ -90,6 +90,14 @@ export type HybridVectorOptions = Readonly<{
   k?: number;
   /** Minimum similarity to include (units depend on metric). */
   minScore?: number;
+  /**
+   * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
+   * The vector side over-fetches `k` (default `4 * limit`) candidates;
+   * `efSearch` must be `>= k` for the index to surface that many
+   * neighbors, and ~2–4× `k` is the high-recall target. Postgres HNSW
+   * only — no-op elsewhere. See `VectorSearchOptions.efSearch`.
+   */
+  efSearch?: number;
 }>;
 
 /**
@@ -108,6 +116,22 @@ export type VectorSearchOptions = Readonly<{
   metric?: VectorMetric;
   /** Minimum similarity to include (units depend on metric). */
   minScore?: number;
+  /**
+   * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
+   * Sizes the dynamic candidate list the index scan maintains — higher
+   * trades latency for recall. The floor for the index to surface
+   * `limit` neighbors is `efSearch >= limit`; ~2–4× is the high-recall
+   * target on million-scale corpora. Lets a latency-sensitive
+   * interactive path and a recall-sensitive batch path share one
+   * connection pool, tuning per query rather than per session.
+   *
+   * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
+   * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
+   * backends without transactions (`drizzle-orm/neon-http`) ignore it
+   * with a one-time warning. Must be a positive integer; pgvector caps
+   * it at 1000.
+   */
+  efSearch?: number;
 }>;
 
 export type HybridFulltextOptions = Readonly<{
@@ -208,6 +232,7 @@ export async function executeVectorSearch<N = Node>(
       `vectorSearch.limit must be a positive integer, got: ${options.limit}`,
     );
   }
+  assertEfSearch(options.efSearch, "vectorSearch.efSearch");
 
   const rows = await backend.vectorSearch({
     graphId,
@@ -217,6 +242,7 @@ export async function executeVectorSearch<N = Node>(
     metric: options.metric ?? "cosine",
     limit: options.limit,
     ...(options.minScore === undefined ? {} : { minScore: options.minScore }),
+    ...(options.efSearch === undefined ? {} : { efSearch: options.efSearch }),
   });
   if (rows.length === 0) return [];
 
@@ -261,6 +287,7 @@ export async function executeHybridSearch<N = Node>(
   if (options.fusion !== undefined) {
     validateHybridFusionOptions(options.fusion);
   }
+  assertEfSearch(options.vector.efSearch, "hybridSearch.vector.efSearch");
 
   validateFulltextCallOptions(backend, {
     mode: options.fulltext.mode,
@@ -286,6 +313,9 @@ export async function executeHybridSearch<N = Node>(
     ...(options.vector.minScore === undefined ?
       {}
     : { minScore: options.vector.minScore }),
+    ...(options.vector.efSearch === undefined ?
+      {}
+    : { efSearch: options.vector.efSearch }),
   });
 
   const fulltextPromise = backend.fulltextSearch({
@@ -399,6 +429,22 @@ export async function executeHybridSearch<N = Node>(
     rank += 1;
   }
   return hits;
+}
+
+/**
+ * Validates the optional `efSearch` knob at the API boundary. Rejects
+ * non-positive-integer values uniformly across backends — the
+ * backend-specific ceiling (pgvector caps `hnsw.ef_search` at 1000) is
+ * enforced on the Postgres path, and backends without an HNSW frontier
+ * knob treat a valid value as a no-op.
+ */
+function assertEfSearch(efSearch: number | undefined, label: string): void {
+  if (efSearch === undefined) return;
+  if (!Number.isInteger(efSearch) || efSearch <= 0) {
+    throw new RangeError(
+      `${label} must be a positive integer, got: ${efSearch}`,
+    );
+  }
 }
 
 type FulltextCallOptions = Readonly<{

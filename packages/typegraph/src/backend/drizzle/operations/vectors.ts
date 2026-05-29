@@ -11,6 +11,14 @@ import type { SqliteTables } from "../schema/sqlite";
 import type { Tables } from "./shared";
 
 /**
+ * pgvector defines `hnsw.ef_search` as an integer GUC with a valid
+ * range of 1..1000; `SET hnsw.ef_search = 1001` errors at the server.
+ * We reject out-of-range values with a clear message instead of letting
+ * the raw pgvector error surface downstream.
+ */
+export const MAX_HNSW_EF_SEARCH = 1000;
+
+/**
  * Validates that all values in an array are finite numbers.
  * Throws if any value is NaN, Infinity, or not a number.
  */
@@ -230,6 +238,14 @@ function assertVectorSearchBounds(params: VectorSearchParams): void {
   if (!Number.isInteger(params.limit) || params.limit <= 0) {
     throw new Error(`limit must be a positive integer, got: ${params.limit}`);
   }
+  if (
+    params.efSearch !== undefined &&
+    (!Number.isInteger(params.efSearch) || params.efSearch <= 0)
+  ) {
+    throw new Error(
+      `efSearch must be a positive integer, got: ${params.efSearch}`,
+    );
+  }
 }
 
 /**
@@ -243,6 +259,12 @@ export function buildVectorSearchPostgres(
   const { embeddings } = tables;
   const queryLiteral = formatEmbeddingLiteral(params.queryEmbedding);
   assertVectorSearchBounds(params);
+  if (params.efSearch !== undefined && params.efSearch > MAX_HNSW_EF_SEARCH) {
+    throw new RangeError(
+      `efSearch must be ≤ ${MAX_HNSW_EF_SEARCH} (pgvector's hnsw.ef_search ` +
+        `valid range is 1..${MAX_HNSW_EF_SEARCH}), got: ${params.efSearch}`,
+    );
+  }
 
   const embeddingColumn = sql`${embeddings.embedding}`;
   const distanceExpression = buildDistanceExpression(
