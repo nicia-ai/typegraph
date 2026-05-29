@@ -450,17 +450,82 @@ export function createContributionMaterializer(
     });
   }
 
+  /**
+   * Durable state of a single contribution on the current connection:
+   * its freshly-computed signature read back against the marker row. A
+   * missing marker *table* (never bootstrapped) is reported as its own
+   * variant so each caller decides what it means — `assertInitialized`
+   * treats it as "not initialized" and throws; `ensureRuntimeContributions`
+   * treats it as "needs first materialization" and falls through to DDL.
+   * Any non-missing-table read fault (connection/permission/driver) is a
+   * real system error and propagates as-is rather than being masked.
+   */
+  async function readContributionState(
+    graphId: string,
+    contribution: StrategyTableContribution,
+  ): Promise<
+    | Readonly<{ kind: "state"; state: ContributionMaterializationState }>
+    | Readonly<{ kind: "missing-table"; error: unknown }>
+  > {
+    const signature = await computeContributionSignature(
+      dialect,
+      contribution,
+      contribution.createDdl,
+    );
+    const identity = identityOf(graphId, contribution);
+    try {
+      const existing = await deps.getMarker(identity);
+      return {
+        kind: "state",
+        state: evaluateContributionState(existing, signature),
+      };
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+      return { kind: "missing-table", error };
+    }
+  }
+
+  /**
+   * SELECT-only verdict over every runtime contribution: `true` only when
+   * each one is already materialized at its current signature. Short-
+   * circuits on the first non-initialized read — a missing marker table
+   * or any missing/stale/failed contribution. Never runs DDL.
+   */
+  async function allContributionsInitialized(
+    graphId: string,
+    contributions: readonly StrategyTableContribution[],
+  ): Promise<boolean> {
+    for (const contribution of contributions) {
+      const read = await readContributionState(graphId, contribution);
+      if (read.kind !== "state" || read.state !== "initialized") return false;
+    }
+    return true;
+  }
+
   async function ensureRuntimeContributions(graphId: string): Promise<void> {
     // Cache guard so a redundant boot call (the warm path materializes
     // via loadActiveSchemaWithBootstrap, then createStoreWithSchema
     // calls again) is a true O(1) no-op rather than a re-SELECT.
     if (initializedGraphIds.has(graphId)) return;
     const contributions = runtimeContributions();
-    if (contributions.length > 0) {
-      await deps.ensureMarkerTable();
-      for (const contribution of contributions) {
-        await materializeOne(graphId, contribution);
-      }
+
+    // Read-only pre-check mirroring `assertInitialized` (#149): when every
+    // contribution is already materialized at its current signature, this
+    // open needs no DDL — skip `ensureMarkerTable()` / `materializeOne`
+    // entirely. A consumer that builds a fresh backend per request (empty
+    // per-instance cache) therefore stays DDL-free on a warm graph instead
+    // of re-running the marker `CREATE TABLE IF NOT EXISTS` on every open,
+    // which fails on connections that can't run it. A missing marker table
+    // or any missing/stale/failed contribution falls through to the
+    // privileged first-materialization path below, unchanged.
+    if (await allContributionsInitialized(graphId, contributions)) {
+      initializedGraphIds.add(graphId);
+      return;
+    }
+
+    await deps.ensureMarkerTable();
+    for (const contribution of contributions) {
+      await materializeOne(graphId, contribution);
     }
     initializedGraphIds.add(graphId);
   }
@@ -468,29 +533,20 @@ export function createContributionMaterializer(
   async function assertInitialized(graphId: string): Promise<void> {
     if (initializedGraphIds.has(graphId)) return;
     for (const contribution of runtimeContributions()) {
-      const signature = await computeContributionSignature(
-        dialect,
-        contribution,
-        contribution.createDdl,
-      );
-      const identity = identityOf(graphId, contribution);
-      let existing: ContributionMaterializationRow | undefined;
-      try {
-        existing = await deps.getMarker(identity);
-      } catch (error) {
-        // A never-bootstrapped database has no marker table — that is
-        // precisely "not initialized". Any other failure (connection,
-        // permission, driver) is a real system fault and must surface
-        // as-is rather than be masked as a user init error.
-        if (!isMissingTableError(error)) throw error;
+      const read = await readContributionState(graphId, contribution);
+      // A never-bootstrapped database has no marker table — that is
+      // precisely "not initialized". `readContributionState` has already
+      // rethrown any non-missing-table fault (connection, permission,
+      // driver), so a real system error never surfaces here masked as a
+      // user init error.
+      if (read.kind === "missing-table") {
         throw new StoreNotInitializedError(graphId, "missing", {
-          cause: error,
+          cause: read.error,
           details: { logicalName: contribution.logicalName },
         });
       }
-      const state = evaluateContributionState(existing, signature);
-      if (state !== "initialized") {
-        throw new StoreNotInitializedError(graphId, state, {
+      if (read.state !== "initialized") {
+        throw new StoreNotInitializedError(graphId, read.state, {
           details: { logicalName: contribution.logicalName },
         });
       }
