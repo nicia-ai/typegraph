@@ -1,5 +1,64 @@
 # @nicia-ai/typegraph
 
+## 0.28.0
+
+### Minor Changes
+
+- [#150](https://github.com/nicia-ai/typegraph/pull/150) [`f9b1300`](https://github.com/nicia-ai/typegraph/commit/f9b1300a031eb758ae456fcd97ba8cbfdf93a2b8) Thanks [@pdlug](https://github.com/pdlug)! - Add a per-search `efSearch` knob for tuning pgvector HNSW recall ([#148](https://github.com/nicia-ai/typegraph/issues/148)).
+
+  `store.search.vector` and the vector half of `store.search.hybrid` now
+  accept an optional `efSearch` — the HNSW search frontier
+  (`hnsw.ef_search`, default 40). pgvector caps a single index scan at
+  `ef_search` candidates, so the hybrid over-fetch (`vectorK = 4 * limit`
+  by default) silently under-delivers once `vectorK` climbs past the
+  session default; the floor is `efSearch >= vectorK` and ~2–4× is the
+  high-recall target. Being per-search lets one connection pool serve both
+  a latency-sensitive interactive path and a recall-sensitive batch path.
+
+  The Postgres backend applies it transaction-locally
+  (`SET LOCAL hnsw.ef_search`) around the vector `SELECT`, so it never
+  leaks to the next query on a pooled connection — `SET LOCAL` issued in
+  autocommit would roll off with the statement and the next pooled query
+  would see the session default. Omitting `efSearch` opens no transaction
+  and preserves today's behavior exactly. Validated as a positive integer
+  ≤ 1000 (pgvector's ceiling).
+
+  Scope: pgvector HNSW only. sqlite-vec has no equivalent frontier knob
+  and treats it as a no-op; transaction-less Postgres drivers
+  (`drizzle-orm/neon-http`) ignore it with a one-time warning. IVFFlat's
+  `ivfflat.probes` is a follow-up.
+
+### Patch Changes
+
+- [#152](https://github.com/nicia-ai/typegraph/pull/152) [`761c672`](https://github.com/nicia-ai/typegraph/commit/761c672a991ea75454e441a4baf5939792da9505) Thanks [@pdlug](https://github.com/pdlug)! - Fix `ensureRuntimeContributions` running marker-table DDL on every store
+  open ([#149](https://github.com/nicia-ai/typegraph/issues/149)).
+
+  `createStoreWithSchema` → `ensureRuntimeContributions` previously ran the
+  `typegraph_contribution_materializations` marker DDL
+  (`ensureMarkerTable()` → `CREATE TABLE IF NOT EXISTS …`) on **every** open
+  for any graph with runtime contributions (e.g. `searchable()` fields),
+  even when every contribution was already materialized. The per-materializer
+  `initializedGraphIds` cache is per-instance, so a deployment that builds a
+  fresh backend per request (the norm on serverless Postgres) got an empty
+  cache each time and re-ran the DDL on every open — which intermittently
+  fails on connections that can't run it (observed on Cloudflare Workers +
+  the Neon serverless driver) and surfaces as a wrapped `DrizzleQueryError`
+  rather than a clean `MigrationError`.
+
+  `ensureRuntimeContributions` now does a read-only pre-check first, mirroring
+  the SELECT-only `assertInitialized`: when every runtime contribution is
+  already materialized (marker present, signature matches, no recorded error)
+  it returns without `ensureMarkerTable()` / `materializeOne`. A missing
+  marker table, or any missing/stale/failed contribution, still falls through
+  to the unchanged privileged first-materialization path. Warm per-request
+  opens are now DDL-free.
+
+  Note: the canonical runtime attach for the least-privilege / per-request
+  deployment model remains `createVerifiedStore` (zero DDL by construction);
+  `createStoreWithSchema` also runs bootstrap and auto-migration DDL and is
+  still intended to run once under a privileged role. This change is
+  defense-in-depth for the marker DDL specifically.
+
 ## 0.27.0
 
 ### Minor Changes
@@ -362,20 +421,21 @@
     for `nodes`/`edges`/etc. Custom `tsvector`/`regconfig` column
     types are exported alongside the existing `vector` column.
 
-         `generatePostgresDDL` deliberately skips the typed Drizzle table
-         (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
+             `generatePostgresDDL` deliberately skips the typed Drizzle table
+             (the column-walker can't reproduce the `GENERATED ALWAYS AS (…)
 
-    STORED`clause) and continues to defer to
-`tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
+        STORED`clause) and continues to defer to
+
+    `tsvectorStrategy.generateDdl()` for the runtime DDL emit. The
     two paths agree byte-for-byte; a drift sentinel test catches any
     divergence.
 
-         Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
-         pgroonga) still own their own DDL via
-         `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
-         Drizzle-kit consumers using a non-default strategy must override
-         `tables.fulltext` in their schema barrel with their strategy's
-         own table.
+             Alternate Postgres fulltext strategies (pg_trgm, ParadeDB,
+             pgroonga) still own their own DDL via
+             `FulltextStrategy.generateDdl()` and the bootstrap probe runs it.
+             Drizzle-kit consumers using a non-default strategy must override
+             `tables.fulltext` in their schema barrel with their strategy's
+             own table.
 
   Documented the SQLite FTS5 virtual-table caveat and the new
   Postgres `tables.fulltext` export in
