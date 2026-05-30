@@ -33,6 +33,26 @@ const MISSING_MARKER_TABLE_ERROR = new Error(
   "no such table: typegraph_contribution_materializations",
 );
 
+// Postgres' missing-relation failure as it actually reaches the gate:
+// drizzle-orm wraps the query-builder `getMarker` SELECT in a
+// `DrizzleQueryError` whose `.message` is the SQL text, with the real pg
+// error (`relation ... does not exist` / SQLSTATE 42P01) on `.cause`.
+// This is the #152 regression shape — the pre-check must still recognize
+// it as a missing table and fall through to first materialization.
+const POSTGRES_MISSING_MARKER_TABLE_ERROR = Object.assign(
+  new Error(
+    'Failed query: select * from "typegraph_contribution_materializations"\nparams: ',
+  ),
+  {
+    cause: Object.assign(
+      new Error(
+        'relation "typegraph_contribution_materializations" does not exist',
+      ),
+      { code: "42P01" },
+    ),
+  },
+);
+
 function markerKey(identity: ContributionMaterializationIdentity): string {
   return [
     identity.graphId,
@@ -196,6 +216,51 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     expect(ensureMarkerTable).toHaveBeenCalledTimes(1);
     expect(execDdl).toHaveBeenCalled();
     expect(recordMarker).toHaveBeenCalled();
+    expect(markers.size).toBe(1);
+  });
+
+  it("falls through to DDL when the marker table is missing behind a DrizzleQueryError (Postgres)", async () => {
+    // The #152 regression: on Postgres the pre-check `getMarker` SELECT
+    // fails wrapped, so the missing-table signal lives on `.cause`. Before
+    // the cause-walking fix this rethrew and broke first boot.
+    let tableExists = false;
+    const ensureMarkerTable = vi.fn((): Promise<void> => {
+      tableExists = true;
+      return Promise.resolve();
+    });
+    const execDdl = vi.fn(
+      (_statement: string): Promise<void> => Promise.resolve(),
+    );
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const getMarker = vi.fn(
+      (
+        identity: ContributionMaterializationIdentity,
+      ): Promise<ContributionMaterializationRow | undefined> =>
+        tableExists ?
+          Promise.resolve(markers.get(markerKey(identity)))
+        : Promise.reject(POSTGRES_MISSING_MARKER_TABLE_ERROR),
+    );
+    const recordMarker = vi.fn(
+      (params: RecordContributionMaterializationParams): Promise<void> => {
+        recordMarkerInto(markers, params);
+        return Promise.resolve();
+      },
+    );
+    const deps = {
+      dialect: "postgres",
+      fulltextStrategy: fts5Strategy,
+      fulltextTableName: FULLTEXT_TABLE,
+      execDdl,
+      ensureMarkerTable,
+      getMarker,
+      recordMarker,
+    } satisfies ContributionMaterializerDeps;
+
+    await expect(
+      createContributionMaterializer(deps).ensureRuntimeContributions(GRAPH_ID),
+    ).resolves.toBeUndefined();
+    expect(ensureMarkerTable).toHaveBeenCalledTimes(1);
+    expect(execDdl).toHaveBeenCalled();
     expect(markers.size).toBe(1);
   });
 
