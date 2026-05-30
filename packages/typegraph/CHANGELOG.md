@@ -1,5 +1,40 @@
 # @nicia-ai/typegraph
 
+## 0.28.1
+
+### Patch Changes
+
+- [#154](https://github.com/nicia-ai/typegraph/pull/154) [`6703c88`](https://github.com/nicia-ai/typegraph/commit/6703c880d3d9047149f91d1db4a27b414983c632) Thanks [@pdlug](https://github.com/pdlug)! - Fix `isMissingTableError` missing DrizzleQueryError-wrapped Postgres
+  "relation does not exist" errors, breaking fresh/partial Postgres boot ([#153](https://github.com/nicia-ai/typegraph/issues/153)).
+
+  `isMissingTableError` (the shared "relation not bootstrapped yet"
+  discriminant for `loadActiveSchemaWithBootstrap`, `readActiveSchemaPure`,
+  and the [#135](https://github.com/nicia-ai/typegraph/issues/135) durable-marker gate) classified failures by inspecting only
+  `error.message`. On Postgres, drizzle-orm wraps every query-builder call
+  (`db.select()`, `db.insert()`, …) in a `DrizzleQueryError` whose `.message`
+  is the failed SQL text; the real driver error — carrying both
+  `relation "…" does not exist` and SQLSTATE `42P01` — is preserved on
+  `error.cause`, which the helper never walked. So the helper returned
+  `false` and a benign "not bootstrapped yet" surfaced as a hard fault.
+
+  This regressed `createStoreWithSchema` after the [#149](https://github.com/nicia-ai/typegraph/issues/149)/[#152](https://github.com/nicia-ai/typegraph/issues/152) read-only
+  pre-check: `ensureRuntimeContributions` now calls `getMarker` (a
+  query-builder read) on the possibly-absent
+  `typegraph_contribution_materializations` table _before_ `ensureMarkerTable()`.
+  On Postgres that read throws a `DrizzleQueryError`, the helper missed it,
+  and the open rethrew instead of materializing — breaking seed, first boot,
+  and test global-setup on any fresh or partial Postgres database (base
+  tables present, marker table absent — e.g. drizzle-kit-managed schemas).
+  SQLite was unaffected because better-sqlite3 throws a raw error whose
+  `.message` literally contains `no such table`.
+
+  `isMissingTableError` now walks the `error.cause` chain (cycle-safe) and
+  additionally keys on the locale-independent SQLSTATE `42P01`, rather than
+  matching only the outermost `.message`. Existing message patterns are
+  retained, so all prior matches still hold; the fix applies uniformly to
+  all three call sites, including the latent slow-path blind spot in
+  `loadActiveSchemaWithBootstrap` / `readActiveSchemaPure`.
+
 ## 0.28.0
 
 ### Minor Changes
