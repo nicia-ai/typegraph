@@ -168,6 +168,8 @@ export type {
 export {
   // Individual relation factories (for convenience)
   broader,
+  // Transitive-closure utilities (reason over subClassOf/equivalentTo hierarchies)
+  computeTransitiveClosure,
   // Core ontology module
   core,
   differentFrom,
@@ -176,8 +178,10 @@ export {
   hasPart,
   implies,
   inverseOf,
+  invertClosure,
   // Type guards
   isMetaEdge,
+  isReachable,
   narrower,
   partOf,
   relatedTo,
