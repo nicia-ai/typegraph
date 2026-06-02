@@ -90,6 +90,23 @@ function isPgNativeClient(candidate: unknown): candidate is NodePgClient {
   return typeof candidate === "object" && hasFunctionProperty(candidate, "query");
 }
 
+function isPgliteClient(candidate: unknown): candidate is NodePgClient {
+  // PGlite (Postgres-in-WASM) exposes `.query(sql, params, options)` like
+  // node-postgres and so also satisfies `isPgNativeClient` — but it does NOT
+  // accept the `{name, text, values}` named-statement config form. Passing
+  // that object doesn't merely fail the call: it desyncs PGlite's single
+  // wire connection, so every subsequent query errors with `08P01`. Detect
+  // PGlite structurally via `dumpDataDir` (a PGlite-specific method absent on
+  // pg `Pool`/`Client`) so `resolvePgClient` can route it to the unnamed
+  // positional wrapper regardless of `prepareStatements`. Duck-typed with no
+  // static import, keeping this module dependency-free and edge-safe.
+  return (
+    typeof candidate === "object" &&
+    hasFunctionProperty(candidate, "query") &&
+    hasFunctionProperty(candidate, "dumpDataDir")
+  );
+}
+
 function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
   // postgres-js's tagged-template Sql is callable, has `.unsafe` (raw
   // parameterized executor), and has `.begin` (transaction starter).
@@ -304,6 +321,10 @@ function adaptPostgresJsClient(sql: PostgresJsClient): PgQueryClient {
  *   via `.unsafe(sql, params)`. Safe because Drizzle installs transparent
  *   parsers on the same client instance at `drizzle()` time, so direct
  *   calls and Drizzle-routed calls produce identical row shapes.
+ * - `drizzle-orm/pglite` (PGlite, Postgres-in-WASM) — routed to the unnamed
+ *   wrapper unconditionally. PGlite's `.query` has no named-statement config
+ *   form (and server-side prepared statements buy nothing for an in-process
+ *   engine), so `prepareStatements` is ignored for it.
  *
  * Returns `undefined` for `drizzle-orm/neon-http` and any other driver we
  * don't recognize; callers fall back to `db.execute(sql)`, which goes
@@ -324,6 +345,12 @@ function resolvePgClient(
     return undefined;
   }
   const client = (db as PgClientCarrier).$client;
+  // Must precede `isPgNativeClient`: PGlite matches it too (object with
+  // `.query`), but only the unnamed wrapper is safe for it (see
+  // `isPgliteClient`).
+  if (isPgliteClient(client)) {
+    return wrapNodePgClientUnnamed(client);
+  }
   if (isPgNativeClient(client)) {
     return prepareStatements
       ? wrapNodePgClient(client, cacheMax)

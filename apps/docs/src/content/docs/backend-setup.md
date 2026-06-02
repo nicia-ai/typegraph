@@ -4,7 +4,7 @@ description: Configure SQLite and PostgreSQL backends for TypeGraph
 ---
 
 TypeGraph stores graph data in your existing relational database using Drizzle ORM adapters.
-This guide covers setting up SQLite and PostgreSQL backends.
+This guide covers setting up SQLite, PostgreSQL, and PGlite backends.
 
 :::note[Custom indexes]
 TypeGraph migrations create the core tables and built-in indexes. For application-specific indexes
@@ -205,6 +205,7 @@ runtime, and TypeGraph works the same way against each.
 | Edge runtime (Cloudflare Workers, Vercel Edge, Netlify Edge) — needs transactions | `@neondatabase/serverless` Pool over WebSockets                        | `drizzle-orm/neon-serverless`                            |
 | Edge runtime — single-statement reads/writes only                                 | `@neondatabase/serverless` `neon(url)` over HTTP                       | `drizzle-orm/neon-http`                                  |
 | Cloudflare Hyperdrive                                                             | `pg` or `postgres` (through the Hyperdrive pooler)                     | `drizzle-orm/node-postgres` or `drizzle-orm/postgres-js` |
+| Embedded apps, local development, Postgres dialect tests                          | `@electric-sql/pglite`                                                 | `drizzle-orm/pglite`                                     |
 
 :::note[Neon HTTP vs WebSocket]
 Both Neon drivers work with TypeGraph. They have different tradeoffs:
@@ -351,6 +352,69 @@ const store = createStore(graph, backend);
 Use `neon-http` for reads, single upserts, and migrations. Use `neon-serverless`
 when you need atomic multi-statement writes.
 
+### PGlite (Postgres-in-WASM)
+
+[PGlite](https://pglite.dev/) is a full Postgres compiled to WebAssembly that runs
+in-process — in Node, Bun, Deno, or the browser — with no server and no native
+addon. It's ideal for local development, embedded apps, and running the real
+Postgres dialect (including pgvector) in tests without Docker.
+
+`@electric-sql/pglite` is an optional peer dependency. Vector support additionally
+needs `@electric-sql/pglite-pgvector` (PGlite ≥ 0.5 ships pgvector as a separate
+package):
+
+```bash
+npm install @electric-sql/pglite @electric-sql/pglite-pgvector
+```
+
+The batteries-included helper constructs the engine, loads pgvector, runs the
+schema DDL, and returns a ready backend — the Postgres analog of
+`createLocalSqliteBackend`:
+
+```typescript
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+import { createStore } from "@nicia-ai/typegraph";
+
+// In-memory by default, with pgvector enabled.
+const { backend, db, client } = await createLocalPgliteBackend();
+const store = createStore(graph, backend);
+
+// backend.close() disposes the PGlite engine.
+```
+
+```typescript
+// Persistent on disk:
+const { backend } = await createLocalPgliteBackend({ dataDir: "./pgdata" });
+
+// No embeddings? Skip the extension (no pgvector dependency needed):
+const { backend } = await createLocalPgliteBackend({ vector: false });
+
+// Pass an explicit pgvector extension object:
+import { vector } from "@electric-sql/pglite-pgvector";
+const { backend } = await createLocalPgliteBackend({ vector });
+```
+
+If you construct PGlite yourself, pass its Drizzle database straight to
+`createPostgresBackend` — the execution fast path detects PGlite and routes it
+correctly:
+
+```typescript
+import { PGlite } from "@electric-sql/pglite";
+import { vector } from "@electric-sql/pglite-pgvector";
+import { drizzle } from "drizzle-orm/pglite";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+
+const client = await PGlite.create({ extensions: { vector } });
+await client.exec(generatePostgresMigrationSQL());
+const backend = createPostgresBackend(drizzle(client));
+```
+
+PGlite is single-connection and serial: there is no pooling, so concurrent
+`store.transaction()` calls queue rather than run in parallel. It complements,
+rather than replaces, a Docker-based Postgres for CI — PGlite exercises the SQL
+dialect and pgvector, but not driver-specific behavior (node-postgres statement
+naming, postgres-js, pgbouncer, real concurrency).
+
 ### PostgreSQL with Vector Search
 
 For semantic search, enable pgvector. `createPostgresBackend` defaults to `pgvectorStrategy`, so no extra
@@ -455,8 +519,8 @@ process.on("SIGTERM", async () => {
 
 Creates a PostgreSQL backend adapter. Accepts any Drizzle PostgreSQL database
 instance, regardless of the underlying driver. Tested with `drizzle-orm/node-postgres`,
-`drizzle-orm/postgres-js`, `drizzle-orm/neon-serverless`, and
-`drizzle-orm/neon-http`. The neon-http driver is auto-detected and
+`drizzle-orm/postgres-js`, `drizzle-orm/neon-serverless`,
+`drizzle-orm/neon-http`, and `drizzle-orm/pglite`. The neon-http driver is auto-detected and
 `capabilities.transactions` is set to `false` (HTTP can't hold a session); use
 `drizzle-orm/neon-serverless` if you need transactional writes.
 
@@ -469,9 +533,9 @@ function createPostgresBackend(
     /**
      * Override the vector search strategy. Defaults to
      * `pgvectorStrategy`. Pass a custom `VectorStrategy` to change the
-     * storage / index engine.
+     * storage / index engine, or `false` to disable vector support.
      */
-    vector?: VectorStrategy;
+    vector?: VectorStrategy | false;
     /**
      * Override specific backend capabilities. Useful for HTTP-style
      * drivers or test scenarios. neon-http already has `transactions:
@@ -495,6 +559,32 @@ function createPostgresBackend(
     preparedStatementCacheMax?: number;
   },
 ): GraphBackend;
+```
+
+#### `createLocalPgliteBackend(options?)`
+
+Creates an in-process PGlite backend with automatic engine construction,
+schema DDL, and optional pgvector loading. The returned backend owns the PGlite
+engine; call `backend.close()` when the process or test is done.
+
+```typescript
+async function createLocalPgliteBackend(options?: {
+  /**
+   * PGlite data directory. Omit for an in-memory database, pass a filesystem
+   * path for persistence, or use a runtime-specific scheme such as `idb://`.
+   */
+  dataDir?: string;
+  tables?: PostgresTables;
+  /**
+   * Omit to load @electric-sql/pglite-pgvector, pass `false` to disable vector
+   * support, or pass a PGlite Extension object to control the extension import.
+   */
+  vector?: false | Extension;
+}): Promise<{
+  backend: GraphBackend;
+  db: PgliteDatabase;
+  client: PGlite;
+}>;
 ```
 
 #### `generatePostgresMigrationSQL()`
@@ -522,7 +612,8 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/sqlite` — Generic SQLite adapter (any Drizzle SQLite driver)
 - `@nicia-ai/typegraph/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
 - `@nicia-ai/typegraph/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
-- `@nicia-ai/typegraph/postgres` — PostgreSQL adapter
+- `@nicia-ai/typegraph/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
+- `@nicia-ai/typegraph/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
 
 Import from the entrypoint matching your database:
 
@@ -531,6 +622,7 @@ import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
 import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
 ```
 
 ## Cloudflare D1

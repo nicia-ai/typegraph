@@ -250,6 +250,45 @@ describe("Index coverage", () => {
 This is particularly effective when run against your full test suite — it catches filter patterns
 across all tests, not just the ones you remember to check manually.
 
+## PGlite Tests (Postgres dialect, no Docker)
+
+Use `createLocalPgliteBackend()` when you want the PostgreSQL dialect and
+pgvector path in ordinary test runs without starting Docker. It creates an
+in-process PGlite engine, runs TypeGraph DDL, and returns a backend that should
+be closed after each test.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+import { createStore } from "@nicia-ai/typegraph";
+import { graph } from "../src/graph";
+
+describe("Postgres dialect behavior", () => {
+  let cleanup: (() => Promise<void>) | undefined;
+  let store: ReturnType<typeof createStore<typeof graph>>;
+
+  beforeEach(async () => {
+    const { backend } = await createLocalPgliteBackend();
+    cleanup = () => backend.close();
+    store = createStore(graph, backend);
+  });
+
+  afterEach(async () => {
+    await cleanup?.();
+  });
+
+  it("runs against the Postgres query compiler", async () => {
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    expect(await store.nodes.Person.getById(alice.id)).toBeDefined();
+  });
+});
+```
+
+PGlite is a good fit for SQL dialect coverage, pgvector behavior, and embedded
+Postgres workflows. Use a real PostgreSQL server for driver-specific behavior
+such as node-postgres named statements, postgres-js, pgbouncer, connection pool
+behavior, isolation levels, and true concurrent sessions.
+
 ## PostgreSQL Integration Tests
 
 For tests that verify PostgreSQL-specific behavior (JSONB operators, GIN indexes, concurrent
@@ -311,11 +350,14 @@ describePostgres("PostgreSQL-specific", () => {
 | Level | Backend | Speed | Isolation | When to use |
 |-------|---------|-------|-----------|-------------|
 | Unit | In-memory SQLite | Fast (~1ms setup) | Full (fresh DB per test) | Collection API, query logic, business rules |
-| Integration | SQLite file or PostgreSQL | Medium | Shared (truncate between tests) | Concurrency, transactions, backend-specific behavior |
+| Integration | PGlite | Fast-medium | Full (fresh DB per test) | Postgres SQL dialect, pgvector, embedded workflows |
+| Integration | SQLite file or real PostgreSQL | Medium | Shared (truncate between tests) | Concurrency, driver behavior, isolation levels |
 | Profiler | In-memory SQLite | Fast | Full | Index coverage, query pattern verification |
 
-Most tests should be unit tests with in-memory SQLite. Reserve PostgreSQL integration tests for
-behavior that differs across backends (array containment, concurrent writes, isolation levels).
+Most tests should be unit tests with in-memory SQLite. Use PGlite when you need
+the Postgres dialect or pgvector path in normal test runs. Reserve real
+PostgreSQL integration tests for behavior PGlite cannot model, such as
+connection pooling, driver quirks, concurrent sessions, and isolation levels.
 
 ## Next Steps
 
