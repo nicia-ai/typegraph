@@ -9,9 +9,14 @@
  *   transactions are auto-disabled because HTTP can't hold a session;
  *   use `drizzle-orm/neon-serverless` if you need transactional writes.
  *
- * Other pg-protocol Drizzle adapters (PGlite, Vercel Postgres, Supabase
- * via pg) should work unchanged because they all expose a compatible
- * `db.execute()` / `db.transaction()` surface.
+ * - `drizzle-orm/pglite` (PGlite, Postgres-in-WASM) — the execution
+ *   fast path detects PGlite and routes it correctly (its `.query` has no
+ *   named-statement form). For a batteries-included in-process setup, see
+ *   `createLocalPgliteBackend` in `@nicia-ai/typegraph/postgres/pglite`.
+ *
+ * Other pg-protocol Drizzle adapters (Vercel Postgres, Supabase via pg)
+ * work unchanged because they all expose a compatible `db.execute()` /
+ * `db.transaction()` surface.
  *
  * @example
  * ```typescript

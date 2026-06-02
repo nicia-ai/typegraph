@@ -47,6 +47,11 @@
       "import": "./dist/backend/postgres/index.js",
       "require": "./dist/backend/postgres/index.cjs"
     },
+    "./postgres/pglite": {
+      "types": "./dist/backend/postgres/pglite.d.ts",
+      "import": "./dist/backend/postgres/pglite.js",
+      "require": "./dist/backend/postgres/pglite.cjs"
+    },
     "./sqlite/local": {
       "types": "./dist/backend/sqlite/local.d.ts",
       "import": "./dist/backend/sqlite/local.js",
@@ -117,6 +122,8 @@
     "node": ">=22"
   },
   "peerDependencies": {
+    "@electric-sql/pglite": ">=0.5.0 <0.6.0",
+    "@electric-sql/pglite-pgvector": ">=0.0.2 <1.0.0",
     "@libsql/client": ">=0.6.0",
     "@neondatabase/serverless": ">=0.9.0 <2.0.0",
     "better-sqlite3": ">=9.0.0 <13.0.0",
@@ -126,6 +133,12 @@
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@electric-sql/pglite": {
+      "optional": true
+    },
+    "@electric-sql/pglite-pgvector": {
+      "optional": true
+    },
     "@libsql/client": {
       "optional": true
     },
@@ -147,6 +160,8 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.7",
+    "@electric-sql/pglite": "^0.5.1",
+    "@electric-sql/pglite-pgvector": "^0.0.2",
     "@libsql/client": "^0.17.3",
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",

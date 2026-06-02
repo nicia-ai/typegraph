@@ -271,6 +271,7 @@ const store = createStore(graph, backend);
 |----------|-----------------|----------|
 | `createLocalSqliteBackend` | Automatic | Quick start, development, tests (Node.js) |
 | `createLibsqlBackend` | Automatic | libsql/Turso (Node.js, Workers, browser) |
+| `createLocalPgliteBackend` | Automatic | In-process Postgres, embedded apps, pgvector tests |
 | `createStore` + manual migration | None | When you manage migrations externally |
 | `createStoreWithSchema` | Auto-creates tables, validates & auto-migrates | **Recommended for production** |
 
@@ -465,6 +466,8 @@ try {
 ## PostgreSQL Setup
 
 TypeGraph also supports PostgreSQL for production deployments with better concurrency and JSON support.
+For in-process Postgres during local development or tests, see
+[PGlite in Backend Setup](/backend-setup#pglite-postgres-in-wasm).
 
 ### Installation
 

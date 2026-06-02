@@ -12,6 +12,7 @@ export default defineConfig({
     "backend/sqlite/local": "src/backend/sqlite/local.ts",
     "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",
     "backend/postgres/index": "src/backend/postgres/index.ts",
+    "backend/postgres/pglite": "src/backend/postgres/pglite.ts",
   },
   format: ["esm", "cjs"],
   dts: true,
@@ -19,5 +20,12 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   treeshake: true,
-  external: ["better-sqlite3", "@libsql/client", "bun:sqlite", "pg"],
+  external: [
+    "better-sqlite3",
+    "@libsql/client",
+    "bun:sqlite",
+    "pg",
+    "@electric-sql/pglite",
+    "@electric-sql/pglite-pgvector",
+  ],
 });
