@@ -36,7 +36,6 @@ export {
 export {
   type CreateSqliteTablesOptions,
   edges,
-  embeddings,
   nodes,
   schemaVersions,
   uniques,

@@ -198,7 +198,7 @@ export function embedding<D extends number>(
 function resolveEmbeddingIndex(
   options: EmbeddingIndexOptions,
 ): ResolvedEmbeddingIndex {
-  const indexType = options.indexType ?? "hnsw";
+  const indexType = options.indexType ?? DEFAULT_EMBEDDING_INDEX_TYPE;
   const m = options.m ?? DEFAULT_HNSW_M;
   const efConstruction = options.efConstruction ?? DEFAULT_HNSW_EF_CONSTRUCTION;
 
@@ -222,7 +222,7 @@ function resolveEmbeddingIndex(
   }
 
   return Object.freeze({
-    metric: options.metric ?? "cosine",
+    metric: options.metric ?? DEFAULT_EMBEDDING_METRIC,
     indexType,
     m,
     efConstruction,
@@ -273,4 +273,99 @@ export function getEmbeddingIndex(
   ];
   if (candidate === undefined) return undefined;
   return candidate as ResolvedEmbeddingIndex;
+}
+
+// ============================================================
+// Embedding Field Resolution
+// ============================================================
+
+/**
+ * One resolved embedding field on a node schema — its dot-path plus the
+ * fixed `dimensions` and the resolved index `(metric, indexType)`.
+ * Sourced from the field's `embedding()` brand, unwrapping `.optional()`
+ * / `.nullable()` / `.default()` / `.readonly()` wrappers. The single
+ * source of truth shared by embedding sync (write path), the query
+ * compiler's `field.similarTo(...)` slot resolution, and search.
+ */
+export type ResolvedEmbeddingField = Readonly<{
+  fieldPath: string;
+  dimensions: number;
+  metric: EmbeddingMetric;
+  indexType: EmbeddingIndexType;
+}>;
+
+/**
+ * The single source of truth for an embedding field's default metric / index
+ * type when unspecified — used by `embedding()` declaration resolution, the
+ * field-fallback below, and the legacy-migration slot defaults
+ * (`migrate-vectors.ts`) so the three never drift.
+ */
+export const DEFAULT_EMBEDDING_METRIC: EmbeddingMetric = "cosine";
+export const DEFAULT_EMBEDDING_INDEX_TYPE: EmbeddingIndexType = "hnsw";
+
+/**
+ * Extracts every top-level embedding field from a node's object schema.
+ * Returns `[]` for non-object schemas or schemas with no embedding
+ * fields. Embeddings nested inside object properties are out of scope by
+ * design (storage keys at the top-level `(kind, fieldPath)` grain).
+ */
+export function resolveEmbeddingFields(
+  schema: z.ZodType,
+): readonly ResolvedEmbeddingField[] {
+  if (schema.type !== "object") return [];
+  const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
+  if (!shape) return [];
+
+  const fields: ResolvedEmbeddingField[] = [];
+  for (const [fieldPath, fieldSchema] of Object.entries(shape)) {
+    const dimensions = resolveEmbeddingDimensions(fieldSchema);
+    if (dimensions === undefined) continue;
+    const index = resolveEmbeddingIndexConfig(fieldSchema);
+    fields.push({
+      fieldPath,
+      dimensions,
+      metric: index?.metric ?? DEFAULT_EMBEDDING_METRIC,
+      indexType: index?.indexType ?? DEFAULT_EMBEDDING_INDEX_TYPE,
+    });
+  }
+  return fields;
+}
+
+function resolveEmbeddingDimensions(schema: z.ZodType): number | undefined {
+  const direct = getEmbeddingDimensions(schema);
+  if (direct !== undefined) return direct;
+  const unwrapped = unwrapToEmbedding(schema);
+  return unwrapped === undefined ? undefined : (
+      getEmbeddingDimensions(unwrapped)
+    );
+}
+
+function resolveEmbeddingIndexConfig(
+  schema: z.ZodType,
+): ResolvedEmbeddingIndex | undefined {
+  const direct = getEmbeddingIndex(schema);
+  if (direct !== undefined) return direct;
+  const unwrapped = unwrapToEmbedding(schema);
+  return unwrapped === undefined ? undefined : getEmbeddingIndex(unwrapped);
+}
+
+/**
+ * Unwraps optional / nullable / default / readonly wrappers to find the
+ * inner embedding schema, recursing through chained wrappers. Returns
+ * `undefined` when no embedding schema is reachable.
+ */
+function unwrapToEmbedding(schema: z.ZodType): z.ZodType | undefined {
+  const type = schema.type;
+  const innerType = (schema.def as { innerType?: z.ZodType }).innerType;
+  if (
+    (type === "optional" ||
+      type === "nullable" ||
+      type === "default" ||
+      type === "readonly") &&
+    innerType
+  ) {
+    if (isEmbeddingSchema(innerType)) return innerType;
+    return unwrapToEmbedding(innerType);
+  }
+  return undefined;
 }

@@ -9,9 +9,10 @@
  * Vector search enables finding semantically similar content
  * using embedding vectors from models like OpenAI, CLIP, or sentence transformers.
  *
- * Prerequisites (for database backends):
- * - PostgreSQL with pgvector extension, OR
- * - SQLite with sqlite-vec extension
+ * Vector search works across every backend via a pluggable VectorStrategy:
+ * - PostgreSQL with pgvector, OR
+ * - SQLite with sqlite-vec (loaded by createLocalSqliteBackend), OR
+ * - libSQL / Turso's built-in vector engine
  *
  * Run with:
  *   npx tsx examples/11-semantic-search.ts
@@ -84,21 +85,50 @@ const graph = defineGraph({
 // ============================================================
 
 /**
- * Generates a deterministic mock embedding based on text content.
- * In production, you would call an actual embedding API.
+ * Deterministic mock embedding via the bag-of-words "hashing trick": each
+ * content word is hashed to one dimension and accumulated, then the vector is
+ * unit-normalized. Texts that share vocabulary land on overlapping dimensions
+ * and score high; texts with disjoint vocabulary are near-orthogonal and score
+ * near zero — so cosine similarity tracks shared content the way a real model
+ * does, only far more crudely (no synonyms or paraphrase). In production you
+ * would call an actual embedding API.
  */
-function mockTextEmbedding(text: string, dimensions: number): number[] {
-  const embedding: number[] = [];
-  for (let i = 0; i < dimensions; i++) {
-    // Generate deterministic values based on text hash
-    const charSum = text.split("").reduce((sum, char, idx) => {
-      return sum + char.charCodeAt(0) * (idx + 1) * (i + 1);
-    }, 0);
-    embedding.push(Math.sin(charSum + i) * 0.5 + 0.5);
+const STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "into", "from", "are", "was",
+  "can", "its", "but", "not", "all", "any", "has", "have", "will",
+]);
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((token) => token.length > 2 && !STOPWORDS.has(token));
+}
+
+/** Deterministic FNV-1a hash, so a given word always maps to the same dimension. */
+function hashWord(word: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < word.length; index += 1) {
+    hash ^= word.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-  // Normalize to unit vector
-  const magnitude = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
-  return embedding.map((v) => v / magnitude);
+  return hash >>> 0;
+}
+
+function mockTextEmbedding(text: string, dimensions: number): number[] {
+  const vector = new Array<number>(dimensions).fill(0);
+  for (const token of tokenize(text)) {
+    const dimension = hashWord(token) % dimensions;
+    vector[dimension] = (vector[dimension] ?? 0) + 1;
+  }
+  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+  // Stopword-only / empty text has no signal — return a fixed unit vector so the
+  // result is still a valid (non-zero) embedding.
+  if (magnitude === 0) {
+    vector[0] = 1;
+    return vector;
+  }
+  return vector.map((value) => value / magnitude);
 }
 
 /**
@@ -169,7 +199,7 @@ export async function main() {
     },
     {
       title: "Natural Language Processing",
-      content: "NLP enables computers to understand human language...",
+      content: "NLP uses neural networks to help computers understand human language...",
       category: "AI",
     },
     {
@@ -213,62 +243,57 @@ export async function main() {
 
   console.log(`Query: "${queryText}"\n`);
 
-  // --- Native Query Builder API ---
-  //
-  // TypeGraph provides the .similarTo() predicate for native vector similarity
-  // search. This API is fully supported and compiles to optimized SQL using:
-  // - pgvector for PostgreSQL
-  // - sqlite-vec for SQLite
-  //
-  // Example usage (requires vector extension to be loaded):
-  //
-  //   const similar = await store
-  //     .query()
-  //     .from("Document", "d")
-  //     .whereNode("d", (d) =>
-  //       d.embedding.similarTo(queryEmbedding, 5, {
-  //         metric: "cosine",   // or "l2", "inner_product"
-  //         minScore: 0.7,      // optional: filter by similarity threshold
-  //       })
-  //     )
-  //     .select((ctx) => ({
-  //       title: ctx.d.title,
-  //       content: ctx.d.content,
-  //     }))
-  //     .execute();
-  //
-  // The .similarTo() predicate:
-  // - Returns results ordered by similarity (most similar first)
-  // - First parameter: query embedding vector
-  // - Second parameter: k (maximum results)
-  // - Third parameter: options (metric, minScore)
-  //
-  // Supported metrics:
-  // - "cosine" (default): Cosine similarity, range 0-1 where 1 is identical
-  // - "l2": Euclidean distance, lower is more similar
-  // - "inner_product": Inner product, higher is more similar
-  //
-  // --- Demo Mode (Manual Similarity) ---
-  //
-  // This example uses an in-memory SQLite backend without sqlite-vec loaded,
-  // so we demonstrate the concept by computing similarity manually:
+  // TypeGraph runs native vector search on whichever backend is configured —
+  // sqlite-vec here, pgvector on PostgreSQL, or libSQL's built-in engine. The
+  // example backend loads sqlite-vec, so the queries below execute for real. We
+  // gate on the backend's advertised capability and fall back to an in-JS
+  // ranking only when no vector engine is present, so the example always runs.
+  const stars = (score: number): string =>
+    "★".repeat(Math.max(0, Math.min(5, Math.round(score * 5))));
 
-  console.log("Computing similarities (demo without vector extension)...\n");
+  if (backend.capabilities.vector?.supported) {
+    // Store facade: ranked hits with similarity scores.
+    const hits = await store.search.vector("Document", {
+      fieldPath: "embedding",
+      queryEmbedding,
+      limit: 5,
+      metric: "cosine",
+    });
 
-  // Compute similarity scores
-  const similarities = createdDocs.map((doc) => ({
-    title: doc.title,
-    category: doc.category,
-    similarity: cosineSimilarity(queryEmbedding, doc.embedding),
-  }));
+    console.log("Results via store.search.vector (ranked by similarity):");
+    for (const hit of hits) {
+      console.log(`  ${stars(hit.score).padEnd(5)} ${hit.score.toFixed(4)} - "${hit.node.title}"`);
+    }
 
-  // Sort by similarity (highest first)
-  similarities.sort((a, b) => b.similarity - a.similarity);
+    // Query builder: compose .similarTo() with a metadata predicate in one SQL
+    // statement (here, restrict the nearest neighbors to the "AI" category).
+    const aiOnly = await store
+      .query()
+      .from("Document", "d")
+      .whereNode("d", (d) =>
+        d.embedding
+          .similarTo(queryEmbedding, 5, { metric: "cosine" })
+          .and(d.category.eq("AI")),
+      )
+      .select((ctx) => ({ title: ctx.d.title, category: ctx.d.category }))
+      .execute();
 
-  console.log("Results (ranked by cosine similarity):");
-  for (const result of similarities) {
-    const stars = "★".repeat(Math.round(result.similarity * 5));
-    console.log(`  ${stars.padEnd(5)} ${result.similarity.toFixed(4)} - "${result.title}"`);
+    console.log('\nFiltered to category = "AI" via .similarTo() + predicate:');
+    for (const row of aiOnly) {
+      console.log(`  - "${row.title}" (${row.category})`);
+    }
+  } else {
+    // No vector engine loaded — rank in JS so the example still runs.
+    console.log("No vector engine loaded; ranking in JS (cosine):\n");
+    const similarities = createdDocs
+      .map((doc) => ({
+        title: doc.title,
+        similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+      }))
+      .sort((a, b) => b.similarity - a.similarity);
+    for (const result of similarities) {
+      console.log(`  ${stars(result.similarity).padEnd(5)} ${result.similarity.toFixed(4)} - "${result.title}"`);
+    }
   }
 
   // ============================================================
@@ -279,9 +304,9 @@ export async function main() {
 
   // Create images with CLIP embeddings
   const images = [
-    { url: "/images/cat.jpg", description: "A fluffy orange cat" },
-    { url: "/images/dog.jpg", description: "A golden retriever" },
-    { url: "/images/landscape.jpg", description: "Mountain sunset" },
+    { url: "/images/cat.jpg", description: "A fluffy orange cat, a beloved house pet" },
+    { url: "/images/dog.jpg", description: "A loyal golden retriever, a friendly pet dog" },
+    { url: "/images/landscape.jpg", description: "A mountain landscape at sunset" },
   ];
 
   console.log("Creating images with CLIP embeddings...\n");
@@ -295,8 +320,25 @@ export async function main() {
     console.log(`  Created: ${img.url} - "${img.description}"`);
   }
 
-  console.log("\nCLIP enables searching images with text queries!");
-  console.log("Example: 'cute pet' would match both cat and dog images.");
+  // CLIP maps text and images into the same vector space, so a text query
+  // embedding searches the image embeddings directly (cross-modal retrieval).
+  const imageQueryText = "a fluffy pet";
+  const imageQuery = mockTextEmbedding(imageQueryText, 512);
+
+  if (backend.capabilities.vector?.supported) {
+    const imageHits = await store.search.vector("Image", {
+      fieldPath: "clipEmbedding",
+      queryEmbedding: imageQuery,
+      limit: 3,
+      metric: "cosine",
+    });
+    console.log(`\nText-to-image search for "${imageQueryText}":`);
+    for (const hit of imageHits) {
+      console.log(`  ${hit.score.toFixed(4)} - ${hit.node.url} ("${hit.node.description ?? ""}")`);
+    }
+  } else {
+    console.log("\nCLIP enables searching images with text queries (no vector engine loaded here).");
+  }
 
   // ============================================================
   // Part 5: Optional Embeddings
@@ -358,8 +400,8 @@ export async function main() {
   console.log("  4. Embeddings can be optional with .optional()");
   console.log("  5. Similarity search ranks results by vector distance");
 
-  console.log("\nNative vector search (PostgreSQL with pgvector, SQLite with sqlite-vec):");
-  console.log("  - Use .similarTo() predicate for hardware-accelerated search");
+  console.log("\nNative vector search (pgvector, sqlite-vec, or libSQL built-in):");
+  console.log("  - Use .similarTo() (query builder) or store.search.vector() (facade)");
   console.log("  - Automatic ORDER BY similarity with configurable LIMIT");
   console.log("  - HNSW/IVFFlat indexes enable sub-millisecond search at scale");
   console.log("  - Supports cosine, L2 (Euclidean), and inner product metrics");

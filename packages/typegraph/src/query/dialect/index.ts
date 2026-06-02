@@ -23,6 +23,11 @@ export type {
   DialectVectorPredicateStrategy,
   SqlDialect,
 } from "./types";
+export {
+  buildVectorCapabilities,
+  type VectorSlot,
+  type VectorStrategy,
+} from "./vector-strategy";
 
 import { postgresDialect } from "./postgres";
 import { sqliteDialect } from "./sqlite";

@@ -11,6 +11,7 @@ import {
   type FulltextCapabilities,
   type FulltextQueryMode,
   type GraphBackend,
+  type VectorIndexType,
   type VectorMetric,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
@@ -21,6 +22,9 @@ import {
 } from "../query/ast";
 import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
+import { assertVectorMinScore } from "../query/dialect/vector-strategy";
+import { type KindRegistry } from "../registry/kind-registry";
+import { getEmbeddingFields } from "./embedding-sync";
 import { rowToNode } from "./row-mappers";
 import { type Node } from "./types";
 
@@ -155,7 +159,51 @@ export type HybridSearchOptions = Readonly<{
 type StoreSearchContext = Readonly<{
   graphId: string;
   backend: GraphBackend;
+  registry: KindRegistry;
 }>;
+
+/**
+ * Resolved storage identity of one embedding field on a concrete node
+ * kind — the `(dimensions, metric, indexType)` the backend needs (in
+ * addition to the runtime `metric` override) to address the field's
+ * typed per-`(kind, field)` storage slot during search.
+ */
+type ResolvedSearchSlot = Readonly<{
+  dimensions: number;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
+}>;
+
+/**
+ * Resolves the `(dimensions, metric, indexType)` for a node kind's
+ * embedding field from the registered node schema's `embedding()`
+ * declaration. Throws a `ConfigurationError` when the kind has no such
+ * embedding field so the caller gets a clear boundary error instead of a
+ * downstream missing-table failure.
+ */
+function resolveSearchSlot(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  fieldPath: string,
+): ResolvedSearchSlot {
+  const nodeType = ctx.registry.getNodeType(nodeKind);
+  if (nodeType !== undefined) {
+    const fields = getEmbeddingFields(nodeType.schema);
+    const field = fields.find((entry) => entry.fieldPath === fieldPath);
+    if (field !== undefined) {
+      return {
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
+      };
+    }
+  }
+  throw new ConfigurationError(
+    `Node kind "${nodeKind}" has no embedding field "${fieldPath}". ` +
+      `Declare it with embedding(dimensions) on the node schema.`,
+    { capability: "vector", graphId: ctx.graphId },
+  );
+}
 
 export async function executeFulltextSearch<N = Node>(
   ctx: StoreSearchContext,
@@ -234,12 +282,29 @@ export async function executeVectorSearch<N = Node>(
   }
   assertEfSearch(options.efSearch, "vectorSearch.efSearch");
 
+  const slot = resolveSearchSlot(ctx, nodeKind, options.fieldPath);
+  assertVectorQueryCompatible(
+    backend,
+    slot,
+    { metric: options.metric, queryEmbedding: options.queryEmbedding },
+    "vectorSearch",
+  );
+  assertMinScore(
+    options.minScore,
+    options.metric ?? slot.metric,
+    "vectorSearch.minScore",
+  );
   const rows = await backend.vectorSearch({
     graphId,
     nodeKind,
     fieldPath: options.fieldPath,
     queryEmbedding: options.queryEmbedding,
-    metric: options.metric ?? "cosine",
+    // Default to the field's DECLARED metric (the metric its index was built
+    // for); only an explicit caller override changes it. Defaulting to cosine
+    // here would mis-rank l2 / inner_product fields and bypass their ANN index.
+    metric: options.metric ?? slot.metric,
+    dimensions: slot.dimensions,
+    indexType: slot.indexType,
     limit: options.limit,
     ...(options.minScore === undefined ? {} : { minScore: options.minScore }),
     ...(options.efSearch === undefined ? {} : { efSearch: options.efSearch }),
@@ -303,12 +368,30 @@ export async function executeHybridSearch<N = Node>(
   const vectorK = options.vector.k ?? options.limit * overFetchMultiplier;
   const fulltextK = options.fulltext.k ?? options.limit * overFetchMultiplier;
 
+  const vectorSlot = resolveSearchSlot(ctx, nodeKind, options.vector.fieldPath);
+  assertVectorQueryCompatible(
+    backend,
+    vectorSlot,
+    {
+      metric: options.vector.metric,
+      queryEmbedding: options.vector.queryEmbedding,
+    },
+    "hybridSearch.vector",
+  );
+  assertMinScore(
+    options.vector.minScore,
+    options.vector.metric ?? vectorSlot.metric,
+    "hybridSearch.vector.minScore",
+  );
   const vectorPromise = backend.vectorSearch({
     graphId,
     nodeKind,
     fieldPath: options.vector.fieldPath,
     queryEmbedding: options.vector.queryEmbedding,
-    metric: options.vector.metric ?? "cosine",
+    // Default to the field's declared metric (see executeVectorSearch).
+    metric: options.vector.metric ?? vectorSlot.metric,
+    dimensions: vectorSlot.dimensions,
+    indexType: vectorSlot.indexType,
     limit: vectorK,
     ...(options.vector.minScore === undefined ?
       {}
@@ -443,6 +526,59 @@ function assertEfSearch(efSearch: number | undefined, label: string): void {
   if (!Number.isInteger(efSearch) || efSearch <= 0) {
     throw new RangeError(
       `${label} must be a positive integer, got: ${efSearch}`,
+    );
+  }
+}
+
+/**
+ * Validates the optional `minScore` filter at the API boundary, mirroring the
+ * query-compiler vector pass. Rejects non-finite values for any metric and,
+ * for cosine (where the score is `1 - distance` similarity), values outside
+ * [-1, 1]. Without this a `NaN` minScore compiles to `distance <= (1 - NaN)`,
+ * which matches nothing — a silent empty result instead of a clear error.
+ */
+function assertMinScore(
+  minScore: number | undefined,
+  metric: VectorMetric,
+  label: string,
+): void {
+  if (minScore === undefined) return;
+  assertVectorMinScore(minScore, metric, label);
+}
+
+/**
+ * Validates a vector search/hybrid call against the field's resolved slot:
+ * an explicit `metric` override must match the field's declared metric (its
+ * storage / ANN index is built for that metric), the declared metric must be
+ * one the backend supports, and the query vector's length must match the
+ * field's dimension. Rejects at the API boundary instead of surfacing an
+ * opaque engine error from deep in `buildSearch`.
+ */
+function assertVectorQueryCompatible(
+  backend: GraphBackend,
+  slot: ResolvedSearchSlot,
+  options: {
+    metric: VectorMetric | undefined;
+    queryEmbedding: readonly number[];
+  },
+  label: string,
+): void {
+  if (options.metric !== undefined && options.metric !== slot.metric) {
+    throw new ConfigurationError(
+      `${label}: metric "${options.metric}" does not match the field's declared metric "${slot.metric}". Vector storage is built for the declared metric — omit metric or pass "${slot.metric}".`,
+      { backend: backend.dialect, capability: "vector" },
+    );
+  }
+  const supported = backend.capabilities.vector?.metrics;
+  if (supported !== undefined && !supported.includes(slot.metric)) {
+    throw new ConfigurationError(
+      `${label}: backend "${backend.dialect}" does not support the "${slot.metric}" metric (supported: ${supported.join(", ")}).`,
+      { backend: backend.dialect, capability: "vector" },
+    );
+  }
+  if (options.queryEmbedding.length !== slot.dimensions) {
+    throw new RangeError(
+      `${label}: queryEmbedding has ${options.queryEmbedding.length} dimensions, but "${slot.dimensions}" are declared for this field.`,
     );
   }
 }

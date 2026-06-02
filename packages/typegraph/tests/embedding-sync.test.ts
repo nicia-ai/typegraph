@@ -70,6 +70,8 @@ describe("getEmbeddingFields", () => {
     expect(fields[0]).toEqual({
       fieldPath: "embedding",
       dimensions: 1536,
+      metric: "cosine",
+      indexType: "hnsw",
     });
   });
 
@@ -210,6 +212,8 @@ describe("syncEmbeddings", () => {
       fieldPath: "embedding",
       embedding: embeddingValue,
       dimensions: 3,
+      metric: "cosine",
+      indexType: "hnsw",
     });
   });
 
@@ -227,6 +231,9 @@ describe("syncEmbeddings", () => {
       nodeKind: "Document",
       nodeId: "doc-123",
       fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine",
+      indexType: "hnsw",
     });
     expect(backend.upsertEmbedding).not.toHaveBeenCalled();
   });
@@ -375,6 +382,9 @@ describe("deleteNodeEmbeddings", () => {
       nodeKind: "Document",
       nodeId: "doc-123",
       fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine",
+      indexType: "hnsw",
     });
   });
 

@@ -7,6 +7,7 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import { ConfigurationError } from "../../errors";
 
@@ -26,8 +27,6 @@ export type SqlTableNames = Readonly<{
   nodes: string;
   /** Edges table name (default: "typegraph_edges") */
   edges: string;
-  /** Node embeddings table name (default: "typegraph_node_embeddings") */
-  embeddings: string;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
@@ -45,8 +44,6 @@ export type SqlSchema = Readonly<{
   nodesTable: SQL;
   /** Get a SQL reference to the edges table */
   edgesTable: SQL;
-  /** Get a SQL reference to the embeddings table */
-  embeddingsTable: SQL;
   /** Get a SQL reference to the fulltext table */
   fulltextTable: SQL;
 }>;
@@ -57,7 +54,6 @@ export type SqlSchema = Readonly<{
 const DEFAULT_TABLE_NAMES: SqlTableNames = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
-  embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
 };
@@ -121,7 +117,7 @@ function quoteIdentifier(name: string): string {
  * const schema = createSqlSchema({
  *   nodes: "myapp_nodes",
  *   edges: "myapp_edges",
- *   embeddings: "myapp_embeddings",
+ *   fulltext: "myapp_fulltext",
  * });
  * ```
  */
@@ -131,7 +127,6 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   // Validate all table names
   validateTableName(tables.nodes, "nodes");
   validateTableName(tables.edges, "edges");
-  validateTableName(tables.embeddings, "embeddings");
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
 
@@ -139,7 +134,6 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     tables,
     nodesTable: sql.raw(quoteIdentifier(tables.nodes)),
     edgesTable: sql.raw(quoteIdentifier(tables.edges)),
-    embeddingsTable: sql.raw(quoteIdentifier(tables.embeddings)),
     fulltextTable: sql.raw(quoteIdentifier(tables.fulltext)),
   };
 }
@@ -148,6 +142,34 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
  * Default SqlSchema using standard TypeGraph table names.
  */
 export const DEFAULT_SQL_SCHEMA: SqlSchema = createSqlSchema();
+
+/**
+ * The compiler's resolved view of one declared embedding field — the
+ * `(dimensions, metric, indexType)` a {@link VectorStrategy} needs to
+ * name and scan the field's typed per-`(kind, field)` storage. Sourced
+ * from the registered node schema's `embedding()` declaration when the
+ * store builds its compile options.
+ */
+export type VectorSlotDescriptor = Readonly<{
+  dimensions: number;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
+}>;
+
+/**
+ * Map of declared embedding slots keyed by {@link vectorSlotKey} -
+ * `"<nodeKind>\0<fieldPath>"` (NUL-separated). Carries every `(concrete kind,
+ * fieldPath)` that declares an embedding field, so the compiler's
+ * `field.similarTo(...)` CTE can UNION ALL the per-field tables for the
+ * kinds in an alias that actually declare the field (only
+ * `includeSubClasses` yields more than one).
+ */
+export type VectorSlotMap = ReadonlyMap<string, VectorSlotDescriptor>;
+
+/** NUL-delimited composite key for {@link VectorSlotMap}. */
+export function vectorSlotKey(nodeKind: string, fieldPath: string): string {
+  return `${nodeKind}\u0000${fieldPath}`;
+}
 
 /**
  * CTE aliases used by the standard query emitter. Joining on these names

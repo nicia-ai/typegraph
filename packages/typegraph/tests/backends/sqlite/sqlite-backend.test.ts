@@ -13,7 +13,7 @@ import {
   type BetterSQLite3Database,
   drizzle as drizzleBetterSqlite3,
 } from "drizzle-orm/better-sqlite3";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -31,6 +31,12 @@ import {
   generateSqliteDDL,
 } from "../../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
+import {
+  type UpsertEmbeddingParams,
+  type VectorSearchParams,
+  type VectorSearchResult,
+} from "../../../src/backend/types";
+import { sqliteVecStrategy } from "../../../src/query/dialect/vector/sqlite-vec-strategy";
 import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
@@ -558,303 +564,6 @@ describe("SQLite Backend - close() disposes serialized queue", () => {
 });
 
 // ============================================================
-// Vector Search Integration Tests (sqlite-vec)
-// ============================================================
-
-/**
- * Attempts to load sqlite-vec extension.
- * Returns true if successful, false otherwise.
- */
-function loadSqliteVec(sqlite: Database.Database): boolean {
-  try {
-    // Try to load sqlite-vec dynamically
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const sqliteVec = require("sqlite-vec") as {
-      load: (db: Database.Database) => void;
-    };
-    sqliteVec.load(sqlite);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Creates a test database with sqlite-vec loaded.
- */
-function createVectorTestDatabase(): Database.Database | undefined {
-  const sqlite = new Database(":memory:");
-
-  if (!loadSqliteVec(sqlite)) {
-    sqlite.close();
-    return undefined;
-  }
-
-  return sqlite;
-}
-
-describe("Vector Search with SQLite (sqlite-vec)", () => {
-  let hasSqliteVec = false;
-  let testSqlite: Database.Database | undefined;
-
-  beforeAll(() => {
-    const sqlite = createVectorTestDatabase();
-    if (sqlite) {
-      hasSqliteVec = true;
-      testSqlite = sqlite;
-
-      // Create embeddings table
-      testSqlite.exec(`
-        CREATE TABLE IF NOT EXISTS typegraph_embeddings (
-          id TEXT PRIMARY KEY,
-          graph_id TEXT NOT NULL,
-          node_kind TEXT NOT NULL,
-          node_id TEXT NOT NULL,
-          field_path TEXT NOT NULL,
-          embedding BLOB NOT NULL,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-      `);
-    }
-  });
-
-  beforeEach(() => {
-    if (!hasSqliteVec || !testSqlite) return;
-    testSqlite.exec("DELETE FROM typegraph_embeddings");
-  });
-
-  it("should detect sqlite-vec availability", () => {
-    if (!hasSqliteVec) {
-      console.log("sqlite-vec not available - skipping vector tests");
-      return;
-    }
-    expect(hasSqliteVec).toBe(true);
-  });
-
-  it("should store embeddings using vec_f32", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // Insert test embedding using vec_f32
-    const embedding = [0.1, 0.2, 0.3, 0.4];
-    testSqlite
-      .prepare(
-        `INSERT INTO typegraph_embeddings
-         (id, graph_id, node_kind, node_id, field_path, embedding)
-         VALUES (?, ?, ?, ?, ?, vec_f32(?))`,
-      )
-      .run(
-        "emb-1",
-        "vector_test_graph",
-        "Document",
-        "doc-1",
-        "/embedding",
-        JSON.stringify(embedding),
-      );
-
-    // Verify it was stored
-    const result = testSqlite
-      .prepare("SELECT id, node_id FROM typegraph_embeddings WHERE id = ?")
-      .get("emb-1") as { id: string; node_id: string } | undefined;
-
-    expect(result).toBeDefined();
-    expect(result?.node_id).toBe("doc-1");
-  });
-
-  it("should compute cosine distance correctly", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // Insert test embeddings
-    const embeddings = [
-      { id: "doc-1", embedding: [1, 0, 0, 0] }, // Unit vector along x
-      { id: "doc-2", embedding: [0, 1, 0, 0] }, // Unit vector along y (orthogonal)
-      { id: "doc-3", embedding: [0.9, 0.1, 0, 0] }, // Close to doc-1
-    ];
-
-    const stmt = testSqlite.prepare(
-      `INSERT INTO typegraph_embeddings
-       (id, graph_id, node_kind, node_id, field_path, embedding)
-       VALUES (?, ?, ?, ?, ?, vec_f32(?))`,
-    );
-
-    for (const emb of embeddings) {
-      stmt.run(
-        `emb-${emb.id}`,
-        "vector_test_graph",
-        "Document",
-        emb.id,
-        "/embedding",
-        JSON.stringify(emb.embedding),
-      );
-    }
-
-    // Query for similar to [1, 0, 0, 0]
-    const queryEmbedding = JSON.stringify([1, 0, 0, 0]);
-    const results = testSqlite
-      .prepare(
-        `SELECT node_id, vec_distance_cosine(embedding, vec_f32(?)) AS distance
-         FROM typegraph_embeddings
-         ORDER BY distance ASC`,
-      )
-      .all(queryEmbedding) as { node_id: string; distance: number }[];
-
-    expect(results.length).toBe(3);
-    // doc-1 should be first (distance 0 - identical)
-    expect(results[0]!.node_id).toBe("doc-1");
-    expect(results[0]!.distance).toBeCloseTo(0, 5);
-    // doc-3 should be second (close to query)
-    expect(results[1]!.node_id).toBe("doc-3");
-    // doc-2 should be last (orthogonal = max distance for cosine)
-    expect(results[2]!.node_id).toBe("doc-2");
-  });
-
-  it("should filter by minimum score", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // Insert test embeddings
-    const embeddings = [
-      { id: "doc-1", embedding: [1, 0, 0, 0] }, // Identical to query
-      { id: "doc-2", embedding: [0.7, 0.7, 0, 0] }, // Somewhat similar
-      { id: "doc-3", embedding: [0, 1, 0, 0] }, // Orthogonal
-    ];
-
-    const stmt = testSqlite.prepare(
-      `INSERT INTO typegraph_embeddings
-       (id, graph_id, node_kind, node_id, field_path, embedding)
-       VALUES (?, ?, ?, ?, ?, vec_f32(?))`,
-    );
-
-    for (const emb of embeddings) {
-      stmt.run(
-        `emb-${emb.id}`,
-        "vector_test_graph",
-        "Document",
-        emb.id,
-        "/embedding",
-        JSON.stringify(emb.embedding),
-      );
-    }
-
-    // Query with minScore filter (distance threshold = 1 - minScore)
-    const queryEmbedding = JSON.stringify([1, 0, 0, 0]);
-    const minScore = 0.5; // Only results with similarity >= 0.5
-    const threshold = 1 - minScore;
-
-    const results = testSqlite
-      .prepare(
-        `SELECT node_id, 1 - vec_distance_cosine(embedding, vec_f32(?)) AS score
-         FROM typegraph_embeddings
-         WHERE vec_distance_cosine(embedding, vec_f32(?)) <= ?
-         ORDER BY score DESC`,
-      )
-      .all(queryEmbedding, queryEmbedding, threshold) as {
-      node_id: string;
-      score: number;
-    }[];
-
-    // Should exclude doc-3 (orthogonal = score ~0)
-    expect(results.length).toBe(2);
-    expect(results.map((r) => r.node_id)).toContain("doc-1");
-    expect(results.map((r) => r.node_id)).toContain("doc-2");
-  });
-
-  it("should limit results to k nearest", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // Insert 10 test embeddings
-    const stmt = testSqlite.prepare(
-      `INSERT INTO typegraph_embeddings
-       (id, graph_id, node_kind, node_id, field_path, embedding)
-       VALUES (?, ?, ?, ?, ?, vec_f32(?))`,
-    );
-
-    for (let index = 0; index < 10; index++) {
-      const embedding = [Math.cos(index * 0.3), Math.sin(index * 0.3), 0, 0];
-      stmt.run(
-        `emb-doc-${index}`,
-        "vector_test_graph",
-        "Document",
-        `doc-${index}`,
-        "/embedding",
-        JSON.stringify(embedding),
-      );
-    }
-
-    // Query for top 3
-    const queryEmbedding = JSON.stringify([1, 0, 0, 0]);
-    const results = testSqlite
-      .prepare(
-        `SELECT node_id, vec_distance_cosine(embedding, vec_f32(?)) AS distance
-         FROM typegraph_embeddings
-         ORDER BY distance ASC
-         LIMIT 3`,
-      )
-      .all(queryEmbedding) as { node_id: string; distance: number }[];
-
-    expect(results.length).toBe(3);
-  });
-
-  it("should support L2 (Euclidean) distance", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // Insert test embeddings
-    const stmt = testSqlite.prepare(
-      `INSERT INTO typegraph_embeddings
-       (id, graph_id, node_kind, node_id, field_path, embedding)
-       VALUES (?, ?, ?, ?, ?, vec_f32(?))`,
-    );
-
-    stmt.run(
-      "emb-1",
-      "vector_test_graph",
-      "Document",
-      "doc-1",
-      "/embedding",
-      JSON.stringify([1, 0, 0, 0]),
-    );
-    stmt.run(
-      "emb-2",
-      "vector_test_graph",
-      "Document",
-      "doc-2",
-      "/embedding",
-      JSON.stringify([2, 0, 0, 0]),
-    );
-
-    // Query using L2 distance
-    const queryEmbedding = JSON.stringify([1, 0, 0, 0]);
-    const results = testSqlite
-      .prepare(
-        `SELECT node_id, vec_distance_l2(embedding, vec_f32(?)) AS distance
-         FROM typegraph_embeddings
-         ORDER BY distance ASC`,
-      )
-      .all(queryEmbedding) as { node_id: string; distance: number }[];
-
-    expect(results.length).toBe(2);
-    // doc-1 should be first (distance 0)
-    expect(results[0]!.node_id).toBe("doc-1");
-    expect(results[0]!.distance).toBeCloseTo(0, 5);
-    // doc-2 should have distance 1 (|[1,0,0,0] - [2,0,0,0]| = 1)
-    expect(results[1]!.node_id).toBe("doc-2");
-    expect(results[1]!.distance).toBeCloseTo(1, 5);
-  });
-
-  it("should not support inner product distance (sqlite-vec limitation)", () => {
-    if (!hasSqliteVec || !testSqlite) return;
-
-    // sqlite-vec does not have a vec_distance_ip function
-    // This test verifies that attempting to use it throws an error
-    // See: https://alexgarcia.xyz/sqlite-vec/api-reference.html
-    expect(() => {
-      testSqlite!.prepare(
-        `SELECT vec_distance_ip(vec_f32('[1,0,0,0]'), vec_f32('[0,1,0,0]'))`,
-      );
-    }).toThrow(/no such function/);
-  });
-});
-
-// ============================================================
 // TypeGraph SQLite Embedding Persistence (end-to-end)
 // ============================================================
 
@@ -892,7 +601,7 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables,
-      hasVectorEmbeddings: true,
+      vector: sqliteVecStrategy,
     });
     expect(backend.upsertEmbedding).toBeDefined();
 
@@ -906,9 +615,14 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
       embedding: [0, 1, 0, 0],
     });
 
-    // Embeddings table should now carry two rows.
+    // The per-(kind, field) vec0 table should now carry two rows.
+    const perFieldTable = sqliteVecStrategy.tableName(
+      graph.id,
+      "Doc",
+      "embedding",
+    );
     const count = sqlite
-      .prepare("SELECT COUNT(*) AS n FROM typegraph_node_embeddings")
+      .prepare(`SELECT COUNT(*) AS n FROM "${perFieldTable}"`)
       .get() as { n: number };
     expect(count.n).toBe(2);
 
@@ -928,7 +642,7 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     sqlite.close();
   });
 
-  it("does not expose upsertEmbedding when hasVectorEmbeddings is false", () => {
+  it("does not expose upsertEmbedding when no vector strategy is configured", () => {
     const sqlite = new Database(":memory:");
     for (const statement of generateSqliteDDL(tables)) {
       sqlite.exec(statement);
@@ -945,7 +659,7 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     sqlite.close();
   });
 
-  it("advertises vector capabilities when hasVectorEmbeddings is true", () => {
+  it("advertises vector capabilities when a vector strategy is configured", () => {
     const sqlite = new Database(":memory:");
     for (const statement of generateSqliteDDL(tables)) {
       sqlite.exec(statement);
@@ -954,13 +668,14 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables,
-      hasVectorEmbeddings: true,
+      vector: sqliteVecStrategy,
     });
     // Documented public capability check — consumers branch on this to
-    // decide whether to take SQLite vector/hybrid paths.
+    // decide whether to take SQLite vector/hybrid paths. The capability is
+    // derived from the active strategy (sqlite-vec advertises real KNN).
     expect(backend.capabilities.vector?.supported).toBe(true);
     expect(backend.capabilities.vector?.metrics).toEqual(["cosine", "l2"]);
-    expect(backend.capabilities.vector?.indexTypes).toEqual(["none"]);
+    expect(backend.capabilities.vector?.indexTypes).toEqual(["hnsw", "none"]);
     expect(backend.capabilities.vector?.maxDimensions).toBeGreaterThan(0);
     sqlite.close();
   });
@@ -985,13 +700,16 @@ describe("SQLite backend.vectorSearch", () => {
     ) => Promise<void>;
     // Convenience: pre-narrowed methods so tests don't sprinkle non-null
     // assertions. The harness only exists when sqlite-vec is loaded, which
-    // is exactly when these methods exist.
-    vectorSearch: NonNullable<
-      ReturnType<typeof createSqliteBackend>["vectorSearch"]
-    >;
-    upsertEmbedding: NonNullable<
-      ReturnType<typeof createSqliteBackend>["upsertEmbedding"]
-    >;
+    // is exactly when these methods exist. The store-resolved slot fields
+    // (`dimensions`, `indexType`, and upsert `metric`) are injected by the
+    // harness so call sites stay focused on the search/seed semantics; the
+    // store populates these in production.
+    vectorSearch: (
+      params: Omit<VectorSearchParams, "dimensions" | "indexType">,
+    ) => Promise<readonly VectorSearchResult[]>;
+    upsertEmbedding: (
+      params: Omit<UpsertEmbeddingParams, "metric" | "indexType">,
+    ) => Promise<void>;
   }>;
 
   // `undefined` when sqlite-vec is not installed — tests early-return so
@@ -1018,14 +736,38 @@ describe("SQLite backend.vectorSearch", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables,
-      hasVectorEmbeddings: true,
+      vector: sqliteVecStrategy,
     });
 
     const graphId = "vector_search_facade";
     const nodeKind = "Doc";
     const fieldPath = "embedding";
-    const upsertEmbedding = backend.upsertEmbedding!;
-    const vectorSearch = backend.vectorSearch!;
+    const rawUpsertEmbedding = backend.upsertEmbedding!;
+    const rawVectorSearch = backend.vectorSearch!;
+
+    // Inject the store-resolved slot fields the backend now requires.
+    // sqlite-vec storage is metric-agnostic and brute-force here, so the
+    // defaults (`cosine` / `none` / dimension from the vector length)
+    // preserve every existing call site's intended behavior.
+    function upsertEmbedding(
+      params: Omit<UpsertEmbeddingParams, "metric" | "indexType">,
+    ): Promise<void> {
+      return rawUpsertEmbedding({
+        ...params,
+        metric: "cosine",
+        indexType: "none",
+      });
+    }
+
+    function vectorSearch(
+      params: Omit<VectorSearchParams, "dimensions" | "indexType">,
+    ): Promise<readonly VectorSearchResult[]> {
+      return rawVectorSearch({
+        ...params,
+        dimensions: params.queryEmbedding.length,
+        indexType: "none",
+      });
+    }
 
     async function seed(
       rows: readonly Readonly<{
@@ -1134,7 +876,7 @@ describe("SQLite backend.vectorSearch", () => {
         metric: "inner_product",
         limit: 5,
       }),
-    ).rejects.toThrow(/inner product/i);
+    ).rejects.toThrow(/inner_product/i);
   });
 
   it("clips to limit when more rows match", async () => {

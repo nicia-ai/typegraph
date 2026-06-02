@@ -13,9 +13,9 @@ export type KindEntity = "node" | "edge";
 
 /**
  * Which physical surface an index targets. Vector indexes don't own a
- * kind directly (they're partial indexes on `typegraph_node_embeddings`
- * scoped by node-kind), but they participate in the same materialization
- * and diff pipelines, so they share this discriminator.
+ * kind directly (they back a per-`(kind, field)` typed embedding table
+ * owned by the active `VectorStrategy`), but they participate in the same
+ * materialization and diff pipelines, so they share this discriminator.
  */
 export type IndexEntity = "node" | "edge" | "vector";
 

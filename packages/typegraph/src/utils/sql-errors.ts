@@ -73,3 +73,34 @@ export function isMissingTableError(error: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * Engine "vector dimension mismatch" message shapes. pgvector:
+ * `expected 384 dimensions, not 512`; libSQL / sqlite-vec surface a similar
+ * `expected N … got/not M`. The first capture is the dimension the *stored*
+ * column expects; the optional second is the dimension that was *attempted*.
+ */
+const DIMENSION_MISMATCH_PATTERN =
+  /expected (\d+) dimensions(?:[,\s]+(?:not|got|but got|but)\s*(\d+))?/i;
+
+/**
+ * Parses an engine vector-dimension-mismatch error into `{ expected, actual }`
+ * by walking the `.cause` chain (drivers wrap the real error). `expected` is
+ * the stored column's dimension; `actual` (when the message includes it) is the
+ * attempted vector's dimension. Returns `undefined` for unrelated errors.
+ */
+export function parseDimensionMismatch(
+  error: unknown,
+): { expected: number; actual: number | undefined } | undefined {
+  for (const link of errorChain(error)) {
+    const message = link instanceof Error ? link.message : String(link);
+    const match = DIMENSION_MISMATCH_PATTERN.exec(message);
+    if (match) {
+      return {
+        expected: Number(match[1]),
+        actual: match[2] === undefined ? undefined : Number(match[2]),
+      };
+    }
+  }
+  return undefined;
+}

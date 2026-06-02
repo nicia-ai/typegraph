@@ -44,6 +44,17 @@ import {
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  assertPgvectorEfSearch,
+  pgvectorStrategy,
+} from "../../query/dialect/vector/pgvector-strategy";
+import {
+  assertVectorSearchLimit,
+  buildVectorCapabilities,
+  type VectorSlot,
+  type VectorStrategy,
+} from "../../query/dialect/vector-strategy";
+import { isMissingTableError } from "../../utils/sql-errors";
+import {
   type AdoptedTransaction,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
@@ -54,7 +65,6 @@ import {
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
   type DropVectorIndexParams,
-  type EmbeddingRow,
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
@@ -116,7 +126,6 @@ import {
   createNodeRowMapper,
   createSchemaVersionRowMapper,
   createUniqueRowMapper,
-  formatPostgresTimestamp,
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "./row-mappers";
@@ -125,11 +134,13 @@ import {
   tables as defaultTables,
 } from "./schema/postgres";
 import {
-  createPostgresVectorIndex,
-  dropPostgresVectorIndex,
-  generateVectorIndexName,
-  type VectorIndexOptions,
-} from "./vector-index";
+  createVectorSlotLatch,
+  mapVectorWriteError,
+  vectorSlotFromCreateIndexParams,
+  vectorSlotFromDropIndexParams,
+  vectorSlotFromParams,
+  type VectorSlotLatch,
+} from "./vector-runtime";
 
 // ============================================================
 // Types
@@ -153,6 +164,16 @@ export type PostgresBackendOptions = Readonly<{
    * pgroonga without forking TypeGraph.
    */
   fulltext?: FulltextStrategy;
+  /**
+   * Vector strategy override. Defaults to `pgvectorStrategy` (pgvector's
+   * `vector(N)` columns + HNSW/IVFFlat). The strategy owns per-`(kind,
+   * field)` typed storage — DDL, upsert, delete, similarity search, and
+   * ANN index lifecycle — and advertises `strategy.capabilities` as
+   * `capabilities.vector`. Pass a custom strategy to swap the entire
+   * vector stack for an alternate Postgres extension without forking
+   * TypeGraph.
+   */
+  vector?: VectorStrategy;
   /**
    * Override specific backend capabilities. Useful when the underlying
    * driver doesn't support a feature TypeGraph would otherwise assume —
@@ -224,49 +245,18 @@ const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
 const toNodeRow = createNodeRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
 const toEdgeRow = createEdgeRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
 const toUniqueRow = createUniqueRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
-const toSchemaVersionRow = createSchemaVersionRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
-
-/**
- * Converts a database row to EmbeddingRow type.
- * Raw SQL returns snake_case column names.
- */
-function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {
-  // pgvector returns embedding as a string '[1,2,3]' or as parsed array
-  let embedding: readonly number[];
-  if (typeof row.embedding === "string") {
-    const content = row.embedding.slice(1, -1);
-    embedding = content === "" ? [] : content.split(",").map((s) => Number.parseFloat(s.trim()));
-  } else if (Array.isArray(row.embedding)) {
-    embedding = row.embedding as number[];
-  } else {
-    embedding = [];
-  }
-
-  return {
-    graph_id: row.graph_id as string,
-    node_kind: row.node_kind as string,
-    node_id: row.node_id as string,
-    field_path: row.field_path as string,
-    embedding,
-    dimensions: row.dimensions as number,
-    created_at: formatPostgresTimestamp(row.created_at) ?? "",
-    updated_at: formatPostgresTimestamp(row.updated_at) ?? "",
-  };
-}
-
+const toSchemaVersionRow = createSchemaVersionRowMapper(
+  POSTGRES_ROW_MAPPER_CONFIG,
+);
 
 function buildPostgresCapabilities(
-  strategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy,
+  vectorStrategy: VectorStrategy,
 ): BackendCapabilities {
   return {
     ...POSTGRES_CAPABILITIES,
-    vector: {
-      supported: true,
-      metrics: ["cosine", "l2", "inner_product"] as const,
-      indexTypes: ["hnsw", "ivfflat", "none"] as const,
-      maxDimensions: 16_000, // pgvector limit
-    },
-    fulltext: buildFulltextCapabilities(strategy),
+    vector: buildVectorCapabilities(vectorStrategy),
+    fulltext: buildFulltextCapabilities(fulltextStrategy),
   };
 }
 
@@ -289,7 +279,16 @@ export function createPostgresBackend(
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
-  const baseCapabilities = buildPostgresCapabilities(fulltextStrategy);
+  // pgvector is compiled in via the extension, so it is wired
+  // unconditionally (overridable for alternate Postgres vector stacks).
+  const vectorStrategy = options.vector ?? pgvectorStrategy;
+  // One latch per backend instance, shared with every transaction-scoped
+  // backend so a slot's per-field table is created at most once per process.
+  const vectorSlotLatch = createVectorSlotLatch();
+  const baseCapabilities = buildPostgresCapabilities(
+    fulltextStrategy,
+    vectorStrategy,
+  );
   // HTTP-only drivers (notably `drizzle-orm/neon-http`) can't hold a
   // session across statements, so multi-statement transactions are
   // unavailable regardless of what we declare. Auto-detect and downgrade
@@ -302,29 +301,28 @@ export function createPostgresBackend(
     ...options.capabilities,
   };
   const adapterOptions: PostgresExecutionAdapterOptions = {
-    ...(options.prepareStatements === undefined
-      ? {}
-      : { prepareStatements: options.prepareStatements }),
-    ...(options.preparedStatementCacheMax === undefined
-      ? {}
-      : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
+    ...(options.prepareStatements === undefined ?
+      {}
+    : { prepareStatements: options.prepareStatements }),
+    ...(options.preparedStatementCacheMax === undefined ?
+      {}
+    : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
-    embeddings: getTableName(tables.embeddings),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
-  // ANALYZE statement on every call.
+  // ANALYZE statement on every call. Per-field vector tables are created
+  // lazily and live outside this base set, so they are not ANALYZEd here.
   const analyzeStatement = sql`ANALYZE ${sql.join(
     [
       tableNames.nodes,
       tableNames.edges,
       getTableName(tables.uniques),
-      tableNames.embeddings,
       tableNames.fulltext,
     ].map((name) => quoteIdentifier(name)),
     sql`, `,
@@ -341,6 +339,8 @@ export function createPostgresBackend(
     tableNames,
     capabilities,
     fulltextStrategy,
+    vectorStrategy,
+    vectorSlotLatch,
   });
 
   /**
@@ -377,9 +377,7 @@ export function createPostgresBackend(
       // Advisory lock: hashtext($graphId) is collision-tolerant for the
       // size of an active graph set; collisions just serialize unrelated
       // graphs which is harmless. Held until the transaction commits.
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
-      );
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
       // Advisory lock is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
       const txBackend = createTransactionBackend({
@@ -389,6 +387,8 @@ export function createPostgresBackend(
         tableNames,
         capabilities,
         fulltextStrategy,
+        vectorStrategy,
+        vectorSlotLatch,
       });
       return fn(txBackend);
     });
@@ -474,6 +474,8 @@ export function createPostgresBackend(
       tableNames,
       capabilities,
       fulltextStrategy,
+      vectorStrategy,
+      vectorSlotLatch,
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -576,9 +578,7 @@ export function createPostgresBackend(
     },
 
     async ensureKindRemovalsTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.kindRemovals)),
-      );
+      await db.execute(sql.raw(generatePgCreateTableSQL(tables.kindRemovals)));
     },
 
     async getPendingKindRemovals(
@@ -695,8 +695,9 @@ export function createPostgresBackend(
       // fulltext never asserts; one that does runs pure DML against an
       // already-materialized table, with the "no DDL in the business
       // transaction" guarantee backed by the durable fact.
-      const txConfig = options?.isolationLevel
-        ? {
+      const txConfig =
+        options?.isolationLevel ?
+          {
             isolationLevel: options.isolationLevel.replace("_", " ") as
               | "read uncommitted"
               | "read committed"
@@ -761,6 +762,10 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   tableNames: SqlTableNames;
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
+  /** Active vector strategy (always `pgvectorStrategy` unless overridden). */
+  vectorStrategy: VectorStrategy;
+  /** Shared per-`(kind, field)` storage-ensure latch. */
+  vectorSlotLatch: VectorSlotLatch;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -771,6 +776,10 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   tableNames: SqlTableNames;
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
+  /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
+  vectorStrategy: VectorStrategy;
+  /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
+  vectorSlotLatch: VectorSlotLatch;
 }>;
 
 function createPostgresOperationBackend(
@@ -784,6 +793,8 @@ function createPostgresOperationBackend(
     tableNames,
     capabilities,
     fulltextStrategy,
+    vectorStrategy,
+    vectorSlotLatch,
   } = options;
 
   // Route through the execution adapter so driver-specific result shapes
@@ -883,6 +894,15 @@ function createPostgresOperationBackend(
     });
   }
 
+  // Runs the strategy's per-field DDL on this backend's connection (the tx
+  // client for a transaction-scoped backend) so a slot's table exists
+  // before the first write/search hits it.
+  async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
+    await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
+      await execRun(sql.raw(statement));
+    });
+  }
+
   const commonBackend = createCommonOperationBackend({
     batchConfig: {
       checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
@@ -924,46 +944,59 @@ function createPostgresOperationBackend(
     ...executeRawMethod,
     capabilities,
     fulltextStrategy,
+    vectorStrategy,
     dialect: "postgres",
     tableNames,
 
     // === Embedding Operations ===
 
     async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-      const timestamp = nowIso();
-      const query = operationStrategy.buildUpsertEmbedding(params, timestamp);
-      await execRun(query);
+      const slot = vectorSlotFromParams(params);
+      await ensureVectorSlotStorage(slot);
+      const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
+      try {
+        for (const statement of statements) {
+          await execRun(statement);
+        }
+      } catch (error) {
+        throw mapVectorWriteError(error, params);
+      }
     },
 
     async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-      const query = operationStrategy.buildDeleteEmbedding(params);
-      await execRun(query);
-    },
-
-    async getEmbedding(
-      graphId: string,
-      nodeKind: string,
-      nodeId: string,
-      fieldPath: string,
-    ): Promise<EmbeddingRow | undefined> {
-      const query = operationStrategy.buildGetEmbedding(
-        graphId,
-        nodeKind,
-        nodeId,
-        fieldPath,
-      );
-      const row = await execGet<Record<string, unknown>>(query);
-      return row ? toEmbeddingRow(row) : undefined;
+      // Ensure the per-field table exists before deleting. A delete can
+      // run before any embedding was ever written for the field (e.g. a
+      // node hard-deleted having never carried one), and on Postgres a
+      // DELETE against a missing relation INSIDE a transaction aborts the
+      // whole transaction — swallowing the JS error can't un-abort it.
+      // The idempotent ensure makes the DELETE target an existing
+      // (possibly empty) table, so it's always a clean no-op.
+      const slot = vectorSlotFromParams(params);
+      await ensureVectorSlotStorage(slot);
+      const statements = vectorStrategy.buildDelete(slot, params);
+      for (const statement of statements) {
+        await execRun(statement);
+      }
     },
 
     async vectorSearch(
       params: VectorSearchParams,
     ): Promise<readonly VectorSearchResult[]> {
-      // Build first: `buildVectorSearch` validates `efSearch` (positive
-      // integer, ≤ pgvector's 1000 ceiling) before `runVectorSearch`
-      // inlines it into `SET LOCAL`.
-      const query = operationStrategy.buildVectorSearch(params);
-      const rows = await runVectorSearch(params.efSearch, query);
+      assertVectorSearchLimit(params.limit);
+      // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
+      // before `runVectorSearch` inlines it into `SET LOCAL`.
+      assertPgvectorEfSearch(params.efSearch);
+      const slot = vectorSlotFromParams(params);
+      await ensureVectorSlotStorage(slot);
+      const query = vectorStrategy.buildSearch(slot, params);
+      let rows: readonly { node_id: string; score: number }[];
+      try {
+        rows = await runVectorSearch(params.efSearch, query);
+      } catch (error) {
+        // A query vector whose dimension no longer matches the stored column
+        // surfaces the same typed error as the write path.
+        throw mapVectorWriteError(error, params);
+      }
       return rows.map((row) => ({
         nodeId: row.node_id,
         score: row.score,
@@ -971,32 +1004,21 @@ function createPostgresOperationBackend(
     },
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      const indexOptions: VectorIndexOptions = {
-        graphId: params.graphId,
-        nodeKind: params.nodeKind,
-        fieldPath: params.fieldPath,
-        dimensions: params.dimensions,
-        embeddingsTableName: tableNames.embeddings,
-        indexType: params.indexType,
-        metric: params.metric,
-        ...(params.indexParams?.m === undefined
-          ? {}
-          : { hnswM: params.indexParams.m }),
-        ...(params.indexParams?.efConstruction === undefined
-          ? {}
-          : { hnswEfConstruction: params.indexParams.efConstruction }),
-        ...(params.indexParams?.lists === undefined
-          ? {}
-          : { ivfflatLists: params.indexParams.lists }),
-        ...(params.concurrent === true ? { concurrent: true } : {}),
-      };
-
-      const result = await createPostgresVectorIndex(db, indexOptions);
-
-      if (!result.success) {
-        throw new Error(
-          result.message ?? "Failed to create PostgreSQL vector index",
-        );
+      const slot = vectorSlotFromCreateIndexParams(params);
+      // Ensure the per-field table exists first (idempotent), then create its
+      // ANN index. pgvector's `ownedTables` builds the table only — the HNSW/
+      // IVFFlat index is created here (and only here) so it picks up the
+      // declared `m`/`ef_construction`/`lists` from `slot.indexParams` rather
+      // than defaults.
+      await ensureVectorSlotStorage(slot);
+      // Honor the `concurrent` flag materializeIndexes passes on Postgres so the
+      // ANN build doesn't take a write-blocking lock on a live table. execRun is
+      // autocommit, which CONCURRENTLY requires.
+      const indexStatement = vectorStrategy.buildCreateIndex?.(slot, {
+        concurrent: params.concurrent === true,
+      });
+      if (indexStatement !== undefined) {
+        await execRun(indexStatement);
       }
     },
 
@@ -1064,25 +1086,16 @@ function createPostgresOperationBackend(
     },
 
     async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      const metrics = capabilities.vector?.metrics ?? (["cosine"] as const);
-
-      // Per-metric DROP statements are independent; run them concurrently.
-      await Promise.all(
-        metrics.map(async (metric) => {
-          const indexName = generateVectorIndexName(
-            params.graphId,
-            params.nodeKind,
-            params.fieldPath,
-            metric,
-          );
-          const result = await dropPostgresVectorIndex(db, indexName);
-          if (!result.success) {
-            throw new Error(
-              result.message ?? "Failed to drop PostgreSQL vector index",
-            );
-          }
-        }),
-      );
+      const slot = vectorSlotFromDropIndexParams(params);
+      const dropStatement = vectorStrategy.buildDropIndex?.(slot);
+      if (dropStatement === undefined) return;
+      try {
+        await execRun(dropStatement);
+      } catch (error) {
+        // The per-field table (and thus its index) may never have been
+        // materialized; treat a missing relation as already-dropped.
+        if (!isMissingTableError(error)) throw error;
+      }
     },
 
     // === Query Execution ===
@@ -1091,7 +1104,9 @@ function createPostgresOperationBackend(
       return executionAdapter.execute<T>(query);
     },
 
-    compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
+    compileSql(
+      query: SQL,
+    ): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },
   };
@@ -1106,6 +1121,12 @@ function createTransactionBackend(
     options.executionAdapter ??
     createPostgresExecutionAdapter(options.db, options.adapterOptions);
 
+  // A transaction-scoped backend gets its OWN per-field ensure-latch, never
+  // the outer process-global one: a `CREATE TABLE/INDEX` that runs inside the
+  // caller's transaction and then rolls back must not leave the shared latch
+  // marking the slot "ensured" (which would skip the re-CREATE and make every
+  // later write fail with "relation does not exist"). The fresh latch is
+  // discarded with the transaction, so the next write re-ensures idempotently.
   return createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -1114,9 +1135,11 @@ function createTransactionBackend(
     tableNames: options.tableNames,
     capabilities: options.capabilities,
     fulltextStrategy: options.fulltextStrategy,
+    vectorStrategy: options.vectorStrategy,
+    vectorSlotLatch: createVectorSlotLatch(),
   });
 }
 
 // Re-export schema utilities
-export type { PostgresTableNames,PostgresTables } from "./schema/postgres";
+export type { PostgresTableNames, PostgresTables } from "./schema/postgres";
 export { createPostgresTables, tables } from "./schema/postgres";

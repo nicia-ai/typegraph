@@ -541,10 +541,10 @@ on the merged graph and tracks per-deployment status in
 The returned `MaterializeIndexesResult` has one entry per declared
 index with `status: "created" | "alreadyMaterialized" | "failed" | "skipped"`.
 The `skipped` status surfaces when the backend recognizes the
-declaration but can't act on it in its current configuration — e.g.
-vector indexes against SQLite without the `sqlite-vec` extension, or
-`embedding(dims, { indexType: "none" })` opting out of automatic
-materialization.
+declaration but has no separate ANN index to build for it — e.g.
+sqlite-vec (KNN lives in the `vec0` virtual table), SQLite without a
+vector engine, or `embedding(dims, { indexType: "none" })` opting out
+of automatic materialization.
 
 Graph-extension-declared relational indexes use the same declaration shape as
 compile-time `defineNodeIndex` / `defineEdgeIndex`, but in a
@@ -585,14 +585,22 @@ const Manual = defineNode("Manual", {
 });
 ```
 
+Embeddings live in per-`(graphId, nodeKind, fieldPath)` typed tables
+named `tg_vec_<graphId>_<kind>_<field>` (each carrying the field's
+fixed dimension), created lazily on first write — there is no single
+shared embeddings table.
+
 On `materializeIndexes()`:
 
 - Postgres with pgvector: emits `CREATE INDEX ... USING hnsw ...` (or
-  `ivfflat`) on `typegraph_node_embeddings` and reports `created`.
-- SQLite with `sqlite-vec`: vectors are stored but the brute-force
-  scan IS the "index"; declarations report `skipped` because
-  HNSW/IVFFlat aren't available natively on SQLite.
-- SQLite without `sqlite-vec`: declarations report `skipped` with a
+  `ivfflat`) on the field's per-`(graphId, kind, field)` vector table
+  and reports `created`.
+- SQLite with `sqlite-vec`: KNN lives in the `vec0` virtual table, so
+  there's no separate ANN index to build; declarations report
+  `skipped` (with a reason), not `failed`.
+- libSQL / Turso: the DiskANN index is created via the strategy's own
+  DDL (`libsql_vector_idx` + `vector_top_k`).
+- SQLite without a vector engine: declarations report `skipped` with a
   reason indicating the backend lacks vector support.
 
 The vector declaration's identity key within a single graph is
@@ -611,8 +619,8 @@ not in the declaration name. Vector status rows in
 declaration name (whether auto-derived from the same kind/field or
 constructed explicitly via `defineGraph({ indexes: [...] })`) don't
 collide in the status table. Each graph's `materializeIndexes()`
-call creates its own physical pgvector index (which is itself
-partial-by-graph_id) and records its own status row.
+call creates its own physical pgvector index on that graph's
+per-`(graphId, kind, field)` vector table and records its own status row.
 
 ### Fulltext indexes (out of scope for v1)
 
@@ -677,6 +685,11 @@ Pass `{ eager: {} }` to run cleanup inline after the schema commit:
 ```ts
 const withoutPaper = await evolved.removeKinds(["Paper"], { eager: {} });
 ```
+
+Removing an embedding field from a surviving kind orphans its
+per-`(graphId, kind, field)` `tg_vec_*` table; `materializeRemovals()`
+reclaims it and reports the count in
+`MaterializeRemovalsResult.reclaimedVectorFields`.
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code

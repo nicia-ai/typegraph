@@ -20,8 +20,8 @@ export function toDeclaredIndex(
  * Vector indexes are excluded from the profiler-format conversion —
  * the profiler operates on relational tables (`typegraph_nodes` /
  * `typegraph_edges`) where index hits / misses can be measured against
- * SQL plans. Vector indexes live on the embeddings table with a
- * different access pattern.
+ * SQL plans. Vector indexes live on the strategy's per-`(kind, field)`
+ * embedding tables with a different access pattern.
  */
 export function toDeclaredIndexes(
   indexes: readonly IndexDeclaration[],

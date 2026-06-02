@@ -505,7 +505,7 @@ function assertNoOverlap(
 function assertIndexableValueType(valueType: ValueType, context: string): void {
   if (valueType === "embedding") {
     throw new Error(
-      `Cannot create props index for embedding field (${context}); use vector indexes on the embeddings table instead`,
+      `Cannot create props index for embedding field (${context}); embedding() fields are indexed automatically in the vector strategy's per-(kind, field) storage`,
     );
   }
 

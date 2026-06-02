@@ -113,7 +113,11 @@ export class StoreSearch<G extends GraphDef> {
   ): Promise<readonly FulltextSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeFulltextSearch<ResolveNode<G, K>>(
-      { graphId: this.#context.graphId, backend: this.#context.backend },
+      {
+        graphId: this.#context.graphId,
+        backend: this.#context.backend,
+        registry: this.#context.registry,
+      },
       nodeKind,
       options,
     );
@@ -136,7 +140,11 @@ export class StoreSearch<G extends GraphDef> {
   ): Promise<readonly VectorSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeVectorSearch<ResolveNode<G, K>>(
-      { graphId: this.#context.graphId, backend: this.#context.backend },
+      {
+        graphId: this.#context.graphId,
+        backend: this.#context.backend,
+        registry: this.#context.registry,
+      },
       nodeKind,
       options,
     );
@@ -157,7 +165,11 @@ export class StoreSearch<G extends GraphDef> {
   ): Promise<readonly HybridSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeHybridSearch<ResolveNode<G, K>>(
-      { graphId: this.#context.graphId, backend: this.#context.backend },
+      {
+        graphId: this.#context.graphId,
+        backend: this.#context.backend,
+        registry: this.#context.registry,
+      },
       nodeKind,
       options,
     );

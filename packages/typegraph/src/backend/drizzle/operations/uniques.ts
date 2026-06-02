@@ -168,25 +168,6 @@ export function buildHardDeleteUniquesByNode(
 }
 
 /**
- * Builds a hard DELETE query for all embeddings for a node.
- */
-export function buildHardDeleteEmbeddingsByNode(
-  tables: Tables,
-  graphId: string,
-  nodeKind: string,
-  nodeId: string,
-): SQL {
-  const { embeddings } = tables;
-
-  return sql`
-    DELETE FROM ${embeddings}
-    WHERE ${embeddings.graphId} = ${graphId}
-      AND ${embeddings.nodeKind} = ${nodeKind}
-      AND ${embeddings.nodeId} = ${nodeId}
-  `;
-}
-
-/**
  * Builds a SELECT query to check for uniqueness violations.
  */
 export function buildCheckUnique(

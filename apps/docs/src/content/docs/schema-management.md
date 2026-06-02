@@ -269,6 +269,37 @@ const result = await ensureSchema(backend, graph, {
 });
 ```
 
+## Migrating Legacy Embedding Storage
+
+Embeddings now live in per-`(graphId, kind, field)` typed tables
+(`tg_vec_<graphId>_<kind>_<field>`), created lazily on first write. This
+replaces the single shared `typegraph_node_embeddings` table. New deployments
+need no action — the per-field tables materialize as you write vectors.
+
+Deployments that already hold rows in the legacy table run a one-time, idempotent
+cutover with `migrateLegacyEmbeddings()`, exported from the package root:
+
+```typescript
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph";
+
+// `backend` is the post-cutover backend, wired with its VectorStrategy.
+const result = await migrateLegacyEmbeddings({ backend });
+
+console.log("Rows migrated:", result.migrated);
+console.log("Per field:", result.perField);
+console.log("Skipped (dimension mismatch):", result.skippedDimensionMismatch);
+console.log("Legacy table existed:", result.legacyTablePresent);
+```
+
+The run re-inserts every legacy embedding into per-field storage and is a clean
+no-op on a fresh install or a re-run (`legacyTablePresent: false`). A non-empty
+`skippedDimensionMismatch` flags `(kind, field)` slots that held mixed dimensions
+and need a deliberate re-embed at a single dimension — see
+[`reembedVectorField`](/schema-evolution#changing-an-embedding-dimension).
+
+The vector and hybrid query API (`.similarTo()`, `store.search.vector`,
+`store.search.hybrid`) is storage-transparent and unchanged by this cutover.
+
 ## Schema Serialization
 
 Schemas are stored as JSON documents with computed hashes for fast comparison:

@@ -256,12 +256,13 @@ export async function materializeIndexes(
 }
 
 function parallelBucketKey(declaration: IndexDeclaration): IndexEntity {
-  // Vector indexes all target the same physical embeddings table, so
-  // they share one bucket. Relational node and edge indexes split into
-  // two buckets keyed by entity (graphs override their physical table
-  // names but every declaration with the same entity still lands on
-  // the same physical table within a given graph). Postgres CIC's
-  // "one in-flight build per relation" rule maps to this bucketing.
+  // Vector indexes now target typed per-`(kind, field)` tables rather
+  // than one shared table, so distinct vector declarations could in
+  // principle build concurrently. They still share one bucket (keyed by
+  // the `"vector"` entity) — serializing them is conservative but
+  // correct, and keeps Postgres CIC's "one in-flight build per relation"
+  // rule trivially satisfied without tracking per-table identity here.
+  // Relational node and edge indexes split into their own entity buckets.
   return declaration.entity;
 }
 
@@ -316,14 +317,16 @@ async function materializeVectorIndex(
   }
 
   // Capability check: backends declare vector support via
-  // `capabilities.vector` (e.g. SQLite needs sqlite-vec opt-in via
-  // `hasVectorEmbeddings: true` at backend creation; Postgres needs
-  // pgvector). When unsupported, surface as skipped — the declaration
-  // is recognized but the backend can't act on it.
+  // `capabilities.vector` (derived from the active `VectorStrategy`) and
+  // expose that strategy as `backend.vectorStrategy`. When either is
+  // absent the backend can't act on the declaration — surface as
+  // skipped. The `vectorStrategy` check also narrows it to defined for
+  // the per-field table-name resolution below.
   const vectorCapability = backend.capabilities.vector;
   if (
     vectorCapability?.supported !== true ||
-    backend.createVectorIndex === undefined
+    backend.createVectorIndex === undefined ||
+    backend.vectorStrategy === undefined
   ) {
     return skippedEntry(
       declaration,
@@ -343,12 +346,16 @@ async function materializeVectorIndex(
     );
   }
 
-  // Hash against the actual physical embeddings table the backend
-  // targets — custom `tableNames.embeddings` would otherwise produce
-  // false drift detection (the recorded signature would mismatch the
-  // signature computed against the renamed table on every call).
-  const embeddingsTable =
-    backend.tableNames?.embeddings ?? "typegraph_node_embeddings";
+  // Hash against the strategy's typed per-`(kind, field)` physical table
+  // — the storage this declaration's index actually targets. Folding the
+  // resolved table name into the signature keeps drift detection honest:
+  // if the strategy (and thus the physical table) changes, the recorded
+  // signature mismatches and re-materialization is forced.
+  const embeddingsTable = backend.vectorStrategy.tableName(
+    graphId,
+    declaration.kind,
+    declaration.fieldPath,
+  );
   const signature = await computeIndexSignature(
     backend.dialect,
     embeddingsTable,
@@ -502,7 +509,10 @@ function skippedEntry(
  * two graphs reusing the same declaration name. The `::` separator
  * keeps the compound visually unambiguous when inspecting the table.
  */
-function vectorStatusKey(graphId: string, declarationName: string): string {
+export function vectorStatusKey(
+  graphId: string,
+  declarationName: string,
+): string {
   return `${graphId}::${declarationName}`;
 }
 
@@ -578,7 +588,7 @@ function buildAttempt(
  * rename. Excludes execution flags (`CONCURRENTLY`, `IF NOT EXISTS`)
  * because those are runtime modifiers, not shape.
  */
-async function computeIndexSignature(
+export async function computeIndexSignature(
   dialect: SqlDialect,
   targetTableName: string,
   declaration: IndexDeclaration,

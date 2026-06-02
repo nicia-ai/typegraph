@@ -15,9 +15,29 @@ import {
 } from "../src";
 import { createQueryBuilder } from "../src/query/builder";
 import { validateHybridFusionOptions } from "../src/query/builder/validation";
-import { compileQuery } from "../src/query/compiler";
+import { compileQuery, type CompileQueryOptions } from "../src/query/compiler";
+import {
+  vectorSlotKey,
+  type VectorSlotMap,
+} from "../src/query/compiler/schema";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlString } from "./sql-test-utils";
+
+// The hybrid vector leg compiles against the strategy's per-field table;
+// supply the pgvector strategy + the declared slot for `HybridDoc.embedding`.
+const VECTOR_SLOTS: VectorSlotMap = new Map([
+  [
+    vectorSlotKey("HybridDoc", "embedding"),
+    { dimensions: 4, metric: "cosine", indexType: "hnsw" } as const,
+  ],
+]);
+
+const PG_VECTOR_OPTIONS: CompileQueryOptions = {
+  dialect: "postgres",
+  vectorStrategy: pgvectorStrategy,
+  vectorSlots: VECTOR_SLOTS,
+};
 
 const HybridDocument = defineNode("HybridDoc", {
   schema: z.object({
@@ -48,7 +68,7 @@ function buildHybridQuery(
     q = q.fuseWith(fusion);
   }
   const ast = q.select((ctx) => ctx.d).toAst();
-  return compileQuery(ast, HybridGraph.id, { dialect: "postgres" });
+  return compileQuery(ast, HybridGraph.id, PG_VECTOR_OPTIONS);
 }
 
 function makeBuilder(): ReturnType<
@@ -118,9 +138,9 @@ describe(".fuseWith()", () => {
       .fuseWith({ k: 60 })
       .select((ctx) => ctx.d)
       .toAst();
-    expect(() =>
-      compileQuery(ast, HybridGraph.id, { dialect: "postgres" }),
-    ).toThrow(UnsupportedPredicateError);
+    expect(() => compileQuery(ast, HybridGraph.id, PG_VECTOR_OPTIONS)).toThrow(
+      UnsupportedPredicateError,
+    );
   });
 
   it("throws at compile time when fuseWith is set without fulltext predicate", () => {
@@ -131,9 +151,9 @@ describe(".fuseWith()", () => {
       .fuseWith({ k: 60 })
       .select((ctx) => ctx.d)
       .toAst();
-    expect(() =>
-      compileQuery(ast, HybridGraph.id, { dialect: "postgres" }),
-    ).toThrow(UnsupportedPredicateError);
+    expect(() => compileQuery(ast, HybridGraph.id, PG_VECTOR_OPTIONS)).toThrow(
+      UnsupportedPredicateError,
+    );
   });
 
   it(".fuseWith() itself throws for bad values at call time", () => {

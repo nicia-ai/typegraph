@@ -280,20 +280,19 @@ export function createCommonOperationBackend(
 
     // IMPORTANT: This cascade is not atomic. Callers must ensure this runs
     // within a transaction to prevent partial deletion on intermediate failure.
+    //
+    // Embeddings are NOT cleaned up here: they live in per-`(nodeKind,
+    // fieldPath)` strategy-owned tables addressable only with the slot
+    // context the graph-agnostic backend lacks. The store's hard-delete
+    // path (`executeNodeHardDelete`) drives `deleteNodeEmbeddings`, which
+    // resolves each embedding field and routes a per-field
+    // `backend.deleteEmbedding` through the active vector strategy.
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
         params.id,
       );
       await execution.execRun(deleteUniquesQuery);
-
-      const deleteEmbeddingsQuery =
-        operationStrategy.buildHardDeleteEmbeddingsByNode(
-          params.graphId,
-          params.kind,
-          params.id,
-        );
-      await execution.execRun(deleteEmbeddingsQuery);
 
       const deleteFulltextStatements =
         operationStrategy.buildDeleteFulltextByNode(

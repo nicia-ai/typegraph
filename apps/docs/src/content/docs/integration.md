@@ -722,7 +722,8 @@ const store = createStore(graph, backend);
 
 - SQLite limitations (single-writer, no pgvector)
 - Cold start times include DB initialization
-- sqlite-vec for vector search (cosine/L2 only)
+- Vector search (cosine/L2): sqlite-vec on the local better-sqlite3 backend;
+  libSQL's built-in vectors on the libSQL / Turso backend
 
 ### Read Replica Separation
 

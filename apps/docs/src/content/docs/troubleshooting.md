@@ -380,7 +380,10 @@ drift fails fast. See
 
 ### "Extension not found" / "vector type not available"
 
-**Cause:** Vector extension not installed.
+**Cause:** Vector extension not installed. Only applies to PostgreSQL
+(pgvector) and SQLite (sqlite-vec). libSQL / Turso has a built-in
+native vector engine — there is nothing to load and it is wired
+automatically by `createLibsqlBackend`.
 
 **PostgreSQL:**
 
@@ -414,9 +417,11 @@ const queryEmbedding = await generateEmbedding(text);
 console.log(queryEmbedding.length); // Should be 1536
 ```
 
-### "Inner product not supported" (SQLite)
+### "Inner product not supported" (SQLite / libSQL)
 
-**Cause:** sqlite-vec doesn't support inner product metric.
+**Cause:** `inner_product` is PostgreSQL-only. Neither sqlite-vec nor
+libSQL support the inner product metric (cosine and l2 only). Check
+`backend.capabilities.vector.metrics` for the active backend.
 
 **Solution:** Use cosine or L2:
 

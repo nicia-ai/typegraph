@@ -98,8 +98,10 @@ TypeGraph deliberately excludes:
 
 These exclusions keep TypeGraph focused and maintainable.
 
-Note: TypeGraph **does support** semantic search via database vector extensions
-(pgvector for PostgreSQL, sqlite-vec for SQLite). See [Semantic Search](/semantic-search) for details.
+Note: TypeGraph **does support** semantic search via native database vector
+engines: pgvector for PostgreSQL, sqlite-vec for the local (better-sqlite3)
+SQLite backend, and libSQL's built-in vectors for the libSQL / Turso backend.
+See [Semantic Search](/semantic-search) for details.
 
 Note: TypeGraph **does support** fulltext search — native BM25 on SQLite (FTS5)
 and `tsvector` + GIN on PostgreSQL, with a query-builder

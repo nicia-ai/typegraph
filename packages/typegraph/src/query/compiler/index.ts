@@ -58,6 +58,7 @@ import {
   type FulltextStrategy,
   getDialect,
   type SqlDialect,
+  type VectorStrategy,
 } from "../dialect";
 import { emitStandardQuerySql } from "./emitter";
 import {
@@ -91,7 +92,11 @@ import {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
 } from "./recursive";
-import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "./schema";
+import {
+  DEFAULT_SQL_SCHEMA,
+  type SqlSchema,
+  type VectorSlotMap,
+} from "./schema";
 import { compileSetOperation as compileSetOp } from "./set-operations";
 import {
   runStandardQueryPassPipeline,
@@ -124,6 +129,20 @@ export type CompileQueryOptions = Readonly<{
    * default (tsvector).
    */
   fulltextStrategy?: FulltextStrategy | undefined;
+  /**
+   * Vector strategy override. When set, `field.similarTo(...)`
+   * predicates compile against the strategy's per-`(kind, field)`
+   * tables and distance expression. Callers read it from
+   * `backend.vectorStrategy` so a backend-declared strategy (pgvector,
+   * libsql-native, sqlite-vec) drives the per-field relevance scan.
+   */
+  vectorStrategy?: VectorStrategy | undefined;
+  /**
+   * Declared embedding slots `(kind, fieldPath) -> descriptor` used by
+   * the `field.similarTo(...)` CTE to know which kinds in an alias
+   * declare the field. Callers build it from the graph's node schemas.
+   */
+  vectorSlots?: VectorSlotMap | undefined;
 }>;
 
 /**
@@ -169,6 +188,12 @@ export function compileQuery(
     schema,
     compileQuery: (subAst, subGraphId) =>
       compileQuery(subAst, subGraphId, propagateOptions(options_)),
+    ...(options_.vectorStrategy === undefined ?
+      {}
+    : { vectorStrategy: options_.vectorStrategy }),
+    ...(options_.vectorSlots === undefined ?
+      {}
+    : { vectorSlots: options_.vectorSlots }),
   };
 
   // Check for variable-length traversals
@@ -270,6 +295,12 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.fulltextStrategy === undefined ?
       {}
     : { fulltextStrategy: options_.fulltextStrategy }),
+    ...(options_.vectorStrategy === undefined ?
+      {}
+    : { vectorStrategy: options_.vectorStrategy }),
+    ...(options_.vectorSlots === undefined ?
+      {}
+    : { vectorSlots: options_.vectorSlots }),
   };
 }
 

@@ -3,9 +3,14 @@ import { type SQL, sql } from "drizzle-orm";
 import { quotedTableName, type Tables } from "./shared";
 
 /**
- * Builds DELETE FROM statements for all per-graph tables filtered by
+ * Builds DELETE FROM statements for all per-graph base tables filtered by
  * graph_id. Delete order respects implicit FK-like dependencies:
- * fulltext → embeddings → uniques → edges → nodes → schema_versions.
+ * fulltext → uniques → edges → nodes → schema_versions.
+ *
+ * Embeddings are NOT cleared here: they live in per-`(nodeKind, fieldPath)`
+ * strategy-owned tables that this graph-agnostic builder cannot enumerate.
+ * The store's `clear()` drives their per-field cleanup through the active
+ * vector strategy.
  *
  * Per-deployment status tables (`indexMaterializations`, `kindRemovals`,
  * `reconciliationMarkers`) also get cleaned because reuse of the same
@@ -21,7 +26,6 @@ export function buildClearGraph(
   const fulltext = quotedTableName(tables.fulltextTableName);
   return [
     sql`DELETE FROM ${fulltext} WHERE "graph_id" = ${graphId}`,
-    sql`DELETE FROM ${tables.embeddings} WHERE ${tables.embeddings.graphId} = ${graphId}`,
     sql`DELETE FROM ${tables.uniques} WHERE ${tables.uniques.graphId} = ${graphId}`,
     sql`DELETE FROM ${tables.edges} WHERE ${tables.edges.graphId} = ${graphId}`,
     sql`DELETE FROM ${tables.nodes} WHERE ${tables.nodes.graphId} = ${graphId}`,

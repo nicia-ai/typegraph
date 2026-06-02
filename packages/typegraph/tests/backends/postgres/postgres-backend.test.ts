@@ -122,7 +122,33 @@ async function setupTestDatabase(): Promise<void> {
     DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
   `);
 
+  // Per-(kind, field) vector tables are created lazily with a fixed,
+  // dimension-typed embedding column (`vector(N)`). They are not in the
+  // base migration, so the base DROP above leaves them behind. Truncating
+  // (as `clearTestData` does for row isolation) keeps the column type, so a
+  // leftover `vector(3)` table from a prior run would reject a later test's
+  // `vector(4)` insert. DROP them here — once, before any backend/latch is
+  // created for this file — so the suite is re-runnable against a persistent
+  // database (e.g. the shared dev Postgres) and order-independent across the
+  // serially-run PG test files.
+  await dropPerFieldVectorTables(sharedPool);
+
   await sharedPool.query(generatePostgresMigrationSQL());
+}
+
+/**
+ * Drops every strategy-owned per-field vector table (`tg_vec_*`), including
+ * its DiskANN/HNSW index. Used at file setup to clear stale typed tables
+ * whose embedding dimension may differ from this run's schema.
+ */
+async function dropPerFieldVectorTables(pool: Pool): Promise<void> {
+  const { rows } = await pool.query<{ tablename: string }>(
+    String.raw`SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
+  );
+  for (const row of rows) {
+    await pool.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
+  }
 }
 
 /**
@@ -131,18 +157,37 @@ async function setupTestDatabase(): Promise<void> {
 async function clearTestData(): Promise<void> {
   if (!sharedPool) return;
 
-  // Fulltext and embedding tables have no FKs to typegraph_nodes, so
-  // truncating the parent tables alone leaves orphaned rows that leak
-  // into subsequent integration tests (particularly fulltext search,
-  // where orphan rows can outrank fresh ones and cause missing hits).
+  // Fulltext tables have no FKs to typegraph_nodes, so truncating the
+  // parent tables alone leaves orphaned rows that leak into subsequent
+  // integration tests (particularly fulltext search, where orphan rows
+  // can outrank fresh ones and cause missing hits).
   await sharedPool.query(
     `TRUNCATE typegraph_node_fulltext,
-              typegraph_node_embeddings,
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,
               typegraph_schema_versions CASCADE`,
   );
+
+  // Per-(kind, field) vector tables are created lazily by the strategy,
+  // so enumerate and truncate any that exist to keep embedding rows from
+  // leaking across tests that reuse graph ids.
+  await truncatePerFieldVectorTables(sharedPool);
+}
+
+/**
+ * Truncates every strategy-owned per-field vector table (`tg_vec_*`)
+ * currently present. Used by test cleanup since the tables are
+ * materialized lazily and there is no single shared embeddings table.
+ */
+async function truncatePerFieldVectorTables(pool: Pool): Promise<void> {
+  const { rows } = await pool.query<{ tablename: string }>(
+    String.raw`SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
+  );
+  for (const row of rows) {
+    await pool.query(`TRUNCATE "${row.tablename}" CASCADE`);
+  }
 }
 
 // ============================================================
@@ -429,7 +474,6 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
         nodes: "tg_custom_nodes",
         edges: "tg_custom_edges",
         uniques: "tg_custom_uniques",
-        embeddings: "tg_custom_embeddings",
         fulltext: "tg_custom_fulltext",
         schemaVersions: "tg_custom_schema_versions",
       });
@@ -1567,79 +1611,39 @@ describe("Vector Search End-to-End (Query Builder)", () => {
   beforeAll(async () => {
     if (!isPostgresAvailable) return;
     hasPgvector = await isPgvectorAvailable();
-    if (hasPgvector && sharedPool) {
-      // Create the full embeddings table matching the schema
-      await sharedPool.query(`
-        DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;
-        CREATE TABLE IF NOT EXISTS typegraph_node_embeddings (
-          graph_id TEXT NOT NULL,
-          node_kind TEXT NOT NULL,
-          node_id TEXT NOT NULL,
-          field_path TEXT NOT NULL,
-          embedding vector NOT NULL,
-          dimensions INTEGER NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          PRIMARY KEY (graph_id, node_kind, node_id, field_path)
-        )
-      `);
-    }
   });
 
   beforeEach(async () => {
     if (!isPostgresAvailable || !hasPgvector) return;
     await clearTestData();
-    await sharedPool?.query("TRUNCATE typegraph_node_embeddings");
   });
 
   it("should execute similarTo query via store.query()", async (ctx) => {
-    const { pool, db } = requirePostgres(ctx);
+    const { db } = requirePostgres(ctx);
 
     const backend = createPostgresBackend(db);
     const store = createStore(vectorTestGraph, backend);
 
-    // Create documents with embeddings
-    const document1 = await store.nodes.Document.create({
+    // Create documents with embeddings. The store's embedding-sync path
+    // persists each through the pgvector strategy's per-field table —
+    // no manual table or insert needed.
+    await store.nodes.Document.create({
       title: "Machine Learning",
       content: "Neural networks and deep learning",
       embedding: [1, 0, 0, 0],
     });
 
-    const document2 = await store.nodes.Document.create({
+    await store.nodes.Document.create({
       title: "Web Development",
       content: "React and TypeScript",
       embedding: [0, 1, 0, 0],
     });
 
-    const document3 = await store.nodes.Document.create({
+    await store.nodes.Document.create({
       title: "AI Fundamentals",
       content: "Artificial intelligence basics",
       embedding: [0.9, 0.1, 0, 0], // Close to doc1
     });
-
-    // Insert embeddings manually since the test backend may not have
-    // the full embedding sync wired up
-    for (const document of [
-      { id: document1.id, embedding: [1, 0, 0, 0] },
-      { id: document2.id, embedding: [0, 1, 0, 0] },
-      { id: document3.id, embedding: [0.9, 0.1, 0, 0] },
-    ]) {
-      await pool.query(
-        `INSERT INTO typegraph_node_embeddings
-         (graph_id, node_kind, node_id, field_path, embedding, dimensions)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (graph_id, node_kind, node_id, field_path)
-         DO UPDATE SET embedding = $5, updated_at = NOW()`,
-        [
-          "vector_e2e_test",
-          "Document",
-          document.id,
-          "/embedding",
-          `[${document.embedding.join(",")}]`,
-          4,
-        ],
-      );
-    }
 
     // Query for documents similar to [1, 0, 0, 0] (Machine Learning topic)
     const queryEmbedding = [1, 0, 0, 0];
@@ -1669,45 +1673,24 @@ describe("Vector Search End-to-End (Query Builder)", () => {
   });
 
   it("should filter by minScore", async (ctx) => {
-    const { pool, db } = requirePostgres(ctx);
+    const { db } = requirePostgres(ctx);
 
     const backend = createPostgresBackend(db);
     const store = createStore(vectorTestGraph, backend);
 
-    // Create documents
-    const document1 = await store.nodes.Document.create({
+    // Create documents — embeddings persist through the strategy's
+    // per-field table via the store's embedding-sync path.
+    await store.nodes.Document.create({
       title: "Exact Match",
       content: "Identical embedding",
       embedding: [1, 0, 0, 0],
     });
 
-    const document2 = await store.nodes.Document.create({
+    await store.nodes.Document.create({
       title: "Orthogonal",
       content: "Completely different",
       embedding: [0, 1, 0, 0],
     });
-
-    // Insert embeddings
-    for (const document of [
-      { id: document1.id, embedding: [1, 0, 0, 0] },
-      { id: document2.id, embedding: [0, 1, 0, 0] },
-    ]) {
-      await pool.query(
-        `INSERT INTO typegraph_node_embeddings
-         (graph_id, node_kind, node_id, field_path, embedding, dimensions)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (graph_id, node_kind, node_id, field_path)
-         DO UPDATE SET embedding = $5, updated_at = NOW()`,
-        [
-          "vector_e2e_test",
-          "Document",
-          document.id,
-          "/embedding",
-          `[${document.embedding.join(",")}]`,
-          4,
-        ],
-      );
-    }
 
     // Query with high minScore - should only return exact match
     const queryEmbedding = [1, 0, 0, 0];

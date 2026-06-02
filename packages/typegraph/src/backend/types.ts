@@ -13,6 +13,7 @@ import {
 } from "../core/types";
 import { type SqlTableNames } from "../query/compiler/schema";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
+import { type VectorStrategy } from "../query/dialect/vector-strategy";
 import { type SerializedSchema } from "../schema/types";
 import {
   type AnyPgDatabase,
@@ -178,20 +179,6 @@ export type SchemaVersionRow = Readonly<{
   is_active: boolean;
 }>;
 
-/**
- * A row from the typegraph_node_embeddings table.
- */
-export type EmbeddingRow = Readonly<{
-  graph_id: string;
-  node_kind: string;
-  node_id: string;
-  field_path: string;
-  embedding: readonly number[];
-  dimensions: number;
-  created_at: string;
-  updated_at: string;
-}>;
-
 // ============================================================
 // Insert Parameters
 // ============================================================
@@ -289,6 +276,14 @@ export type HardDeleteEdgeParams = Readonly<{
 
 /**
  * Parameters for inserting or updating an embedding.
+ *
+ * `dimensions`, `metric`, and `indexType` together resolve the slot's
+ * typed per-`(nodeKind, fieldPath)` storage (the strategy needs the fixed
+ * dimension for the column type, and the metric/index type to address the
+ * right ANN structure). The store populates them from the schema's
+ * `embedding()` declaration via `getEmbeddingDimensions()` /
+ * `getEmbeddingIndex()`; the backend constructs a `VectorSlot` from them
+ * and stays graph-agnostic.
  */
 export type UpsertEmbeddingParams = Readonly<{
   graphId: string;
@@ -297,16 +292,30 @@ export type UpsertEmbeddingParams = Readonly<{
   fieldPath: string;
   embedding: readonly number[];
   dimensions: number;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
 }>;
 
 /**
  * Parameters for deleting an embedding.
+ *
+ * `dimensions` / `metric` / `indexType` mirror {@link UpsertEmbeddingParams}
+ * so the backend can resolve the slot's typed per-`(nodeKind, fieldPath)`
+ * storage and idempotently ensure it exists before the DELETE. That
+ * matters because a delete can run before any embedding was ever written
+ * (e.g. a node hard-deleted having never carried one), and on Postgres a
+ * DELETE against a missing relation inside a transaction aborts the whole
+ * transaction. The store populates them from the schema's `embedding()`
+ * declaration, exactly as for upserts.
  */
 export type DeleteEmbeddingParams = Readonly<{
   graphId: string;
   nodeKind: string;
   nodeId: string;
   fieldPath: string;
+  dimensions: number;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
 }>;
 
 /**
@@ -318,6 +327,19 @@ export type VectorSearchParams = Readonly<{
   fieldPath: string;
   queryEmbedding: readonly number[];
   metric: VectorMetric;
+  /**
+   * Fixed vector dimension `N` for the searched `(nodeKind, fieldPath)`
+   * slot. The store populates it from the schema's `embedding()`
+   * declaration via `getEmbeddingDimensions()`; the backend uses it to
+   * construct the `VectorSlot` whose typed storage the strategy scans.
+   */
+  dimensions: number;
+  /**
+   * Index type materialized for this slot. `"none"` means brute-force
+   * only; otherwise the strategy may route through its ANN structure.
+   * The store populates it from `getEmbeddingIndex()`.
+   */
+  indexType: VectorIndexType;
   limit: number;
   minScore?: number;
   /**
@@ -735,6 +757,16 @@ export type GraphBackend = Readonly<{
    * When absent, the dialect's default strategy is used.
    */
   fulltextStrategy?: FulltextStrategy | undefined;
+  /**
+   * Optional vector strategy this backend is wired with. The query
+   * compiler reads it (via `compileQuery` options) to emit per-`(kind,
+   * field)` relevance scans for `field.similarTo(...)` predicates, and
+   * the index-materialization / removal paths read its deterministic
+   * `tableName(...)` to address the right physical per-field storage.
+   * `undefined` when the backend has no vector support (e.g. a generic
+   * SQLite backend without sqlite-vec).
+   */
+  vectorStrategy?: VectorStrategy | undefined;
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
@@ -843,12 +875,6 @@ export type GraphBackend = Readonly<{
   // === Embedding Operations (optional - depends on vector capabilities) ===
   upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
   deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
-  getEmbedding?: (
-    graphId: string,
-    nodeKind: string,
-    nodeId: string,
-    fieldPath: string,
-  ) => Promise<EmbeddingRow | undefined>;
   vectorSearch?: (
     params: VectorSearchParams,
   ) => Promise<readonly VectorSearchResult[]>;

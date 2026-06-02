@@ -335,4 +335,4 @@ import to `createPostgresBackend` — see [Backend Setup](/backend-setup).
 - [Ontology & Reasoning](/ontology) — inverse edges, subclass hierarchies,
   and other ontology primitives beyond `broader_than`
 - [Semantic Search](/semantic-search) — production vector search with
-  pgvector and sqlite-vec
+  pgvector, sqlite-vec, and native libSQL / Turso vectors

@@ -23,6 +23,7 @@ deployment.
 - Keep graph data in your existing SQL database (no separate graph service)
 - Model richer semantics with `subClassOf`, `implies`, `inverseOf`, and `disjointWith`
 - Traverse relationships with compile-time type safety
+- Run vector and hybrid search across every backend — pgvector, sqlite-vec, and libSQL/Turso native vectors
 - Start with SQLite, move to PostgreSQL without changing your graph definition
 - Evolve the schema at runtime from agent-proposed JSON — no redeploy
   ([Graph Extensions](https://typegraph.dev/graph-extensions))

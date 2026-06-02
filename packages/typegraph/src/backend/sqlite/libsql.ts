@@ -28,6 +28,7 @@
 import type { Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
+import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";
 import { generateSqliteDDL } from "../drizzle/ddl";
 import {
   createSqliteBackend,
@@ -107,6 +108,9 @@ export async function createLibsqlBackend(
       transactionMode: "drizzle",
     },
     tables,
+    // libSQL ships native vector search in core — no extension to load —
+    // so the strategy is wired unconditionally.
+    vector: libsqlVectorStrategy,
   });
 
   return { backend, db };

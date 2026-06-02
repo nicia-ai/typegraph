@@ -344,8 +344,11 @@ export function runStandardQueryPassPipeline(
   const vectorPass = runCompilerPass(state, {
     name: "vector_predicate",
     execute(currentState): VectorSimilarityPredicate | undefined {
-      return runVectorPredicatePass(currentState.ast, currentState.ctx.dialect)
-        .vectorPredicate;
+      return runVectorPredicatePass(
+        currentState.ast,
+        currentState.ctx.dialect,
+        currentState.ctx.vectorStrategy,
+      ).vectorPredicate;
     },
     update(currentState, vectorPredicate): StandardQueryPassState {
       return {
