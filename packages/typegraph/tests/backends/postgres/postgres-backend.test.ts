@@ -347,6 +347,26 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       expect(backend.capabilities.jsonb).toBe(true);
       expect(backend.capabilities.ginIndexes).toBe(true);
     });
+
+    it("runs non-vector CRUD with vector disabled (vector: false)", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      // A PGlite instance built without pgvector takes this path: the
+      // backend must work end-to-end for ordinary graph operations — store
+      // creation (schema commit + index materialization), writes, reads —
+      // while advertising no vector support.
+      const backend = createPostgresBackend(db, { vector: false });
+      expect(backend.capabilities.vector).toBeUndefined();
+
+      const store = createStore(testGraph, backend);
+      const person = await store.nodes.Person.create({
+        name: "Alice",
+        email: "alice@example.com",
+      });
+      const fetched = await store.nodes.Person.getById(person.id);
+
+      expect(fetched).toBeDefined();
+      expect(fetched!.name).toBe("Alice");
+    });
   });
 
   describe("generatePostgresDDL()", () => {

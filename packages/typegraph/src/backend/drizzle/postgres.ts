@@ -172,8 +172,16 @@ export type PostgresBackendOptions = Readonly<{
    * `capabilities.vector`. Pass a custom strategy to swap the entire
    * vector stack for an alternate Postgres extension without forking
    * TypeGraph.
+   *
+   * Pass `false` to disable vector support entirely. The backend then
+   * advertises no `capabilities.vector` and omits the embedding/search
+   * methods, mirroring a SQLite connection without sqlite-vec. Required
+   * for an in-process Postgres (e.g. PGlite) built without the pgvector
+   * extension: the default `pgvectorStrategy` assumes `vector(N)` exists,
+   * so any embedding write or `CREATE EXTENSION vector` would otherwise
+   * hard-fail at runtime.
    */
-  vector?: VectorStrategy;
+  vector?: VectorStrategy | false;
   /**
    * Override specific backend capabilities. Useful when the underlying
    * driver doesn't support a feature TypeGraph would otherwise assume —
@@ -251,11 +259,13 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 
 function buildPostgresCapabilities(
   fulltextStrategy: FulltextStrategy,
-  vectorStrategy: VectorStrategy,
+  vectorStrategy: VectorStrategy | undefined,
 ): BackendCapabilities {
   return {
     ...POSTGRES_CAPABILITIES,
-    vector: buildVectorCapabilities(vectorStrategy),
+    ...(vectorStrategy === undefined ?
+      {}
+    : { vector: buildVectorCapabilities(vectorStrategy) }),
     fulltext: buildFulltextCapabilities(fulltextStrategy),
   };
 }
@@ -279,12 +289,18 @@ export function createPostgresBackend(
 ): GraphBackend {
   const tables = options.tables ?? defaultTables;
   const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
-  // pgvector is compiled in via the extension, so it is wired
-  // unconditionally (overridable for alternate Postgres vector stacks).
-  const vectorStrategy = options.vector ?? pgvectorStrategy;
+  // pgvector is compiled into a standalone Postgres server, so it is wired
+  // unconditionally by default (overridable for alternate Postgres vector
+  // stacks). `vector: false` disables it — required for an in-process
+  // Postgres (PGlite) built without the pgvector extension, where the
+  // default strategy's `vector(N)` DDL would hard-fail.
+  const vectorStrategy =
+    options.vector === false ? undefined : (options.vector ?? pgvectorStrategy);
   // One latch per backend instance, shared with every transaction-scoped
   // backend so a slot's per-field table is created at most once per process.
-  const vectorSlotLatch = createVectorSlotLatch();
+  // Absent when vector support is disabled.
+  const vectorSlotLatch =
+    vectorStrategy === undefined ? undefined : createVectorSlotLatch();
   const baseCapabilities = buildPostgresCapabilities(
     fulltextStrategy,
     vectorStrategy,
@@ -762,10 +778,16 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   tableNames: SqlTableNames;
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
-  /** Active vector strategy (always `pgvectorStrategy` unless overridden). */
-  vectorStrategy: VectorStrategy;
-  /** Shared per-`(kind, field)` storage-ensure latch. */
-  vectorSlotLatch: VectorSlotLatch;
+  /**
+   * Active vector strategy (`pgvectorStrategy` unless overridden), or
+   * `undefined` when vector support is disabled (`vector: false`).
+   */
+  vectorStrategy: VectorStrategy | undefined;
+  /**
+   * Shared per-`(kind, field)` storage-ensure latch. Paired with
+   * `vectorStrategy`: both present, or both `undefined`.
+   */
+  vectorSlotLatch: VectorSlotLatch | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -777,9 +799,9 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
-  vectorStrategy: VectorStrategy;
+  vectorStrategy: VectorStrategy | undefined;
   /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
-  vectorSlotLatch: VectorSlotLatch;
+  vectorSlotLatch: VectorSlotLatch | undefined;
 }>;
 
 function createPostgresOperationBackend(
@@ -898,6 +920,7 @@ function createPostgresOperationBackend(
   // client for a transaction-scoped backend) so a slot's table exists
   // before the first write/search hits it.
   async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
+    if (vectorStrategy === undefined || vectorSlotLatch === undefined) return;
     await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
       await execRun(sql.raw(statement));
     });
@@ -939,71 +962,82 @@ function createPostgresOperationBackend(
         },
       };
 
+  // Embedding write/search methods are present only when a vector strategy
+  // is wired. With `vector: false` (e.g. PGlite without pgvector) they are
+  // omitted, so `capabilities.vector` is absent and the store never routes
+  // embedding work here — mirroring a SQLite connection without sqlite-vec.
+  const vectorEmbeddingMethods =
+    vectorStrategy === undefined ?
+      {}
+    : {
+        async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
+          try {
+            for (const statement of statements) {
+              await execRun(statement);
+            }
+          } catch (error) {
+            throw mapVectorWriteError(error, params);
+          }
+        },
+
+        async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
+          // Ensure the per-field table exists before deleting. A delete can
+          // run before any embedding was ever written for the field (e.g. a
+          // node hard-deleted having never carried one), and on Postgres a
+          // DELETE against a missing relation INSIDE a transaction aborts the
+          // whole transaction — swallowing the JS error can't un-abort it.
+          // The idempotent ensure makes the DELETE target an existing
+          // (possibly empty) table, so it's always a clean no-op.
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const statements = vectorStrategy.buildDelete(slot, params);
+          for (const statement of statements) {
+            await execRun(statement);
+          }
+        },
+
+        async vectorSearch(
+          params: VectorSearchParams,
+        ): Promise<readonly VectorSearchResult[]> {
+          assertVectorSearchLimit(params.limit);
+          // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
+          // before `runVectorSearch` inlines it into `SET LOCAL`.
+          assertPgvectorEfSearch(params.efSearch);
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const query = vectorStrategy.buildSearch(slot, params);
+          let rows: readonly { node_id: string; score: number }[];
+          try {
+            rows = await runVectorSearch(params.efSearch, query);
+          } catch (error) {
+            // A query vector whose dimension no longer matches the stored
+            // column surfaces the same typed error as the write path.
+            throw mapVectorWriteError(error, params);
+          }
+          return rows.map((row) => ({
+            nodeId: row.node_id,
+            score: row.score,
+          }));
+        },
+      };
+
   const operationBackend: InternalOperationBackend = {
     ...commonBackend,
     ...executeRawMethod,
+    ...vectorEmbeddingMethods,
     capabilities,
     fulltextStrategy,
-    vectorStrategy,
+    ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
     dialect: "postgres",
     tableNames,
 
-    // === Embedding Operations ===
-
-    async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-      const slot = vectorSlotFromParams(params);
-      await ensureVectorSlotStorage(slot);
-      const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
-      try {
-        for (const statement of statements) {
-          await execRun(statement);
-        }
-      } catch (error) {
-        throw mapVectorWriteError(error, params);
-      }
-    },
-
-    async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-      // Ensure the per-field table exists before deleting. A delete can
-      // run before any embedding was ever written for the field (e.g. a
-      // node hard-deleted having never carried one), and on Postgres a
-      // DELETE against a missing relation INSIDE a transaction aborts the
-      // whole transaction — swallowing the JS error can't un-abort it.
-      // The idempotent ensure makes the DELETE target an existing
-      // (possibly empty) table, so it's always a clean no-op.
-      const slot = vectorSlotFromParams(params);
-      await ensureVectorSlotStorage(slot);
-      const statements = vectorStrategy.buildDelete(slot, params);
-      for (const statement of statements) {
-        await execRun(statement);
-      }
-    },
-
-    async vectorSearch(
-      params: VectorSearchParams,
-    ): Promise<readonly VectorSearchResult[]> {
-      assertVectorSearchLimit(params.limit);
-      // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
-      // before `runVectorSearch` inlines it into `SET LOCAL`.
-      assertPgvectorEfSearch(params.efSearch);
-      const slot = vectorSlotFromParams(params);
-      await ensureVectorSlotStorage(slot);
-      const query = vectorStrategy.buildSearch(slot, params);
-      let rows: readonly { node_id: string; score: number }[];
-      try {
-        rows = await runVectorSearch(params.efSearch, query);
-      } catch (error) {
-        // A query vector whose dimension no longer matches the stored column
-        // surfaces the same typed error as the write path.
-        throw mapVectorWriteError(error, params);
-      }
-      return rows.map((row) => ({
-        nodeId: row.node_id,
-        score: row.score,
-      }));
-    },
+    // === Vector Index Operations ===
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      if (vectorStrategy === undefined) return;
       const slot = vectorSlotFromCreateIndexParams(params);
       // Ensure the per-field table exists first (idempotent), then create its
       // ANN index. pgvector's `ownedTables` builds the table only — the HNSW/
@@ -1086,6 +1120,7 @@ function createPostgresOperationBackend(
     },
 
     async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
+      if (vectorStrategy === undefined) return;
       const slot = vectorSlotFromDropIndexParams(params);
       const dropStatement = vectorStrategy.buildDropIndex?.(slot);
       if (dropStatement === undefined) return;
@@ -1127,6 +1162,7 @@ function createTransactionBackend(
   // marking the slot "ensured" (which would skip the re-CREATE and make every
   // later write fail with "relation does not exist"). The fresh latch is
   // discarded with the transaction, so the next write re-ensures idempotently.
+  // No latch when vector support is disabled (`vector: false`).
   return createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -1136,7 +1172,8 @@ function createTransactionBackend(
     capabilities: options.capabilities,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    vectorSlotLatch: createVectorSlotLatch(),
+    vectorSlotLatch:
+      options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
   });
 }
 
