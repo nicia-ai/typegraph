@@ -15,8 +15,13 @@ import {
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
+import type {
+  VectorSlot,
+  VectorStrategy,
+} from "../query/dialect/vector-strategy";
 import { parseSerializedSchema } from "../schema/manager";
 import { nowIso } from "../utils/date";
+import { isMissingTableError } from "../utils/sql-errors";
 import {
   ensureFocusedStatusTable,
   runMaterialization,
@@ -58,8 +63,30 @@ export type MaterializeRemovalsEntry = Readonly<{
   error?: Error;
 }>;
 
+/**
+ * Outcome of reclaiming one per-`(graphId, kind, field)` vector table that
+ * was orphaned when its embedding field was dropped from a *surviving*
+ * kind's schema. Distinct from {@link MaterializeRemovalsEntry} (whole
+ * kinds) because the unit is a single embedding field, not a kind.
+ */
+export type ReclaimedVectorFieldEntry = Readonly<{
+  kind: string;
+  fieldPath: string;
+  status: "reclaimed" | "failed";
+  error?: Error;
+}>;
+
 export type MaterializeRemovalsResult = Readonly<{
   results: readonly MaterializeRemovalsEntry[];
+  /**
+   * Embedding fields removed from a *surviving* kind whose per-field vector
+   * table this pass dropped (or confirmed already absent). Empty when the
+   * backend has no vector strategy or no embedding field has ever been
+   * dropped. Re-derived from immutable schema history each call, so it lists
+   * the same removed fields on repeat passes — the underlying drop is
+   * idempotent (`DROP ... IF EXISTS`). See {@link reclaimRemovedVectorFieldTables}.
+   */
+  reclaimedVectorFields: readonly ReclaimedVectorFieldEntry[];
 }>;
 
 type MaterializeRemovalsContext = Readonly<{
@@ -99,6 +126,15 @@ export async function materializeRemovals(
   // history: walk every transition, find kinds whose removal isn't
   // reflected in the queue, and re-record them.
   await reconcilePendingRemovals(context);
+
+  // Independent of pending kind removals: a per-field vector table is
+  // orphaned the moment its embedding field is dropped from a *surviving*
+  // kind (an `evolve` that removes the field, with no kind removal at all).
+  // The add-only `materializeIndexes` path never reclaims it and the
+  // candidate loop below only handles whole kinds, so reclaim here before
+  // the no-candidates short-circuit.
+  const reclaimedVectorFields = await reclaimRemovedVectorFieldTables(context);
+
   const pending = await backend.getPendingKindRemovals(graphId);
 
   const kindFilter =
@@ -107,12 +143,11 @@ export async function materializeRemovals(
     kindFilter === undefined ? true : kindFilter.has(row.kindName),
   );
 
-  if (candidates.length === 0) return { results: [] };
+  if (candidates.length === 0) return { results: [], reclaimedVectorFields };
 
   const tableNames = backend.tableNames;
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
-  const embeddingsTable = tableNames?.embeddings ?? "typegraph_node_embeddings";
   const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
 
@@ -121,7 +156,6 @@ export async function materializeRemovals(
     graphId,
     nodesTable,
     edgesTable,
-    embeddingsTable,
     fulltextTable,
     uniquesTable,
   } as const;
@@ -135,6 +169,7 @@ export async function materializeRemovals(
     results: await runMaterialization(candidates, options, (removal) =>
       materializeOne(removal, ctx),
     ),
+    reclaimedVectorFields,
   };
 }
 
@@ -290,7 +325,6 @@ async function materializeOne(
     graphId: string;
     nodesTable: string;
     edgesTable: string;
-    embeddingsTable: string;
     fulltextTable: string;
     uniquesTable: string;
   }>,
@@ -300,12 +334,13 @@ async function materializeOne(
   try {
     // Build the per-row DELETEs. For a removed node kind: drop the
     // primary rows, every edge referencing it (via from_kind / to_kind
-    // — those would otherwise dangle), plus the secondary tables that
-    // partition by node_kind (embeddings, fulltext, uniques). Without
-    // the secondary cleanup, repeated remove/re-add cycles accumulate
-    // dead rows that vector / fulltext / unique lookups still scan.
-    // For a removed edge kind: only the edges table needs cleanup.
-    // All statements target disjoint row sets — issued in parallel.
+    // — those would otherwise dangle), the secondary tables that
+    // partition by node_kind (fulltext, uniques), plus the strategy's
+    // typed per-`(kind, field)` embedding tables. Without the secondary
+    // cleanup, repeated remove/re-add cycles accumulate dead rows that
+    // fulltext / unique / vector lookups still scan. For a removed edge
+    // kind: only the edges table needs cleanup. All statements target
+    // disjoint row sets — issued in parallel.
     const deletes: Promise<void>[] = [];
     const graphLit = literal(ctx.graphId);
     const kindLit = literal(row.kindName);
@@ -318,14 +353,12 @@ async function materializeOne(
           `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
         ),
         executeDdl(
-          `DELETE FROM ${quote(ctx.embeddingsTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-        ),
-        executeDdl(
           `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
         ),
         executeDdl(
           `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
         ),
+        ...buildEmbeddingTableCleanup(ctx, row),
       );
     } else {
       deletes.push(
@@ -370,6 +403,250 @@ async function materializeOne(
     };
   }
 }
+
+/**
+ * Builds the embedding-storage cleanup for a removed node kind.
+ *
+ * With per-`(graphId, kind, field)` storage there is no single shared
+ * embeddings table to filter by `node_kind`; each embedding field of the
+ * removed kind has its own typed, graph-scoped table. We resolve those fields
+ * from the schema version that still *had* the kind (`schemaVersion - 1`) and
+ * drop each per-field table via the strategy — the same teardown the
+ * removed-*field* reclamation uses — so the kind's table and any ANN index it
+ * owns are fully reclaimed (a stale empty table would otherwise collide with a
+ * re-added kind at a different dimension).
+ *
+ * Backends without a vector strategy, or schema history that can't be
+ * read, yield no cleanup — there is no embedding storage to reclaim.
+ * Returned as a single combined promise so the caller can issue it
+ * alongside the other disjoint DELETEs.
+ */
+function buildEmbeddingTableCleanup(
+  ctx: Readonly<{
+    backend: GraphBackend;
+    graphId: string;
+  }>,
+  row: KindRemovalRow,
+): readonly Promise<void>[] {
+  const vectorStrategy = ctx.backend.vectorStrategy;
+  if (vectorStrategy === undefined) return [];
+
+  const executeDdl = ctx.backend.executeDdl!;
+  const cleanup = (async () => {
+    const slots = await resolveRemovedKindEmbeddingSlots(ctx.backend, row);
+    await Promise.all(
+      slots.map((slot) =>
+        dropVectorSlotStorage(vectorStrategy, executeDdl, slot),
+      ),
+    );
+  })();
+  return [cleanup];
+}
+
+/**
+ * Drops a per-field vector slot's storage via the strategy (table + any ANN
+ * index it owns), tolerating an already-absent table — a declared field whose
+ * per-field table was never materialized (no write, no index build) has nothing
+ * to reclaim. Runs as autocommit statements, so swallowing a missing-table
+ * failure can't poison a sibling drop. Shared by removed-kind cleanup and
+ * removed-field reclamation so both reclaim storage the same way.
+ */
+async function dropVectorSlotStorage(
+  strategy: VectorStrategy,
+  executeDdl: (statement: string) => Promise<void>,
+  slot: VectorSlot,
+): Promise<void> {
+  try {
+    for (const ddl of strategy.buildDropStorage(slot)) {
+      await executeDdl(ddl);
+    }
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+  }
+}
+
+/**
+ * Resolves the embedding field paths a removed node kind declared, read
+ * from the persisted vector index declarations in the schema version
+ * just before the removal (`schemaVersion - 1`). Returns `[]` when the
+ * prior version is unavailable or declared no embedding fields for the
+ * kind.
+ */
+async function resolveRemovedKindEmbeddingSlots(
+  backend: GraphBackend,
+  row: KindRemovalRow,
+): Promise<readonly VectorSlot[]> {
+  const priorVersion = row.schemaVersion - 1;
+  if (priorVersion < 1) return [];
+  const priorRow = await backend.getSchemaVersion(row.graphId, priorVersion);
+  if (priorRow === undefined) return [];
+
+  const priorSchema = parseSerializedSchema(priorRow.schema_doc);
+  const slots = new Map<string, VectorSlot>();
+  for (const declaration of priorSchema.indexes ?? []) {
+    if (declaration.entity === "vector" && declaration.kind === row.kindName) {
+      slots.set(declaration.fieldPath, {
+        graphId: row.graphId,
+        nodeKind: row.kindName,
+        fieldPath: declaration.fieldPath,
+        dimensions: declaration.dimensions,
+        metric: declaration.metric,
+        indexType: declaration.indexType,
+      });
+    }
+  }
+  return [...slots.values()];
+}
+
+/** Stable key for a `(kind, fieldPath)` embedding-field pair. */
+function vectorFieldKey(kind: string, fieldPath: string): string {
+  return `${kind}\u0000${fieldPath}`;
+}
+
+/**
+ * The historical declaration of a vector field, carrying everything
+ * {@link VectorStrategy.buildDropStorage} needs to tear the storage down —
+ * notably `indexType`, which libSQL reads to also drop its DiskANN index.
+ */
+type HistoricalVectorField = Readonly<{
+  kind: string;
+  fieldPath: string;
+  slot: VectorSlot;
+}>;
+
+/**
+ * Reclaims per-`(graphId, kind, field)` vector tables orphaned by embedding-
+ * field removals on *surviving* kinds.
+ *
+ * Per-field storage means every embedding field owns a typed table. When a
+ * field is dropped from a kind that still exists (an `evolve` that removes the
+ * embedding), nothing reclaims that table: the add-only `materializeIndexes`
+ * path ignores removals and the kind-scoped cleanup above only fires for whole
+ * removed kinds. Left alone the table lingers with dead rows that no query
+ * reads again, and — worse — a later re-add of the field at a different
+ * dimension would collide with the stale table.
+ *
+ * The orphan set is derived from schema history: every vector field ever
+ * declared, minus the ones still declared in the *active* schema, restricted
+ * to kinds that still exist (removed-kind fields are the kind path's job).
+ * Using the active schema as the "still declared" source of truth makes
+ * remove-then-re-add safe — a re-added field is current, so it is never
+ * dropped. `buildDropStorage` emits `DROP ... IF EXISTS`, so the pass is
+ * idempotent and a never-materialized field is a clean no-op; deriving from
+ * full history each call also reclaims tables orphaned before this shipped.
+ *
+ * Backends without a vector strategy or `executeDdl` have no per-field tables
+ * to reclaim and yield an empty result.
+ */
+async function reclaimRemovedVectorFieldTables(
+  context: MaterializeRemovalsContext,
+): Promise<readonly ReclaimedVectorFieldEntry[]> {
+  const { backend, graphId } = context;
+  const vectorStrategy = backend.vectorStrategy;
+  const executeDdl = backend.executeDdl;
+  if (vectorStrategy === undefined || executeDdl === undefined) return [];
+
+  const activeRow = await backend.getActiveSchema(graphId);
+  if (activeRow === undefined) return [];
+
+  // The orphan set is a pure function of (graphId, active version) over
+  // immutable schema history and the drops are idempotent, so re-walking the
+  // whole history on every materializeRemovals call is wasted O(versions) work.
+  // Memoize per (backend, graphId:version); an evolve bumps the version and
+  // invalidates. Only fully-successful passes are cached (a failed drop must be
+  // retried), and the cache is in-process so a fresh backend re-walks once.
+  const cacheKey = `${graphId} ${activeRow.version}`;
+  let perBackend = reclaimCache.get(backend);
+  const cached = perBackend?.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const activeSchema = parseSerializedSchema(activeRow.schema_doc);
+
+  const activeVectorFields = new Set<string>();
+  for (const declaration of activeSchema.indexes ?? []) {
+    if (declaration.entity === "vector") {
+      activeVectorFields.add(
+        vectorFieldKey(declaration.kind, declaration.fieldPath),
+      );
+    }
+  }
+  const survivingKinds = new Set(Object.keys(activeSchema.nodes));
+
+  // Walk history backward, keeping the most-recent declaration of each
+  // vector field (first seen wins) so `buildDropStorage` gets a faithful
+  // `indexType`/`dimensions`.
+  const historical = new Map<string, HistoricalVectorField>();
+  for (let version = activeRow.version - 1; version >= 1; version -= 1) {
+    const priorRow = await backend.getSchemaVersion(graphId, version);
+    if (priorRow === undefined) continue;
+    const priorSchema = parseSerializedSchema(priorRow.schema_doc);
+    for (const declaration of priorSchema.indexes ?? []) {
+      if (declaration.entity !== "vector") continue;
+      const key = vectorFieldKey(declaration.kind, declaration.fieldPath);
+      if (historical.has(key)) continue;
+      historical.set(key, {
+        kind: declaration.kind,
+        fieldPath: declaration.fieldPath,
+        slot: {
+          graphId,
+          nodeKind: declaration.kind,
+          fieldPath: declaration.fieldPath,
+          dimensions: declaration.dimensions,
+          metric: declaration.metric,
+          indexType: declaration.indexType,
+        },
+      });
+    }
+  }
+
+  const orphans = [...historical.values()].filter(
+    (field) =>
+      !activeVectorFields.has(vectorFieldKey(field.kind, field.fieldPath)) &&
+      survivingKinds.has(field.kind),
+  );
+
+  const results: ReclaimedVectorFieldEntry[] = [];
+  for (const field of orphans) {
+    // dropVectorSlotStorage swallows the missing-table case (a never-
+    // materialized field has nothing to reclaim), so reaching the catch means
+    // a genuine failure.
+    try {
+      await dropVectorSlotStorage(vectorStrategy, executeDdl, field.slot);
+      results.push({
+        kind: field.kind,
+        fieldPath: field.fieldPath,
+        status: "reclaimed",
+      });
+    } catch (error) {
+      results.push({
+        kind: field.kind,
+        fieldPath: field.fieldPath,
+        status: "failed",
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
+  // Cache only a fully-successful pass — a failed drop must be retried.
+  if (results.every((entry) => entry.status === "reclaimed")) {
+    if (perBackend === undefined) {
+      perBackend = new Map();
+      reclaimCache.set(backend, perBackend);
+    }
+    perBackend.set(cacheKey, results);
+  }
+  return results;
+}
+
+/**
+ * In-process memo for {@link reclaimRemovedVectorFieldTables}, keyed by backend
+ * then `graphId:activeVersion`. See that function for why version-keying is
+ * sound (the orphan set is a pure function of immutable history + the version).
+ */
+const reclaimCache = new WeakMap<
+  GraphBackend,
+  Map<string, readonly ReclaimedVectorFieldEntry[]>
+>();
 
 // `executeDdl` accepts a raw SQL string. The DELETE statements built
 // here are dialect-neutral (no SQLite/Postgres-specific syntax) and

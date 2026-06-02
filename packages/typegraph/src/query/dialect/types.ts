@@ -82,7 +82,14 @@ export type DialectCapabilities = Readonly<{
   vectorPredicateStrategy: DialectVectorPredicateStrategy;
 
   /**
-   * Metrics supported by vector predicates for this dialect.
+   * Metrics supported by vector predicates for this dialect — a FALLBACK only.
+   * The active `VectorStrategy.capabilities.metrics` is the real authority and
+   * is what the vector pass validates against on the normal compile path; this
+   * dialect list is consulted ONLY by the strategy-less plan-lowering path
+   * (recursive / set-operation queries, which don't plumb a strategy). It must
+   * therefore stay a superset of every strategy that runs on this dialect, or a
+   * metric a strategy supports could be wrongly rejected when a query happens to
+   * lower through that path. (The bundled dialects mirror their strategies.)
    */
   vectorMetrics: readonly VectorMetric[];
 
@@ -338,46 +345,13 @@ export interface DialectAdapter {
   // ============================================================
 
   /**
-   * Whether this dialect supports vector similarity operations.
-   * When false, vector operations will throw an error.
-   *
-   * Note: This indicates dialect-level support. Actual availability
-   * depends on whether the vector extension is loaded at runtime.
+   * Whether this dialect supports vector similarity predicates
+   * (`field.similarTo(...)`) at compile time. The vector predicate pass
+   * checks this before reaching for the backend's {@link VectorStrategy};
+   * the strategy owns the actual distance SQL (`distanceExpression`), so
+   * no per-dialect distance/format method lives on the dialect anymore.
    */
   readonly supportsVectors: boolean;
-
-  /**
-   * Computes the distance between a column and a query embedding.
-   * Lower values indicate higher similarity.
-   *
-   * @param column - The column containing the embedding (e.g., from embeddings table)
-   * @param embedding - The query embedding as a number array
-   * @param metric - The similarity metric to use
-   * @returns SQL expression computing the distance
-   *
-   * @example
-   * PostgreSQL (cosine): column <=> '[1,2,3]'::vector
-   * PostgreSQL (L2): column <-> '[1,2,3]'::vector
-   * PostgreSQL (inner product): column <#> '[1,2,3]'::vector
-   * SQLite: vec_distance_cosine(column, vec_f32('[1,2,3]'))
-   */
-  vectorDistance(
-    column: SQL,
-    embedding: readonly number[],
-    metric: VectorMetric,
-  ): SQL;
-
-  /**
-   * Formats an embedding array for use in SQL.
-   *
-   * @param embedding - The embedding as a number array
-   * @returns SQL expression representing the embedding
-   *
-   * @example
-   * PostgreSQL: '[1.0,2.0,3.0]'::vector
-   * SQLite: vec_f32('[1.0,2.0,3.0]')
-   */
-  formatEmbedding(embedding: readonly number[]): SQL;
 
   // ============================================================
   // Fulltext Operations

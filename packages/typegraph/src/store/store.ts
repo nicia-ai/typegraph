@@ -24,6 +24,7 @@ import {
   isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
+import { resolveEmbeddingFields } from "../core/embedding";
 import type { KindEntity, NodeId } from "../core/types";
 import {
   ConfigurationError,
@@ -39,6 +40,7 @@ import { IncompatibleChangeError } from "../graph-extension/errors";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
+import { type VectorIndexDeclaration } from "../indexes/types";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
@@ -48,6 +50,7 @@ import {
 } from "../query/builder";
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
+import { type VectorSlot } from "../query/dialect/vector-strategy";
 import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
@@ -72,9 +75,11 @@ import {
 } from "./collection-factory";
 import { introspectSchema, type SchemaIntrospection } from "./introspect";
 import {
+  computeIndexSignature,
   materializeIndexes as materializeIndexesImpl,
   type MaterializeIndexesOptions,
   type MaterializeIndexesResult,
+  vectorStatusKey,
 } from "./materialize-indexes";
 import {
   buildPendingKindRemoval,
@@ -121,6 +126,7 @@ import {
   type GraphEdgeCollections,
   type GraphNodeCollections,
   type HookContext,
+  type Node,
   type OperationHookContext,
   type QueryOptions,
   type StoreHooks,
@@ -144,7 +150,11 @@ type CaughtUpVerb =
   | "materialize"
   | "deprecate"
   | "undeprecate"
-  | "remove";
+  | "remove"
+  | "reembed";
+
+/** Default page size for the {@link Store.reembedVectorField} re-embed loop. */
+const DEFAULT_REEMBED_BATCH_SIZE = 200;
 
 const CAUGHT_UP_VERB_DETAILS: Readonly<
   Record<CaughtUpVerb, Readonly<{ phrase: string; code: string }>>
@@ -162,6 +172,10 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
   undeprecate: {
     phrase: "undeprecate kinds on",
     code: "DEPRECATE_BEFORE_INITIALIZE",
+  },
+  reembed: {
+    phrase: "re-embed a vector field on",
+    code: "REEMBED_BEFORE_INITIALIZE",
   },
 };
 
@@ -202,6 +216,40 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
  *   .execute();
  * ```
  */
+
+/**
+ * Optional embedder for {@link Store.reembedVectorField}. Receives a batch of
+ * the kind's nodes and returns a map of `nodeId → new embedding vector` (omit
+ * an id to leave that node without an embedding). Called once per page; the
+ * page size is `batchSize`.
+ */
+export type ReembedFunction = (
+  nodes: readonly Node[],
+) =>
+  | Promise<ReadonlyMap<string, readonly number[]>>
+  | ReadonlyMap<string, readonly number[]>;
+
+/** Options for {@link Store.reembedVectorField}. */
+export type ReembedVectorFieldOptions = Readonly<{
+  /**
+   * When supplied, drives a batched re-embed loop after recreating storage:
+   * pages the kind's nodes, calls `embed(batch)`, and upserts the returned
+   * vectors. When omitted, storage is recreated empty and the caller
+   * re-embeds via normal `update()` / `upsertEmbedding` writes.
+   */
+  embed?: ReembedFunction;
+  /** Re-embed page size. Default 200. */
+  batchSize?: number;
+}>;
+
+/** Result of {@link Store.reembedVectorField}. */
+export type ReembedVectorFieldResult = Readonly<{
+  /** Whether the per-field storage was dropped and recreated. */
+  recreated: boolean;
+  /** Number of nodes whose embedding was re-written (0 without `embed`). */
+  reembedded: number;
+}>;
+
 export class Store<G extends GraphDef> {
   readonly #graph: G;
   readonly #backend: GraphBackend;
@@ -1010,11 +1058,50 @@ export class Store<G extends GraphDef> {
       this.#backend.transaction(async (tx) => doClear(tx))
     : doClear(this.#backend));
 
+    // `clearGraph` is graph-agnostic and can't reach the strategy-owned
+    // per-`(kind, field)` vector tables, so reset them here — otherwise cleared
+    // embeddings leak and a reused node id would resurface a stale vector.
+    await this.#clearVectorStorage();
+
     // Reset lazy-initialized collection caches
     this.#nodeCollections = undefined;
     this.#edgeCollections = undefined;
     this.#algorithms = undefined;
     this.#search = undefined;
+  }
+
+  /**
+   * Resets every declared embedding field's per-field storage for this graph by
+   * dropping and recreating it empty. Drop+recreate (rather than DELETE) mirrors
+   * `reembedVectorField` and keeps the backend's storage-ensure latch valid: the
+   * table still exists after clear, so a later write finds it. Enumerated from
+   * the in-memory registry (not the DB schema, which `clearGraph` just wiped).
+   */
+  async #clearVectorStorage(): Promise<void> {
+    const backend = this.#backend;
+    const strategy = backend.vectorStrategy;
+    if (strategy === undefined || backend.executeDdl === undefined) return;
+
+    for (const [nodeKind, nodeType] of this.#registry.nodeKinds) {
+      for (const field of resolveEmbeddingFields(nodeType.schema)) {
+        const slot: VectorSlot = {
+          graphId: this.graphId,
+          nodeKind,
+          fieldPath: field.fieldPath,
+          dimensions: field.dimensions,
+          metric: field.metric,
+          indexType: field.indexType,
+        };
+        for (const ddl of strategy.buildDropStorage(slot)) {
+          await backend.executeDdl(ddl);
+        }
+        for (const contribution of strategy.ownedTables(slot)) {
+          for (const ddl of contribution.createDdl) {
+            await backend.executeDdl(ddl);
+          }
+        }
+      }
+    }
   }
 
   // === Lifecycle ===
@@ -1323,6 +1410,193 @@ export class Store<G extends GraphDef> {
       },
       options ?? {},
     );
+  }
+
+  /**
+   * Recreate a vector field's per-field storage at its current declared
+   * dimension, then optionally re-embed existing rows.
+   *
+   * Use this after changing a field's `embedding(N)` to `embedding(M)` (e.g. a
+   * new embedding model): the stored N-dim vectors are invalid under the new
+   * dimension and must be recomputed, not converted. This drops and recreates
+   * the per-`(graphId, kind, field)` table at the new dimension — a brief
+   * window where the field returns no vector hits — resets its materialization
+   * marker, then, when `options.embed` is supplied, pages the kind's nodes,
+   * calls `embed(batch)`, and upserts the returned vectors. Without `embed`,
+   * storage is recreated empty and the caller re-embeds via normal
+   * `update()` / `upsertEmbedding` writes.
+   *
+   * @throws {ConfigurationError} when the backend has no vector strategy or
+   *   cannot execute DDL, or `(kind, fieldPath)` is not a declared embedding.
+   */
+  async reembedVectorField(
+    kind: string,
+    fieldPath: string,
+    options?: ReembedVectorFieldOptions,
+  ): Promise<ReembedVectorFieldResult> {
+    // Validate up front, before any drop/recreate side effects.
+    if (
+      options?.batchSize !== undefined &&
+      (!Number.isInteger(options.batchSize) || options.batchSize <= 0)
+    ) {
+      throw new RangeError(
+        `reembedVectorField batchSize must be a positive integer, got: ${options.batchSize}`,
+      );
+    }
+    const { activeRow, baseline } = await this.#loadCaughtUp("reembed");
+    const backend = this.#backend;
+    const strategy = backend.vectorStrategy;
+    if (strategy === undefined || backend.executeDdl === undefined) {
+      throw new ConfigurationError(
+        "reembedVectorField requires a backend with a vector strategy and executeDdl.",
+        {
+          backend: backend.dialect,
+          capability: "vector",
+          operation: "reembed",
+        },
+      );
+    }
+    const declaration = (baseline.indexes ?? []).find(
+      (candidate): candidate is VectorIndexDeclaration =>
+        candidate.entity === "vector" &&
+        candidate.kind === kind &&
+        candidate.fieldPath === fieldPath,
+    );
+    if (declaration === undefined) {
+      throw new ConfigurationError(
+        `No embedding field "${kind}.${fieldPath}" is declared in the active schema.`,
+        { kind, fieldPath, operation: "reembed" },
+      );
+    }
+
+    const slot: VectorSlot = {
+      graphId: this.graphId,
+      nodeKind: kind,
+      fieldPath,
+      dimensions: declaration.dimensions,
+      metric: declaration.metric,
+      indexType: declaration.indexType,
+    };
+
+    // Recreate storage at the new dimension: drop, then re-emit the table DDL
+    // the strategy owns (libSQL/sqlite-vec also (re)create their index/vtable
+    // here; pgvector's index is built via createVectorIndex below). Run via
+    // executeDdl directly so it bypasses the ensure-latch, which may still
+    // record the pre-drop slot as ensured.
+    for (const ddl of strategy.buildDropStorage(slot)) {
+      await backend.executeDdl(ddl);
+    }
+    for (const contribution of strategy.ownedTables(slot)) {
+      for (const ddl of contribution.createDdl) {
+        await backend.executeDdl(ddl);
+      }
+    }
+
+    // Whether this backend would actually materialize an ANN index for the
+    // declared slot — brute-force-only ("none") slots and index types the
+    // backend doesn't advertise are skipped. Gates both the index (re)build
+    // and the materialization-marker reset below so they stay in lockstep.
+    const declaredIndexMaterializes =
+      declaration.indexType !== "none" &&
+      backend.capabilities.vector?.indexTypes.includes(
+        declaration.indexType,
+      ) === true;
+
+    // (Re)build the ANN index with the field's DECLARED tuning. The table was
+    // just recreated above, so createVectorIndex's own ensure is a safe no-op
+    // even if the latch is stale.
+    if (declaredIndexMaterializes && backend.createVectorIndex !== undefined) {
+      await backend.createVectorIndex({
+        graphId: this.graphId,
+        nodeKind: kind,
+        fieldPath,
+        dimensions: declaration.dimensions,
+        metric: declaration.metric,
+        indexType: declaration.indexType,
+        indexParams: {
+          m: declaration.indexParams.m,
+          efConstruction: declaration.indexParams.efConstruction,
+          ...(declaration.indexParams.lists === undefined ?
+            {}
+          : { lists: declaration.indexParams.lists }),
+        },
+      });
+    }
+
+    // Reset the index-materialization marker so a later materializeIndexes()
+    // sees the new-dimension signature as already materialized, not as drift.
+    if (
+      declaredIndexMaterializes &&
+      backend.recordIndexMaterialization !== undefined
+    ) {
+      const tableName = strategy.tableName(this.graphId, kind, fieldPath);
+      const signature = await computeIndexSignature(
+        backend.dialect,
+        tableName,
+        declaration,
+      );
+      const now = nowIso();
+      await backend.recordIndexMaterialization({
+        indexName: vectorStatusKey(this.graphId, declaration.name),
+        graphId: this.graphId,
+        entity: "vector",
+        kind,
+        signature,
+        schemaVersion: activeRow.version,
+        attemptedAt: now,
+        materializedAt: now,
+        error: undefined,
+      });
+    }
+
+    if (options?.embed === undefined) {
+      return { recreated: true, reembedded: 0 };
+    }
+
+    if (backend.upsertEmbedding === undefined) {
+      throw new ConfigurationError(
+        "reembedVectorField with an `embed` callback requires a backend that supports upsertEmbedding.",
+        {
+          backend: backend.dialect,
+          capability: "vector",
+          operation: "reembed",
+        },
+      );
+    }
+
+    // Re-embed: page the kind's nodes, compute vectors, upsert. Offset paging
+    // is stable because upserts target the per-field table, not the nodes table.
+    const upsertEmbedding = backend.upsertEmbedding;
+    const batchSize = options.batchSize ?? DEFAULT_REEMBED_BATCH_SIZE;
+    const collection = this.getNodeCollectionOrThrow(kind);
+    let reembedded = 0;
+    let offset = 0;
+    for (;;) {
+      const batch = (await collection.find({
+        limit: batchSize,
+        offset,
+      })) as readonly Node[];
+      if (batch.length === 0) break;
+      const vectors = await options.embed(batch);
+      for (const node of batch) {
+        const embedding = vectors.get(node.id);
+        if (embedding === undefined) continue;
+        await upsertEmbedding({
+          graphId: this.graphId,
+          nodeKind: kind,
+          nodeId: node.id,
+          fieldPath,
+          embedding,
+          dimensions: declaration.dimensions,
+          metric: declaration.metric,
+          indexType: declaration.indexType,
+        });
+        reembedded += 1;
+      }
+      offset += batch.length;
+      if (batch.length < batchSize) break;
+    }
+    return { recreated: true, reembedded };
   }
 
   /**

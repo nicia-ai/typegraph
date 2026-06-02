@@ -26,7 +26,6 @@ const config: KnipConfig = {
         "**/test-utils.ts",
         // Public API utilities for advanced users (schema introspection, vector operations)
         "src/backend/drizzle/columns/vector.ts",
-        "src/backend/drizzle/vector-index.ts",
         "src/core/embedding.ts",
         "src/core/external-ref.ts",
         "src/core/searchable.ts",

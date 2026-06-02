@@ -30,6 +30,7 @@ import {
 } from "drizzle-orm/better-sqlite3";
 
 import { ConfigurationError } from "../../errors";
+import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import { generateSqliteDDL } from "../drizzle/ddl";
 import {
   createSqliteBackend,
@@ -170,12 +171,12 @@ export function createLocalSqliteBackend(
 
   const sqlite = createDatabase(path);
 
-  // Best-effort: load sqlite-vec so embedding fields are persisted to the
-  // embeddings table. Without it, nodes with `embedding()` fields validate
-  // and insert but their vectors are silently dropped. When the user has
-  // installed sqlite-vec as a peer dep we load it; otherwise we proceed
-  // without vector support.
-  const hasVectorEmbeddings = tryLoadSqliteVec(sqlite);
+  // Best-effort: load sqlite-vec so embedding fields are persisted to
+  // per-`(kind, field)` `vec0` storage. Without it, nodes with
+  // `embedding()` fields validate and insert but their vectors are silently
+  // dropped. When the user has installed sqlite-vec as a peer dep we load
+  // it and wire the strategy; otherwise we proceed without vector support.
+  const hasSqliteVec = tryLoadSqliteVec(sqlite);
 
   const db = drizzle(sqlite);
 
@@ -190,7 +191,7 @@ export function createLocalSqliteBackend(
       isSync: true,
     },
     tables,
-    hasVectorEmbeddings,
+    ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
   });
   const managedBackend = wrapWithManagedClose(backend, () => {
     sqlite.close();

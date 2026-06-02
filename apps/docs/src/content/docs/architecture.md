@@ -415,42 +415,76 @@ cycle predicates.
 
 ## Vector Search Architecture
 
-For semantic search with embeddings:
+Semantic search with embeddings works across **all** backends — pgvector on PostgreSQL, sqlite-vec on
+better-sqlite3, and libSQL/Turso's built-in vector engine. The behavior is selected by a pluggable
+`VectorStrategy`, so adding a new backend is a single strategy object with no edits to the core.
+
+### Pluggable Strategies
+
+Each backend wires a strategy that knows how to store embeddings and compile similarity queries:
+
+| Backend | Strategy | Storage / Index | Metrics |
+|---------|----------|-----------------|---------|
+| PostgreSQL | `pgvectorStrategy` (default) | typed `vector(N)` tables, HNSW / IVFFlat | cosine, l2, inner_product |
+| better-sqlite3 | `sqliteVecStrategy` (when the sqlite-vec extension loads) | `vec0` virtual tables (KNN) | cosine, l2 |
+| libSQL / Turso | `libsqlVectorStrategy` (wired automatically) | `F32_BLOB(N)`, DiskANN ANN via `libsql_vector_idx` + `vector_top_k` | cosine, l2 |
+
+`createSqliteBackend` and `createPostgresBackend` accept a `vector?: VectorStrategy` option to override the
+default. The strategies, the `buildVectorCapabilities` helper, and the `VectorStrategy` / `VectorSlot` types are
+exported from the package root.
+
+A backend advertises its vector support as data on `backend.capabilities.vector`:
+
+```typescript
+backend.capabilities.vector; // { supported, metrics, indexTypes, maxDimensions, ... }
+```
 
 ### Storage
 
+Embeddings are stored in **per-field typed tables**, one per `(graphId, nodeKind, fieldPath)`, each carrying
+that field's fixed dimension. Tables are created lazily on first write and named
+`tg_vec_<graphId>_<kind>_<field>`. Graph-scoping the table name lets multiple graphs in one database declare the
+same kind+field at different dimensions without collision.
+
 ```sql
--- PostgreSQL with pgvector
-CREATE TABLE typegraph_embeddings (
+-- PostgreSQL with pgvector: one table per (graphId, kind, field). The kind
+-- and field are encoded in the table name, so rows only key by node.
+CREATE TABLE tg_vec_my_graph_document_embedding (
   graph_id    TEXT NOT NULL,
-  node_kind   TEXT NOT NULL,
   node_id     TEXT NOT NULL,
-  field       TEXT NOT NULL,
-  embedding   vector(1536),      -- pgvector type
-  PRIMARY KEY (graph_id, node_kind, node_id, field)
+  embedding   vector(1536) NOT NULL,  -- pgvector type, fixed dimension per field
+  created_at  TIMESTAMPTZ NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (graph_id, node_id)
 );
 
-CREATE INDEX ON typegraph_embeddings
+CREATE INDEX ON tg_vec_my_graph_document_embedding
   USING hnsw (embedding vector_cosine_ops);  -- HNSW index for fast similarity
 ```
 
+`generatePostgresMigrationSQL()` runs `CREATE EXTENSION IF NOT EXISTS vector` but creates no embedding table —
+the per-field tables are created at runtime on first write.
+
 ### Query Flow
+
+The query API is storage-transparent and unchanged across backends:
 
 ```typescript
 .whereNode("d", (d) => d.embedding.similarTo(queryVector, 10))
 ```
 
-Compiles to:
+Compiles to a backend-specific nearest-neighbor query — for example, on PostgreSQL:
 
 ```sql
--- PostgreSQL
 SELECT * FROM typegraph_nodes n
-JOIN typegraph_embeddings e ON e.node_id = n.id
+JOIN tg_vec_my_graph_document_embedding e
+  ON e.node_id = n.id AND e.graph_id = n.graph_id
 ORDER BY e.embedding <=> $1    -- Cosine distance
 LIMIT 10;
 ```
 
-The database's vector index (HNSW or IVFFlat) handles approximate nearest neighbor search efficiently.
+The backend's vector index (pgvector HNSW/IVFFlat, sqlite-vec `vec0`, or libSQL DiskANN) handles approximate
+nearest neighbor search efficiently.
 
 ## Performance Characteristics
 
@@ -459,7 +493,7 @@ The database's vector index (HNSW or IVFFlat) handles approximate nearest neighb
 - **Point lookups by ID**: O(1) with primary key index
 - **Traversals**: Single SQL query with JOINs, optimized by the database
 - **Ontology expansion**: Precomputed at initialization, O(1) at query time
-- **Semantic search**: HNSW indexes provide sub-linear search
+- **Semantic search**: ANN indexes (pgvector HNSW/IVFFlat, sqlite-vec `vec0`, libSQL DiskANN) provide sub-linear search
 
 ### What's Slower
 

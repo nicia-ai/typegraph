@@ -8,7 +8,6 @@ import type {
   CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
-  DeleteEmbeddingParams,
   DeleteFulltextBatchParams,
   DeleteFulltextParams,
   DeleteNodeParams,
@@ -27,10 +26,8 @@ import type {
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
-  UpsertEmbeddingParams,
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
-  VectorSearchParams,
 } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
@@ -79,18 +76,9 @@ import {
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildDeleteUnique,
-  buildHardDeleteEmbeddingsByNode,
   buildHardDeleteUniquesByNode,
   buildInsertUnique,
 } from "./uniques";
-import {
-  buildDeleteEmbedding,
-  buildGetEmbedding,
-  buildUpsertEmbeddingPostgres,
-  buildUpsertEmbeddingSqlite,
-  buildVectorSearchPostgres,
-  buildVectorSearchSqlite,
-} from "./vectors";
 
 export type CommonOperationStrategy = Readonly<{
   buildUpsertFulltext: (
@@ -162,11 +150,6 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
   buildHardDeleteUniquesByNode: (graphId: string, nodeId: string) => SQL;
-  buildHardDeleteEmbeddingsByNode: (
-    graphId: string,
-    nodeKind: string,
-    nodeId: string,
-  ) => SQL;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
@@ -179,44 +162,15 @@ export type CommonOperationStrategy = Readonly<{
   buildClearGraph: (graphId: string) => readonly SQL[];
 }>;
 
-export type PostgresVectorOperationStrategy = Readonly<{
-  buildUpsertEmbedding: (
-    params: UpsertEmbeddingParams,
-    timestamp: string,
-  ) => SQL;
-  buildDeleteEmbedding: (params: DeleteEmbeddingParams) => SQL;
-  buildGetEmbedding: (
-    graphId: string,
-    nodeKind: string,
-    nodeId: string,
-    fieldPath: string,
-  ) => SQL;
-  buildVectorSearch: (params: VectorSearchParams) => SQL;
-}>;
-
 /**
- * SQLite embedding operations.
- *
- * `getEmbedding` is intentionally absent (asymmetry vs Postgres): reading
- * the raw BLOB back as a number array requires `vec_to_json(...)` and
- * additional row decoding, which no current consumer needs.
+ * Vector embedding operations are no longer part of the dialect operation
+ * strategy: the active {@link VectorStrategy} owns all embedding storage
+ * and SQL (upsert / delete / search / index lifecycle) per-`(kind, field)`,
+ * so both dialects share the same operation strategy shape.
  */
-export type SqliteVectorOperationStrategy = Readonly<{
-  buildUpsertEmbedding: (
-    params: UpsertEmbeddingParams,
-    timestamp: string,
-  ) => SQL;
-  buildDeleteEmbedding: (params: DeleteEmbeddingParams) => SQL;
-  buildVectorSearch: (params: VectorSearchParams) => SQL;
-}>;
+export type SqliteOperationStrategy = CommonOperationStrategy;
 
-export type SqliteOperationStrategy = Readonly<
-  CommonOperationStrategy & SqliteVectorOperationStrategy
->;
-
-export type PostgresOperationStrategy = Readonly<
-  CommonOperationStrategy & PostgresVectorOperationStrategy
->;
+export type PostgresOperationStrategy = CommonOperationStrategy;
 
 type TableOperationBuilder = (
   tables: Tables,
@@ -278,7 +232,6 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
-  buildHardDeleteEmbeddingsByNode,
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildGetSchemaVersion,
@@ -357,53 +310,12 @@ export function createSqliteOperationStrategy(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy,
 ): SqliteOperationStrategy {
-  const common = createCommonOperationStrategy(
-    tables,
-    "sqlite",
-    fulltextStrategy,
-  );
-  return {
-    ...common,
-    buildUpsertEmbedding(params: UpsertEmbeddingParams, timestamp: string): SQL {
-      return buildUpsertEmbeddingSqlite(tables, params, timestamp);
-    },
-    buildDeleteEmbedding(params: DeleteEmbeddingParams): SQL {
-      return buildDeleteEmbedding(tables, params);
-    },
-    buildVectorSearch(params: VectorSearchParams): SQL {
-      return buildVectorSearchSqlite(tables, params);
-    },
-  };
+  return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
 }
 
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
   fulltextStrategy: FulltextStrategy,
 ): PostgresOperationStrategy {
-  const common = createCommonOperationStrategy(
-    tables,
-    "postgres",
-    fulltextStrategy,
-  );
-
-  return {
-    ...common,
-    buildUpsertEmbedding(params: UpsertEmbeddingParams, timestamp: string): SQL {
-      return buildUpsertEmbeddingPostgres(tables, params, timestamp);
-    },
-    buildDeleteEmbedding(params: DeleteEmbeddingParams): SQL {
-      return buildDeleteEmbedding(tables, params);
-    },
-    buildGetEmbedding(
-      graphId: string,
-      nodeKind: string,
-      nodeId: string,
-      fieldPath: string,
-    ): SQL {
-      return buildGetEmbedding(tables, graphId, nodeKind, nodeId, fieldPath);
-    },
-    buildVectorSearch(params: VectorSearchParams): SQL {
-      return buildVectorSearchPostgres(tables, params);
-    },
-  };
+  return createCommonOperationStrategy(tables, "postgres", fulltextStrategy);
 }

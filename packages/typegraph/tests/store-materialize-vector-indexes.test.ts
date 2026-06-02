@@ -4,20 +4,43 @@
  * and are dispatched through `materializeIndexes()` like relational
  * indexes.
  *
- * SQLite does not have native vector index support in the bundled
- * configuration, so the test backend reports `status: "skipped"` for
- * vector entries. Postgres with pgvector is covered separately in
- * `tests/backends/postgres/`.
+ * A SQLite backend with no vector strategy reports `status: "skipped"`
+ * for vector entries, which these dispatch tests use to isolate
+ * auto-derivation from physical ANN creation. Real sqlite-vec ANN
+ * creation and Postgres/pgvector are covered separately in
+ * `tests/backends/`.
  */
+import Database from "better-sqlite3";
+import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
+import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
+import { createSqliteBackend, generateSqliteDDL } from "../src/backend/sqlite";
+import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { defineGraphExtension } from "../src/graph-extension";
 import { type VectorIndexDeclaration } from "../src/indexes/types";
 import { createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
+
+/**
+ * A SQLite backend with NO vector strategy configured — the
+ * bring-your-own-Drizzle path without the `vector` option. Used to
+ * exercise the "backend lacks vector support → skipped" dispatch
+ * deterministically, independent of whether sqlite-vec is installed.
+ */
+function createNoVectorSqliteBackend(): GraphBackend {
+  const sqlite = new Database(":memory:");
+  for (const statement of generateSqliteDDL(sqliteTables)) {
+    sqlite.exec(statement);
+  }
+  return createSqliteBackend(drizzleBetterSqlite3(sqlite), {
+    executionProfile: { isSync: true },
+    tables: sqliteTables,
+  });
+}
 
 const Document = defineNode("Document", {
   schema: z.object({
@@ -168,10 +191,10 @@ describe("auto-derive vector indexes from embedding() brands", () => {
 
 describe("Store.materializeIndexes — vector dispatch on SQLite", () => {
   it("reports vector indexes as skipped when the backend lacks vector support", async () => {
-    // The test backend does not enable sqlite-vec, so vector indexes
-    // can't be materialized. The dispatch returns status: "skipped"
-    // with a reason rather than failing.
-    const backend = createTestBackend();
+    // A SQLite backend with no vector strategy can't materialize vector
+    // indexes. The dispatch returns status: "skipped" with a reason
+    // rather than failing.
+    const backend = createNoVectorSqliteBackend();
     const graph = defineGraph({
       id: "vector_sqlite_skip",
       nodes: { Document: { type: Document } },
@@ -186,6 +209,7 @@ describe("Store.materializeIndexes — vector dispatch on SQLite", () => {
     expect(vectorEntry).toBeDefined();
     expect(vectorEntry!.status).toBe("skipped");
     expect(vectorEntry!.reason).toMatch(/vector/i);
+    await backend.close();
   });
 
   it("indexType: 'none' on the embedding brand surfaces as skipped with a clear reason", async () => {
@@ -309,7 +333,11 @@ describe("cross-graph vector status disambiguation (compound key)", () => {
 
 describe("graph-extension embedding modifiers flow through materializeIndexes", () => {
   it("auto-derives a vector index from a graph-extension kind's embedding modifier", async () => {
-    const backend = createTestBackend();
+    // A no-vector backend keeps the assertion deterministic (skipped),
+    // isolating what this test proves: the graph-extension kind's
+    // embedding modifier auto-derived a declaration that the materializer
+    // dispatched on. Real ANN creation is covered by the e2e suites.
+    const backend = createNoVectorSqliteBackend();
     const baseGraph = defineGraph({
       id: "vector_runtime_extension",
       nodes: { Plain: { type: Plain } },
@@ -339,11 +367,12 @@ describe("graph-extension embedding modifiers flow through materializeIndexes", 
       (entry) => entry.entity === "vector" && entry.kind === "Article",
     );
     expect(articleVector).toBeDefined();
-    // Test backend lacks sqlite-vec, so the entry surfaces as skipped
-    // — but it surfaces, which proves the graph-extension kind's embedding
-    // brand auto-derived a `VectorIndexDeclaration` and the
-    // materializer dispatched on it.
+    // The no-vector backend surfaces the entry as skipped — but it
+    // surfaces, which proves the graph-extension kind's embedding brand
+    // auto-derived a `VectorIndexDeclaration` and the materializer
+    // dispatched on it.
     expect(articleVector?.status).toBe("skipped");
     expect(articleVector?.indexName).toContain("article");
+    await backend.close();
   });
 });

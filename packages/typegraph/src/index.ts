@@ -126,6 +126,30 @@ export {
 } from "./query/dialect/fulltext-strategy";
 
 // ============================================================
+// Vector Strategy (pluggable per-(kind, field) vector storage)
+// ============================================================
+
+export { libsqlVectorStrategy } from "./query/dialect/vector/libsql-strategy";
+export { pgvectorStrategy } from "./query/dialect/vector/pgvector-strategy";
+export { sqliteVecStrategy } from "./query/dialect/vector/sqlite-vec-strategy";
+export {
+  buildVectorCapabilities,
+  type VectorSlot,
+  type VectorStrategy,
+} from "./query/dialect/vector-strategy";
+
+// ============================================================
+// Vector Storage Migration (one-time shared-table → per-field cutover)
+// ============================================================
+
+export {
+  type LegacyEmbeddingSlotConfig,
+  migrateLegacyEmbeddings,
+  type MigrateLegacyEmbeddingsOptions,
+  type MigrateLegacyEmbeddingsResult,
+} from "./backend/migrate-vectors";
+
+// ============================================================
 // Core Types
 // ============================================================
 
@@ -210,6 +234,7 @@ export {
   DisjointError,
   EagerMaterializationError,
   EdgeNotFoundError,
+  EmbeddingDimensionChangedError,
   EndpointError,
   EndpointNotFoundError,
   // Error utility functions
@@ -257,6 +282,10 @@ export type {
   OntologyIntrospection,
   RebuildFulltextOptions,
   RebuildFulltextResult,
+  ReclaimedVectorFieldEntry,
+  ReembedFunction,
+  ReembedVectorFieldOptions,
+  ReembedVectorFieldResult,
   SchemaIntrospection,
   SchemaManagerOptions,
   SchemaValidationResult,

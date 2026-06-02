@@ -65,18 +65,20 @@ beforeEach(async () => {
   if (sharedPool === undefined) return;
   await sharedPool.query(
     `TRUNCATE typegraph_index_materializations,
-              typegraph_node_embeddings,
               typegraph_node_uniques,
               typegraph_nodes,
               typegraph_edges,
               typegraph_schema_versions CASCADE`,
   );
-  // Drop leaked physical indexes from prior runs.
-  const leaked = await sharedPool.query<{ indexname: string }>(
-    `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'tg_vec_%'`,
+  // Drop the strategy's per-field vector tables from prior runs so each
+  // test re-materializes its table + ANN index from scratch (the
+  // contribution DDL is `CREATE ... IF NOT EXISTS`, so a leftover table
+  // would mask a fresh materialization).
+  const tables = await sharedPool.query<{ tablename: string }>(
+    String.raw`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
   );
-  for (const { indexname } of leaked.rows) {
-    await sharedPool.query(`DROP INDEX IF EXISTS "${indexname}"`);
+  for (const { tablename } of tables.rows) {
+    await sharedPool.query(`DROP TABLE IF EXISTS "${tablename}" CASCADE`);
   }
 });
 
@@ -104,14 +106,18 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
     );
     expect(vectorEntry?.status).toBe("created");
 
-    // The physical pgvector index is now visible in pg_indexes. The
-    // bundled vector-index helper names HNSW indexes with `_hnsw_` in
-    // them; the higher-level VectorIndexDeclaration name uses `tg_vec_`
-    // and is what we record in the materialization status table.
+    // The physical pgvector HNSW index is now visible on the strategy's
+    // per-(graphId, kind, field) table.
+    const table = backend.vectorStrategy!.tableName(
+      "vector_pg_auto",
+      "Document",
+      "embedding",
+    );
     const created = await pool.query<{ indexname: string; indexdef: string }>(
       `SELECT indexname, indexdef FROM pg_indexes
-       WHERE schemaname = 'public' AND tablename = 'typegraph_node_embeddings'
+       WHERE schemaname = 'public' AND tablename = $1
        AND indexdef LIKE '%hnsw%'`,
+      [table],
     );
     expect(created.rows.length).toBeGreaterThan(0);
   });
@@ -134,12 +140,13 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
     expect(vectorEntry?.status).toBe("alreadyMaterialized");
   });
 
-  it("two graphs sharing the same kind/field each create their own physical pgvector index", async (ctx) => {
-    // Regression for the cross-graph false-skip bug. Two graphs
-    // declaring an embedding on `Document.embedding` should each
-    // produce their own physical pgvector index (which is partial-
-    // by-graph_id) and each report `created` — neither should hit
-    // `alreadyMaterialized` from the other graph's status row.
+  it("two graphs sharing the same kind/field each get their own per-field table + index", async (ctx) => {
+    // Regression for the cross-graph false-skip bug + the graph-scoping
+    // guarantee. Two graphs declaring `Document.embedding` get SEPARATE
+    // per-(graphId, kind, field) tables and ANN indexes, so divergent
+    // dimensions can't collide and libSQL `vector_top_k` stays per-graph.
+    // Each graph records its own materialization status row, so both report
+    // `created` — neither falsely hits `alreadyMaterialized` from the other.
     const { pool } = requirePostgres(ctx);
     const graphA = defineGraph({
       id: "vec_pg_xgraph_a",
@@ -151,14 +158,10 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const [storeA] = await createStoreWithSchema(
-      graphA,
-      createPostgresBackend(drizzle(pool)),
-    );
-    const [storeB] = await createStoreWithSchema(
-      graphB,
-      createPostgresBackend(drizzle(pool)),
-    );
+    const backendA = createPostgresBackend(drizzle(pool));
+    const backendB = createPostgresBackend(drizzle(pool));
+    const [storeA] = await createStoreWithSchema(graphA, backendA);
+    const [storeB] = await createStoreWithSchema(graphB, backendB);
 
     const resultA = await storeA.materializeIndexes();
     const resultB = await storeB.materializeIndexes();
@@ -170,15 +173,28 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
       resultB.results.find((entry) => entry.entity === "vector")?.status,
     ).toBe("created");
 
-    // Two physical pgvector indexes exist — one per graph.
-    const indexes = await pool.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes
-       WHERE schemaname = 'public' AND tablename = 'typegraph_node_embeddings'
-       AND indexdef LIKE '%hnsw%'
-       AND (indexname LIKE 'idx_emb_vec_pg_xgraph_a_%'
-         OR indexname LIKE 'idx_emb_vec_pg_xgraph_b_%')`,
+    // Each graph has its own per-field table, each with its own HNSW index —
+    // distinct physical objects, no cross-graph sharing.
+    const tableA = backendA.vectorStrategy!.tableName(
+      "vec_pg_xgraph_a",
+      "Document",
+      "embedding",
     );
-    expect(indexes.rows.length).toBe(2);
+    const tableB = backendB.vectorStrategy!.tableName(
+      "vec_pg_xgraph_b",
+      "Document",
+      "embedding",
+    );
+    expect(tableA).not.toBe(tableB);
+    for (const table of [tableA, tableB]) {
+      const indexes = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = 'public' AND tablename = $1
+         AND indexdef LIKE '%hnsw%'`,
+        [table],
+      );
+      expect(indexes.rows.length).toBe(1);
+    }
   });
 
   it("indexType: 'none' opts out of physical materialization", async (ctx) => {
@@ -203,5 +219,58 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
     );
     expect(vectorEntry?.status).toBe("skipped");
     expect(vectorEntry?.reason).toContain("'none'");
+  });
+
+  it("emits the field's declared HNSW tuning (m / ef_construction) in the index DDL", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const TunedDocument = defineNode("TunedDoc", {
+      schema: z.object({
+        title: z.string(),
+        embedding: embedding(8, { m: 32, efConstruction: 100 }),
+      }),
+    });
+    const graph = defineGraph({
+      id: "vector_pg_tuned",
+      nodes: { TunedDoc: { type: TunedDocument } },
+      edges: {},
+    });
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const tunedTable = backend.vectorStrategy!.tableName(
+      "vector_pg_tuned",
+      "TunedDoc",
+      "embedding",
+    );
+
+    const first = await store.materializeIndexes();
+    expect(
+      first.results.find((entry) => entry.entity === "vector")?.status,
+    ).toBe("created");
+
+    const indexdef = async (): Promise<string> => {
+      const rows = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = $1
+           AND indexdef LIKE '%hnsw%'`,
+        [tunedTable],
+      );
+      expect(rows.rows.length).toBe(1);
+      return rows.rows[0]!.indexdef;
+    };
+
+    // The declared tuning must reach the emitted DDL, not pgvector defaults
+    // (m = 16, ef_construction = 64).
+    expect(await indexdef()).toMatch(/m\s*=\s*'?32'?/);
+    expect(await indexdef()).toMatch(/ef_construction\s*=\s*'?100'?/);
+
+    // #6: reembed rebuilds the index with the SAME declared tuning, and a
+    // subsequent materializeIndexes sees a matching signature (no drift).
+    await store.reembedVectorField("TunedDoc", "embedding");
+    expect(await indexdef()).toMatch(/m\s*=\s*'?32'?/);
+    const second = await store.materializeIndexes();
+    expect(
+      second.results.find((entry) => entry.entity === "vector")?.status,
+    ).toBe("alreadyMaterialized");
   });
 });

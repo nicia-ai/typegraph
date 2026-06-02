@@ -94,12 +94,21 @@ async function clearTestData(): Promise<void> {
   if (!sharedSql) return;
   await sharedSql.unsafe(
     `TRUNCATE typegraph_node_fulltext,
-              typegraph_node_embeddings,
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,
               typegraph_schema_versions CASCADE`,
   );
+  // Per-(kind, field) vector tables are created lazily by the strategy,
+  // so enumerate and truncate any that exist (there is no single shared
+  // embeddings table to TRUNCATE).
+  const rows = await sharedSql.unsafe<{ tablename: string }[]>(
+    String.raw`SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
+  );
+  for (const row of rows) {
+    await sharedSql.unsafe(`TRUNCATE "${row.tablename}" CASCADE`);
+  }
 }
 
 beforeAll(async () => {

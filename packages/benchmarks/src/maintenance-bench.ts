@@ -9,7 +9,6 @@
  * gate Postgres runs on `POSTGRES_URL` being set (same convention as the
  * query bench).
  */
-import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 
 import Database from "better-sqlite3";
@@ -36,7 +35,7 @@ import {
   generateSqliteDDL,
 } from "@nicia-ai/typegraph/sqlite";
 
-import { DEFAULT_POSTGRES_URL } from "./config";
+import { getPostgresUrl } from "./config";
 import { formatMs, median, percentile } from "./utils";
 
 const WARMUP_ITERATIONS = 3;
@@ -53,28 +52,11 @@ type AdminResources = Readonly<{
   close: AdminCloser;
 }>;
 
-const sqliteVecRequire = createRequire(import.meta.url);
-
-function loadSqliteVec(sqlite: Database.Database): boolean {
-  try {
-    const sqliteVec = sqliteVecRequire("sqlite-vec") as {
-      load: (db: Database.Database) => void;
-    };
-    sqliteVec.load(sqlite);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function getPostgresUrl(): string {
-  return process.env.POSTGRES_URL ?? DEFAULT_POSTGRES_URL;
-}
-
+// The maintenance graph declares no embedding fields, so no `tg_vec_*` tables
+// are ever created here — only the core tables need resetting.
 const POSTGRES_RESET_DDL = `
   DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
   DROP TABLE IF EXISTS typegraph_kind_removals CASCADE;
-  DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;
   DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
   DROP TABLE IF EXISTS typegraph_edges CASCADE;
   DROP TABLE IF EXISTS typegraph_nodes CASCADE;
@@ -85,7 +67,6 @@ const POSTGRES_RESET_DDL = `
 async function createSqliteResources(graphId: string): Promise<AdminResources> {
   const tables = createSqliteTables({});
   const sqlite = new Database(":memory:");
-  loadSqliteVec(sqlite);
   for (const statement of generateSqliteDDL(tables)) {
     sqlite.exec(statement);
   }

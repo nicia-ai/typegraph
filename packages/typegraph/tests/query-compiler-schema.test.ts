@@ -15,7 +15,7 @@ describe("createSqlSchema", () => {
 
       expect(schema.tables.nodes).toBe("typegraph_nodes");
       expect(schema.tables.edges).toBe("typegraph_edges");
-      expect(schema.tables.embeddings).toBe("typegraph_node_embeddings");
+      expect(schema.tables.fulltext).toBe("typegraph_node_fulltext");
     });
 
     it("creates SQL references for default tables", () => {
@@ -24,7 +24,7 @@ describe("createSqlSchema", () => {
       // Verify SQL objects are created (they wrap the quoted identifiers)
       expect(schema.nodesTable).toBeDefined();
       expect(schema.edgesTable).toBeDefined();
-      expect(schema.embeddingsTable).toBeDefined();
+      expect(schema.fulltextTable).toBeDefined();
     });
   });
 
@@ -33,12 +33,12 @@ describe("createSqlSchema", () => {
       const schema = createSqlSchema({
         nodes: "myapp_nodes",
         edges: "myapp_edges",
-        embeddings: "myapp_embeddings",
+        fulltext: "myapp_fulltext",
       });
 
       expect(schema.tables.nodes).toBe("myapp_nodes");
       expect(schema.tables.edges).toBe("myapp_edges");
-      expect(schema.tables.embeddings).toBe("myapp_embeddings");
+      expect(schema.tables.fulltext).toBe("myapp_fulltext");
     });
 
     it("allows partial overrides", () => {
@@ -48,7 +48,7 @@ describe("createSqlSchema", () => {
 
       expect(schema.tables.nodes).toBe("custom_nodes");
       expect(schema.tables.edges).toBe("typegraph_edges");
-      expect(schema.tables.embeddings).toBe("typegraph_node_embeddings");
+      expect(schema.tables.fulltext).toBe("typegraph_node_fulltext");
     });
 
     it("accepts names starting with underscore", () => {
@@ -89,9 +89,9 @@ describe("createSqlSchema", () => {
       );
     });
 
-    it("rejects empty string for embeddings table", () => {
-      expect(() => createSqlSchema({ embeddings: "" })).toThrow(
-        "embeddings table name cannot be empty",
+    it("rejects empty string for fulltext table", () => {
+      expect(() => createSqlSchema({ fulltext: "" })).toThrow(
+        "fulltext table name cannot be empty",
       );
     });
   });

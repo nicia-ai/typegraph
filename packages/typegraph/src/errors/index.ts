@@ -876,6 +876,40 @@ export class DatabaseOperationError extends TypeGraphError {
 }
 
 // ============================================================
+// Vector / Embedding Errors (category: "user")
+// ============================================================
+
+/**
+ * Thrown when an embedding field's declared dimension no longer matches the
+ * dimension of its materialized per-field storage — i.e. a field's
+ * `embedding(N)` was changed to `embedding(M)`. The stored vectors are invalid
+ * under the new dimension and cannot be converted, only recomputed, so this is
+ * a deliberate app-driven migration: call
+ * `store.reembedVectorField(kind, fieldPath, ...)` to recreate the storage at
+ * the new dimension and re-embed existing rows.
+ */
+export class EmbeddingDimensionChangedError extends TypeGraphError {
+  constructor(
+    message: string,
+    details: Readonly<{
+      kind: string;
+      fieldPath: string;
+      declaredDimensions?: number;
+      storedDimensions?: number;
+    }>,
+    options?: { cause?: unknown },
+  ) {
+    super(message, "EMBEDDING_DIMENSION_CHANGED", {
+      details,
+      category: "user",
+      suggestion: `Run store.reembedVectorField("${details.kind}", "${details.fieldPath}", { embed }) to recreate the field's storage at the new dimension and re-embed existing rows.`,
+      cause: options?.cause,
+    });
+    this.name = "EmbeddingDimensionChangedError";
+  }
+}
+
+// ============================================================
 // Query Errors (category: "system")
 // ============================================================
 

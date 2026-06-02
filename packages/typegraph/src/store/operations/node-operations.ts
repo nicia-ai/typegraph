@@ -958,11 +958,18 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     await enforceDeleteBehavior(ctx, kind, id, "hard", backend, registration);
 
     // The cascade (uniques, embeddings, edges, node) is not individually atomic,
-    // so wrap in a transaction when the backend supports it.
+    // so wrap in a transaction when the backend supports it. Embeddings live in
+    // strategy-owned per-`(kind, field)` tables, so they are cleaned up here —
+    // through `deleteNodeEmbeddings` → `backend.deleteEmbedding` — rather than
+    // in the backend's graph-agnostic `hardDeleteNode` cascade.
     const hardDelete = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
       await target.hardDeleteNode({ graphId: ctx.graphId, kind, id });
+      await deleteNodeEmbeddings(
+        createEmbeddingSyncContext(ctx.graphId, kind, id, target),
+        registration.type.schema,
+      );
     };
 
     await ("transaction" in backend && backend.capabilities.transactions ?

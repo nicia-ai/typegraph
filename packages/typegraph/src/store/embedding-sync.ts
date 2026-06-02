@@ -8,7 +8,10 @@
 import { type z } from "zod";
 
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
-import { getEmbeddingDimensions, isEmbeddingSchema } from "../core/embedding";
+import {
+  type ResolvedEmbeddingField,
+  resolveEmbeddingFields,
+} from "../core/embedding";
 
 // ============================================================
 // Types
@@ -16,13 +19,13 @@ import { getEmbeddingDimensions, isEmbeddingSchema } from "../core/embedding";
 
 /**
  * Information about an embedding field in a node schema.
+ *
+ * Re-exports the canonical {@link ResolvedEmbeddingField} so the backend
+ * gets `dimensions` plus the resolved index `(metric, indexType)` — all
+ * three needed to address the field's typed per-`(kind, field)` storage
+ * slot when upserting.
  */
-type EmbeddingFieldInfo = Readonly<{
-  /** The field path (e.g., "embedding" or "contentEmbedding") */
-  fieldPath: string;
-  /** The number of dimensions for this embedding */
-  dimensions: number;
-}>;
+type EmbeddingFieldInfo = ResolvedEmbeddingField;
 
 /**
  * Context for embedding sync operations.
@@ -50,81 +53,19 @@ const embeddingFieldsCache = new WeakMap<
 /**
  * Extracts embedding field information from a Zod schema.
  * Returns all embedding fields found at the top level of an object schema.
+ *
+ * Thin per-schema-instance memoization over the canonical
+ * {@link resolveEmbeddingFields}; the same schema reference recurs across
+ * every CRUD call, so caching avoids re-walking the shape each time.
  */
 export function getEmbeddingFields(
   schema: z.ZodType,
 ): readonly EmbeddingFieldInfo[] {
   const cached = embeddingFieldsCache.get(schema);
   if (cached) return cached;
-  const fields = computeEmbeddingFields(schema);
+  const fields = resolveEmbeddingFields(schema);
   embeddingFieldsCache.set(schema, fields);
   return fields;
-}
-
-function computeEmbeddingFields(
-  schema: z.ZodType,
-): readonly EmbeddingFieldInfo[] {
-  if (schema.type !== "object") return [];
-
-  const def = schema.def as { shape?: Record<string, z.ZodType> };
-  const shape = def.shape;
-  if (!shape) return [];
-
-  const fields: EmbeddingFieldInfo[] = [];
-  for (const [fieldPath, fieldSchema] of Object.entries(shape)) {
-    const dimensions = getEmbeddingDimensionsFromField(fieldSchema);
-    if (dimensions !== undefined) {
-      fields.push({ fieldPath, dimensions });
-    }
-  }
-  return fields;
-}
-
-/**
- * Gets embedding dimensions from a field schema, handling wrappers like optional/nullable.
- */
-function getEmbeddingDimensionsFromField(
-  schema: z.ZodType,
-): number | undefined {
-  // Check the schema directly
-  const directDimensions = getEmbeddingDimensions(schema);
-  if (directDimensions !== undefined) {
-    return directDimensions;
-  }
-
-  // Check if it's wrapped (optional, nullable, default, etc.)
-  const unwrapped = unwrapToEmbedding(schema);
-  if (unwrapped) {
-    return getEmbeddingDimensions(unwrapped);
-  }
-
-  return undefined;
-}
-
-/**
- * Unwraps wrapper types to find an embedding schema.
- */
-function unwrapToEmbedding(schema: z.ZodType): z.ZodType | undefined {
-  const type = schema.type;
-  const def = schema.def as { innerType?: z.ZodType };
-
-  // Handle common wrapper types
-  if (
-    (type === "optional" ||
-      type === "nullable" ||
-      type === "default" ||
-      type === "readonly") &&
-    def.innerType
-  ) {
-    // Check if inner type is an embedding
-    if (isEmbeddingSchema(def.innerType)) {
-      return def.innerType;
-    }
-    // Recursively unwrap
-    return unwrapToEmbedding(def.innerType);
-  }
-
-  return undefined;
 }
 
 // ============================================================
@@ -167,6 +108,8 @@ export async function syncEmbeddings(
         fieldPath: field.fieldPath,
         embedding: value,
         dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
       });
     } else if (value === undefined) {
       // Delete any existing embedding for this field
@@ -175,6 +118,9 @@ export async function syncEmbeddings(
         nodeKind: ctx.nodeKind,
         nodeId: ctx.nodeId,
         fieldPath: field.fieldPath,
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
       });
     }
     // If value is null or invalid, skip (validation should have caught this)
@@ -182,7 +128,13 @@ export async function syncEmbeddings(
 }
 
 /**
- * Deletes all embeddings for a node.
+ * Deletes a node's embeddings for the embedding fields its kind CURRENTLY
+ * declares. A field dropped from the schema after the node was written is
+ * intentionally NOT swept here — its entire per-field table is reclaimed
+ * wholesale by `store.materializeRemovals()` (the deferred-cleanup verb), which
+ * also covers live (never-deleted) nodes' rows. So a hard/soft delete can leave
+ * a transient orphan row in a removed field's table until the next reclaim pass;
+ * that is the deferred-cleanup design, not a leak.
  */
 export async function deleteNodeEmbeddings(
   ctx: EmbeddingSyncContext,
@@ -206,6 +158,9 @@ export async function deleteNodeEmbeddings(
       nodeKind: ctx.nodeKind,
       nodeId: ctx.nodeId,
       fieldPath: field.fieldPath,
+      dimensions: field.dimensions,
+      metric: field.metric,
+      indexType: field.indexType,
     });
   }
 }

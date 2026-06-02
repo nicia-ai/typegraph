@@ -13,6 +13,10 @@ import {
   type VectorSimilarityPredicate,
 } from "../../ast";
 import { type DialectAdapter } from "../../dialect";
+import {
+  vectorMinScoreCondition,
+  vectorScoreExpression,
+} from "../../dialect/vector-strategy";
 import { jsonPointer } from "../../json-pointer";
 import { type TemporalFilterPass } from "../passes";
 import {
@@ -33,6 +37,7 @@ import {
   EMBEDDINGS_CTE_ALIAS,
   FULLTEXT_CTE_ALIAS,
   HYBRID_CANDIDATES_CTE_ALIAS,
+  vectorSlotKey,
 } from "../schema";
 import { compileTypedJsonExtract } from "../typed-json-extract";
 import {
@@ -763,13 +768,22 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
   vectorPredicate: VectorSimilarityPredicate;
 }>;
 
+/**
+ * Builds the relevance CTE for a `field.similarTo(...)` predicate in the query
+ * builder. NOTE: this path is exact-but-brute-force — it splices the strategy's
+ * `distanceExpression` and full-scans each declaring kind's per-field table
+ * (`ORDER BY distance LIMIT k`); it does NOT use a strategy's engine-native ANN
+ * (vec0 `MATCH … k=`, libSQL `vector_top_k`, pgvector's HNSW scan), which is
+ * only reachable through the `store.search.vector` / `store.search.hybrid`
+ * facade. For ANN-accelerated retrieval at scale use the facade; use
+ * `.where(similarTo())` when you need to compose vector similarity with
+ * arbitrary predicates / traversals in one query and exact ranking is fine.
+ */
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
 ): SQL {
   const { ctx, graphId, nodeKinds, vectorPredicate } = input;
-  const { dialect } = ctx;
   const { field, metric, minScore, queryEmbedding } = vectorPredicate;
-  const embeddingsTableName = ctx.schema.tables.embeddings;
 
   if (nodeKinds.length === 0) {
     throw new UnsupportedPredicateError(
@@ -777,41 +791,92 @@ export function buildStandardEmbeddingsCte(
     );
   }
 
-  const fieldPath = resolveEmbeddingFieldPath(field);
-
-  const distanceExpr = dialect.vectorDistance(
-    qualifyColumn(embeddingsTableName, "embedding"),
-    queryEmbedding,
-    metric,
-  );
-  const scopedNodes = buildScopedNodeIdsSubquery(field.alias);
-
-  // Filter by the alias's resolved kinds so similarTo() doesn't leak
-  // rank weight from other kinds that happen to embed the same field_path.
-  const conditions: SQL[] = [
-    sql`${qualifyColumn(embeddingsTableName, "graph_id")} = ${graphId}`,
-    compileKindFilter(
-      qualifyColumn(embeddingsTableName, "node_kind"),
-      nodeKinds,
-    ),
-    sql`${qualifyColumn(embeddingsTableName, "field_path")} = ${fieldPath}`,
-  ];
-
-  if (minScore !== undefined) {
-    // minScore validation (finiteness, cosine range) is handled by the vector
-    // predicate pass in passes/vector.ts — no redundant check here.
-    conditions.push(
-      compileVectorMinScoreCondition(distanceExpr, metric, minScore),
+  const { vectorStrategy } = ctx;
+  if (vectorStrategy === undefined) {
+    throw new UnsupportedPredicateError(
+      "Vector similarity predicate requires a backend with a vector strategy",
     );
   }
 
-  const scoreExpr = compileVectorScoreExpression(distanceExpr, metric);
+  const fieldPath = resolveEmbeddingFieldPath(field);
+  const vectorSlots = ctx.vectorSlots;
+  const scopedNodes = buildScopedNodeIdsSubquery(field.alias);
+
+  // Only the kinds in this alias that actually DECLARE the embedding
+  // field back a per-field table. Skipping kinds without a slot keeps
+  // similarTo() from referencing a table that was never created and
+  // stops rank weight leaking from kinds that happen to share a
+  // field_path but don't embed it.
+  const declaringKinds = nodeKinds.filter((kind) =>
+    vectorSlots?.has(vectorSlotKey(kind, fieldPath)),
+  );
+
+  // Per-kind relevance scan against the strategy's typed per-field
+  // table. The strategy owns the engine-specific distance fragment
+  // (`<=>` / `vec_distance_cosine` / `vector_distance_cos`); the score
+  // and minScore math around it stays shared so the OUTPUT columns
+  // (node_id, node_kind, distance, score, ord) are identical across
+  // engines and the hybrid RRF / vector ORDER BY paths are untouched.
+  const branches = declaringKinds.map((kind) => {
+    const tableName = vectorStrategy.tableName(graphId, kind, fieldPath);
+    // Use the predicate's explicit metric if given, else this kind's DECLARED
+    // metric (the one its ANN index was built for). Resolving per kind keeps an
+    // includeSubClasses union correct when subkinds declare different metrics.
+    const branchMetric =
+      metric ??
+      vectorSlots?.get(vectorSlotKey(kind, fieldPath))?.metric ??
+      "cosine";
+    const distanceExpr = vectorStrategy.distanceExpression(
+      qualifyColumn(tableName, "embedding"),
+      queryEmbedding,
+      branchMetric,
+    );
+    const scoreExpr = vectorScoreExpression(distanceExpr, branchMetric);
+
+    const conditions: SQL[] = [
+      sql`${qualifyColumn(tableName, "graph_id")} = ${graphId}`,
+    ];
+    if (minScore !== undefined) {
+      // minScore validation (finiteness, cosine range) is handled by the
+      // vector predicate pass in passes/vector.ts — no redundant check.
+      conditions.push(
+        vectorMinScoreCondition(distanceExpr, branchMetric, minScore),
+      );
+    }
+
+    return sql`
+      SELECT
+        ${qualifyColumn(tableName, "node_id")} AS node_id,
+        ${kind} AS node_kind,
+        ${distanceExpr} AS distance,
+        ${scoreExpr} AS score
+      FROM ${quoteIdentifier(tableName)}
+      INNER JOIN ${scopedNodes}
+        ON ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_id`)} =
+           ${qualifyColumn(tableName, "node_id")}
+       AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} = ${kind}
+      WHERE ${sql.join(conditions, sql` AND `)}
+    `;
+  });
+
+  // No declaring kind → emit a CTE with the right column shape that
+  // yields no rows, so the rest of the emitter (which always references
+  // cte_embeddings) compiles and simply matches nothing.
+  const unionBody =
+    branches.length === 0 ?
+      emptyEmbeddingsBody()
+    : sql.join(
+        branches,
+        sql`
+          UNION ALL
+        `,
+      );
 
   // Inner SELECT applies the predicate's k-cutoff, then ROW_NUMBER ranks
-  // over that bounded set. Without the inner LIMIT, a hybrid query
-  // would assign vector ordinals to every row in the embeddings table,
-  // letting documents far outside the requested top-k contribute to the
-  // RRF fused score and reorder final results.
+  // over that bounded set. Without the inner LIMIT, a hybrid query would
+  // assign vector ordinals to every candidate, letting documents far
+  // outside the requested top-k contribute to the RRF fused score and
+  // reorder final results.
   return sql`
     ${sql.raw(EMBEDDINGS_CTE_ALIAS)} AS (
       SELECT
@@ -821,18 +886,7 @@ export function buildStandardEmbeddingsCte(
         score,
         ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
       FROM (
-        SELECT
-          ${qualifyColumn(embeddingsTableName, "node_id")} AS node_id,
-          ${qualifyColumn(embeddingsTableName, "node_kind")} AS node_kind,
-          ${distanceExpr} AS distance,
-          ${scoreExpr} AS score
-        FROM ${ctx.schema.embeddingsTable}
-        INNER JOIN ${scopedNodes}
-          ON ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_id`)} =
-             ${qualifyColumn(embeddingsTableName, "node_id")}
-         AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
-             ${qualifyColumn(embeddingsTableName, "node_kind")}
-        WHERE ${sql.join(conditions, sql` AND `)}
+        ${unionBody}
         ORDER BY distance ASC
         LIMIT ${vectorPredicate.limit}
       ) AS vec_inner
@@ -840,39 +894,20 @@ export function buildStandardEmbeddingsCte(
   `;
 }
 
-function compileVectorScoreExpression(
-  distanceExpr: SQL,
-  metric: VectorSimilarityPredicate["metric"],
-): SQL {
-  switch (metric) {
-    case "cosine": {
-      return sql`(1.0 - ${distanceExpr})`;
-    }
-    case "l2":
-    case "inner_product": {
-      return distanceExpr;
-    }
-  }
-}
-
-function compileVectorMinScoreCondition(
-  distanceExpr: SQL,
-  metric: VectorSimilarityPredicate["metric"],
-  minScore: number,
-): SQL {
-  switch (metric) {
-    case "cosine": {
-      const threshold = 1 - minScore;
-      return sql`${distanceExpr} <= ${threshold}`;
-    }
-    case "l2": {
-      return sql`${distanceExpr} <= ${minScore}`;
-    }
-    case "inner_product": {
-      const negativeThreshold = -minScore;
-      return sql`${distanceExpr} <= ${negativeThreshold}`;
-    }
-  }
+/**
+ * A no-row inner body carrying the exact `(node_id, node_kind, distance,
+ * score)` column contract, used when no kind in the alias declares the
+ * embedding field. `WHERE 1 = 0` keeps the planner from scanning.
+ */
+function emptyEmbeddingsBody(): SQL {
+  return sql`
+    SELECT
+      CAST(NULL AS TEXT) AS node_id,
+      CAST(NULL AS TEXT) AS node_kind,
+      CAST(NULL AS REAL) AS distance,
+      CAST(NULL AS REAL) AS score
+    WHERE 1 = 0
+  `;
 }
 
 // ============================================================

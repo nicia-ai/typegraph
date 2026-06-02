@@ -12,9 +12,8 @@
  *
  * Auto-derivation is intentionally limited to TOP-LEVEL embedding
  * fields. Embeddings nested inside object properties are out of scope
- * for v1 — pgvector's column-based indexes don't address sub-paths
- * cleanly, and the storage layer's `typegraph_node_embeddings` table
- * uses a flat `field_path` keyed at the kind level.
+ * for v1 — vector slots are materialized as flat `(kind, fieldPath)`
+ * storage units, and top-level fields keep that contract explicit.
  *
  * Explicit `defineVectorIndex(node, fieldPath, opts)` declarations
  * passed via `defineGraph({ indexes })` take precedence — when an

@@ -43,7 +43,6 @@ import {
   type IndexDeclaration,
 } from "../../../indexes";
 import { regconfig, tsvector } from "../columns/fulltext";
-import { vector } from "../columns/vector";
 
 /**
  * Table name configuration.
@@ -53,7 +52,6 @@ export type PostgresTableNames = Readonly<{
   edges: string;
   uniques: string;
   schemaVersions: string;
-  embeddings: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
@@ -76,7 +74,6 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   edges: "typegraph_edges",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
-  embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   contributionMaterializations: "typegraph_contribution_materializations",
@@ -224,55 +221,6 @@ export function createPostgresTables(
       uniqueIndex(`${n.schemaVersions}_one_active_per_graph_idx`)
         .on(t.graphId)
         .where(sql`${t.isActive} = TRUE`),
-    ],
-  );
-
-  /**
-   * Embeddings table for vector search.
-   *
-   * Stores embeddings using pgvector's native VECTOR type for efficient
-   * similarity operations without runtime casts.
-   *
-   * The column uses unparameterized VECTOR type to support multiple
-   * embedding dimensions in a single table. Dimension validation is
-   * handled at the application level via the `dimensions` column.
-   *
-   * Requires pgvector extension:
-   *   CREATE EXTENSION IF NOT EXISTS vector;
-   *
-   * Vector indices (HNSW, IVFFlat) are created dynamically based on the
-   * configured metric and dimensions.
-   */
-  const embeddings = pgTable(
-    n.embeddings,
-    {
-      graphId: text("graph_id").notNull(),
-      nodeKind: text("node_kind").notNull(),
-      nodeId: text("node_id").notNull(),
-      fieldPath: text("field_path").notNull(),
-      /** Embedding vector stored as native pgvector type */
-      embedding: vector("embedding").notNull(),
-      /** Number of dimensions (for validation) */
-      dimensions: integer("dimensions").notNull(),
-      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
-    },
-    (t) => [
-      primaryKey({
-        columns: [t.graphId, t.nodeKind, t.nodeId, t.fieldPath],
-      }),
-      // Index for looking up embeddings by node
-      index(`${n.embeddings}_node_idx`).on(
-        t.graphId,
-        t.nodeKind,
-        t.nodeId,
-      ),
-      // Index for filtering by kind and field (used in vector search)
-      index(`${n.embeddings}_kind_field_idx`).on(
-        t.graphId,
-        t.nodeKind,
-        t.fieldPath,
-      ),
     ],
   );
 
@@ -433,7 +381,6 @@ export function createPostgresTables(
     edges,
     uniques,
     schemaVersions,
-    embeddings,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,
@@ -451,14 +398,7 @@ export const tables = createPostgresTables();
 /**
  * Convenience exports for default tables.
  */
-export const {
-  nodes,
-  edges,
-  uniques,
-  schemaVersions,
-  embeddings,
-  fulltext,
-} = tables;
+export const { nodes, edges, uniques, schemaVersions, fulltext } = tables;
 
 /**
  * Type representing the tables object returned by createPostgresTables.

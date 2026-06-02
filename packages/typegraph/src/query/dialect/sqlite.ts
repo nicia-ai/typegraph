@@ -236,49 +236,9 @@ export const sqliteDialect: DialectAdapter = {
   // Vector Operations
   // ============================================================
 
+  // Compile-time gate for `field.similarTo(...)`; the active
+  // `VectorStrategy` (sqlite-vec / libSQL-native) owns the distance SQL.
   supportsVectors: true,
-
-  vectorDistance(column, embedding, metric) {
-    // sqlite-vec functions expect vec_f32 format for the query embedding
-    const formatted = this.formatEmbedding(embedding);
-    switch (metric) {
-      case "cosine": {
-        // Cosine distance: 1 - cosine_similarity
-        // Lower is more similar (0 = identical)
-        return sql`vec_distance_cosine(${column}, ${formatted})`;
-      }
-      case "l2": {
-        // Euclidean (L2) distance
-        // Lower is more similar (0 = identical)
-        return sql`vec_distance_l2(${column}, ${formatted})`;
-      }
-      case "inner_product": {
-        // sqlite-vec does not support inner product distance
-        // See: https://alexgarcia.xyz/sqlite-vec/api-reference.html
-        throw new Error(
-          "Inner product distance is not supported by sqlite-vec. Use 'cosine' or 'l2' metrics instead.",
-        );
-      }
-      default: {
-        const _exhaustive: never = metric;
-        throw new Error("Unsupported vector metric: " + String(_exhaustive));
-      }
-    }
-  },
-
-  formatEmbedding(embedding) {
-    // Validate all values are finite numbers
-    for (const [index, value] of embedding.entries()) {
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new TypeError(
-          `embedding[${index}] must be a finite number, got: ${value}`,
-        );
-      }
-    }
-    // sqlite-vec uses vec_f32() to convert JSON array to binary format
-    const asJson = JSON.stringify(embedding);
-    return sql`vec_f32(${asJson})`;
-  },
 
   // ============================================================
   // Fulltext Operations

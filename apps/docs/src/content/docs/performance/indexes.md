@@ -319,7 +319,9 @@ const profiler = new QueryProfiler({
   (`string`, `number`, `boolean`, `Date`). For array containment queries, create
   [GIN indexes](#gin-indexes-array-and-object-containment--postgresql-only) manually.
 - GIN indexes are PostgreSQL-only. SQLite has no equivalent for JSON containment acceleration.
-- Embedding fields are indexed via the embeddings table; see [Semantic Search](/semantic-search).
+- Embedding fields live in per-`(graphId, kind, field)` vector tables (`tg_vec_*`) and are indexed
+  through `store.materializeIndexes()` (pgvector builds an HNSW / IVFFlat ANN index; sqlite-vec and
+  libSQL report `skipped`/build their own). See [Semantic Search](/semantic-search).
 
 ## Next Steps
 

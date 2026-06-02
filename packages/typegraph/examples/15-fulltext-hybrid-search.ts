@@ -16,15 +16,13 @@
  *   - `store.search.rebuildFulltext()` backfills the fulltext index
  *     after schema changes or drift.
  *
- * The example uses an in-memory SQLite backend. FTS5 is built into the
- * standard SQLite distribution so fulltext works out of the box — no
- * extension required. Real vector similarity (both `store.search.hybrid`
- * and the `.similarTo()` builder predicate) needs sqlite-vec (or
- * pgvector on Postgres); since this example's in-memory SQLite does not
- * load that extension, Part 6 attaches a small JS cosine-similarity
- * `vectorSearch` shim so the hybrid call actually executes end-to-end
- * against the same code path a native deployment would take. The
- * `.similarTo()` builder path is shown as code only.
+ * The example uses an in-memory SQLite backend from createLocalSqliteBackend,
+ * which loads FTS5 (built into SQLite, so fulltext needs no extension) AND
+ * sqlite-vec (an optional peer dep). Both halves of hybrid search therefore run
+ * natively here — the same code path runs on pgvector (Postgres) or libSQL's
+ * built-in engine. If a backend without a vector engine is ever used, Part 6
+ * falls back to a small in-JS cosine `vectorSearch` shim so the example still
+ * completes end-to-end.
  *
  * Run with:
  *   npx tsx examples/15-fulltext-hybrid-search.ts
@@ -107,10 +105,10 @@ function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
 }
 
 /**
- * Attaches a JS-side cosine-similarity `vectorSearch` implementation to
- * the backend. The in-memory SQLite used by examples does not load
- * sqlite-vec, so the real native path is unavailable here; a production
- * deployment swaps pgvector or sqlite-vec in and keeps the same API.
+ * Fallback only: attaches a JS-side cosine-similarity `vectorSearch` to a
+ * backend that has no native vector engine, so `store.search.hybrid()` still
+ * has a vector source. The example backend loads sqlite-vec, so this is not
+ * used here — it's a safety net for backends without a VectorStrategy.
  */
 function attachJsVectorSearchStub(
   backend: GraphBackend,
@@ -414,16 +412,15 @@ export async function main(): Promise<void> {
       "so it fuses them without caring about score-scale differences.\n",
   );
 
-  // In-memory SQLite does not load the sqlite-vec extension, so
-  // `backend.vectorSearch` is absent and `store.search.hybrid()` would
-  // fail its capability check. A real deployment uses pgvector (Postgres)
-  // or sqlite-vec (SQLite); here we attach a small JS cosine-similarity
-  // stub that ranks the stored embeddings so the example exercises the
-  // same hybrid code path end-to-end.
-  attachJsVectorSearchStub(backend, seededEmbeddings);
-
   const hybridQuery = "waterproof shell";
   const queryEmbedding = mockEmbedding(hybridQuery);
+
+  // createLocalSqliteBackend loads sqlite-vec, so the vector half runs
+  // natively. Only if a backend without a vector engine is used do we fall back
+  // to a small JS cosine shim so store.search.hybrid() still has a vector source.
+  if (!backend.capabilities.vector?.supported) {
+    attachJsVectorSearchStub(backend, seededEmbeddings);
+  }
 
   const hybridHits = await store.search.hybrid("Product", {
     limit: 5,
@@ -466,30 +463,33 @@ export async function main(): Promise<void> {
   );
 
   console.log(
-    "\nFor composition with graph traversal / metadata predicates, use the\n" +
-      "query-builder path — both predicates in one whereNode(), fusion\n" +
-      "configured via .fuseWith():\n",
+    "\nThe same fusion is available in the query builder, composing both\n" +
+      "predicates with metadata filters in one SQL statement via .fuseWith().\n" +
+      "Here we additionally restrict to `active` products:\n",
   );
-  console.log(
-    [
-      `  await store.query()`,
-      `    .from("Product", "p")`,
-      `    .whereNode("p", p =>`,
-      `      p.$fulltext.matches(query, 20)`,
-      `        .and(p.embedding.similarTo(queryEmbedding, 20))`,
-      `        .and(p.status.eq("active"))`,
-      `    )`,
-      `    .fuseWith({ k: 60, weights: { vector: 1, fulltext: 1.25 } })`,
-      `    .select(ctx => ctx.p)`,
-      `    .limit(5)`,
-      `    .execute();`,
-    ].join("\n"),
-  );
-  console.log(
-    "\nThe builder path compiles both predicates into a single SQL\n" +
-      "statement; it requires a vector-capable backend at runtime\n" +
-      "(pgvector or sqlite-vec) and is therefore not executed here.",
-  );
+
+  if (backend.capabilities.vector?.supported) {
+    const builderHybrid = await store
+      .query()
+      .from("Product", "p")
+      .whereNode("p", (p) =>
+        p.$fulltext
+          .matches(hybridQuery, 20)
+          .and(p.embedding.similarTo(queryEmbedding, 20))
+          .and(p.status.eq("active")),
+      )
+      .fuseWith({ k: 60, weights: { vector: 1, fulltext: 1.25 } })
+      .select((ctx) => ({ sku: ctx.p.sku, name: ctx.p.name }))
+      .limit(5)
+      .execute();
+
+    console.log(`Builder hybrid (active only): "${hybridQuery}"`);
+    for (const [index, row] of builderHybrid.entries()) {
+      console.log(`  ${String(index + 1).padStart(2)}. [${row.sku}] ${row.name}`);
+    }
+  } else {
+    console.log("  (skipped — the builder hybrid path needs a vector-capable backend)");
+  }
 
   // ============================================================
   // Part 7: Rebuild the fulltext index

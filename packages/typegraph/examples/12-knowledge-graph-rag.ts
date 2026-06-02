@@ -108,7 +108,8 @@ function mockEmbedding(text: string): number[] {
 export async function main() {
   console.log("=== Knowledge Graph for RAG ===\n");
 
-  const store = createStore(graph, createExampleBackend());
+  const backend = createExampleBackend();
+  const store = createStore(graph, backend);
 
   // ----------------------------------------------------------
   // Seed data: Two documents about AI companies
@@ -299,12 +300,17 @@ export async function main() {
   console.log("\n--- Pattern 4: Hybrid Retrieval (Single Query) ---");
   console.log("Vector search + fan-out to entities AND document\n");
 
-  // Single query using `from` option for fan-out pattern
-  // Simulating vector match with text filter (in production, use .similarTo())
+  // Real vector similarity on the chunk embedding, fanning out in one query to
+  // the entities each matched chunk mentions AND back to its source document.
+  // (Falls back to a keyword filter if the backend has no vector engine.)
+  const vectorReady = backend.capabilities.vector?.supported === true;
+  const chunkQuery = mockEmbedding("company leadership and CEO");
   const hybridResults = await store
     .query()
     .from("Chunk", "c")
-    .whereNode("c", (c) => c.text.contains("CEO"))
+    .whereNode("c", (c) =>
+      vectorReady ? c.embedding.similarTo(chunkQuery, 3) : c.text.contains("CEO"),
+    )
     .traverse("mentions", "m")
     .to("Entity", "e")
     .traverse("containsChunk", "d_edge", { direction: "in", from: "c" }) // Fan-out from chunk

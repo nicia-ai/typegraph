@@ -20,7 +20,6 @@
  */
 import { sql } from "drizzle-orm";
 import {
-  blob,
   index,
   integer,
   primaryKey,
@@ -43,13 +42,20 @@ export type SqliteTableNames = Readonly<{
   edges: string;
   uniques: string;
   schemaVersions: string;
-  embeddings: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
 }>;
+
+/**
+ * Physical name of the legacy single shared embeddings table, dropped in
+ * the cross-backend vector cutover (the clean cut of #157). Strategies now
+ * own per-`(nodeKind, fieldPath)` typed storage. Retained only so the
+ * one-time migration utility can address and drain the old table.
+ */
+export const LEGACY_EMBEDDINGS_TABLE_NAME = "typegraph_node_embeddings";
 
 export type CreateSqliteTablesOptions = Readonly<{
   /**
@@ -66,7 +72,6 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   edges: "typegraph_edges",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
-  embeddings: "typegraph_node_embeddings",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   contributionMaterializations: "typegraph_contribution_materializations",
@@ -220,50 +225,6 @@ export function createSqliteTables(
   );
 
   /**
-   * Embeddings table for vector search.
-   *
-   * Stores embeddings as BLOB (for sqlite-vec binary format) or as JSON text.
-   * When sqlite-vec extension is loaded, the BLOB column can be used with
-   * vec_f32() for similarity operations.
-   */
-  const embeddings = sqliteTable(
-    n.embeddings,
-    {
-      graphId: text("graph_id").notNull(),
-      nodeKind: text("node_kind").notNull(),
-      nodeId: text("node_id").notNull(),
-      fieldPath: text("field_path").notNull(),
-      /**
-       * Embedding vector.
-       * Stored as BLOB for sqlite-vec binary format, or JSON text for fallback.
-       * For sqlite-vec: use vec_f32() to convert JSON array to binary.
-       */
-      embedding: blob("embedding", { mode: "buffer" }).notNull(),
-      /** Number of dimensions (for validation) */
-      dimensions: integer("dimensions").notNull(),
-      createdAt: text("created_at").notNull(),
-      updatedAt: text("updated_at").notNull(),
-    },
-    (t) => [
-      primaryKey({
-        columns: [t.graphId, t.nodeKind, t.nodeId, t.fieldPath],
-      }),
-      // Index for looking up embeddings by node
-      index(`${n.embeddings}_node_idx`).on(
-        t.graphId,
-        t.nodeKind,
-        t.nodeId,
-      ),
-      // Index for filtering by kind and field (used in vector search)
-      index(`${n.embeddings}_kind_field_idx`).on(
-        t.graphId,
-        t.nodeKind,
-        t.fieldPath,
-      ),
-    ],
-  );
-
-  /**
    * Per-deployment record of which declared indexes have been
    * materialized against this database. Owned and written by
    * `store.materializeIndexes()`. Keyed on `index_name` because SQL
@@ -368,7 +329,6 @@ export function createSqliteTables(
     edges,
     uniques,
     schemaVersions,
-    embeddings,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,
@@ -390,7 +350,7 @@ export const tables = createSqliteTables();
 /**
  * Convenience exports for default tables.
  */
-export const { nodes, edges, uniques, schemaVersions, embeddings } = tables;
+export const { nodes, edges, uniques, schemaVersions } = tables;
 
 /**
  * Type representing the tables object returned by createSqliteTables.

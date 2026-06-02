@@ -188,13 +188,19 @@ Use application-level validation instead.
 
 ## Vector Search Backend Requirements
 
-Vector similarity search requires specific database extensions:
+Vector and hybrid search work across all primary backends via a pluggable
+`VectorStrategy`. Each backend advertises its capabilities through
+`backend.capabilities.vector` (`{ supported, metrics, indexTypes, maxDimensions }`):
 
-| Backend | Requirement |
-|---------|-------------|
-| PostgreSQL | pgvector extension |
-| SQLite | sqlite-vec extension |
-| D1 | Not supported |
+| Backend | Requirement | Metrics |
+|---------|-------------|---------|
+| PostgreSQL | pgvector extension (HNSW / IVFFlat) | cosine, l2, inner_product |
+| SQLite | sqlite-vec extension (`vec0` KNN) | cosine, l2 |
+| libSQL / Turso | built-in native engine (DiskANN); nothing to load | cosine, l2 |
+| D1 | Not supported | — |
+
+Note that `inner_product` is PostgreSQL-only — sqlite-vec and libSQL support
+cosine and l2 only.
 
 Using vector predicates on unsupported backends throws `UnsupportedPredicateError`:
 

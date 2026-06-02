@@ -138,19 +138,13 @@ const graph = defineGraph({
 ## Database Setup
 
 ```typescript
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import * as sqliteVec from "sqlite-vec";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
-// Initialize database with vector extension
-const sqlite = new Database("documents.db");
-sqliteVec.load(sqlite);
-sqlite.exec(generateSqliteMigrationSQL());
-
-const db = drizzle(sqlite);
-const backend = createSqliteBackend(db);
+// `createLocalSqliteBackend` loads sqlite-vec (an optional peer dep) and wires
+// the vector strategy, so `embedding()` fields are persisted to real `vec0`
+// KNN storage. It also runs the base DDL for you.
+const { backend } = createLocalSqliteBackend({ path: "documents.db" });
 
 // `searchable()` fields require the durable fulltext-materialization
 // step that `createStoreWithSchema` performs at boot. Bare

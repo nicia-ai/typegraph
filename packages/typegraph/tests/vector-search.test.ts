@@ -4,7 +4,6 @@
  * Tests the embedding type, schema introspection, predicate builders,
  * and dialect adapter SQL generation for vector similarity search.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -150,94 +149,39 @@ describe("schema introspector with embeddings", () => {
 });
 
 // ============================================================
-// Dialect Adapter Vector Operations Tests
+// Dialect Adapter Vector Capability Tests
 // ============================================================
+//
+// The dialect now exposes only the compile-time `supportsVectors` gate and
+// its advertised `vectorMetrics`; the distance/format SQL moved entirely
+// into the per-engine `VectorStrategy`, each with its own executable
+// suite (`vector/libsql-strategy`, `vector/sqlite-vec-strategy`,
+// `vector/pgvector-strategy`, `vector-cross-backend-parity`).
 
-describe("PostgreSQL dialect vector operations", () => {
-  const testEmbedding = [0.1, 0.2, 0.3];
-
-  it("should support vectors", () => {
+describe("PostgreSQL dialect vector capabilities", () => {
+  it("advertises vector support", () => {
     expect(postgresDialect.supportsVectors).toBe(true);
   });
 
-  it("should format embeddings as PostgreSQL vector literals", () => {
-    const formatted = postgresDialect.formatEmbedding(testEmbedding);
-    // The formatted embedding should be an SQL template
-    expect(formatted).toBeDefined();
-    expect(formatted.queryChunks).toBeDefined();
-  });
-
-  it("should generate cosine distance SQL", () => {
-    const column = sql.raw("embedding_column");
-    const distance = postgresDialect.vectorDistance(
-      column,
-      testEmbedding,
+  it("advertises cosine, l2, and inner_product metrics", () => {
+    expect(postgresDialect.capabilities.vectorMetrics).toEqual([
       "cosine",
-    );
-    // Should return an SQL template
-    expect(distance).toBeDefined();
-    expect(distance.queryChunks).toBeDefined();
-  });
-
-  it("should generate L2 distance SQL", () => {
-    const column = sql.raw("embedding_column");
-    const distance = postgresDialect.vectorDistance(
-      column,
-      testEmbedding,
       "l2",
-    );
-    expect(distance).toBeDefined();
-    expect(distance.queryChunks).toBeDefined();
-  });
-
-  it("should generate inner product distance SQL", () => {
-    const column = sql.raw("embedding_column");
-    const distance = postgresDialect.vectorDistance(
-      column,
-      testEmbedding,
       "inner_product",
-    );
-    expect(distance).toBeDefined();
-    expect(distance.queryChunks).toBeDefined();
+    ]);
   });
 });
 
-describe("SQLite dialect vector operations", () => {
-  const testEmbedding = [0.1, 0.2, 0.3];
-
-  it("should support vectors", () => {
+describe("SQLite dialect vector capabilities", () => {
+  it("advertises vector support", () => {
     expect(sqliteDialect.supportsVectors).toBe(true);
   });
 
-  it("should format embeddings using vec_f32", () => {
-    const formatted = sqliteDialect.formatEmbedding(testEmbedding);
-    expect(formatted).toBeDefined();
-    expect(formatted.queryChunks).toBeDefined();
-  });
-
-  it("should generate cosine distance SQL", () => {
-    const column = sql.raw("embedding_column");
-    const distance = sqliteDialect.vectorDistance(
-      column,
-      testEmbedding,
-      "cosine",
+  it("advertises cosine and l2 metrics (no inner_product)", () => {
+    expect(sqliteDialect.capabilities.vectorMetrics).toEqual(["cosine", "l2"]);
+    expect(sqliteDialect.capabilities.vectorMetrics).not.toContain(
+      "inner_product",
     );
-    expect(distance).toBeDefined();
-    expect(distance.queryChunks).toBeDefined();
-  });
-
-  it("should generate L2 distance SQL", () => {
-    const column = sql.raw("embedding_column");
-    const distance = sqliteDialect.vectorDistance(column, testEmbedding, "l2");
-    expect(distance).toBeDefined();
-    expect(distance.queryChunks).toBeDefined();
-  });
-
-  it("should throw for inner product distance (not supported by sqlite-vec)", () => {
-    const column = sql.raw("embedding_column");
-    expect(() => {
-      sqliteDialect.vectorDistance(column, testEmbedding, "inner_product");
-    }).toThrow("Inner product distance is not supported by sqlite-vec");
   });
 });
 
@@ -358,65 +302,5 @@ describe("embedding extraction from schema", () => {
     expect(getEmbeddingFields(z.string())).toHaveLength(0);
     expect(getEmbeddingFields(z.number())).toHaveLength(0);
     expect(getEmbeddingFields(z.array(z.string()))).toHaveLength(0);
-  });
-});
-
-// ============================================================
-// Vector Index Name Generation Tests
-// ============================================================
-
-describe("vector index name generation", () => {
-  it("should generate consistent index names", async () => {
-    const { generateVectorIndexName } =
-      await import("../src/backend/drizzle/vector-index");
-
-    const name1 = generateVectorIndexName(
-      "my-graph",
-      "Document",
-      "embedding",
-      "cosine",
-    );
-    const name2 = generateVectorIndexName(
-      "my-graph",
-      "Document",
-      "embedding",
-      "cosine",
-    );
-
-    expect(name1).toBe(name2);
-    expect(name1).toContain("idx_emb");
-    expect(name1).toContain("cosine");
-  });
-
-  it("should generate different names for different metrics", async () => {
-    const { generateVectorIndexName } =
-      await import("../src/backend/drizzle/vector-index");
-
-    const cosine = generateVectorIndexName("g", "N", "e", "cosine");
-    const l2 = generateVectorIndexName("g", "N", "e", "l2");
-    const ip = generateVectorIndexName("g", "N", "e", "inner_product");
-
-    expect(cosine).not.toBe(l2);
-    expect(cosine).not.toBe(ip);
-    expect(l2).not.toBe(ip);
-  });
-
-  it("should sanitize special characters in names", async () => {
-    const { generateVectorIndexName } =
-      await import("../src/backend/drizzle/vector-index");
-
-    const name = generateVectorIndexName(
-      "my-graph!",
-      "Node.Type",
-      "field/path",
-      "cosine",
-    );
-
-    // Should not contain special characters
-    expect(name).not.toContain("!");
-    expect(name).not.toContain(".");
-    expect(name).not.toContain("/");
-    // Should only contain valid SQL identifier characters
-    expect(name).toMatch(/^[a-z0-9_]+$/);
   });
 });

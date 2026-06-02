@@ -266,8 +266,12 @@ export type VectorSimilarityPredicate = Readonly<{
   field: FieldRef;
   /** The query embedding to compare against */
   queryEmbedding: readonly number[];
-  /** Similarity metric to use */
-  metric: VectorMetricType;
+  /**
+   * Similarity metric. Omitted when the caller didn't pass one — the compiler
+   * then uses the field's DECLARED `embedding()` metric (resolved per kind),
+   * falling back to "cosine" only when no declaration is available.
+   */
+  metric?: VectorMetricType;
   /** Maximum number of results to return */
   limit: number;
   /** Optional minimum similarity score (0-1 for cosine) */

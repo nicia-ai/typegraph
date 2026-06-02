@@ -51,8 +51,15 @@ export type {
   MaterializeRemovalsEntry,
   MaterializeRemovalsOptions,
   MaterializeRemovalsResult,
+  ReclaimedVectorFieldEntry,
 } from "./materialize-removals";
-export type { SchemaManagerOptions, SchemaValidationResult } from "./store";
+export type {
+  ReembedFunction,
+  ReembedVectorFieldOptions,
+  ReembedVectorFieldResult,
+  SchemaManagerOptions,
+  SchemaValidationResult,
+} from "./store";
 export type { Store } from "./store";
 export {
   createStore,

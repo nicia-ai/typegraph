@@ -741,7 +741,10 @@ function vectorSimilarity(
     __type: "vector_similarity",
     field,
     queryEmbedding,
-    metric: options?.metric ?? "cosine",
+    // Leave metric unset when the caller didn't specify one, so the compiler
+    // resolves the field's declared metric per kind. Defaulting to "cosine"
+    // here would mis-rank l2/inner_product fields and bypass their ANN index.
+    ...(options?.metric !== undefined && { metric: options.metric }),
     limit,
     ...(options?.minScore !== undefined && { minScore: options.minScore }),
   };

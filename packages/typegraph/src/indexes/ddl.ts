@@ -35,8 +35,8 @@ export type GenerateIndexDdlOptions = Readonly<{
  * Vector index declarations (`entity: "vector"`) are NOT handled here —
  * they go through `backend.createVectorIndex` instead because the DDL
  * is dialect-specific (`USING hnsw (...) WITH (m=..., ef_construction=...)`
- * on Postgres) and operates on the embeddings table, not
- * `typegraph_nodes` / `typegraph_edges`. Callers narrow to the
+ * on Postgres) and operates on the strategy's per-`(kind, field)` embedding
+ * tables, not `typegraph_nodes` / `typegraph_edges`. Callers narrow to the
  * relational subset before calling this function.
  */
 export function generateIndexDDL(

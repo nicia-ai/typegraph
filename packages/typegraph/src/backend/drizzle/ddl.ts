@@ -28,7 +28,10 @@ import {
   type StrategyTableContribution,
   type TableContribution,
 } from "../table-contribution";
-import { type PostgresTables, tables as postgresTables } from "./schema/postgres";
+import {
+  type PostgresTables,
+  tables as postgresTables,
+} from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
 
 // Narrow interfaces for Drizzle column internals not exposed in public types.
@@ -154,17 +157,14 @@ function flattenSqlChunk(chunk: unknown): string {
     // column name directly. Match these BEFORE the `getSQL` fallback —
     // a column's `.getSQL()` wraps the column back inside a SQL object
     // that points to itself, which would recurse infinitely.
-    if (
-      "name" in chunk &&
-      typeof (chunk).name === "string"
-    ) {
+    if ("name" in chunk && typeof chunk.name === "string") {
       return `"${(chunk as { name: string }).name}"`;
     }
 
     // Drizzle's StringChunk stores its literal as `.value`, usually as a
     // one-element array ([""], ["SELECT "]) but sometimes as a plain string.
     if ("value" in chunk) {
-      const value = (chunk).value;
+      const value = chunk.value;
       if (typeof value === "string") {
         return value;
       }
@@ -173,10 +173,7 @@ function flattenSqlChunk(chunk: unknown): string {
       }
     }
 
-    if (
-      "queryChunks" in chunk &&
-      Array.isArray((chunk).queryChunks)
-    ) {
+    if ("queryChunks" in chunk && Array.isArray(chunk.queryChunks)) {
       return (chunk as { queryChunks: readonly unknown[] }).queryChunks
         .map((part) => flattenSqlChunk(part))
         .join("");
@@ -316,9 +313,9 @@ export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
   fulltextStrategy: FulltextStrategy = fts5Strategy,
 ): string[] {
-  return sqliteContributions(tables, fulltextStrategy).flatMap((
-    contribution,
-  ) => [...contribution.createDdl]);
+  return sqliteContributions(tables, fulltextStrategy).flatMap(
+    (contribution) => [...contribution.createDdl],
+  );
 }
 
 /**
@@ -355,8 +352,8 @@ function getPgColumnType(column: PgColumn): string {
     }
     case "PgTimestamp": {
       return (column as unknown as TimestampColumnConfig).config?.withTimezone ?
-        "TIMESTAMPTZ"
-      : "TIMESTAMP";
+          "TIMESTAMPTZ"
+        : "TIMESTAMP";
     }
     case "PgReal": {
       return "REAL";
@@ -398,10 +395,7 @@ export function generatePgCreateTableSQL(
 
   // Generate column definitions
   for (const column of config.columns) {
-    const parts: string[] = [
-      `"${column.name}"`,
-      getPgColumnType(column),
-    ];
+    const parts: string[] = [`"${column.name}"`, getPgColumnType(column)];
 
     if (column.notNull) {
       parts.push("NOT NULL");
@@ -528,24 +522,26 @@ export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
   fulltextStrategy: FulltextStrategy = tsvectorStrategy,
 ): string[] {
-  return postgresContributions(tables, fulltextStrategy).flatMap((
-    contribution,
-  ) => [...contribution.createDdl]);
+  return postgresContributions(tables, fulltextStrategy).flatMap(
+    (contribution) => [...contribution.createDdl],
+  );
 }
 
 /**
  * Generates a single SQL string for PostgreSQL migrations.
  * Convenience function that joins all DDL statements.
  *
- * Includes CREATE EXTENSION for pgvector since the embeddings table
- * uses the native VECTOR type.
+ * Includes CREATE EXTENSION for pgvector since the per-`(kind, field)`
+ * embedding tables `pgvectorStrategy` materializes at runtime use the
+ * native VECTOR type.
  */
 export function generatePostgresMigrationSQL(
   tables: PostgresTables = postgresTables,
   fulltextStrategy: FulltextStrategy = tsvectorStrategy,
 ): string {
-  // pgvector extension is required for the embeddings table
-  const extensionSql = "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
+  // pgvector extension is required for the per-field embedding tables
+  const extensionSql =
+    "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
   const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
   return `${extensionSql}\n\n${ddlSql}`;
 }

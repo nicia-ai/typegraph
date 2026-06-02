@@ -142,14 +142,15 @@ services:
       - "5432:5432"
 ```
 
-**TypeGraph migration includes vector support:**
+**TypeGraph migration enables vector support:**
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
-// Generates DDL including:
-// - CREATE EXTENSION IF NOT EXISTS vector;
-// - typegraph_embeddings table with vector column
+// Generates DDL including `CREATE EXTENSION IF NOT EXISTS vector;`.
+// It does NOT create a single embeddings table — each embedding field gets
+// its own typed `vector(N)` table, created lazily on first write (see
+// Storage Layout below).
 const migrationSQL = generatePostgresMigrationSQL();
 ```
 
@@ -160,7 +161,16 @@ for SQLite. It offers:
 
 - `vec_f32` type for 32-bit float vectors
 - Cosine and L2 distance functions
-- Works with any SQLite database
+
+:::caution[sqlite-vec requires a native (better-sqlite3) connection]
+sqlite-vec is a loadable C extension. TypeGraph loads it through
+better-sqlite3's `loadExtension` in `createLocalSqliteBackend`, so it only
+applies to the **local, native** SQLite backend. It does **not** apply to the
+**libSQL / Turso** backend (`createLibsqlBackend`): `@libsql/client` does not
+expose `loadExtension`, and libSQL ships its **own** native vector engine
+(`F32_BLOB`, `vector_distance_cos`, `vector_top_k`) which is a different API
+than sqlite-vec. See [libSQL / Turso](#libsql--turso-native-vectors) below.
+:::
 
 **Installation:**
 
@@ -183,13 +193,99 @@ sqliteVec.load(sqlite);
 - sqlite-vec does not support inner product distance
 - Use `cosine` or `l2` metrics only
 
+### libSQL / Turso (native vectors)
+
+The **libSQL / Turso** backend (`createLibsqlBackend`) does **not** use
+sqlite-vec. libSQL has a built-in vector engine — no extension to load — so
+vector and hybrid search work out of the box on local files, embedded
+replicas, and remote Turso databases:
+
+```typescript
+import { createClient } from "@libsql/client";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+
+const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
+const { backend } = await createLibsqlBackend(client);
+// backend.capabilities.vector?.supported === true
+```
+
+Under the hood it stores embeddings as `F32_BLOB` and searches with
+`vector_distance_cos` / `vector_distance_l2`, with optional approximate
+nearest-neighbor (DiskANN) indexes via `libsql_vector_idx` + `vector_top_k`.
+Supported metrics are `cosine` and `l2` (no `inner_product`), matching the
+sqlite-vec feature set.
+
 ### Supported Distance Metrics
 
-| Metric | PostgreSQL | SQLite | Description |
-|--------|------------|--------|-------------|
-| `cosine` | `<=>` | `vec_distance_cosine` | Cosine distance (1 - similarity). Best for normalized embeddings. |
-| `l2` | `<->` | `vec_distance_l2` | Euclidean distance. Good for unnormalized vectors. |
-| `inner_product` | `<#>` | Not supported | Negative inner product. For maximum inner product search (MIPS). |
+| Metric | PostgreSQL | SQLite (sqlite-vec) | libSQL / Turso | Description |
+|--------|------------|---------------------|----------------|-------------|
+| `cosine` | `<=>` | `vec_distance_cosine` | `vector_distance_cos` | Cosine distance (1 - similarity). Best for normalized embeddings. |
+| `l2` | `<->` | `vec_distance_l2` | `vector_distance_l2` | Euclidean distance. Good for unnormalized vectors. |
+| `inner_product` | `<#>` | Not supported | Not supported | Negative inner product. For maximum inner product search (MIPS). |
+
+## Storage Layout & Maintenance
+
+Each embedding field is stored in its own typed, graph-scoped table named
+`tg_vec_<graphId>_<kind>_<field>`, carrying that field's fixed dimension
+(pgvector `vector(N)`, libSQL `F32_BLOB(N)`, sqlite-vec `vec0`). Tables are
+created lazily on the first write, so no migration step provisions them.
+Graph-scoping means several graphs in one database can declare the same
+`kind`+`field` at different dimensions without collision. This is transparent
+to queries — `.similarTo()`, `store.search.vector`, and `store.search.hybrid`
+read it for you.
+
+### Changing an embedding dimension
+
+Switching embedding models usually changes the vector dimension. Stored vectors
+can't be reinterpreted at a new dimension, so a stray write at the old
+dimension throws `EmbeddingDimensionChangedError`. Update the field's
+`embedding(N)` declaration, then recompute the stored vectors with
+`store.reembedVectorField()`, which recreates the field's storage at the new
+dimension:
+
+```typescript
+// embedding(1536) → embedding(3072): recreate storage and re-embed in batches.
+// `embed` receives a page of nodes and returns a Map from node id to vector.
+await store.reembedVectorField("Document", "embedding", {
+  embed: async (nodes) => {
+    const vectors = await batchEmbed(nodes.map((node) => node.content));
+    return new Map(nodes.map((node, index) => [node.id, vectors[index]]));
+  },
+});
+// → { recreated: true, reembedded: <count> }
+```
+
+Without an `embed` callback the storage is recreated empty and you re-embed via
+normal `update()` writes.
+
+### Reclaiming removed embedding fields
+
+Removing an embedding field from a kind that still exists orphans its
+`tg_vec_*` table. `store.materializeRemovals()` reclaims it — it drops per-field
+tables for embedding fields no longer in the active schema and reports them in
+`reclaimedVectorFields`:
+
+```typescript
+const { reclaimedVectorFields } = await store.materializeRemovals();
+// → [{ kind: "Document", fieldPath: "embedding", status: "reclaimed" }]
+```
+
+The active schema is the source of truth, so a removed-then-re-added field is
+never dropped. The pass is idempotent.
+
+### Migrating from the legacy shared table
+
+Earlier versions stored every embedding in a single shared
+`typegraph_node_embeddings` table. If you have existing data there, run the
+one-time, idempotent `migrateLegacyEmbeddings()` utility to copy it into the new
+per-field tables (new deployments need no action):
+
+```typescript
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph";
+
+const result = await migrateLegacyEmbeddings({ backend });
+// → { migrated, perField, skippedDimensionMismatch, legacyTablePresent }
+```
 
 ## Schema Design
 

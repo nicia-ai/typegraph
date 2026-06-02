@@ -274,6 +274,31 @@ for (const person of people) {
 
 Remove `age`, rename `ageNumeric` to `age` with the new type, and force migrate.
 
+### Changing an Embedding Dimension
+
+Switching embedding models usually changes the vector dimension (e.g.
+`embedding(1536)` → `embedding(3072)`). The stored vectors are invalid under the
+new dimension — they must be recomputed, not converted — so this is handled
+out-of-band from the schema diff. Update the field's `embedding(N)` in the
+schema, then call `store.reembedVectorField()`. It drops and recreates the
+field's per-`(graphId, kind, field)` `tg_vec_*` storage at the new dimension and,
+when you pass an `embed` callback, pages the kind's nodes and re-embeds them:
+
+```typescript
+const result = await store.reembedVectorField("Document", "embedding", {
+  embed: async (nodes) => {
+    const texts = nodes.map((node) => node.content); // schema fields are top-level
+    const vectors = await batchEmbed(texts); // your new model
+    return new Map(nodes.map((node, index) => [node.id, vectors[index]]));
+  },
+});
+// result.recreated === true, result.reembedded === <count of re-embedded nodes>
+```
+
+Without an `embed` callback, the storage is recreated empty and you re-embed via
+normal `update()` writes. Until a field is re-embedded at the new dimension, a
+stray write at the **old** dimension throws `EmbeddingDimensionChangedError`.
+
 ## Pre-Deploy Schema Checks
 
 Use `getSchemaChanges()` in CI to catch breaking changes before they reach
@@ -500,6 +525,27 @@ if (result.status === "migrated" && result.toVersion === 3) {
   }
 }
 ```
+
+## Reclaiming Removed Embedding Storage
+
+Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), created
+lazily on first write. When you remove an `embedding()` field from a **surviving**
+kind, the schema change commits fast but the field's now-orphaned vector table
+remains until you reconcile it. `store.materializeRemovals()` drops it (this is
+the same pass that cleans up storage for fully removed kinds):
+
+```typescript
+const result = await store.materializeRemovals();
+
+for (const reclaimed of result.reclaimedVectorFields) {
+  // → { kind: "Document", fieldPath: "embedding", status: "reclaimed" }
+  console.log(`Dropped vector table for ${reclaimed.kind}.${reclaimed.fieldPath}`);
+}
+```
+
+The pass is idempotent and derived from immutable schema history, so re-running
+it lists the same removed fields and the underlying `DROP ... IF EXISTS` is a
+no-op on subsequent calls.
 
 ## Current Limitations
 

@@ -6,7 +6,7 @@ import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
 import { Pool } from "pg";
 import postgres, { type Sql } from "postgres";
-import { createStore } from "@nicia-ai/typegraph";
+import { createStore, sqliteVecStrategy } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -19,7 +19,7 @@ import {
 } from "@nicia-ai/typegraph/sqlite";
 
 import {
-  DEFAULT_POSTGRES_URL,
+  getPostgresUrl,
   type PerfBackend,
   type PostgresDriver,
 } from "./config";
@@ -37,10 +37,6 @@ type BackendResources = Readonly<{
   /** True when `store.search.hybrid(...)` works. */
   hasHybridFacade: boolean;
 }>;
-
-function getPostgresUrl(): string {
-  return process.env.POSTGRES_URL ?? DEFAULT_POSTGRES_URL;
-}
 
 /**
  * Attempt to load `sqlite-vec` into a better-sqlite3 connection. Returns
@@ -61,8 +57,20 @@ function loadSqliteVec(sqlite: Database.Database): boolean {
   }
 }
 
+// Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), created
+// lazily on first write, so a clean reset drops whatever this graph
+// materialized in a prior run — there is no single shared embeddings table.
 const POSTGRES_RESET_DDL = `
-  DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;
+  DO $$
+  DECLARE tbl text;
+  BEGIN
+    FOR tbl IN
+      SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec_%'
+    LOOP
+      EXECUTE format('DROP TABLE IF EXISTS %I CASCADE', tbl);
+    END LOOP;
+  END $$;
   DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
   DROP TABLE IF EXISTS typegraph_edges CASCADE;
   DROP TABLE IF EXISTS typegraph_nodes CASCADE;
@@ -98,7 +106,9 @@ export async function createBackendResources(
     const sqliteBackend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables,
-      hasVectorEmbeddings,
+      // Vector support is wired by passing the strategy (the old
+      // `hasVectorEmbeddings` boolean was replaced by `vector?: VectorStrategy`).
+      ...(hasVectorEmbeddings ? { vector: sqliteVecStrategy } : {}),
     });
     // #135: the harness builds the schema via raw DDL and uses the sync
     // createStore, so it writes the durable fulltext-materialization

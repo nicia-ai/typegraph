@@ -76,24 +76,30 @@ const store = createStore(graph, backend);
 
 ### SQLite with Vector Search
 
-For semantic search, use sqlite-vec:
+For semantic search, use the sqlite-vec extension. `createLocalSqliteBackend()` wires the
+`sqliteVecStrategy` automatically when the extension loads. For a bring-your-own connection, load the
+extension and pass the strategy explicitly:
 
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { sqliteVecStrategy } from "@nicia-ai/typegraph";
 
 const sqlite = new Database("app.db");
 
 // Load sqlite-vec extension
 sqlite.loadExtension("vec0");
 
-// Run migrations (includes vector index setup)
+// Run migrations (core tables)
 sqlite.exec(generateSqliteMigrationSQL());
 
 const db = drizzle(sqlite);
-const backend = createSqliteBackend(db);
+const backend = createSqliteBackend(db, { vector: sqliteVecStrategy });
 ```
+
+sqlite-vec stores embeddings in `vec0` virtual tables and supports the `cosine` and `l2` metrics. Per-field
+vector tables are created lazily on first write — no embedding-table DDL is part of the migration.
 
 See [Semantic Search](/semantic-search) for query examples.
 
@@ -127,6 +133,11 @@ Drizzle `db` instance for direct SQL access. The caller retains ownership of the
 client and is responsible for closing it when done — this allows sharing a single
 client across TypeGraph and other libraries.
 
+The libsql backend has native vector and hybrid search, wired automatically via `libsqlVectorStrategy` — no
+extension to load. It uses libSQL's built-in engine (`F32_BLOB(N)` storage, `vector_distance_cos` /
+`vector_distance_l2`, and DiskANN approximate nearest neighbor via `libsql_vector_idx` + `vector_top_k`) and
+supports the `cosine` and `l2` metrics. See [Semantic Search](/semantic-search) for query examples.
+
 :::caution[In-memory databases and transactions]
 libsql's `file::memory:` creates a separate database per connection. Since transactions
 open a new connection, the original database is destroyed after a transaction completes
@@ -149,10 +160,14 @@ function createLocalSqliteBackend(options?: {
 
 #### `createSqliteBackend(db, options?)`
 
-Creates a SQLite backend from an existing Drizzle database instance.
+Creates a SQLite backend from an existing Drizzle database instance. Pass `vector` to enable vector search
+(for example `sqliteVecStrategy` after loading the sqlite-vec extension).
 
 ```typescript
-function createSqliteBackend(db: BetterSQLite3Database, options?: { tables?: SqliteTables }): GraphBackend;
+function createSqliteBackend(
+  db: BetterSQLite3Database,
+  options?: { tables?: SqliteTables; vector?: VectorStrategy },
+): GraphBackend;
 ```
 
 #### `generateSqliteMigrationSQL()`
@@ -338,7 +353,8 @@ when you need atomic multi-statement writes.
 
 ### PostgreSQL with Vector Search
 
-For semantic search, enable pgvector:
+For semantic search, enable pgvector. `createPostgresBackend` defaults to `pgvectorStrategy`, so no extra
+wiring is required:
 
 ```typescript
 import { Pool } from "pg";
@@ -347,13 +363,17 @@ import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/t
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-// Migration SQL includes pgvector extension
+// Migration SQL enables the pgvector extension
 await pool.query(generatePostgresMigrationSQL());
 // Runs: CREATE EXTENSION IF NOT EXISTS vector;
 
 const db = drizzle(pool);
 const backend = createPostgresBackend(db);
 ```
+
+pgvector stores embeddings in per-field typed `vector(N)` tables (created lazily on first write — the migration
+creates no embedding table) with HNSW or IVFFlat indexes, and supports the `cosine`, `l2`, and `inner_product`
+metrics.
 
 See [Semantic Search](/semantic-search) for query examples.
 
@@ -446,6 +466,12 @@ function createPostgresBackend(
   options?: {
     tables?: PostgresTables;
     fulltext?: FulltextStrategy;
+    /**
+     * Override the vector search strategy. Defaults to
+     * `pgvectorStrategy`. Pass a custom `VectorStrategy` to change the
+     * storage / index engine.
+     */
+    vector?: VectorStrategy;
     /**
      * Override specific backend capabilities. Useful for HTTP-style
      * drivers or test scenarios. neon-http already has `transactions:

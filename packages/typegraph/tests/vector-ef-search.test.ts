@@ -15,12 +15,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, searchable } from "../src";
-import {
-  buildVectorSearchPostgres,
-  MAX_HNSW_EF_SEARCH,
-} from "../src/backend/drizzle/operations/vectors";
-import { tables as pgTables } from "../src/backend/drizzle/schema/postgres";
 import { embedding } from "../src/core/embedding";
+import {
+  assertPgvectorEfSearch,
+  MAX_HNSW_EF_SEARCH,
+} from "../src/query/dialect/vector/pgvector-strategy";
 import { createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
 
@@ -45,15 +44,6 @@ async function seededStore() {
   await store.nodes.Doc.create({ title: "gamma", embedding: [0, 0, 1, 0] });
   return store;
 }
-
-const PG_PARAMS = {
-  graphId: "g",
-  nodeKind: "Doc",
-  fieldPath: "embedding",
-  queryEmbedding: [0.1, 0.2, 0.3, 0.4],
-  metric: "cosine",
-  limit: 10,
-} as const;
 
 describe("efSearch validation (store boundary)", () => {
   it("rejects a non-positive-integer efSearch on vector search", async () => {
@@ -86,30 +76,30 @@ describe("efSearch validation (store boundary)", () => {
   });
 });
 
-describe("efSearch pgvector ceiling (query builder)", () => {
+describe("efSearch pgvector ceiling (assertPgvectorEfSearch)", () => {
   it("rejects efSearch above pgvector's 1000 ceiling", () => {
-    expect(() =>
-      buildVectorSearchPostgres(pgTables, {
-        ...PG_PARAMS,
-        efSearch: MAX_HNSW_EF_SEARCH + 1,
-      }),
-    ).toThrow(/1\.\.1000/);
+    expect(() => {
+      assertPgvectorEfSearch(MAX_HNSW_EF_SEARCH + 1);
+    }).toThrow(/1\.\.1000/);
   });
 
   it("accepts efSearch exactly at the ceiling", () => {
-    expect(() =>
-      buildVectorSearchPostgres(pgTables, {
-        ...PG_PARAMS,
-        efSearch: MAX_HNSW_EF_SEARCH,
-      }),
-    ).not.toThrow();
+    expect(() => {
+      assertPgvectorEfSearch(MAX_HNSW_EF_SEARCH);
+    }).not.toThrow();
+  });
+
+  it("accepts an undefined efSearch (no override)", () => {
+    expect(() => {
+      assertPgvectorEfSearch();
+    }).not.toThrow();
   });
 
   it("rejects a non-positive-integer efSearch at the build boundary", () => {
     for (const bad of [0, -5, 2.5]) {
-      expect(() =>
-        buildVectorSearchPostgres(pgTables, { ...PG_PARAMS, efSearch: bad }),
-      ).toThrow(/efSearch must be a positive integer/);
+      expect(() => {
+        assertPgvectorEfSearch(bad);
+      }).toThrow(/efSearch must be a positive integer/);
     }
   });
 });

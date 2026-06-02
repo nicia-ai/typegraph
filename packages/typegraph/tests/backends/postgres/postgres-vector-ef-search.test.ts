@@ -81,12 +81,21 @@ afterAll(async () => {
 beforeEach(async () => {
   if (sharedPool === undefined) return;
   await sharedPool.query(
-    `TRUNCATE typegraph_node_embeddings,
-              typegraph_node_uniques,
+    `TRUNCATE typegraph_node_uniques,
               typegraph_nodes,
               typegraph_edges,
               typegraph_schema_versions CASCADE`,
   );
+  // The strategy's per-(kind, field) vector table is created lazily, so
+  // truncate any that exist to keep embedding rows from leaking across
+  // tests that reuse the `Doc.embedding` slot under different graph ids.
+  const { rows } = await sharedPool.query<{ tablename: string }>(
+    String.raw`SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
+  );
+  for (const row of rows) {
+    await sharedPool.query(`TRUNCATE "${row.tablename}" CASCADE`);
+  }
 });
 
 const Document = defineNode("Doc", {
@@ -170,6 +179,8 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
         fieldPath: "embedding",
         queryEmbedding: [1, 0, 0, 0],
         metric: "cosine",
+        dimensions: 4,
+        indexType: "hnsw",
         limit: 3,
       } as const;
 
@@ -220,6 +231,8 @@ describe("Postgres efSearch — transaction-less backend", () => {
         fieldPath: "embedding",
         queryEmbedding: [1, 0, 0, 0],
         metric: "cosine",
+        dimensions: 4,
+        indexType: "hnsw",
         limit: 3,
         efSearch: 256,
       } as const;

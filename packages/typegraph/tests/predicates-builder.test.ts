@@ -486,11 +486,21 @@ describe("embeddingField", () => {
     const expr = pred.__expr as unknown as {
       queryEmbedding: readonly number[];
       limit: number;
-      metric: string;
+      metric: string | undefined;
     };
     expect(expr.queryEmbedding).toEqual(queryVector);
     expect(expr.limit).toBe(10);
-    expect(expr.metric).toBe("cosine");
+    // metric is intentionally left unset when the caller omits it — the
+    // compiler resolves the field's declared embedding() metric per kind.
+    expect(expr.metric).toBeUndefined();
+  });
+
+  it("carries an explicit similarTo metric override", () => {
+    const pred = embeddingField(field).similarTo([0.1, 0.2, 0.3], 10, {
+      metric: "l2",
+    });
+    const expr = pred.__expr as unknown as { metric: string | undefined };
+    expect(expr.metric).toBe("l2");
   });
 
   it("creates similarTo predicate with custom metric", () => {

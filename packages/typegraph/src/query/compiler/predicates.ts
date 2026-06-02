@@ -22,7 +22,7 @@ import {
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import { type DialectAdapter, type VectorStrategy } from "../dialect";
 import {
   joinJsonPointers,
   type JsonPointer,
@@ -35,7 +35,7 @@ import {
   isInSubqueryTypeCompatible,
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
-import { type SqlSchema } from "./schema";
+import { type SqlSchema, type VectorSlotMap } from "./schema";
 
 const COMPARISON_OP_SQL: Record<string, string> = {
   eq: "=",
@@ -396,6 +396,21 @@ export type PredicateCompilerContext = Readonly<{
   schema: SqlSchema;
   compileQuery: (ast: QueryAst, graphId: string) => SQL;
   cteColumnPrefix?: string;
+  /**
+   * Active vector strategy for `field.similarTo(...)` compilation. When
+   * present, the embeddings CTE scans the strategy's per-`(kind, field)`
+   * tables and uses its `distanceExpression`; absent on backends without
+   * vector support (the vector pass rejects the predicate before the CTE
+   * builder runs).
+   */
+  vectorStrategy?: VectorStrategy;
+  /**
+   * Declared embedding slots `(kind, fieldPath) -> {dimensions, metric,
+   * indexType}`. The embeddings CTE consults it to know which kinds in
+   * an alias actually declare the field — only those get a per-field
+   * table scan in the UNION ALL.
+   */
+  vectorSlots?: VectorSlotMap;
 }>;
 
 /**

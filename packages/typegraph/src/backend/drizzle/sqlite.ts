@@ -38,6 +38,13 @@ import {
   type FulltextStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  assertVectorSearchLimit,
+  buildVectorCapabilities,
+  type VectorSlot,
+  type VectorStrategy,
+} from "../../query/dialect/vector-strategy";
+import { isMissingTableError } from "../../utils/sql-errors";
+import {
   type AdoptedTransaction,
   type BackendCapabilities,
   type CommitSchemaVersionParams,
@@ -73,6 +80,14 @@ import {
   type SqliteExecutionAdapter,
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
+import {
+  createVectorSlotLatch,
+  mapVectorWriteError,
+  vectorSlotFromCreateIndexParams,
+  vectorSlotFromDropIndexParams,
+  vectorSlotFromParams,
+  type VectorSlotLatch,
+} from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import {
   buildContributionInsertValues,
@@ -113,11 +128,6 @@ import {
   SQLITE_ROW_MAPPER_CONFIG,
 } from "./row-mappers";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
-import {
-  createSqliteVectorIndex,
-  dropSqliteVectorIndex,
-  type VectorIndexOptions,
-} from "./vector-index";
 
 // ============================================================
 // Types
@@ -145,16 +155,17 @@ export type SqliteBackendOptions = Readonly<{
    */
   fulltext?: FulltextStrategy;
   /**
-   * Set to `true` when sqlite-vec has been loaded on the connection.
-   * Enables vector embedding persistence via `upsertEmbedding` /
-   * `deleteEmbedding`, which the store's embedding-sync path relies on
-   * whenever node schemas declare `embedding()` fields. When omitted the
-   * backend does not expose those methods and embedding values pass
-   * through writes without being indexed — matching existing behavior
-   * for backends without sqlite-vec. `createLocalSqliteBackend` sets
-   * this automatically when it loads the extension.
+   * Vector strategy override. When present, the backend owns per-`(kind,
+   * field)` typed storage through this strategy (DDL, upsert, delete,
+   * similarity search, ANN index lifecycle) and advertises
+   * `strategy.capabilities` as `capabilities.vector`. `createLibsqlBackend`
+   * passes `libsqlVectorStrategy` unconditionally; `createLocalSqliteBackend`
+   * passes `sqliteVecStrategy` when the extension loads. When absent the
+   * backend exposes no vector capability and embedding values pass through
+   * writes without being indexed — matching existing behavior for SQLite
+   * connections without a vector extension.
    */
-  hasVectorEmbeddings?: boolean;
+  vector?: VectorStrategy;
 }>;
 
 const SQLITE_MAX_BIND_PARAMETERS = 999;
@@ -194,7 +205,9 @@ type SerializedExecutionQueue = Readonly<{
 const toNodeRow = createNodeRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toEdgeRow = createEdgeRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toUniqueRow = createUniqueRowMapper(SQLITE_ROW_MAPPER_CONFIG);
-const toSchemaVersionRow = createSchemaVersionRowMapper(SQLITE_ROW_MAPPER_CONFIG);
+const toSchemaVersionRow = createSchemaVersionRowMapper(
+  SQLITE_ROW_MAPPER_CONFIG,
+);
 
 /** A shared promise that never settles — used to absorb post-dispose work. */
 const PENDING_FOREVER: Promise<never> = new Promise<never>(noop);
@@ -262,19 +275,6 @@ function runWithSerializedQueue<T>(
   return queue.runExclusive(task);
 }
 
-// sqlite-vec exposes vec_distance_cosine and vec_distance_l2 but has no
-// vec_distance_ip — keep this list aligned with the SQLite dialect's
-// vectorMetrics so query compilation and capability advertising agree.
-const SQLITE_VECTOR_METRICS = ["cosine", "l2"] as const;
-// sqlite-vec doesn't expose explicit index types (vec0 manages indexing
-// internally); createSqliteVectorIndex is a no-op. "none" matches that
-// reality without claiming HNSW/IVFFlat support we don't have.
-const SQLITE_VECTOR_INDEX_TYPES = ["none"] as const;
-// sqlite-vec's vec_f32 has no documented hard cap, but practical ANN
-// performance degrades well before pgvector's 16k limit. 8000 is a
-// conservative ceiling consistent with the extension's typical use.
-const SQLITE_VECTOR_MAX_DIMENSIONS = 8000;
-
 /**
  * The async storage transaction runner Drizzle's durable-sqlite driver
  * exposes as `db.$client` (`ctx.storage.transaction(async () => ...)`).
@@ -296,27 +296,20 @@ function throwSqliteTransactionsDisabled(message: string): never {
 function buildSqliteCapabilities(
   options: Readonly<{
     fulltextStrategy: FulltextStrategy;
-    hasVectorEmbeddings: boolean;
+    vectorStrategy: VectorStrategy | undefined;
     transactionMode: SqliteExecutionAdapter["profile"]["transactionMode"];
   }>,
 ): BackendCapabilities {
   const base =
-    options.transactionMode === "none"
-      ? { ...SQLITE_CAPABILITIES, transactions: false }
-      : SQLITE_CAPABILITIES;
+    options.transactionMode === "none" ?
+      { ...SQLITE_CAPABILITIES, transactions: false }
+    : SQLITE_CAPABILITIES;
   return {
     ...base,
     fulltext: buildFulltextCapabilities(options.fulltextStrategy),
-    ...(options.hasVectorEmbeddings
-      ? {
-          vector: {
-            supported: true,
-            metrics: SQLITE_VECTOR_METRICS,
-            indexTypes: SQLITE_VECTOR_INDEX_TYPES,
-            maxDimensions: SQLITE_VECTOR_MAX_DIMENSIONS,
-          },
-        }
-      : {}),
+    ...(options.vectorStrategy === undefined ?
+      {}
+    : { vector: buildVectorCapabilities(options.vectorStrategy) }),
   };
 }
 
@@ -341,8 +334,20 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   serializedQueue?: SerializedExecutionQueue;
   tableNames: SqlTableNames;
   fulltextStrategy: FulltextStrategy;
-  /** Wire up upsertEmbedding / deleteEmbedding. See transaction options for details. */
-  hasVectorEmbeddings?: boolean;
+  /**
+   * Active vector strategy, or `undefined` when the connection has no
+   * vector extension. When present, the backend exposes upsertEmbedding /
+   * deleteEmbedding / vectorSearch / createVectorIndex / dropVectorIndex,
+   * all routed through this strategy's per-`(kind, field)` storage.
+   */
+  vectorStrategy?: VectorStrategy | undefined;
+  /**
+   * Per-`(kind, field)` storage-ensure latch shared across the outer
+   * backend and every transaction-scoped backend (see
+   * {@link createVectorSlotLatch}). Required whenever `vectorStrategy` is
+   * set so writes never hit a missing per-field table.
+   */
+  vectorSlotLatch?: VectorSlotLatch | undefined;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -353,12 +358,10 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   profileHints: SqliteExecutionProfileHints;
   tableNames: SqlTableNames;
   fulltextStrategy: FulltextStrategy;
-  /**
-   * When true, the backend exposes upsertEmbedding / deleteEmbedding —
-   * detected by probing `vec_f32(...)` on the connection at boot so the
-   * store's embedding-sync path persists vectors to the embeddings table.
-   */
-  hasVectorEmbeddings?: boolean;
+  /** Active vector strategy. See {@link CreateSqliteOperationBackendOptions}. */
+  vectorStrategy?: VectorStrategy | undefined;
+  /** Shared storage-ensure latch. See {@link CreateSqliteOperationBackendOptions}. */
+  vectorSlotLatch?: VectorSlotLatch | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -372,6 +375,8 @@ function createSqliteOperationBackend(
     serializedQueue,
     tableNames,
     fulltextStrategy,
+    vectorStrategy,
+    vectorSlotLatch,
   } = options;
 
   function execGet<T>(query: SQL): Promise<T | undefined> {
@@ -438,34 +443,68 @@ function createSqliteOperationBackend(
         },
       };
 
+  // The latch runs per-field DDL on the same connection a write/search
+  // executes on, so a transaction-scoped write materializes its slot inside
+  // the caller's transaction.
+  async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
+    if (vectorStrategy === undefined || vectorSlotLatch === undefined) return;
+    await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
+      await execRun(sql.raw(statement));
+    });
+  }
+
   const vectorEmbeddingMethods =
-    options.hasVectorEmbeddings
-      ? {
-          async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-            const query = operationStrategy.buildUpsertEmbedding(
-              params,
-              nowIso(),
-            );
-            await execRun(query);
-          },
-          async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-            const query = operationStrategy.buildDeleteEmbedding(params);
-            await execRun(query);
-          },
-          async vectorSearch(
-            params: VectorSearchParams,
-          ): Promise<readonly VectorSearchResult[]> {
-            const query = operationStrategy.buildVectorSearch(params);
-            const rows = await execAll<{ node_id: string; score: number }>(
-              query,
-            );
-            return rows.map((row) => ({
-              nodeId: row.node_id,
-              score: row.score,
-            }));
-          },
-        }
-      : {};
+    vectorStrategy === undefined ?
+      {}
+    : {
+        async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
+          try {
+            for (const statement of statements) {
+              await execRun(statement);
+            }
+          } catch (error) {
+            throw mapVectorWriteError(error, params);
+          }
+        },
+        async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
+          // Ensure the per-field table exists before deleting. A delete
+          // can run before any embedding was ever written for the field
+          // (e.g. a node hard-deleted having never carried one); the
+          // idempotent ensure makes the DELETE a clean no-op against an
+          // existing (possibly empty) table, matching the Postgres path
+          // (where a DELETE on a missing relation would abort an
+          // enclosing transaction).
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const statements = vectorStrategy.buildDelete(slot, params);
+          for (const statement of statements) {
+            await execRun(statement);
+          }
+        },
+        async vectorSearch(
+          params: VectorSearchParams,
+        ): Promise<readonly VectorSearchResult[]> {
+          assertVectorSearchLimit(params.limit);
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          const query = vectorStrategy.buildSearch(slot, params);
+          let rows: readonly { node_id: string; score: number }[];
+          try {
+            rows = await execAll<{ node_id: string; score: number }>(query);
+          } catch (error) {
+            // A query vector whose dimension no longer matches the stored
+            // column surfaces the same typed error as the write path.
+            throw mapVectorWriteError(error, params);
+          }
+          return rows.map((row) => ({
+            nodeId: row.node_id,
+            score: row.score,
+          }));
+        },
+      };
 
   const operationBackend: InternalOperationBackend = {
     ...commonBackend,
@@ -475,44 +514,35 @@ function createSqliteOperationBackend(
     dialect: "sqlite",
     tableNames,
     fulltextStrategy,
+    ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
 
-    createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      const indexOptions: VectorIndexOptions = {
-        graphId: params.graphId,
-        nodeKind: params.nodeKind,
-        fieldPath: params.fieldPath,
-        dimensions: params.dimensions,
-        indexType: params.indexType,
-        metric: params.metric,
-        ...(params.indexParams?.m === undefined
-          ? {}
-          : { hnswM: params.indexParams.m }),
-        ...(params.indexParams?.efConstruction === undefined
-          ? {}
-          : { hnswEfConstruction: params.indexParams.efConstruction }),
-        ...(params.indexParams?.lists === undefined
-          ? {}
-          : { ivfflatLists: params.indexParams.lists }),
-      };
-
-      const result = createSqliteVectorIndex(indexOptions);
-
-      if (!result.success) {
-        throw new Error(result.message ?? "Failed to create SQLite vector index");
+    async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      const slot = vectorSlotFromCreateIndexParams(params);
+      // Ensure the per-field table exists first (idempotent), then create
+      // its ANN index. `ownedTables` already folds the index DDL in, so the
+      // explicit `buildCreateIndex` step is belt-and-suspenders for slots
+      // whose index intent changed after the table was first materialized.
+      await ensureVectorSlotStorage(slot);
+      const indexStatement = vectorStrategy.buildCreateIndex?.(slot);
+      if (indexStatement !== undefined) {
+        await execRun(indexStatement);
       }
-      return Promise.resolve();
     },
 
-    dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      const result = dropSqliteVectorIndex(
-        params.graphId,
-        params.nodeKind,
-        params.fieldPath,
-      );
-      if (!result.success) {
-        throw new Error(result.message ?? "Failed to drop SQLite vector index");
+    async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
+      if (vectorStrategy === undefined) return;
+      const slot = vectorSlotFromDropIndexParams(params);
+      const dropStatement = vectorStrategy.buildDropIndex?.(slot);
+      if (dropStatement === undefined) return;
+      try {
+        await execRun(dropStatement);
+      } catch (error) {
+        // The per-field table (and thus its index) may never have been
+        // materialized; DROP INDEX IF EXISTS against a missing table errors
+        // on some drivers, so treat that as already-dropped.
+        if (!isMissingTableError(error)) throw error;
       }
-      return Promise.resolve();
     },
 
     // === Fulltext Operations ===
@@ -584,7 +614,9 @@ function createSqliteOperationBackend(
       );
     },
 
-    compileSql(query: SQL): Readonly<{ sql: string; params: readonly unknown[] }> {
+    compileSql(
+      query: SQL,
+    ): Readonly<{ sql: string; params: readonly unknown[] }> {
       return executionAdapter.compile(query);
     },
   };
@@ -601,21 +633,25 @@ export function createSqliteBackend(
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
   const { isSync, transactionMode } = executionAdapter.profile;
-  // Explicit opt-in: wire upsertEmbedding / deleteEmbedding only when
-  // the caller confirms sqlite-vec is loaded. Probing synchronously
-  // isn't portable across drizzle SQLite drivers (sync vs async), so
-  // the gate lives with the caller that loaded the extension.
-  const hasVectorEmbeddings = options.hasVectorEmbeddings === true;
+  // The active vector strategy gates upsertEmbedding / deleteEmbedding /
+  // vectorSearch and supplies the per-`(kind, field)` storage. Passed by
+  // the caller that knows the connection's vector capability
+  // (`createLibsqlBackend` always; `createLocalSqliteBackend` when the
+  // extension loads); absent for plain SQLite drivers with no extension.
+  const vectorStrategy = options.vector;
+  // One latch per backend instance, shared with every transaction-scoped
+  // backend so a slot's per-field table is created at most once per process.
+  const vectorSlotLatch =
+    vectorStrategy === undefined ? undefined : createVectorSlotLatch();
   const capabilities: BackendCapabilities = buildSqliteCapabilities({
     fulltextStrategy,
-    hasVectorEmbeddings,
+    vectorStrategy,
     transactionMode,
   });
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
-    embeddings: getTableName(tables.embeddings),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -631,7 +667,8 @@ export function createSqliteBackend(
     operationStrategy,
     tableNames,
     fulltextStrategy,
-    hasVectorEmbeddings,
+    vectorStrategy,
+    vectorSlotLatch,
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -649,9 +686,7 @@ export function createSqliteBackend(
    * (schema-version commits — data only, never DDL: the #135 invariant
    * holds because `bootstrapTables` runs outside any transaction).
    */
-  function runDoSqliteStorageTransaction<T>(
-    run: () => Promise<T>,
-  ): Promise<T> {
+  function runDoSqliteStorageTransaction<T>(run: () => Promise<T>): Promise<T> {
     const storage = (db as { $client?: DurableObjectStorageClient }).$client;
     const storageTransaction = storage?.transaction;
     if (typeof storageTransaction !== "function") {
@@ -701,7 +736,8 @@ export function createSqliteBackend(
           profileHints: { isSync: true },
           tableNames,
           fulltextStrategy,
-          hasVectorEmbeddings,
+          vectorStrategy,
+          vectorSlotLatch,
         });
         db.run(sql`BEGIN IMMEDIATE`);
         try {
@@ -731,7 +767,8 @@ export function createSqliteBackend(
           profileHints: { isSync },
           tableNames,
           fulltextStrategy,
-          hasVectorEmbeddings,
+          vectorStrategy,
+          vectorSlotLatch,
         });
         return fn(txBackend);
       });
@@ -741,19 +778,25 @@ export function createSqliteBackend(
     // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
     // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
     // write lock at the start of the transaction.
-    return runWithSerializedQueue(serializedQueue, async () =>
-      db.transaction(async (tx) => {
-        const txBackend = createTransactionBackend({
-          capabilities,
-          db: tx,
-          operationStrategy,
-          profileHints: { isSync },
-          tableNames,
-          fulltextStrategy,
-          hasVectorEmbeddings,
-        });
-        return fn(txBackend);
-      }, { behavior: "immediate" }) as Promise<T>,
+    return runWithSerializedQueue(
+      serializedQueue,
+      async () =>
+        db.transaction(
+          async (tx) => {
+            const txBackend = createTransactionBackend({
+              capabilities,
+              db: tx,
+              operationStrategy,
+              profileHints: { isSync },
+              tableNames,
+              fulltextStrategy,
+              vectorStrategy,
+              vectorSlotLatch,
+            });
+            return fn(txBackend);
+          },
+          { behavior: "immediate" },
+        ) as Promise<T>,
     );
   }
 
@@ -829,9 +872,7 @@ export function createSqliteBackend(
   // the tx) and `adoptTransaction()` (#134 — the caller already opened
   // it): bind a tx-scoped backend to the *literal* `tx` client and gate
   // fulltext on the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(
-    tx: AnySqliteDatabase,
-  ): TransactionBackend {
+  function bindTransactionBackend(tx: AnySqliteDatabase): TransactionBackend {
     const txBackend = createTransactionBackend({
       capabilities,
       db: tx,
@@ -839,7 +880,8 @@ export function createSqliteBackend(
       profileHints: { isSync },
       tableNames,
       fulltextStrategy,
-      hasVectorEmbeddings,
+      vectorStrategy,
+      vectorSlotLatch,
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -1080,7 +1122,8 @@ export function createSqliteBackend(
             profileHints: { isSync: true },
             tableNames,
             fulltextStrategy,
-            hasVectorEmbeddings,
+            vectorStrategy,
+            vectorSlotLatch,
           });
           db.run(sql`BEGIN`);
 
@@ -1108,10 +1151,12 @@ export function createSqliteBackend(
       }
 
       // transactionMode === "drizzle"
-      return runWithSerializedQueue(serializedQueue, async () =>
-        db.transaction(
-          async (tx) => fn(bindTransactionBackend(tx), tx),
-        ) as Promise<T>,
+      return runWithSerializedQueue(
+        serializedQueue,
+        async () =>
+          db.transaction(async (tx) =>
+            fn(bindTransactionBackend(tx), tx),
+          ) as Promise<T>,
       );
     },
 
@@ -1160,6 +1205,12 @@ function createTransactionBackend(
       profileHints: options.profileHints,
     });
 
+  // A transaction-scoped backend gets its OWN per-field ensure-latch, never
+  // the outer process-global one. A `CREATE TABLE/INDEX` that runs inside the
+  // caller's transaction and then rolls back must not leave the shared latch
+  // marking the slot "ensured" — that would skip the re-CREATE and make every
+  // later write fail with "no such table". The fresh latch is discarded with
+  // the transaction, so the next write re-ensures idempotently.
   return createSqliteOperationBackend({
     capabilities: options.capabilities,
     db: options.db,
@@ -1167,12 +1218,13 @@ function createTransactionBackend(
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
-    ...(options.hasVectorEmbeddings === undefined
+    vectorStrategy: options.vectorStrategy,
+    ...(options.vectorStrategy === undefined
       ? {}
-      : { hasVectorEmbeddings: options.hasVectorEmbeddings }),
+      : { vectorSlotLatch: createVectorSlotLatch() }),
   });
 }
 
 // Re-export schema utilities
-export type { SqliteTableNames,SqliteTables } from "./schema/sqlite";
+export type { SqliteTableNames, SqliteTables } from "./schema/sqlite";
 export { createSqliteTables, tables } from "./schema/sqlite";

@@ -225,49 +225,9 @@ export const postgresDialect: DialectAdapter = {
   // Vector Operations
   // ============================================================
 
+  // Compile-time gate for `field.similarTo(...)`; the active
+  // `VectorStrategy` (pgvector) owns the distance SQL.
   supportsVectors: true,
-
-  vectorDistance(column, embedding, metric) {
-    const formatted = this.formatEmbedding(embedding);
-    // Column is native VECTOR type, no cast needed
-    switch (metric) {
-      case "cosine": {
-        // Cosine distance: 1 - cosine_similarity
-        // Lower is more similar (0 = identical)
-        return sql`(${column} <=> ${formatted})`;
-      }
-      case "l2": {
-        // Euclidean (L2) distance
-        // Lower is more similar (0 = identical)
-        return sql`(${column} <-> ${formatted})`;
-      }
-      case "inner_product": {
-        // Inner product distance (negative inner product)
-        // Note: pgvector uses <#> which returns NEGATIVE inner product
-        // More negative = more similar for normalized vectors
-        return sql`(${column} <#> ${formatted})`;
-      }
-      default: {
-        const _exhaustive: never = metric;
-        throw new Error("Unsupported vector metric: " + String(_exhaustive));
-      }
-    }
-  },
-
-  formatEmbedding(embedding) {
-    // Validate all values are finite numbers to prevent injection
-    for (const [index, value] of embedding.entries()) {
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new TypeError(
-          `embedding[${index}] must be a finite number, got: ${value}`,
-        );
-      }
-    }
-    // Format as PostgreSQL vector literal: '[1.0,2.0,3.0]'::vector
-    // Query embedding still needs cast since it's a literal string
-    const asString = `[${embedding.join(",")}]`;
-    return sql`${asString}::vector`;
-  },
 
   // ============================================================
   // Fulltext Operations

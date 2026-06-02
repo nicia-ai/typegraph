@@ -18,11 +18,39 @@ import {
 import { type GraphBackend } from "../src/backend/types";
 import { type PropsAccessor } from "../src/query/builder/types";
 import { compileQuery } from "../src/query/compiler";
+import {
+  vectorSlotKey,
+  type VectorSlotMap,
+} from "../src/query/compiler/schema";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import { type FulltextAccessor } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
 import type { createStore } from "../src/store";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 import { createInitializedStore, createTestBackend } from "./test-utils";
+
+// ============================================================
+// Vector compile helpers
+// ============================================================
+
+// The compiler's `field.similarTo(...)` CTE scans the strategy's per-field
+// tables, so a compile-only vector/hybrid test must pass the pgvector
+// strategy plus a slot map naming every `(kind, embeddingField)` it uses.
+function pgVectorCompileOptions(
+  slots: readonly (readonly [kind: string, fieldPath: string])[],
+) {
+  const vectorSlots: VectorSlotMap = new Map(
+    slots.map(([kind, fieldPath]) => [
+      vectorSlotKey(kind, fieldPath),
+      { dimensions: 4, metric: "cosine", indexType: "hnsw" } as const,
+    ]),
+  );
+  return {
+    dialect: "postgres",
+    vectorStrategy: pgvectorStrategy,
+    vectorSlots,
+  } as const;
+}
 
 // ============================================================
 // Fixture schemas
@@ -630,9 +658,11 @@ describe(".matches() with polymorphic alias", () => {
       .select((ctx) => ctx.d)
       .toAst();
 
-    const compiled = compileQuery(ast, HybridGraph.id, {
-      dialect: "postgres",
-    });
+    const compiled = compileQuery(
+      ast,
+      HybridGraph.id,
+      pgVectorCompileOptions([["HybridDoc", "embedding"]]),
+    );
     const sqlText = toSqlString(compiled);
     // The outer ORDER BY contains the fused RRF expression FOLLOWED BY
     // the user's `rank` orderBy as a tiebreaker (json-path extraction).
@@ -675,9 +705,11 @@ describe(".matches() with polymorphic alias", () => {
       .select((ctx) => ctx.d)
       .toAst();
 
-    const compiled = compileQuery(ast, HybridGraph.id, {
-      dialect: "postgres",
-    });
+    const compiled = compileQuery(
+      ast,
+      HybridGraph.id,
+      pgVectorCompileOptions([["HybridDoc", "embedding"]]),
+    );
     const sqlText = toSqlString(compiled);
 
     expect(sqlText).toMatch(/cte_relevance_candidates AS/);
@@ -777,26 +809,35 @@ describe(".matches() with polymorphic alias", () => {
       .select((ctx) => ctx.v)
       .toAst();
 
-    const compiled = compileQuery(ast, VectorPolyGraph.id, {
-      dialect: "postgres",
-    });
+    const compiled = compileQuery(
+      ast,
+      VectorPolyGraph.id,
+      pgVectorCompileOptions([
+        ["PolyVector", "embedding"],
+        ["PolyChild", "embedding"],
+      ]),
+    );
     const sqlText = toSqlString(compiled);
     const { params } = toSqlWithParams(compiled, "postgres");
 
-    // Filter restricts to the alias's resolved kinds.
-    expect(sqlText).toMatch(
-      /node_kind" IN \(PolyVector, PolyChild\)|node_kind IN \(PolyVector, PolyChild\)/,
-    );
-    expect(params).toContain("embedding");
-    // JOIN keys on both id AND kind.
+    // The embeddings CTE UNION-ALLs the per-(kind, field) tables for both
+    // resolved kinds, scoping each branch to its own kind. There is no
+    // shared table / field_path filter anymore — the kind lives in the
+    // table name and the `'<kind>' AS node_kind` literal.
+    expect(sqlText).toContain("tg_vec_vector_poly_test_polyvector_embedding");
+    expect(sqlText).toContain("tg_vec_vector_poly_test_polychild_embedding");
+    expect(sqlText).toMatch(/UNION ALL/);
+    // The kind literals are bound as parameters (the `'<kind>' AS node_kind`
+    // projection and the scoped-join kind equality).
+    expect(params).toContain("PolyVector");
+    expect(params).toContain("PolyChild");
+    // The outer relevance JOIN keys on both id AND kind.
     expect(sqlText).toMatch(
       /INNER JOIN cte_embeddings ON cte_embeddings\.node_id = cte_v\.v_id AND cte_embeddings\.node_kind = cte_v\.v_kind/,
     );
-    // CTE carries node_kind through both the inner subquery SELECT and
-    // the outer ROW_NUMBER-wrapping SELECT. Counting total occurrences
-    // in the whole query: the baseline without node_kind support would
-    // be 1 (the kind filter). Post-fix we expect ≥4 — inner projection,
-    // outer projection, inner WHERE, and the JOIN's ON clause.
+    // node_kind threads through the inner branch projections, the outer
+    // ROW_NUMBER-wrapping SELECT, the scoped-relevance join, and the outer
+    // relevance JOIN — comfortably ≥4 mentions across the query.
     const nodeKindMentions = (sqlText.match(/node_kind/g) ?? []).length;
     expect(nodeKindMentions).toBeGreaterThanOrEqual(4);
   });

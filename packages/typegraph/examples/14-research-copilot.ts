@@ -392,7 +392,8 @@ export async function main(): Promise<void> {
   // createStoreWithSchema path — the canonical, durable initialization
   // step. (Sync createStore() is an attach-only, zero-I/O path and
   // would throw StoreNotInitializedError on the first searchable write.)
-  const [store] = await createStoreWithSchema(graph, createExampleBackend());
+  const backend = createExampleBackend();
+  const [store] = await createStoreWithSchema(graph, backend);
 
   console.log("━".repeat(68));
   console.log(" Research Copilot — RAG + citation graph + graph algorithms");
@@ -486,20 +487,36 @@ export async function main(): Promise<void> {
 
   const queryEmbedding = mockEmbedding(query);
 
-  // Fetch every paper + embedding once; rank by cosine similarity in JS.
-  // In production you'd use `d.embedding.similarTo(queryEmbedding, k)` for
-  // hardware-accelerated vector search via pgvector or sqlite-vec.
   const allPapers = await store.nodes.Paper.find();
   type PaperNode = (typeof allPapers)[number];
   const paperById = new Map<string, PaperNode>(
     allPapers.map((paper) => [paper.id, paper]),
   );
-  const ranked = allPapers
-    .map((paper) => ({
-      paper,
-      similarity: cosine(queryEmbedding, paper.embedding),
-    }))
-    .sort((a, b) => b.similarity - a.similarity);
+
+  // Rank papers by semantic similarity. The example backend loads sqlite-vec,
+  // so this runs native vector search (store.search.vector); pgvector / libSQL
+  // run the identical call. If no vector engine is present we rank in JS so the
+  // example still completes.
+  let ranked: ReadonlyArray<{ paper: PaperNode; similarity: number }>;
+  if (backend.capabilities.vector?.supported) {
+    const hits = await store.search.vector("Paper", {
+      fieldPath: "embedding",
+      queryEmbedding,
+      limit: allPapers.length,
+      metric: "cosine",
+    });
+    ranked = hits.map((hit) => ({
+      paper: paperById.get(hit.node.id)!,
+      similarity: hit.score,
+    }));
+  } else {
+    ranked = allPapers
+      .map((paper) => ({
+        paper,
+        similarity: cosine(queryEmbedding, paper.embedding),
+      }))
+      .sort((a, b) => b.similarity - a.similarity);
+  }
 
   console.log("\nTop semantic hits (vector similarity only):");
   for (const hit of ranked.slice(0, 5)) {
