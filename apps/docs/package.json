@@ -18,10 +18,10 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
-    "@astrojs/cloudflare": "^13.5.3",
-    "@astrojs/starlight": "^0.39.2",
+    "@astrojs/cloudflare": "^13.6.1",
+    "@astrojs/starlight": "^0.39.3",
     "@astrojs/starlight-tailwind": "^5.0.0",
-    "astro": "^6.3.6",
+    "astro": "^6.4.3",
     "starlight-llms-txt": "^0.10.0"
   },
   "devDependencies": {
@@ -29,10 +29,10 @@
     "@typegraph/eslint-config": "workspace:*",
     "@types/node": "^24.12.0",
     "astro-eslint-parser": "^1.4.0",
-    "eslint": "^10.4.0",
+    "eslint": "^10.4.1",
     "eslint-plugin-astro": "^1.7.0",
     "tailwindcss": "^4.3.0",
     "typescript": "^5.9.3",
-    "wrangler": "^4.93.0"
+    "wrangler": "^4.97.0"
   }
 }
