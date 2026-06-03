@@ -47,11 +47,17 @@ jobs:
           mkdir -p .tmp-release
           PACK_OUTPUT="$(pnpm --filter @nicia-ai/typegraph pack --json --pack-destination .tmp-release)"
           TARBALL_PATH="$(echo "$PACK_OUTPUT" | node -e 'const fs = require("node:fs"); const input = fs.readFileSync(0, "utf8"); const data = JSON.parse(input); const filename = Array.isArray(data) ? data[0]?.filename : data?.filename; if (!filename) process.exit(1); process.stdout.write(filename);')"
+          # Backend subpaths (sqlite/local, sqlite/libsql, postgres/pglite) load a
+          # driver at import time. Pin those optional peers to the exact ranges the
+          # repo validates against — PGlite's is tight (>=0.5.0 <0.6.0) — so the
+          # smoke can import every public subpath, not just the driver-agnostic ones.
+          DRIVER_SPECS="$(node -e 'const dev = require("./packages/typegraph/package.json").devDependencies; const names = ["better-sqlite3", "@libsql/client", "@electric-sql/pglite"]; process.stdout.write(names.map((name) => `${name}@${dev[name]}`).join(" "));')"
           mkdir -p .tmp-release/smoke
+          cp packages/typegraph/scripts/smoke-exports.mjs .tmp-release/smoke/
           cd .tmp-release/smoke
           npm init -y >/dev/null
-          npm install "$TARBALL_PATH" >/dev/null
-          node --input-type=module -e 'const pkg = await import("@nicia-ai/typegraph"); if (typeof pkg.createStore !== "function") throw new Error("Missing createStore export");'
+          npm install "$TARBALL_PATH" $DRIVER_SPECS >/dev/null
+          node smoke-exports.mjs
 
       - name: Create release PR or publish
         uses: changesets/action@v1

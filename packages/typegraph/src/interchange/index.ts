@@ -4,16 +4,15 @@
  * Provides import/export functionality for graph data in a standardized
  * JSON format. Use this module to:
  *
- * - Import data from TypeGraph Cloud extractions
  * - Export graph data for backup or transfer
- * - Exchange data between TypeGraph instances
+ * - Exchange data between TypeGraph instances and external systems
  *
  * @example
  * ```typescript
  * import { importGraph, exportGraph, GraphDataSchema } from "@nicia-ai/typegraph/interchange";
  *
- * // Import from Cloud extraction
- * const data = GraphDataSchema.parse(jsonFromCloud);
+ * // Validate and import data exported from another store
+ * const data = GraphDataSchema.parse(exportedJson);
  * const result = await importGraph(store, data, {
  *   onConflict: "update",
  *   onUnknownProperty: "strip",

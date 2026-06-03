@@ -6,7 +6,6 @@ description: Import and export graph data for backups, migrations, and external 
 TypeGraph provides a standardized interchange format for importing and exporting
 graph data. Use it for:
 
-- Importing data extracted by TypeGraph Cloud
 - Backing up and restoring graph data
 - Migrating data between environments
 - Exchanging data with external systems
@@ -52,7 +51,7 @@ interface GraphData {
   formatVersion: "1.0";
   exportedAt: string; // ISO datetime
   source: {
-    type: "typegraph-cloud" | "typegraph-export" | "external";
+    type: "typegraph-export" | "external";
     // Additional source-specific fields
   };
   nodes: Array<{
@@ -207,50 +206,6 @@ await importGraph(store, data, { onUnknownProperty: "strip" });
 ```typescript
 await importGraph(store, data, { onUnknownProperty: "allow" });
 // Behavior depends on your database and schema strictness
-```
-
-## TypeGraph Cloud Integration
-
-When using TypeGraph Cloud for document extraction, the workflow is:
-
-1. **Schema Discovery** (optional): Cloud analyzes your documents and proposes schemas
-2. **Schema-Guided Extraction**: Cloud extracts entities/relationships matching your schema
-3. **Import**: Use `importGraph` to load extracted data into your store
-
-```typescript
-import { importGraph, GraphDataSchema } from "@nicia-ai/typegraph/interchange";
-
-// Fetch extraction from Cloud API
-const response = await fetch("https://api.typegraph.cloud/extractions/abc123", {
-  headers: { Authorization: `Bearer ${apiKey}` },
-});
-const cloudData = await response.json();
-
-// Validate and import
-const validated = GraphDataSchema.parse(cloudData);
-const result = await importGraph(store, validated, {
-  onConflict: "update",
-  onUnknownProperty: "strip", // Cloud may include provenance fields
-});
-```
-
-### Cloud Data Sources
-
-Data from TypeGraph Cloud includes source metadata:
-
-```typescript
-{
-  formatVersion: "1.0",
-  exportedAt: "2024-01-15T10:30:00Z",
-  source: {
-    type: "typegraph-cloud",
-    extractionId: "ext_abc123",
-    schemaId: "schema_xyz789",
-    schemaVersion: 2,
-  },
-  nodes: [...],
-  edges: [...],
-}
 ```
 
 ## Backup and Restore
