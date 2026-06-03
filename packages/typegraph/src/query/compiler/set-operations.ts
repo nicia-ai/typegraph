@@ -33,7 +33,7 @@ import {
   type QueryAst,
   type SetOperation,
 } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import { type DialectAdapter, type VectorStrategy } from "../dialect";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { emitSetOperationQuerySql } from "./emitter";
 import { runCompilerPass } from "./passes";
@@ -65,6 +65,7 @@ function runSetOperationPassPipeline(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
+  vectorStrategy: VectorStrategy | undefined,
 ): SetOperationPassState {
   let state: SetOperationPassState = {
     dialect,
@@ -80,6 +81,7 @@ function runSetOperationPassPipeline(
         dialect: currentState.dialect.name,
         graphId: currentState.graphId,
         op: currentState.op,
+        ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
       });
     },
     update(currentState, logicalPlan): SetOperationPassState {
@@ -110,6 +112,8 @@ function runSetOperationPassPipeline(
  * @param graphId - The graph ID
  * @param dialect - The dialect adapter
  * @param compileQuery - Function to compile regular (leaf) queries
+ * @param vectorStrategy - The backend-configured vector strategy, if any, used
+ *   to validate leaf vector predicates against the strategy's metric set
  * @returns SQL for the set operation
  */
 export function compileSetOperation(
@@ -117,8 +121,14 @@ export function compileSetOperation(
   graphId: string,
   dialect: DialectAdapter,
   compileQuery: QueryCompilerFunction,
+  vectorStrategy?: VectorStrategy,
 ): SQL {
-  const passState = runSetOperationPassPipeline(op, graphId, dialect);
+  const passState = runSetOperationPassPipeline(
+    op,
+    graphId,
+    dialect,
+    vectorStrategy,
+  );
   const { logicalPlan } = passState;
   if (logicalPlan === undefined) {
     throw new CompilerInvariantError(

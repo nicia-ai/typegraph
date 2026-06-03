@@ -8,7 +8,11 @@ import type {
   SetOperation,
   VectorSimilarityPredicate,
 } from "../../ast";
-import { getDialect, type SqlDialect } from "../../dialect";
+import {
+  getDialect,
+  type SqlDialect,
+  type VectorStrategy,
+} from "../../dialect";
 import {
   resolveFulltextAwareLimit,
   resolveVectorAwareLimit,
@@ -46,6 +50,12 @@ export type LowerSetOperationToLogicalPlanInput = Readonly<{
   dialect: SqlDialect;
   graphId: string;
   op: SetOperation;
+  /**
+   * The backend-configured vector strategy, threaded so a set-operation leaf's
+   * vector predicate validates against the same metric set as standalone leaf
+   * compilation (rather than only the dialect's fallback metric list).
+   */
+  vectorStrategy?: VectorStrategy;
 }>;
 
 /**
@@ -341,6 +351,7 @@ function lowerComposableQueryToLogicalPlanNode(
   dialect: SqlDialect,
   graphId: string,
   nextPlanNodeId: () => string,
+  vectorStrategy: VectorStrategy | undefined,
 ): LogicalPlanNode {
   if ("__type" in query) {
     return lowerSetOperationToLogicalPlanNode(
@@ -348,6 +359,7 @@ function lowerComposableQueryToLogicalPlanNode(
       graphId,
       dialect,
       nextPlanNodeId,
+      vectorStrategy,
     );
   }
 
@@ -367,6 +379,7 @@ function lowerComposableQueryToLogicalPlanNode(
   const vectorPredicate = runVectorPredicatePass(
     query,
     dialectAdapter,
+    vectorStrategy,
   ).vectorPredicate;
   const fulltextPredicate = runFulltextPredicatePass(
     query,
@@ -397,6 +410,7 @@ function lowerSetOperationToLogicalPlanNode(
   graphId: string,
   dialect: SqlDialect,
   nextPlanNodeId: () => string,
+  vectorStrategy: VectorStrategy | undefined,
 ): LogicalPlanNode {
   let currentNode: LogicalPlanNode = {
     id: nextPlanNodeId(),
@@ -405,6 +419,7 @@ function lowerSetOperationToLogicalPlanNode(
       dialect,
       graphId,
       nextPlanNodeId,
+      vectorStrategy,
     ),
     op: "set_op",
     operator: op.operator,
@@ -413,6 +428,7 @@ function lowerSetOperationToLogicalPlanNode(
       dialect,
       graphId,
       nextPlanNodeId,
+      vectorStrategy,
     ),
   };
 
@@ -489,6 +505,7 @@ export function lowerSetOperationToLogicalPlan(
       input.graphId,
       input.dialect,
       nextPlanNodeId,
+      input.vectorStrategy,
     ),
   };
 }

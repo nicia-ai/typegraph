@@ -725,7 +725,7 @@ if (backend.capabilities.vector?.supported) {
 | --- | --- |
 | `transactions` | Atomic transactions available (see note below) |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
-| `fulltext?.{modes,phraseQueries,prefixQueries,highlighting,languages}` | Fulltext strategy capabilities |
+| `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
 
 ### SQLite ↔ PostgreSQL parity
 

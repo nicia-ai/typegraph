@@ -259,8 +259,12 @@ export function compileSetOperation(
   const dialect = options_.dialect ?? "sqlite";
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
-  return compileSetOp(op, graphId, adapter, (ast, gid) =>
-    compileQuery(ast, gid, propagateOptions(options_)),
+  return compileSetOp(
+    op,
+    graphId,
+    adapter,
+    (ast, gid) => compileQuery(ast, gid, propagateOptions(options_)),
+    options_.vectorStrategy,
   );
 }
 
