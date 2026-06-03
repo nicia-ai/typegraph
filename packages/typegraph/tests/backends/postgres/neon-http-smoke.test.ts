@@ -77,8 +77,6 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
     // and refuses with a typed ConfigurationError on this backend.
     expect(backend.capabilities.transactions).toBe(false);
     // Other capabilities are unchanged.
-    expect(backend.capabilities.cte).toBe(true);
-    expect(backend.capabilities.jsonb).toBe(true);
     expect(backend.capabilities.vector?.supported).toBe(true);
   });
 

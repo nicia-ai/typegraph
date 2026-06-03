@@ -76,10 +76,7 @@ describe("SQLite Backend - Adapter Specific", () => {
       const backend = createSqliteBackend(db);
 
       expect(backend.dialect).toBe("sqlite");
-      expect(backend.capabilities.cte).toBe(true);
-      expect(backend.capabilities.returning).toBe(true);
-      expect(backend.capabilities.jsonb).toBe(false);
-      expect(backend.capabilities.ginIndexes).toBe(false);
+      expect(backend.capabilities.transactions).toBe(true);
     });
 
     it("reuses prepared statements in execute() for repeated SQL shapes", async () => {

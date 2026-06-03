@@ -719,6 +719,63 @@ if (backend.capabilities.vector?.supported) {
 }
 ```
 
+`backend.capabilities` is the runtime source of truth. The shape is:
+
+| Field | Meaning |
+| --- | --- |
+| `transactions` | Atomic transactions available (see note below) |
+| `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
+| `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
+
+### SQLite ↔ PostgreSQL parity
+
+The **query language is fully portable** between SQLite and PostgreSQL. Predicates (comparison, string/`ILIKE`,
+null, `between`, array, object, JSON-path), fixed and variable-length (recursive) traversals, aggregates
+(`count`/`sum`/`avg`/`min`/`max` with `groupBy`/`having`), set operations (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`,
+including traversal, subquery, `GROUP BY`/`HAVING`, and per-leaf `ORDER BY`/`LIMIT`/`OFFSET` leaves), ordering with
+`NULLS FIRST`/`LAST`, cursor pagination, temporal queries, and the fulltext query modes (`websearch`, `phrase`,
+`plain`, `raw`) all behave identically. A query you write against one backend compiles and runs the same way on the
+other.
+
+The remaining differences are **engine-capability gaps in the vector and fulltext layers** — they stem from what
+`sqlite-vec`/FTS5 implement versus `pgvector`/`tsvector`, not from TypeGraph choosing to support a feature on one
+backend only:
+
+| Capability | SQLite | PostgreSQL | Behavior on the unsupported side |
+| --- | --- | --- | --- |
+| Vector metric `inner_product` | ✗ | ✓ | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
+| Vector index type `ivfflat` | ✗ | ✓ | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`) |
+| Per-query fulltext `language` override | ✗ | ✓ | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query |
+| HNSW `efSearch` query tuning | ✗ | ✓ | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results |
+
+Vector and fulltext capabilities are populated from the configured strategy, so the matrix above reflects the
+bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
+different `metrics`/`indexTypes` shifts these rows accordingly — always check `backend.capabilities` at runtime
+rather than hard-coding the dialect.
+
+:::note[JSON is native on both backends]
+SQLite stores JSON as text and queries it with the built-in JSON functions (`json_extract`, `json_each`, …);
+PostgreSQL uses native `JSONB`. The dialect layer hides this difference, so JSON-path predicates and **B-tree
+expression indexes on scalar JSON properties** (`defineNodeIndex` / `defineEdgeIndex`) are at full parity. The one
+JSON-related difference is performance, not capability: PostgreSQL can use a single GIN index to accelerate
+array/object **containment** predicates (`contains()` / `containsAll()` / `hasKey()` / `pathEquals()`), whereas on
+SQLite those run as `json_each()` scans — correct results, just not index-accelerated. See
+[Indexes](/performance/indexes) for the full breakdown.
+:::
+
+:::note[Transactions are driver-dependent, not backend-dependent]
+Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
+Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
+`transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`) throw on those
+drivers regardless of backend.
+:::
+
+:::note[Aggregate set operations are a builder limitation, not a parity gap]
+`GROUP BY`/`HAVING` leaves are supported by the set-operation compiler on **both** backends, but the query builder
+does not expose `.union()`/`.intersect()`/`.except()` on `.aggregate()` queries. That limit applies equally to SQLite
+and PostgreSQL, so it is not a portability difference.
+:::
+
 ## Connection Management
 
 TypeGraph does not manage database connections. You are responsible for:

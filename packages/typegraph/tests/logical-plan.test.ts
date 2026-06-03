@@ -13,6 +13,8 @@ import {
   lowerSetOperationToLogicalPlan,
   lowerStandardQueryToLogicalPlan,
 } from "../src/query/compiler";
+import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
+import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
 import { jsonPointer } from "../src/query/json-pointer";
 
 function createIdField(alias: string): FieldRef {
@@ -82,6 +84,53 @@ function createBaseAst(extra: Partial<QueryAst> = {}): QueryAst {
 }
 
 describe("logical plan lowering", () => {
+  it("validates a set-op leaf's vector metric against the configured strategy", () => {
+    const vectorPredicate: VectorSimilarityPredicate = {
+      __type: "vector_similarity",
+      field: {
+        __type: "field_ref",
+        alias: "p",
+        jsonPointer: jsonPointer(["embedding"]),
+        path: ["props", "embedding"],
+        valueType: "embedding",
+      },
+      limit: 8,
+      metric: "inner_product",
+      queryEmbedding: [0.1, 0.2, 0.3],
+    };
+    const op: SetOperation = {
+      __type: "set_operation",
+      left: createBaseAst({
+        predicates: [{ expression: vectorPredicate, targetAlias: "p" }],
+      }),
+      operator: "union",
+      right: createBaseAst(),
+    };
+
+    // SQLite's dialect fallback metric list is cosine/l2, so without a strategy
+    // the inner_product leaf is rejected.
+    expect(() =>
+      lowerSetOperationToLogicalPlan({ dialect: "sqlite", graphId: "g", op }),
+    ).toThrow(/inner_product.*not supported for dialect "sqlite"/);
+
+    // A configured strategy advertising inner_product is honored.
+    const innerProductStrategy: VectorStrategy = {
+      ...sqliteVecStrategy,
+      capabilities: {
+        ...sqliteVecStrategy.capabilities,
+        metrics: ["cosine", "l2", "inner_product"],
+      },
+    };
+    expect(() =>
+      lowerSetOperationToLogicalPlan({
+        dialect: "sqlite",
+        graphId: "g",
+        op,
+        vectorStrategy: innerProductStrategy,
+      }),
+    ).not.toThrow();
+  });
+
   it("lowers simple query into scan/filter/project pipeline", () => {
     const predicateExpression: PredicateExpression = {
       __type: "comparison",

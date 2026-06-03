@@ -42,8 +42,6 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless", () => {
     const backend = createPostgresBackend(db);
 
     expect(backend.dialect).toBe("postgres");
-    expect(backend.capabilities.cte).toBe(true);
-    expect(backend.capabilities.jsonb).toBe(true);
     // Vector / pgvector capability is declared at backend-construction
     // time and doesn't depend on a live connection. It's the same on
     // every PostgreSQL driver we support.

@@ -97,16 +97,6 @@ export type { SqlDialect } from "../query/dialect/types";
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
-  /** Whether the backend supports JSONB type (vs TEXT for JSON) */
-  jsonb: boolean;
-  /** Whether the backend supports partial indexes */
-  partialIndexes: boolean;
-  /** Whether the backend supports GIN indexes for JSON */
-  ginIndexes: boolean;
-  /** Whether the backend supports CTE (WITH) queries */
-  cte: boolean;
-  /** Whether the backend supports RETURNING clause */
-  returning: boolean;
   /** Whether the backend supports atomic transactions (D1 does not) */
   transactions: boolean;
   /** Vector search capabilities (undefined if not configured) */
@@ -1483,11 +1473,6 @@ export type CountEdgesByKindParams = Readonly<{
  * Default capabilities for SQLite.
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = {
-  jsonb: false, // SQLite uses TEXT with json functions
-  partialIndexes: true, // SQLite supports WHERE in CREATE INDEX
-  ginIndexes: false, // SQLite doesn't have GIN
-  cte: true, // SQLite supports WITH
-  returning: true, // SQLite 3.35+ supports RETURNING
   transactions: true, // SQLite supports transactions
 };
 
@@ -1495,10 +1480,5 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = {
  * Default capabilities for PostgreSQL.
  */
 export const POSTGRES_CAPABILITIES: BackendCapabilities = {
-  jsonb: true, // PostgreSQL has native JSONB
-  partialIndexes: true,
-  ginIndexes: true,
-  cte: true,
-  returning: true,
   transactions: true, // PostgreSQL supports transactions
 };

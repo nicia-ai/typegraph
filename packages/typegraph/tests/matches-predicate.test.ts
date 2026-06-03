@@ -145,6 +145,22 @@ describe(".matches() predicate", () => {
     );
   });
 
+  it("rejects a per-query language override on a strategy that does not honor it", async () => {
+    // FTS5's tokenizer is fixed at table-create time, so a per-query `language`
+    // override is rejected on SQLite — matching the store-level search guard.
+    const query = store
+      .query()
+      .from("Document", "d")
+      .whereNode("d", (d) =>
+        d.$fulltext.matches("climate", 10, { language: "french" }),
+      )
+      .select((ctx) => ctx.d);
+
+    await expect(query.execute()).rejects.toThrow(
+      /does not honor a per-query `language` override/,
+    );
+  });
+
   it("enforces the top-k limit from the matches() call", async () => {
     for (let index = 0; index < 5; index += 1) {
       await store.nodes.Document.create({

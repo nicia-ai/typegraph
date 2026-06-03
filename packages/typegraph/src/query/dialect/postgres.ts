@@ -57,7 +57,6 @@ export const postgresDialect: DialectAdapter = {
   capabilities: {
     standardQueryStrategy: "cte_project",
     recursiveQueryStrategy: "recursive_cte",
-    setOperationStrategy: "standard_parenthesized",
     materializeIntermediateTraversalCtes: false,
     emitNotMaterializedHint: true,
     forceRecursiveWorktableOuterJoinOrder: false,
@@ -169,6 +168,16 @@ export const postgresDialect: DialectAdapter = {
   ilike(column, pattern) {
     // PostgreSQL has native ILIKE operator
     return sql`${column} ILIKE ${pattern}`;
+  },
+
+  // ============================================================
+  // Set Operations
+  // ============================================================
+
+  wrapSetOperationOperand(inner) {
+    // PostgreSQL allows a complete SELECT (incl. its own WITH) as a
+    // parenthesized compound operand.
+    return sql`(${inner})`;
   },
 
   // ============================================================

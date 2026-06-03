@@ -51,6 +51,17 @@ export function runFulltextPredicatePass(
   }
 
   if (
+    fulltextPredicate.language !== undefined &&
+    !strategy.supportsLanguageOverride
+  ) {
+    throw new UnsupportedPredicateError(
+      `Fulltext strategy "${strategy.name}" does not honor a per-query \`language\` override ` +
+        `(its tokenizer is fixed at table-create time). Drop the option, or use a strategy ` +
+        `that advertises \`supportsLanguageOverride: true\`.`,
+    );
+  }
+
+  if (
     !Number.isFinite(fulltextPredicate.limit) ||
     fulltextPredicate.limit <= 0
   ) {
