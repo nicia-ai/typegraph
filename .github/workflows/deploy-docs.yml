@@ -20,6 +20,9 @@ concurrency:
 permissions:
   contents: read
   deployments: write
+  # Allows the failure-report step to open/comment on a tracking issue when an
+  # unattended (release-triggered) deploy fails.
+  issues: write
 
 jobs:
   deploy:
@@ -39,8 +42,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # `astro build` intermittently fails on a cold Vite cache: the SSR dep
+      # optimizer discovers the Astro Actions runtime mid-build, re-optimizes,
+      # and the workerd runner references a chunk hash the reload just
+      # invalidated. The first attempt warms node_modules/.vite, so a retry
+      # clears it. The warning fires even on eventual success so the flake
+      # frequency stays visible in run summaries.
       - name: Build docs
-        run: pnpm --filter @nicia-ai/typegraph-docs build
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::Build attempt $attempt"
+            if pnpm --filter @nicia-ai/typegraph-docs build; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::astro build failed on attempt $attempt; retrying with warmed Vite cache"
+          done
+          exit 1
         env:
           NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
           NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
@@ -55,3 +74,33 @@ jobs:
           pnpm --filter @nicia-ai/typegraph-docs exec wrangler deploy "${VAR_FLAGS[@]}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Release-triggered deploys run unattended, so a failure must surface
+      # somewhere a human will see it. Dedup on an open tracking issue: comment
+      # if one exists, otherwise create it — repeated flakes never spam.
+      - name: Report deploy failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL: docs-deploy-failure
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create "$LABEL" \
+            --color B60205 \
+            --description "Automated: Deploy Docs workflow failed on main" \
+            2>/dev/null || true
+
+          body="$(printf '%s\n' \
+            "The **Deploy Docs** workflow failed on \`main\`." \
+            "" \
+            "- Run: $RUN_URL" \
+            "- Commit: \`${GITHUB_SHA}\`" \
+            "" \
+            "This deploy is unattended (release/CHANGELOG pushes), so the live docs at https://typegraph.dev may be stale until resolved. A transient Vite dep-optimizer race is the usual cause — re-running the failed job typically clears it.")"
+
+          existing="$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Docs deploy failed on main" --label "$LABEL" --body "$body"
+          fi
