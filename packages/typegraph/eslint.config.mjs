@@ -17,6 +17,9 @@ export default [
       "test-d/**",
       "type-smoke/**",
       "tmp/**",
+      // Plain-node CI tooling (runs under `node`, not part of the typed
+      // library program); still formatted by prettier.
+      "scripts/**/*.mjs",
       // #140: workerd-only do-sqlite suite (cloudflare:test). Runs via
       // its own `test:do` lane, not the Node lanes which cannot resolve
       // the `cloudflare:test` / worker ambient types.

@@ -134,17 +134,10 @@ export type ImportOptions = z.infer<typeof ImportOptionsSchema>;
  * Source metadata for graph data.
  *
  * Uses discriminated union to capture different origin types:
- * - `typegraph-cloud`: Extracted by TypeGraph Cloud
  * - `typegraph-export`: Exported from a TypeGraph store
  * - `external`: From a third-party system
  */
 export const GraphDataSourceSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("typegraph-cloud"),
-    extractionId: z.string(),
-    schemaId: z.string(),
-    schemaVersion: z.number().int().positive().optional(),
-  }),
   z.object({
     type: z.literal("typegraph-export"),
     graphId: z.string(),

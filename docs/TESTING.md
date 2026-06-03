@@ -302,11 +302,26 @@ it("closure is transitive", () => {
 
 ## CI Integration
 
-Tests run on every PR via Turbo:
+Every pull request to `main` must pass the full gate defined in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It is much broader
+than the local `pnpm test` default (which runs only SQLite unit/property
+tests). The jobs are:
 
-```bash
-turbo run test
-```
+| Job | What it runs |
+|-----|--------------|
+| **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
+| **Test (SQLite)** | `test:unit` + `test:property` on Node 22 and 24, plus a SQLite perf sanity check and an example smoke test |
+| **Test (Coverage)** | `test:coverage` — enforces the coverage thresholds |
+| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.2 |
+| **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
+| **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
+| **Build** | `turbo run build` — gated on every job above |
 
-Coverage thresholds are enforced when running `pnpm test:coverage`. CI currently runs unit/property
-tests by default.
+A separate [release workflow](../.github/workflows/release.yml) packs the npm
+tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
+before publishing.
+
+To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
+typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
+change touching backend, store, or collection code. Coverage thresholds are
+enforced by `pnpm test:coverage`.
