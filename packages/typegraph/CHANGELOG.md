@@ -1,5 +1,152 @@
 # @nicia-ai/typegraph
 
+## 0.29.0
+
+### Minor Changes
+
+- [#161](https://github.com/nicia-ai/typegraph/pull/161) [`9e86269`](https://github.com/nicia-ai/typegraph/commit/9e862695c6a3341af5d8acbd4f652738bd7727ca) Thanks [@pdlug](https://github.com/pdlug)! - Add cross-backend vector and hybrid search through a pluggable
+  `VectorStrategy`, closing [#157](https://github.com/nicia-ai/typegraph/issues/157). TypeGraph now has first-class vector storage and
+  search for libSQL/Turso, sqlite-vec, and pgvector behind the same semantic
+  search APIs.
+
+  Backend highlights:
+  - libSQL/Turso stores fixed-dimension embeddings in `F32_BLOB(N)` columns,
+    supports cosine/L2 search, and can use DiskANN through `libsql_vector_idx`
+    and `vector_top_k`.
+  - sqlite-vec uses `vec0` KNN tables instead of brute-force vector scans.
+  - pgvector uses graph-scoped, per-field `vector(N)` tables with HNSW/IVFFlat
+    materialization.
+  - Backends advertise vector metrics, index types, and dimension limits from the
+    active strategy, and `createSqliteBackend` / `createPostgresBackend` accept a
+    custom `vector?: VectorStrategy`.
+
+  The release also adds migration and lifecycle tooling for the new storage model:
+  - `migrateLegacyEmbeddings(...)` copies existing rows out of the legacy shared
+    `typegraph_node_embeddings` table.
+  - `store.reembedVectorField(kind, fieldPath, { embed? })` recreates a field's
+    storage after an embedding dimension change and can re-embed existing rows.
+  - `store.materializeRemovals()` reclaims vector tables for removed embedding
+    fields and reports them in `MaterializeRemovalsResult.reclaimedVectorFields`.
+
+  **Breaking storage change:** vector embeddings now live in graph-scoped,
+  fixed-dimension per-field storage instead of the shared
+  `typegraph_node_embeddings` table. Search no longer reads the legacy table.
+  Deployments with existing embeddings must run `migrateLegacyEmbeddings(...)`
+  once after upgrading; deployments without stored embeddings need no migration.
+
+- [#165](https://github.com/nicia-ai/typegraph/pull/165) [`ae5bfdc`](https://github.com/nicia-ai/typegraph/commit/ae5bfdc55aae3531bcd75f0770cb2812ad9682d9) Thanks [@pdlug](https://github.com/pdlug)! - Reduce `BackendCapabilities` to the flags the library actually consumes:
+  `transactions`, `vector`, and `fulltext`.
+
+  The descriptive-only flags `jsonb`, `ginIndexes`, `partialIndexes`, `cte`, and
+  `returning` were never read anywhere to gate a query feature or pick an index
+  strategy. `jsonb`/`ginIndexes` additionally misrepresented SQLite, which has
+  native JSON (`json_extract`/`json_each`) and supports B-tree expression indexes
+  on scalar JSON properties at parity with PostgreSQL — the only real JSON
+  difference (GIN containment acceleration) is a Postgres performance
+  characteristic, not a gated capability.
+
+  If you were reading any of these removed flags, branch on
+  `backend.dialect === "postgres"` instead, or rely on the dialect layer
+  (JSON-path predicates, `WITH` queries, `RETURNING`, partial indexes, and
+  `defineNodeIndex`/`defineEdgeIndex` work the same on both backends).
+
+- [#163](https://github.com/nicia-ai/typegraph/pull/163) [`0175a25`](https://github.com/nicia-ai/typegraph/commit/0175a2585029aa1b6ceabc9889074a72b8895d03) Thanks [@pdlug](https://github.com/pdlug)! - Add first-class support for [PGlite](https://pglite.dev/) (Postgres-in-WASM),
+  closing [#160](https://github.com/nicia-ai/typegraph/issues/160).
+  - **Execution fast-path fix.** `createPostgresBackend` now detects a PGlite
+    `db.$client` and routes it to the unnamed positional query wrapper. PGlite's
+    `.query` has no node-postgres named-statement config form — passing one
+    desyncs its single connection (`08P01`), so under the default
+    `prepareStatements: true` every query previously failed. PGlite works
+    unchanged with `createPostgresBackend(drizzle(pglite))` now.
+  - **`createLocalPgliteBackend`** — a batteries-included helper under the new
+    `@nicia-ai/typegraph/postgres/pglite` entry, the Postgres analog of
+    `createLocalSqliteBackend`. It constructs an in-process PGlite engine
+    (in-memory by default, or any `dataDir`), loads pgvector, runs the schema
+    DDL, and returns `{ backend, db, client }` whose `close()` disposes the
+    engine. Pass `vector: false` to skip the extension, or `vector: <Extension>`
+    to bring your own pgvector build.
+
+  `@electric-sql/pglite` (and, for vector support, `@electric-sql/pglite-pgvector`
+  on PGlite ≥ 0.5) are optional peer dependencies. The biggest payoff: the
+  Postgres dialect and pgvector path can now be exercised in plain `pnpm test`
+  with zero Docker.
+
+- [#162](https://github.com/nicia-ai/typegraph/pull/162) [`48a6ffc`](https://github.com/nicia-ai/typegraph/commit/48a6ffc3e63459e7a2535a936a8c9c3fbcd29a99) Thanks [@pdlug](https://github.com/pdlug)! - Add `vector: false` to `createPostgresBackend` to disable the vector stack.
+
+  The Postgres backend wires `pgvectorStrategy` by default, assuming a standalone
+  Postgres server has the pgvector extension installed. An in-process Postgres
+  (PGlite) built without that extension can't honor it — the default strategy's
+  `vector(N)` DDL hard-fails the moment an embedding is written or
+  `CREATE EXTENSION vector` runs. Passing `vector: false` turns the stack off:
+  the backend advertises no `capabilities.vector` and omits the
+  embedding/search methods, mirroring a SQLite connection without sqlite-vec, so
+  the store never routes vector work to it.
+
+  Real-Postgres behavior is unchanged — the default remains `pgvectorStrategy`.
+
+- [#158](https://github.com/nicia-ai/typegraph/pull/158) [`bc07847`](https://github.com/nicia-ai/typegraph/commit/bc07847cbde20eedd01781062e0403856cb46079) Thanks [@pdlug](https://github.com/pdlug)! - Export the ontology transitive-closure utilities (`computeTransitiveClosure`, `invertClosure`, `isReachable`) from the package root. These were previously internal-only. Exposing them lets consumers reason over `subClassOf` / `equivalentTo` hierarchies — e.g. reconciling node types when merging graphs from independent sources.
+
+- [#166](https://github.com/nicia-ai/typegraph/pull/166) [`a32d31f`](https://github.com/nicia-ai/typegraph/commit/a32d31f7bbe9fc4657eb956e86900eaf1c283ef9) Thanks [@pdlug](https://github.com/pdlug)! - Remove the `typegraph-cloud` source type from the interchange
+  `GraphDataSourceSchema`.
+
+  TypeGraph Cloud is not a publicly available product, so the `typegraph-cloud`
+  variant has been dropped from the graph-data source discriminated union, and the
+  corresponding interchange documentation has been removed. `GraphDataSource` now
+  accepts only `typegraph-export` and `external`.
+
+  **Breaking:** importing data whose `source.type` is `"typegraph-cloud"` now
+  fails schema validation. Re-tag such payloads as `"external"` before importing.
+
+- [#165](https://github.com/nicia-ai/typegraph/pull/165) [`ae5bfdc`](https://github.com/nicia-ai/typegraph/commit/ae5bfdc55aae3531bcd75f0770cb2812ad9682d9) Thanks [@pdlug](https://github.com/pdlug)! - Support the full query feature set inside SQLite set operations
+  (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`).
+
+  Previously the SQLite set-operation compiler hand-rolled a thin subset of leaf
+  compilation and rejected leaves that used traversals, `EXISTS`/`IN` subqueries,
+  vector or fulltext predicates, `GROUP BY`/`HAVING`, or per-leaf
+  `ORDER BY`/`LIMIT`/`OFFSET` — throwing `UnsupportedPredicateError` at execution
+  time. PostgreSQL accepted all of these. The result was a portability cliff: a
+  combined query developed against PostgreSQL could throw the moment the backend
+  was switched to SQLite.
+
+  Both dialects now compile every leaf with the full query compiler and only
+  differ in how each operand is wrapped. SQLite forbids parenthesized compound
+  operands, but it does allow a `WITH` clause inside a FROM-subquery, so each
+  operand is emitted as `SELECT * FROM (<leaf>)`. This keeps every leaf's CTEs
+  (traversal joins, recursive expansions, vector/fulltext relevance) scoped to its
+  own subquery and lets per-leaf `ORDER BY`/`LIMIT`/`OFFSET` live inside the wrap.
+  Nested set operations are wrapped the same way, preserving the AST's grouping
+  regardless of the dialect's native compound-operator associativity. As a
+  side effect, vector/fulltext predicates in set-operation leaves now use the
+  backend's configured relevance strategy instead of falling back to the dialect
+  default.
+
+  Note: `GROUP BY`/`HAVING` leaves are supported at the compiler level, but the
+  query builder still does not expose `.union()`/`.intersect()`/`.except()` on
+  aggregate queries — that builder gate is unchanged and applies equally to both
+  backends.
+
+### Patch Changes
+
+- [#165](https://github.com/nicia-ai/typegraph/pull/165) [`ae5bfdc`](https://github.com/nicia-ai/typegraph/commit/ae5bfdc55aae3531bcd75f0770cb2812ad9682d9) Thanks [@pdlug](https://github.com/pdlug)! - Fix `ORDER BY`/`LIMIT`/`OFFSET` being silently dropped on a nested set-operation
+  operand.
+
+  When a set operation was nested inside another — e.g.
+  `a.union(b).limit(10).intersect(c)` — the inner compound's suffix clauses were
+  applied only at the top level, so the inner `limit`/`offset` were ignored and
+  the outer operation ran over the full (unlimited) inner result. The compiler now
+  emits each nested compound's own `ORDER BY`/`LIMIT`/`OFFSET` inside its operand
+  subquery on both SQLite and PostgreSQL.
+
+- [#165](https://github.com/nicia-ai/typegraph/pull/165) [`ae5bfdc`](https://github.com/nicia-ai/typegraph/commit/ae5bfdc55aae3531bcd75f0770cb2812ad9682d9) Thanks [@pdlug](https://github.com/pdlug)! - Validate set-operation leaf vector predicates against the configured vector
+  strategy rather than only the dialect's fallback metric list, so a custom
+  strategy's metric (e.g. `inner_product` on SQLite) is accepted inside
+  `UNION`/`INTERSECT`/`EXCEPT` leaves exactly as it is in a standalone query.
+
+  Reject a per-query fulltext `language` override on the query-builder path
+  (`.$fulltext.matches(..., { language })`) when the strategy's tokenizer is fixed
+  at table-create time (SQLite/FTS5), matching the store-level search guard
+  instead of silently ignoring the option.
+
 ## 0.28.1
 
 ### Patch Changes
