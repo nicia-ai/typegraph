@@ -280,6 +280,36 @@ import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
 const backend = createPostgresBackend(pool);
 ```
 
+## Backend parity
+
+A query written against one backend must behave identically on the other. We
+get there by construction, not by hoping:
+
+1. **The query compiler (`src/query`) is a single shared path.** The only
+   sanctioned place for a dialect difference is a member of the `DialectAdapter`
+   interface — a *token-level* seam (quote an identifier, pick a JSON function,
+   emit a boolean literal). Because it is an `interface`, every dialect is forced
+   by the type checker to provide an implementation, so a backend can never be
+   silently skipped. An ESLint rule bans inline `=== "sqlite"` / `case
+   "postgres"` branching under `src/query` to keep this true. Never reintroduce a
+   per-dialect *strategy function* that re-implements compilation for one backend
+   — that parallel-path pattern is exactly what hid the set-operation gap.
+   (Backend provisioning under `src/backend` — DDL, migrations, extension setup —
+   legitimately branches on dialect and is out of scope.)
+
+2. **Query-feature tests live in the shared cross-backend suite**
+   (`tests/backends/integration/*.ts`, registered via `createIntegrationTestSuite`
+   and run against every backend). Per-dialect tests in `tests/backends/{sqlite,
+   postgres}/**` are for backend-specific wiring only — never for query
+   semantics. A per-dialect test will happily certify a divergence; only the
+   same case run on both backends verifies equivalence.
+
+3. **Genuine engine gaps are declared, not hidden.** When an engine truly cannot
+   do something (e.g. `sqlite-vec` has no `inner_product` metric), surface it as
+   a typed capability (`backend.capabilities`), document it in the parity matrix
+   in `backend-setup.md`, and add a test asserting the *exact* error on the
+   unsupported backend. No silent no-ops.
+
 ## Graph Definition
 
 ```typescript
