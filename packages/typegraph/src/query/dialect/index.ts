@@ -18,7 +18,6 @@ export type {
   DialectAdapter,
   DialectCapabilities,
   DialectRecursiveQueryStrategy,
-  DialectSetOperationStrategy,
   DialectStandardQueryStrategy,
   DialectVectorPredicateStrategy,
   SqlDialect,

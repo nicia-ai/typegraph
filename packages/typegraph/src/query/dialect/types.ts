@@ -17,13 +17,6 @@ import { type FulltextStrategy } from "./fulltext-strategy";
 export type SqlDialect = "sqlite" | "postgres";
 
 /**
- * Strategy for compiling set operations.
- */
-export type DialectSetOperationStrategy =
-  | "standard_parenthesized"
-  | "sqlite_compound";
-
-/**
  * Strategy for compiling standard (non-recursive, non-set-op) queries.
  */
 export type DialectStandardQueryStrategy = "cte_project";
@@ -51,11 +44,6 @@ export type DialectCapabilities = Readonly<{
    * Recursive query compilation strategy.
    */
   recursiveQueryStrategy: DialectRecursiveQueryStrategy;
-
-  /**
-   * Set operation compilation strategy.
-   */
-  setOperationStrategy: DialectSetOperationStrategy;
 
   /**
    * Whether intermediate traversal CTEs should be materialized.
@@ -253,6 +241,23 @@ export interface DialectAdapter {
    * PostgreSQL: column ILIKE pattern
    */
   ilike(column: SQL, pattern: SQL | string): SQL;
+
+  // ============================================================
+  // Set Operations
+  // ============================================================
+
+  /**
+   * Wraps a single operand of a compound SELECT (UNION/INTERSECT/EXCEPT) so it
+   * is a valid compound member for this dialect. The inner SQL is a complete
+   * leaf SELECT (which may carry its own WITH clause) or an already-combined
+   * nested compound.
+   *
+   * @example
+   * SQLite: SELECT * FROM (inner)   // parenthesized operands are forbidden,
+   *                                 // but a WITH may live in a FROM-subquery
+   * PostgreSQL: (inner)
+   */
+  wrapSetOperationOperand(inner: SQL): SQL;
 
   // ============================================================
   // Recursive CTE Path Operations

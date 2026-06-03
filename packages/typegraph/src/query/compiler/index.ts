@@ -257,10 +257,9 @@ export function compileSetOperation(
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;
   const dialect = options_.dialect ?? "sqlite";
-  const schema = options_.schema ?? DEFAULT_SQL_SCHEMA;
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
-  return compileSetOp(op, graphId, adapter, schema, (ast, gid) =>
+  return compileSetOp(op, graphId, adapter, (ast, gid) =>
     compileQuery(ast, gid, propagateOptions(options_)),
   );
 }

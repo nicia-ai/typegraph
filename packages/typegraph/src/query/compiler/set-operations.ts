@@ -3,13 +3,20 @@
  *
  * Compiles UNION, INTERSECT, and EXCEPT operations to SQL.
  *
- * For SQLite, special handling is required because:
- * - CTEs (WITH clauses) cannot be wrapped in parentheses
- * - Compound SELECT statements can only have a single WITH clause at the start
+ * Both dialects compile each leaf with the full query compiler and combine
+ * the results with the requested operator. The only dialect-specific concern
+ * is how each operand is wrapped so the compound statement stays valid:
  *
- * This module handles these requirements by:
- * - For simple queries (no traversals): Compiling without CTEs, using direct table queries
- * - For complex queries: Merging all CTEs into a single WITH clause with unique prefixes
+ * - PostgreSQL allows a complete SELECT (including its own WITH clause) to be
+ *   parenthesized as a compound operand: `(SELECT ...) UNION (SELECT ...)`.
+ * - SQLite forbids parentheses around compound operands, but it does allow a
+ *   `WITH` clause inside a FROM-subquery, so each operand is wrapped as
+ *   `SELECT * FROM (SELECT ...)`. This keeps every leaf's CTEs (traversals,
+ *   vector/fulltext joins, recursive expansions) scoped to its own subquery
+ *   and lets per-leaf ORDER BY/LIMIT/OFFSET live inside the wrap.
+ *
+ * Nested set operations are wrapped the same way, which preserves the AST's
+ * grouping regardless of the dialect's native compound-operator associativity.
  */
 import { type SQL, sql } from "drizzle-orm";
 
@@ -26,34 +33,16 @@ import {
   type QueryAst,
   type SetOperation,
 } from "../ast";
-import {
-  type DialectAdapter,
-  type DialectSetOperationStrategy,
-} from "../dialect";
+import { type DialectAdapter } from "../dialect";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { emitSetOperationQuerySql } from "./emitter";
-import { createTemporalFilterPass, runCompilerPass } from "./passes";
+import { runCompilerPass } from "./passes";
 import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
-import {
-  compilePredicateExpression,
-  type PredicateCompilerContext,
-} from "./predicates";
-import { type SqlSchema } from "./schema";
-import { compileTypedJsonExtract } from "./typed-json-extract";
 
 /**
  * Type for the query compiler function.
  */
 export type QueryCompilerFunction = (ast: QueryAst, graphId: string) => SQL;
-
-type SetOperationStrategyHandler = (
-  op: SetOperation,
-  graphId: string,
-  dialect: DialectAdapter,
-  logicalPlan: LogicalPlan,
-  schema: SqlSchema,
-  compileQuery: QueryCompilerFunction,
-) => SQL;
 
 /**
  * Operator mapping for set operations.
@@ -63,48 +52,6 @@ const OPERATOR_MAP: Record<SetOperationType, string> = {
   unionAll: "UNION ALL",
   intersect: "INTERSECT",
   except: "EXCEPT",
-};
-
-function compileSetOperationWithStandardParenthesizedStrategy(
-  op: SetOperation,
-  graphId: string,
-  dialect: DialectAdapter,
-  logicalPlan: LogicalPlan,
-  _schema: SqlSchema,
-  compileQuery: QueryCompilerFunction,
-): SQL {
-  return compileSetOperationStandard(
-    op,
-    graphId,
-    dialect,
-    logicalPlan,
-    compileQuery,
-  );
-}
-
-function compileSetOperationWithSqliteCompoundStrategy(
-  op: SetOperation,
-  graphId: string,
-  dialect: DialectAdapter,
-  logicalPlan: LogicalPlan,
-  schema: SqlSchema,
-  _compileQuery: QueryCompilerFunction,
-): SQL {
-  return compileSetOperationForSqlite(
-    op,
-    graphId,
-    dialect,
-    logicalPlan,
-    schema,
-  );
-}
-
-const SET_OPERATION_STRATEGY_HANDLERS: Record<
-  DialectSetOperationStrategy,
-  SetOperationStrategyHandler
-> = {
-  standard_parenthesized: compileSetOperationWithStandardParenthesizedStrategy,
-  sqlite_compound: compileSetOperationWithSqliteCompoundStrategy,
 };
 
 type SetOperationPassState = Readonly<{
@@ -154,21 +101,21 @@ function runSetOperationPassPipeline(
 /**
  * Compiles a set operation to SQL.
  *
- * For SQLite, uses a special compilation strategy that avoids wrapping
- * CTEs in parentheses. For other databases, uses the standard approach.
+ * Each leaf is compiled by the full query compiler, so set operations support
+ * exactly the same query features as standalone queries (traversals, EXISTS/IN
+ * subqueries, vector/fulltext predicates, GROUP BY/HAVING, and per-leaf
+ * ORDER BY/LIMIT/OFFSET) on every dialect.
  *
  * @param op - The set operation AST
  * @param graphId - The graph ID
  * @param dialect - The dialect adapter
- * @param schema - SQL schema configuration for table names
- * @param compileQuery - Function to compile regular queries
+ * @param compileQuery - Function to compile regular (leaf) queries
  * @returns SQL for the set operation
  */
 export function compileSetOperation(
   op: SetOperation,
   graphId: string,
   dialect: DialectAdapter,
-  schema: SqlSchema,
   compileQuery: QueryCompilerFunction,
 ): SQL {
   const passState = runSetOperationPassPipeline(op, graphId, dialect);
@@ -179,31 +126,7 @@ export function compileSetOperation(
     );
   }
 
-  const strategy = dialect.capabilities.setOperationStrategy;
-  const handler = SET_OPERATION_STRATEGY_HANDLERS[strategy];
-  return handler(op, graphId, dialect, logicalPlan, schema, compileQuery);
-}
-
-// ============================================================
-// Standard (PostgreSQL) Compilation
-// ============================================================
-
-/**
- * Standard set operation compilation for databases that support CTEs in parentheses.
- */
-function compileSetOperationStandard(
-  op: SetOperation,
-  graphId: string,
-  dialect: DialectAdapter,
-  logicalPlan: LogicalPlan,
-  compileQuery: QueryCompilerFunction,
-): SQL {
-  const coreSql = compileSetOperationCoreStandard(
-    op,
-    graphId,
-    dialect,
-    compileQuery,
-  );
+  const coreSql = compileSetOperationCore(op, graphId, compileQuery, dialect);
 
   const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
   return emitSetOperationQuerySql({
@@ -214,584 +137,66 @@ function compileSetOperationStandard(
 }
 
 /**
- * Compiles the core set operation with parentheses (standard approach).
+ * Compiles a set operation node into a compound SELECT by wrapping each side
+ * with the dialect's operand wrapper and joining them with the operator.
  */
-function compileSetOperationCoreStandard(
+function compileSetOperationCore(
   op: SetOperation,
   graphId: string,
-  dialect: DialectAdapter,
   compileQuery: QueryCompilerFunction,
+  dialect: DialectAdapter,
 ): SQL {
-  const left = compileComposableQueryStandard(
-    op.left,
-    graphId,
-    dialect,
-    compileQuery,
-  );
-  const right = compileComposableQueryStandard(
+  const left = compileComposableQuery(op.left, graphId, compileQuery, dialect);
+  const right = compileComposableQuery(
     op.right,
     graphId,
-    dialect,
     compileQuery,
+    dialect,
   );
 
   const opSql = sql.raw(OPERATOR_MAP[op.operator]);
 
-  return sql`(${left}) ${opSql} (${right})`;
+  return sql`${dialect.wrapSetOperationOperand(left)} ${opSql} ${dialect.wrapSetOperationOperand(right)}`;
 }
 
 /**
- * Compiles a composable query for standard databases.
+ * Compiles a composable query operand. Leaves are compiled by the full query
+ * compiler; nested set operations recurse into a complete compound SELECT
+ * (including their own ORDER BY/LIMIT/OFFSET) before the parent wraps them.
  */
-function compileComposableQueryStandard(
+function compileComposableQuery(
   query: ComposableQuery,
   graphId: string,
-  dialect: DialectAdapter,
   compileQuery: QueryCompilerFunction,
+  dialect: DialectAdapter,
 ): SQL {
   if ("__type" in query) {
-    return compileSetOperationCoreStandard(
-      query,
-      graphId,
-      dialect,
-      compileQuery,
-    );
+    return compileSetOperationCompound(query, graphId, compileQuery, dialect);
   }
   return compileQuery(query, graphId);
 }
 
-// ============================================================
-// SQLite Compilation
-// ============================================================
-
-type SqliteSetOperationLeaf = Readonly<{
-  ast: QueryAst;
-  prefix: string;
-}>;
-
-type SqliteSetOperationValidationPassResult = Readonly<{
-  leaves: readonly SqliteSetOperationLeaf[];
-}>;
-
 /**
- * Validates and prepares SQLite set-operation leaves.
- *
- * Invariants:
- * - All leaves are flattened with stable prefixes.
- * - Every leaf passes SQLite compound-query compatibility checks.
+ * Compiles a set operation into a complete compound SELECT, including its own
+ * ORDER BY/LIMIT/OFFSET suffix clauses. Used for nested operands: a nested
+ * compound carries suffix clauses that belong inside the operand, not on the
+ * outer statement. The top-level entry (compileSetOperation) layers the
+ * logical-plan emitter invariant on top of these same core + suffix clauses.
  */
-function runSqliteSetOperationValidationPass(
-  op: SetOperation,
-): SqliteSetOperationValidationPassResult {
-  const leaves: SqliteSetOperationLeaf[] = [];
-  collectLeafQueries(op, leaves, "q");
-
-  for (const leaf of leaves) {
-    validateSqliteSetOpLeaf(leaf.ast);
-  }
-
-  return { leaves };
-}
-
-/**
- * SQLite-specific set operation compilation.
- *
- * SQLite compound SELECT statements cannot have parentheses around
- * queries that include CTEs. This function compiles set operations
- * by merging all CTEs into a single WITH clause at the top.
- *
- * @throws Error if any leaf query contains traversals (not yet supported)
- */
-function compileSetOperationForSqlite(
+function compileSetOperationCompound(
   op: SetOperation,
   graphId: string,
+  compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
-  logicalPlan: LogicalPlan,
-  schema: SqlSchema,
 ): SQL {
-  const { leaves } = runSqliteSetOperationValidationPass(op);
-
-  // Build all CTEs with unique prefixes
-  const allCtes: SQL[] = [];
-  const ctx: PredicateCompilerContext = {
-    dialect,
-    schema,
-    compileQuery: () => {
-      throw new CompilerInvariantError(
-        "compileQuery is not available in set-operation CTE compilation",
-      );
-    },
-  };
-
-  for (const leaf of leaves) {
-    const cte = compilePrefixedStartCte(leaf.ast, leaf.prefix, graphId, ctx);
-    allCtes.push(cte);
-  }
-
-  // Build SELECT statements for each leaf
-  const selectStatements: SQL[] = [];
-  for (const leaf of leaves) {
-    const select = compilePrefixedSelect(leaf.ast, leaf.prefix, dialect);
-    selectStatements.push(select);
-  }
-
-  // Build compound SELECT from the set operation structure
-  const compoundSelect = buildCompoundSelect(op, leaves, selectStatements);
-
+  const core = compileSetOperationCore(op, graphId, compileQuery, dialect);
   const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
-  return emitSetOperationQuerySql({
-    baseQuery: compoundSelect,
-    ...(allCtes.length === 0 ? {} : { ctes: allCtes }),
-    logicalPlan,
-    ...(suffixClauses.length === 0 ? {} : { suffixClauses }),
-  });
-}
-
-/**
- * Validates that a leaf query is compatible with SQLite set operations.
- * SQLite's compound SELECT has significant limitations compared to PostgreSQL.
- *
- * @throws Error if the query uses unsupported features
- */
-function validateSqliteSetOpLeaf(ast: QueryAst): void {
-  const unsupported: string[] = [];
-
-  // Traversals require multiple CTEs which SQLite can't handle in compound statements
-  if (ast.traversals.length > 0) {
-    unsupported.push("traversals");
-  }
-
-  // Subqueries (EXISTS/IN) would need CTEs or nested queries
-  if (hasSubqueryPredicates(ast)) {
-    unsupported.push("EXISTS/IN subqueries");
-  }
-
-  // Vector similarity requires the embeddings table join
-  if (hasVectorSimilarityPredicates(ast)) {
-    unsupported.push("vector similarity predicates");
-  }
-
-  // Fulltext match requires the fulltext table join
-  if (hasFulltextMatchPredicates(ast)) {
-    unsupported.push("fulltext match predicates");
-  }
-
-  // GROUP BY/HAVING would need to be applied to the individual leaf, not the compound result
-  if (ast.groupBy !== undefined) {
-    unsupported.push("GROUP BY");
-  }
-  if (ast.having !== undefined) {
-    unsupported.push("HAVING");
-  }
-
-  // Per-leaf ORDER BY/LIMIT/OFFSET would silently be ignored in compound statements
-  // (only the outer ORDER BY/LIMIT/OFFSET apply)
-  if (ast.orderBy !== undefined && ast.orderBy.length > 0) {
-    unsupported.push(
-      "per-query ORDER BY (use set operation's orderBy instead)",
-    );
-  }
-  if (ast.limit !== undefined) {
-    unsupported.push("per-query LIMIT (use set operation's limit instead)");
-  }
-  if (ast.offset !== undefined) {
-    unsupported.push("per-query OFFSET (use set operation's offset instead)");
-  }
-
-  if (unsupported.length > 0) {
-    throw new UnsupportedPredicateError(
-      `SQLite set operations (UNION/INTERSECT/EXCEPT) do not support: ${unsupported.join(", ")}. ` +
-        "Use PostgreSQL for complex set operations, or refactor to separate queries.",
-    );
-  }
-}
-
-/**
- * Checks if a query AST has vector similarity predicates.
- */
-function hasVectorSimilarityPredicates(ast: QueryAst): boolean {
-  return ast.predicates.some((predicate) =>
-    hasVectorSimilarityInExpression(predicate.expression),
-  );
-}
-
-/**
- * Recursively checks if a predicate expression contains vector similarity.
- */
-function hasVectorSimilarityInExpression(
-  expr: QueryAst["predicates"][0]["expression"],
-): boolean {
-  if ("__type" in expr) {
-    switch (expr.__type) {
-      case "and":
-      case "or": {
-        return expr.predicates.some((p) => hasVectorSimilarityInExpression(p));
-      }
-      case "not": {
-        return hasVectorSimilarityInExpression(expr.predicate);
-      }
-      case "vector_similarity": {
-        return true;
-      }
-      case "exists":
-      case "in_subquery":
-      case "comparison":
-      case "string_op":
-      case "null_check":
-      case "between":
-      case "array_op":
-      case "object_op":
-      case "aggregate_comparison":
-      case "fulltext_match": {
-        return false;
-      }
-    }
-  }
-  return false;
-}
-
-function hasFulltextMatchPredicates(ast: QueryAst): boolean {
-  return ast.predicates.some((predicate) =>
-    hasFulltextMatchInExpression(predicate.expression),
-  );
-}
-
-function hasFulltextMatchInExpression(
-  expr: QueryAst["predicates"][0]["expression"],
-): boolean {
-  if ("__type" in expr) {
-    switch (expr.__type) {
-      case "and":
-      case "or": {
-        return expr.predicates.some((p) => hasFulltextMatchInExpression(p));
-      }
-      case "not": {
-        return hasFulltextMatchInExpression(expr.predicate);
-      }
-      case "fulltext_match": {
-        return true;
-      }
-      case "exists":
-      case "in_subquery":
-      case "comparison":
-      case "string_op":
-      case "null_check":
-      case "between":
-      case "array_op":
-      case "object_op":
-      case "aggregate_comparison":
-      case "vector_similarity": {
-        return false;
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * Checks if a query AST has predicates with subqueries (EXISTS/IN with subquery).
- */
-function hasSubqueryPredicates(ast: QueryAst): boolean {
-  return ast.predicates.some((predicate) =>
-    hasSubqueryInExpression(predicate.expression),
-  );
-}
-
-/**
- * Recursively checks if a predicate expression contains subqueries.
- */
-function hasSubqueryInExpression(
-  expr: QueryAst["predicates"][0]["expression"],
-): boolean {
-  if ("__type" in expr) {
-    switch (expr.__type) {
-      case "and":
-      case "or": {
-        return expr.predicates.some((p) => hasSubqueryInExpression(p));
-      }
-      case "not": {
-        return hasSubqueryInExpression(expr.predicate);
-      }
-      case "exists": {
-        return true; // EXISTS always has a subquery
-      }
-      case "in_subquery": {
-        return true; // IN with subquery
-      }
-      // These expression types don't contain subqueries
-      case "comparison":
-      case "string_op":
-      case "null_check":
-      case "between":
-      case "array_op":
-      case "object_op":
-      case "aggregate_comparison":
-      case "vector_similarity":
-      case "fulltext_match": {
-        return false;
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * Recursively collects all leaf QueryAst nodes from a set operation tree.
- * Assigns unique prefixes to each leaf (q0, q1, q2, etc.).
- */
-function collectLeafQueries(
-  query: ComposableQuery,
-  leaves: SqliteSetOperationLeaf[],
-  basePrefix: string,
-): void {
-  if ("__type" in query) {
-    // This is a SetOperation, recurse
-    collectLeafQueries(query.left, leaves, basePrefix);
-    collectLeafQueries(query.right, leaves, basePrefix);
-  } else {
-    // This is a QueryAst leaf
-    const index = leaves.length;
-    leaves.push({ ast: query, prefix: `${basePrefix}${index}` });
-  }
-}
-
-/**
- * Compiles a CTE for the start node selection with a unique prefix.
- */
-function compilePrefixedStartCte(
-  ast: QueryAst,
-  prefix: string,
-  graphId: string,
-  ctx: PredicateCompilerContext,
-): SQL {
-  const temporalFilterPass = createTemporalFilterPass(
-    ast,
-    ctx.dialect.currentTimestamp(),
-  );
-  const alias = ast.start.alias;
-  const kinds = ast.start.kinds;
-
-  // Kind filter
-  const kindFilter =
-    kinds.length === 1 ?
-      sql`kind = ${kinds[0]}`
-    : sql`kind IN (${sql.join(
-        kinds.map((k) => sql`${k}`),
-        sql`, `,
-      )})`;
-
-  // Temporal filter
-  const temporalFilter = temporalFilterPass.forAlias();
-
-  // Node predicates for this alias
-  const cteContext: PredicateCompilerContext = { ...ctx, cteColumnPrefix: "" };
-  const predicateClauses = ast.predicates
-    .filter((p) => p.targetAlias === alias)
-    .map((p) => compilePredicateExpression(p.expression, cteContext));
-
-  // Combine all WHERE clauses
-  const whereClauses = [
-    sql`graph_id = ${graphId}`,
-    kindFilter,
-    temporalFilter,
-    ...predicateClauses,
-  ];
-
-  // Use prefixed CTE name: cte_q0_c, cte_q1_c, etc.
-  const cteName = `cte_${prefix}_${alias}`;
-
-  return sql`
-    ${sql.raw(cteName)} AS (
-      SELECT
-        id AS ${sql.raw(alias)}_id,
-        kind AS ${sql.raw(alias)}_kind,
-        props AS ${sql.raw(alias)}_props,
-        version AS ${sql.raw(alias)}_version,
-        valid_from AS ${sql.raw(alias)}_valid_from,
-        valid_to AS ${sql.raw(alias)}_valid_to,
-        created_at AS ${sql.raw(alias)}_created_at,
-        updated_at AS ${sql.raw(alias)}_updated_at,
-        deleted_at AS ${sql.raw(alias)}_deleted_at
-      FROM ${ctx.schema.nodesTable}
-      WHERE ${sql.join(whereClauses, sql` AND `)}
-    )
-  `;
-}
-
-/**
- * Compiles the SELECT statement for a leaf query using the prefixed CTE.
- */
-function compilePrefixedSelect(
-  ast: QueryAst,
-  prefix: string,
-  dialect: DialectAdapter,
-): SQL {
-  const alias = ast.start.alias;
-  const cteName = `cte_${prefix}_${alias}`;
-  const fields = ast.projection.fields;
-
-  // Build projection
-  const projection =
-    fields.length === 0 ?
-      sql.raw("*")
-    : sql.join(
-        fields.map((f) => {
-          const source = compileFieldValueForSetOp(
-            f.source,
-            prefix,
-            alias,
-            dialect,
-          );
-          return sql`${source} AS ${sql.raw(dialect.quoteIdentifier(f.outputName))}`;
-        }),
-        sql`, `,
-      );
-
-  return sql`SELECT ${projection} FROM ${sql.raw(cteName)}`;
-}
-
-/**
- * Compiles a field value reference for set operation queries.
- */
-function compileFieldValueForSetOp(
-  source: QueryAst["projection"]["fields"][0]["source"],
-  prefix: string,
-  alias: string,
-  dialect: DialectAdapter,
-): SQL {
-  if ("__type" in source && source.__type === "aggregate") {
-    // Aggregate expressions
-    const { field, function: fn } = source;
-
-    switch (fn) {
-      case "count":
-      case "countDistinct":
-      case "sum":
-      case "avg":
-      case "min":
-      case "max": {
-        const column = compileFieldColumnForSetOp(field, prefix, dialect);
-        if (fn === "countDistinct") {
-          return sql`COUNT(DISTINCT ${column})`;
-        }
-        return sql`${sql.raw(fn.toUpperCase())}(${column})`;
-      }
-      default: {
-        throw new CompilerInvariantError(
-          `Unknown aggregate function: ${String(fn)}`,
-        );
-      }
-    }
-  }
-
-  // Field reference
-  return compileFieldColumnForSetOp(source, prefix, dialect);
-}
-
-/**
- * Compiles a field column reference for set operation queries.
- */
-function compileFieldColumnForSetOp(
-  field: {
-    alias: string;
-    path: readonly string[];
-    jsonPointer?: JsonPointer | undefined;
-    valueType?: string | undefined;
-  },
-  prefix: string,
-  dialect: DialectAdapter,
-): SQL {
-  const cteName = `cte_${prefix}_${field.alias}`;
-  const alias = field.alias;
-
-  // Handle direct column references
-  if (field.path.length === 1) {
-    const columnName = field.path[0];
-    // Map path names to column names
-    const columnMap: Record<string, string> = {
-      id: "_id",
-      kind: "_kind",
-      props: "_props",
-      version: "_version",
-      valid_from: "_valid_from",
-      valid_to: "_valid_to",
-      created_at: "_created_at",
-      updated_at: "_updated_at",
-      deleted_at: "_deleted_at",
-    };
-    if (columnName === undefined) return sql.raw(`${cteName}.${alias}_props`);
-    const suffix = columnMap[columnName];
-    if (suffix) {
-      return sql.raw(`${cteName}.${alias}${suffix}`);
-    }
-  }
-
-  // JSON field (path starts with "props" and has a json pointer)
-  const column = sql.raw(`${cteName}.${alias}_props`);
-  const pointer = field.jsonPointer;
-
-  if (!pointer) {
-    return column;
-  }
-
-  return compileTypedJsonExtract({
-    column,
-    dialect,
-    fallback: "text",
-    pointer,
-    valueType: field.valueType,
-  });
-}
-
-/**
- * Builds the compound SELECT statement from the set operation structure.
- */
-function buildCompoundSelect(
-  op: SetOperation,
-  leaves: readonly SqliteSetOperationLeaf[],
-  selectStatements: readonly SQL[],
-): SQL {
-  // Build a map from prefix to select statement
-  const prefixToSelect = new Map<string, SQL>();
-  for (const [index, leaf] of leaves.entries()) {
-    prefixToSelect.set(leaf.prefix, selectStatements[index]!);
-  }
-
-  // Recursively build compound select
-  return buildCompoundSelectRecursive(op, leaves, prefixToSelect);
-}
-
-/**
- * Recursively builds compound SELECT with proper operator placement.
- */
-function buildCompoundSelectRecursive(
-  query: ComposableQuery,
-  leaves: readonly SqliteSetOperationLeaf[],
-  prefixToSelect: Map<string, SQL>,
-): SQL {
-  if (!("__type" in query)) {
-    // This is a leaf QueryAst - find its prefix and return the SELECT
-    const leaf = leaves.find((l) => l.ast === query);
-    if (!leaf) {
-      throw new CompilerInvariantError("Leaf query not found in leaves array");
-    }
-    return prefixToSelect.get(leaf.prefix)!;
-  }
-
-  // This is a SetOperation
-  const left = buildCompoundSelectRecursive(query.left, leaves, prefixToSelect);
-  const right = buildCompoundSelectRecursive(
-    query.right,
-    leaves,
-    prefixToSelect,
-  );
-  const opSql = sql.raw(OPERATOR_MAP[query.operator]);
-
-  return sql`${left} ${opSql} ${right}`;
+  if (suffixClauses.length === 0) return core;
+  return sql.join([core, ...suffixClauses], sql` `);
 }
 
 // ============================================================
-// Shared Utilities
+// Suffix Clauses (ORDER BY / LIMIT / OFFSET)
 // ============================================================
 
 /**

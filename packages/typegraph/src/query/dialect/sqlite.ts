@@ -61,7 +61,6 @@ export const sqliteDialect: DialectAdapter = {
   capabilities: {
     standardQueryStrategy: "cte_project",
     recursiveQueryStrategy: "recursive_cte",
-    setOperationStrategy: "sqlite_compound",
     materializeIntermediateTraversalCtes: true,
     emitNotMaterializedHint: false,
     forceRecursiveWorktableOuterJoinOrder: true,
@@ -175,6 +174,16 @@ export const sqliteDialect: DialectAdapter = {
     // SQLite LIKE is case-insensitive for ASCII by default, but we use
     // LOWER() for consistency with non-ASCII characters
     return sql`LOWER(${column}) LIKE LOWER(${pattern})`;
+  },
+
+  // ============================================================
+  // Set Operations
+  // ============================================================
+
+  wrapSetOperationOperand(inner) {
+    // SQLite forbids parenthesized compound operands, but a FROM-subquery may
+    // carry its own WITH clause, so wrap each operand as a subquery.
+    return sql`SELECT * FROM (${inner})`;
   },
 
   // ============================================================

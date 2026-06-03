@@ -12,7 +12,6 @@ import {
   type QueryAst,
   type SetOperation,
 } from "../src/query/ast";
-import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import {
   compileSetOperation,
   type QueryCompilerFunction,
@@ -100,6 +99,11 @@ function mockCompileQuery(ast: QueryAst, _graphId: string): SQL {
   return sql`SELECT * FROM ${sql.raw(ast.start.alias)}`;
 }
 
+function taggedCompileQuery(ast: QueryAst, _graphId: string): SQL {
+  // Tags each leaf so we can assert the set-op compiler delegated to it.
+  return sql`SELECT 'leaf:' || ${sql.raw(ast.start.alias)}`;
+}
+
 function getSqlString(
   op: SetOperation,
   compileQuery: QueryCompilerFunction = mockCompileQuery,
@@ -108,7 +112,6 @@ function getSqlString(
     op,
     "test-graph",
     sqliteDialect,
-    DEFAULT_SQL_SCHEMA,
     compileQuery,
   );
   return toSqlString(result);
@@ -153,18 +156,19 @@ describe("compileSetOperation", () => {
       expect(sql).toContain("EXCEPT");
     });
 
-    it("produces correct SQLite format with merged CTEs", () => {
+    it("wraps each leaf as a FROM-subquery operand (SQLite compound format)", () => {
       const op = createSetOperation("union");
 
       const sql = getSqlString(op);
 
-      // SQLite uses merged CTEs: WITH cte1 AS (...), cte2 AS (...) SELECT ... UNION SELECT ...
-      // No parentheses around individual queries (SQLite doesn't support CTEs in parentheses)
-      expect(sql).toMatch(/WITH\s+cte_q0_a/);
-      expect(sql).toMatch(/cte_q1_b/);
-      expect(sql).toMatch(
-        /SELECT.*FROM\s+cte_q0_a.*UNION.*SELECT.*FROM\s+cte_q1_b/s,
-      );
+      // SQLite forbids parenthesized compound operands, so each leaf (compiled
+      // by the provided compile function) is wrapped as `SELECT * FROM (...)`.
+      // The leaf bodies keep their own CTEs scoped inside the subquery.
+      expect(sql).toMatch(/SELECT \* FROM \(SELECT \* FROM a\)/);
+      expect(sql).toMatch(/UNION/);
+      expect(sql).toMatch(/SELECT \* FROM \(SELECT \* FROM b\)/);
+      // No top-level CTE hoisting / prefixing anymore.
+      expect(sql).not.toContain("cte_q0_a");
     });
   });
 
@@ -219,6 +223,30 @@ describe("compileSetOperation", () => {
       expect(sql).toContain("UNION");
       expect(sql).toContain("INTERSECT");
       expect(sql).toContain("EXCEPT");
+    });
+
+    it("applies a nested operand's own LIMIT/OFFSET inside its subquery", () => {
+      // (a UNION b LIMIT 10 OFFSET 5) INTERSECT c — the inner LIMIT/OFFSET
+      // belong to the inner compound, not the outer statement, and must not be
+      // dropped.
+      const inner: SetOperation = {
+        ...createSetOperation("union", "a", "b"),
+        limit: 10,
+        offset: 5,
+      };
+      const outer: SetOperation = {
+        __type: "set_operation",
+        operator: "intersect",
+        left: inner,
+        right: createMinimalAst("c"),
+      };
+
+      const sql = getSqlString(outer);
+
+      expect(sql).toContain("LIMIT");
+      expect(sql).toContain("OFFSET");
+      // The inner suffix lives inside a wrapped operand, ahead of INTERSECT.
+      expect(sql).toMatch(/LIMIT.*OFFSET.*\)\s*INTERSECT/s);
     });
   });
 
@@ -448,17 +476,17 @@ describe("compileSetOperation", () => {
   // ============================================================
 
   describe("with custom compile function", () => {
-    it("SQLite compilation includes graph_id filtering", () => {
-      // Note: SQLite uses internal compilation (not custom compile function)
-      // to handle CTE merging. The custom compile function is only used
-      // for PostgreSQL which supports CTEs in parentheses.
+    it("delegates leaf compilation to the provided compile function on SQLite", () => {
+      // Both dialects now compile each leaf with the full query compiler.
+      // The leaf compiler owns graph_id filtering, projections, traversals,
+      // etc.; the set-op compiler only combines and wraps the operands.
       const op = createSetOperation("union");
 
-      const sqlString = getSqlString(op);
+      const sqlString = getSqlString(op, taggedCompileQuery);
 
-      // SQLite compiles internally but should still include graph_id filtering
-      expect(sqlString).toContain("graph_id");
-      expect(sqlString).toContain("test-graph");
+      expect(sqlString).toContain("'leaf:'");
+      expect(sqlString).toContain("SELECT * FROM (SELECT 'leaf:' || a)");
+      expect(sqlString).toContain("SELECT * FROM (SELECT 'leaf:' || b)");
     });
   });
 });
