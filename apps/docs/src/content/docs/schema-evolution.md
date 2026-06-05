@@ -528,11 +528,13 @@ if (result.status === "migrated" && result.toVersion === 3) {
 
 ## Reclaiming Removed Embedding Storage
 
-Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), created
-lazily on first write. When you remove an `embedding()` field from a **surviving**
+Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), provisioned
+by the privileged migrator (`createStoreWithSchema`, or `evolve()` for a
+runtime-added field). When you remove an `embedding()` field from a **surviving**
 kind, the schema change commits fast but the field's now-orphaned vector table
-remains until you reconcile it. `store.materializeRemovals()` drops it (this is
-the same pass that cleans up storage for fully removed kinds):
+remains until you reconcile it. `store.materializeRemovals()` drops it — and
+clears its durable contribution marker so a later re-add re-provisions cleanly
+(this is the same pass that cleans up storage for fully removed kinds):
 
 ```typescript
 const result = await store.materializeRemovals();

@@ -92,6 +92,7 @@ import {
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
+  type ContributionMaterializer,
   createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
@@ -139,12 +140,10 @@ import {
   tables as defaultTables,
 } from "./schema/postgres";
 import {
-  createVectorSlotLatch,
   mapVectorWriteError,
   vectorSlotFromCreateIndexParams,
   vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
-  type VectorSlotLatch,
 } from "./vector-runtime";
 
 // ============================================================
@@ -301,11 +300,6 @@ export function createPostgresBackend(
   // default strategy's `vector(N)` DDL would hard-fail.
   const vectorStrategy =
     options.vector === false ? undefined : (options.vector ?? pgvectorStrategy);
-  // One latch per backend instance, shared with every transaction-scoped
-  // backend so a slot's per-field table is created at most once per process.
-  // Absent when vector support is disabled.
-  const vectorSlotLatch =
-    vectorStrategy === undefined ? undefined : createVectorSlotLatch();
   const baseCapabilities = buildPostgresCapabilities(
     fulltextStrategy,
     vectorStrategy,
@@ -352,72 +346,14 @@ export function createPostgresBackend(
     tables,
     fulltextStrategy,
   );
-  const operations = createPostgresOperationBackend({
-    db,
-    executionAdapter,
-    adapterOptions,
-    operationStrategy,
-    tableNames,
-    capabilities,
-    fulltextStrategy,
-    vectorStrategy,
-    vectorSlotLatch,
-  });
 
-  /**
-   * Runs `fn` inside a Postgres transaction, holding an
-   * `pg_advisory_xact_lock` keyed on the graph id. The advisory lock
-   * serializes all schema commits per-graph: the read-then-write CAS in
-   * `commitSchemaVersion` is safe even for the initial-commit case
-   * where there is no row yet to `SELECT ... FOR UPDATE`.
-   *
-   * Refuses on backends that don't support transactions
-   * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
-   * eliminated without atomicity, so silent best-effort degradation is
-   * worse than a typed error.
-   */
-  function runSchemaWriteTransaction<T>(
-    graphId: string,
-    fn: (tx: CommonOperationBackend) => Promise<T>,
-  ): Promise<T> {
-    if (!capabilities.transactions) {
-      throw new ConfigurationError(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
-          "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
-          "driver communicates over HTTP and cannot hold a session across statements; " +
-          "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
-        {
-          backend: "postgres",
-          capability: "transactions",
-          supportsTransactions: false,
-        },
-      );
-    }
-
-    return db.transaction(async (tx) => {
-      // Advisory lock: hashtext($graphId) is collision-tolerant for the
-      // size of an active graph set; collisions just serialize unrelated
-      // graphs which is harmless. Held until the transaction commits.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
-      // Advisory lock is held here, so the schema-write-capable
-      // InternalOperationBackend is used intentionally (see its type).
-      const txBackend = createTransactionBackend({
-        db: tx,
-        adapterOptions,
-        operationStrategy,
-        tableNames,
-        capabilities,
-        fulltextStrategy,
-        vectorStrategy,
-        vectorSlotLatch,
-      });
-      return fn(txBackend);
-    });
-  }
-
-  // Durable fulltext materialization (#135): the dialect-specific
+  // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /
-  // per-instance cache) lives once in `createContributionMaterializer`.
+  // per-instance cache) lives once in `createContributionMaterializer`,
+  // shared by the outer backend and every transaction-scoped backend so a
+  // slot's marker is resolved at most once per process. Built before
+  // `operations` so the operation backend's vector methods can assert/
+  // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
   async function ensureContributionMaterializationsTableImpl(): Promise<void> {
@@ -471,17 +407,97 @@ export function createPostgresBackend(
       });
   }
 
+  async function deleteContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<void> {
+    await db
+      .delete(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "postgres",
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
+    vectorStrategy,
     execDdl: async (statement) => {
       await db.execute(sql.raw(statement));
     },
     ensureMarkerTable: ensureContributionMaterializationsTableImpl,
     getMarker: getContributionMaterializationRow,
     recordMarker: recordContributionMaterializationRow,
+    deleteMarker: deleteContributionMaterializationRow,
   });
+
+  const operations = createPostgresOperationBackend({
+    db,
+    executionAdapter,
+    adapterOptions,
+    operationStrategy,
+    tableNames,
+    capabilities,
+    fulltextStrategy,
+    vectorStrategy,
+    contributionMaterializer,
+  });
+
+  /**
+   * Runs `fn` inside a Postgres transaction, holding an
+   * `pg_advisory_xact_lock` keyed on the graph id. The advisory lock
+   * serializes all schema commits per-graph: the read-then-write CAS in
+   * `commitSchemaVersion` is safe even for the initial-commit case
+   * where there is no row yet to `SELECT ... FOR UPDATE`.
+   *
+   * Refuses on backends that don't support transactions
+   * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
+   * eliminated without atomicity, so silent best-effort degradation is
+   * worse than a typed error.
+   */
+  function runSchemaWriteTransaction<T>(
+    graphId: string,
+    fn: (tx: CommonOperationBackend) => Promise<T>,
+  ): Promise<T> {
+    if (!capabilities.transactions) {
+      throw new ConfigurationError(
+        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
+          "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
+          "driver communicates over HTTP and cannot hold a session across statements; " +
+          "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
+        {
+          backend: "postgres",
+          capability: "transactions",
+          supportsTransactions: false,
+        },
+      );
+    }
+
+    return db.transaction(async (tx) => {
+      // Advisory lock: hashtext($graphId) is collision-tolerant for the
+      // size of an active graph set; collisions just serialize unrelated
+      // graphs which is harmless. Held until the transaction commits.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
+      // Advisory lock is held here, so the schema-write-capable
+      // InternalOperationBackend is used intentionally (see its type).
+      const txBackend = createTransactionBackend({
+        db: tx,
+        adapterOptions,
+        operationStrategy,
+        tableNames,
+        capabilities,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer,
+      });
+      return fn(txBackend);
+    });
+  }
 
   // Shared by `transaction()` (TypeGraph opens the tx) and
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
@@ -496,7 +512,7 @@ export function createPostgresBackend(
       capabilities,
       fulltextStrategy,
       vectorStrategy,
-      vectorSlotLatch,
+      contributionMaterializer,
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -660,6 +676,29 @@ export function createPostgresBackend(
       await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
+    // Vector counterparts of the runtime-contribution methods. Present
+    // only when a vector strategy is wired (omitted under `vector: false`,
+    // mirroring the embedding/search methods), so a no-vector backend
+    // doesn't advertise vector materialization it can't perform.
+    ...(vectorStrategy === undefined ?
+      {}
+    : {
+        async ensureVectorSlotContribution(
+          slot: VectorSlot,
+          options_?: Readonly<{ force?: boolean }>,
+        ): Promise<void> {
+          await contributionMaterializer.ensureVectorSlot(slot, options_);
+        },
+
+        async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.assertVectorSlot(slot);
+        },
+
+        async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.dropVectorSlot(slot);
+        },
+      }),
+
     async getReconciliationMarker(
       graphId: string,
     ): Promise<number | undefined> {
@@ -789,10 +828,13 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    */
   vectorStrategy: VectorStrategy | undefined;
   /**
-   * Shared per-`(kind, field)` storage-ensure latch. Paired with
-   * `vectorStrategy`: both present, or both `undefined`.
+   * Shared durable-marker materializer. The vector methods assert a
+   * slot's marker (SELECT, never DDL) on the hot path and `createVectorIndex`
+   * ensures it (privileged) — replacing the old in-process ensure-latch.
+   * Shared across the outer backend and every transaction-scoped backend
+   * so a slot's marker is resolved at most once per process.
    */
-  vectorSlotLatch: VectorSlotLatch | undefined;
+  contributionMaterializer: ContributionMaterializer;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -805,8 +847,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
   vectorStrategy: VectorStrategy | undefined;
-  /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
-  vectorSlotLatch: VectorSlotLatch | undefined;
+  /** Shared durable-marker materializer. See {@link CreatePostgresOperationBackendOptions}. */
+  contributionMaterializer: ContributionMaterializer;
 }>;
 
 function createPostgresOperationBackend(
@@ -821,7 +863,7 @@ function createPostgresOperationBackend(
     capabilities,
     fulltextStrategy,
     vectorStrategy,
-    vectorSlotLatch,
+    contributionMaterializer,
   } = options;
 
   // Route through the execution adapter so driver-specific result shapes
@@ -921,16 +963,6 @@ function createPostgresOperationBackend(
     });
   }
 
-  // Runs the strategy's per-field DDL on this backend's connection (the tx
-  // client for a transaction-scoped backend) so a slot's table exists
-  // before the first write/search hits it.
-  async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
-    if (vectorStrategy === undefined || vectorSlotLatch === undefined) return;
-    await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
-      await execRun(sql.raw(statement));
-    });
-  }
-
   const commonBackend = createCommonOperationBackend({
     batchConfig: {
       checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
@@ -977,7 +1009,11 @@ function createPostgresOperationBackend(
     : {
         async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Assert the slot's durable marker (SELECT, cached) — never DDL.
+          // The per-field table is provisioned by the privileged migrator
+          // (`createStoreWithSchema` → `materializeVectorContributions`), so
+          // a least-privilege runtime role writes embeddings without CREATE.
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
           try {
             for (const statement of statements) {
@@ -989,15 +1025,15 @@ function createPostgresOperationBackend(
         },
 
         async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Ensure the per-field table exists before deleting. A delete can
+          // Assert the slot's durable marker before deleting. A delete can
           // run before any embedding was ever written for the field (e.g. a
-          // node hard-deleted having never carried one), and on Postgres a
-          // DELETE against a missing relation INSIDE a transaction aborts the
-          // whole transaction — swallowing the JS error can't un-abort it.
-          // The idempotent ensure makes the DELETE target an existing
-          // (possibly empty) table, so it's always a clean no-op.
+          // node hard-deleted having never carried one); the per-field table
+          // was provisioned at boot, so the DELETE targets an existing
+          // (possibly empty) table and is a clean no-op — never a DELETE
+          // against a missing relation, which would abort an enclosing
+          // Postgres transaction. SELECT-only assert, never DDL.
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildDelete(slot, params);
           for (const statement of statements) {
             await execRun(statement);
@@ -1012,7 +1048,7 @@ function createPostgresOperationBackend(
           // before `runVectorSearch` inlines it into `SET LOCAL`.
           assertPgvectorEfSearch(params.efSearch);
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          await contributionMaterializer.assertVectorSlot(slot);
           const query = vectorStrategy.buildSearch(slot, params);
           let rows: readonly { node_id: string; score: number }[];
           try {
@@ -1044,12 +1080,12 @@ function createPostgresOperationBackend(
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       if (vectorStrategy === undefined) return;
       const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table exists first (idempotent), then create its
-      // ANN index. pgvector's `ownedTables` builds the table only — the HNSW/
-      // IVFFlat index is created here (and only here) so it picks up the
-      // declared `m`/`ef_construction`/`lists` from `slot.indexParams` rather
-      // than defaults.
-      await ensureVectorSlotStorage(slot);
+      // Ensure the per-field table + its durable marker first (privileged,
+      // idempotent), then create its ANN index. pgvector's `ownedTables`
+      // builds the table only — the HNSW/IVFFlat index is created here (and
+      // only here) so it picks up the declared `m`/`ef_construction`/`lists`
+      // from `slot.indexParams` rather than defaults.
+      await contributionMaterializer.ensureVectorSlot(slot);
       // Honor the `concurrent` flag materializeIndexes passes on Postgres so the
       // ANN build doesn't take a write-blocking lock on a live table. execRun is
       // autocommit, which CONCURRENTLY requires.
@@ -1161,13 +1197,12 @@ function createTransactionBackend(
     options.executionAdapter ??
     createPostgresExecutionAdapter(options.db, options.adapterOptions);
 
-  // A transaction-scoped backend gets its OWN per-field ensure-latch, never
-  // the outer process-global one: a `CREATE TABLE/INDEX` that runs inside the
-  // caller's transaction and then rolls back must not leave the shared latch
-  // marking the slot "ensured" (which would skip the re-CREATE and make every
-  // later write fail with "relation does not exist"). The fresh latch is
-  // discarded with the transaction, so the next write re-ensures idempotently.
-  // No latch when vector support is disabled (`vector: false`).
+  // The transaction-scoped backend shares the outer backend's
+  // contribution materializer: the per-field vector table is provisioned
+  // (DDL) only by the privileged outer backend, so a tx-scoped vector op
+  // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
+  // anything on rollback. The shared per-instance cache means a slot
+  // confirmed once stays a pure `Set.has` inside every later transaction.
   return createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -1177,8 +1212,7 @@ function createTransactionBackend(
     capabilities: options.capabilities,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    vectorSlotLatch:
-      options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
+    contributionMaterializer: options.contributionMaterializer,
   });
 }
 

@@ -442,9 +442,10 @@ backend.capabilities.vector; // { supported, metrics, indexTypes, maxDimensions,
 ### Storage
 
 Embeddings are stored in **per-field typed tables**, one per `(graphId, nodeKind, fieldPath)`, each carrying
-that field's fixed dimension. Tables are created lazily on first write and named
-`tg_vec_<graphId>_<kind>_<field>`. Graph-scoping the table name lets multiple graphs in one database declare the
-same kind+field at different dimensions without collision.
+that field's fixed dimension. Tables are provisioned by the privileged migrator (`createStoreWithSchema`, and
+`evolve()` for runtime-added fields), with a durable contribution marker; the runtime hot path asserts the
+marker and never issues DDL. They are named `tg_vec_<graphId>_<kind>_<field>`. Graph-scoping the table name lets
+multiple graphs in one database declare the same kind+field at different dimensions without collision.
 
 ```sql
 -- PostgreSQL with pgvector: one table per (graphId, kind, field). The kind
@@ -463,7 +464,7 @@ CREATE INDEX ON tg_vec_my_graph_document_embedding
 ```
 
 `generatePostgresMigrationSQL()` runs `CREATE EXTENSION IF NOT EXISTS vector` but creates no embedding table —
-the per-field tables are created at runtime on first write.
+the per-field tables are provisioned by `createStoreWithSchema` at boot (under the privileged role).
 
 ### Query Flow
 

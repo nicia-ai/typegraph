@@ -65,8 +65,14 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (sharedPool === undefined) return;
+  // Clear the durable contribution markers (#135) alongside dropping the
+  // per-field tables below: this suite drops `tg_vec_*` tables directly
+  // (bypassing reclaim), so a marker left behind on this shared database
+  // would outlive its table and make a later evolve()/createStoreWithSchema
+  // trust the marker and skip re-creating the table.
   await sharedPool.query(
     `TRUNCATE typegraph_index_materializations,
+              typegraph_contribution_materializations,
               typegraph_node_uniques,
               typegraph_nodes,
               typegraph_edges,

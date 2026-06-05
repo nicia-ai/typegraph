@@ -20,7 +20,7 @@
 import { z } from "zod";
 
 import {
-  createStore,
+  createStoreWithSchema,
   defineGraph,
   defineNode,
   embedding,
@@ -183,7 +183,10 @@ export async function main() {
   console.log("\n=== Part 2: Storing Documents with Embeddings ===\n");
 
   const backend = createExampleBackend();
-  const store = createStore(graph, backend);
+  // createStoreWithSchema provisions each embedding field's per-(kind, field)
+  // vector table + durable marker under the (privileged) migrator role, so
+  // runtime embedding writes/searches never issue DDL. Run it once at boot.
+  const [store] = await createStoreWithSchema(graph, backend);
 
   // Sample documents to index
   const documents = [

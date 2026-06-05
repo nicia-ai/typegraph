@@ -92,16 +92,24 @@ async function setupTestDatabase(): Promise<void> {
 
 async function clearTestData(): Promise<void> {
   if (!sharedSql) return;
+  // Clear the durable contribution markers (#135) alongside the data so each
+  // test starts genuinely un-provisioned: `createStoreWithSchema` (run per
+  // test by the integration suite) then re-materializes every per-field
+  // vector table + marker in lockstep. Leaving markers behind on this shared,
+  // long-lived test database would let a marker outlive a dropped table, so a
+  // later boot would trust the marker, skip the CREATE, and writes would hit a
+  // missing relation.
   await sharedSql.unsafe(
     `TRUNCATE typegraph_node_fulltext,
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,
+              typegraph_contribution_materializations,
               typegraph_schema_versions CASCADE`,
   );
-  // Per-(kind, field) vector tables are created lazily by the strategy,
-  // so enumerate and truncate any that exist (there is no single shared
-  // embeddings table to TRUNCATE).
+  // Per-(kind, field) vector tables are materialized per field, so enumerate
+  // and truncate any that exist (there is no single shared embeddings table).
+  // createStoreWithSchema re-creates any that are missing (markers cleared).
   const rows = await sharedSql.unsafe<{ tablename: string }[]>(
     String.raw`SELECT tablename FROM pg_tables
       WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
