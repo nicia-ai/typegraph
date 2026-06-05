@@ -760,7 +760,13 @@ rather than hard-coding the dialect.
 
 Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile
-sets `windowFunctions: false`.
+sets `windowFunctions: false` — there the window output *is* the result (the relevance k-cutoff / rank ordinal), so
+there is no correct fallback.
+
+`bulkFindByIndex({ limitPerInput })` also uses `ROW_NUMBER()` when available, but it does **not** throw on a
+windowless profile: the per-input cap is a transfer optimization with identical row semantics either way, so it
+degrades gracefully — fetching all matching ids and capping per group in application code. The unbounded
+`bulkFindByIndex` path needs no window and is always available.
 
 :::note[JSON is native on both backends]
 SQLite stores JSON as text and queries it with the built-in JSON functions (`json_extract`, `json_each`, …);
