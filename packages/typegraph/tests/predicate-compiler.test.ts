@@ -106,6 +106,7 @@ function createContext(cteColumnPrefix?: string): PredicateCompilerContext {
     dialect: sqliteDialect,
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
+    windowFunctions: true,
   };
   if (cteColumnPrefix !== undefined) {
     return { ...base, cteColumnPrefix };
@@ -1237,6 +1238,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM users WHERE active = 1`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1253,6 +1255,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM deleted_users`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1269,6 +1272,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id FROM admins`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1286,6 +1290,7 @@ describe("subquery predicates", () => {
       dialect: postgresDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT score FROM scores`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1316,6 +1321,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT blocked_id FROM blocklist`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1333,6 +1339,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id, role FROM admins`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1366,6 +1373,7 @@ describe("subquery predicates", () => {
       dialect: postgresDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT name FROM people`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1395,6 +1403,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT profile FROM people`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {
@@ -1426,6 +1435,7 @@ describe("subquery predicates", () => {
       dialect: sqliteDialect,
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1`,
+      windowFunctions: true,
     };
 
     const expr: PredicateExpression = {

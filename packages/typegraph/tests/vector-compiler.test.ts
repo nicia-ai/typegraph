@@ -1,6 +1,7 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 
+import { ConfigurationError } from "../src/errors";
 import { type QueryAst, type VectorMetricType } from "../src/query/ast";
 import { compileQuery, type CompileQueryOptions } from "../src/query/compiler";
 import {
@@ -114,6 +115,27 @@ describe("vector compilation semantics", () => {
     expect(sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY distance ASC\) AS ord/);
     // The inner k-cutoff bounds the ranked set to the predicate's limit.
     expect(sql).toMatch(/ORDER BY distance ASC\s+LIMIT 10/);
+  });
+
+  it("rejects vector relevance ranking when window functions are unavailable", () => {
+    let caught: unknown;
+    try {
+      compileQuery(buildVectorAst("cosine", 0.5), "graph_1", {
+        ...pgVectorOptions(),
+        windowFunctions: false,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect(caught).toMatchObject({
+      details: {
+        capability: "windowFunctions",
+        operation: "vector relevance ranking",
+        windowFunctions: false,
+      },
+    });
   });
 
   it("unions per-(kind, field) tables across kinds the alias resolves to (includeSubClasses)", () => {

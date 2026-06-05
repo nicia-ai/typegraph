@@ -99,6 +99,8 @@ export type { SqlDialect } from "../query/dialect/types";
 export type BackendCapabilities = Readonly<{
   /** Whether the backend supports atomic transactions (D1 does not) */
   transactions: boolean;
+  /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
+  windowFunctions: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -1474,6 +1476,7 @@ export type CountEdgesByKindParams = Readonly<{
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = {
   transactions: true, // SQLite supports transactions
+  windowFunctions: true, // SQLite has supported window functions since 3.25.0
 };
 
 /**
@@ -1481,4 +1484,5 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = {
  */
 export const POSTGRES_CAPABILITIES: BackendCapabilities = {
   transactions: true, // PostgreSQL supports transactions
+  windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
 };

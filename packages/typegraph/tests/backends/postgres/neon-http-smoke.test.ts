@@ -77,6 +77,7 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
     // and refuses with a typed ConfigurationError on this backend.
     expect(backend.capabilities.transactions).toBe(false);
     // Other capabilities are unchanged.
+    expect(backend.capabilities.windowFunctions).toBe(true);
     expect(backend.capabilities.vector?.supported).toBe(true);
   });
 
@@ -139,9 +140,10 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
     const sql = neon("postgresql://test:test@invalid.neon.tech/test");
     const db = drizzleNeonHttp({ client: sql });
     const backend = createPostgresBackend(db, {
-      capabilities: { transactions: true },
+      capabilities: { transactions: true, windowFunctions: false },
     });
 
     expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.windowFunctions).toBe(false);
   });
 });

@@ -43,7 +43,7 @@ export { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
 
 import { type SQL, sql } from "drizzle-orm";
 
-import { CompilerInvariantError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import {
   type AggregateExpr,
   type FulltextMatchPredicate,
@@ -138,6 +138,11 @@ export type CompileQueryOptions = Readonly<{
    */
   vectorStrategy?: VectorStrategy | undefined;
   /**
+   * Whether the active backend supports SQL window functions such as
+   * `ROW_NUMBER()`. Defaults to true for direct compiler callers.
+   */
+  windowFunctions?: boolean | undefined;
+  /**
    * Declared embedding slots `(kind, fieldPath) -> descriptor` used by
    * the `field.similarTo(...)` CTE to know which kinds in an alias
    * declare the field. Callers build it from the graph's node schemas.
@@ -191,6 +196,7 @@ export function compileQuery(
     ...(options_.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: options_.vectorStrategy }),
+    windowFunctions: options_.windowFunctions ?? true,
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -301,6 +307,7 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: options_.vectorStrategy }),
+    windowFunctions: options_.windowFunctions ?? true,
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -762,6 +769,37 @@ function selectStandardOrderBy(
   });
 }
 
+function selectWindowFunctionOperation(
+  vectorPredicate: VectorSimilarityPredicate | undefined,
+  fulltextPredicate: FulltextMatchPredicate | undefined,
+): string {
+  if (vectorPredicate !== undefined && fulltextPredicate !== undefined) {
+    return "hybrid relevance ranking";
+  }
+  if (vectorPredicate !== undefined) return "vector relevance ranking";
+  return "fulltext relevance ranking";
+}
+
+function assertWindowFunctionsSupported(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): void {
+  if (ctx.windowFunctions) return;
+
+  throw new ConfigurationError(
+    `${operation} requires SQL window functions, but this backend profile declares windowFunctions: false.`,
+    {
+      capability: "windowFunctions",
+      operation,
+      windowFunctions: false,
+    },
+    {
+      suggestion:
+        "Use a backend profile that supports SQL window functions, or avoid this query shape.",
+    },
+  );
+}
+
 function compileStandardQueryWithCteStrategy(
   ast: QueryAst,
   graphId: string,
@@ -792,6 +830,13 @@ function compileStandardQueryWithCteStrategy(
     throw new CompilerInvariantError(
       "Logical plan pass did not initialize plan state",
       { phase: "standard-pass-pipeline" },
+    );
+  }
+
+  if (vectorPredicate !== undefined || fulltextPredicate !== undefined) {
+    assertWindowFunctionsSupported(
+      ctx,
+      selectWindowFunctionOperation(vectorPredicate, fulltextPredicate),
     );
   }
 

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   defineGraph,
   defineNode,
   embedding,
@@ -103,6 +104,66 @@ describe(".fuseWith()", () => {
     const sqlText = toSqlString(compiled);
     expect(sqlText).toMatch(/1\.3 \/ \(42 \+ cte_embeddings\.ord\)/);
     expect(sqlText).toMatch(/0\.7 \/ \(42 \+ cte_fulltext\.ord\)/);
+  });
+
+  it("rejects hybrid relevance ranking when window functions are unavailable", () => {
+    const builder = makeBuilder();
+    const ast = builder
+      .from("HybridDoc", "d")
+      .whereNode("d", (d) =>
+        d.$fulltext
+          .matches("anything", 50)
+          .and(d.embedding.similarTo([0.1, 0.2, 0.3, 0.4], 50)),
+      )
+      .select((ctx) => ctx.d)
+      .toAst();
+
+    let caught: unknown;
+    try {
+      compileQuery(ast, HybridGraph.id, {
+        ...PG_VECTOR_OPTIONS,
+        windowFunctions: false,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect(caught).toMatchObject({
+      details: {
+        capability: "windowFunctions",
+        operation: "hybrid relevance ranking",
+        windowFunctions: false,
+      },
+    });
+  });
+
+  it("rejects fulltext relevance ranking when window functions are unavailable", () => {
+    const builder = makeBuilder();
+    const ast = builder
+      .from("HybridDoc", "d")
+      .whereNode("d", (d) => d.$fulltext.matches("anything", 50))
+      .select((ctx) => ctx.d)
+      .toAst();
+
+    let caught: unknown;
+    try {
+      compileQuery(ast, HybridGraph.id, {
+        dialect: "postgres",
+        windowFunctions: false,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect(caught).toMatchObject({
+      details: {
+        capability: "windowFunctions",
+        operation: "fulltext relevance ranking",
+        windowFunctions: false,
+      },
+    });
   });
 
   it("rejects invalid k values via validateHybridFusionOptions", () => {

@@ -166,7 +166,11 @@ Creates a SQLite backend from an existing Drizzle database instance. Pass `vecto
 ```typescript
 function createSqliteBackend(
   db: BetterSQLite3Database,
-  options?: { tables?: SqliteTables; vector?: VectorStrategy },
+  options?: {
+    tables?: SqliteTables;
+    vector?: VectorStrategy;
+    capabilities?: Partial<BackendCapabilities>;
+  },
 ): GraphBackend;
 ```
 
@@ -724,6 +728,7 @@ if (backend.capabilities.vector?.supported) {
 | Field | Meaning |
 | --- | --- |
 | `transactions` | Atomic transactions available (see note below) |
+| `windowFunctions` | SQL window functions such as `ROW_NUMBER()` are available |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
 
@@ -752,6 +757,10 @@ Vector and fulltext capabilities are populated from the configured strategy, so 
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
 different `metrics`/`indexTypes` shifts these rows accordingly — always check `backend.capabilities` at runtime
 rather than hard-coding the dialect.
+
+Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
+queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile
+sets `windowFunctions: false`.
 
 :::note[JSON is native on both backends]
 SQLite stores JSON as text and queries it with the built-in JSON functions (`json_extract`, `json_each`, …);

@@ -54,6 +54,10 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+const MOCK_BACKEND_CAPABILITIES = {
+  transactions: true,
+  windowFunctions: true,
+} as const;
 
 // ============================================================
 // State Preservation Tests
@@ -223,6 +227,7 @@ describe("UnionableQuery state preservation", () => {
   describe("result transformation", () => {
     it("applies select function when executing with mock backend", async () => {
       const mockBackend = {
+        capabilities: MOCK_BACKEND_CAPABILITIES,
         execute: vi.fn().mockResolvedValue([
           {
             p_id: "person-1",
@@ -267,6 +272,7 @@ describe("UnionableQuery state preservation", () => {
 
     it("returns raw rows when no select function is set", async () => {
       const mockBackend = {
+        capabilities: MOCK_BACKEND_CAPABILITIES,
         execute: vi
           .fn()
           .mockResolvedValue([

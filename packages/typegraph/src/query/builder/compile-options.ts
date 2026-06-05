@@ -21,6 +21,7 @@ export function buildCompileOptions(
   return {
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
+    windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
     ...(fulltextStrategy === undefined ? {} : { fulltextStrategy }),
     ...(vectorStrategy === undefined ?
       {}

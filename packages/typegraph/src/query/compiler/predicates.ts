@@ -405,6 +405,11 @@ export type PredicateCompilerContext = Readonly<{
    */
   vectorStrategy?: VectorStrategy;
   /**
+   * Whether the active backend supports SQL window functions such as
+   * `ROW_NUMBER()`.
+   */
+  windowFunctions: boolean;
+  /**
    * Declared embedding slots `(kind, fieldPath) -> {dimensions, metric,
    * indexType}`. The embeddings CTE consults it to know which kinds in
    * an alias actually declare the field — only those get a per-field

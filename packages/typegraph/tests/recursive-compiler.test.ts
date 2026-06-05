@@ -91,6 +91,7 @@ function createContext(
     dialect,
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
+    windowFunctions: true,
   };
 }
 

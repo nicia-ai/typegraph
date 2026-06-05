@@ -39,6 +39,10 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+const MOCK_BACKEND_CAPABILITIES = {
+  transactions: true,
+  windowFunctions: true,
+} as const;
 
 // ============================================================
 // ExecutableAggregateQuery toAst
@@ -256,6 +260,7 @@ describe("ExecutableAggregateQuery.execute", () => {
 
   it("executes query with mock backend", async () => {
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       execute: vi.fn().mockResolvedValue([
         { category: "Electronics", count: 10 },
         { category: "Books", count: 25 },
@@ -282,6 +287,7 @@ describe("ExecutableAggregateQuery.execute", () => {
 
   it("maps only requested fields from results", async () => {
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       execute: vi
         .fn()
         .mockResolvedValue([
@@ -308,6 +314,7 @@ describe("ExecutableAggregateQuery.execute", () => {
 
   it("handles empty result set", async () => {
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       execute: vi.fn().mockResolvedValue([]),
     };
 

@@ -54,6 +54,11 @@ const User = defineNode("User", {
   }),
 });
 
+const MOCK_BACKEND_CAPABILITIES = {
+  transactions: true,
+  windowFunctions: true,
+} as const;
+
 const Admin = defineNode("Admin", {
   schema: z.object({
     name: z.string(),
@@ -514,6 +519,7 @@ describe("UnionableQuery.execute", () => {
   it("executes query with mock backend", async () => {
     // Mock returns database-style rows with prefixed columns
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       execute: vi.fn().mockResolvedValue([
         {
           u_id: "user-1",
@@ -572,6 +578,7 @@ describe("UnionableQuery.execute", () => {
 
   it("handles empty result set", async () => {
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       execute: vi.fn().mockResolvedValue([]),
     };
 
@@ -641,6 +648,7 @@ describe("UnionableQuery complex scenarios", () => {
 
   it("rejects execute() when any leaf query contains param() references", async () => {
     const mockBackend = {
+      capabilities: MOCK_BACKEND_CAPABILITIES,
       dialect: "sqlite" as const,
       execute: vi.fn(),
     };

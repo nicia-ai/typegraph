@@ -166,6 +166,11 @@ export type SqliteBackendOptions = Readonly<{
    * connections without a vector extension.
    */
   vector?: VectorStrategy;
+  /**
+   * Override specific backend capabilities. Useful for custom SQLite builds
+   * or tests that need to simulate an engine-level capability gap.
+   */
+  capabilities?: Partial<BackendCapabilities>;
 }>;
 
 const SQLITE_MAX_BIND_PARAMETERS = 999;
@@ -643,11 +648,14 @@ export function createSqliteBackend(
   // backend so a slot's per-field table is created at most once per process.
   const vectorSlotLatch =
     vectorStrategy === undefined ? undefined : createVectorSlotLatch();
-  const capabilities: BackendCapabilities = buildSqliteCapabilities({
-    fulltextStrategy,
-    vectorStrategy,
-    transactionMode,
-  });
+  const capabilities: BackendCapabilities = {
+    ...buildSqliteCapabilities({
+      fulltextStrategy,
+      vectorStrategy,
+      transactionMode,
+    }),
+    ...options.capabilities,
+  };
 
   const tableNames: SqlTableNames = {
     nodes: getTableName(tables.nodes),

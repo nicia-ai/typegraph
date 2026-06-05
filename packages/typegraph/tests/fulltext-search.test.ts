@@ -15,6 +15,7 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import { createSqliteBackend } from "../src/backend/sqlite";
 import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import {
@@ -26,7 +27,11 @@ import { createSchemaIntrospector } from "../src/query/schema-introspector";
 import type { createStore } from "../src/store";
 import { getSearchableFields } from "../src/store/fulltext-sync";
 import { type FulltextSearchHit } from "../src/store/search";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  createTestDatabase,
+} from "./test-utils";
 
 type DocumentProps = Readonly<{ title: string; body: string; plain?: string }>;
 function documentProps(hit: FulltextSearchHit): DocumentProps {
@@ -203,6 +208,44 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
     expect(backend.capabilities.fulltext?.supported).toBe(true);
     expect(backend.capabilities.fulltext?.phraseQueries).toBe(true);
     expect(backend.capabilities.fulltext?.prefixQueries).toBe(true);
+  });
+
+  it("rejects relevance ranking when the backend disables window functions", async () => {
+    const db = createTestDatabase();
+    const backendWithoutWindows = createSqliteBackend(db, {
+      capabilities: { windowFunctions: false },
+    });
+
+    try {
+      await backendWithoutWindows.bootstrapTables?.();
+      const storeWithoutWindows = await createInitializedStore(
+        SearchableGraph,
+        backendWithoutWindows,
+      );
+
+      let caught: unknown;
+      try {
+        await storeWithoutWindows
+          .query()
+          .from("Document", "d")
+          .whereNode("d", (d) => d.$fulltext.matches("climate", 10))
+          .select((ctx) => ctx.d)
+          .execute();
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect(caught).toMatchObject({
+        details: {
+          capability: "windowFunctions",
+          operation: "fulltext relevance ranking",
+          windowFunctions: false,
+        },
+      });
+    } finally {
+      await backendWithoutWindows.close();
+    }
   });
 
   it("indexes searchable fields on create and surfaces them in search", async () => {
