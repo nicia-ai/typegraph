@@ -230,6 +230,24 @@ export interface DialectAdapter {
   jsonPathIsNotNull(column: SQL, pointer: JsonPointer): SQL;
 
   // ============================================================
+  // Comparison Operations
+  // ============================================================
+
+  /**
+   * Null-safe equality: `TRUE` when both sides are equal OR both are NULL.
+   * Unlike `=`, a NULL on either side does not yield NULL/unknown.
+   *
+   * Used by batched declared-index lookup so a NULL probe value matches a
+   * NULL stored index-field value. Plain `=` would silently never match
+   * NULLs, diverging from the lookup's documented null semantics.
+   *
+   * @example
+   * SQLite: left IS right
+   * PostgreSQL: left IS NOT DISTINCT FROM right
+   */
+  nullSafeEquals(left: SQL, right: SQL): SQL;
+
+  // ============================================================
   // String Operations
   // ============================================================
 

@@ -9,7 +9,7 @@
 
 import { ValidationError } from "../errors";
 import { type OrderSpec } from "./ast";
-import { parseJsonPointer } from "./json-pointer";
+import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
 // Types
@@ -199,12 +199,7 @@ export function extractCursorValue(
 
     // Then follow jsonPointer if present (e.g., "/name")
     if (jsonPointer) {
-      const segments = parseJsonPointer(jsonPointer);
-      for (const segment of segments) {
-        if (current === null || current === undefined) return undefined;
-        if (typeof current !== "object") return undefined;
-        current = (current as Record<string, unknown>)[segment];
-      }
+      return resolveJsonPointer(current, jsonPointer);
     }
 
     return current;

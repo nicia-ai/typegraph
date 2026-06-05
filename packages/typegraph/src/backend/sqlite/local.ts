@@ -37,7 +37,11 @@ import {
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
-import { type GraphBackend, wrapWithManagedClose } from "../types";
+import {
+  type BackendCapabilities,
+  type GraphBackend,
+  wrapWithManagedClose,
+} from "../types";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -117,6 +121,13 @@ export type LocalSqliteBackendOptions = Readonly<{
    * Defaults to standard TypeGraph table names.
    */
   tables?: SqliteTables;
+
+  /**
+   * Override specific backend capabilities — e.g. to simulate an engine-level
+   * gap like missing SQL window functions in tests. Forwarded to
+   * createSqliteBackend.
+   */
+  capabilities?: Partial<BackendCapabilities>;
 }>;
 
 /**
@@ -192,6 +203,7 @@ export function createLocalSqliteBackend(
     },
     tables,
     ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
+    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
   });
   const managedBackend = wrapWithManagedClose(backend, () => {
     sqlite.close();

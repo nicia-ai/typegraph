@@ -5,6 +5,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  defineNodeIndex,
   embedding,
   searchable,
 } from "../../../src";
@@ -44,6 +45,7 @@ const Company = defineNode("Company", {
 const Document = defineNode("Document", {
   schema: z.object({
     title: z.string(),
+    publishedAt: z.date().optional(),
     tags: z.array(z.string()).optional(),
     scores: z.array(z.number()).optional(),
     metadata: z
@@ -89,6 +91,38 @@ const knows = defineEdge("knows", {
   }),
 });
 
+/**
+ * Declared node indexes exercised by the `bulkFindByIndex` suite. Names are
+ * stable so tests can reference them. These are declared but not materialized
+ * by the shared store factory — `bulkFindByIndex` is correct either way.
+ */
+const productCategoryIndex = defineNodeIndex(Product, {
+  name: "product_category",
+  fields: ["category"],
+});
+
+const productCategoryInStockIndex = defineNodeIndex(Product, {
+  name: "product_category_in_stock",
+  fields: ["category"],
+  where: (w) => w.inStock.eq(true),
+});
+
+const personActiveNameIndex = defineNodeIndex(Person, {
+  name: "person_active_name",
+  fields: ["isActive", "name"],
+});
+
+const documentAuthorIndex = defineNodeIndex(Document, {
+  name: "document_author",
+  fields: [["metadata", "author"] as const],
+});
+
+// Date-typed key — bulkFindByIndex rejects this (no cross-backend parity).
+const documentPublishedAtIndex = defineNodeIndex(Document, {
+  name: "document_published_at",
+  fields: ["publishedAt"],
+});
+
 export const integrationTestGraph = defineGraph({
   id: "integration_test",
   nodes: {
@@ -98,6 +132,13 @@ export const integrationTestGraph = defineGraph({
     Document: { type: Document },
     Article: { type: Article },
   },
+  indexes: [
+    productCategoryIndex,
+    productCategoryInStockIndex,
+    personActiveNameIndex,
+    documentAuthorIndex,
+    documentPublishedAtIndex,
+  ],
   edges: {
     worksAt: {
       type: worksAt,

@@ -100,6 +100,7 @@ import {
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
   executeNodeBulkFindByConstraint,
+  executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,
@@ -613,6 +614,15 @@ export class Store<G extends GraphDef> {
           constraintName,
           items,
           backend,
+        ),
+      executeBulkFindByIndex: (kind, indexName, items, backend, options) =>
+        executeNodeBulkFindByIndex(
+          ctx,
+          kind,
+          indexName,
+          items,
+          backend,
+          options,
         ),
     };
   }

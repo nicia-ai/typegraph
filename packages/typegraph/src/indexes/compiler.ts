@@ -98,6 +98,34 @@ export function compileEdgeIndexKeys(
   return { keys };
 }
 
+/**
+ * Compiles the per-field key-extraction expressions for a node index's
+ * **lookup keys** — `index.fields` only, excluding scope columns and
+ * `coveringFields` (which are index payload, not part of the lookup key).
+ *
+ * Each expression is the exact extraction the index DDL builds for that
+ * field (via the shared {@link compileIndexKeyValue}), so a runtime lookup
+ * predicate stays byte-identical to the materialized index expression —
+ * the single source of truth that lets the planner use the physical index.
+ */
+export function compileNodeIndexFieldKeys(
+  index: NodeIndexDeclaration,
+  ctx: IndexCompilationContext,
+): readonly SQL[] {
+  const adapter = getDialect(ctx.dialect);
+  const keys: SQL[] = [];
+  for (const [position, pointer] of index.fields.entries()) {
+    const extracted = compileIndexKeyValue(
+      adapter,
+      ctx.propsColumn,
+      pointer,
+      index.fieldValueTypes[position],
+    );
+    keys.push(sql`(${extracted})`);
+  }
+  return keys;
+}
+
 function compileIndexKeyValue(
   dialect: ReturnType<typeof getDialect>,
   propsColumn: SQL,

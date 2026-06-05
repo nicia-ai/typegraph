@@ -21,6 +21,7 @@ import {
   type GraphNodeCollections,
   type IfExistsMode,
   type Node,
+  type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
   type QueryOptions,
   type UpdateNodeInput,
@@ -92,6 +93,13 @@ export type NodeOperations = Readonly<{
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<(Node | undefined)[]>;
+  executeBulkFindByIndex: (
+    kind: string,
+    indexName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeBulkFindByIndexOptions,
+  ) => Promise<Node[][]>;
 }>;
 
 export type EdgeOperations = Readonly<{
