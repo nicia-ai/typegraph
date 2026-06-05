@@ -188,6 +188,23 @@ export function parseJsonPointer(pointer: JsonPointer): readonly string[] {
   return rawSegments.map((segment) => decodeJsonPointerSegment(segment));
 }
 
+/**
+ * Resolves the value at a JSON pointer within a plain JS value, returning
+ * `undefined` if any segment is missing or traverses a non-object.
+ */
+export function resolveJsonPointer(
+  value: unknown,
+  pointer: JsonPointer,
+): unknown {
+  let current = value;
+  for (const segment of parseJsonPointer(pointer)) {
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
 export function joinJsonPointers(
   base: JsonPointer | undefined,
   relative: JsonPointer,

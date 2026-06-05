@@ -167,6 +167,16 @@ export const sqliteDialect: DialectAdapter = {
   },
 
   // ============================================================
+  // Comparison Operations
+  // ============================================================
+
+  nullSafeEquals(left, right) {
+    // SQLite's IS operator is null-safe equality (equivalent to = for
+    // non-null operands, TRUE when both sides are NULL).
+    return sql`${left} IS ${right}`;
+  },
+
+  // ============================================================
   // String Operations
   // ============================================================
 

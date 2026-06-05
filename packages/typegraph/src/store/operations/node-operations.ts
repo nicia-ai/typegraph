@@ -3,6 +3,8 @@
  *
  * Handles node CRUD operations: create, update, delete.
  */
+import { type SQL, sql } from "drizzle-orm";
+
 import {
   type GraphBackend,
   type InsertNodeParams,
@@ -22,14 +24,30 @@ import {
   type UniqueConstraint,
 } from "../../core/types";
 import {
+  ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
   NodeConstraintNotFoundError,
+  NodeIndexNotFoundError,
   NodeNotFoundError,
   RestrictedDeleteError,
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
+import {
+  compileIndexWhere,
+  compileNodeIndexFieldKeys,
+  type IndexCompilationContext,
+} from "../../indexes/compiler";
+import { type NodeIndexDeclaration } from "../../indexes/types";
+import { type ValueType } from "../../query/ast";
+import {
+  createSqlSchema,
+  DEFAULT_SQL_SCHEMA,
+} from "../../query/compiler/schema";
+import { getDialect } from "../../query/dialect";
+import { type DialectAdapter } from "../../query/dialect/types";
+import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { validateOptionalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -47,11 +65,13 @@ import {
   type FulltextSyncContext,
   syncFulltext,
 } from "../fulltext-sync";
+import { getNodeRowsByIds } from "../node-fetch";
 import { rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
+  type NodeBulkFindByIndexOptions,
   type NodeGetOrCreateByConstraintOptions,
   type OperationHookContext,
   type UpdateNodeInput,
@@ -1256,6 +1276,368 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
   }
 
   return results;
+}
+
+// ============================================================
+// Bulk Find-By-Index
+// ============================================================
+
+/**
+ * Resolves a declared node index by name, validating the kind first.
+ *
+ * @throws {KindNotFoundError} when the node kind is not registered
+ * @throws {NodeIndexNotFoundError} when no node index of that name exists
+ */
+function resolveNodeIndex<G extends GraphDef>(
+  graph: G,
+  kind: string,
+  indexName: string,
+): NodeIndexDeclaration {
+  getNodeRegistration(graph, kind);
+
+  const declaration = graph.indexes?.find(
+    (candidate) =>
+      candidate.entity === "node" &&
+      candidate.kind === kind &&
+      candidate.name === indexName,
+  );
+
+  if (declaration?.entity !== "node") {
+    throw new NodeIndexNotFoundError(indexName, kind);
+  }
+
+  return declaration;
+}
+
+const INDEX_PROBE_EXPECTED_TYPEOF: Partial<Record<ValueType, string>> = {
+  string: "string",
+  number: "number",
+  boolean: "boolean",
+};
+
+/**
+ * Validates a single probe value against its declared index-field type.
+ * Missing/null values are valid (null probes); only a present, scalar
+ * value of the wrong type is rejected.
+ */
+function validateIndexProbeValue(
+  value: unknown,
+  valueType: ValueType | undefined,
+  pointer: JsonPointer,
+  kind: string,
+): void {
+  if (value === undefined || value === null) return;
+
+  // Index keys are scalar; a non-scalar probe can't be bound and must fail
+  // with a typed error rather than a cryptic driver bind error downstream.
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    typeof value !== "boolean" &&
+    !(value instanceof Date)
+  ) {
+    throw indexProbeTypeError(
+      pointer,
+      kind,
+      "a scalar (string, number, boolean, or Date)",
+      value,
+    );
+  }
+
+  if (valueType === "date") {
+    if (value instanceof Date || typeof value === "string") return;
+    throw indexProbeTypeError(
+      pointer,
+      kind,
+      "date (Date or ISO string)",
+      value,
+    );
+  }
+
+  const expected = INDEX_PROBE_EXPECTED_TYPEOF[valueType ?? "unknown"];
+  if (expected === undefined) return;
+  if (typeof value !== expected) {
+    throw indexProbeTypeError(pointer, kind, expected, value);
+  }
+}
+
+function indexProbeTypeError(
+  pointer: JsonPointer,
+  kind: string,
+  expected: string,
+  value: unknown,
+): ValidationError {
+  return new ValidationError(
+    `Index probe value for "${pointer}" on node kind "${kind}" has an incompatible type`,
+    {
+      entityType: "node",
+      kind,
+      issues: [
+        {
+          path: pointer,
+          message: `Expected ${expected}, received ${typeof value}`,
+          code: "invalid_type",
+        },
+      ],
+    },
+  );
+}
+
+/** Coerces a non-null probe value into a driver-bindable scalar. */
+function coerceIndexProbeBind(
+  value: unknown,
+  adapter: DialectAdapter,
+): unknown {
+  return adapter.bindValue(normalizeProbeScalar(value as ProbeScalar));
+}
+
+type ProbeScalar = string | number | boolean | Date;
+
+/**
+ * Canonical scalar form of a validated probe value, shared by the dedup key
+ * and the bound SQL value so the two can never drift (a Date and its ISO
+ * string normalize identically — and produce identical predicates).
+ */
+function normalizeProbeScalar(value: ProbeScalar): string | number | boolean {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+const PROBE_NULL_TAG = 0;
+const PROBE_VALUE_TAG = 1;
+
+/**
+ * Stable dedup key for a probe tuple. Each slot is tagged so a null/undefined
+ * value can never collide with a string that happens to equal a sentinel -
+ * null maps to [0], a present scalar to [1, normalized].
+ */
+function canonicalIndexProbeKey(probe: readonly unknown[]): string {
+  return JSON.stringify(
+    probe.map((value) =>
+      value === undefined || value === null ?
+        [PROBE_NULL_TAG]
+      : [PROBE_VALUE_TAG, normalizeProbeScalar(value as ProbeScalar)],
+    ),
+  );
+}
+
+/**
+ * Batched candidate retrieval against a declared node index.
+ *
+ * Emits a single query against the nodes table: each input's indexed-field
+ * values become a probe predicate (null-safe equality, reusing the index's
+ * own extraction expressions so the planner can use the physical index), and
+ * a `CASE` selector tags each matched row with the deduped probe group it
+ * satisfies. Rows are grouped back to input positions in order; each input's
+ * candidate set is ordered by node id.
+ */
+export async function executeNodeBulkFindByIndex<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  indexName: string,
+  items: readonly Readonly<{ props: Record<string, unknown> }>[],
+  backend: GraphBackend | TransactionBackend,
+  options?: NodeBulkFindByIndexOptions,
+): Promise<Node[][]> {
+  if (items.length === 0) return [];
+
+  const index = resolveNodeIndex(ctx.graph, kind, indexName);
+
+  // Date-typed lookup keys can't satisfy the cross-backend parity guarantee:
+  // SQLite compares stored ISO text byte-wise while Postgres compares
+  // timestamptz instants, so equal instants in different ISO forms diverge.
+  // Declare the gap rather than return backend-dependent results.
+  if (index.fieldValueTypes.includes("date")) {
+    throw new ConfigurationError(
+      `bulkFindByIndex does not support date-typed key fields on index "${indexName}" (node kind "${kind}")`,
+      { indexName, kind },
+      {
+        suggestion:
+          "Date index keys compare differently across SQLite and PostgreSQL. Use a string-encoded key field, or query date predicates via store.query(...).where(...).",
+      },
+    );
+  }
+
+  const limitPerInput = options?.limitPerInput;
+  if (
+    limitPerInput !== undefined &&
+    (!Number.isInteger(limitPerInput) || limitPerInput <= 0)
+  ) {
+    throw new ValidationError(
+      "bulkFindByIndex limitPerInput must be a positive integer",
+      {
+        entityType: "node",
+        kind,
+        issues: [
+          {
+            path: "limitPerInput",
+            message: `Expected a positive integer, received ${String(limitPerInput)}`,
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
+
+  const adapter = getDialect(backend.dialect);
+
+  // 1. Extract + validate each input's indexed-field probe tuple.
+  const probes: unknown[][] = items.map((item) =>
+    index.fields.map((pointer, position) => {
+      const value = resolveJsonPointer(item.props, pointer);
+      validateIndexProbeValue(
+        value,
+        index.fieldValueTypes[position],
+        pointer,
+        kind,
+      );
+      return value;
+    }),
+  );
+
+  // 2. Dedupe probe tuples; map each distinct tuple to its input positions.
+  const groupByKey = new Map<string, number>();
+  const groupProbes: unknown[][] = [];
+  const groupToInputs: number[][] = [];
+  for (const [inputIndex, probe] of probes.entries()) {
+    const key = canonicalIndexProbeKey(probe);
+    const existing = groupByKey.get(key);
+    if (existing === undefined) {
+      groupByKey.set(key, groupProbes.length);
+      groupProbes.push(probe);
+      groupToInputs.push([inputIndex]);
+      continue;
+    }
+    groupToInputs[existing]?.push(inputIndex);
+  }
+
+  // 3. Build probe predicates shared by the CASE selector and WHERE filter.
+  const schema =
+    backend.tableNames ?
+      createSqlSchema(backend.tableNames)
+    : DEFAULT_SQL_SCHEMA;
+  const compileContext: IndexCompilationContext = {
+    dialect: backend.dialect,
+    propsColumn: sql.raw(`"props"`),
+    systemColumn: (column) => sql.raw(`"${column}"`),
+  };
+  const fieldKeys = compileNodeIndexFieldKeys(index, compileContext);
+
+  const groupPredicates = groupProbes.map(
+    (probe) =>
+      sql`(${sql.join(
+        fieldKeys.map((fieldKey, position) => {
+          const value = probe[position];
+          if (value === undefined || value === null) {
+            return sql`${fieldKey} IS NULL`;
+          }
+          return adapter.nullSafeEquals(
+            fieldKey,
+            sql`${coerceIndexProbeBind(value, adapter)}`,
+          );
+        }),
+        sql` AND `,
+      )})`,
+  );
+
+  const caseBranches = groupPredicates.map(
+    (predicate, group) => sql`WHEN ${predicate} THEN ${sql.raw(String(group))}`,
+  );
+  const probeIndexExpr = sql`CASE ${sql.join(caseBranches, sql` `)} ELSE NULL END`;
+
+  const conditions: SQL[] = [
+    sql`"graph_id" = ${ctx.graphId}`,
+    sql`"kind" = ${kind}`,
+    sql`"deleted_at" IS NULL`,
+  ];
+  if (index.where !== undefined) {
+    conditions.push(compileIndexWhere(compileContext, index.where));
+  }
+  conditions.push(sql`(${sql.join(groupPredicates, sql` OR `)})`);
+  const whereClause = sql.join(conditions, sql` AND `);
+
+  // The probe matching runs against the nodes table; rows are hydrated
+  // separately via the backend's normalized node reads so the returned
+  // shape is identical to every other node API (props/timestamp
+  // normalization is backend-owned, not re-derived from raw driver rows).
+  const probedSelect = sql`SELECT "id", ${probeIndexExpr} AS probe_idx FROM ${schema.nodesTable} WHERE ${whereClause}`;
+
+  // limitPerInput caps each input's candidates per probe group. When the
+  // backend supports window functions we cap in SQL (`ROW_NUMBER()`), which
+  // also avoids transferring excess ids on low-selectivity keys. Otherwise we
+  // degrade gracefully: fetch all matching ids and cap per group in JS before
+  // hydration — the cap stays correct, only the id transfer is unbounded.
+  const capInSql =
+    limitPerInput !== undefined && backend.capabilities.windowFunctions;
+
+  const query =
+    capInSql ?
+      sql`SELECT "id", probe_idx FROM (SELECT "id", probe_idx, ROW_NUMBER() OVER (PARTITION BY probe_idx ORDER BY "id") AS probe_rank FROM (${probedSelect}) AS probed) AS ranked WHERE probe_rank <= ${limitPerInput} ORDER BY probe_idx, "id"`
+    : sql`${probedSelect} ORDER BY probe_idx, "id"`;
+
+  // 4. Execute, hydrate matched nodes, and group back to input positions.
+  const rawMatches = await backend.execute<ProbeMatch>(query);
+  const matches =
+    limitPerInput !== undefined && !capInSql ?
+      capMatchesPerGroup(rawMatches, limitPerInput)
+    : rawMatches;
+
+  const nodesById = await hydrateNodesById(
+    backend,
+    ctx.graphId,
+    kind,
+    matches.map((match) => match.id),
+  );
+
+  const results: Node[][] = Array.from({ length: items.length }, () => []);
+  for (const match of matches) {
+    const node = nodesById.get(match.id);
+    if (node === undefined) continue;
+    const inputs = groupToInputs[match.probe_idx];
+    if (inputs === undefined) continue;
+    for (const inputIndex of inputs) {
+      results[inputIndex]?.push(node);
+    }
+  }
+
+  return results;
+}
+
+type ProbeMatch = Readonly<{ id: string; probe_idx: number }>;
+
+/**
+ * Caps matches to the first `limitPerInput` per probe group (the JS-side
+ * equivalent of the `ROW_NUMBER()` window). Relies on `matches` already being
+ * ordered by `(probe_idx, id)`, so the kept rows are the lowest ids per group.
+ */
+function capMatchesPerGroup(
+  matches: readonly ProbeMatch[],
+  limitPerInput: number,
+): ProbeMatch[] {
+  const perGroupCount = new Map<number, number>();
+  const capped: ProbeMatch[] = [];
+  for (const match of matches) {
+    const count = perGroupCount.get(match.probe_idx) ?? 0;
+    if (count >= limitPerInput) continue;
+    perGroupCount.set(match.probe_idx, count + 1);
+    capped.push(match);
+  }
+  return capped;
+}
+
+/** Hydrates live nodes by id via the backend's normalized node reads. */
+async function hydrateNodesById(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+): Promise<Map<string, Node>> {
+  const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+  const nodesById = new Map<string, Node>();
+  for (const [id, row] of rowsById) {
+    if (row.deleted_at !== undefined) continue;
+    nodesById.set(id, rowToNode(row));
+  }
+  return nodesById;
 }
 
 // ============================================================

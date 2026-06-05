@@ -162,6 +162,14 @@ export const postgresDialect: DialectAdapter = {
   },
 
   // ============================================================
+  // Comparison Operations
+  // ============================================================
+
+  nullSafeEquals(left, right) {
+    return sql`${left} IS NOT DISTINCT FROM ${right}`;
+  },
+
+  // ============================================================
   // String Operations
   // ============================================================
 

@@ -14,6 +14,7 @@ export {
   type HookContext,
   type IfExistsMode,
   type Node,
+  type NodeBulkFindByIndexOptions,
   type NodeCollection,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,

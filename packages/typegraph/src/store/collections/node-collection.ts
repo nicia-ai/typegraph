@@ -18,11 +18,13 @@ import {
 import { ConfigurationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import { nowIso } from "../../utils/date";
+import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
+  type NodeBulkFindByIndexOptions,
   type NodeCollection,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
@@ -114,6 +116,13 @@ export type NodeCollectionConfig = Readonly<{
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<(Node | undefined)[]>;
+  executeBulkFindByIndex: (
+    kind: string,
+    indexName: string,
+    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    backend: GraphBackend | TransactionBackend,
+    options?: NodeBulkFindByIndexOptions,
+  ) => Promise<Node[][]>;
 }>;
 
 function buildCreateInput(
@@ -190,6 +199,7 @@ export function createNodeCollection<
     executeBulkGetOrCreateByConstraint,
     executeFindByConstraint,
     executeBulkFindByConstraint,
+    executeBulkFindByIndex,
   } = config;
 
   return {
@@ -227,28 +237,13 @@ export function createNodeCollection<
     ): Promise<readonly (Node<N> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      if (backend.getNodes !== undefined) {
-        const rows = await backend.getNodes(graphId, kind, ids);
-        const rowMap = new Map<string, (typeof rows)[number]>();
-        for (const row of rows) {
-          rowMap.set(row.id, row);
-        }
-        return ids.map((id) => {
-          const row = rowMap.get(id);
-          if (!row) return;
-          if (!matchesTemporalMode(row, options)) return;
-          return narrowNode<N>(rowToNode(row));
-        });
-      }
-
-      return Promise.all(
-        ids.map(async (id) => {
-          const row = await backend.getNode(graphId, kind, id);
-          if (!row) return;
-          if (!matchesTemporalMode(row, options)) return;
-          return narrowNode<N>(rowToNode(row));
-        }),
-      );
+      const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+      return ids.map((id) => {
+        const row = rowsById.get(id);
+        if (!row) return;
+        if (!matchesTemporalMode(row, options)) return;
+        return narrowNode<N>(rowToNode(row));
+      });
     },
 
     async update(
@@ -559,6 +554,29 @@ export function createNodeCollection<
       return results.map((result) =>
         result === undefined ? undefined : narrowNode<N>(result),
       );
+    },
+
+    async bulkFindByIndex(
+      indexName: string,
+      items: readonly Readonly<{
+        props: Partial<z.input<N["schema"]>>;
+      }>[],
+      options?: NodeBulkFindByIndexOptions,
+    ): Promise<readonly Node<N>[][]> {
+      if (items.length === 0) return [];
+
+      const mappedItems = items.map((item) => ({
+        props: item.props,
+      }));
+
+      const results = await executeBulkFindByIndex(
+        kind,
+        indexName,
+        mappedItems,
+        backend,
+        options,
+      );
+      return results.map((bucket) => narrowNodes<N>(bucket));
     },
 
     async getOrCreateByConstraint(

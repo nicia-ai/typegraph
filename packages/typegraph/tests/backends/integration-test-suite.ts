@@ -25,6 +25,7 @@ import {
   registerAdvancedEdgePropertyIntegrationTests,
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
+  registerBulkFindByIndexIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -113,6 +114,7 @@ export function createIntegrationTestSuite(
     });
 
     registerAggregateIntegrationTests(context);
+    registerBulkFindByIndexIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerTemporalIntegrationTests(context);

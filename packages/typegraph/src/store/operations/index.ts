@@ -20,6 +20,7 @@ export {
 } from "./edge-operations";
 export {
   executeNodeBulkFindByConstraint,
+  executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
   executeNodeCreate,
   executeNodeCreateBatch,

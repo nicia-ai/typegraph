@@ -185,6 +185,48 @@ CREATE INDEX idx_person_email_name ON typegraph_nodes
   WHERE deleted_at IS NULL;
 ```
 
+## Batched Index Lookup (`bulkFindByIndex`)
+
+`store.nodes.<Kind>.bulkFindByIndex(indexName, items, options?)` takes many in-memory records and
+returns the live nodes that share each record's declared **index key** — batched candidate retrieval
+for import reconciliation, dedup-candidate discovery, and joining incoming records against the graph
+by a declared composite key.
+
+```ts
+const candidates = await store.nodes.Person.bulkFindByIndex("person_active_name", [
+  { props: { isActive: true, name: "Ana" } },
+  { props: { name: "Bo" } }, // missing isActive → matches stored null
+]);
+// readonly Node<Person>[][] — one bucket per input, ordered by node id
+```
+
+Semantics:
+
+- **One bucket per input**, in input order; empty input returns `[]`. The index may be non-unique, so
+  each bucket is a (possibly empty) array — this is candidate retrieval, not a uniqueness guarantee.
+  For unique lookups prefer `bulkFindByConstraint` (backed by the uniqueness side-table).
+- TypeGraph computes the lookup key from **`index.fields` only** (JSON-pointer extraction, reusing the
+  index's own extraction expressions). `coveringFields` are not part of the key.
+- The index's partial `where` is applied in SQL to **stored** rows only; probes carry index-field
+  values, nothing else. Only the indexed fields are validated — full records are not required.
+- A missing/`undefined` indexed field matches stored `NULL` (null-safe equality). Live,
+  non-soft-deleted nodes only.
+- `options.limitPerInput` caps each bucket (ordered by node id); unbounded by default — no silent
+  truncation. A non-positive value throws `ValidationError`. An unknown index name throws
+  `NodeIndexNotFoundError`. A non-scalar probe value throws `ValidationError`. On backends that
+  support SQL window functions the cap is applied in-database (`ROW_NUMBER()`); on backends without
+  them (`capabilities.windowFunctions: false`) it degrades to an in-memory cap after fetching the
+  matching ids — same result, but it transfers all matching ids for low-selectivity keys.
+- **Key field types:** string, number, and boolean keys are supported. **Date-typed key fields are
+  not** — they throw `ConfigurationError`, because SQLite compares stored ISO text byte-wise while
+  PostgreSQL compares `timestamptz` instants, so the same instant in different ISO forms would match
+  on one backend but not the other. Use a string-encoded key, or `store.query(...).where(...)` for
+  date predicates.
+
+The lookup is correct whether or not the physical index has been materialized; materialize it (see
+below) for the query planner to actually use it. Null-safe predicates may be less reliably
+index-accelerated than plain equality.
+
 ## Choosing the Right Index Type
 
 TypeGraph's `defineNodeIndex` / `defineEdgeIndex` generate **B-tree expression indexes** — the right

@@ -343,6 +343,25 @@ export class NodeConstraintNotFoundError extends TypeGraphError {
   }
 }
 
+/**
+ * Thrown when a declared node index name is not found on a node kind.
+ */
+export class NodeIndexNotFoundError extends TypeGraphError {
+  constructor(indexName: string, kind: string, options?: { cause?: unknown }) {
+    super(
+      `Index not found: "${indexName}" on node kind "${kind}"`,
+      "INDEX_NOT_FOUND",
+      {
+        details: { indexName, kind },
+        category: "user",
+        suggestion: `Verify the index name "${indexName}" is declared via defineNodeIndex for "${kind}" and passed to defineGraph({ indexes }).`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "NodeIndexNotFoundError";
+  }
+}
+
 // ============================================================
 // Constraint Errors (category: "constraint")
 // ============================================================

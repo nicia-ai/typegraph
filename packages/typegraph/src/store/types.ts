@@ -345,6 +345,20 @@ export type NodeGetOrCreateByConstraintOptions = Readonly<{
 }>;
 
 /**
+ * Options for node bulkFindByIndex operations.
+ */
+export type NodeBulkFindByIndexOptions = Readonly<{
+  /**
+   * Maximum number of candidate nodes returned per input item. When omitted,
+   * each input's candidate set is unbounded. Must be a positive integer.
+   *
+   * Candidates are ordered deterministically by node id, so the cap is stable
+   * across calls. Use this to bound fan-out on low-selectivity index keys.
+   */
+  limitPerInput?: number;
+}>;
+
+/**
  * Result of an edge getOrCreateByEndpoints operation.
  */
 export type EdgeGetOrCreateByEndpointsResult<
@@ -573,6 +587,33 @@ export type NodeCollection<
       props: z.input<N["schema"]>;
     }>[],
   ) => Promise<(Node<N> | undefined)[]>;
+
+  /**
+   * Batched candidate retrieval against a declared node index.
+   *
+   * For each input item, TypeGraph computes the index lookup key from
+   * `index.fields` (JSON-pointer extraction, partial-`where` applied to
+   * stored rows, null-safe matching) and returns the live, non-soft-deleted
+   * nodes that share that key. Unlike {@link bulkFindByConstraint}, the index
+   * may be non-unique, so each input yields a (possibly empty) array.
+   *
+   * Results preserve input order; each inner array is ordered by node id.
+   * Empty input returns `[]`. An unknown index name throws
+   * `NodeIndexNotFoundError`; a type-incompatible indexed field throws
+   * `ValidationError`. This is candidate retrieval, not a uniqueness or
+   * identity guarantee.
+   *
+   * @param indexName - Name of the declared node index to match on
+   * @param items - Records whose `props` supply the indexed-field values
+   * @param options - Optional `limitPerInput` to bound per-input fan-out
+   */
+  bulkFindByIndex: (
+    indexName: string,
+    items: readonly Readonly<{
+      props: Partial<z.input<N["schema"]>>;
+    }>[],
+    options?: NodeBulkFindByIndexOptions,
+  ) => Promise<readonly Node<N>[][]>;
 
   /**
    * Get an existing node by uniqueness constraint, or create a new one.
