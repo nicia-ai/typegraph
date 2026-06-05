@@ -1,5 +1,17 @@
 # @nicia-ai/typegraph
 
+## 0.30.0
+
+### Minor Changes
+
+- [#171](https://github.com/nicia-ai/typegraph/pull/171) [`f5defd3`](https://github.com/nicia-ai/typegraph/commit/f5defd35b331e56f282d4eb501b98d3b9affe562) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.nodes.<Kind>.bulkFindByIndex(indexName, items, options?)` — batched candidate retrieval against declared node indexes, including non-unique ones. For each input record it returns the live nodes that share that record's declared index key, for import reconciliation, dedup-candidate discovery, and joining records against the graph by a composite key. Each input yields its own array (candidate retrieval, not a uniqueness guarantee); buckets preserve input order and are ordered by node id.
+
+  TypeGraph owns the index semantics: keys are computed from `index.fields` only (reusing the index's own extraction expressions), the partial `where` is applied to stored rows, and a missing/`undefined` indexed field matches a stored `NULL` via a new null-safe-equality dialect adapter. An optional `limitPerInput` caps each bucket — in SQL via `ROW_NUMBER()` when the backend supports window functions, otherwise capped in memory with the same result. Date-typed key fields are rejected with `ConfigurationError` because they can't compare identically across SQLite and PostgreSQL. Unknown index names throw `NodeIndexNotFoundError`.
+
+  `createLocalSqliteBackend` also gains a `capabilities` override for simulating engine capability gaps (e.g. `windowFunctions: false`) in tests.
+
+- [#173](https://github.com/nicia-ai/typegraph/pull/173) [`bd96cfb`](https://github.com/nicia-ai/typegraph/commit/bd96cfbeadde11c6986fb667f9a86b0ba0b5b1bd) Thanks [@pdlug](https://github.com/pdlug)! - Add the `backend.capabilities.windowFunctions` capability and reject relevance-ranking queries before SQL generation when a custom backend profile disables SQL window functions.
+
 ## 0.29.0
 
 ### Minor Changes
