@@ -1,89 +1,30 @@
 /**
- * Backend-runtime glue between a {@link VectorStrategy} and the Drizzle
- * SQLite / PostgreSQL backends. Holds the two responsibilities that belong
- * in the backend rather than the strategy:
+ * Backend-runtime glue between a `VectorStrategy` and the Drizzle
+ * SQLite / PostgreSQL backends. Holds the slot-construction and
+ * write-error-mapping responsibilities that belong in the backend rather
+ * than the strategy:
  *
- * 1. **Slot construction.** The backend stays graph-agnostic: it never
- *    inspects the graph/registry. The store resolves a field's
- *    `dimensions` / `metric` / `indexType` from the schema and threads
- *    them through `UpsertEmbeddingParams` / `VectorSearchParams` /
- *    `CreateVectorIndexParams`; these helpers reshape those params into the
- *    `VectorSlot` a strategy addresses its storage with.
- * 2. **The storage-ensure latch.** A per-storage-shape
- *    in-process latch that runs `strategy.ownedTables(slot).createDdl`
- *    (idempotent `CREATE ... IF NOT EXISTS`) once before the first write to
- *    a slot, so a write never hits a missing per-field table. Shared across
- *    the outer backend and every transaction-scoped backend within one
- *    `createBackend` call. `materializeIndexes()` creates the same storage
- *    idempotently, so the two never conflict.
+ * - **Slot construction.** The backend stays graph-agnostic: it never
+ *   inspects the graph/registry. The store resolves a field's
+ *   `dimensions` / `metric` / `indexType` from the schema and threads
+ *   them through `UpsertEmbeddingParams` / `VectorSearchParams` /
+ *   `CreateVectorIndexParams`; these helpers reshape those params into the
+ *   `VectorSlot` a strategy addresses its storage with.
+ * - **Write-error mapping.** Turns a raw engine dimension-mismatch into a
+ *   typed {@link EmbeddingDimensionChangedError} with actionable guidance.
+ *
+ * Per-field table creation is no longer done here: it rides the #135
+ * durable-contribution machinery (`createContributionMaterializer`),
+ * materialized by the privileged migrator at boot and asserted (SELECT,
+ * never DDL) on the runtime hot path — see `contribution-materializations.ts`.
  */
 import { EmbeddingDimensionChangedError } from "../../errors";
-import {
-  type VectorSlot,
-  type VectorStrategy,
-} from "../../query/dialect/vector-strategy";
+import { type VectorSlot } from "../../query/dialect/vector-strategy";
 import { parseDimensionMismatch } from "../../utils/sql-errors";
 import {
   type CreateVectorIndexParams,
   type DropVectorIndexParams,
 } from "../types";
-
-/**
- * In-process per-storage-shape storage-ensure latch. The DDL it runs is
- * idempotent, so re-running it is harmless; the latch only avoids redundant
- * round-trips and de-duplicates concurrent ensures.
- */
-export type VectorSlotLatch = Readonly<{
-  ensure: (
-    strategy: VectorStrategy,
-    slot: VectorSlot,
-    execDdl: (statement: string) => Promise<void>,
-  ) => Promise<void>;
-}>;
-
-function vectorSlotKey(slot: VectorSlot): string {
-  // JSON of the storage-shaping fields: collision-safe across arbitrary
-  // graph/kind/field strings (a raw delimiter could otherwise appear in a name).
-  // Metric and index type matter even when the physical table name does not:
-  // libSQL folds DiskANN DDL into `ownedTables` only for ANN slots, and
-  // sqlite-vec bakes the metric into its virtual-table declaration.
-  return JSON.stringify([
-    slot.graphId,
-    slot.nodeKind,
-    slot.fieldPath,
-    slot.dimensions,
-    slot.metric,
-    slot.indexType,
-  ]);
-}
-
-export function createVectorSlotLatch(): VectorSlotLatch {
-  const inFlight = new Map<string, Promise<void>>();
-
-  return {
-    ensure(strategy, slot, execDdl): Promise<void> {
-      const key = vectorSlotKey(slot);
-      const existing = inFlight.get(key);
-      if (existing !== undefined) return existing;
-
-      const run = (async (): Promise<void> => {
-        for (const contribution of strategy.ownedTables(slot)) {
-          for (const statement of contribution.createDdl) {
-            await execDdl(statement);
-          }
-        }
-      })();
-      // Cache only the successful resolution: a failed CREATE (e.g. a
-      // transient lock) must not poison the slot so the next write retries.
-      const cached = run.catch((error: unknown) => {
-        inFlight.delete(key);
-        throw error;
-      });
-      inFlight.set(key, cached);
-      return cached;
-    },
-  };
-}
 
 /**
  * Placeholder dimension for slots built from params that don't carry one

@@ -587,8 +587,12 @@ const Manual = defineNode("Manual", {
 
 Embeddings live in per-`(graphId, nodeKind, fieldPath)` typed tables
 named `tg_vec_<graphId>_<kind>_<field>` (each carrying the field's
-fixed dimension), created lazily on first write — there is no single
-shared embeddings table.
+fixed dimension) — there is no single shared embeddings table. The
+privileged migrator provisions each table plus a durable marker: at boot
+via `createStoreWithSchema`, and for a field a runtime `evolve()`
+introduces, by that `evolve()` call. The runtime hot path then asserts
+the marker (never DDL), so a least-privilege role can read/write
+embeddings.
 
 On `materializeIndexes()`:
 

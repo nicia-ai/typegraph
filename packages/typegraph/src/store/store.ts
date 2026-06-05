@@ -24,7 +24,10 @@ import {
   isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
-import { resolveEmbeddingFields } from "../core/embedding";
+import {
+  resolveEmbeddingFields,
+  resolveGraphVectorSlots,
+} from "../core/embedding";
 import type { KindEntity, NodeId } from "../core/types";
 import {
   ConfigurationError,
@@ -1294,6 +1297,15 @@ export class Store<G extends GraphDef> {
       merged,
       activeRow.version,
     );
+    // Provision per-field vector tables + durable markers for any embedding
+    // fields this evolution introduced (idempotent for fields that already
+    // existed). `evolve()` is a privileged migrator path — it commits schema
+    // versions and runs index DDL in eager mode — so emitting the table DDL
+    // here mirrors how `createStoreWithSchema` provisions at first boot, and
+    // keeps a runtime write to a freshly-added embedding field from hitting
+    // an unmaterialized slot. The shared fulltext table needs no such step
+    // (one table for all kinds); vectors are per-`(kind, field)`.
+    await materializeVectorContributions(this.#backend, merged);
     const evolved = this.#cloneWithGraph(
       merged,
       options?.ref,
@@ -1478,18 +1490,26 @@ export class Store<G extends GraphDef> {
       indexType: declaration.indexType,
     };
 
-    // Recreate storage at the new dimension: drop, then re-emit the table DDL
-    // the strategy owns (libSQL/sqlite-vec also (re)create their index/vtable
-    // here; pgvector's index is built via createVectorIndex below). Run via
-    // executeDdl directly so it bypasses the ensure-latch, which may still
-    // record the pre-drop slot as ensured.
+    // Recreate storage at the new dimension: drop, then re-create the per-
+    // field table the strategy owns (libSQL/sqlite-vec also (re)create their
+    // index/vtable here; pgvector's index is built via createVectorIndex
+    // below). `ensureVectorSlotContribution({ force: true })` re-runs the
+    // table DDL AND re-stamps the durable contribution marker at the new
+    // signature, bypassing the drift-guard — this is the sanctioned shape
+    // change. Without the marker reset, the post-reembed runtime assert would
+    // see a stale marker and refuse every write. Backends without the marker
+    // method (custom, pre-#135) fall back to raw recreate DDL.
     for (const ddl of strategy.buildDropStorage(slot)) {
       await backend.executeDdl(ddl);
     }
-    for (const contribution of strategy.ownedTables(slot)) {
-      for (const ddl of contribution.createDdl) {
-        await backend.executeDdl(ddl);
+    if (backend.ensureVectorSlotContribution === undefined) {
+      for (const contribution of strategy.ownedTables(slot)) {
+        for (const ddl of contribution.createDdl) {
+          await backend.executeDdl(ddl);
+        }
       }
+    } else {
+      await backend.ensureVectorSlotContribution(slot, { force: true });
     }
 
     // Whether this backend would actually materialize an ANN index for the
@@ -2134,6 +2154,33 @@ async function materializeRuntimeContributions(
   await backend.ensureFulltextTable?.(graphId);
 }
 
+/**
+ * Privileged boot step: materialize every embedding `(kind, field)` slot's
+ * per-field vector table + durable marker, enumerated from the graph via
+ * {@link resolveGraphVectorSlots}. The vector counterpart of
+ * {@link materializeRuntimeContributions} (fulltext) — runs once under the
+ * privileged role inside `createStoreWithSchema` so a least-privilege runtime
+ * can assert the markers (a cached SELECT) and write embeddings without
+ * holding `CREATE` on the schema. No-op on backends without vector support
+ * (`ensureVectorSlotContribution` absent, or `capabilities.vector` unsupported)
+ * and for graphs that declare no embedding fields.
+ */
+async function materializeVectorContributions(
+  backend: GraphBackend,
+  graph: GraphDef,
+): Promise<void> {
+  const ensureVectorSlotContribution = backend.ensureVectorSlotContribution;
+  if (
+    ensureVectorSlotContribution === undefined ||
+    backend.capabilities.vector?.supported !== true
+  ) {
+    return;
+  }
+  for (const slot of resolveGraphVectorSlots(graph)) {
+    await ensureVectorSlotContribution(slot);
+  }
+}
+
 // ============================================================
 // Async Factory with Schema Management
 // ============================================================
@@ -2199,6 +2246,10 @@ export async function createStoreWithSchema<G extends GraphDef>(
   // first — otherwise contribution DDL derived from the new code graph
   // would hit a stale table shape and mask `MigrationError`.
   await materializeRuntimeContributions(backend, merged.id);
+  // Provision every embedding field's per-`(kind, field)` vector table +
+  // durable marker under the privileged role, so a least-privilege runtime
+  // asserts the markers (SELECT) and writes embeddings without `CREATE`.
+  await materializeVectorContributions(backend, merged);
 
   const store = new Store(
     merged,

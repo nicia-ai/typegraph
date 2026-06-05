@@ -1,0 +1,37 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+Vector storage now rides the #135 durable-contribution machinery, so the
+runtime never issues DDL on the embedding hot path.
+
+Previously every vector op (`upsertEmbedding` / `deleteEmbedding` /
+`vectorSearch` / `createVectorIndex`) lazily ran `CREATE TABLE IF NOT EXISTS`
+for its per-`(kind, field)` table on whatever connection it executed on. On a
+least-privilege Postgres role (USAGE on `public`, full DML, but no `CREATE`)
+this failed with `permission denied for schema public` (SQLSTATE 42501) — even
+when the table already existed, because Postgres runs the schema aclcheck before
+the `IF NOT EXISTS` short-circuit. The fulltext path already avoided this via
+durable markers; vectors now do too.
+
+What changed:
+
+- **Boot (privileged):** `createStoreWithSchema` provisions every embedding
+  `(kind, field)` table + a durable contribution marker, enumerated from the
+  graph. `evolve()` provisions any embedding fields it introduces.
+- **Runtime (DML-only):** the hot path asserts the durable marker with a cached
+  SELECT and runs DML — never DDL. `createVerifiedStore` verifies vector markers
+  at attach, alongside fulltext.
+- `reembedVectorField` re-stamps the marker after recreating storage at a new
+  dimension; vector-field reclaim (`materializeRemovals`) clears the marker when
+  it drops a table.
+
+**Breaking:** vector ops now require a prior privileged `createStoreWithSchema`
+(exactly as fulltext already does). A plain `createStore` + embedding write with
+no provisioning step throws `StoreNotInitializedError` instead of lazily
+creating the table.
+
+**Migration:** after upgrading, run `createStoreWithSchema(graph, adminBackend)`
+once under the schema-owner role. It creates the per-field vector tables +
+markers; least-privilege runtimes then assert markers (SELECT) and run vector
+DML with zero DDL — no `GRANT CREATE` required.

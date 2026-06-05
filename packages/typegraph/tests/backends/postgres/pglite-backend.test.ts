@@ -27,7 +27,7 @@ import { defineGraph, defineNode, embedding } from "../../../src";
 import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
-import { createStore } from "../../../src/store";
+import { createStore, createStoreWithSchema } from "../../../src/store";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string().optional() }),
@@ -87,7 +87,7 @@ describe("PGlite backend", () => {
       cleanups.push(() => backend.close());
       expect(backend.capabilities.vector?.supported).toBe(true);
 
-      const store = createStore(documentsGraph, backend);
+      const [store] = await createStoreWithSchema(documentsGraph, backend);
       await store.nodes.Doc.create({ title: "near", embedding: [1, 0, 0, 0] });
       await store.nodes.Doc.create({ title: "far", embedding: [0, 0, 0, 1] });
 
@@ -139,7 +139,7 @@ describe("PGlite backend", () => {
       cleanups.push(() => backend.close());
       expect(backend.capabilities.vector?.supported).toBe(true);
 
-      const store = createStore(documentsGraph, backend);
+      const [store] = await createStoreWithSchema(documentsGraph, backend);
       await store.nodes.Doc.create({ title: "only", embedding: [0, 1, 0, 0] });
       const hits = await store.search.vector("Doc", {
         fieldPath: "embedding",
@@ -155,11 +155,17 @@ describe("PGlite backend", () => {
       cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
 
       // Session 1: write a node + embedding, then close to flush to disk.
+      // createStoreWithSchema provisions the per-field vector table + marker
+      // (both persist to the dataDir for session 2 to assert against).
       const first = await createLocalPgliteBackend({ dataDir });
-      const created = await createStore(
+      const [firstStore] = await createStoreWithSchema(
         documentsGraph,
         first.backend,
-      ).nodes.Doc.create({ title: "persisted", embedding: [1, 0, 0, 0] });
+      );
+      const created = await firstStore.nodes.Doc.create({
+        title: "persisted",
+        embedding: [1, 0, 0, 0],
+      });
       await first.backend.close();
 
       // Session 2: reopen the same dataDir — the node and its embedding

@@ -272,9 +272,11 @@ const result = await ensureSchema(backend, graph, {
 ## Migrating Legacy Embedding Storage
 
 Embeddings now live in per-`(graphId, kind, field)` typed tables
-(`tg_vec_<graphId>_<kind>_<field>`), created lazily on first write. This
-replaces the single shared `typegraph_node_embeddings` table. New deployments
-need no action — the per-field tables materialize as you write vectors.
+(`tg_vec_<graphId>_<kind>_<field>`), provisioned by `createStoreWithSchema` (the
+privileged migrator) at boot. This replaces the single shared
+`typegraph_node_embeddings` table. New deployments need no action — the per-field
+tables are materialized by `createStoreWithSchema`, which the legacy migration
+below also relies on having run.
 
 Deployments that already hold rows in the legacy table run a one-time, idempotent
 cutover with `migrateLegacyEmbeddings()`, exported from the package root:
