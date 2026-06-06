@@ -40,6 +40,7 @@ npx tsx examples/<example-name>.ts
 | [07-delete-behaviors.ts](./07-delete-behaviors.ts) | Cascade, restrict, and disconnect on delete |
 | [09-pagination-streaming.ts](./09-pagination-streaming.ts) | Cursor pagination and result streaming |
 | [13-aggregates.ts](./13-aggregates.ts) | GROUP BY, COUNT, SUM, AVG, MIN, MAX, and HAVING |
+| [17-bulk-find-by-index.ts](./17-bulk-find-by-index.ts) | Batched candidate lookup by declared index for import reconciliation and dedup, with null-safe matching and `limitPerInput` |
 
 ### Backend Configuration
 
@@ -61,6 +62,12 @@ the only diff from example 10 is the import line and connection setup.
 | [12-knowledge-graph-rag.ts](./12-knowledge-graph-rag.ts) | Knowledge graph patterns for RAG applications |
 | [14-research-copilot.ts](./14-research-copilot.ts) | End-to-end showcase: semantic search + ontology-expanded topics + all five Tier 1 graph algorithms over a citation graph |
 | [15-fulltext-hybrid-search.ts](./15-fulltext-hybrid-search.ts) | BM25 fulltext + hybrid (vector + fulltext) retrieval with RRF, query modes, and index rebuild |
+
+### Runtime Schema & Application Showcases
+
+| Example | Description |
+|---------|-------------|
+| [16-graph-extensions.ts](./16-graph-extensions.ts) | Runtime schema evolution with operator-approved graph extensions, dynamic kinds, fulltext, indexes, and removal |
 
 ## Prerequisites
 
@@ -121,5 +128,7 @@ Each example follows a consistent pattern:
 4. Understand data lifecycle with **07-delete-behaviors**
 5. Learn efficient data access with **09-pagination-streaming**
 6. Learn aggregate queries with **13-aggregates**
-7. For production, see **10-postgresql** for backend configuration
-8. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+7. Reconcile imports and find dedup candidates with **17-bulk-find-by-index**
+8. For production, see **10-postgresql** for backend configuration
+9. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+10. For end-to-end application demos, see **14-research-copilot**

@@ -228,6 +228,13 @@ export const typegraphTables = createSqliteTables({}, { indexes: [personEmail] }
 For PostgreSQL, use `createPostgresTables` from `@nicia-ai/typegraph/postgres`.
 See [Indexes](/performance/indexes) for covering fields, partial indexes, and profiler integration.
 
+Beyond accelerating queries, a declared index powers `store.nodes.<Kind>.bulkFindByIndex(indexName, items)` — a
+batched lookup that returns, for each incoming record, the live nodes sharing its index key. This is the primitive for
+**import reconciliation** and **dedup-candidate discovery**: probe an entire import batch against the graph in one
+query to decide create-vs-merge per record (the key may be non-unique, so each record yields its own candidate list).
+See the [batched index lookup reference](/performance/indexes#batched-index-lookup-bulkfindbyindex) and the runnable
+[`examples/17-bulk-find-by-index.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/17-bulk-find-by-index.ts).
+
 If you only need PostgreSQL adapter exports, import from `@nicia-ai/typegraph/postgres`:
 
 ```typescript
