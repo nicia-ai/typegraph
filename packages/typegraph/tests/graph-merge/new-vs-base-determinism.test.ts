@@ -29,9 +29,16 @@ import { z } from "zod";
 import { branch } from "../../src/graph-merge/branch";
 import { mergeAgainstBase } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
-import type { BranchId, GraphBranch, MergeOptions } from "../../src/graph-merge/types";
+import type {
+  BranchId,
+  GraphBranch,
+  MergeOptions,
+} from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { normalizeGraph, normalizeReport } from "../property/graph-merge/normalize";
+import {
+  normalizeGraph,
+  normalizeReport,
+} from "../property/graph-merge/normalize";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {

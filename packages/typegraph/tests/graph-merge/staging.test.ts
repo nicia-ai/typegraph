@@ -40,18 +40,40 @@ type G = typeof graph;
  * fields: ids, kinds, branch tags, and parsed props.
  */
 type StagingShape = Readonly<{
-  newNodes: readonly Readonly<{ kind: string; id: string; branchId: string; name: unknown }>[];
-  modifiedNodes: readonly Readonly<{ kind: string; id: string; branchId: string; name: unknown }>[];
-  deletedNodes: readonly Readonly<{ kind: string; id: string; branchId: string }>[];
+  newNodes: readonly Readonly<{
+    kind: string;
+    id: string;
+    branchId: string;
+    name: unknown;
+  }>[];
+  modifiedNodes: readonly Readonly<{
+    kind: string;
+    id: string;
+    branchId: string;
+    name: unknown;
+  }>[];
+  deletedNodes: readonly Readonly<{
+    kind: string;
+    id: string;
+    branchId: string;
+  }>[];
   newEdges: readonly Readonly<{
-      kind: string;
-      id: string;
-      branchId: string;
-      from: string;
-      to: string;
-    }>[];
-  modifiedEdges: readonly Readonly<{ kind: string; id: string; branchId: string }>[];
-  deletedEdges: readonly Readonly<{ kind: string; id: string; branchId: string }>[];
+    kind: string;
+    id: string;
+    branchId: string;
+    from: string;
+    to: string;
+  }>[];
+  modifiedEdges: readonly Readonly<{
+    kind: string;
+    id: string;
+    branchId: string;
+  }>[];
+  deletedEdges: readonly Readonly<{
+    kind: string;
+    id: string;
+    branchId: string;
+  }>[];
 }>;
 
 function projectStaging(staging: StagingSet): StagingShape {

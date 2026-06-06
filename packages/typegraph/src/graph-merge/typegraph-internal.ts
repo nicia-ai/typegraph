@@ -6,19 +6,11 @@ export {
   type GraphDef,
 } from "../core/define-graph";
 export { defineNode } from "../core/node";
-export type {
-  EdgeId,
-  JsonValue,
-  NodeId,
-  NodeType,
-} from "../core/types";
+export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
 export { TypeGraphError, type TypeGraphErrorOptions } from "../errors";
 export { exportGraph } from "../interchange/export";
 export { importGraph } from "../interchange/import";
-export {
-  computeTransitiveClosure,
-  isReachable,
-} from "../ontology/closures";
+export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
 export {
   type OntologyIntrospection,

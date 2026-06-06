@@ -3,13 +3,20 @@ import { describe, expect, it } from "vitest";
 
 import type { ClusterResult } from "../../src/graph-merge/clustering";
 import { buildBranchRank } from "../../src/graph-merge/conflict-policy";
-import type { MergedEdge, StagedEdge } from "../../src/graph-merge/edge-repoint";
+import type {
+  MergedEdge,
+  StagedEdge,
+} from "../../src/graph-merge/edge-repoint";
 import {
   buildCanonicalMap,
   ENDPOINT_DELETED_DROP_REASON,
   repointEdges,
 } from "../../src/graph-merge/edge-repoint";
-import { compareMergeKeys, type MergeKey, mergeKey } from "../../src/graph-merge/node-key";
+import {
+  compareMergeKeys,
+  type MergeKey,
+  mergeKey,
+} from "../../src/graph-merge/node-key";
 import { asBranchId } from "../../src/graph-merge/types";
 
 type AnyNodeId = NodeId<NodeType>;
@@ -174,10 +181,7 @@ describe("repointEdges", () => {
     // Survivor id is the lexicographically-minimal contributing edge id, and
     // BOTH source ids are recorded as merged.
     expect(edge.id).toBe("edge-1");
-    expect(edge.mergedIds.map((id) => id).sort()).toEqual([
-      "edge-1",
-      "edge-2",
-    ]);
+    expect(edge.mergedIds.map((id) => id).sort()).toEqual(["edge-1", "edge-2"]);
     // Equal props → no conflict.
     expect(result.conflicts).toHaveLength(0);
     expect(result.dropped).toHaveLength(0);

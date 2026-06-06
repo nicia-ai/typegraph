@@ -26,7 +26,10 @@ import { z } from "zod";
 import { branch } from "../../src/graph-merge/branch";
 import { BASE_PROVENANCE_BRANCH } from "../../src/graph-merge/canonicalize";
 import { mergeAgainstBase } from "../../src/graph-merge/merge";
-import { openProvenanceStore, readProvenance } from "../../src/graph-merge/provenance-store";
+import {
+  openProvenanceStore,
+  readProvenance,
+} from "../../src/graph-merge/provenance-store";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";

@@ -370,12 +370,12 @@ function mergeModifiedProps(
 
     const values = [...changed].sort((left, right) => {
       const byBranch = compareBranchIds(left.branchId, right.branchId);
-      return byBranch === 0 ? (
+      return byBranch === 0 ?
           compareStrings(
             canonicalValueKey(left.value),
             canonicalValueKey(right.value),
           )
-        ) : byBranch;
+        : byBranch;
     });
     const canonicalValue = baseHas ? baseProps[property]! : values[0]!.value;
     const input: ConflictInput = { property, values, canonicalValue };

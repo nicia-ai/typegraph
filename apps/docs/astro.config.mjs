@@ -13,6 +13,7 @@ const LLMS_SMALL_PAGES = new Set([
   "schema-management",
   "schema-evolution",
   "graph-extensions",
+  "graph-merge",
   "integration",
   "multiple-graphs",
   "queries/overview",
@@ -47,6 +48,7 @@ const sidebar = [
       { label: "Schema Migrations", slug: "schema-management" },
       { label: "Evolving Schemas", slug: "schema-evolution" },
       { label: "Graph Extensions", slug: "graph-extensions" },
+      { label: "Graph Merge", slug: "graph-merge" },
       { label: "Multiple Graphs", slug: "multiple-graphs" },
       { label: "Import/export", slug: "interchange" },
       { label: "Testing", slug: "testing" },
@@ -82,6 +84,10 @@ const sidebar = [
   {
     label: "Examples",
     items: [
+      {
+        label: "FHIR Graph Merge",
+        slug: "examples/fhir-graph-merge",
+      },
       {
         label: "Agent-Driven Schema",
         slug: "examples/agent-driven-schema",

@@ -161,8 +161,7 @@ export async function readProvenance(
   store: Store<ProvenanceGraph>,
   query: ProvenanceQuery = {},
 ): Promise<readonly ProvenanceNode[]> {
-  const branchId =
-    query.branchId === undefined ? undefined : (query.branchId);
+  const branchId = query.branchId === undefined ? undefined : query.branchId;
   const all = await store.nodes.Provenance.find();
   return all
     .filter(

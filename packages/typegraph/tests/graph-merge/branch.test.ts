@@ -10,7 +10,10 @@ import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
-import { enumerateAllEdges, enumerateAllNodes } from "../../src/graph-merge/state-diff";
+import {
+  enumerateAllEdges,
+  enumerateAllNodes,
+} from "../../src/graph-merge/state-diff";
 import { asBranchId } from "../../src/graph-merge/types";
 import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
 import { backendMatrix } from "./test-utils";

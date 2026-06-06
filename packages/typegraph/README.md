@@ -54,12 +54,29 @@ TypeGraph ships semantic graph merge as a dedicated subpath:
 import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
 ```
 
-`branch()` creates isolated working copies over caller-provided backends.
-`merge()` reconciles branches back into a target graph with deterministic entity
-resolution, conflict reporting, edge repointing, optional ontology type
-reconciliation, and provenance reporting. It lives in the core package because
-the primitive is defined over TypeGraph stores, schemas, indexes, backends, and
-ontology semantics rather than as a separate product surface.
+`branch()` creates isolated working copies over caller-provided backends, stamped
+with the base graph's schema and content version. `merge()` reconciles those
+branches back into a target graph with deterministic entity resolution, conflict
+reporting, edge repointing, optional ontology type reconciliation, and provenance
+reporting.
+
+Use it when several agents, importers, reviewers, or local workers edit graph
+state independently and the application needs one canonical result instead of an
+append-only pile of duplicates. The merge pipeline can:
+
+- resolve duplicate entities by exact unique constraints, blocking keys,
+  fulltext/custom similarity, or vector/hybrid similarity;
+- preserve branch-specific context by repointing edges to canonical nodes;
+- surface property and delete/modify conflicts in a `MergeReport`;
+- expose report-only provenance, with optional sidecar persistence.
+
+It lives in the core package because the primitive is defined over TypeGraph
+stores, schemas, indexes, backends, and ontology semantics rather than as a
+separate product surface.
+
+Docs: [Graph Merge](https://typegraph.dev/graph-merge)
+
+Example: [FHIR Graph Merge](https://typegraph.dev/examples/fhir-graph-merge)
 
 ## Performance Smoke Check
 

@@ -22,10 +22,7 @@ export default defineConfig({
         __dirname,
         "src/profiler/index.ts",
       ),
-      "@nicia-ai/typegraph/schema": resolve(
-        __dirname,
-        "src/schema/index.ts",
-      ),
+      "@nicia-ai/typegraph/schema": resolve(__dirname, "src/schema/index.ts"),
       "@nicia-ai/typegraph/graph-merge": resolve(
         __dirname,
         "src/graph-merge/index.ts",

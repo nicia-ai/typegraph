@@ -7,7 +7,10 @@ import {
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { blockNodes, UNBLOCKED_BUCKET_KEY } from "../../src/graph-merge/blocking";
+import {
+  blockNodes,
+  UNBLOCKED_BUCKET_KEY,
+} from "../../src/graph-merge/blocking";
 import type { ResolveConfig } from "../../src/graph-merge/types";
 import { createSqliteMergeBackend } from "./test-utils";
 

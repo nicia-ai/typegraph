@@ -25,7 +25,10 @@ import { z } from "zod";
 
 import { idOf, type MergeKey } from "../../src/graph-merge/node-key";
 import { FORCED_MATCH_SCORE } from "../../src/graph-merge/scoring";
-import type { BaseLookupStore, SourceScope } from "../../src/graph-merge/sources";
+import type {
+  BaseLookupStore,
+  SourceScope,
+} from "../../src/graph-merge/sources";
 import { baseUniqueSource } from "../../src/graph-merge/sources";
 import { backendMatrix } from "./test-utils";
 

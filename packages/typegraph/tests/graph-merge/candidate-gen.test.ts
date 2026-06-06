@@ -10,11 +10,17 @@ import { z } from "zod";
 import { blockNodes } from "../../src/graph-merge/blocking";
 import type { CandidateEdge } from "../../src/graph-merge/candidate-gen";
 import { generateCandidates } from "../../src/graph-merge/candidate-gen";
-import { MergeError, SimilarityUnavailableError } from "../../src/graph-merge/errors";
+import {
+  MergeError,
+  SimilarityUnavailableError,
+} from "../../src/graph-merge/errors";
 import { idOf } from "../../src/graph-merge/node-key";
 import { isErr, isOk } from "../../src/graph-merge/result";
 import type { SimilarityContext } from "../../src/graph-merge/similarity";
-import type { ResolveConfig, SimilarityStrategy } from "../../src/graph-merge/types";
+import type {
+  ResolveConfig,
+  SimilarityStrategy,
+} from "../../src/graph-merge/types";
 import { backendMatrix, fakeEmbeddings } from "./test-utils";
 
 const Patient = defineNode("Patient", {

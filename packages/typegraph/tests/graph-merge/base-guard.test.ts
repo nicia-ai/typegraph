@@ -172,11 +172,18 @@ describe.each(backendMatrix())("component base guard [$name]", (entry) => {
       "base-b",
     ]);
     // The report carries the full (kind, id) identity, not a bare id.
-    expect(ambiguity.baseIds.every((index) => index.kind === "Patient")).toBe(true);
-    expect(
-      ambiguity.memberIds.map((identity) => identity.id).sort(),
-    ).toEqual(["base-a", "base-b", "new-1", "new-2"]);
-    expect(ambiguity.memberIds.every((index) => index.kind === "Patient")).toBe(true);
+    expect(ambiguity.baseIds.every((index) => index.kind === "Patient")).toBe(
+      true,
+    );
+    expect(ambiguity.memberIds.map((identity) => identity.id).sort()).toEqual([
+      "base-a",
+      "base-b",
+      "new-1",
+      "new-2",
+    ]);
+    expect(ambiguity.memberIds.every((index) => index.kind === "Patient")).toBe(
+      true,
+    );
 
     // Each base absorbed its OWN matching new node — never the other base's.
     const resolutionTargets = result.data.resolutions
@@ -205,9 +212,7 @@ describe.each(backendMatrix())("component base guard [$name]", (entry) => {
     // Ambiguity still reported despite the diameter split.
     expect(result.data.baseAmbiguities).toHaveLength(1);
     expect(
-      result.data.baseAmbiguities[0]!.baseIds.map(
-        (identity) => identity.id,
-      ),
+      result.data.baseAmbiguities[0]!.baseIds.map((identity) => identity.id),
     ).toEqual(["base-a", "base-b"]);
 
     // Both committed entities still survive, separate.

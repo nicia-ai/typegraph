@@ -13,7 +13,10 @@ import { branch } from "../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
 import { merge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
-import { enumerateAllEdges, enumerateAllNodes } from "../../src/graph-merge/state-diff";
+import {
+  enumerateAllEdges,
+  enumerateAllNodes,
+} from "../../src/graph-merge/state-diff";
 import type {
   BranchId,
   GraphBranch,
@@ -121,9 +124,7 @@ function lexicographicMin(left: string, right: string): string {
 /** Live `{ id, name, mrn }` for every Patient in a store, sorted by id. */
 async function livePatients(
   store: Store<CareGraph>,
-): Promise<
-  readonly Readonly<{ id: string; name: unknown; mrn: unknown }>[]
-> {
+): Promise<readonly Readonly<{ id: string; name: unknown; mrn: unknown }>[]> {
   const rows = await enumerateAllNodes(store.backend, store.graphId, "Patient");
   return rows
     .filter((row) => row.deleted_at === undefined)
@@ -364,8 +365,10 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     const swapPatients = await livePatients(orderSwap.baseStore);
     expect(isOk(swapForward)).toBe(true);
     expect(swapPatients).toHaveLength(1);
-    const expectedCanonical =
-      lexicographicMin(orderSwap.annaId, orderSwap.anaId);
+    const expectedCanonical = lexicographicMin(
+      orderSwap.annaId,
+      orderSwap.anaId,
+    );
     expect(swapPatients[0]!.id).toBe(expectedCanonical);
   });
 

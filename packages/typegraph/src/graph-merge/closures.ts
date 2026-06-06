@@ -77,9 +77,7 @@ function find(unionFind: UnionFind, value: string): string {
   ensure(unionFind, value);
   let root = value;
   while (unionFind.parent.get(root) !== root) {
-    const grandparent = unionFind.parent.get(
-      unionFind.parent.get(root)!,
-    )!;
+    const grandparent = unionFind.parent.get(unionFind.parent.get(root)!)!;
     unionFind.parent.set(root, grandparent);
     root = grandparent;
   }

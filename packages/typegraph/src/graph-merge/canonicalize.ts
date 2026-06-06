@@ -194,9 +194,9 @@ function pickClusterSurvivor(
       preferKind(kinds)
     : undefined;
   return (
-    (chosenKind === undefined ?
-      undefined
-    : membersAtId.find((member) => member.kind === chosenKind)) ?? [...membersAtId].sort(byKey)[0]!
+    (chosenKind === undefined ? undefined : (
+      membersAtId.find((member) => member.kind === chosenKind)
+    )) ?? [...membersAtId].sort(byKey)[0]!
   );
 }
 

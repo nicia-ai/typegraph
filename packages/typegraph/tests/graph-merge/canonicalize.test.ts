@@ -3,10 +3,17 @@ import { generateId } from "@nicia-ai/typegraph";
 import { describe, expect, it } from "vitest";
 
 import type { ClusterMember } from "../../src/graph-merge/canonicalize";
-import { canonicalizeCluster, pickCanonical } from "../../src/graph-merge/canonicalize";
+import {
+  canonicalizeCluster,
+  pickCanonical,
+} from "../../src/graph-merge/canonicalize";
 import type { ClusterResult } from "../../src/graph-merge/clustering";
 import { buildBranchRank } from "../../src/graph-merge/conflict-policy";
-import { compareMergeKeys, type MergeKey, mergeKey } from "../../src/graph-merge/node-key";
+import {
+  compareMergeKeys,
+  type MergeKey,
+  mergeKey,
+} from "../../src/graph-merge/node-key";
 import type {
   BranchId,
   PropertyConflictPolicy,

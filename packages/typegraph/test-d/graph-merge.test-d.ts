@@ -1,12 +1,7 @@
 import { expectAssignable, expectType } from "tsd";
 import { z } from "zod";
 
-import {
-  type GraphBackend,
-  defineGraph,
-  defineNode,
-  type Store,
-} from "..";
+import { type GraphBackend, defineGraph, defineNode, type Store } from "..";
 import {
   BranchError,
   type GraphBranch,

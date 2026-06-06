@@ -243,7 +243,9 @@ export type ReconcileTypesMode = "ontology" | "off";
  * Map of node kind name → its {@link ResolveConfig}. Kinds omitted from this map
  * merge by ID only (new fork nodes added as-is, no fuzzy resolution).
  */
-export type ResolveMap<G extends GraphDef = GraphDef> = Readonly<Record<string, ResolveConfig<G, NodeType>>>;
+export type ResolveMap<G extends GraphDef = GraphDef> = Readonly<
+  Record<string, ResolveConfig<G, NodeType>>
+>;
 
 /**
  * Caller-facing options for {@link merge}. All fields are optional with frozen

@@ -227,12 +227,12 @@ function collectEdgeValues(
   }
   return [...values].sort((left, right) => {
     const byBranch = compareStrings(left.branchId, right.branchId);
-    return byBranch === 0 ? (
+    return byBranch === 0 ?
         compareStrings(
           canonicalValueKey(left.value),
           canonicalValueKey(right.value),
         )
-      ) : byBranch;
+      : byBranch;
   });
 }
 

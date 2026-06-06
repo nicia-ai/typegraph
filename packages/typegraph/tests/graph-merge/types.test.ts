@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { canonicalizeProps } from "../../src/graph-merge/canonical-props";
-import { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "../../src/graph-merge/options";
+import {
+  MERGE_OPTION_DEFAULTS,
+  normalizeMergeOptions,
+} from "../../src/graph-merge/options";
 import type {
   BranchId,
   MergeOptions,

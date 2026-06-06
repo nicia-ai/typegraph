@@ -27,7 +27,10 @@ import type { GraphDef, Store } from "@nicia-ai/typegraph";
 import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph";
 
 import { canonicalizeProps } from "../../../src/graph-merge/canonical-props";
-import { enumerateAllEdges, enumerateAllNodes } from "../../../src/graph-merge/state-diff";
+import {
+  enumerateAllEdges,
+  enumerateAllNodes,
+} from "../../../src/graph-merge/state-diff";
 import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
 
 /** Lexicographic comparator over two strings (ids, kinds, properties). */
@@ -154,9 +157,9 @@ function normalizeConflictValues(
     }))
     .sort((left, right) => {
       const byBranch = compareStrings(left.branchId, right.branchId);
-      return byBranch === 0 ? (
+      return byBranch === 0 ?
           compareStrings(left.value, right.value)
-        ) : byBranch;
+        : byBranch;
     });
 }
 

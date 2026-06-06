@@ -175,13 +175,13 @@ export async function stageBranches<G extends GraphDef>(
   branches: readonly GraphBranch<G>[],
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
-  const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] = [];
-  const deletedNodes: (StagedDeletedNode & { kind: string; id: string })[] =
+  const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
     [];
+  const deletedNodes: (StagedDeletedNode & { kind: string; id: string })[] = [];
   const newEdges: (StagedNewEdge & { kind: string; id: string })[] = [];
-  const modifiedEdges: (StagedModifiedEdge & { kind: string; id: string })[] = [];
-  const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] =
+  const modifiedEdges: (StagedModifiedEdge & { kind: string; id: string })[] =
     [];
+  const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
 
   for (const branch of branches) {
     const diff = await diffAgainstBase(baseStore, branch.store);

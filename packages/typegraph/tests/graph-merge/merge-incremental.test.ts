@@ -716,14 +716,10 @@ describe.each(backendMatrix())(
         (await target.nodes.Patient.find()).map((patient) => patient.id),
       ).toEqual(["base-ana"]);
       expect(
-        (await target.nodes.Encounter.find()).map(
-          (encounter) => encounter.id,
-        ),
+        (await target.nodes.Encounter.find()).map((encounter) => encounter.id),
       ).toEqual(["base-enc"]);
       expect(
-        (await target.edges.primaryEncounter.find()).map(
-          (edge) => edge.id,
-        ),
+        (await target.edges.primaryEncounter.find()).map((edge) => edge.id),
       ).toEqual(["base-primary"]);
     });
 

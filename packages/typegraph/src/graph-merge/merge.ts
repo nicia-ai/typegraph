@@ -160,9 +160,9 @@ function newNodesByKind(
       kind,
       [...items].sort((left, right) => {
         const byId = compareStrings(left.node.id, right.node.id);
-        return byId === 0 ? (
+        return byId === 0 ?
             compareStrings(left.branchId, right.branchId)
-          ) : byId;
+          : byId;
       }),
     );
   }
@@ -961,10 +961,7 @@ export async function commitPlan<G extends GraphDef>(
       }
       const kind = plan.retypeMap.get(identity) ?? entity.kind;
       const collection = nodeCollection(nodesApi, kind);
-      await collection.upsertByIdFromRecord(
-        entity.canonicalId,
-        entity.props,
-      );
+      await collection.upsertByIdFromRecord(entity.canonicalId, entity.props);
       committedNodeIds.add(mergeKey(kind, entity.canonicalId));
     }
 
@@ -1781,11 +1778,11 @@ async function applyIncrementalEdges<G extends GraphDef>(
   const toCreate = new Map<
     string,
     Readonly<{
-        id: string;
-        from: Readonly<{ kind: string; id: string }>;
-        to: Readonly<{ kind: string; id: string }>;
-        props: Record<string, unknown>;
-      }>[]
+      id: string;
+      from: Readonly<{ kind: string; id: string }>;
+      to: Readonly<{ kind: string; id: string }>;
+      props: Record<string, unknown>;
+    }>[]
   >();
 
   for (const edge of plan.mergedEdges) {

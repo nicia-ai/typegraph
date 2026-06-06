@@ -37,7 +37,10 @@ import {
 } from "../../src/graph-merge/node-key";
 import { isOk } from "../../src/graph-merge/result";
 import type { CandidateEdge } from "../../src/graph-merge/scoring";
-import { FORCED_MATCH_SCORE, scoreCandidates } from "../../src/graph-merge/scoring";
+import {
+  FORCED_MATCH_SCORE,
+  scoreCandidates,
+} from "../../src/graph-merge/scoring";
 import type { SimilarityContext } from "../../src/graph-merge/similarity";
 import {
   exactKeySource,
@@ -46,7 +49,10 @@ import {
   pairsFromBlocks,
   uniqueSource,
 } from "../../src/graph-merge/sources";
-import type { ResolveConfig, SimilarityStrategy } from "../../src/graph-merge/types";
+import type {
+  ResolveConfig,
+  SimilarityStrategy,
+} from "../../src/graph-merge/types";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {

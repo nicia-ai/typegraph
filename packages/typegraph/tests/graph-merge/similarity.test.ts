@@ -10,7 +10,10 @@ import { z } from "zod";
 import { SimilarityUnavailableError } from "../../src/graph-merge/errors";
 import { isErr, isOk } from "../../src/graph-merge/result";
 import type { SimilarityContext } from "../../src/graph-merge/similarity";
-import { diceTrigramSimilarity, scorePair } from "../../src/graph-merge/similarity";
+import {
+  diceTrigramSimilarity,
+  scorePair,
+} from "../../src/graph-merge/similarity";
 import type { SimilarityStrategy } from "../../src/graph-merge/types";
 import {
   backendMatrix,

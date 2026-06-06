@@ -16,7 +16,11 @@ import {
 } from "../../src/graph-merge/delete-modify";
 import { unwrap } from "../../src/graph-merge/result";
 import { stageBranches } from "../../src/graph-merge/staging";
-import type { BranchId, DeleteModifyPolicy, GraphBranch } from "../../src/graph-merge/types";
+import type {
+  BranchId,
+  DeleteModifyPolicy,
+  GraphBranch,
+} from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { backendMatrix } from "./test-utils";
 
@@ -42,15 +46,19 @@ const BRANCH_B = asBranchId("branch-b");
  * load-bearing fields.
  */
 type ResolutionShape = Readonly<{
-  survivingModifications: readonly Readonly<{ id: string; branchId: string; name: unknown }>[];
+  survivingModifications: readonly Readonly<{
+    id: string;
+    branchId: string;
+    name: unknown;
+  }>[];
   nodeDeletions: readonly Readonly<{ id: string; kind: string }>[];
   conflicts: readonly Readonly<{
-      entityId: string;
-      kind: string;
-      deletedBy: string;
-      modifiedBy: string;
-      resolution: DeleteModifyPolicy;
-    }>[];
+    entityId: string;
+    kind: string;
+    deletedBy: string;
+    modifiedBy: string;
+    resolution: DeleteModifyPolicy;
+  }>[];
   dropped: readonly Readonly<{ kind: string; id: string; reason: string }>[];
 }>;
 

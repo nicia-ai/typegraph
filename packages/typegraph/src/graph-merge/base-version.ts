@@ -144,11 +144,11 @@ async function computeContentFingerprint<G extends GraphDef>(
   const edgeKinds = getEdgeKinds(graph);
 
   const nodeDigest: Readonly<{
-      id: string;
-      kind: string;
-      updatedAt: string;
-      props: string;
-    }>[] = [];
+    id: string;
+    kind: string;
+    updatedAt: string;
+    props: string;
+  }>[] = [];
   for (const kind of nodeKinds) {
     const rows = await enumerateAllNodes(backend, graphId, kind);
     for (const row of rows) {
@@ -164,13 +164,13 @@ async function computeContentFingerprint<G extends GraphDef>(
   }
 
   const edgeDigest: Readonly<{
-      id: string;
-      kind: string;
-      fromId: string;
-      toId: string;
-      updatedAt: string;
-      props: string;
-    }>[] = [];
+    id: string;
+    kind: string;
+    fromId: string;
+    toId: string;
+    updatedAt: string;
+    props: string;
+  }>[] = [];
   for (const kind of edgeKinds) {
     const rows = await enumerateAllEdges(backend, graphId, kind);
     for (const row of rows) {

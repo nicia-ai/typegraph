@@ -426,7 +426,10 @@ function unionByCompatibility(
   for (let index = 0; index < identities.length; index += 1) {
     for (let index_ = index + 1; index_ < identities.length; index_ += 1) {
       if (
-        isRetypeCompatible([kindOf(identities[index]!), kindOf(identities[index_]!)])
+        isRetypeCompatible([
+          kindOf(identities[index]!),
+          kindOf(identities[index_]!),
+        ])
       ) {
         parent.set(find(identities[index]!), find(identities[index_]!));
       }

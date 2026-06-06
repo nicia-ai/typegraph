@@ -28,7 +28,11 @@ import { z } from "zod";
 import { branch } from "../../src/graph-merge/branch";
 import { merge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
-import type { Embedder, GraphBranch, MergeOptions } from "../../src/graph-merge/types";
+import type {
+  Embedder,
+  GraphBranch,
+  MergeOptions,
+} from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { backendMatrix, fakeEmbedder } from "./test-utils";
 
