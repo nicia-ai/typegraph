@@ -35,13 +35,13 @@ import {
 import { type GraphDef, isKnownKind } from "../core/define-graph";
 import type { IndexEntity } from "../core/types";
 import { ConfigurationError, KindNotFoundError } from "../errors";
+import { generateIndexDDL } from "../indexes/ddl";
 import {
-  generateIndexDDL,
   type IndexDeclaration,
   type RelationalIndexDeclaration,
   type VectorIndexDeclaration,
-} from "../indexes";
-import { type SqlDialect } from "../query/dialect";
+} from "../indexes/types";
+import { type SqlDialect } from "../query/dialect/types";
 import { sortedReplacer } from "../schema/canonical";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";

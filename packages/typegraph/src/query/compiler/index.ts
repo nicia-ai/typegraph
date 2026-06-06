@@ -38,8 +38,9 @@ export {
   type TemporalFilterOptions,
 } from "./temporal";
 
-// Re-export dialect types
-export { type DialectAdapter, getDialect, type SqlDialect } from "../dialect";
+// Re-export dialect helpers and types
+export { getDialect } from "../dialect";
+export { type DialectAdapter, type SqlDialect } from "../dialect/types";
 
 import { type SQL, sql } from "drizzle-orm";
 
@@ -52,14 +53,14 @@ import {
   type SetOperation,
   type VectorSimilarityPredicate,
 } from "../ast";
+import { getDialect } from "../dialect";
+import { type FulltextStrategy } from "../dialect/fulltext-strategy";
 import {
   type DialectAdapter,
   type DialectStandardQueryStrategy,
-  type FulltextStrategy,
-  getDialect,
   type SqlDialect,
-  type VectorStrategy,
-} from "../dialect";
+} from "../dialect/types";
+import { type VectorStrategy } from "../dialect/vector-strategy";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLimitOffsetClause,

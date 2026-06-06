@@ -40,8 +40,8 @@ import {
 import {
   buildPostgresEdgeIndexBuilders,
   buildPostgresNodeIndexBuilders,
-  type IndexDeclaration,
-} from "../../../indexes";
+} from "../../../indexes/drizzle";
+import { type IndexDeclaration } from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
 
 /**

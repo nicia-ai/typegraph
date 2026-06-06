@@ -12,7 +12,7 @@ import {
   type SelectiveField,
   type VectorSimilarityPredicate,
 } from "../../ast";
-import { type DialectAdapter } from "../../dialect";
+import { type DialectAdapter } from "../../dialect/types";
 import {
   vectorMinScoreCondition,
   vectorScoreExpression,

@@ -1,7 +1,8 @@
 import { type SQL, sql } from "drizzle-orm";
 import { CasingCache } from "drizzle-orm/casing";
 
-import { getDialect, type SqlDialect } from "../query/dialect";
+import { getDialect } from "../query/dialect";
+import { type SqlDialect } from "../query/dialect/types";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,

@@ -1,7 +1,8 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type ValueType } from "../query/ast";
-import { getDialect, type SqlDialect } from "../query/dialect";
+import { getDialect } from "../query/dialect";
+import { type SqlDialect } from "../query/dialect/types";
 import { type JsonPointer, jsonPointer } from "../query/json-pointer";
 import {
   type EdgeIndexDeclaration,

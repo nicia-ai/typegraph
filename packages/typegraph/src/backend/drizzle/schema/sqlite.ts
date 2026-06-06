@@ -31,8 +31,8 @@ import {
 import {
   buildSqliteEdgeIndexBuilders,
   buildSqliteNodeIndexBuilders,
-  type IndexDeclaration,
-} from "../../../indexes";
+} from "../../../indexes/drizzle";
+import { type IndexDeclaration } from "../../../indexes/types";
 
 /**
  * Table name configuration.

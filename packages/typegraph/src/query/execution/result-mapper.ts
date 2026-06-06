@@ -15,7 +15,7 @@ import type {
   SelectableNode,
   SelectContext,
 } from "../builder/types";
-import { type SqlDialect } from "../compiler/index";
+import { type SqlDialect } from "../dialect/types";
 
 /**
  * Transforms SQLite path columns from pipe-delimited strings to arrays.

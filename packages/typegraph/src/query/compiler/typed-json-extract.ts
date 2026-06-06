@@ -1,6 +1,6 @@
 import { type SQL } from "drizzle-orm";
 
-import { type DialectAdapter } from "../dialect";
+import { type DialectAdapter } from "../dialect/types";
 import { type JsonPointer } from "../json-pointer";
 
 type JsonExtractFallback = "json" | "text";

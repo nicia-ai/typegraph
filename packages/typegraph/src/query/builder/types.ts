@@ -33,7 +33,8 @@ import {
   type TraversalDirection,
   type TraversalExpansion,
 } from "../ast";
-import { type SqlDialect, type SqlSchema } from "../compiler/index";
+import { type SqlSchema } from "../compiler/schema";
+import { type SqlDialect } from "../dialect/types";
 import { type JsonPointerInput } from "../json-pointer";
 import type {
   FulltextAccessor,

@@ -22,7 +22,8 @@ import {
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
-import { type DialectAdapter, type VectorStrategy } from "../dialect";
+import { type DialectAdapter } from "../dialect/types";
+import { type VectorStrategy } from "../dialect/vector-strategy";
 import {
   joinJsonPointers,
   type JsonPointer,

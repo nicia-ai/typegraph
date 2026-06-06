@@ -5,7 +5,7 @@ import type {
   QueryAst,
   VectorSimilarityPredicate,
 } from "../ast";
-import { type DialectAdapter } from "../dialect";
+import { type DialectAdapter } from "../dialect/types";
 import {
   createTemporalFilterPass,
   resolveFulltextAwareLimit,

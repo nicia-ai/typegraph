@@ -20,8 +20,8 @@ import {
   StoreNotInitializedError,
   type StoreNotInitializedReason,
 } from "../../errors";
-import { type SqlDialect } from "../../query/dialect";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
+import { type SqlDialect } from "../../query/dialect/types";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { isMissingTableError } from "../../utils/sql-errors";
