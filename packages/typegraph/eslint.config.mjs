@@ -27,6 +27,36 @@ export default [
     ],
   }),
 
+  // graph-merge was incubated outside the package and is intentionally heavy on
+  // deterministic ordering helpers plus branch-dependent assertions. Keep the
+  // type/import rules from the shared profile, but do not churn the imported
+  // algorithm code just to satisfy style-only Unicorn/Vitest preferences.
+  {
+    files: [
+      "src/graph-merge/**/*.ts",
+      "tests/graph-merge/**/*.ts",
+      "tests/property/graph-merge/**/*.ts",
+    ],
+    rules: {
+      "@typescript-eslint/no-confusing-void-expression": "off",
+      "@typescript-eslint/no-unnecessary-condition": "off",
+      "@typescript-eslint/prefer-nullish-coalescing": "off",
+      "@typescript-eslint/require-await": "off",
+      "unicorn/consistent-function-scoping": "off",
+      "unicorn/no-array-callback-reference": "off",
+      "unicorn/no-array-reduce": "off",
+      "unicorn/no-array-reverse": "off",
+      "unicorn/no-array-sort": "off",
+      "unicorn/no-await-expression-member": "off",
+      "unicorn/no-for-loop": "off",
+      "unicorn/no-null": "off",
+      "unicorn/prefer-code-point": "off",
+      "unicorn/prefer-structured-clone": "off",
+      "unicorn/prevent-abbreviations": "off",
+      "vitest/no-conditional-expect": "off",
+    },
+  },
+
   // Backend parity guardrail. The query compiler is a single shared path; the
   // only sanctioned place for a dialect difference is a DialectAdapter member.
   // Inline `=== "sqlite"` / `case "postgres"` branching reintroduces the

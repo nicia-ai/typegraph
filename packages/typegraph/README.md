@@ -46,6 +46,21 @@ See the repo README for more.
 
 Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](https://github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples)
 
+## Graph Merge
+
+TypeGraph ships semantic graph merge as a dedicated subpath:
+
+```ts
+import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
+```
+
+`branch()` creates isolated working copies over caller-provided backends.
+`merge()` reconciles branches back into a target graph with deterministic entity
+resolution, conflict reporting, edge repointing, optional ontology type
+reconciliation, and provenance reporting. It lives in the core package because
+the primitive is defined over TypeGraph stores, schemas, indexes, backends, and
+ontology semantics rather than as a separate product surface.
+
 ## Performance Smoke Check
 
 The perf harness lives in `@nicia-ai/typegraph-benchmarks`; these commands delegate to it.

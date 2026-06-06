@@ -13,6 +13,12 @@ import {
   type Store,
   type TemporalAlgorithmOptions,
 } from "@nicia-ai/typegraph";
+import type {
+  GraphBranch,
+  MakeBackend,
+  MergeOptions,
+} from "@nicia-ai/typegraph/graph-merge";
+import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
 import type { SqliteTables } from "@nicia-ai/typegraph/sqlite";
 import { z } from "zod";
 
@@ -78,6 +84,8 @@ const graph = defineGraph({
 declare const store: Store<typeof graph>;
 declare const worksAtId: EdgeId<typeof worksAt>;
 declare const sqliteTables: SqliteTables;
+declare const makeBackend: MakeBackend;
+declare const branches: readonly GraphBranch<typeof graph>[];
 
 const nodeKinds = getNodeKinds(graph);
 const edgeKinds = getEdgeKinds(graph);
@@ -93,6 +101,19 @@ void store.nodes.Person.findByConstraint("email_unique", {
   email: "alice@example.com",
   name: "Alice",
 });
+
+const mergeOptions: MergeOptions<typeof graph> = {
+  resolve: {
+    Person: {
+      block: () => "person",
+      similarity: { kind: "fulltext", fields: ["name"] },
+      threshold: 0.8,
+    },
+  },
+};
+
+void branch(store, makeBackend);
+void merge(store, branches, mergeOptions);
 
 // @ts-expect-error - edge id brands cannot be mixed across edge kinds
 void store.edges.knows.getById(worksAtId);

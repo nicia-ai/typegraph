@@ -10,6 +10,10 @@ export default defineConfig({
         __dirname,
         "src/interchange/index.ts",
       ),
+      "@nicia-ai/typegraph/postgres/pglite": resolve(
+        __dirname,
+        "src/backend/postgres/pglite.ts",
+      ),
       "@nicia-ai/typegraph/postgres": resolve(
         __dirname,
         "src/backend/postgres/index.ts",
@@ -17,6 +21,14 @@ export default defineConfig({
       "@nicia-ai/typegraph/profiler": resolve(
         __dirname,
         "src/profiler/index.ts",
+      ),
+      "@nicia-ai/typegraph/schema": resolve(
+        __dirname,
+        "src/schema/index.ts",
+      ),
+      "@nicia-ai/typegraph/graph-merge": resolve(
+        __dirname,
+        "src/graph-merge/index.ts",
       ),
       "@nicia-ai/typegraph/sqlite/local": resolve(
         __dirname,
@@ -41,6 +53,12 @@ export default defineConfig({
       "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc}.config.*",
     ],
     globals: false,
+    // Graph-merge runs an in-process Postgres per PGlite fixture. Serialize
+    // files and use generous budgets so normal PGlite startup/cleanup latency
+    // does not masquerade as a correctness failure.
+    fileParallelism: false,
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "json-summary"],

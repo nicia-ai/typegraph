@@ -37,6 +37,11 @@
       "import": "./dist/graph-extension/index.js",
       "require": "./dist/graph-extension/index.cjs"
     },
+    "./graph-merge": {
+      "types": "./dist/graph-merge/index.d.ts",
+      "import": "./dist/graph-merge/index.js",
+      "require": "./dist/graph-merge/index.cjs"
+    },
     "./sqlite": {
       "types": "./dist/backend/sqlite/index.d.ts",
       "import": "./dist/backend/sqlite/index.js",
