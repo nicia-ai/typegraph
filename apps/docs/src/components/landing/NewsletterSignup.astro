@@ -1,4 +1,5 @@
 ---
+
 ---
 
 <section class="py-24 text-center">
@@ -84,8 +85,9 @@
       return;
     }
 
-    messageEl.textContent = data.alreadySubscribed
-      ? "You\u2019re already subscribed!"
+    messageEl.textContent =
+      data.alreadySubscribed ?
+        "You\u2019re already subscribed!"
       : "You\u2019re in. Thanks for subscribing!";
     messageEl.className = "mt-4 text-sm text-primary";
     emailInput.disabled = true;

@@ -14,3 +14,11 @@ src/routeTree.gen.ts
 worker-configuration.d.ts
 dist/
 node_modules
+
+# Vendor analytics bootstrap: minified is:inline snippet that prettier-plugin-astro cannot parse
+apps/docs/src/components/Analytics.astro
+
+# Hand-authored SVG illustrations: prettier-plugin-astro expands self-closing SVG tags and
+# wraps every attribute, bloating these write-once art files with no readability gain
+apps/docs/src/components/landing/HeroIllustration.astro
+apps/docs/src/components/landing/FeatureIcon.astro

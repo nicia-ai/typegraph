@@ -54,15 +54,33 @@ const version = package_.version;
     </section>
 
     <section class="py-16 text-center">
-      <h2 class="text-4xl font-extrabold mb-4">Define. Connect. Query. Evolve.</h2>
+      <h2 class="text-4xl font-extrabold mb-4">
+        Define. Connect. Query. Evolve.
+      </h2>
       <p class="text-xl text-text-muted mb-12">
         Your schema is your database. Your types are your queries.
       </p>
 
       <div class="code-tabs max-w-[900px] mx-auto text-left">
-        <input type="radio" name="ctab" id="ctab-basic" checked aria-label="Basic example" />
-        <input type="radio" name="ctab" id="ctab-hybrid" aria-label="Hybrid search example" />
-        <input type="radio" name="ctab" id="ctab-evolve" aria-label="Runtime evolution example" />
+        <input
+          type="radio"
+          name="ctab"
+          id="ctab-basic"
+          checked
+          aria-label="Basic example"
+        />
+        <input
+          type="radio"
+          name="ctab"
+          id="ctab-hybrid"
+          aria-label="Hybrid search example"
+        />
+        <input
+          type="radio"
+          name="ctab"
+          id="ctab-evolve"
+          aria-label="Runtime evolution example"
+        />
 
         <div
           class="code-tab-labels flex gap-1 border-b border-[#333] bg-[#252526] rounded-t-xl overflow-x-auto"
@@ -73,9 +91,12 @@ const version = package_.version;
           <label for="ctab-evolve">Runtime Evolution</label>
         </div>
 
-        <div class="code-tab-panels bg-[#1e1e1e] border border-t-0 border-[#333] rounded-b-xl shadow-2xl overflow-hidden">
+        <div
+          class="code-tab-panels bg-[#1e1e1e] border border-t-0 border-[#333] rounded-b-xl shadow-2xl overflow-hidden"
+        >
           <div class="code-panel code-panel-basic p-6 overflow-x-auto">
-            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, defineEdge, defineGraph, createStore } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre
+              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, defineEdge, defineGraph, createStore } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 <span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
 
 <span class="hl-comment">// 1. Define your ontology</span>
@@ -104,7 +125,8 @@ const version = package_.version;
           </div>
 
           <div class="code-panel code-panel-hybrid p-6 overflow-x-auto">
-            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, searchable, embedding } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre
+              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineNode, searchable, embedding } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 <span class="hl-keyword">import</span> { z } <span class="hl-keyword">from</span> <span class="hl-string">"zod"</span>;
 
 <span class="hl-comment">// 1. Declare semantic + fulltext fields right in the Zod schema</span>
@@ -133,7 +155,8 @@ const version = package_.version;
           </div>
 
           <div class="code-panel code-panel-evolve p-6 overflow-x-auto">
-            <pre class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineGraphExtension } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+            <pre
+              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { defineGraphExtension } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
 
 <span class="hl-comment">// 1. An agent proposes a typed kind from observed data.</span>
 <span class="hl-keyword">const</span> <span class="hl-type">proposal</span> = defineGraphExtension({
@@ -196,8 +219,8 @@ const version = package_.version;
           </h3>
           <p class="text-text-muted">
             Built for RAG and agentic systems. Hybrid retrieval blends BM25
-            fulltext with vector similarity in a single query, and your
-            ontology gives LLMs the structured context they need.
+            fulltext with vector similarity in a single query, and your ontology
+            gives LLMs the structured context they need.
           </p>
         </div>
         <div
@@ -283,9 +306,9 @@ const version = package_.version;
             </h3>
             <p class="text-text-muted mb-6 grow">
               Feed your LLMs high-fidelity, structured context. Map documents to
-              concepts, authors, and entities — then retrieve with hybrid
-              search (vector + fulltext) and let agents extend the ontology
-              when they encounter new types.
+              concepts, authors, and entities — then retrieve with hybrid search
+              (vector + fulltext) and let agents extend the ontology when they
+              encounter new types.
             </p>
             <a
               href="/examples/knowledge-graph-rag/"
