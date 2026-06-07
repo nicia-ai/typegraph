@@ -41,6 +41,8 @@ npx tsx examples/<example-name>.ts
 | [09-pagination-streaming.ts](./09-pagination-streaming.ts) | Cursor pagination and result streaming |
 | [13-aggregates.ts](./13-aggregates.ts) | GROUP BY, COUNT, SUM, AVG, MIN, MAX, and HAVING |
 | [17-bulk-find-by-index.ts](./17-bulk-find-by-index.ts) | Batched candidate lookup by declared index for import reconciliation and dedup, with null-safe matching and `limitPerInput` |
+| [18-fhir-graph-merge.ts](./18-fhir-graph-merge.ts) | Branch and merge overlapping FHIR-style records into a canonical patient care graph with conflict and provenance reporting |
+| [19-incremental-merge.ts](./19-incremental-merge.ts) | Incrementally ingest a new source into a live graph with `mergeIncremental()` — recall an already-committed entity by its unique key (no duplicate), flag the conflict, and persist queryable provenance |
 
 ### Backend Configuration
 
@@ -129,6 +131,8 @@ Each example follows a consistent pattern:
 5. Learn efficient data access with **09-pagination-streaming**
 6. Learn aggregate queries with **13-aggregates**
 7. Reconcile imports and find dedup candidates with **17-bulk-find-by-index**
-8. For production, see **10-postgresql** for backend configuration
-9. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
-10. For end-to-end application demos, see **14-research-copilot**
+8. Merge independently edited graph branches with **18-fhir-graph-merge**, then
+   ingest into a live graph in waves with **19-incremental-merge**
+9. For production, see **10-postgresql** for backend configuration
+10. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+11. For end-to-end application demos, see **14-research-copilot**

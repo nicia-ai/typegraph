@@ -133,6 +133,14 @@ export function buildCountNodesByKind(
 
 /**
  * Builds a query to find edges by kind with optional endpoint filters.
+ *
+ * Pagination mirrors {@link buildFindNodesByKind}:
+ * - Offset pagination (`limit` + `offset`): keeps the historical
+ *   `ORDER BY created_at DESC` and adds `id DESC` as a deterministic tiebreaker
+ *   so a non-unique `created_at` can no longer shuffle rows across pages.
+ * - Keyset pagination (`orderBy: "id"` + optional `after`): iterates by `id ASC`
+ *   over the unique `id`, a TOTAL order, so a full enumeration can neither skip
+ *   nor duplicate a row even when many edges share a `created_at`.
  */
 export function buildFindEdgesByKind(
   tables: Tables,
@@ -162,13 +170,22 @@ export function buildFindEdgesByKind(
     conditions.push(sql`${edges.toId} = ${params.toId}`);
   }
 
+  if (params.orderBy === "id" && params.after !== undefined) {
+    conditions.push(sql`${edges.id} > ${params.after}`);
+  }
+
   const whereClause = sql.join(conditions, sql` AND `);
+
+  const orderByClause =
+    params.orderBy === "id"
+      ? sql`${edges.id} ASC`
+      : sql`${edges.createdAt} DESC, ${edges.id} DESC`;
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`
       SELECT * FROM ${edges}
       WHERE ${whereClause}
-      ORDER BY ${edges.createdAt} DESC
+      ORDER BY ${orderByClause}
       LIMIT ${params.limit} OFFSET ${params.offset}
     `;
   }
@@ -177,7 +194,7 @@ export function buildFindEdgesByKind(
     return sql`
       SELECT * FROM ${edges}
       WHERE ${whereClause}
-      ORDER BY ${edges.createdAt} DESC
+      ORDER BY ${orderByClause}
       LIMIT ${params.limit}
     `;
   }
@@ -185,7 +202,7 @@ export function buildFindEdgesByKind(
   return sql`
     SELECT * FROM ${edges}
     WHERE ${whereClause}
-    ORDER BY ${edges.createdAt} DESC
+    ORDER BY ${orderByClause}
   `;
 }
 

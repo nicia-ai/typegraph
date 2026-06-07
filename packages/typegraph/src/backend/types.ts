@@ -1447,6 +1447,20 @@ export type FindEdgesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Stable ordering for keyset pagination. Default: "created_at" (existing
+   * behavior). Use "id" for iteration that is stable under shared `created_at`
+   * timestamps — the offset path orders by the NON-unique `created_at`, so a
+   * full enumeration must page by the unique `id` to avoid skipping a row at a
+   * page boundary. Mirrors {@link FindNodesByKindParams.orderBy}.
+   */
+  orderBy?: "id" | "created_at";
+  /**
+   * Keyset cursor. Returns rows strictly greater (by `orderBy`) than this value.
+   * When `orderBy: "id"`, compared lexicographically. Mutually exclusive with
+   * `offset` — callers pick one. Mirrors {@link FindNodesByKindParams.after}.
+   */
+  after?: string;
 }>;
 
 /**

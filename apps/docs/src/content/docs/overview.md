@@ -125,6 +125,15 @@ atomically commits a new schema version — no redeploy, full Zod
 validation, restart parity. See [Graph Extensions](/graph-extensions)
 for the agent-driven workflow.
 
+Note: TypeGraph ships **graph merge** — fork a store into isolated working
+copies, let many writers (parallel agents, importers, reviewers) edit
+independently, then reconcile them into one canonical graph with deterministic
+entity resolution (exact / blocking / fulltext / vector / hybrid), edge
+repointing, conflict reporting, and provenance. `mergeIncremental()` folds new
+sources into a *live* graph without creating duplicates — the primitive for
+multi-agent knowledge-graph construction and continuous ingestion. See
+[Graph Merge](/graph-merge) for the full guide.
+
 ## Why TypeGraph?
 
 ### Compared to Graph Databases (Neo4j, Amazon Neptune)
@@ -192,6 +201,8 @@ TypeGraph is ideal for:
 - **Content graphs** with topics, articles, and references
 - **Domain models** requiring semantic constraints
 - **RAG applications** combining graph traversal with vector search
+- **Multi-source ingestion & entity resolution** — reconcile parallel agent or
+  importer outputs into one canonical graph with [graph merge](/graph-merge)
 
 TypeGraph is not ideal for:
 

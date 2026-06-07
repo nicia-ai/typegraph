@@ -9,10 +9,15 @@
       "@nicia-ai/typegraph": ["./src/index.ts"],
       "@nicia-ai/typegraph/interchange": ["./src/interchange/index.ts"],
       "@nicia-ai/typegraph/profiler": ["./src/profiler/index.ts"],
+      "@nicia-ai/typegraph/schema": ["./src/schema/index.ts"],
       "@nicia-ai/typegraph/indexes": ["./src/indexes/index.ts"],
+      "@nicia-ai/typegraph/graph-merge": ["./src/graph-merge/index.ts"],
       "@nicia-ai/typegraph/sqlite": ["./src/backend/sqlite/index.ts"],
       "@nicia-ai/typegraph/sqlite/local": ["./src/backend/sqlite/local.ts"],
-      "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"]
+      "@nicia-ai/typegraph/postgres": ["./src/backend/postgres/index.ts"],
+      "@nicia-ai/typegraph/postgres/pglite": [
+        "./src/backend/postgres/pglite.ts"
+      ]
     }
   },
   "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"],
