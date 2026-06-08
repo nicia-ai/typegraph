@@ -31,6 +31,7 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/schema", expectedExport: "deserializeSchema" },
   { subpath: "/indexes", expectedExport: "defineNodeIndex" },
   { subpath: "/graph-extension", expectedExport: "defineGraphExtension" },
+  { subpath: "/graph-merge", expectedExport: "branch" },
   { subpath: "/sqlite", expectedExport: "createSqliteBackend" },
   { subpath: "/postgres", expectedExport: "createPostgresBackend" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteBackend" },

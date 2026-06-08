@@ -42,19 +42,25 @@ export function unwrapOr<T, E>(result: Result<T, E>, defaultValue: T): T {
 
 /**
  * Type guard to check if result is successful.
+ *
+ * Narrows to the `Readonly<{...}>` success arm so that an early-return on the
+ * negative branch (`if (isErr(x)) return; x.data`) leaves the success arm
+ * reachable — the union members are themselves `Readonly`, so a mutable
+ * predicate target would subtract nothing and break narrowing for callers.
  */
 export function isOk<T, E>(
   result: Result<T, E>,
-): result is { success: true; data: T } {
+): result is Readonly<{ success: true; data: T }> {
   return result.success;
 }
 
 /**
- * Type guard to check if result is an error.
+ * Type guard to check if result is an error. See {@link isOk} for why the
+ * predicate narrows to the `Readonly<{...}>` arm.
  */
 export function isErr<T, E>(
   result: Result<T, E>,
-): result is { success: false; error: E } {
+): result is Readonly<{ success: false; error: E }> {
   return !result.success;
 }
 

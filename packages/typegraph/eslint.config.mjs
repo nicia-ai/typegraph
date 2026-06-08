@@ -27,6 +27,48 @@ export default [
     ],
   }),
 
+  // graph-merge is intentionally heavy on deterministic ordering helpers plus
+  // branch-dependent assertions. Relax only STYLE-ONLY Unicorn/Vitest
+  // preferences for the subsystem. The type-safety rules
+  // (no-unnecessary-condition, prefer-nullish-coalescing, require-await) stay ON
+  // for the SOURCE — this is the most algorithmically complex code in the
+  // package and exactly where a dead guard or a value-dropping `||` must be
+  // caught.
+  {
+    files: [
+      "src/graph-merge/**/*.ts",
+      "tests/graph-merge/**/*.ts",
+      "tests/property/graph-merge/**/*.ts",
+    ],
+    rules: {
+      "@typescript-eslint/no-confusing-void-expression": "off",
+      "unicorn/consistent-function-scoping": "off",
+      "unicorn/no-array-callback-reference": "off",
+      "unicorn/no-array-reduce": "off",
+      "unicorn/no-array-reverse": "off",
+      "unicorn/no-array-sort": "off",
+      "unicorn/no-await-expression-member": "off",
+      "unicorn/no-for-loop": "off",
+      "unicorn/no-null": "off",
+      "unicorn/prefer-code-point": "off",
+      "unicorn/prefer-structured-clone": "off",
+      "unicorn/prevent-abbreviations": "off",
+      "vitest/no-conditional-expect": "off",
+    },
+  },
+
+  // Merge TESTS additionally relax two rules that are pure noise in test code:
+  // `no-unnecessary-condition` (defensive `cleanups ?? []` harness idioms,
+  // tautological narrowing after an `expect(x).toBe(...)`) and `require-await`
+  // (uniform `async` test/callback signatures). These stay ON for the source.
+  {
+    files: ["tests/graph-merge/**/*.ts", "tests/property/graph-merge/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-unnecessary-condition": "off",
+      "@typescript-eslint/require-await": "off",
+    },
+  },
+
   // Backend parity guardrail. The query compiler is a single shared path; the
   // only sanctioned place for a dialect difference is a DialectAdapter member.
   // Inline `=== "sqlite"` / `case "postgres"` branching reintroduces the
