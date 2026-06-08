@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.31.0
+
+### Minor Changes
+
+- [#178](https://github.com/nicia-ai/typegraph/pull/178) [`6b6e418`](https://github.com/nicia-ai/typegraph/commit/6b6e4186642c65d58c939250458b6521efbc40c7) Thanks [@pdlug](https://github.com/pdlug)! - Add `@nicia-ai/typegraph/graph-merge`, a TypeGraph-native branch and semantic merge subpath for deterministic entity-resolution merges across graph forks.
+
 ## 0.30.0
 
 ### Minor Changes
