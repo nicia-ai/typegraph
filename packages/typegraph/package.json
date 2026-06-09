@@ -164,7 +164,7 @@
     "nanoid": "^5.1.11"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.12",
+    "@cloudflare/vitest-pool-workers": "^0.16.14",
     "@electric-sql/pglite": "^0.5.1",
     "@electric-sql/pglite-pgvector": "^0.0.2",
     "@libsql/client": "^0.17.3",

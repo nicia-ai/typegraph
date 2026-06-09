@@ -77,10 +77,7 @@ export function runVectorPredicatePass(
         `Vector minScore must be a finite number, got ${String(minScore)}`,
       );
     }
-    if (
-      vectorPredicate.metric === "cosine" &&
-      (minScore < -1 || minScore > 1)
-    ) {
+    if (vectorPredicate.metric === "cosine" && Math.abs(minScore) > 1) {
       throw new UnsupportedPredicateError(
         `Cosine minScore must be between -1 and 1, got ${String(minScore)}`,
       );

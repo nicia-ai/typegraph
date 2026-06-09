@@ -315,7 +315,7 @@ export function assertVectorMinScore(
   if (!Number.isFinite(minScore)) {
     throw new RangeError(`${label} must be a finite number, got: ${minScore}`);
   }
-  if (metric === "cosine" && (minScore < -1 || minScore > 1)) {
+  if (metric === "cosine" && Math.abs(minScore) > 1) {
     throw new RangeError(
       `${label} for the cosine metric must be between -1 and 1, got: ${minScore}`,
     );

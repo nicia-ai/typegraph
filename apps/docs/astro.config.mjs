@@ -1,4 +1,5 @@
 import cloudflare from "@astrojs/cloudflare";
+import { satteri } from "@astrojs/markdown-satteri";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, envField, passthroughImageService } from "astro/config";
@@ -158,8 +159,14 @@ const llmsSmallExclude = extractSlugs(sidebar).filter(
 
 export default defineConfig({
   site: "https://typegraph.dev",
+  markdown: {
+    processor: satteri(),
+  },
   vite: {
     plugins: [tailwindcss()],
+    optimizeDeps: {
+      exclude: ["astro/actions/runtime/entrypoints/route.js"],
+    },
   },
   image: {
     service: passthroughImageService(),

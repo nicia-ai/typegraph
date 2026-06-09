@@ -17,7 +17,7 @@ export const unicodeStringArb = fc.oneof(
   fc.string(), // ASCII
   fc.string({ unit: "grapheme" }), // Unicode graphemes
   fc.constant(""), // Empty
-  fc.constant("   "), // Whitespace only
+  fc.constant(" ".repeat(3)), // Whitespace only
   fc.constantFrom(
     "日本語", // Japanese
     "中文", // Chinese
