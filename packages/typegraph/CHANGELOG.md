@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.32.0
+
+### Minor Changes
+
+- [#182](https://github.com/nicia-ai/typegraph/pull/182) [`0f0e771`](https://github.com/nicia-ai/typegraph/commit/0f0e77161d473b5c3b2d2e224d930c611eb4b123) Thanks [@pdlug](https://github.com/pdlug)! - Close the TOCTOU windows in graph-merge commits. A merge resolves its plan from reads taken before the commit transaction, so a write landing on the target in between could previously be committed over. Now, inside the commit transaction: `merge()` and `mergeAgainstBase()` re-validate the target's base@V content fingerprint, and `mergeIncremental()` re-runs its new-vs-base identity resolution (the unique-constraint and block-index probes). All three fail with `BaseVersionMismatchError` — instead of committing a stale plan or a duplicate entity — when the target changed in that window. Merge commits run at `SERIALIZABLE` isolation with bounded retry on serialization failures and deadlocks, making the guards race-free on multi-writer Postgres. `Store.transaction()` accepts optional `TransactionOptions` (isolation level) and `TransactionContext` exposes the transaction-scoped `backend`.
+
 ## 0.31.0
 
 ### Minor Changes
