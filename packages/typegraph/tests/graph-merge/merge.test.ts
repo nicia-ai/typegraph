@@ -494,6 +494,42 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
     }
   });
 
+  it("rejects re-merging an already-merged branch — a successful merge advances base@V", async () => {
+    const { baseStore, branchA, branchB } = await seedScenario();
+
+    const first = await merge<CareGraph>(
+      baseStore,
+      [branchA],
+      fhirMergeOptions(),
+    );
+    expect(isOk(first)).toBe(true);
+
+    // The committed merge changed the target's content fingerprint, so the
+    // SAME branch cannot be merged twice (no double-application)...
+    const again = await merge<CareGraph>(
+      baseStore,
+      [branchA],
+      fhirMergeOptions(),
+    );
+    expect(isErr(again)).toBe(true);
+    if (isErr(again)) {
+      expect(again.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+
+    // ...and a SIBLING branch forked before the first merge landed is equally
+    // stale: sequential single-branch merges require a re-fork (or
+    // mergeIncremental). Merging siblings together is the snapshot contract.
+    const sibling = await merge<CareGraph>(
+      baseStore,
+      [branchB],
+      fhirMergeOptions(),
+    );
+    expect(isErr(sibling)).toBe(true);
+    if (isErr(sibling)) {
+      expect(sibling.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+  });
+
   // Regression (F20): a base row soft-deleted BEFORE branching must not come back
   // to life. The clone formerly exported `includeDeleted: true`, but interchange's
   // meta schema has no `deletedAt`, so the tombstone was lost and the row imported

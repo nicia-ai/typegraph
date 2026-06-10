@@ -370,6 +370,59 @@ describe("repointEdges", () => {
     ]);
   });
 
+  it("repoints an INTRA-cluster edge a→b to a kept self-edge c*→c*", () => {
+    // An edge BETWEEN two cluster members: both endpoints repoint to the same
+    // canonical, producing a self-edge. The contract is that the relationship
+    // SURVIVES as c*→c* — it is not dropped (only edges to finally-deleted
+    // endpoints drop), so no merged relationship silently vanishes.
+    const staged = [stagedEdge({ id: "edge-1", from: "a", to: "b" })];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.dropped).toEqual([]);
+    expect(result.edges).toHaveLength(1);
+    const edge = result.edges[0]!;
+    expect(edge.fromId).toBe("a");
+    expect(edge.toId).toBe("a");
+    expect(edge.id).toBe("edge-1");
+  });
+
+  it("dedupes the reversed intra-cluster pair a→b and b→a into ONE self-edge", () => {
+    // Once {a, b} collapse, BOTH directions repoint to the same (c*, type, c*)
+    // identity, so with equal props the pair dedupes to a single self-edge —
+    // the original direction is deliberately unrecoverable after the collapse.
+    const staged = [
+      stagedEdge({ id: "edge-1", from: "a", to: "b", branchId: BRANCH_A }),
+      stagedEdge({ id: "edge-2", from: "b", to: "a", branchId: BRANCH_B }),
+    ];
+
+    const result = repointEdges(
+      staged,
+      collapse,
+      new Set<MergeKey>(),
+      "flag",
+      rank(),
+    );
+
+    expect(result.dropped).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.edges).toHaveLength(1);
+    const edge = result.edges[0]!;
+    expect(edge.fromId).toBe("a");
+    expect(edge.toId).toBe("a");
+    expect(edge.id).toBe("edge-1");
+    expect(edge.mergedIds.map((id) => id as string).sort()).toEqual([
+      "edge-1",
+      "edge-2",
+    ]);
+  });
+
   it("produces an identical result across shuffled input-edge order", () => {
     const staged = [
       stagedEdge({ id: "edge-1", from: "x", to: "a", props: { weight: 1 } }),
