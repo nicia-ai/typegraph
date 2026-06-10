@@ -1,11 +1,17 @@
 /**
- * Bounded fast-check arbitraries for the determinism property test (T12).
+ * Bounded fast-check arbitraries for the graph-merge property tests: the
+ * determinism gate (T12, {@link determinismScenarioArb}) and the three-way
+ * merge-law suite ({@link mergeLawScenarioArb}).
  *
- * The arbitrary produces a PURE DATA scenario spec — never a live store. The
- * property body materializes it twice (a base + N branches) and merges a natural
- * and a permuted branch order onto two fresh target clones, so the same logical
- * scenario drives both runs with identical node/edge ids (deep-equal is only
- * meaningful when both merges see the SAME ids).
+ * Every arbitrary produces a PURE DATA scenario spec — never a live store. The
+ * property body materializes it (a base + N branches) with EXPLICIT,
+ * scenario-derived ids, so independent materializations of the same scenario
+ * are id-for-id identical and their merge outcomes deep-comparable.
+ *
+ * For the determinism gate the body materializes the scenario twice and merges
+ * a natural and a permuted branch order onto two fresh target clones, so the
+ * same logical scenario drives both runs with identical node/edge ids
+ * (deep-equal is only meaningful when both merges see the SAME ids).
  *
  * The scenario deliberately exercises every order-sensitive merge path the gate
  * must prove commutative:
@@ -140,4 +146,97 @@ export const determinismScenarioArb: fc.Arbitrary<DeterminismScenario> =
     ontology: fc.record({
       pair: fc.constantFrom(...DOCTOR_NAME_PAIRS),
     }),
+  });
+
+/** What a law-scenario branch does to the inherited (edge-free) base patient. */
+export type InheritedAction = "delete" | "none" | "update";
+
+/**
+ * The scenario for the three-way merge-law properties (identity,
+ * diff-coherence, idempotence). Three patients drive it:
+ *
+ *   - INHERITED — an edge-free base patient the branch may leave alone, update
+ *     (mrn), or delete. Edge-free because the default `onDelete: "restrict"`
+ *     would reject deleting a node with live edges; the laws are about merge
+ *     semantics, not delete-behavior policy.
+ *   - ANCHOR — static base content (patient + encounter + edge) that must pass
+ *     through every merge untouched.
+ *   - ADDED — the branch's additions (patient + encounter + edge).
+ *
+ * The three names are drawn from {@link DISTINCT_NAMES} at pairwise-distinct
+ * indices, so no pair clears the 0.85 Dice threshold and NO entity resolution
+ * fires — the laws quantify over plain three-way diffs, where faithful
+ * application is the contract. (Resolution-triggering scenarios are the
+ * determinism gate's domain; ER merge is deliberately NOT claimed idempotent.)
+ */
+export type MergeLawScenario = Readonly<{
+  inherited: Readonly<{
+    name: string;
+    birthDate: string;
+    mrn: string;
+    updatedMrn: string;
+  }>;
+  anchor: Readonly<{
+    name: string;
+    birthDate: string;
+    encounterReason: string;
+    edgeOn: string;
+  }>;
+  added: Readonly<{
+    name: string;
+    birthDate: string;
+    mrn: string;
+    encounterReason: string;
+    edgeOn: string;
+  }>;
+  inheritedAction: InheritedAction;
+}>;
+
+/**
+ * The bounded merge-law scenario arbitrary. `updatedMrn` is DERIVED from the
+ * base mrn so an "update" action is GUARANTEED to change the canonicalized
+ * props (an equal value would silently turn the update path into a no-op).
+ */
+export const mergeLawScenarioArb: fc.Arbitrary<MergeLawScenario> = fc
+  .record({
+    nameOffset: fc.nat({ max: DISTINCT_NAMES.length - 1 }),
+    inheritedBirthDate: fc.constantFrom(...BIRTH_DATES),
+    anchorBirthDate: fc.constantFrom(...BIRTH_DATES),
+    addedBirthDate: fc.constantFrom(...BIRTH_DATES),
+    inheritedMrn: tokenArb,
+    addedMrn: tokenArb,
+    anchorReason: tokenArb,
+    addedReason: tokenArb,
+    edgeOn: fc.constantFrom(...BIRTH_DATES),
+    inheritedAction: fc.constantFrom<InheritedAction>(
+      "none",
+      "update",
+      "delete",
+    ),
+  })
+  .map((draw) => {
+    const nameAt = (offset: number): string =>
+      DISTINCT_NAMES[(draw.nameOffset + offset) % DISTINCT_NAMES.length]!;
+    return {
+      inherited: {
+        name: nameAt(0),
+        birthDate: draw.inheritedBirthDate,
+        mrn: draw.inheritedMrn,
+        updatedMrn: `${draw.inheritedMrn}-MOD`,
+      },
+      anchor: {
+        name: nameAt(1),
+        birthDate: draw.anchorBirthDate,
+        encounterReason: draw.anchorReason,
+        edgeOn: draw.edgeOn,
+      },
+      added: {
+        name: nameAt(2),
+        birthDate: draw.addedBirthDate,
+        mrn: draw.addedMrn,
+        encounterReason: draw.addedReason,
+        edgeOn: draw.edgeOn,
+      },
+      inheritedAction: draw.inheritedAction,
+    };
   });
