@@ -26,11 +26,17 @@ else
   POSTGRES_URL="$DEFAULT_POSTGRES_URL"
 fi
 
-# Run all postgres tests (backend-specific and integration).
+# Run all postgres tests (backend-specific, integration, and graph-merge).
 #
 # `--no-file-parallelism` serializes test-file execution: every PG test
 # suite targets the same `typegraph_test` database, and several files'
 # `beforeAll` hooks run schema-destructive DDL (DROP TABLE). Running
 # files in parallel is a recipe for flaky mid-test table disappearance.
+# (Graph-merge fixtures isolate per-fixture schemas, but they share the
+# serialized lane for the same connection-budget reasons.)
+#
+# With POSTGRES_URL set, the graph-merge backendMatrix() gains its
+# server-Postgres entry, so those suites run on SQLite, PGlite, AND the
+# production pg driver in this lane.
 echo "Running PostgreSQL tests..."
-POSTGRES_URL="$POSTGRES_URL" vitest run --no-file-parallelism tests/backends/postgres/ tests/backends/integration/
+POSTGRES_URL="$POSTGRES_URL" vitest run --no-file-parallelism tests/backends/postgres/ tests/backends/integration/ tests/graph-merge/ tests/property/graph-merge/

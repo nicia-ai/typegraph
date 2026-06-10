@@ -1,17 +1,29 @@
+import { randomUUID } from "node:crypto";
+
 import type { GraphBackend } from "@nicia-ai/typegraph";
+import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
 import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Client, Pool } from "pg";
 
 import type { Embedder } from "../../src/graph-merge/types";
 
 /**
- * Dual-backend test fixtures for the graph-merge suite.
+ * Backend test fixtures for the graph-merge suite.
  *
- * Both backends run fully in-process: SQLite via better-sqlite3
- * (`createLocalSqliteBackend`) and Postgres via PGlite + pgvector
- * (`createLocalPgliteBackend`). There is NO Docker, NO `POSTGRES_URL`, and no
- * 5432 dependency — `backendMatrix()` returns both backends and both ALWAYS
- * run under plain `pnpm test`.
+ * Two backends run fully in-process and ALWAYS run under plain `pnpm test`:
+ * SQLite via better-sqlite3 (`createLocalSqliteBackend`) and Postgres via
+ * PGlite + pgvector (`createLocalPgliteBackend`) — no Docker, no
+ * `POSTGRES_URL`, no 5432 dependency.
+ *
+ * When `POSTGRES_URL` IS set (the `pnpm test:postgres` lane), a third entry
+ * runs every suite against the real server-Postgres backend (node-postgres
+ * `Pool` + Drizzle) — the production driver and transaction wiring PGlite
+ * cannot exercise. Each fixture gets its own throwaway schema on the shared
+ * server (merge fixtures must be EMPTY and several live simultaneously per
+ * test: a base plus its branches), created on `make()` and dropped by
+ * `cleanup()`.
  */
 
 /**
@@ -51,6 +63,83 @@ export async function createPgliteMergeBackend(): Promise<MergeBackendFixture> {
       await backend.close();
     },
   };
+}
+
+/**
+ * Creates a server-Postgres backend fixture on the shared `POSTGRES_URL`
+ * server, isolated in its own throwaway schema.
+ *
+ * The data pool pins `search_path` to the fixture schema (with `public` second
+ * so extension types like pgvector's `vector` still resolve); all TypeGraph
+ * DDL and DML are schema-relative, so every fixture sees an empty graph store.
+ * `backend.close()` ends the data pool; the one-connection admin pool drops
+ * the schema afterwards.
+ */
+export async function createServerPostgresMergeBackend(
+  postgresUrl: string,
+): Promise<MergeBackendFixture> {
+  const schemaName = `merge_test_${randomUUID().replaceAll("-", "")}`;
+  await runAdminQuery(postgresUrl, `CREATE SCHEMA "${schemaName}"`);
+
+  // `max: 2` keeps the shared server's connection budget intact: the property
+  // suites hold a base plus several branch fixtures alive at once, and a
+  // default-size pool (10) per fixture exhausts `max_connections` ("sorry,
+  // too many clients already"). Merge traffic is sequential — one connection
+  // serves it; the second is headroom so a transaction never self-starves.
+  const dataPool = new Pool({
+    connectionString: postgresUrl,
+    options: `-c search_path=${schemaName},public`,
+    max: 2,
+  });
+  const backend = createPostgresBackend(drizzle(dataPool));
+
+  // Force the DDL bootstrap NOW. The lazy bootstrap gate only fires when
+  // `typegraph_schema_versions` is missing — and on a shared server whose
+  // `public` schema already has the tables, search_path fall-through makes the
+  // probe SUCCEED against `public`, so no per-schema tables would ever be
+  // created and every fixture would silently share `public`'s data. Creating
+  // the full table set in the fixture schema up front shadows `public` for all
+  // subsequent unqualified references. (`public` stays second on the path so
+  // extension types — pgvector's `vector` — still resolve.)
+  if (backend.bootstrapTables === undefined) {
+    await backend.close();
+    throw new Error(
+      "createPostgresBackend() returned no bootstrapTables(); the schema-isolated merge fixture requires it.",
+    );
+  }
+  await backend.bootstrapTables();
+
+  return {
+    backend,
+    cleanup: async () => {
+      // `createPostgresBackend(db).close()` is deliberately a no-op — the
+      // caller owns the connection lifecycle — so the fixture must end its
+      // own pool or every fixture leaks its connections for the whole worker
+      // process (the shared server then hits "too many clients").
+      await backend.close();
+      await dataPool.end();
+      await runAdminQuery(postgresUrl, `DROP SCHEMA "${schemaName}" CASCADE`);
+    },
+  };
+}
+
+/**
+ * Runs one admin statement (schema create/drop) on a TRANSIENT connection.
+ * A per-fixture admin pool would hold an idle connection for the fixture's
+ * whole lifetime — multiplied across the property suites' simultaneous
+ * fixtures, enough to breach the shared server's connection limit.
+ */
+async function runAdminQuery(
+  postgresUrl: string,
+  statement: string,
+): Promise<void> {
+  const client = new Client({ connectionString: postgresUrl });
+  await client.connect();
+  try {
+    await client.query(statement);
+  } finally {
+    await client.end();
+  }
 }
 
 /** Fixed alphabet for {@link fakeEmbedder}: a–z plus space (27 dims). */
@@ -105,12 +194,14 @@ export type BackendMatrixEntry = Readonly<{
 }>;
 
 /**
- * Returns the full dual-backend matrix. Both entries always run — there is no
- * environment gating. SQLite's synchronous factory is wrapped so every entry
- * shares the async `make()` signature.
+ * Returns the backend matrix. The in-process SQLite and PGlite entries always
+ * run; the server-Postgres entry (production `pg` driver over Docker/CI
+ * Postgres) joins only when `POSTGRES_URL` is set — the `pnpm test:postgres`
+ * lane. SQLite's synchronous factory is wrapped so every entry shares the
+ * async `make()` signature.
  */
 export function backendMatrix(): readonly BackendMatrixEntry[] {
-  return [
+  const entries: BackendMatrixEntry[] = [
     {
       name: "SQLite",
       make: () => Promise.resolve(createSqliteMergeBackend()),
@@ -120,4 +211,12 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
       make: () => createPgliteMergeBackend(),
     },
   ];
+  const postgresUrl = process.env.POSTGRES_URL;
+  if (postgresUrl !== undefined && postgresUrl !== "") {
+    entries.push({
+      name: "Postgres",
+      make: () => createServerPostgresMergeBackend(postgresUrl),
+    });
+  }
+  return entries;
 }

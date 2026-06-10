@@ -2170,13 +2170,15 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
     .filter((id) => !existingById.has(id))
     .sort((left, right) => compareStrings(left, right));
   if (notFound.length > 0) {
-    const perKind = await Promise.all(
-      Object.keys(target.graph.edges).map((kind) =>
-        edgeCollection(edgesApi, kind).getByIds(notFound, INCLUDE_TOMBSTONES),
-      ),
-    );
+    // Sequential: all queries share the same transaction client (a single
+    // pg PoolClient). Concurrent client.query() calls on a PoolClient queue
+    // with a deprecation warning in pg@8 and become an error in pg@9.
     const crossKindById = new Map<string, Edge>();
-    for (const rows of perKind) {
+    for (const kind of Object.keys(target.graph.edges)) {
+      const rows = await edgeCollection(edgesApi, kind).getByIds(
+        notFound,
+        INCLUDE_TOMBSTONES,
+      );
       for (const [index, id] of notFound.entries()) {
         const row = rows[index];
         if (row !== undefined && !crossKindById.has(id)) {

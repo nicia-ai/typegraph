@@ -165,14 +165,35 @@ describe.each(backendMatrix())("state-diff [$name]", (entry) => {
     const a = await store.nodes.Person.create({ name: "A" });
     const b = await store.nodes.Person.create({ name: "B" });
     const c = await store.nodes.Person.create({ name: "C" });
-    await store.edges.knows.create(a, b, { since: "1" });
-    await store.edges.knows.create(b, c, { since: "2" });
-    await store.edges.knows.create(c, a, { since: "3" });
+    // DELIBERATELY inserted out of id order, with explicit all-lowercase ids:
+    // every backend collation (SQLite byte order, PGlite "C", a server
+    // Postgres database under a linguistic/ICU collation) agrees on the
+    // ordering of same-shape lowercase ASCII ids, so the expected sequence is
+    // portable — mixed-case generated ids are NOT (e.g. "V" < "s" in code
+    // units but not under a case-insensitive linguistic collation).
+    await store.edges.knows.bulkCreate([
+      {
+        id: "e-ccc",
+        from: { kind: "Person", id: c.id },
+        to: { kind: "Person", id: a.id },
+        props: { since: "3" },
+      },
+      {
+        id: "e-aaa",
+        from: { kind: "Person", id: a.id },
+        to: { kind: "Person", id: b.id },
+        props: { since: "1" },
+      },
+      {
+        id: "e-bbb",
+        from: { kind: "Person", id: b.id },
+        to: { kind: "Person", id: c.id },
+        props: { since: "2" },
+      },
+    ]);
 
     const rows = await enumerateAllEdges(store.backend, store.graphId, "knows");
-    const ids = rows.map((row) => row.id);
-    expect(ids).toEqual([...ids].sort());
-    expect(ids).toHaveLength(3);
+    expect(rows.map((row) => row.id)).toEqual(["e-aaa", "e-bbb", "e-ccc"]);
   });
 
   it("detects no changes between a base and its faithful clone", async () => {

@@ -149,7 +149,7 @@ export const determinismScenarioArb: fc.Arbitrary<DeterminismScenario> =
   });
 
 /** What a law-scenario branch does to the inherited (edge-free) base patient. */
-export type InheritedAction = "delete" | "none" | "update";
+type InheritedAction = "delete" | "none" | "update";
 
 /**
  * The scenario for the three-way merge-law properties (identity,
