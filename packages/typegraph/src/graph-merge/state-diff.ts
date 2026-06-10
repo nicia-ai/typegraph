@@ -33,6 +33,7 @@ import type {
   NodeId,
   NodeType,
   Store,
+  TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds } from "./typegraph-internal";
 
@@ -155,10 +156,16 @@ export type StateDiff = Readonly<{
 
 /**
  * Enumerates EVERY node of `kind` for `graphId` (live and soft-deleted) via
- * keyset pagination on `id`. Returns rows in ascending `id` order.
+ * keyset pagination on `id`. Returns rows ascending in the BACKEND's own id
+ * ordering — byte order on SQLite/PGlite, the database collation on server
+ * Postgres. That order is deterministic and pagination-consistent (the cursor
+ * comparison uses the same collation as ORDER BY), but it is NOT guaranteed to
+ * equal JS code-unit order for mixed-case ids; consumers needing a canonical
+ * cross-backend order sort in JS (as `stateDiff` and the base@V fingerprint
+ * do).
  */
 export async function enumerateAllNodes(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   graphId: string,
   kind: string,
 ): Promise<readonly NodeRow[]> {
@@ -188,10 +195,12 @@ export async function enumerateAllNodes(
  * Enumerates EVERY edge of `kind` for `graphId` (live and soft-deleted) via
  * keyset pagination on the unique `id` (a TOTAL order), so paging can neither
  * skip nor duplicate a row regardless of how many edges share a `created_at`.
- * Returns rows in ascending `id` order. Mirrors {@link enumerateAllNodes}.
+ * Returns rows ascending in the backend's own id ordering (see
+ * {@link enumerateAllNodes} for the collation caveat). Mirrors
+ * {@link enumerateAllNodes}.
  */
 export async function enumerateAllEdges(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   graphId: string,
   kind: string,
 ): Promise<readonly EdgeRow[]> {

@@ -7,6 +7,7 @@ import {
   type AdoptedTransaction,
   type EdgeRow,
   type NodeRow,
+  type TransactionBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
@@ -1039,6 +1040,13 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
   sql?: AdoptedTransaction;
+  /**
+   * The transaction-scoped backend the collections are bound to, for advanced
+   * raw reads that must observe the transaction's snapshot (e.g. graph-merge's
+   * in-transaction base@V re-validation). On the non-transactional fallback it
+   * is the store's plain backend — reads work, but there is no snapshot.
+   */
+  backend: TransactionBackend;
 }>;
 
 // ============================================================

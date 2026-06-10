@@ -16,6 +16,7 @@ import {
   runOptionallyInTransaction,
   type SchemaVersionRow,
   type TransactionBackend,
+  type TransactionOptions,
 } from "../backend/types";
 import {
   type AllNodeTypes,
@@ -912,23 +913,37 @@ export class Store<G extends GraphDef> {
    *   // sequential, non-atomic — handle partial-failure recovery yourself
    * }
    * ```
+   *
+   * @param fn The callback run inside the transaction boundary.
+   * @param options Optional {@link TransactionOptions} forwarded to the
+   *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
+   *   without isolation-level support ignore it; the non-transactional
+   *   fallback ignores it entirely.
    */
   async transaction<T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
   ): Promise<T> {
     // Without a real transaction the tx-scoped collections would be
     // bound to the same backend as this.nodes/this.edges and exposing
     // the cached versions avoids rebuilding the proxies on every call.
+    // An isolation-level request in `options` is equally meaningless here.
     if (!this.#backend.capabilities.transactions) {
-      return fn({ nodes: this.nodes, edges: this.edges });
+      return fn({
+        nodes: this.nodes,
+        edges: this.edges,
+        backend: this.#backend,
+      });
     }
 
     // #134/#135: no gate here. The backend's transaction() wraps the
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
-    return this.#backend.transaction(async (txBackend, sql) =>
-      fn(this.#buildTransactionContext(txBackend, sql)),
+    return this.#backend.transaction(
+      async (txBackend, sql) =>
+        fn(this.#buildTransactionContext(txBackend, sql)),
+      options,
     );
   }
 
@@ -1043,7 +1058,9 @@ export class Store<G extends GraphDef> {
       txEdgeOperations,
     );
 
-    return sql === undefined ? { nodes, edges } : { nodes, edges, sql };
+    return sql === undefined ?
+        { nodes, edges, backend: txBackend }
+      : { nodes, edges, sql, backend: txBackend };
   }
 
   // === Graph Lifecycle ===

@@ -40,7 +40,12 @@
  * identical committed graph. T12 proves this with a fast-check shuffle property.
  */
 
-import { computeBaseVersion, computeSchemaComponent } from "./base-version";
+import {
+  computeBaseVersion,
+  computeContentComponent,
+  computeSchemaComponent,
+  contentComponentOf,
+} from "./base-version";
 import { blockNodes } from "./blocking";
 import { canonicalizeProps } from "./canonical-props";
 import type { CanonicalEntity, ClusterMember } from "./canonicalize";
@@ -101,6 +106,7 @@ import type {
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
+import { withTxConflictRetry } from "./tx-retry";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
@@ -112,6 +118,8 @@ import type {
   NodeId,
   NodeType,
   Store,
+  TransactionBackend,
+  TransactionOptions,
   UniqueIntrospection,
 } from "./typegraph-internal";
 import type {
@@ -1271,6 +1279,7 @@ async function applyMergePlan<G extends GraphDef>(
 export async function commitPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
+  expectedBaseVersion?: BaseVersion,
 ): Promise<Readonly<{ nodes: number; edges: number }>> {
   if (!target.backend.capabilities.transactions) {
     throw new MergeError(
@@ -1278,13 +1287,70 @@ export async function commitPlan<G extends GraphDef>(
       { details: { capability: "transactions" } },
     );
   }
-  return target.transaction((tx) =>
-    applyMergePlan(
-      plan,
-      tx.nodes as unknown as TxNodes,
-      tx.edges as unknown as TxEdges,
-    ),
+  return withTxConflictRetry(() =>
+    target.transaction(async (tx) => {
+      // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
+      // transaction, so the target may have been written between the base@V
+      // precondition and this commit. Re-deriving the content fingerprint
+      // through the tx-scoped backend (this transaction's snapshot) and
+      // comparing it to the captured token proves the plan still describes the
+      // live target; SERIALIZABLE isolation makes the proof race-free — a
+      // concurrent write that invalidates these reads aborts one transaction
+      // with a retryable serialization failure instead of committing silently.
+      if (expectedBaseVersion !== undefined) {
+        await assertTargetUnchanged(tx.backend, target, expectedBaseVersion);
+      }
+      return applyMergePlan(
+        plan,
+        tx.nodes as unknown as TxNodes,
+        tx.edges as unknown as TxEdges,
+      );
+    }, MERGE_COMMIT_TX_OPTIONS),
   );
+}
+
+/**
+ * Isolation for the merge commit transaction. SERIALIZABLE closes the window
+ * between the in-transaction re-validation reads and COMMIT on multi-writer
+ * Postgres (SSI aborts a racing writer with SQLSTATE 40001, which
+ * {@link withTxConflictRetry} retries); SQLite and PGlite serialize writers by
+ * construction, and the SQLite backend ignores the option.
+ */
+const MERGE_COMMIT_TX_OPTIONS = {
+  isolationLevel: "serializable",
+} as const satisfies TransactionOptions;
+
+/**
+ * The in-transaction half of the base@V guard: recomputes the target's content
+ * fingerprint through the TRANSACTION-SCOPED backend and compares it to the
+ * token captured by the precondition (`merge()`) or at plan start
+ * (`mergeAgainstBase()`). The schema component cannot drift (it is a pure
+ * function of the in-memory graph definition), so only content is compared.
+ */
+async function assertTargetUnchanged<G extends GraphDef>(
+  txBackend: TransactionBackend,
+  target: Store<G>,
+  expectedBaseVersion: BaseVersion,
+): Promise<void> {
+  const liveContent = await computeContentComponent(
+    txBackend,
+    target.graphId,
+    target.graph,
+  );
+  const expectedContent = contentComponentOf(expectedBaseVersion);
+  if (liveContent !== expectedContent) {
+    throw new BaseVersionMismatchError(
+      "The merge target was modified between the base@V check and the commit transaction; the resolved plan no longer describes the live target and was not applied.",
+      {
+        details: {
+          expectedContentFingerprint: expectedContent,
+          liveContentFingerprint: liveContent,
+        },
+        suggestion:
+          "Re-run the merge (and re-branch if the divergence is real), or serialize writers against merges on this target.",
+      },
+    );
+  }
 }
 
 /**
@@ -1384,7 +1450,7 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
 async function validateBaseVersions<G extends GraphDef>(
   target: Store<G>,
   branches: readonly GraphBranch<G>[],
-): Promise<Result<undefined, BaseVersionMismatchError>> {
+): Promise<Result<BaseVersion, BaseVersionMismatchError>> {
   const targetVersion = await computeBaseVersion(target);
   for (const branch of branches) {
     if (branch.base !== targetVersion) {
@@ -1402,7 +1468,7 @@ async function validateBaseVersions<G extends GraphDef>(
       );
     }
   }
-  return ok();
+  return ok(targetVersion);
 }
 
 /** Normalizes options, converting an invalid-option throw into a typed result. */
@@ -1431,6 +1497,7 @@ async function resolveMerge<G extends GraphDef>(
   options: NormalizedMergeOptions<G>,
   useBaseSources: boolean,
   incremental?: IncrementalConfig,
+  expectedBaseVersion?: BaseVersion,
 ): Promise<Result<MergeReport<G>, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
@@ -1534,11 +1601,21 @@ async function resolveMerge<G extends GraphDef>(
     );
 
     // (9) commit to the target. Incremental mode commits through the guarded path
-    // (the existing-target-id write guard, §6.6); snapshot mode commits directly.
+    // (the existing-target-id write guard, §6.6); snapshot mode commits directly,
+    // re-validating the captured base@V inside the transaction (TOCTOU guard).
     const merged =
       incremental === undefined ?
-        await commitPlan(target, plan)
-      : await commitIncrementalPlan(target, plan);
+        await commitPlan(target, plan, expectedBaseVersion)
+      : await commitIncrementalPlan(target, plan, {
+          stagedNewByKind: newNodesByKind(staging),
+          options,
+          introspectionKinds,
+          // The committed (kind, id) keys the base sources matched at PLAN time;
+          // anything NEW the in-tx re-probe surfaces is a window write.
+          plannedBaseMatchKeys: new Set(
+            candidates.data.baseMembers.map((member) => mergeKeyOf(member)),
+          ),
+        });
 
     // (10) assemble the report. The full provenance records are always built in the
     // plan; the in-memory index is gated by `provenance`, and on-graph persistence
@@ -1642,13 +1719,24 @@ export async function merge<G extends GraphDef>(
   const options = normalized.data;
   const target = options.target ?? store;
 
-  // (1) base@V precondition — the snapshot contract.
+  // (1) base@V precondition — the snapshot contract. The validated token is
+  // re-checked INSIDE the commit transaction (see `commitPlan`), so a target
+  // write landing between this check and the commit fails typed instead of
+  // committing a stale plan.
   const precondition = await validateBaseVersions(target, branches);
   if (isErr(precondition)) {
     return err(precondition.error);
   }
 
-  return resolveMerge(store, target, branches, options, false);
+  return resolveMerge(
+    store,
+    target,
+    branches,
+    options,
+    false,
+    undefined,
+    precondition.data,
+  );
 }
 
 /**
@@ -1676,7 +1764,21 @@ export async function mergeAgainstBase<G extends GraphDef>(
   }
   const options = normalized.data;
   const target = options.target ?? store;
-  return resolveMerge(store, target, branches, options, true);
+
+  // No branch-level base@V precondition here (the synthetic scope's contract),
+  // but PLAN STABILITY still holds: the token captured before any planning
+  // read is re-validated inside the commit transaction, so the target must not
+  // move while THIS merge is in flight.
+  const expectedBaseVersion = await computeBaseVersion(target);
+  return resolveMerge(
+    store,
+    target,
+    branches,
+    options,
+    true,
+    undefined,
+    expectedBaseVersion,
+  );
 }
 
 // --- mergeIncremental: full fork-point-vs-live-target entry point (§6.6) -------
@@ -2154,6 +2256,123 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
 }
 
 /**
+ * The reads `commitIncrementalPlan` needs to re-run the NEW-vs-BASE identity
+ * resolution INSIDE the commit transaction — the inputs to {@link
+ * collectBaseMatchKeys}, plus the set of committed `(kind, id)` keys those base
+ * sources matched at PLAN time. Comparing the two closes the identity-resolution
+ * TOCTOU window (see {@link assertBaseResolutionStable}).
+ */
+type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
+  stagedNewByKind: ReadonlyMap<string, readonly StagedNewNode[]>;
+  options: NormalizedMergeOptions<G>;
+  introspectionKinds: ReadonlyMap<string, readonly UniqueIntrospection[]>;
+  plannedBaseMatchKeys: ReadonlySet<MergeKey>;
+}>;
+
+/**
+ * Re-runs the NEW-vs-BASE identity probes — each kind's unique constraints
+ * (`baseUnique`) and its declared block index (`baseKey`) — for the staged new
+ * nodes against `lookupStore`, returning the set of committed `(kind, id)` keys
+ * those probes surface. It computes the lookup keys from the SAME staged props
+ * the planner used (typegraph owns key derivation), so the result over the
+ * plan-time target reproduces `candidates.baseMembers`, and the result over the
+ * tx-snapshot target reveals any committed row that became a match in between.
+ *
+ * Probes are issued STRICTLY SEQUENTIALLY (one awaited query at a time): inside
+ * the commit transaction these run on the single tx-held client, where
+ * concurrent `client.query()` calls queue with a pg deprecation warning that
+ * becomes an error in pg@9.
+ */
+async function collectBaseMatchKeys<G extends GraphDef>(
+  lookupStore: BaseLookupStore,
+  guard: IncrementalCommitGuard<G>,
+): Promise<ReadonlySet<MergeKey>> {
+  const matched = new Set<MergeKey>();
+  for (const [kind, stagedNodes] of guard.stagedNewByKind) {
+    const resolveConfig = guard.options.resolve[kind];
+    // A kind with no resolve config has no base recall — it never pulls a
+    // committed row into scope, so it carries no identity-resolution TOCTOU.
+    if (resolveConfig === undefined) {
+      continue;
+    }
+    const collection = lookupStore.nodes[kind];
+    if (collection === undefined || stagedNodes.length === 0) {
+      continue;
+    }
+    const items = stagedNodes.map((staged) => ({ props: staged.node.props }));
+
+    for (const constraint of uniqueConstraintsFor(
+      guard.introspectionKinds,
+      kind,
+    )) {
+      const matches = await collection.bulkFindByConstraint(
+        constraint.name,
+        items,
+      );
+      for (const base of matches) {
+        if (base !== undefined) {
+          matched.add(mergeKeyOf(base));
+        }
+      }
+    }
+
+    if (resolveConfig.blockIndex !== undefined) {
+      const matchesByItem = await collection.bulkFindByIndex(
+        resolveConfig.blockIndex,
+        items,
+      );
+      for (const perItem of matchesByItem) {
+        for (const base of perItem) {
+          matched.add(mergeKeyOf(base));
+        }
+      }
+    }
+  }
+  return matched;
+}
+
+/**
+ * The identity-resolution half of the incremental TOCTOU guard. The planner
+ * resolves each branch addition against the target's committed rows from reads
+ * taken OUTSIDE this transaction (`baseUnique`/`baseKey` in candidate
+ * generation). A committed row sharing a branch addition's unique-constraint or
+ * block-index key that LANDS in the plan→commit window is invisible to the
+ * per-row write guards — they only re-fetch the plan's own write ids — so the
+ * stale plan would commit the addition under its own id, leaving a duplicate the
+ * base-source resolution would otherwise have collapsed. A unique-constraint
+ * collision is still caught at write time by the uniques side-table, but only as
+ * a late, opaque failure mid-apply; a non-unique BLOCK-INDEX collision has no
+ * such backstop and commits the duplicate SILENTLY. This guard refuses both
+ * early and typed, before any row is touched.
+ *
+ * Re-deriving the matched base keys through the TX-scoped store and comparing
+ * them to the plan-time set proves no new identity match appeared. SERIALIZABLE
+ * isolation makes the proof race-free on multi-writer Postgres: a concurrent
+ * insert that this read would have to see aborts one side with a retryable
+ * serialization failure; the retry re-runs this probe and fails typed.
+ */
+async function assertBaseResolutionStable<G extends GraphDef>(
+  lookupStore: BaseLookupStore,
+  guard: IncrementalCommitGuard<G>,
+): Promise<void> {
+  const liveKeys = await collectBaseMatchKeys(lookupStore, guard);
+  const appeared = [...liveKeys]
+    .filter((key) => !guard.plannedBaseMatchKeys.has(key))
+    .sort((left, right) => compareMergeKeys(left, right));
+  if (appeared.length === 0) {
+    return;
+  }
+  throw new BaseVersionMismatchError(
+    `mergeIncremental() resolved its branch additions against the target as of planning, but ${appeared.length} committed row(s) matching a branch addition's identity key (a unique constraint or block index) were inserted before the commit transaction. Committing the plan would create duplicate entities the base-source resolution would otherwise have collapsed.`,
+    {
+      details: { appeared },
+      suggestion:
+        "Re-run mergeIncremental(); the re-planned merge resolves the branch additions against the now-committed rows.",
+    },
+  );
+}
+
+/**
  * The full incremental commit path (§6.6). The planner has already folded the live
  * target in as a preferred synthetic branch, so this path preflights destructive
  * row hazards inside the target transaction and then applies the normal merge plan.
@@ -2161,6 +2380,7 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
 async function commitIncrementalPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
+  guard: IncrementalCommitGuard<G>,
 ): Promise<Readonly<{ nodes: number; edges: number }>> {
   if (!target.backend.capabilities.transactions) {
     throw new MergeError(
@@ -2169,13 +2389,24 @@ async function commitIncrementalPlan<G extends GraphDef>(
     );
   }
 
-  return target.transaction(async (tx) => {
-    const nodesApi = tx.nodes as unknown as TxNodes;
-    const edgesApi = tx.edges as unknown as TxEdges;
-    await validateIncrementalNodeWrites(target, nodesApi, plan);
-    await validateIncrementalEdgeWrites(target, edgesApi, plan);
-    return applyMergePlan(plan, nodesApi, edgesApi);
-  });
+  // SERIALIZABLE + retry for the same reason as `commitPlan`: the per-row
+  // guards read inside this transaction, and SSI turns a concurrent write that
+  // invalidates those reads into a retryable abort instead of a lost update.
+  // Every retry re-runs the guards, so a real hazard fails typed, never stale.
+  return withTxConflictRetry(() =>
+    target.transaction(async (tx) => {
+      const nodesApi = tx.nodes as unknown as TxNodes;
+      const edgesApi = tx.edges as unknown as TxEdges;
+      // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
+      // this transaction, so re-derive them here (tx snapshot) and refuse the
+      // plan if a matching committed row appeared in the window. `tx` exposes
+      // the same `.nodes` collection record a `BaseLookupStore` needs.
+      await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
+      await validateIncrementalNodeWrites(target, nodesApi, plan);
+      await validateIncrementalEdgeWrites(target, edgesApi, plan);
+      return applyMergePlan(plan, nodesApi, edgesApi);
+    }, MERGE_COMMIT_TX_OPTIONS),
+  );
 }
 
 /**

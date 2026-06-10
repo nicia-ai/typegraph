@@ -35,7 +35,12 @@
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
-import type { GraphBackend, GraphDef, Store } from "./typegraph-internal";
+import type {
+  GraphBackend,
+  GraphDef,
+  Store,
+  TransactionBackend,
+} from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
@@ -118,14 +123,17 @@ const CONTENT_FINGERPRINT_BYTES = 16;
  * user-mutable row content, so a validity-only edit that leaves `updated_at`
  * unchanged must still move the token. Soft-deleted rows are intentionally
  * excluded — the fingerprint describes the live base a branch forks from.
+ *
+ * Takes the backend rather than a `Store` so the SAME fingerprint can be
+ * re-computed inside a commit transaction (via the tx-scoped backend) for the
+ * in-transaction `base@V` re-validation — the reads then observe the
+ * transaction's snapshot, not whatever a concurrent writer has since committed.
  */
-async function computeContentFingerprint<G extends GraphDef>(
-  store: Store<G>,
+export async function computeContentComponent<G extends GraphDef>(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  graph: G,
 ): Promise<string> {
-  const backend = store.backend;
-  const graphId = store.graphId;
-  const graph = store.graph;
-
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
 
@@ -202,9 +210,26 @@ export async function computeBaseVersion<G extends GraphDef>(
 ): Promise<BaseVersion> {
   const [schemaComponent, contentComponent] = await Promise.all([
     computeSchemaComponent(store),
-    computeContentFingerprint(store),
+    computeContentComponent(store.backend, store.graphId, store.graph),
   ]);
   return asBaseVersion(
     `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
   );
+}
+
+/**
+ * Extracts the content-fingerprint component from a `base@V` token. The schema
+ * component is a fixed-width hex digest with no NUL byte, so the substring after
+ * the single NUL separator is exactly the content fingerprint.
+ *
+ * Used by the in-transaction re-validation: the SCHEMA component is a pure
+ * function of the in-memory graph definition (it cannot drift between the
+ * precondition check and the commit), so only the content component needs to be
+ * re-compared against live rows.
+ */
+export function contentComponentOf(version: BaseVersion): string {
+  const separatorIndex = (version as string).indexOf(TOKEN_SEPARATOR);
+  return separatorIndex === -1 ? version : (
+      (version as string).slice(separatorIndex + 1)
+    );
 }

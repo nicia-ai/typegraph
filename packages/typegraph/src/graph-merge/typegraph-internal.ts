@@ -1,4 +1,8 @@
-export type { GraphBackend } from "../backend/types";
+export type {
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
   defineGraph,
