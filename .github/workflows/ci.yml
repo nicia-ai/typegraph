@@ -97,12 +97,12 @@ jobs:
       - name: Unused code check
         run: pnpm test:unused
 
-  test-sqlite:
-    name: Test (SQLite, Node ${{ matrix.node-version }})
+  test-sqlite-unit:
+    name: Test Unit (SQLite, Node ${{ matrix.node-version }})
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -123,11 +123,48 @@ jobs:
       - name: Run unit tests
         run: pnpm turbo run test:unit
 
+  test-sqlite-property:
+    name: Test Property (SQLite, Node 24)
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Run property tests
         run: pnpm turbo run test:property
 
+  test-sqlite-smoke:
+    name: Test Smoke (SQLite, Node 24)
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Run SQLite perf sanity
-        if: ${{ matrix.node-version == 24 }}
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check
 
       - name: Run example smoke test
@@ -258,7 +295,9 @@ jobs:
     needs:
       - detect-release-metadata-push
       - lint-and-check
-      - test-sqlite
+      - test-sqlite-unit
+      - test-sqlite-property
+      - test-sqlite-smoke
       - test-coverage
       - test-typescript-compat
       - test-postgres
