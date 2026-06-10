@@ -731,6 +731,7 @@ if (backend.capabilities.vector?.supported) {
 | `windowFunctions` | SQL window functions such as `ROW_NUMBER()` are available |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
+| `history?` | Recorded-time history capture guarantee: `"atomic"`, `"best-effort"`, or `undefined` when the backend has no capture support (see the [History](/queries/history) guide) |
 
 ### SQLite ↔ PostgreSQL parity
 
@@ -757,6 +758,23 @@ Vector and fulltext capabilities are populated from the configured strategy, so 
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
 different `metrics`/`indexTypes` shifts these rows accordingly — always check `backend.capabilities` at runtime
 rather than hard-coding the dialect.
+
+### Recorded-time history capture
+
+Opt-in [recorded-time history](/queries/history) (`createStore(graph, backend, { history: true })`) is supported on
+every bundled backend; the guarantee differs only by whether the driver can run the capture in the same transaction
+as the mutation. `backend.capabilities.history` reports which guarantee applies:
+
+| Driver | `capabilities.history` | Why |
+| --- | --- | --- |
+| SQLite — better-sqlite3 / libsql / bun | `atomic` | Capture and mutation run in one transaction (`transactions: true`) |
+| SQLite — Cloudflare D1 (`transactionMode: "none"`) | `best-effort` | Non-transactional: mutation first, capture second — missing history on a crash, never a phantom transition |
+| Postgres — node-postgres / postgres-js / neon-serverless / PGlite | `atomic` | Capture and mutation run in one transaction (`transactions: true`) |
+| Postgres — neon-http | `atomic` | Single data-modifying CTE captures the pre-image and mutates in one statement |
+
+`atomic` means a history row commits if and only if its mutation commits. `best-effort` applies only to the same
+two non-transactional drivers as the transactions note below — it never fabricates a transition that did not happen.
+See the [History](/queries/history) guide for the full capture contract.
 
 Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile

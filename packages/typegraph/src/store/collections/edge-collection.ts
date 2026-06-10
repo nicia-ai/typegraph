@@ -11,11 +11,11 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
-import { UnsupportedPredicateError } from "../../errors";
+import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
 import { nowIso } from "../../utils/date";
-import { type EdgeRow } from "../row-mappers";
+import { type EdgeRow, rowToEdgeHistoryEntry } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
@@ -23,6 +23,7 @@ import {
   type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsResult,
+  type EdgeHistoryEntry,
   type GetOrCreateAction,
   type IfExistsMode,
   type NodeRef,
@@ -296,6 +297,21 @@ export function createEdgeCollection<
       if (row.kind !== kind) return undefined; // Edge is a different type
       if (!matchesTemporalMode(row, options)) return undefined;
       return narrowEdge<E>(rowToEdge(row));
+    },
+
+    async history(id: string): Promise<readonly EdgeHistoryEntry<E>[]> {
+      if (backend.history === undefined) {
+        throw new ConfigurationError(
+          `store.edges.${kind}.history(id) requires a store created with ` +
+            `{ history: true } and a backend that supports recorded-time ` +
+            `history capture.`,
+          { kind, operation: "history" },
+        );
+      }
+      const rows = await backend.history.getEdgeHistory(graphId, id);
+      return rows.map(
+        (row) => rowToEdgeHistoryEntry(row) as EdgeHistoryEntry<E>,
+      );
     },
 
     async getByIds(

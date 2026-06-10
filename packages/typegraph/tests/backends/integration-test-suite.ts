@@ -31,6 +31,7 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerHistoryIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -128,6 +129,7 @@ export function createIntegrationTestSuite(
     registerSubgraphIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
+    registerHistoryIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
   });

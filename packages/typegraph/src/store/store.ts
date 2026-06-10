@@ -131,9 +131,11 @@ import {
   type Node,
   type OperationHookContext,
   type QueryOptions,
+  type StoreHistory,
   type StoreHooks,
   type StoreOptions,
   type StoreRef,
+  type StoreTransactionOptions,
   type TransactionContext,
 } from "./types";
 
@@ -287,6 +289,21 @@ export class Store<G extends GraphDef> {
       options?.queryDefaults?.traversalExpansion ?? "inverse";
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
+
+    // Recorded-time history is opt-in at store creation (F1a). Flip the
+    // backend's shared capture flag; subsequent mutations write pre-images.
+    // Idempotent across `evolve()`-produced clones (same backend instance).
+    if (options?.history === true) {
+      if (backend.history === undefined) {
+        throw new ConfigurationError(
+          "createStore({ history: true }) requires a backend that supports " +
+            "recorded-time history capture. Use a Drizzle SQLite or Postgres " +
+            "backend (createSqliteBackend / createPostgresBackend).",
+          { capability: "history" },
+        );
+      }
+      backend.history.enable();
+    }
   }
 
   // === Accessors ===
@@ -759,6 +776,33 @@ export class Store<G extends GraphDef> {
     return this.#search;
   }
 
+  // === Recorded-Time History (F1a) ===
+
+  /**
+   * Retention surface for recorded-time history. `store.history.prune({
+   * before })` drops history rows whose currency ended before the given
+   * timestamp. Per-entity reads live on the collections
+   * (`store.nodes.<Kind>.history(id)` / `store.edges.<kind>.history(id)`).
+   *
+   * @throws {ConfigurationError} when the backend does not support history.
+   */
+  get history(): StoreHistory {
+    const backend = this.#backend;
+    const graphId = this.graphId;
+    return {
+      async prune(options: Readonly<{ before: string }>): Promise<void> {
+        if (backend.history === undefined) {
+          throw new ConfigurationError(
+            "store.history.prune requires a backend that supports " +
+              "recorded-time history capture.",
+            { capability: "history" },
+          );
+        }
+        await backend.history.prune({ graphId, before: options.before });
+      },
+    };
+  }
+
   // === Batch Query Execution ===
 
   /**
@@ -922,7 +966,7 @@ export class Store<G extends GraphDef> {
    */
   async transaction<T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T> {
     // Without a real transaction the tx-scoped collections would be
     // bound to the same backend as this.nodes/this.edges and exposing
@@ -943,8 +987,32 @@ export class Store<G extends GraphDef> {
     return this.#backend.transaction(
       async (txBackend, sql) =>
         fn(this.#buildTransactionContext(txBackend, sql)),
-      options,
+      this.#buildBackendTransactionOptions(options),
     );
+  }
+
+  /**
+   * Maps {@link StoreTransactionOptions} to backend
+   * {@link TransactionOptions}. The `meta` shortcut becomes the history
+   * audit `meta` for every capture in the transaction (F1a); the backend
+   * generates the shared `tx_id`. History options are attached only when
+   * capture is enabled, so a meta-less transaction stays untouched.
+   */
+  #buildBackendTransactionOptions(
+    options?: StoreTransactionOptions,
+  ): TransactionOptions | undefined {
+    const isolationLevel = options?.isolationLevel;
+    const meta = options?.meta;
+    // Attach the history audit `meta` only when capture is enabled; the
+    // narrowing inside the branch keeps `meta` non-undefined for
+    // `exactOptionalPropertyTypes`.
+    if (meta !== undefined && this.#backend.history?.isEnabled() === true) {
+      return {
+        ...(isolationLevel === undefined ? {} : { isolationLevel }),
+        history: { meta },
+      };
+    }
+    return isolationLevel === undefined ? undefined : { isolationLevel };
   }
 
   /**

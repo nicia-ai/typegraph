@@ -6,6 +6,8 @@ import { type z } from "zod";
 import {
   type AdoptedTransaction,
   type EdgeRow,
+  type HistoryMeta,
+  type HistoryOp,
   type NodeRow,
   type TransactionBackend,
 } from "../backend/types";
@@ -168,6 +170,58 @@ export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 }>;
 
 // ============================================================
+// Recorded-Time History Types (F1a)
+// ============================================================
+
+/**
+ * One recorded version of an entity (F1a). `image` is the entity exactly
+ * as it stood during the `[recordedFrom, recordedTo)` interval; `op` is the
+ * mutation that ended that interval. `meta` is the parsed "who/why" record
+ * supplied at write time, or `undefined`. Returned newest-first by
+ * `collection.history(id)`. This is the audit surface — there is no
+ * separate log; recorded history is queried, never replayed.
+ */
+export type NodeHistoryEntry<N extends NodeType = NodeType> = Readonly<{
+  image: Node<N>;
+  recordedFrom: string;
+  recordedTo: string;
+  op: HistoryOp;
+  schemaVersion: number;
+  txId: string;
+  meta: Record<string, unknown> | undefined;
+}>;
+
+/**
+ * One recorded version of an edge (F1a). See {@link NodeHistoryEntry}.
+ */
+export type EdgeHistoryEntry<
+  E extends AnyEdgeType = EdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Readonly<{
+  image: Edge<E, From, To>;
+  recordedFrom: string;
+  recordedTo: string;
+  op: HistoryOp;
+  schemaVersion: number;
+  txId: string;
+  meta: Record<string, unknown> | undefined;
+}>;
+
+/**
+ * Store-level retention surface for recorded-time history (F1a),
+ * accessed via `store.history`.
+ */
+export type StoreHistory = Readonly<{
+  /**
+   * Drop history rows whose currency ended strictly before `before`
+   * (an ISO timestamp). Append-forever history is a footgun for
+   * bulk-ingest workloads; prune trims it.
+   */
+  prune: (options: Readonly<{ before: string }>) => Promise<void>;
+}>;
+
+// ============================================================
 // Query Options
 // ============================================================
 
@@ -283,6 +337,34 @@ export type StoreOptions = Readonly<{
     /** Default traversal ontology expansion mode (default: "inverse"). */
     traversalExpansion?: TraversalExpansion;
   }>;
+  /**
+   * Enable recorded-time history capture (F1a). When `true`, every
+   * mutation of an existing node or edge writes a complete pre-image to the
+   * history side-tables in the same transaction, queryable via
+   * `collection.history(id)` and trimmed via `store.history.prune(...)`.
+   *
+   * Off by default: a general-purpose library must not double write volume
+   * silently, and off = zero overhead by construction (no capture
+   * statements are emitted). Requires a backend that supports capture (the
+   * Drizzle SQLite/Postgres backends); throws `ConfigurationError` if set
+   * against a backend without `backend.history`.
+   */
+  history?: boolean;
+}>;
+
+/**
+ * Options for `store.transaction(fn, options)`. Extends the backend
+ * transaction options with a `meta` shortcut: the "who/why" record stamped
+ * on every history row captured inside the transaction (F1a). No effect
+ * when history capture is disabled.
+ */
+export type StoreTransactionOptions = Readonly<{
+  isolationLevel?:
+    | "read_uncommitted"
+    | "read_committed"
+    | "repeatable_read"
+    | "serializable";
+  meta?: HistoryMeta;
 }>;
 
 /**
@@ -422,6 +504,16 @@ export type NodeCollection<
     id: NodeId<N>,
     options?: QueryOptions,
   ) => Promise<Node<N> | undefined>;
+
+  /**
+   * Recorded-time history for a node (F1a) — every prior version, newest
+   * first, each with its `[recordedFrom, recordedTo)` interval, the `op`
+   * that ended it, and audit columns. Requires the store to have been
+   * created with `{ history: true }` and a backend that supports capture;
+   * throws `ConfigurationError` otherwise. The current (open) version is
+   * not included — read it with `getById`.
+   */
+  history: (id: NodeId<N>) => Promise<readonly NodeHistoryEntry<N>[]>;
 
   /** Get multiple nodes by ID, preserving input order (undefined for missing) */
   getByIds: (
@@ -728,6 +820,14 @@ export type EdgeCollection<
     id: EdgeId<E>,
     options?: QueryOptions,
   ) => Promise<Edge<E, From, To> | undefined>;
+
+  /**
+   * Recorded-time history for an edge (F1a) — every prior version, newest
+   * first. Requires `{ history: true }` and a capture-capable backend;
+   * throws `ConfigurationError` otherwise. See
+   * {@link NodeCollection.history}.
+   */
+  history: (id: EdgeId<E>) => Promise<readonly EdgeHistoryEntry<E, From, To>[]>;
 
   /** Get multiple edges by ID, preserving input order (undefined for missing) */
   getByIds: (

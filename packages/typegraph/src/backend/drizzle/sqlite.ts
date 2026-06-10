@@ -55,11 +55,14 @@ import {
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
   type DropVectorIndexParams,
+  type EdgeHistoryRow,
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
   type IndexMaterializationRow,
   type KindRemovalRow,
+  type NodeHistoryRow,
+  type PruneHistoryParams,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
@@ -89,6 +92,7 @@ import {
   type VectorSlotLatch,
 } from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
+import { generateId } from "../../utils/id";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -113,14 +117,20 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
+  buildHistoryCoreConfig,
   type CommonOperationBackend,
   createCommonOperationBackend,
+  type HistoryContext,
+  type HistoryWiring,
   type InternalOperationBackend,
 } from "./operation-backend-core";
+import { createHistoryStrategy } from "./operations/history";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   coerceNumericScore,
+  createEdgeHistoryRowMapper,
   createEdgeRowMapper,
+  createNodeHistoryRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
   createUniqueRowMapper,
@@ -213,6 +223,8 @@ const toUniqueRow = createUniqueRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toSchemaVersionRow = createSchemaVersionRowMapper(
   SQLITE_ROW_MAPPER_CONFIG,
 );
+const toNodeHistoryRow = createNodeHistoryRowMapper(SQLITE_ROW_MAPPER_CONFIG);
+const toEdgeHistoryRow = createEdgeHistoryRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 
 /** A shared promise that never settles — used to absorb post-dispose work. */
 const PENDING_FOREVER: Promise<never> = new Promise<never>(noop);
@@ -353,6 +365,22 @@ type CreateSqliteOperationBackendOptions = Readonly<{
    * set so writes never hit a missing per-field table.
    */
   vectorSlotLatch?: VectorSlotLatch | undefined;
+  /** Recorded-time history capture wiring (F1a); absent → capture off. */
+  historyWiring?: HistoryWiring | undefined;
+  /** Fixed per-transaction audit context for tx-scoped backends. */
+  historyContext?: HistoryContext | undefined;
+  /**
+   * Atomic `runMany` override for the OUTER backend: wraps the SQLite
+   * `[capture, mutation]` pair in a driver transaction so an implicit op's
+   * capture commits with its mutation. Tx-scoped backends omit it and use
+   * the sequential default (already inside the caller's transaction).
+   */
+  runManyOverride?:
+    | (<TRow>(
+        queries: readonly SQL[],
+        lastReturnsRows: boolean,
+      ) => Promise<readonly TRow[]>)
+    | undefined;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -367,6 +395,10 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   vectorStrategy?: VectorStrategy | undefined;
   /** Shared storage-ensure latch. See {@link CreateSqliteOperationBackendOptions}. */
   vectorSlotLatch?: VectorSlotLatch | undefined;
+  /** Recorded-time history capture wiring (F1a); absent → capture off. */
+  historyWiring?: HistoryWiring | undefined;
+  /** Fixed per-transaction audit context (one tx_id for the whole tx). */
+  historyContext?: HistoryContext | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -382,6 +414,9 @@ function createSqliteOperationBackend(
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
+    historyWiring,
+    historyContext,
+    runManyOverride,
   } = options;
 
   function execGet<T>(query: SQL): Promise<T | undefined> {
@@ -410,6 +445,24 @@ function createSqliteOperationBackend(
     });
   }
 
+  // Sequential history capture for tx-scoped backends: the statements
+  // already ride the caller's transaction, so just run them in order (all
+  // but the last for effect, the last via `.all()` only when it has
+  // RETURNING — better-sqlite3 throws on `.all()` otherwise). The outer
+  // backend overrides this with a transaction-wrapping `runMany`.
+  async function runManySequential<TRow>(
+    queries: readonly SQL[],
+    lastReturnsRows: boolean,
+  ): Promise<readonly TRow[]> {
+    for (let index = 0; index < queries.length - 1; index += 1) {
+      await execRun(queries[index]!);
+    }
+    const last = queries.at(-1)!;
+    if (lastReturnsRows) return execAll<TRow>(last);
+    await execRun(last);
+    return [];
+  }
+
   const commonBackend = createCommonOperationBackend({
     batchConfig: {
       checkUniqueBatchChunkSize: SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
@@ -422,6 +475,7 @@ function createSqliteOperationBackend(
       execAll,
       execGet,
       execRun,
+      runMany: runManyOverride ?? runManySequential,
     },
     nowIso,
     operationStrategy,
@@ -431,6 +485,9 @@ function createSqliteOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    ...(historyWiring === undefined
+      ? {}
+      : { history: buildHistoryCoreConfig(historyWiring, historyContext) }),
   });
 
   const executeCompiled = executionAdapter.executeCompiled;
@@ -648,12 +705,18 @@ export function createSqliteBackend(
   // backend so a slot's per-field table is created at most once per process.
   const vectorSlotLatch =
     vectorStrategy === undefined ? undefined : createVectorSlotLatch();
+  // History capture is atomic wherever transactions exist; on
+  // `transactionMode: "none"` (Cloudflare D1) the capture pair can't be
+  // wrapped, so it degrades to mutation-first / capture-second best-effort.
+  const historyMode: "atomic" | "best-effort" =
+    transactionMode === "none" ? "best-effort" : "atomic";
   const capabilities: BackendCapabilities = {
     ...buildSqliteCapabilities({
       fulltextStrategy,
       vectorStrategy,
       transactionMode,
     }),
+    history: historyMode,
     ...options.capabilities,
   };
 
@@ -668,6 +731,68 @@ export function createSqliteBackend(
     fulltextStrategy,
   );
   const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
+
+  // === Recorded-time history wiring (F1a) ===
+  const historyState = { enabled: false };
+  const historyStrategy = createHistoryStrategy(tables, "sqlite");
+  // Active schema version stamped on every history row, cached per graph
+  // and invalidated by `commitSchemaVersion` / `setActiveVersion`. Shared
+  // by the outer and every tx-scoped backend through `historyWiring`; the
+  // cold read happens inside the backend core on its own connection.
+  const schemaVersionCache = new Map<string, number>();
+  function invalidateSchemaVersion(graphId: string): void {
+    schemaVersionCache.delete(graphId);
+  }
+  const historyWiring: HistoryWiring = {
+    state: historyState,
+    strategy: historyStrategy,
+    mode: historyMode,
+    schemaVersionCache,
+  };
+
+  // Atomic `runMany` for the OUTER backend: wraps the SQLite
+  // `[capture, mutation]` pair in a driver transaction so an implicit op's
+  // history row commits with its mutation. `lastReturnsRows` picks the
+  // driver call for the final statement (better-sqlite3 throws on `.all()`
+  // against a statement without RETURNING). Only relevant in atomic mode;
+  // best-effort never emits a two-statement pair.
+  function runHistoryManyAtomic<TRow>(
+    queries: readonly SQL[],
+    lastReturnsRows: boolean,
+  ): Promise<readonly TRow[]> {
+    const last = queries.at(-1)!;
+    const leading = queries.slice(0, -1);
+    const runLast = async (
+      target: AnySqliteDatabase,
+    ): Promise<readonly TRow[]> => {
+      for (const stmt of leading) await target.run(stmt);
+      if (lastReturnsRows) return (await target.all(last));
+      await target.run(last);
+      return [];
+    };
+    if (transactionMode === "do-sqlite") {
+      return runDoSqliteStorageTransaction(async () => runLast(db));
+    }
+    if (transactionMode === "drizzle") {
+      return runWithSerializedQueue(
+        serializedQueue,
+        async () =>
+          db.transaction(async (tx) => runLast(tx)) as Promise<readonly TRow[]>,
+      );
+    }
+    return runWithSerializedQueue(serializedQueue, async () => {
+      db.run(sql`BEGIN`);
+      try {
+        const rows = await runLast(db);
+        db.run(sql`COMMIT`);
+        return rows;
+      } catch (error) {
+        db.run(sql`ROLLBACK`);
+        throw error;
+      }
+    });
+  }
+
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
@@ -677,6 +802,10 @@ export function createSqliteBackend(
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
+    historyWiring,
+    ...(historyMode === "atomic"
+      ? { runManyOverride: runHistoryManyAtomic }
+      : {}),
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -876,11 +1005,33 @@ export function createSqliteBackend(
     recordMarker: recordContributionMaterializationRow,
   });
 
+  /**
+   * The per-transaction audit context for captures inside `transaction()` /
+   * `adoptTransaction()`: one tx_id (caller-supplied or generated) and the
+   * serialized `meta` for the whole transaction. `undefined` when capture
+   * is disabled (the context would never be read).
+   */
+  function resolveHistoryContext(
+    options?: TransactionOptions,
+  ): HistoryContext | undefined {
+    if (!historyState.enabled) return undefined;
+    return {
+      txId: options?.history?.txId ?? generateId(),
+      meta:
+        options?.history?.meta === undefined
+          ? undefined
+          : JSON.stringify(options.history.meta),
+    };
+  }
+
   // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
   // the tx) and `adoptTransaction()` (#134 — the caller already opened
   // it): bind a tx-scoped backend to the *literal* `tx` client and gate
   // fulltext on the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnySqliteDatabase): TransactionBackend {
+  function bindTransactionBackend(
+    tx: AnySqliteDatabase,
+    historyContext?: HistoryContext,
+  ): TransactionBackend {
     const txBackend = createTransactionBackend({
       capabilities,
       db: tx,
@@ -890,6 +1041,8 @@ export function createSqliteBackend(
       fulltextStrategy,
       vectorStrategy,
       vectorSlotLatch,
+      historyWiring,
+      ...(historyContext === undefined ? {} : { historyContext }),
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -1087,20 +1240,23 @@ export function createSqliteBackend(
     async commitSchemaVersion(
       params: CommitSchemaVersionParams,
     ): Promise<SchemaVersionRow> {
-      return runSchemaWriteTransaction((target) =>
+      const result = await runSchemaWriteTransaction((target) =>
         target.commitSchemaVersion(params),
       );
+      invalidateSchemaVersion(params.graphId);
+      return result;
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
       await runSchemaWriteTransaction((target) =>
         target.setActiveVersion(params),
       );
+      invalidateSchemaVersion(params.graphId);
     },
 
     async transaction<T>(
       fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-      _options?: TransactionOptions,
+      options?: TransactionOptions,
     ): Promise<T> {
       if (transactionMode === "none") {
         throwSqliteTransactionsDisabled(
@@ -1110,6 +1266,10 @@ export function createSqliteBackend(
             "or use individual operations with manual error handling.",
         );
       }
+
+      // One history audit context (tx_id + meta) covers every capture made
+      // inside this transaction (F1a).
+      const historyContext = resolveHistoryContext(options);
 
       // #134/#135: NO DDL or ensure here. The tx-scoped backend
       // exposes raw fulltext methods without self-ensure wrappers; the
@@ -1132,6 +1292,8 @@ export function createSqliteBackend(
             fulltextStrategy,
             vectorStrategy,
             vectorSlotLatch,
+            historyWiring,
+            ...(historyContext === undefined ? {} : { historyContext }),
           });
           db.run(sql`BEGIN`);
 
@@ -1154,7 +1316,7 @@ export function createSqliteBackend(
 
       if (transactionMode === "do-sqlite") {
         return runDoSqliteStorageTransaction(async () =>
-          fn(bindTransactionBackend(db), db),
+          fn(bindTransactionBackend(db, historyContext), db),
         );
       }
 
@@ -1163,7 +1325,7 @@ export function createSqliteBackend(
         serializedQueue,
         async () =>
           db.transaction(async (tx) =>
-            fn(bindTransactionBackend(tx), tx),
+            fn(bindTransactionBackend(tx, historyContext), tx),
           ) as Promise<T>,
       );
     },
@@ -1192,7 +1354,47 @@ export function createSqliteBackend(
       // sync better-sqlite3 driver runs the adopted statements on the
       // caller's stack, so wrapping a caller-driven tx in our queue
       // could deadlock against the caller's outer `db.transaction(...)`.
-      return bindTransactionBackend(externalTx);
+      return bindTransactionBackend(externalTx, resolveHistoryContext());
+    },
+
+    history: {
+      enable(): void {
+        historyState.enabled = true;
+      },
+      isEnabled(): boolean {
+        return historyState.enabled;
+      },
+      async getNodeHistory(
+        graphId: string,
+        kind: string,
+        id: string,
+      ): Promise<readonly NodeHistoryRow[]> {
+        const rows = await operations.execute<Record<string, unknown>>(
+          historyStrategy.buildGetNodeHistory(graphId, kind, id),
+        );
+        return rows.map((row) => toNodeHistoryRow(row));
+      },
+      async getEdgeHistory(
+        graphId: string,
+        id: string,
+      ): Promise<readonly EdgeHistoryRow[]> {
+        const rows = await operations.execute<Record<string, unknown>>(
+          historyStrategy.buildGetEdgeHistory(graphId, id),
+        );
+        return rows.map((row) => toEdgeHistoryRow(row));
+      },
+      async prune(params: PruneHistoryParams): Promise<void> {
+        // DELETE returns no rows; better-sqlite3 requires `.run()`, so go
+        // through the run-style seam (serialized for the sync driver).
+        await runWithSerializedQueue(serializedQueue, async () => {
+          await db.run(
+            historyStrategy.buildPruneNodeHistory(params.graphId, params.before),
+          );
+          await db.run(
+            historyStrategy.buildPruneEdgeHistory(params.graphId, params.before),
+          );
+        });
+      },
     },
 
     close(): Promise<void> {
@@ -1230,6 +1432,16 @@ function createTransactionBackend(
     ...(options.vectorStrategy === undefined
       ? {}
       : { vectorSlotLatch: createVectorSlotLatch() }),
+    // Tx-scoped backend: history captures ride the caller's transaction, so
+    // it uses the sequential `runMany` default (no override). The wiring +
+    // fixed audit context flow through; absent for schema-write txns, which
+    // never mutate nodes/edges.
+    ...(options.historyWiring === undefined
+      ? {}
+      : { historyWiring: options.historyWiring }),
+    ...(options.historyContext === undefined
+      ? {}
+      : { historyContext: options.historyContext }),
   });
 }
 

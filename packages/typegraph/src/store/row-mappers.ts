@@ -4,7 +4,9 @@
  * Transforms database rows into typed Node and Edge objects.
  */
 import {
+  type EdgeHistoryRow,
   type EdgeRow as BackendEdgeRow,
+  type NodeHistoryRow,
   type NodeRow as BackendNodeRow,
 } from "../backend/types";
 import {
@@ -12,7 +14,14 @@ import {
   RESERVED_EDGE_KEYS,
   RESERVED_NODE_KEYS,
 } from "./reserved-keys";
-import { type Edge, type EdgeMeta, type Node, type NodeMeta } from "./types";
+import {
+  type Edge,
+  type EdgeHistoryEntry,
+  type EdgeMeta,
+  type Node,
+  type NodeHistoryEntry,
+  type NodeMeta,
+} from "./types";
 
 /**
  * Raw node row from database (without graph_id).
@@ -107,5 +116,49 @@ export function rowToEdgeMeta(
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: nullToUndefined(row.deleted_at),
+  };
+}
+
+/**
+ * Parses the history `meta` JSON string into a record, or `undefined`.
+ * The backend normalizes the column to a JSON string (or undefined) before
+ * it reaches here.
+ */
+function parseHistoryMeta(
+  meta: string | undefined,
+): Record<string, unknown> | undefined {
+  if (meta === undefined) return undefined;
+  return JSON.parse(meta) as Record<string, unknown>;
+}
+
+/**
+ * Transforms a backend node-history row into a typed {@link NodeHistoryEntry}.
+ * The pre-image columns hydrate `image` via {@link rowToNode}; the interval
+ * and audit columns become the entry's metadata.
+ */
+export function rowToNodeHistoryEntry(row: NodeHistoryRow): NodeHistoryEntry {
+  return {
+    image: rowToNode(row),
+    recordedFrom: row.recorded_from,
+    recordedTo: row.recorded_to,
+    op: row.op,
+    schemaVersion: row.schema_version,
+    txId: row.tx_id,
+    meta: parseHistoryMeta(row.meta),
+  };
+}
+
+/**
+ * Transforms a backend edge-history row into a typed {@link EdgeHistoryEntry}.
+ */
+export function rowToEdgeHistoryEntry(row: EdgeHistoryRow): EdgeHistoryEntry {
+  return {
+    image: rowToEdge(row),
+    recordedFrom: row.recorded_from,
+    recordedTo: row.recorded_to,
+    op: row.op,
+    schemaVersion: row.schema_version,
+    txId: row.tx_id,
+    meta: parseHistoryMeta(row.meta),
   };
 }

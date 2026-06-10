@@ -48,6 +48,14 @@ type CustomColumnType = Readonly<{
 // ============================================================
 
 /**
+ * Name of the surrogate primary-key column on the F1a history
+ * side-tables. Declared as a column-level autoincrement/serial PK, which
+ * the generic column-walker can't render — `generate{Sqlite,Pg}HistoryDDL`
+ * special-cases this column and the tables are excluded from the walker.
+ */
+const HISTORY_SURROGATE_PK_COLUMN = "history_id";
+
+/**
  * Maps Drizzle column types to SQLite types.
  */
 function getSqliteColumnType(column: SQLiteColumn): string {
@@ -236,6 +244,44 @@ function generateSqliteCreateIndexSQL(
 }
 
 /**
+ * Generates CREATE TABLE + CREATE INDEX SQL for an F1a history
+ * side-table. The history tables carry a surrogate autoincrement primary
+ * key declared as a *column* constraint (`INTEGER PRIMARY KEY
+ * AUTOINCREMENT`), which the generic column-walker can't express — it only
+ * emits table-level `PRIMARY KEY (...)`. So history DDL is generated here
+ * and the tables are excluded from the column-walker contribution set.
+ * Column types and indexes are still read from the Drizzle definition, so
+ * only the surrogate-PK rendering is bespoke.
+ */
+export function generateSqliteHistoryDDL(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  table: SQLiteTableWithColumns<any>,
+): string[] {
+  const config = getSqliteTableConfig(table);
+  const columnDefs: string[] = [];
+
+  for (const column of config.columns) {
+    if (column.name === HISTORY_SURROGATE_PK_COLUMN) {
+      columnDefs.push(`"${column.name}" INTEGER PRIMARY KEY AUTOINCREMENT`);
+      continue;
+    }
+    const parts: string[] = [
+      `"${column.name}"`,
+      getSqliteColumnType(column as SQLiteColumn),
+    ];
+    if (column.notNull) {
+      parts.push("NOT NULL");
+    }
+    columnDefs.push(parts.join(" "));
+  }
+
+  return [
+    `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`,
+    ...generateSqliteCreateIndexSQL(table),
+  ];
+}
+
+/**
  * Whether a schema-barrel value is a Drizzle SQLite table. The barrel
  * exposes non-table values (e.g. `fulltextTableName: string`) the DDL
  * generators must skip — and a contribution's barrel key is its
@@ -277,6 +323,10 @@ export function sqliteContributions(
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
     if (!isSqliteTable(table)) continue;
+    // History side-tables carry a column-level autoincrement PK the
+    // column-walker can't render; their DDL is emitted by
+    // `generateSqliteHistoryDDL` (appended in `generateSqliteDDL`).
+    if (table === tables.nodeHistory || table === tables.edgeHistory) continue;
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
     // overrides; the resolved SQL name is only the physical tableName.
@@ -313,9 +363,16 @@ export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
   fulltextStrategy: FulltextStrategy = fts5Strategy,
 ): string[] {
-  return sqliteContributions(tables, fulltextStrategy).flatMap(
-    (contribution) => [...contribution.createDdl],
-  );
+  return [
+    ...sqliteContributions(tables, fulltextStrategy).flatMap((contribution) => [
+      ...contribution.createDdl,
+    ]),
+    // F1a history side-tables: always created (like the status tables) so
+    // enabling capture later needs no migration; excluded from the
+    // column-walker above because of their surrogate-PK rendering.
+    ...generateSqliteHistoryDDL(tables.nodeHistory),
+    ...generateSqliteHistoryDDL(tables.edgeHistory),
+  ];
 }
 
 /**
@@ -452,6 +509,38 @@ function generatePgCreateIndexSQL(
 }
 
 /**
+ * Generates CREATE TABLE + CREATE INDEX SQL for an F1a history
+ * side-table on PostgreSQL. The surrogate PK is a `BIGSERIAL` declared as
+ * a column constraint, which the generic column-walker can't render (it
+ * has no `PgBigSerial` case and emits only table-level PKs). Other column
+ * types and indexes are read from the Drizzle definition.
+ */
+export function generatePgHistoryDDL(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  table: PgTableWithColumns<any>,
+): string[] {
+  const config = getPgTableConfig(table);
+  const columnDefs: string[] = [];
+
+  for (const column of config.columns) {
+    if (column.name === HISTORY_SURROGATE_PK_COLUMN) {
+      columnDefs.push(`"${column.name}" BIGSERIAL PRIMARY KEY`);
+      continue;
+    }
+    const parts: string[] = [`"${column.name}"`, getPgColumnType(column)];
+    if (column.notNull) {
+      parts.push("NOT NULL");
+    }
+    columnDefs.push(parts.join(" "));
+  }
+
+  return [
+    `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`,
+    ...generatePgCreateIndexSQL(table),
+  ];
+}
+
+/**
  * Whether a schema-barrel value is a Drizzle Postgres table. See
  * {@link isSqliteTable} for why this uses Drizzle's brand check.
  */
@@ -488,6 +577,10 @@ export function postgresContributions(
     // can't reproduce its generated tsvector column); the strategy
     // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
+    // History side-tables carry a column-level BIGSERIAL PK the
+    // column-walker can't render; their DDL is emitted by
+    // `generatePgHistoryDDL` (appended in `generatePostgresDDL`).
+    if (table === tables.nodeHistory || table === tables.edgeHistory) continue;
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
     // overrides; the resolved SQL name is only the physical tableName.
@@ -522,9 +615,16 @@ export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
   fulltextStrategy: FulltextStrategy = tsvectorStrategy,
 ): string[] {
-  return postgresContributions(tables, fulltextStrategy).flatMap(
-    (contribution) => [...contribution.createDdl],
-  );
+  return [
+    ...postgresContributions(tables, fulltextStrategy).flatMap(
+      (contribution) => [...contribution.createDdl],
+    ),
+    // F1a history side-tables: always created (like the status tables) so
+    // enabling capture later needs no migration; excluded from the
+    // column-walker above because of their surrogate-PK rendering.
+    ...generatePgHistoryDDL(tables.nodeHistory),
+    ...generatePgHistoryDDL(tables.edgeHistory),
+  ];
 }
 
 /**

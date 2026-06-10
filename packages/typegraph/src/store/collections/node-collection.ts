@@ -19,7 +19,7 @@ import { ConfigurationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import { nowIso } from "../../utils/date";
 import { getNodeRowsByIds } from "../node-fetch";
-import { type NodeRow } from "../row-mappers";
+import { type NodeRow, rowToNodeHistoryEntry } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
@@ -28,6 +28,7 @@ import {
   type NodeCollection,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
+  type NodeHistoryEntry,
   type QueryOptions,
   type UpdateNodeInput,
 } from "../types";
@@ -244,6 +245,21 @@ export function createNodeCollection<
         if (!matchesTemporalMode(row, options)) return;
         return narrowNode<N>(rowToNode(row));
       });
+    },
+
+    async history(id: NodeId<N>): Promise<readonly NodeHistoryEntry<N>[]> {
+      if (backend.history === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.history(id) requires a store created with ` +
+            `{ history: true } and a backend that supports recorded-time ` +
+            `history capture.`,
+          { kind, operation: "history" },
+        );
+      }
+      const rows = await backend.history.getNodeHistory(graphId, kind, id);
+      return rows.map(
+        (row) => rowToNodeHistoryEntry(row) as NodeHistoryEntry<N>,
+      );
     },
 
     async update(

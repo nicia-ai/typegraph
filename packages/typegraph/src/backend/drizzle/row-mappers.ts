@@ -3,7 +3,16 @@
  */
 
 import { DatabaseOperationError } from "../../errors";
-import type { EdgeRow, NodeRow, SchemaVersionRow, UniqueRow } from "../types";
+import {
+  type EdgeHistoryRow,
+  type EdgeRow,
+  HISTORY_OPS,
+  type HistoryOp,
+  type NodeHistoryRow,
+  type NodeRow,
+  type SchemaVersionRow,
+  type UniqueRow,
+} from "../types";
 
 function requireTimestamp(value: string | undefined, field: string): string {
   if (value === undefined) {
@@ -185,6 +194,79 @@ export function createUniqueRowMapper(
     node_id: asString(row.node_id, "node_id"),
     concrete_kind: asString(row.concrete_kind, "concrete_kind"),
     deleted_at: nullToUndefined(config.formatTimestamp(row.deleted_at)),
+  });
+}
+
+/**
+ * Normalizes a nullable JSON column (the history `meta`) to a JSON string
+ * or undefined. SQLite stores text; Postgres returns parsed JSONB.
+ */
+function normalizeNullableJson(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function asHistoryOp(value: unknown): HistoryOp {
+  if (
+    typeof value === "string" &&
+    (HISTORY_OPS as readonly string[]).includes(value)
+  ) {
+    return value as HistoryOp;
+  }
+  throw new DatabaseOperationError(
+    `Expected history op to be one of ${HISTORY_OPS.join(", ")}, got ${String(value)}`,
+    { operation: "select", entity: "history" },
+  );
+}
+
+/**
+ * Maps a raw `typegraph_node_history` row to {@link NodeHistoryRow}: the
+ * node pre-image (via the node mapper) plus the currency interval and
+ * audit columns. The surrogate `history_id` is intentionally not surfaced.
+ */
+export function createNodeHistoryRowMapper(
+  config: DialectRowMapperConfig,
+): (row: Record<string, unknown>) => NodeHistoryRow {
+  const toNode = createNodeRowMapper(config);
+  return (row) => ({
+    ...toNode(row),
+    recorded_from: requireTimestamp(
+      config.formatTimestamp(row.recorded_from),
+      "recorded_from",
+    ),
+    recorded_to: requireTimestamp(
+      config.formatTimestamp(row.recorded_to),
+      "recorded_to",
+    ),
+    op: asHistoryOp(row.op),
+    schema_version: asNumber(row.schema_version, "schema_version"),
+    tx_id: asString(row.tx_id, "tx_id"),
+    meta: normalizeNullableJson(row.meta),
+  });
+}
+
+/**
+ * Maps a raw `typegraph_edge_history` row to {@link EdgeHistoryRow}.
+ * Mirrors {@link createNodeHistoryRowMapper} for edges.
+ */
+export function createEdgeHistoryRowMapper(
+  config: DialectRowMapperConfig,
+): (row: Record<string, unknown>) => EdgeHistoryRow {
+  const toEdge = createEdgeRowMapper(config);
+  return (row) => ({
+    ...toEdge(row),
+    recorded_from: requireTimestamp(
+      config.formatTimestamp(row.recorded_from),
+      "recorded_from",
+    ),
+    recorded_to: requireTimestamp(
+      config.formatTimestamp(row.recorded_to),
+      "recorded_to",
+    ),
+    op: asHistoryOp(row.op),
+    schema_version: asNumber(row.schema_version, "schema_version"),
+    tx_id: asString(row.tx_id, "tx_id"),
+    meta: normalizeNullableJson(row.meta),
   });
 }
 

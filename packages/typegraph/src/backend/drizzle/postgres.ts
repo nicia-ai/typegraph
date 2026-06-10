@@ -58,6 +58,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { generateId } from "../../utils/id";
 import { isMissingTableError } from "../../utils/sql-errors";
 import {
   type AdoptedTransaction,
@@ -70,12 +71,15 @@ import {
   type DeleteFulltextBatchParams,
   type DeleteFulltextParams,
   type DropVectorIndexParams,
+  type EdgeHistoryRow,
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
   type IndexMaterializationRow,
   type KindRemovalRow,
+  type NodeHistoryRow,
   POSTGRES_CAPABILITIES,
+  type PruneHistoryParams,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
@@ -120,14 +124,20 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
+  buildHistoryCoreConfig,
   type CommonOperationBackend,
   createCommonOperationBackend,
+  type HistoryContext,
+  type HistoryWiring,
   type InternalOperationBackend,
 } from "./operation-backend-core";
+import { createHistoryStrategy } from "./operations/history";
 import { createPostgresOperationStrategy } from "./operations/strategy";
 import {
   coerceNumericScore,
+  createEdgeHistoryRowMapper,
   createEdgeRowMapper,
+  createNodeHistoryRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
   createUniqueRowMapper,
@@ -261,6 +271,8 @@ const toUniqueRow = createUniqueRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
 const toSchemaVersionRow = createSchemaVersionRowMapper(
   POSTGRES_ROW_MAPPER_CONFIG,
 );
+const toNodeHistoryRow = createNodeHistoryRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
+const toEdgeHistoryRow = createEdgeHistoryRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
 
 function buildPostgresCapabilities(
   fulltextStrategy: FulltextStrategy,
@@ -318,6 +330,9 @@ export function createPostgresBackend(
   const httpOnlyOverrides = isNeonHttpClient(db) ? { transactions: false } : {};
   const capabilities: BackendCapabilities = {
     ...baseCapabilities,
+    // History capture is a single data-modifying CTE, atomic even on
+    // non-transactional drivers (neon-http executes it in one round-trip).
+    history: "atomic",
     ...httpOnlyOverrides,
     ...options.capabilities,
   };
@@ -352,6 +367,26 @@ export function createPostgresBackend(
     tables,
     fulltextStrategy,
   );
+
+  // === Recorded-time history wiring (F1a) ===
+  const historyState = { enabled: false };
+  const historyStrategy = createHistoryStrategy(tables, "postgres");
+  // Active schema version stamped on every history row, cached per graph
+  // and invalidated by `commitSchemaVersion` / `setActiveVersion`. Shared
+  // by the outer and every tx-scoped backend through `historyWiring`; the
+  // cold read happens inside the backend core on its own connection (the
+  // tx connection inside a transaction — never a second connection).
+  const schemaVersionCache = new Map<string, number>();
+  function invalidateSchemaVersion(graphId: string): void {
+    schemaVersionCache.delete(graphId);
+  }
+  const historyWiring: HistoryWiring = {
+    state: historyState,
+    strategy: historyStrategy,
+    mode: "atomic",
+    schemaVersionCache,
+  };
+
   const operations = createPostgresOperationBackend({
     db,
     executionAdapter,
@@ -359,6 +394,7 @@ export function createPostgresBackend(
     operationStrategy,
     tableNames,
     capabilities,
+    historyWiring,
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
@@ -483,11 +519,33 @@ export function createPostgresBackend(
     recordMarker: recordContributionMaterializationRow,
   });
 
+  /**
+   * The per-transaction audit context for captures inside `transaction()` /
+   * `adoptTransaction()`: one tx_id (caller-supplied or generated) and the
+   * serialized `meta` for the whole transaction. `undefined` when capture
+   * is disabled (the context would never be read).
+   */
+  function resolveHistoryContext(
+    options?: TransactionOptions,
+  ): HistoryContext | undefined {
+    if (!historyState.enabled) return undefined;
+    return {
+      txId: options?.history?.txId ?? generateId(),
+      meta:
+        options?.history?.meta === undefined
+          ? undefined
+          : JSON.stringify(options.history.meta),
+    };
+  }
+
   // Shared by `transaction()` (TypeGraph opens the tx) and
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgDatabase): TransactionBackend {
+  function bindTransactionBackend(
+    tx: AnyPgDatabase,
+    historyContext?: HistoryContext,
+  ): TransactionBackend {
     const txBackend = createTransactionBackend({
       db: tx,
       adapterOptions,
@@ -497,6 +555,8 @@ export function createPostgresBackend(
       fulltextStrategy,
       vectorStrategy,
       vectorSlotLatch,
+      historyWiring,
+      ...(historyContext === undefined ? {} : { historyContext }),
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -694,15 +754,18 @@ export function createPostgresBackend(
     async commitSchemaVersion(
       params: CommitSchemaVersionParams,
     ): Promise<SchemaVersionRow> {
-      return runSchemaWriteTransaction(params.graphId, (target) =>
+      const result = await runSchemaWriteTransaction(params.graphId, (target) =>
         target.commitSchemaVersion(params),
       );
+      invalidateSchemaVersion(params.graphId);
+      return result;
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
       await runSchemaWriteTransaction(params.graphId, (target) =>
         target.setActiveVersion(params),
       );
+      invalidateSchemaVersion(params.graphId);
     },
 
     async transaction<T>(
@@ -727,8 +790,12 @@ export function createPostgresBackend(
           }
         : undefined;
 
+      // One history audit context (tx_id + meta) covers every capture made
+      // inside this transaction (F1a).
+      const historyContext = resolveHistoryContext(options);
+
       return db.transaction(
-        async (tx) => fn(bindTransactionBackend(tx), tx),
+        async (tx) => fn(bindTransactionBackend(tx, historyContext), tx),
         txConfig,
       );
     },
@@ -758,7 +825,43 @@ export function createPostgresBackend(
       // `db.transaction(...)`. We adopt the literal `tx` client and run
       // pure DML on it — no transaction is opened or closed here, and no
       // DDL is emitted inside the caller's business transaction.
-      return bindTransactionBackend(externalTx);
+      return bindTransactionBackend(externalTx, resolveHistoryContext());
+    },
+
+    history: {
+      enable(): void {
+        historyState.enabled = true;
+      },
+      isEnabled(): boolean {
+        return historyState.enabled;
+      },
+      async getNodeHistory(
+        graphId: string,
+        kind: string,
+        id: string,
+      ): Promise<readonly NodeHistoryRow[]> {
+        const rows = await operations.execute<Record<string, unknown>>(
+          historyStrategy.buildGetNodeHistory(graphId, kind, id),
+        );
+        return rows.map((row) => toNodeHistoryRow(row));
+      },
+      async getEdgeHistory(
+        graphId: string,
+        id: string,
+      ): Promise<readonly EdgeHistoryRow[]> {
+        const rows = await operations.execute<Record<string, unknown>>(
+          historyStrategy.buildGetEdgeHistory(graphId, id),
+        );
+        return rows.map((row) => toEdgeHistoryRow(row));
+      },
+      async prune(params: PruneHistoryParams): Promise<void> {
+        await operations.execute(
+          historyStrategy.buildPruneNodeHistory(params.graphId, params.before),
+        );
+        await operations.execute(
+          historyStrategy.buildPruneEdgeHistory(params.graphId, params.before),
+        );
+      },
     },
 
     async close(): Promise<void> {
@@ -793,6 +896,10 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * `vectorStrategy`: both present, or both `undefined`.
    */
   vectorSlotLatch: VectorSlotLatch | undefined;
+  /** Recorded-time history capture wiring (F1a); absent → capture off. */
+  historyWiring?: HistoryWiring | undefined;
+  /** Fixed per-transaction audit context for tx-scoped backends. */
+  historyContext?: HistoryContext | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -807,6 +914,10 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   vectorStrategy: VectorStrategy | undefined;
   /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
   vectorSlotLatch: VectorSlotLatch | undefined;
+  /** Recorded-time history capture wiring (F1a); absent → capture off. */
+  historyWiring?: HistoryWiring | undefined;
+  /** Fixed per-transaction audit context (one tx_id for the whole tx). */
+  historyContext?: HistoryContext | undefined;
 }>;
 
 function createPostgresOperationBackend(
@@ -822,6 +933,8 @@ function createPostgresOperationBackend(
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
+    historyWiring,
+    historyContext,
   } = options;
 
   // Route through the execution adapter so driver-specific result shapes
@@ -939,6 +1052,8 @@ function createPostgresOperationBackend(
       getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
       nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
     },
+    // No `runMany`: Postgres captures via a single data-modifying CTE, so
+    // the core never emits a multi-statement pair on this dialect.
     execution: {
       execAll,
       execGet,
@@ -952,6 +1067,9 @@ function createPostgresOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    ...(historyWiring === undefined
+      ? {}
+      : { history: buildHistoryCoreConfig(historyWiring, historyContext) }),
   });
 
   const executeCompiled = executionAdapter.executeCompiled;
@@ -1179,6 +1297,15 @@ function createTransactionBackend(
     vectorStrategy: options.vectorStrategy,
     vectorSlotLatch:
       options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
+    // History captures inside a transaction ride the caller's transaction;
+    // the wiring + fixed audit context flow through. Absent for
+    // schema-write txns, which never mutate nodes/edges.
+    ...(options.historyWiring === undefined
+      ? {}
+      : { historyWiring: options.historyWiring }),
+    ...(options.historyContext === undefined
+      ? {}
+      : { historyContext: options.historyContext }),
   });
 }
 

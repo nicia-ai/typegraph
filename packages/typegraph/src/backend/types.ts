@@ -105,6 +105,20 @@ export type BackendCapabilities = Readonly<{
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
   fulltext?: FulltextCapabilities | undefined;
+  /**
+   * Recorded-time history capture guarantee (F1a):
+   *
+   * - `"atomic"` — a history row commits if and only if its mutation
+   *   commits (the capture rides the mutation's transaction, or one
+   *   data-modifying statement on Postgres). Every backend with
+   *   `transactions: true`.
+   * - `"best-effort"` — no atomic capture available
+   *   (`transactions: false`, e.g. Cloudflare D1 / `drizzle-orm/neon-http`).
+   *   The mutation is applied first and the history row written second, so
+   *   a crash between the two loses a history row but never fabricates a
+   *   transition that did not happen (missing history, never phantom).
+   */
+  history?: "atomic" | "best-effort" | undefined;
 }>;
 
 // ============================================================
@@ -144,6 +158,99 @@ export type EdgeRow = Readonly<{
   created_at: string;
   updated_at: string;
   deleted_at: string | undefined;
+}>;
+
+// ============================================================
+// History Types (F1a — recorded-time history capture)
+// ============================================================
+
+/**
+ * The mutation that ended a row's currency interval, recorded on every
+ * history row (F1a). `restore` is an update with `clearDeleted` (the
+ * upsert-revive path); `hardDelete` captures the final image of a
+ * permanently-removed row, including each edge in a node's hard-delete
+ * cascade.
+ */
+export const HISTORY_OPS = [
+  "update",
+  "delete",
+  "restore",
+  "hardDelete",
+] as const;
+export type HistoryOp = (typeof HISTORY_OPS)[number];
+
+/**
+ * Audit / provenance metadata attached to each captured history row. An
+ * opaque "who/why" record serialized to the history `meta` column; never
+ * interpreted by TypeGraph.
+ */
+export type HistoryMeta = Readonly<Record<string, unknown>>;
+
+/**
+ * The columns every history row carries in addition to the captured
+ * pre-image: the `[recorded_from, recorded_to)` currency interval plus the
+ * audit columns. `recorded_from` is the pre-image's `updated_at` (when
+ * that version became current); `recorded_to` is when it stopped (T).
+ */
+export type HistoryAuditColumns = Readonly<{
+  recorded_from: string;
+  recorded_to: string;
+  op: HistoryOp;
+  schema_version: number;
+  tx_id: string;
+  /** JSON string, or undefined when no meta was supplied. */
+  meta: string | undefined;
+}>;
+
+/**
+ * A row from the `typegraph_node_history` table: the complete pre-image of
+ * a node (all {@link NodeRow} columns) plus the {@link HistoryAuditColumns}.
+ * The surrogate `history_id` PK is deliberately omitted — it is an
+ * internal row-identity detail, never part of the read contract.
+ */
+export type NodeHistoryRow = NodeRow & HistoryAuditColumns;
+
+/**
+ * A row from the `typegraph_edge_history` table: the complete pre-image of
+ * an edge plus the {@link HistoryAuditColumns}.
+ */
+export type EdgeHistoryRow = EdgeRow & HistoryAuditColumns;
+
+/**
+ * Parameters for `history.prune` — drops history rows whose currency
+ * ended strictly before `before`.
+ */
+export type PruneHistoryParams = Readonly<{
+  graphId: string;
+  /** ISO timestamp; rows with `recorded_to < before` are removed. */
+  before: string;
+}>;
+
+/**
+ * The recorded-time history surface a backend exposes when it supports
+ * F1a capture (the Drizzle SQLite/Postgres backends). Absent on backends
+ * that don't implement history.
+ *
+ * Capture is opt-in and off by default: `enable()` flips a shared flag the
+ * mutation path reads at call time, so an un-enabled backend emits
+ * byte-identical mutation SQL (no capture statements at all). The read and
+ * prune methods operate on the history side-tables directly.
+ */
+export type HistoryBackend = Readonly<{
+  /** Turn capture on for this backend (and all its tx-scoped children). */
+  enable: () => void;
+  /** Whether capture is currently enabled. */
+  isEnabled: () => boolean;
+  getNodeHistory: (
+    graphId: string,
+    kind: string,
+    id: string,
+  ) => Promise<readonly NodeHistoryRow[]>;
+  getEdgeHistory: (
+    graphId: string,
+    id: string,
+  ) => Promise<readonly EdgeHistoryRow[]>;
+  prune: (params: PruneHistoryParams) => Promise<void>;
 }>;
 
 /**
@@ -682,6 +789,16 @@ export type TransactionOptions = Readonly<{
     | "read_committed"
     | "repeatable_read"
     | "serializable";
+  /**
+   * Recorded-time history context for captures made inside this
+   * transaction (F1a). When history capture is enabled, every mutation in
+   * the transaction writes a history row stamped with this `txId` (so a
+   * multi-row transition groups under one id) and `meta` (the "who/why").
+   * `txId` defaults to a backend-generated id when omitted; `meta`
+   * defaults to none. No effect when capture is disabled. Set by
+   * `store.transaction(fn, { meta })`.
+   */
+  history?: Readonly<{ txId?: string; meta?: HistoryMeta }> | undefined;
 }>;
 
 /**
@@ -759,6 +876,14 @@ export type GraphBackend = Readonly<{
    * SQLite backend without sqlite-vec).
    */
   vectorStrategy?: VectorStrategy | undefined;
+  /**
+   * Recorded-time history capture surface (F1a). Present on the Drizzle
+   * SQLite/Postgres backends; absent on backends that don't implement
+   * history. Capture is opt-in via `history.enable()` (wired by
+   * `createStore(..., { history: true })`); off by default with no effect
+   * on mutation SQL. See {@link HistoryBackend}.
+   */
+  history?: HistoryBackend | undefined;
 
   // === Node Operations ===
   insertNode: (params: InsertNodeParams) => Promise<NodeRow>;

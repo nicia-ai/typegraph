@@ -67,6 +67,7 @@ const sidebar = [
       { label: "Aggregate", slug: "queries/aggregate" },
       { label: "Order", slug: "queries/order" },
       { label: "Temporal", slug: "queries/temporal" },
+      { label: "History", slug: "queries/history" },
       { label: "Compose", slug: "queries/compose" },
       { label: "Combine", slug: "queries/combine" },
       { label: "Execute", slug: "queries/execute" },

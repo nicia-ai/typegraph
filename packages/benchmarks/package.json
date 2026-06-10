@@ -17,6 +17,12 @@
     "bench:maintenance": "tsx src/maintenance-bench.ts",
     "prebench:maintenance:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "bench:maintenance:postgres": "tsx src/maintenance-bench.ts --backend=postgres",
+    "prebench:history": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:history": "tsx src/history-capture-bench.ts",
+    "prebench:history:pglite": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:history:pglite": "tsx src/history-capture-bench.ts --backend=pglite",
+    "prebench:history:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:history:postgres": "tsx src/history-capture-bench.ts --backend=postgres",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

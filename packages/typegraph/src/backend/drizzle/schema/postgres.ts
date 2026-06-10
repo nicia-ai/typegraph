@@ -26,6 +26,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  bigserial,
   boolean,
   index,
   integer,
@@ -57,6 +58,8 @@ export type PostgresTableNames = Readonly<{
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
+  nodeHistory: string;
+  edgeHistory: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -79,6 +82,8 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
+  nodeHistory: "typegraph_node_history",
+  edgeHistory: "typegraph_edge_history",
 };
 
 /**
@@ -376,6 +381,88 @@ export function createPostgresTables(
     ],
   );
 
+  /**
+   * Recorded-time history side-table for nodes (F1a). Holds the complete
+   * pre-image of every mutated node row plus a `[recorded_from,
+   * recorded_to)` currency interval and audit columns (`op`,
+   * `schema_version`, `tx_id`, `meta`). Written in the same transaction
+   * as the mutation (one data-modifying CTE) when `history` capture is
+   * enabled; never on create.
+   *
+   * `historyId` is a surrogate `bigserial` PK for row identity (a
+   * same-timestamp transition tiebreaker); it is an implementation detail,
+   * never exposed in the read API and granting no replay semantics —
+   * user-visible ordering is `(recorded_from, recorded_to, version)`. The
+   * serial column-PK can't be expressed by the generic DDL walker, so this
+   * table's DDL is emitted by `generatePgHistoryTableSQL` and excluded
+   * from the column-walker contribution set.
+   */
+  const nodeHistory = pgTable(
+    n.nodeHistory,
+    {
+      historyId: bigserial("history_id", { mode: "number" }).primaryKey(),
+      graphId: text("graph_id").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+      props: jsonb("props").notNull(),
+      version: integer("version").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      txId: text("tx_id").notNull(),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      index(`${n.nodeHistory}_entity_idx`).on(
+        t.graphId,
+        t.kind,
+        t.id,
+        t.recordedTo,
+      ),
+      index(`${n.nodeHistory}_prune_idx`).on(t.graphId, t.recordedTo),
+    ],
+  );
+
+  /**
+   * Recorded-time history side-table for edges (F1a). Mirrors
+   * {@link nodeHistory}; see its doc for the contract.
+   */
+  const edgeHistory = pgTable(
+    n.edgeHistory,
+    {
+      historyId: bigserial("history_id", { mode: "number" }).primaryKey(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      kind: text("kind").notNull(),
+      fromKind: text("from_kind").notNull(),
+      fromId: text("from_id").notNull(),
+      toKind: text("to_kind").notNull(),
+      toId: text("to_id").notNull(),
+      props: jsonb("props").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version").notNull(),
+      txId: text("tx_id").notNull(),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      index(`${n.edgeHistory}_entity_idx`).on(t.graphId, t.id, t.recordedTo),
+      index(`${n.edgeHistory}_prune_idx`).on(t.graphId, t.recordedTo),
+    ],
+  );
+
   return {
     nodes,
     edges,
@@ -385,6 +472,8 @@ export function createPostgresTables(
     contributionMaterializations,
     kindRemovals,
     reconciliationMarkers,
+    nodeHistory,
+    edgeHistory,
     fulltext,
     fulltextTableName: n.fulltext,
   } as const;
