@@ -161,8 +161,11 @@ try {
 **Solution:** Either delete the edges first or use a different delete behavior:
 
 ```typescript
-// Option 1: Delete edges first
-const edges = await store.edges.worksAt.findFrom(person);
+// Option 1: Delete edges first. Include ended-but-not-deleted edges if you
+// are cleaning up historical validity windows too.
+const edges = await store.edges.worksAt.findFrom(person, {
+  temporalMode: "includeEnded",
+});
 for (const edge of edges) {
   await store.edges.worksAt.delete(edge.id);
 }

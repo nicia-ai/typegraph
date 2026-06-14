@@ -3,11 +3,16 @@
  */
 import { type GraphDef } from "../../core/define-graph";
 import {
+  assertValidAsOf,
+  coordinateContext,
+  describeCoordinate,
+} from "../../core/temporal";
+import {
   type EdgeType,
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { KindNotFoundError, ValidationError } from "../../errors";
+import { ConfigurationError, KindNotFoundError } from "../../errors";
 import {
   type AggregateExpr,
   type FieldRef,
@@ -879,19 +884,22 @@ export class QueryBuilder<
     mode: TemporalMode,
     asOf?: string,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
-    if (mode === "asOf" && asOf === undefined) {
-      throw new ValidationError(
-        'Temporal mode "asOf" requires a timestamp',
+    if (this.#config.sealedCoordinate !== undefined) {
+      const coordinate = this.#config.sealedCoordinate;
+      throw new ConfigurationError(
+        `.temporal() is not available on a StoreView query — the view's ` +
+          `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+          `Re-coordinate on the live Store via store.query() or store.view(...).`,
         {
-          issues: [
-            { path: "asOf", message: "Timestamp is required for asOf mode" },
-          ],
-        },
-        {
-          suggestion: `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
+          code: "STORE_VIEW_SEALED_QUERY",
+          ...coordinateContext(coordinate),
+          requestedMode: mode,
         },
       );
     }
+    assertValidAsOf(mode, asOf, {
+      suggestion: `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
+    });
     return new QueryBuilder(this.#config, {
       ...this.#state,
       temporalMode: mode,

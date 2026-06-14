@@ -13,6 +13,8 @@ import {
   type GraphData,
   importGraph,
   ImportOptionsSchema,
+  InterchangeEdgeSchema,
+  InterchangeNodeSchema,
 } from "../src/interchange";
 import { createStore } from "../src/store";
 import { createTestBackend } from "./test-utils";
@@ -573,5 +575,91 @@ describe("Multiple Round-Trips", () => {
       name: "Bob",
       age: 25,
     });
+  });
+});
+
+describe("Canonical validity-window validation", () => {
+  it("rejects non-canonical validFrom / validTo on the interchange schemas", () => {
+    const nodeBase = {
+      kind: "Person",
+      id: "p1",
+      properties: { name: "Alice" },
+    };
+    // Missing milliseconds, zoned offset, and date-only all parse under the
+    // lenient z.iso.datetime() but are not canonical fixed-width UTC, so they
+    // would mis-sort as text against the asOf read coordinate. Import must
+    // reject them, matching create/update — not persist a non-canonical row.
+    for (const validFrom of [
+      "2024-01-15T10:30:00Z",
+      "2024-01-15T10:30:00+02:00",
+      "2024-01-15",
+    ]) {
+      expect(
+        InterchangeNodeSchema.safeParse({ ...nodeBase, validFrom }).success,
+      ).toBe(false);
+    }
+
+    expect(
+      InterchangeEdgeSchema.safeParse({
+        kind: "knows",
+        id: "e1",
+        from: { kind: "Person", id: "p1" },
+        to: { kind: "Person", id: "p2" },
+        properties: {},
+        // ".1Z" (= .100) sorts AFTER ".101Z" as text — the canonical contract
+        // rejects variable-width milliseconds.
+        validTo: "2024-01-15T10:30:00.1Z",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts canonical fixed-width UTC validFrom / validTo", () => {
+    expect(
+      InterchangeNodeSchema.safeParse({
+        kind: "Person",
+        id: "p1",
+        properties: { name: "Alice" },
+        validFrom: "2024-01-15T10:30:00.000Z",
+        validTo: "2025-01-15T10:30:00.000Z",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects a non-canonical validFrom at the import write seam (schema bypassed)", async () => {
+    // importGraph accepts a pre-typed GraphData without re-parsing, so a caller
+    // that casts a hand-built object bypasses the schema. The write seam must
+    // still reject a non-canonical validFrom — recorded as a per-row error, not
+    // persisted as a row the asOf coordinate would later mis-compare.
+    const sourceStore = createStore(testGraph, createTestBackend());
+    await sourceStore.nodes.Person.create(
+      { name: "Alice" },
+      { id: "person-1" },
+    );
+    const exported = await exportGraph(sourceStore);
+    const corrupted: GraphData = {
+      ...exported,
+      nodes: exported.nodes.map((node) =>
+        node.id === "person-1" ?
+          { ...node, validFrom: "2024-01-15T10:30:00Z" } // missing milliseconds
+        : node,
+      ),
+    };
+
+    const targetStore = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      targetStore,
+      corrupted,
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.entityType).toBe("node");
+    expect(result.errors[0]?.id).toBe("person-1");
+    expect(result.errors[0]?.error).toMatch(/canonical ISO 8601/);
+    // The malformed row was not written.
+    expect(
+      await targetStore.nodes.Person.getById("person-1" as never),
+    ).toBeUndefined();
   });
 });

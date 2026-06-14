@@ -44,7 +44,7 @@ export type TemporalFilterOptions = Readonly<{
  * // → e.deleted_at IS NULL AND (e.valid_from IS NULL OR ...) AND ...
  *
  * // AsOf mode
- * compileTemporalFilter({ mode: "asOf", asOf: "2024-01-01T00:00:00Z" })
+ * compileTemporalFilter({ mode: "asOf", asOf: "2024-01-01T00:00:00.000Z" })
  * // → deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= '2024-01-01...') AND ...
  * ```
  */

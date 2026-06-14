@@ -1066,7 +1066,7 @@ should not need code changes.
   await store.algorithms.shortestPath(alice, bob, {
     edges: ["knows"],
     temporalMode: "asOf",
-    asOf: "2023-01-15T00:00:00Z",
+    asOf: "2023-01-15T00:00:00.000Z",
   });
 
   await store.subgraph(rootId, {

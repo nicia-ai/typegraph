@@ -14,6 +14,7 @@ import type {
   GraphBackend,
   TransactionBackend,
 } from "../src/backend/types";
+import { ValidationError } from "../src/errors";
 import { createStore } from "../src/store";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
@@ -1342,13 +1343,13 @@ describe("Date Validation", () => {
           { name: "Alice" },
           { validFrom: "not-a-date" },
         ),
-      ).rejects.toThrow(/Invalid ISO 8601 datetime for "validFrom"/);
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
     });
 
     it("rejects invalid validTo format", async () => {
       await expect(
         store.nodes.Person.create({ name: "Alice" }, { validTo: "2024-01-15" }),
-      ).rejects.toThrow(/Invalid ISO 8601 datetime for "validTo"/);
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validTo"/);
     });
 
     it("rejects dates with timezone offset instead of Z", async () => {
@@ -1357,7 +1358,7 @@ describe("Date Validation", () => {
           { name: "Alice" },
           { validFrom: "2024-01-15T10:30:00+00:00" },
         ),
-      ).rejects.toThrow(/Invalid ISO 8601 datetime/);
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime/);
     });
   });
 
@@ -1391,7 +1392,7 @@ describe("Date Validation", () => {
           { role: "Engineer" },
           { validFrom: "bad-date" },
         ),
-      ).rejects.toThrow(/Invalid ISO 8601 datetime for "validFrom"/);
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
     });
   });
 
@@ -1405,7 +1406,7 @@ describe("Date Validation", () => {
           { name: "Alice Updated" },
           { validTo: "not-iso" },
         ),
-      ).rejects.toThrow(/Invalid ISO 8601 datetime for "validTo"/);
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validTo"/);
     });
   });
 });
@@ -1541,7 +1542,7 @@ describe("Temporal filtering in count() and find()", () => {
         { validFrom: PAST, validTo: PAST },
       );
 
-      const results = await store.nodes.Person.find({
+      const results = await store.nodes.Person.find(undefined, {
         temporalMode: "includeEnded",
       });
 
@@ -1553,7 +1554,7 @@ describe("Temporal filtering in count() and find()", () => {
       await store.nodes.Person.create({ name: "Active" });
       await store.nodes.Person.delete(person.id);
 
-      const results = await store.nodes.Person.find({
+      const results = await store.nodes.Person.find(undefined, {
         temporalMode: "includeTombstones",
       });
 
@@ -1567,7 +1568,7 @@ describe("Temporal filtering in count() and find()", () => {
       );
       await store.nodes.Person.create({ name: "Current" }, { validFrom: PAST });
 
-      const results = await store.nodes.Person.find({
+      const results = await store.nodes.Person.find(undefined, {
         temporalMode: "asOf",
         asOf: NOW,
       });
@@ -1598,15 +1599,15 @@ describe("Temporal filtering in count() and find()", () => {
       await store.nodes.Person.create({ name: "Active" });
       await store.nodes.Person.delete(person.id);
 
-      const withoutWhere = await store.nodes.Person.find({
+      const withoutWhere = await store.nodes.Person.find(undefined, {
         temporalMode: "includeTombstones",
       });
       expect(withoutWhere).toHaveLength(2);
 
-      const withWhere = await store.nodes.Person.find({
-        temporalMode: "includeTombstones",
-        where: (person) => person.name.startsWith("Will"),
-      });
+      const withWhere = await store.nodes.Person.find(
+        { where: (person) => person.name.startsWith("Will") },
+        { temporalMode: "includeTombstones" },
+      );
       expect(withWhere).toHaveLength(1);
       expect(withWhere[0]!.name).toBe("Will Delete");
     });
@@ -1633,11 +1634,10 @@ describe("Temporal filtering in count() and find()", () => {
       );
       await store.nodes.Person.create({ name: "Current" }, { validFrom: PAST });
 
-      const results = await store.nodes.Person.find({
-        temporalMode: "asOf",
-        asOf: "2020-06-01T00:00:00.000Z",
-        where: (person) => person.name.startsWith(""),
-      });
+      const results = await store.nodes.Person.find(
+        { where: (person) => person.name.startsWith("") },
+        { temporalMode: "asOf", asOf: "2020-06-01T00:00:00.000Z" },
+      );
 
       expect(results).toHaveLength(2);
     });
@@ -1676,7 +1676,7 @@ describe("Temporal filtering in count() and find()", () => {
       const countDefault = await store.edges.worksAt.count();
       expect(countDefault).toBe(1);
 
-      const countIncludeEnded = await store.edges.worksAt.count({
+      const countIncludeEnded = await store.edges.worksAt.count(undefined, {
         temporalMode: "includeEnded",
       });
       expect(countIncludeEnded).toBe(2);
@@ -1692,7 +1692,7 @@ describe("Temporal filtering in count() and find()", () => {
       await store.edges.worksAt.create(alice, acme, { role: "Active" });
       await store.edges.worksAt.delete(edge.id);
 
-      const countAll = await store.edges.worksAt.count({
+      const countAll = await store.edges.worksAt.count(undefined, {
         temporalMode: "includeTombstones",
       });
       expect(countAll).toBe(2);
@@ -1715,7 +1715,7 @@ describe("Temporal filtering in count() and find()", () => {
         { validFrom: PAST },
       );
 
-      const count = await store.edges.worksAt.count({
+      const count = await store.edges.worksAt.count(undefined, {
         temporalMode: "asOf",
         asOf: NOW,
       });
@@ -1739,10 +1739,10 @@ describe("Temporal filtering in count() and find()", () => {
       const aliceCount = await store.edges.worksAt.count({ from: alice });
       expect(aliceCount).toBe(1);
 
-      const aliceCountAll = await store.edges.worksAt.count({
-        from: alice,
-        temporalMode: "includeEnded",
-      });
+      const aliceCountAll = await store.edges.worksAt.count(
+        { from: alice },
+        { temporalMode: "includeEnded" },
+      );
       expect(aliceCountAll).toBe(2);
     });
   });
@@ -1778,7 +1778,7 @@ describe("Temporal filtering in count() and find()", () => {
         { validFrom: PAST, validTo: PAST },
       );
 
-      const results = await store.edges.worksAt.find({
+      const results = await store.edges.worksAt.find(undefined, {
         temporalMode: "includeEnded",
       });
 
@@ -1802,13 +1802,107 @@ describe("Temporal filtering in count() and find()", () => {
         { validFrom: PAST },
       );
 
-      const results = await store.edges.worksAt.find({
+      const results = await store.edges.worksAt.find(undefined, {
         temporalMode: "asOf",
         asOf: NOW,
       });
 
       expect(results).toHaveLength(1);
       expect(results[0]!.role).toBe("Current");
+    });
+
+    it("rejects non-canonical asOf timestamps across collection reads", async () => {
+      const person = await store.nodes.Person.create(
+        { name: "Alice" },
+        { validFrom: PAST },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Acme" },
+        { validFrom: PAST },
+      );
+      const edge = await store.edges.worksAt.create(
+        person,
+        company,
+        { role: "Engineer" },
+        { validFrom: PAST },
+      );
+      const nonCanonical = "2021-01-01T00:00:00Z";
+      const options = {
+        temporalMode: "asOf",
+        asOf: nonCanonical,
+      } as const;
+
+      await expect(
+        store.nodes.Person.getById(person.id, options),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        store.nodes.Person.find(undefined, {
+          temporalMode: "asOf",
+          asOf: nonCanonical,
+        }),
+      ).rejects.toThrow(ValidationError);
+      await expect(store.nodes.Person.count(options)).rejects.toThrow(
+        ValidationError,
+      );
+      await expect(
+        store.edges.worksAt.getById(edge.id, options),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        store.edges.worksAt.findFrom(person, options),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        store.edges.worksAt.count(undefined, options),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it("find({ where }) validates the coordinate like find(filter)", async () => {
+      // A missing asOf in asOf mode must throw on BOTH paths — the where path
+      // used to silently default to "now" while the non-where path threw.
+      await expect(
+        store.nodes.Person.find(undefined, { temporalMode: "asOf" }),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        store.nodes.Person.find(
+          { where: (person) => person.name.startsWith("A") },
+          { temporalMode: "asOf" },
+        ),
+      ).rejects.toThrow(ValidationError);
+
+      // A non-canonical asOf is rejected on the where path too.
+      await expect(
+        store.nodes.Person.find(
+          { where: (person) => person.name.startsWith("A") },
+          { temporalMode: "asOf", asOf: "2021-01-01T00:00:00Z" },
+        ),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it("find({ where }) honors a supplied asOf the same as find(filter)", async () => {
+      await store.nodes.Person.create(
+        { name: "Past" },
+        { validFrom: PAST, validTo: NOW },
+      );
+      await store.nodes.Person.create({ name: "Present" }, { validFrom: NOW });
+
+      // asOf mode and current+explicit-asOf are equivalent; the where path must
+      // compare against the supplied instant, not the DB clock (it previously
+      // ignored asOf in current mode and used CURRENT_TIMESTAMP).
+      for (const temporal of [
+        { temporalMode: "asOf", asOf: PAST },
+        { temporalMode: "current", asOf: PAST },
+      ] as const) {
+        const viaFilter = await store.nodes.Person.find(undefined, temporal);
+        const viaWhere = await store.nodes.Person.find(
+          { where: (person) => person.name.startsWith("P") },
+          temporal,
+        );
+        expect(viaFilter.map((person) => person.name).toSorted()).toEqual([
+          "Past",
+        ]);
+        expect(viaWhere.map((person) => person.name).toSorted()).toEqual([
+          "Past",
+        ]);
+      }
     });
   });
 });
