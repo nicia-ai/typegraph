@@ -7,10 +7,11 @@ import { ValidationError } from "../src/errors";
 import {
   decodeDate,
   encodeDate,
+  isCanonicalIsoDate,
   isValidIsoDate,
   nowIso,
+  validateCanonicalIsoDate,
   validateIsoDate,
-  validateOptionalIsoDate,
 } from "../src/utils/date";
 
 describe("date utilities", () => {
@@ -72,20 +73,54 @@ describe("date utilities", () => {
     });
   });
 
-  describe("validateOptionalIsoDate", () => {
-    it("returns undefined for undefined input", () => {
-      expect(validateOptionalIsoDate(undefined, "testField")).toBeUndefined();
+  describe("isCanonicalIsoDate", () => {
+    it("accepts canonical fixed-width millisecond timestamps", () => {
+      expect(isCanonicalIsoDate("2024-01-15T10:30:00.000Z")).toBe(true);
+      expect(isCanonicalIsoDate("2024-12-31T23:59:59.999Z")).toBe(true);
+      expect(isCanonicalIsoDate(nowIso())).toBe(true);
     });
 
-    it("returns the value if valid", () => {
+    it("rejects variable-width or missing milliseconds", () => {
+      // These pass the lenient isValidIsoDate but break text ordering:
+      // "...00.1Z" sorts AFTER "...00.101Z", so they are not canonical.
+      expect(isCanonicalIsoDate("2024-01-15T10:30:00.1Z")).toBe(false);
+      expect(isCanonicalIsoDate("2024-01-15T10:30:00.12Z")).toBe(false);
+      expect(isCanonicalIsoDate("2024-01-15T10:30:00Z")).toBe(false);
+      expect(isValidIsoDate("2024-01-15T10:30:00.1Z")).toBe(true); // contrast
+    });
+
+    it("rejects offsets, date-only, and natural-language strings", () => {
+      expect(isCanonicalIsoDate("2024-01-15T10:30:00.000+02:00")).toBe(false);
+      expect(isCanonicalIsoDate("2024-01-15")).toBe(false);
+      expect(isCanonicalIsoDate("January 15, 2024")).toBe(false);
+      expect(isCanonicalIsoDate("2024-01-15T25:00:00.000Z")).toBe(false);
+      expect(isCanonicalIsoDate("2024-01-15T24:00:00.000Z")).toBe(false);
+      expect(isCanonicalIsoDate("2024-02-30T00:00:00.000Z")).toBe(false);
+    });
+  });
+
+  describe("validateCanonicalIsoDate", () => {
+    it("returns the value if canonical", () => {
       const date = "2024-01-15T10:30:00.000Z";
-      expect(validateOptionalIsoDate(date, "testField")).toBe(date);
+      expect(validateCanonicalIsoDate(date, "asOf")).toBe(date);
     });
 
-    it("throws ValidationError for invalid dates", () => {
-      expect(() => validateOptionalIsoDate("invalid", "testField")).toThrow(
-        ValidationError,
-      );
+    it("throws ValidationError for non-canonical millisecond widths", () => {
+      expect(() =>
+        validateCanonicalIsoDate("2024-01-15T10:30:00.1Z", "asOf"),
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateCanonicalIsoDate("2024-01-15T10:30:00Z", "asOf"),
+      ).toThrow(/Invalid canonical ISO 8601 datetime for "asOf"/);
+    });
+
+    it("throws ValidationError for rollover dates", () => {
+      expect(() =>
+        validateCanonicalIsoDate("2024-02-30T00:00:00.000Z", "asOf"),
+      ).toThrow(ValidationError);
+      expect(() =>
+        validateCanonicalIsoDate("2024-01-15T24:00:00.000Z", "asOf"),
+      ).toThrow(ValidationError);
     });
   });
 

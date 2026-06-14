@@ -9,6 +9,8 @@
  */
 import { z } from "zod";
 
+import { isCanonicalIsoDate } from "../utils/date";
+
 // ============================================================
 // Format Version
 // ============================================================
@@ -18,6 +20,22 @@ import { z } from "zod";
  * Increment for breaking changes to the format.
  */
 export const FORMAT_VERSION = "1.0" as const;
+
+/**
+ * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
+ * canonical fixed-width UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ss.sssZ`) — the
+ * same contract `create` / `update` enforce — because temporal filters compare
+ * it as text against the `asOf` read coordinate, and a variable-width value
+ * (date-only, offset, missing/variable milliseconds) would mis-sort and
+ * silently include or exclude the wrong rows. Convert non-canonical inputs with
+ * `new Date(value).toISOString()`.
+ */
+const ValidityTimestampSchema = z.iso
+  .datetime()
+  .refine((value) => isCanonicalIsoDate(value), {
+    message:
+      "Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ); convert with new Date(value).toISOString().",
+  });
 
 // ============================================================
 // Node Interchange
@@ -33,8 +51,8 @@ export const InterchangeNodeSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
   properties: z.record(z.string(), z.unknown()),
-  validFrom: z.iso.datetime().optional(),
-  validTo: z.iso.datetime().optional(),
+  validFrom: ValidityTimestampSchema.optional(),
+  validTo: ValidityTimestampSchema.optional(),
   meta: z
     .object({
       version: z.number().int().positive().optional(),
@@ -68,8 +86,8 @@ export const InterchangeEdgeSchema = z.object({
     id: z.string().min(1),
   }),
   properties: z.record(z.string(), z.unknown()).default({}),
-  validFrom: z.iso.datetime().optional(),
-  validTo: z.iso.datetime().optional(),
+  validFrom: ValidityTimestampSchema.optional(),
+  validTo: ValidityTimestampSchema.optional(),
   meta: z
     .object({
       createdAt: z.iso.datetime().optional(),

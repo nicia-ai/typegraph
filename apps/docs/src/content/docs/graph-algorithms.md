@@ -224,7 +224,7 @@ await store.algorithms.shortestPath(alice, bob, { edges: ["knows"] });
 await store.algorithms.shortestPath(alice, bob, {
   edges: ["knows"],
   temporalMode: "asOf",
-  asOf: "2023-01-15T00:00:00Z",
+  asOf: "2023-01-15T00:00:00.000Z",
 });
 
 // Include validity-ended (but not soft-deleted) rows — useful for

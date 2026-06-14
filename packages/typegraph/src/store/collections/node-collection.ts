@@ -17,7 +17,6 @@ import {
 } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
-import { nowIso } from "../../utils/date";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow } from "../row-mappers";
 import {
@@ -31,6 +30,10 @@ import {
   type QueryOptions,
   type UpdateNodeInput,
 } from "../types";
+import {
+  resolveTemporalReadParams,
+  type TemporalReadParams,
+} from "./temporal-read-params";
 
 /**
  * Narrows unparameterized Node to Node<N>.
@@ -88,7 +91,7 @@ export type NodeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
-  matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
+  temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (
     kind: string,
@@ -193,7 +196,7 @@ export function createNodeCollection<
     executeUpsertUpdate: executeNodeUpsertUpdate,
     executeDelete: executeNodeDelete,
     executeHardDelete: executeNodeHardDelete,
-    matchesTemporalMode,
+    temporalRowMatcher,
     createQuery,
     executeGetOrCreateByConstraint,
     executeBulkGetOrCreateByConstraint,
@@ -227,7 +230,7 @@ export function createNodeCollection<
     ): Promise<Node<N> | undefined> {
       const row = await backend.getNode(graphId, kind, id);
       if (!row) return undefined;
-      if (!matchesTemporalMode(row, options)) return undefined;
+      if (!temporalRowMatcher(options)(row)) return undefined;
       return narrowNode<N>(rowToNode(row));
     },
 
@@ -238,10 +241,12 @@ export function createNodeCollection<
       if (ids.length === 0) return [];
 
       const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+      // Resolve the coordinate once so the whole batch observes one instant.
+      const matches = temporalRowMatcher(options);
       return ids.map((id) => {
         const row = rowsById.get(id);
         if (!row) return;
-        if (!matchesTemporalMode(row, options)) return;
+        if (!matches(row)) return;
         return narrowNode<N>(rowToNode(row));
       });
     },
@@ -267,78 +272,69 @@ export function createNodeCollection<
     },
 
     async find(
-      options?: Readonly<{
+      filter?: Readonly<{
         where?: (accessor: never) => unknown;
         limit?: number;
         offset?: number;
-        temporalMode?: TemporalMode;
-        asOf?: string;
       }>,
+      temporal?: QueryOptions,
     ): Promise<Node<N>[]> {
-      if (options?.where !== undefined && createQuery === undefined) {
+      if (filter?.where !== undefined && createQuery === undefined) {
         throw new ConfigurationError(
           `store.nodes.${kind}.find({ where }) requires a query-capable store`,
           { kind, operation: "find" },
         );
       }
-      if (options?.where !== undefined && createQuery !== undefined) {
-        const mode = options.temporalMode ?? defaultTemporalMode;
+      if (filter?.where !== undefined && createQuery !== undefined) {
+        // Resolve the coordinate through the same helper as the non-where
+        // branch and count(), so find({ where }) and find(filter) observe
+        // identical rows. `current` / `asOf` both resolve to a concrete instant
+        // the backend find path compares against; pin the query to that same
+        // instant — `current` would otherwise compile against the DB clock and
+        // ignore the resolved asOf. includeEnded / includeTombstones carry no
+        // instant. Routing through resolveTemporalReadParams also makes a
+        // missing asOf in asOf mode throw here, matching the non-where branch.
+        const { temporalMode, asOf } = resolveTemporalReadParams(
+          temporal,
+          defaultTemporalMode,
+        );
         let query = createQuery()
           .from(kind, "_n")
-          .temporal(
-            mode,
-            mode === "asOf" ? (options.asOf ?? nowIso()) : undefined,
-          )
-          .whereNode("_n", options.where as never)
+          .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
+          .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx._n);
-        if (options.limit !== undefined) query = query.limit(options.limit);
-        if (options.offset !== undefined) query = query.offset(options.offset);
+        if (filter.limit !== undefined) query = query.limit(filter.limit);
+        if (filter.offset !== undefined) query = query.offset(filter.offset);
         const results = await query.execute();
         return results as Node<N>[];
       }
 
-      const mode = options?.temporalMode ?? defaultTemporalMode;
       const params: {
         graphId: string;
         kind: string;
         limit?: number;
         offset?: number;
-        excludeDeleted: boolean;
-        temporalMode: TemporalMode;
-        asOf?: string;
-      } = {
+      } & TemporalReadParams = {
         graphId,
         kind,
-        excludeDeleted: mode !== "includeTombstones",
-        temporalMode: mode,
+        ...resolveTemporalReadParams(temporal, defaultTemporalMode),
       };
-      if (mode === "current" || mode === "asOf") {
-        params.asOf = options?.asOf ?? nowIso();
-      }
-      if (options?.limit !== undefined) params.limit = options.limit;
-      if (options?.offset !== undefined) params.offset = options.offset;
+      if (filter?.limit !== undefined) params.limit = filter.limit;
+      if (filter?.offset !== undefined) params.offset = filter.offset;
 
       const rows = await backend.findNodesByKind(params);
       return rows.map((row) => narrowNode<N>(rowToNode(row)));
     },
 
-    async count(options?: QueryOptions): Promise<number> {
-      const mode = options?.temporalMode ?? defaultTemporalMode;
+    async count(temporal?: QueryOptions): Promise<number> {
       const params: {
         graphId: string;
         kind: string;
-        excludeDeleted: boolean;
-        temporalMode: TemporalMode;
-        asOf?: string;
-      } = {
+      } & TemporalReadParams = {
         graphId,
         kind,
-        excludeDeleted: mode !== "includeTombstones",
-        temporalMode: mode,
+        ...resolveTemporalReadParams(temporal, defaultTemporalMode),
       };
-      if (mode === "current" || mode === "asOf") {
-        params.asOf = options?.asOf ?? nowIso();
-      }
       return backend.countNodesByKind(params);
     },
 

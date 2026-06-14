@@ -646,16 +646,21 @@ Permanently deletes a node. This is irreversible and should be used carefully.
 store.nodes.Person.hardDelete(id: NodeId<Person>): Promise<void>;
 ```
 
-#### `find(options?)`
+#### `find(filter?, temporal?)`
 
-Finds nodes of this kind with optional filtering and pagination.
+Finds nodes of this kind with optional filtering and pagination. The temporal
+coordinate is a separate second argument (`temporalMode` / `asOf`), so the
+filter object never mixes filtering with temporal scope.
 
 ```typescript
-store.nodes.Person.find(options?: {
-  where?: (accessor) => Predicate;
-  limit?: number;
-  offset?: number;
-}): Promise<Node<Person>[]>;
+store.nodes.Person.find(
+  filter?: {
+    where?: (accessor) => Predicate;
+    limit?: number;
+    offset?: number;
+  },
+  temporal?: { temporalMode?: TemporalMode; asOf?: string },
+): Promise<Node<Person>[]>;
 ```
 
 The optional `where` predicate uses the same accessor API as `whereNode()` in the query builder:
@@ -665,14 +670,24 @@ const activeUsers = await store.nodes.Person.find({
   where: (p) => p.status.eq("active"),
   limit: 50,
 });
+
+// Pass the temporal coordinate as the second argument.
+const asOfLastYear = await store.nodes.Person.find(
+  { where: (p) => p.status.eq("active") },
+  { temporalMode: "asOf", asOf: "2024-01-01T00:00:00.000Z" },
+);
 ```
 
-#### `count()`
+#### `count(temporal?)`
 
-Counts nodes of this kind (excluding soft-deleted nodes).
+Counts nodes of this kind (excluding soft-deleted nodes). Accepts the same
+optional temporal coordinate as `find`.
 
 ```typescript
-store.nodes.Person.count(): Promise<number>;
+store.nodes.Person.count(temporal?: {
+  temporalMode?: TemporalMode;
+  asOf?: string;
+}): Promise<number>;
 ```
 
 #### `createFromRecord(data, options?)`
@@ -1003,35 +1018,48 @@ store.edges.worksAt.update(
 ): Promise<Edge<worksAt>>;
 ```
 
-#### `findFrom(from)`
+#### `findFrom(from, options?)`
 
-Finds edges from a node.
+Finds edges from a node. Honors the same temporal model as `getById` / `find`:
+with no `options`, the graph's default `temporalMode` applies (so under the
+default `"current"` mode, edges outside their `validFrom` / `validTo` window are
+excluded). Pass `temporalMode` / `asOf` to read the endpoint's edges at another
+coordinate — e.g. `{ temporalMode: "includeEnded" }` for every non-deleted edge.
 
 ```typescript
 store.edges.worksAt.findFrom(
-  from: NodeRef<Person>
+  from: NodeRef<Person>,
+  options?: { temporalMode?: TemporalMode; asOf?: string }
 ): Promise<Edge<worksAt>[]>;
 ```
 
-#### `findTo(to)`
+#### `findTo(to, options?)`
 
-Finds edges to a node.
+Finds edges to a node. Temporal semantics mirror `findFrom`.
 
 ```typescript
 store.edges.worksAt.findTo(
-  to: NodeRef<Company>
+  to: NodeRef<Company>,
+  options?: { temporalMode?: TemporalMode; asOf?: string }
 ): Promise<Edge<worksAt>[]>;
 ```
 
-#### `batchFindFrom(from)` / `batchFindTo(to)` / `batchFindByEndpoints(from, to, options?)`
+#### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
 [`store.batch()`](#batch-query-execution). These return a `BatchableQuery` instead of
-executing immediately.
+executing immediately. `batchFindFrom` / `batchFindTo` accept the same temporal
+`options` as `findFrom` / `findTo`.
 
 ```typescript
-store.edges.worksAt.batchFindFrom(from: NodeRef<Person>): BatchableQuery<Edge<worksAt>>;
-store.edges.worksAt.batchFindTo(to: NodeRef<Company>): BatchableQuery<Edge<worksAt>>;
+store.edges.worksAt.batchFindFrom(
+  from: NodeRef<Person>,
+  options?: { temporalMode?: TemporalMode; asOf?: string }
+): BatchableQuery<Edge<worksAt>>;
+store.edges.worksAt.batchFindTo(
+  to: NodeRef<Company>,
+  options?: { temporalMode?: TemporalMode; asOf?: string }
+): BatchableQuery<Edge<worksAt>>;
 store.edges.worksAt.batchFindByEndpoints(
   from: NodeRef<Person>,
   to: NodeRef<Company>,
@@ -1049,30 +1077,37 @@ const [skills, employer] = await store.batch(
 
 `batchFindByEndpoints` returns a 0-or-1 element array (matching the at-most-one semantics of `findByEndpoints`).
 
-#### `find(options?)`
+#### `find(filter?, temporal?)`
 
-Finds edges with endpoint filtering.
+Finds edges with endpoint filtering. The temporal coordinate is a separate
+second argument, mirroring `store.nodes.<kind>.find`.
 
 ```typescript
-store.edges.worksAt.find(options?: {
-  from?: NodeRef<Person>;
-  to?: NodeRef<Company>;
-  limit?: number;
-  offset?: number;
-}): Promise<Edge<worksAt>[]>;
+store.edges.worksAt.find(
+  filter?: {
+    from?: NodeRef<Person>;
+    to?: NodeRef<Company>;
+    limit?: number;
+    offset?: number;
+  },
+  temporal?: { temporalMode?: TemporalMode; asOf?: string },
+): Promise<Edge<worksAt>[]>;
 ```
 
 For edge property filters, use the query builder with `whereEdge(...)`.
 
-#### `count(options?)`
+#### `count(filter?, temporal?)`
 
 Counts edges matching filters.
 
 ```typescript
-store.edges.worksAt.count(options?: {
-  from?: NodeRef<Person>;
-  to?: NodeRef<Company>;
-}): Promise<number>;
+store.edges.worksAt.count(
+  filter?: {
+    from?: NodeRef<Person>;
+    to?: NodeRef<Company>;
+  },
+  temporal?: { temporalMode?: TemporalMode; asOf?: string },
+): Promise<number>;
 ```
 
 #### `delete(id)`
@@ -1202,11 +1237,15 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
 >;
 ```
 
-#### `findByEndpoints(from, to, options?)`
+#### `findByEndpoints(from, to, options?, temporal?)`
 
-Looks up an edge by its endpoints without creating. Returns the matching edge or `undefined`. Soft-deleted edges are excluded.
+Looks up an edge by its endpoints without creating. Returns the matching edge or
+`undefined`. Honors the same temporal model as `findFrom` / `findTo`: with no
+`temporal` argument the graph's default `temporalMode` applies (so under the
+default `"current"` mode, edges outside their validity window are excluded). Pass
+`temporalMode` / `asOf` to look up the edge as of another coordinate.
 
-When `matchOn` is omitted, returns the first live edge between the two endpoints.
+When `matchOn` is omitted, returns the first matching edge between the two endpoints.
 When `matchOn` is provided, filters by the specified property fields.
 
 ```typescript
@@ -1216,7 +1255,8 @@ store.edges.knows.findByEndpoints(
   options?: {
     matchOn?: readonly ("relationship" | "since")[];
     props?: Partial<{ relationship: string; since: string }>;
-  }
+  },
+  temporal?: { temporalMode?: TemporalMode; asOf?: string },
 ): Promise<Edge<knows> | undefined>;
 ```
 
@@ -1646,8 +1686,8 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
 | Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
 | Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
-| Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed |
-| Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit |
+| Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
+| Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Single recursive CTE or `COUNT` per call — see [Graph Algorithms](/graph-algorithms) |
 
 **Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
@@ -1910,6 +1950,95 @@ skippedTruncated }`.
 
 See [Fulltext Search](/fulltext-search) for query modes, RRF tuning,
 `FulltextStrategy` customization, and troubleshooting.
+
+### Temporal Views (`store.asOf` and `store.view`)
+
+A `StoreView` is a **read-only** lens that pins one temporal coordinate and
+routes every supported read through it — the as-of database value, in the style
+of Datomic `(d/as-of db t)` and SQL:2011 `FOR SYSTEM_TIME AS OF`. Use it when
+several reads should share the same temporal coordinate; reach for the per-query
+[`.temporal("asOf", T)`](/queries/temporal#point-in-time-queries-asof) when only
+one query needs it.
+
+```typescript
+store.asOf(asOf: string): StoreView<G>;
+store.view(coordinate: { mode: TemporalMode; asOf?: string }): StoreView<G>;
+store.snapshot(): StoreView<G>;
+```
+
+- **`store.asOf(T)`** pins valid-time `asOf` mode at timestamp `T`.
+- **`store.view({ mode, asOf })`** pins any public mode (`"current"`,
+  `"asOf"`, `"includeEnded"`, `"includeTombstones"`). `asOf` is required for
+  `"asOf"` mode.
+- **`store.snapshot()`** pins the current instant, captured once at
+  construction — sugar for `store.asOf(new Date().toISOString())`. Unlike
+  `store.view({ mode: "current" })` (which tracks "now" live and may read
+  different surfaces against slightly different clocks), a snapshot is a stable
+  point-in-time value where every surface observes the same instant. Mirrors
+  Datomic's `(d/db conn)`.
+
+`asOf` must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) —
+a date-only, zoned-offset, or natural-language string is rejected with a
+`ValidationError`, because the temporal filters compare it as text.
+
+```typescript
+const past = store.asOf("2026-01-01T00:00:00.000Z");
+
+const alice = await past.nodes.Person.getById(aliceId);
+const jobs = await past.edges.worksAt.findFrom(alice);
+const names = await past
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq("Alice"))
+  .select((ctx) => ctx.p.name)
+  .execute();
+const reach = await past.reachable(aliceId, { edges: ["knows"] });
+const sg = await past.subgraph(aliceId, { edges: ["knows"] });
+```
+
+#### Surface
+
+The view exposes the read surface of the `Store`, each pinned to its
+coordinate:
+
+| Surface | Behavior |
+| --- | --- |
+| `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
+| `view.edges`: `findFrom`, `findTo`, `findByEndpoints` | pinned |
+| `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
+| `view.subgraph(rootId, options)` | pinned |
+| `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
+| `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
+| `view.search` reads (`fulltext` / `vector` / `hybrid`) | delegate to the live search on a `"current"` view; reject on any other pin |
+| `view.search.rebuildFulltext()` | rejected on every view (maintenance write) |
+| `view.mode` / `view.asOf` | the pinned coordinate |
+
+The algorithm and `subgraph` option objects are the same as on the live `Store`
+**minus** `temporalMode` / `asOf`, which the pin supplies.
+
+`view.query()` is a **capability-safe** pinned read context: the returned query
+builder seeds the view's coordinate and seals the temporal axis, so calling
+`.temporal(...)` on it (or on any builder derived from it) throws a
+`ConfigurationError`. To read at a different coordinate, construct a different
+view or use the live `store.query()`.
+
+#### Read-only
+
+A view is read-only by construction. Writes (`create` / `update` / `delete` /
+`upsert*` / `bulk*` / `getOrCreate*`) and temporally-unscoped reads on a view
+collection reject with a `ConfigurationError`, and the view exposes no
+`transaction`. Perform writes on the live `Store`.
+
+Constraint / index lookups (`findByConstraint`, `bulkFindByConstraint`,
+`bulkFindByIndex`) read current state only — they have no temporal axis — so a
+view **delegates** them on a `"current"` view and **rejects** them on any
+temporal pin (rather than silently returning current data while every sibling
+read is pinned). `search` is refused on a non-`"current"` view for the same
+reason: the fulltext / vector index reflects current state only. (Edge
+`findByEndpoints` *does* have a temporal axis and is pinned like `findFrom`.)
+
+See [Temporal queries](/queries/temporal#shared-coordinate-views-storeasof) for
+worked examples.
 
 ## Observability Hooks
 

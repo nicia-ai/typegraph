@@ -1,4 +1,5 @@
 import { type GraphBackend } from "../../backend/types";
+import { assertValidAsOf } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
@@ -43,8 +44,10 @@ export function resolveTemporalOptions(
   ctx: AlgorithmContext,
   options: InternalTemporalOptions,
 ): Readonly<{ temporalMode: TemporalMode; asOf?: string }> {
+  const temporalMode = options.temporalMode ?? ctx.defaultTemporalMode;
+  assertValidAsOf(temporalMode, options.asOf);
   return {
-    temporalMode: options.temporalMode ?? ctx.defaultTemporalMode,
+    temporalMode,
     ...(options.asOf !== undefined && { asOf: options.asOf }),
   };
 }

@@ -64,15 +64,78 @@ export function validateIsoDate(value: string, fieldName: string): string {
 }
 
 /**
- * Validates an optional ISO date string.
- * Returns undefined if value is undefined, otherwise validates.
+ * Strict canonical ISO 8601 pattern: fixed-width UTC with exactly
+ * millisecond precision (`YYYY-MM-DDTHH:mm:ss.sssZ`). Unlike
+ * {@link ISO_DATE_PATTERN}, which tolerates a missing or variable-width
+ * fractional part, this is the only shape whose lexicographic text order
+ * matches chronological order — avoiding cases like `"...:00.1Z"` (= `.100`)
+ * sorting *after* `"...:00.101Z"`.
  */
-export function validateOptionalIsoDate(
+const CANONICAL_ISO_DATE_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * Checks if a string is a canonical UTC ISO 8601 datetime with fixed
+ * millisecond width (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+ */
+export function isCanonicalIsoDate(value: string): boolean {
+  if (!CANONICAL_ISO_DATE_PATTERN.test(value)) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+}
+
+/**
+ * Validates that a string is a canonical UTC ISO 8601 datetime with fixed
+ * millisecond width. Stricter than {@link validateIsoDate} (which also
+ * accepts missing or 1–2 digit milliseconds): required wherever the value
+ * is compared **as text** against stored timestamps and must sort
+ * chronologically — e.g. a temporal `asOf` coordinate, where a
+ * variable-width value would mis-order and silently include or exclude the
+ * wrong rows. Produce one with `new Date(value).toISOString()`.
+ *
+ * @param value - String to validate
+ * @param fieldName - Name of field for error message
+ * @returns The validated string
+ * @throws ValidationError if not a canonical UTC ISO datetime
+ */
+export function validateCanonicalIsoDate(
+  value: string,
+  fieldName: string,
+): string {
+  if (!isCanonicalIsoDate(value)) {
+    throw new ValidationError(
+      `Invalid canonical ISO 8601 datetime for "${fieldName}": "${value}". ` +
+        `Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ`,
+      {
+        issues: [
+          {
+            path: fieldName,
+            message: `Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), got: "${value}"`,
+          },
+        ],
+      },
+      {
+        suggestion: `Use a fixed-width UTC datetime like "2024-01-15T10:30:00.000Z" (e.g. new Date(value).toISOString()).`,
+      },
+    );
+  }
+  return value;
+}
+
+/**
+ * Validates an optional canonical ISO date string. Returns `undefined` for an
+ * absent value; otherwise enforces canonical fixed-width UTC ISO 8601 via
+ * {@link validateCanonicalIsoDate}. Used for stored validity-window inputs
+ * (`validFrom` / `validTo`) so every timestamp the temporal filters compare as
+ * text is canonical and sorts chronologically — the same contract the `asOf`
+ * read coordinate already enforces.
+ */
+export function validateOptionalCanonicalIsoDate(
   value: string | undefined,
   fieldName: string,
 ): string | undefined {
   if (value === undefined) return undefined;
-  return validateIsoDate(value, fieldName);
+  return validateCanonicalIsoDate(value, fieldName);
 }
 
 /**

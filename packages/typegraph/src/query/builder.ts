@@ -114,7 +114,14 @@ export function createQueryBuilder<G extends GraphDef>(
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),
+    ...(options?.sealedCoordinate !== undefined && {
+      sealedCoordinate: options.sealedCoordinate,
+    }),
   };
+
+  // A sealed coordinate (StoreView pin) seeds the temporal axis; `.temporal()`
+  // then refuses to override it.
+  const sealed = options?.sealedCoordinate?.valid;
 
   const initialState: QueryBuilderState = {
     startAlias: "",
@@ -127,8 +134,8 @@ export function createQueryBuilder<G extends GraphDef>(
     orderBy: [],
     limit: undefined,
     offset: undefined,
-    temporalMode: "current",
-    asOf: undefined,
+    temporalMode: sealed?.mode ?? "current",
+    asOf: sealed?.asOf,
     groupBy: undefined,
     having: undefined,
     fusion: undefined,

@@ -11,7 +11,7 @@ import { z } from "zod";
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
-import { ConfigurationError } from "../src/errors";
+import { ConfigurationError, ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
 import {
   collectAllEdges,
@@ -942,6 +942,42 @@ describe("store.algorithms temporal behavior", () => {
           temporalMode: "asOf",
         }),
       ).rejects.toThrow(/asOf/);
+    });
+
+    it("rejects non-canonical asOf timestamps across algorithms", async () => {
+      const nonCanonical = "2021-01-01T00:00:00Z";
+
+      await expect(
+        store.algorithms.reachable(temporalIds.alice, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+          asOf: nonCanonical,
+        }),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        store.algorithms.shortestPath(temporalIds.alice, temporalIds.bob, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+          asOf: nonCanonical,
+        }),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        store.algorithms.canReach(temporalIds.alice, temporalIds.bob, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+          asOf: nonCanonical,
+        }),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        store.algorithms.degree(temporalIds.alice, {
+          edges: ["knows"],
+          temporalMode: "asOf",
+          asOf: nonCanonical,
+        }),
+      ).rejects.toThrow(ValidationError);
     });
   });
 

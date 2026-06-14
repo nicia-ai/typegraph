@@ -295,11 +295,32 @@ export type {
   VectorSearchHit,
   VectorSearchOptions,
 } from "./store";
+export type {
+  EdgeBatchReads,
+  EdgeTemporalReads,
+  EdgeWrites,
+  NodeCurrentReads,
+  NodeTemporalReads,
+  NodeWrites,
+  StoreViewCanReachOptions,
+  StoreViewCoordinate,
+  StoreViewDegreeOptions,
+  StoreViewEdgeCollection,
+  StoreViewEdgeCollections,
+  StoreViewNeighborsOptions,
+  StoreViewNodeCollection,
+  StoreViewNodeCollections,
+  StoreViewReachableOptions,
+  StoreViewShortestPathOptions,
+  StoreViewSubgraphOptions,
+  TypedStoreViewEdgeCollection,
+} from "./store";
 export {
   createStore,
   createStoreWithSchema,
   createVerifiedStore,
   StoreSearch,
+  StoreView,
 } from "./store";
 export type {
   AlgorithmCyclePolicy,

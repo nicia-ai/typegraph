@@ -15,6 +15,7 @@ import type {
   GraphDef,
   NodeKinds,
 } from "../core/define-graph";
+import { assertValidAsOf } from "../core/temporal";
 import type { KindEntity } from "../core/types";
 import type {
   AnyEdgeType,
@@ -464,6 +465,9 @@ export async function executeSubgraph<
   options: SubgraphOptions<G, EK, NK, P>;
 }): Promise<SubgraphResult<G, NK, EK, P>> {
   const { options } = params;
+  const temporalMode =
+    options.temporalMode ?? params.graph.defaults.temporalMode;
+  assertValidAsOf(temporalMode, options.asOf);
 
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
@@ -479,7 +483,7 @@ export async function executeSubgraph<
     excludeRoot: options.excludeRoot ?? false,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
-    temporalMode: options.temporalMode ?? params.graph.defaults.temporalMode,
+    temporalMode,
     asOf: options.asOf,
     dialect: params.dialect,
     schema: params.schema ?? DEFAULT_SQL_SCHEMA,

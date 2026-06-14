@@ -74,6 +74,52 @@ const historicalProfile = await store
   .first();
 ```
 
+## Shared-Coordinate Views (store.asOf)
+
+`.temporal("asOf", T)` pins a single query. When several reads should share one
+temporal coordinate, pin it once with `store.asOf(T)` and reuse the returned
+**read-only view** — TypeGraph's as-of database value, in the style of Datomic
+`(d/as-of db t)` and SQL:2011 `FOR SYSTEM_TIME AS OF`.
+
+```typescript
+const past = store.asOf("2024-01-01T00:00:00.000Z");
+
+// Every read on `past` observes the graph as it was valid at that instant.
+const alice = await past.nodes.Person.getById(aliceId);
+const jobs = await past.edges.worksAt.findFrom(alice);
+const peers = await past.reachable(aliceId, { edges: ["knows"] });
+const team = await past.subgraph(aliceId, { edges: ["reportsTo"] });
+
+const names = await past
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.department.eq("Engineering"))
+  .select((ctx) => ctx.p.name)
+  .execute();
+```
+
+The view pins the `nodes` / `edges` collections (`getById`, `getByIds`, `find`,
+`count`, `findFrom`, `findTo`), `query()`, `subgraph()`, and the graph
+algorithms (`reachable`, `canReach`, `shortestPath`, `neighbors`, `degree`).
+
+For the other modes, use `store.view({ mode, asOf })`:
+
+```typescript
+// A view over every version, including soft-deleted ones.
+const audit = store.view({ mode: "includeTombstones" });
+const everyVersion = await audit.nodes.Document.find();
+```
+
+A view is **read-only**: writes stay on the live `store`, and a view collection
+rejects `create` / `update` / `delete` with a `ConfigurationError`. `search` is
+refused on a non-`"current"` view (the fulltext / vector index reflects current
+state only). `asOf` must be a canonical UTC ISO-8601 timestamp
+(`YYYY-MM-DDTHH:mm:ss.sssZ`).
+
+See the [`store.asOf` / `store.view`
+reference](/schemas-stores#temporal-views-storeasof-and-storeview) for the full
+surface.
+
 ## Including Historical Data (includeEnded)
 
 View all versions, including superseded records:
