@@ -12,6 +12,7 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type EmbeddingValue } from "../../core/embedding";
+import { type ReadCoordinate } from "../../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
@@ -560,6 +561,12 @@ export type QueryBuilderConfig = Readonly<{
   dialect?: SqlDialect;
   /** SQL schema configuration for custom table names. */
   schema?: SqlSchema;
+  /**
+   * When set, the builder is pinned to a {@link StoreView}'s coordinate and
+   * its temporal axis is sealed: `.temporal(...)` throws. Threaded verbatim
+   * through every builder clone, so the seal survives the whole fluent chain.
+   */
+  sealedCoordinate?: ReadCoordinate;
 }>;
 
 /**
@@ -604,4 +611,10 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /**
+   * Pin the builder to a {@link StoreView} coordinate and seal its temporal
+   * axis. Seeds the initial `temporalMode` / `asOf` and makes `.temporal(...)`
+   * throw. Used by `store.view(...).query()`.
+   */
+  sealedCoordinate?: ReadCoordinate;
 }>;

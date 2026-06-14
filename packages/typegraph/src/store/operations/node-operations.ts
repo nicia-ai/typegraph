@@ -49,7 +49,7 @@ import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { validateOptionalIsoDate } from "../../utils/date";
+import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import {
   checkDisjointnessConstraint,
@@ -404,8 +404,11 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
     operation: "create",
   });
 
-  const validFrom = validateOptionalIsoDate(input.validFrom, "validFrom");
-  const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+  const validFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
@@ -508,7 +511,7 @@ async function performNodeUpdate<G extends GraphDef>(
     id,
   });
 
-  const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
   await updateUniquenessEntries(
     createUniquenessContext(ctx.graphId, ctx.registry, backend),

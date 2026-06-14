@@ -814,6 +814,24 @@ describe("Query Builder - Temporal Modes", () => {
     }).toThrow(/requires a timestamp/);
   });
 
+  it("throws ValidationError when asOf is supplied with a non-asOf mode", () => {
+    // current + asOf is a caller error, not a silently-dropped argument: the
+    // compiler ignores asOf in current mode and uses the DB clock, so accepting
+    // it would diverge from the collection path that pins to the instant.
+    const timestamp = "2024-01-01T00:00:00.000Z";
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .temporal("current", timestamp);
+    }).toThrow(ValidationError);
+
+    expect(() => {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .temporal("current", timestamp);
+    }).toThrow(/does not take an asOf/);
+  });
+
   it("compiles temporal filters into WHERE clauses", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")

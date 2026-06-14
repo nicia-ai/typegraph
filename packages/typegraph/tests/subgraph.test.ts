@@ -23,6 +23,7 @@ import {
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
+import { ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
 import {
   collectAllEdges,
@@ -1289,6 +1290,31 @@ describe("store.subgraph temporal behavior", () => {
     expect(result.nodes.has(ids.activeTaskId)).toBe(true);
     expect(result.nodes.has(ids.endedTaskId)).toBe(true);
     expect(result.nodes.has(ids.futureTaskId)).toBe(false);
+  });
+
+  it("rejects non-canonical asOf timestamps", async () => {
+    await expect(
+      store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "asOf",
+        asOf: "2021-01-01T00:00:00Z",
+      }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects current + asOf instead of pinning the instant", async () => {
+    // Pinning an instant is only meaningful in asOf mode; the subgraph CTE
+    // resolves current via the DB clock and would drop the pin. Reject it so
+    // the contract matches collection, query(), algorithms, and StoreView.
+    await expect(
+      store.subgraph(ids.runId as never, {
+        edges: ["has_task"],
+        maxDepth: 1,
+        temporalMode: "current",
+        asOf: BEFORE,
+      }),
+    ).rejects.toThrow(ValidationError);
   });
 
   it("includeEnded traverses through validity-ended rows", async () => {

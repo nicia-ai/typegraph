@@ -3,11 +3,16 @@
  */
 import { type GraphDef } from "../../core/define-graph";
 import {
+  coordinateContext,
+  describeCoordinate,
+  resolveReadCoordinate,
+} from "../../core/temporal";
+import {
   type EdgeType,
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { KindNotFoundError, ValidationError } from "../../errors";
+import { ConfigurationError, KindNotFoundError } from "../../errors";
 import {
   type AggregateExpr,
   type FieldRef,
@@ -872,30 +877,39 @@ export class QueryBuilder<
    * Sets temporal mode.
    *
    * @param mode - The temporal mode to use
-   * @param asOf - Required timestamp for "asOf" mode (ISO 8601 string)
-   * @throws ValidationError if mode is "asOf" but no timestamp is provided
+   * @param asOf - Required timestamp for "asOf" mode (ISO 8601 string).
+   *   Rejected for every other mode — pinning an instant is only meaningful
+   *   in "asOf" mode, so `temporal("current", t)` is a caller error, not a
+   *   silently-dropped argument.
+   * @throws ValidationError if mode is "asOf" but no timestamp is provided, or
+   *   if an asOf is supplied with a non-"asOf" mode.
    */
   temporal(
     mode: TemporalMode,
     asOf?: string,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
-    if (mode === "asOf" && asOf === undefined) {
-      throw new ValidationError(
-        'Temporal mode "asOf" requires a timestamp',
+    if (this.#config.sealedCoordinate !== undefined) {
+      const coordinate = this.#config.sealedCoordinate;
+      throw new ConfigurationError(
+        `.temporal() is not available on a StoreView query — the view's ` +
+          `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+          `Re-coordinate on the live Store via store.query() or store.view(...).`,
         {
-          issues: [
-            { path: "asOf", message: "Timestamp is required for asOf mode" },
-          ],
-        },
-        {
-          suggestion: `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
+          code: "STORE_VIEW_SEALED_QUERY",
+          ...coordinateContext(coordinate),
+          requestedMode: mode,
         },
       );
     }
+    const coordinate = resolveReadCoordinate(
+      mode,
+      asOf,
+      `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
+    );
     return new QueryBuilder(this.#config, {
       ...this.#state,
-      temporalMode: mode,
-      asOf,
+      temporalMode: coordinate.valid.mode,
+      asOf: coordinate.valid.asOf,
     });
   }
 

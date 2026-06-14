@@ -65,7 +65,7 @@ export type NodeOperations = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
-  matchesTemporalMode: (row: NodeRow, options?: QueryOptions) => boolean;
+  temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (
     kind: string,
@@ -142,7 +142,7 @@ export type EdgeOperations = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
-  matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
+  temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByEndpoints: (
     kind: string,

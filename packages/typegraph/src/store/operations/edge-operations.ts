@@ -11,7 +11,11 @@ import {
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
-import { type Cardinality, type KindEntity } from "../../core/types";
+import {
+  type Cardinality,
+  type KindEntity,
+  type TemporalMode,
+} from "../../core/types";
 import {
   DatabaseOperationError,
   EdgeNotFoundError,
@@ -21,7 +25,7 @@ import {
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { validateOptionalIsoDate } from "../../utils/date";
+import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import {
   checkCardinalityConstraint,
@@ -331,8 +335,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   });
 
   // Validate temporal fields
-  const validFrom = validateOptionalIsoDate(input.validFrom, "validFrom");
-  const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+  const validFrom = validateOptionalCanonicalIsoDate(
+    input.validFrom,
+    "validFrom",
+  );
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
   // Check cardinality constraints
   const cardinality = registration.cardinality ?? "many";
@@ -585,7 +592,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     });
 
     // Validate temporal fields
-    const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+    const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
     // Update edge - conditionally include optional fields
     const updateParams: {
@@ -639,7 +646,7 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
     id,
   });
 
-  const validTo = validateOptionalIsoDate(input.validTo, "validTo");
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
   const updateParams: {
     graphId: string;
@@ -869,8 +876,11 @@ function findMatchingEdge(
 /**
  * Executes a single findByEndpoints operation.
  *
- * Looks up a live edge by endpoints and optional matchOn fields.
- * Returns the edge if found, or undefined. Soft-deleted edges are excluded.
+ * Looks up an edge by endpoints and optional matchOn fields, honoring the
+ * temporal coordinate in `options` (mode / asOf / excludeDeleted) the same way
+ * `findFrom` / `findTo` do. Returns the matching edge, or undefined. By default
+ * soft-deleted and out-of-window edges are excluded; under `includeTombstones`
+ * (excludeDeleted = false) a soft-deleted edge can be returned.
  */
 export async function executeEdgeFindByEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -883,6 +893,9 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
   options?: Readonly<{
     matchOn?: readonly string[];
     props?: Record<string, unknown>;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
   }>,
 ): Promise<Edge | undefined> {
   const matchOn = options?.matchOn ?? [];
@@ -902,7 +915,11 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
     fromId,
     toKind,
     toId,
-    excludeDeleted: true,
+    excludeDeleted: options?.excludeDeleted ?? true,
+    ...(options?.temporalMode !== undefined && {
+      temporalMode: options.temporalMode,
+    }),
+    ...(options?.asOf !== undefined && { asOf: options.asOf }),
   });
 
   if (candidateRows.length === 0) return undefined;

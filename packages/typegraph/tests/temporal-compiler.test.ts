@@ -149,14 +149,14 @@ describe("extractTemporalOptions", () => {
 
   it("extracts asOf mode options with timestamp", () => {
     const ast = {
-      temporalMode: { mode: "asOf" as const, asOf: "2024-01-01T00:00:00Z" },
+      temporalMode: { mode: "asOf" as const, asOf: "2024-01-01T00:00:00.000Z" },
     };
 
     const options = extractTemporalOptions(ast);
 
     expect(options).toEqual({
       mode: "asOf",
-      asOf: "2024-01-01T00:00:00Z",
+      asOf: "2024-01-01T00:00:00.000Z",
       tableAlias: undefined,
     });
   });
@@ -199,14 +199,14 @@ describe("extractTemporalOptions", () => {
 
   it("includes both asOf and table alias", () => {
     const ast = {
-      temporalMode: { mode: "asOf" as const, asOf: "2024-06-15T12:00:00Z" },
+      temporalMode: { mode: "asOf" as const, asOf: "2024-06-15T12:00:00.000Z" },
     };
 
     const options = extractTemporalOptions(ast, "e");
 
     expect(options).toEqual({
       mode: "asOf",
-      asOf: "2024-06-15T12:00:00Z",
+      asOf: "2024-06-15T12:00:00.000Z",
       tableAlias: "e",
     });
   });

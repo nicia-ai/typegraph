@@ -34,15 +34,16 @@ export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
  *
  * Algorithms honor the same temporal model as the rest of the store: both
  * nodes and edges are filtered according to the resolved mode. `asOf` is
- * only consulted when the resolved mode is `"asOf"`. If neither option is
- * supplied, the algorithm falls back to `graph.defaults.temporalMode`.
+ * required when the resolved mode is `"asOf"` and rejected for every other
+ * mode. If neither option is supplied, the algorithm falls back to
+ * `graph.defaults.temporalMode`.
  */
 export type TemporalAlgorithmOptions = Readonly<{
   /** Temporal mode. Defaults to the graph's configured default. */
   temporalMode?: TemporalMode;
   /**
-   * ISO-8601 timestamp used when `temporalMode` is `"asOf"`. Required in that
-   * mode; ignored in all others.
+   * ISO-8601 timestamp pinning the read. Required when `temporalMode` is
+   * `"asOf"`; rejected (throws `ValidationError`) for every other mode.
    */
   asOf?: string;
 }>;

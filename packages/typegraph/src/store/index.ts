@@ -6,30 +6,53 @@ export {
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
+  type EdgeBatchReads,
   type EdgeCollection,
   type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsResult,
+  type EdgeTemporalReads,
+  type EdgeWrites,
   type GetOrCreateAction,
   type HookContext,
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
+  type NodeCurrentReads,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
   type NodeRef,
+  type NodeTemporalReads,
+  type NodeWrites,
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
   type StoreHooks,
   type StoreOptions,
   type StoreRef,
+  type StoreViewEdgeCollection,
+  type StoreViewEdgeCollections,
+  type StoreViewNodeCollection,
+  type StoreViewNodeCollections,
   type TransactionContext,
   type TypedEdgeCollection,
+  type TypedStoreViewEdgeCollection,
   type UpdateEdgeInput,
   type UpdateNodeInput,
 } from "./types";
+
+// StoreView (read-only as-of lens)
+export type {
+  StoreViewCanReachOptions,
+  StoreViewCoordinate,
+  StoreViewDegreeOptions,
+  StoreViewNeighborsOptions,
+  StoreViewReachableOptions,
+  StoreViewShortestPathOptions,
+  StoreViewSubgraphOptions,
+} from "./store-view";
+export { StoreView } from "./store-view";
 
 // Subgraph extraction
 export type {

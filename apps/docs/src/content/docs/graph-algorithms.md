@@ -224,7 +224,7 @@ await store.algorithms.shortestPath(alice, bob, { edges: ["knows"] });
 await store.algorithms.shortestPath(alice, bob, {
   edges: ["knows"],
   temporalMode: "asOf",
-  asOf: "2023-01-15T00:00:00Z",
+  asOf: "2023-01-15T00:00:00.000Z",
 });
 
 // Include validity-ended (but not soft-deleted) rows — useful for
@@ -246,8 +246,9 @@ await store.algorithms.canReach(alice, ghost, {
 - The temporal filter applies to **both nodes and edges** along the
   traversal. An edge can only be traversed if it passes the filter *and*
   its endpoint node passes too.
-- `asOf` is required when `temporalMode: "asOf"` and ignored in every
-  other mode.
+- `asOf` is required when `temporalMode: "asOf"` and rejected (throws
+  `ValidationError`) in every other mode — pinning an instant is only
+  meaningful in `"asOf"` mode.
 - Temporal filtering is orthogonal to `cyclePolicy` — cycle detection
   operates on path membership, not on time. A node that was valid → ended
   → re-valid is not treated as "visited" just because it appears in two

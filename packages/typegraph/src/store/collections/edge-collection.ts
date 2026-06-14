@@ -6,6 +6,7 @@
 import { type z } from "zod";
 
 import {
+  type FindEdgesByKindParams,
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
@@ -14,7 +15,6 @@ import { type AnyEdgeType, type TemporalMode } from "../../core/types";
 import { UnsupportedPredicateError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
-import { nowIso } from "../../utils/date";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -28,6 +28,10 @@ import {
   type NodeRef,
   type QueryOptions,
 } from "../types";
+import {
+  resolveTemporalReadParams,
+  type TemporalReadParams,
+} from "./temporal-read-params";
 
 /**
  * Narrows unparameterized Edge to Edge<E>.
@@ -90,7 +94,7 @@ export type EdgeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
-  matchesTemporalMode: (row: EdgeRow, options?: QueryOptions) => boolean;
+  temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByEndpoints: (
     kind: string,
@@ -130,6 +134,9 @@ export type EdgeCollectionConfig = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       props?: Record<string, unknown>;
+      excludeDeleted?: boolean;
+      temporalMode?: TemporalMode;
+      asOf?: string;
     }>,
   ) => Promise<Edge | undefined>;
 }>;
@@ -223,50 +230,75 @@ export function createEdgeCollection<
     executeUpsertUpdate: executeEdgeUpsertUpdate,
     executeDelete: executeEdgeDelete,
     executeHardDelete: executeEdgeHardDelete,
-    matchesTemporalMode,
+    temporalRowMatcher,
   } = config;
 
   const mapRows = (rows: readonly EdgeRow[]): Edge<E>[] =>
     rows.map((row) => narrowEdge<E>(rowToEdge(row)));
 
+  /**
+   * Builds the `findEdgesByKind` params for an endpoint lookup, resolving
+   * the temporal mode the same way `find` / `getById` do: the per-call
+   * `options` win, falling back to the graph's default mode. Keeps
+   * `findFrom` / `findTo` honoring the temporal model instead of silently
+   * returning every non-deleted edge.
+   */
+  function buildEndpointFindParams(
+    endpoint:
+      | Readonly<{ fromKind: string; fromId: string }>
+      | Readonly<{ toKind: string; toId: string }>,
+    options: QueryOptions | undefined,
+  ): FindEdgesByKindParams {
+    return {
+      graphId,
+      kind,
+      ...endpoint,
+      ...resolveTemporalReadParams(options, defaultTemporalMode),
+    };
+  }
+
   async function findEdgesFrom(
     from: NodeRef,
     target: GraphBackend | TransactionBackend,
+    options?: QueryOptions,
   ): Promise<Edge<E>[]> {
-    const rows = await target.findEdgesByKind({
-      graphId,
-      kind,
-      fromKind: from.kind,
-      fromId: from.id,
-      excludeDeleted: true,
-    });
+    const rows = await target.findEdgesByKind(
+      buildEndpointFindParams(
+        { fromKind: from.kind, fromId: from.id },
+        options,
+      ),
+    );
     return mapRows(rows);
   }
 
   async function findEdgesTo(
     to: NodeRef,
     target: GraphBackend | TransactionBackend,
+    options?: QueryOptions,
   ): Promise<Edge<E>[]> {
-    const rows = await target.findEdgesByKind({
-      graphId,
-      kind,
-      toKind: to.kind,
-      toId: to.id,
-      excludeDeleted: true,
-    });
+    const rows = await target.findEdgesByKind(
+      buildEndpointFindParams({ toKind: to.kind, toId: to.id }, options),
+    );
     return mapRows(rows);
   }
 
   function buildFindByEndpointsOptions(
     options?: EdgeFindByEndpointsOptions<E>,
+    temporal?: QueryOptions,
   ): Readonly<{
     matchOn?: readonly string[];
     props?: Record<string, unknown>;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
   }> {
     const result: {
       matchOn?: readonly string[];
       props?: Record<string, unknown>;
-    } = {};
+      excludeDeleted?: boolean;
+      temporalMode?: TemporalMode;
+      asOf?: string;
+    } = { ...resolveTemporalReadParams(temporal, defaultTemporalMode) };
     if (options?.matchOn !== undefined)
       result.matchOn = options.matchOn as readonly string[];
     if (options?.props !== undefined) result.props = options.props;
@@ -294,7 +326,7 @@ export function createEdgeCollection<
       const row = await backend.getEdge(graphId, id);
       if (!row) return undefined;
       if (row.kind !== kind) return undefined; // Edge is a different type
-      if (!matchesTemporalMode(row, options)) return undefined;
+      if (!temporalRowMatcher(options)(row)) return undefined;
       return narrowEdge<E>(rowToEdge(row));
     },
 
@@ -303,6 +335,9 @@ export function createEdgeCollection<
       options?: QueryOptions,
     ): Promise<readonly (Edge<E> | undefined)[]> {
       if (ids.length === 0) return [];
+
+      // Resolve the coordinate once so the whole batch observes one instant.
+      const matches = temporalRowMatcher(options);
 
       if (backend.getEdges !== undefined) {
         const rows = await backend.getEdges(graphId, ids);
@@ -314,7 +349,7 @@ export function createEdgeCollection<
           const row = rowMap.get(id);
           if (!row) return;
           if (row.kind !== kind) return;
-          if (!matchesTemporalMode(row, options)) return;
+          if (!matches(row)) return;
           return narrowEdge<E>(rowToEdge(row));
         });
       }
@@ -324,7 +359,7 @@ export function createEdgeCollection<
           const row = await backend.getEdge(graphId, id);
           if (!row) return;
           if (row.kind !== kind) return;
-          if (!matchesTemporalMode(row, options)) return;
+          if (!matches(row)) return;
           return narrowEdge<E>(rowToEdge(row));
         }),
       );
@@ -342,26 +377,30 @@ export function createEdgeCollection<
       return narrowEdge<E>(result);
     },
 
-    async findFrom(from: NodeRef): Promise<Edge<E>[]> {
-      return findEdgesFrom(from, backend);
+    async findFrom(from: NodeRef, options?: QueryOptions): Promise<Edge<E>[]> {
+      return findEdgesFrom(from, backend, options);
     },
 
-    async findTo(to: NodeRef): Promise<Edge<E>[]> {
-      return findEdgesTo(to, backend);
+    async findTo(to: NodeRef, options?: QueryOptions): Promise<Edge<E>[]> {
+      return findEdgesTo(to, backend, options);
     },
 
-    batchFindFrom(from: NodeRef): BatchableQuery<Edge<E>> {
-      return { executeOn: (target) => findEdgesFrom(from, target) };
+    batchFindFrom(
+      from: NodeRef,
+      options?: QueryOptions,
+    ): BatchableQuery<Edge<E>> {
+      return { executeOn: (target) => findEdgesFrom(from, target, options) };
     },
 
-    batchFindTo(to: NodeRef): BatchableQuery<Edge<E>> {
-      return { executeOn: (target) => findEdgesTo(to, target) };
+    batchFindTo(to: NodeRef, options?: QueryOptions): BatchableQuery<Edge<E>> {
+      return { executeOn: (target) => findEdgesTo(to, target, options) };
     },
 
     batchFindByEndpoints(
       from: NodeRef,
       to: NodeRef,
       options?: EdgeFindByEndpointsOptions<E>,
+      temporal?: QueryOptions,
     ): BatchableQuery<Edge<E>> {
       return {
         executeOn: async (target) => {
@@ -372,7 +411,7 @@ export function createEdgeCollection<
             to.kind,
             to.id,
             target,
-            buildFindByEndpointsOptions(options),
+            buildFindByEndpointsOptions(options, temporal),
           );
           return result === undefined ? [] : [narrowEdge<E>(result)];
         },
@@ -388,19 +427,16 @@ export function createEdgeCollection<
     },
 
     async find(
-      options?: Readonly<{
+      filter?: Readonly<{
         from?: NodeRef;
         to?: NodeRef;
         limit?: number;
         offset?: number;
-        temporalMode?: TemporalMode;
-        asOf?: string;
       }>,
+      temporal?: QueryOptions,
     ): Promise<Edge<E>[]> {
-      const untypedOptions = options as
-        | Readonly<{ where?: unknown }>
-        | undefined;
-      if (untypedOptions?.where !== undefined) {
+      const untypedFilter = filter as Readonly<{ where?: unknown }> | undefined;
+      if (untypedFilter?.where !== undefined) {
         throw new UnsupportedPredicateError(
           `store.edges.${kind}.find({ where }) is not supported. ` +
             `Use store.query().traverse(...).whereEdge(...) for edge property filters.`,
@@ -408,7 +444,6 @@ export function createEdgeCollection<
         );
       }
 
-      const mode = options?.temporalMode ?? defaultTemporalMode;
       const params: {
         graphId: string;
         kind: string;
@@ -418,39 +453,29 @@ export function createEdgeCollection<
         toId?: string;
         limit?: number;
         offset?: number;
-        excludeDeleted: boolean;
-        temporalMode: TemporalMode;
-        asOf?: string;
-      } = {
+      } & TemporalReadParams = {
         graphId,
         kind,
-        excludeDeleted: mode !== "includeTombstones",
-        temporalMode: mode,
+        ...resolveTemporalReadParams(temporal, defaultTemporalMode),
       };
-      if (mode === "current" || mode === "asOf") {
-        params.asOf = options?.asOf ?? nowIso();
-      }
-      if (options?.from?.kind !== undefined)
-        params.fromKind = options.from.kind;
-      if (options?.from?.id !== undefined) params.fromId = options.from.id;
-      if (options?.to?.kind !== undefined) params.toKind = options.to.kind;
-      if (options?.to?.id !== undefined) params.toId = options.to.id;
-      if (options?.limit !== undefined) params.limit = options.limit;
-      if (options?.offset !== undefined) params.offset = options.offset;
+      if (filter?.from?.kind !== undefined) params.fromKind = filter.from.kind;
+      if (filter?.from?.id !== undefined) params.fromId = filter.from.id;
+      if (filter?.to?.kind !== undefined) params.toKind = filter.to.kind;
+      if (filter?.to?.id !== undefined) params.toId = filter.to.id;
+      if (filter?.limit !== undefined) params.limit = filter.limit;
+      if (filter?.offset !== undefined) params.offset = filter.offset;
 
       const rows = await backend.findEdgesByKind(params);
       return mapRows(rows);
     },
 
     async count(
-      options?: Readonly<{
+      filter?: Readonly<{
         from?: NodeRef;
         to?: NodeRef;
-        temporalMode?: TemporalMode;
-        asOf?: string;
       }>,
+      temporal?: QueryOptions,
     ): Promise<number> {
-      const mode = options?.temporalMode ?? defaultTemporalMode;
       const params: {
         graphId: string;
         kind: string;
@@ -458,23 +483,15 @@ export function createEdgeCollection<
         fromId?: string;
         toKind?: string;
         toId?: string;
-        excludeDeleted: boolean;
-        temporalMode: TemporalMode;
-        asOf?: string;
-      } = {
+      } & TemporalReadParams = {
         graphId,
         kind,
-        excludeDeleted: mode !== "includeTombstones",
-        temporalMode: mode,
+        ...resolveTemporalReadParams(temporal, defaultTemporalMode),
       };
-      if (mode === "current" || mode === "asOf") {
-        params.asOf = options?.asOf ?? nowIso();
-      }
-      if (options?.from?.kind !== undefined)
-        params.fromKind = options.from.kind;
-      if (options?.from?.id !== undefined) params.fromId = options.from.id;
-      if (options?.to?.kind !== undefined) params.toKind = options.to.kind;
-      if (options?.to?.id !== undefined) params.toId = options.to.id;
+      if (filter?.from?.kind !== undefined) params.fromKind = filter.from.kind;
+      if (filter?.from?.id !== undefined) params.fromId = filter.from.id;
+      if (filter?.to?.kind !== undefined) params.toKind = filter.to.kind;
+      if (filter?.to?.id !== undefined) params.toId = filter.to.id;
 
       return backend.countEdgesByKind(params);
     },
@@ -639,6 +656,7 @@ export function createEdgeCollection<
       from: NodeRef,
       to: NodeRef,
       options?: EdgeFindByEndpointsOptions<E>,
+      temporal?: QueryOptions,
     ): Promise<Edge<E> | undefined> {
       const result = await config.executeFindByEndpoints(
         kind,
@@ -647,7 +665,7 @@ export function createEdgeCollection<
         to.kind,
         to.id,
         backend,
-        buildFindByEndpointsOptions(options),
+        buildFindByEndpointsOptions(options, temporal),
       );
       return result === undefined ? undefined : narrowEdge<E>(result);
     },

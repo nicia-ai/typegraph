@@ -36,6 +36,7 @@ import {
   registerPredicateIntegrationTests,
   registerRecursiveIntegrationTests,
   registerSetOperationIntegrationTests,
+  registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
   registerTraversalIntegrationTests,
@@ -126,6 +127,7 @@ export function createIntegrationTestSuite(
     registerEdgePropertyIntegrationTests(context);
     registerAdvancedEdgePropertyIntegrationTests(context);
     registerSubgraphIntegrationTests(context);
+    registerStoreViewIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);

@@ -1,4 +1,5 @@
 import { type GraphBackend } from "../../backend/types";
+import { resolveReadCoordinate } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
@@ -37,22 +38,28 @@ export type InternalTraversalOptions = InternalTemporalOptions &
 /**
  * Resolves per-call temporal overrides against the graph's default mode into
  * a plain `{ temporalMode, asOf? }` object. Shared by callers that forward
- * the pair to `buildReachableCte`.
+ * the pair to `buildReachableCte`. An `asOf` is rejected unless the mode is
+ * `"asOf"` (via {@link resolveReadCoordinate}), matching every other read path.
  */
 export function resolveTemporalOptions(
   ctx: AlgorithmContext,
   options: InternalTemporalOptions,
 ): Readonly<{ temporalMode: TemporalMode; asOf?: string }> {
+  const { valid } = resolveReadCoordinate(
+    options.temporalMode ?? ctx.defaultTemporalMode,
+    options.asOf,
+  );
   return {
-    temporalMode: options.temporalMode ?? ctx.defaultTemporalMode,
-    ...(options.asOf !== undefined && { asOf: options.asOf }),
+    temporalMode: valid.mode,
+    ...(valid.asOf !== undefined && { asOf: valid.asOf }),
   };
 }
 
 /**
- * Compiles the resolved temporal filter to SQL. `asOf` is only meaningful
- * when the resolved mode is `"asOf"`; `compileTemporalFilter` ignores it in
- * every other mode.
+ * Compiles the resolved temporal filter to SQL. `resolveTemporalOptions`
+ * has already rejected an `asOf` paired with any non-`"asOf"` mode, so a
+ * stray pin can never reach the filter; `current` resolves against the
+ * dialect's current-timestamp expression.
  */
 export function resolveTemporalFilter(
   ctx: AlgorithmContext,

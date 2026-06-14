@@ -15,6 +15,7 @@ import type {
   GraphDef,
   NodeKinds,
 } from "../core/define-graph";
+import { resolveReadCoordinate } from "../core/temporal";
 import type { KindEntity } from "../core/types";
 import type {
   AnyEdgeType,
@@ -464,6 +465,11 @@ export async function executeSubgraph<
   options: SubgraphOptions<G, EK, NK, P>;
 }): Promise<SubgraphResult<G, NK, EK, P>> {
   const { options } = params;
+  const { valid: coordinate } = resolveReadCoordinate(
+    options.temporalMode ?? params.graph.defaults.temporalMode,
+    options.asOf,
+  );
+  const temporalMode = coordinate.mode;
 
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
@@ -479,8 +485,8 @@ export async function executeSubgraph<
     excludeRoot: options.excludeRoot ?? false,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
-    temporalMode: options.temporalMode ?? params.graph.defaults.temporalMode,
-    asOf: options.asOf,
+    temporalMode,
+    asOf: coordinate.asOf,
     dialect: params.dialect,
     schema: params.schema ?? DEFAULT_SQL_SCHEMA,
     backend: params.backend,

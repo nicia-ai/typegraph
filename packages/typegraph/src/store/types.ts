@@ -377,7 +377,7 @@ export type EdgeGetOrCreateByEndpointsResult<
 export type EdgeFindByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
   /**
    * Edge property fields to include in the match alongside the (from, to) endpoints.
-   * When omitted, matches on endpoints only (returns first live edge).
+   * When omitted, matches on endpoints only (returns the first edge at the read coordinate).
    */
   matchOn?: readonly (keyof z.input<E["schema"]>)[];
   /** Property values to match against when matchOn is specified. */
@@ -459,17 +459,16 @@ export type NodeCollection<
    * For simple queries. Use store.query() for complex traversals.
    */
   find: (
-    options?: Readonly<{
+    filter?: Readonly<{
       where?: (accessor: NodeAccessor<N>) => Predicate;
       limit?: number;
       offset?: number;
-      temporalMode?: TemporalMode;
-      asOf?: string;
     }>,
+    temporal?: QueryOptions,
   ) => Promise<Node<N>[]>;
 
   /** Count nodes matching criteria */
-  count: (options?: QueryOptions) => Promise<number>;
+  count: (temporal?: QueryOptions) => Promise<number>;
 
   /**
    * Create a node from untyped data, relying on runtime Zod validation.
@@ -742,25 +741,51 @@ export type EdgeCollection<
     options?: Readonly<{ validTo?: string }>,
   ) => Promise<Edge<E, From, To>>;
 
-  /** Find edges from a specific node */
-  findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
+  /**
+   * Find edges from a specific node.
+   *
+   * Honors the same temporal model as `getById` / `find`: with no
+   * `options`, the graph's default `temporalMode` applies (excluding
+   * soft-deleted edges and, in `current` / `asOf` modes, edges outside
+   * their validity window). Pass `temporalMode` / `asOf` to read the
+   * endpoint's edges at another temporal coordinate.
+   */
+  findFrom: (
+    from: NodeRef<From>,
+    options?: QueryOptions,
+  ) => Promise<Edge<E, From, To>[]>;
 
-  /** Find edges to a specific node */
-  findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+  /**
+   * Find edges to a specific node.
+   *
+   * Temporal semantics mirror {@link EdgeCollection.findFrom}.
+   */
+  findTo: (
+    to: NodeRef<To>,
+    options?: QueryOptions,
+  ) => Promise<Edge<E, From, To>[]>;
 
   /**
    * Deferred variant of `findFrom` for use with `store.batch()`.
    *
-   * Returns a `BatchableQuery` instead of executing immediately.
+   * Returns a `BatchableQuery` instead of executing immediately. Accepts
+   * the same temporal `options` as {@link EdgeCollection.findFrom}.
    */
-  batchFindFrom: (from: NodeRef<From>) => BatchableQuery<Edge<E, From, To>>;
+  batchFindFrom: (
+    from: NodeRef<From>,
+    options?: QueryOptions,
+  ) => BatchableQuery<Edge<E, From, To>>;
 
   /**
    * Deferred variant of `findTo` for use with `store.batch()`.
    *
-   * Returns a `BatchableQuery` instead of executing immediately.
+   * Returns a `BatchableQuery` instead of executing immediately. Accepts
+   * the same temporal `options` as {@link EdgeCollection.findTo}.
    */
-  batchFindTo: (to: NodeRef<To>) => BatchableQuery<Edge<E, From, To>>;
+  batchFindTo: (
+    to: NodeRef<To>,
+    options?: QueryOptions,
+  ) => BatchableQuery<Edge<E, From, To>>;
 
   /**
    * Deferred variant of `findByEndpoints` for use with `store.batch()`.
@@ -772,6 +797,7 @@ export type EdgeCollection<
     from: NodeRef<From>,
     to: NodeRef<To>,
     options?: EdgeFindByEndpointsOptions<E>,
+    temporal?: QueryOptions,
   ) => BatchableQuery<Edge<E, From, To>>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
@@ -790,24 +816,22 @@ export type EdgeCollection<
 
   /** Find edges matching endpoint and pagination criteria */
   find: (
-    options?: Readonly<{
+    filter?: Readonly<{
       from?: NodeRef<From>;
       to?: NodeRef<To>;
       limit?: number;
       offset?: number;
-      temporalMode?: TemporalMode;
-      asOf?: string;
     }>,
+    temporal?: QueryOptions,
   ) => Promise<Edge<E, From, To>[]>;
 
   /** Count edges matching criteria */
   count: (
-    options?: Readonly<{
+    filter?: Readonly<{
       from?: NodeRef<From>;
       to?: NodeRef<To>;
-      temporalMode?: TemporalMode;
-      asOf?: string;
     }>,
+    temporal?: QueryOptions,
   ) => Promise<number>;
 
   /**
@@ -871,19 +895,26 @@ export type EdgeCollection<
   bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
 
   /**
-   * Find a live edge by endpoints and optional property fields.
+   * Find an edge by endpoints and optional property fields.
    *
-   * Returns the first matching live edge, or undefined.
-   * Soft-deleted edges are excluded.
+   * Returns the first matching edge at the read coordinate, or undefined.
+   * Honors the temporal model like `findFrom` / `findTo`: by default
+   * (`current` mode) soft-deleted and out-of-window edges are excluded; under
+   * `includeTombstones` a soft-deleted edge can be returned.
    *
    * @param from - Source node
    * @param to - Target node
    * @param options - Match criteria (matchOn fields and property values)
+   * @param temporal - Temporal coordinate. With no `temporal`, the graph's
+   *   default `temporalMode` applies (so under the default `"current"` mode,
+   *   edges outside their validity window are excluded). Pass
+   *   `temporalMode` / `asOf` to read the edge as of another coordinate.
    */
   findByEndpoints: (
     from: NodeRef<From>,
     to: NodeRef<To>,
     options?: EdgeFindByEndpointsOptions<E>,
+    temporal?: QueryOptions,
   ) => Promise<Edge<E, From, To> | undefined>;
 
   /**
@@ -980,6 +1011,239 @@ export type GraphNodeCollections<G extends GraphDef> = {
 /** Mapped type of all edge collections for a graph. */
 export type GraphEdgeCollections<G extends GraphDef> = {
   [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
+};
+
+// ============================================================
+// StoreView read-only collection surfaces
+// ============================================================
+
+// ------------------------------------------------------------
+// Collection read / write split
+// ------------------------------------------------------------
+//
+// The live NodeCollection / EdgeCollection partition into buckets a
+// StoreView treats differently:
+//
+//   - temporal reads — honor the pinned coordinate (the view pins them, with
+//     the per-call temporal argument dropped);
+//   - current reads  — have no temporal axis, so the view delegates them on a
+//     `current` pin and refuses them on a temporal pin (they would otherwise
+//     silently return current data);
+//   - writes         — never available on a read-only view; and
+//   - batch reads    — deferred reads for `store.batch()`, absent from a view
+//     (no batch context).
+//
+// `Pick` validates every key against the live collection, and a `test-d`
+// conformance check asserts the buckets exactly partition it — so a new
+// method cannot be silently omitted from the view's surface decision, and a
+// new temporal read auto-appears (pinned) in the derived view type.
+
+/** Temporal-aware node reads — a {@link StoreView} pins these. */
+export type NodeTemporalReads<
+  N extends NodeType,
+  CN extends string = string,
+> = Pick<NodeCollection<N, CN>, "getById" | "getByIds" | "find" | "count">;
+
+/**
+ * The method names of the current-state-only node reads (constraint / index
+ * lookups). Single source of truth: {@link NodeCurrentReads} (the type) and the
+ * `StoreView`'s runtime routing Set are both derived from this array, so adding
+ * a current-only read here updates both at once — a new read cannot pass the
+ * type partition yet be misrouted at runtime (refused as a write).
+ */
+export const CURRENT_ONLY_READ_NAMES = [
+  "findByConstraint",
+  "bulkFindByConstraint",
+  "bulkFindByIndex",
+] as const;
+
+/**
+ * Current-state-only node reads (constraint / index lookups). No temporal
+ * axis, so a {@link StoreView} delegates them on a `current` pin and refuses
+ * them on a temporal pin.
+ */
+export type NodeCurrentReads<
+  N extends NodeType,
+  CN extends string = string,
+> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
+
+/** Node writes — never available on a read-only {@link StoreView}. */
+export type NodeWrites<N extends NodeType, CN extends string = string> = Pick<
+  NodeCollection<N, CN>,
+  | "create"
+  | "createFromRecord"
+  | "update"
+  | "delete"
+  | "hardDelete"
+  | "upsertById"
+  | "upsertByIdFromRecord"
+  | "bulkCreate"
+  | "bulkUpsertById"
+  | "bulkInsert"
+  | "bulkDelete"
+  | "getOrCreateByConstraint"
+  | "bulkGetOrCreateByConstraint"
+>;
+
+/**
+ * Temporal-aware edge reads — a {@link StoreView} pins these. Unlike the node
+ * collection, edges have no current-state-only reads: `findByEndpoints` honors
+ * the temporal coordinate like `findFrom` / `findTo`, so every edge read is
+ * pinnable.
+ */
+export type EdgeTemporalReads<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Pick<
+  EdgeCollection<E, From, To>,
+  | "getById"
+  | "getByIds"
+  | "find"
+  | "count"
+  | "findFrom"
+  | "findTo"
+  | "findByEndpoints"
+>;
+
+/**
+ * Deferred edge reads for `store.batch()` — absent from a {@link StoreView},
+ * which has no batch context.
+ */
+export type EdgeBatchReads<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Pick<
+  EdgeCollection<E, From, To>,
+  "batchFindFrom" | "batchFindTo" | "batchFindByEndpoints"
+>;
+
+/** Edge writes — never available on a read-only {@link StoreView}. */
+export type EdgeWrites<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Pick<
+  EdgeCollection<E, From, To>,
+  | "create"
+  | "update"
+  | "delete"
+  | "hardDelete"
+  | "bulkCreate"
+  | "bulkUpsertById"
+  | "bulkInsert"
+  | "bulkDelete"
+  | "getOrCreateByEndpoints"
+  | "bulkGetOrCreateByEndpoints"
+>;
+
+/**
+ * The read-only node surface a {@link StoreView} exposes for one node kind.
+ * The temporal reads drop the per-call temporal argument — the pin owns the
+ * axis; the current reads ({@link NodeCurrentReads}) are exposed as-is
+ * (delegated on a `current` view, refused on a temporal pin). Writes live on
+ * the live `Store`. The conformance test asserts the temporal part equals the
+ * pinned form of {@link NodeTemporalReads}.
+ */
+export type StoreViewNodeCollection<
+  N extends NodeType,
+  CN extends string = string,
+> = Readonly<{
+  /** Get a node by ID at the view's pinned coordinate. */
+  getById: (id: NodeId<N>) => Promise<Node<N> | undefined>;
+
+  /** Get multiple nodes by ID, preserving input order (undefined for missing). */
+  getByIds: (
+    ids: readonly NodeId<N>[],
+  ) => Promise<readonly (Node<N> | undefined)[]>;
+
+  /** Find nodes matching criteria at the view's pinned coordinate. */
+  find: (
+    filter?: Readonly<{
+      where?: (accessor: NodeAccessor<N>) => Predicate;
+      limit?: number;
+      offset?: number;
+    }>,
+  ) => Promise<Node<N>[]>;
+
+  /** Count nodes at the view's pinned coordinate. */
+  count: () => Promise<number>;
+}> &
+  NodeCurrentReads<N, CN>;
+
+/**
+ * The read-only edge surface a {@link StoreView} exposes for one edge
+ * kind, mirroring {@link StoreViewNodeCollection}. Every edge read —
+ * including `findByEndpoints` — honors the pin via the same temporal model,
+ * so (unlike nodes) there are no current-state-only edge reads.
+ */
+export type StoreViewEdgeCollection<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Readonly<{
+  /** Get an edge by ID at the view's pinned coordinate. */
+  getById: (id: EdgeId<E>) => Promise<Edge<E, From, To> | undefined>;
+
+  /** Get multiple edges by ID, preserving input order (undefined for missing). */
+  getByIds: (
+    ids: readonly EdgeId<E>[],
+  ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
+
+  /** Find edges matching endpoint and pagination criteria. */
+  find: (
+    filter?: Readonly<{
+      from?: NodeRef<From>;
+      to?: NodeRef<To>;
+      limit?: number;
+      offset?: number;
+    }>,
+  ) => Promise<Edge<E, From, To>[]>;
+
+  /** Count edges matching criteria at the view's pinned coordinate. */
+  count: (
+    filter?: Readonly<{ from?: NodeRef<From>; to?: NodeRef<To> }>,
+  ) => Promise<number>;
+
+  /** Find edges from a specific node at the view's pinned coordinate. */
+  findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
+
+  /** Find edges to a specific node at the view's pinned coordinate. */
+  findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+
+  /** Find the edge between two endpoints at the view's pinned coordinate. */
+  findByEndpoints: (
+    from: NodeRef<From>,
+    to: NodeRef<To>,
+    options?: EdgeFindByEndpointsOptions<E>,
+  ) => Promise<Edge<E, From, To> | undefined>;
+}>;
+
+/**
+ * Read-only view edge collection derived from an `EdgeRegistration`,
+ * extracting the edge type and from/to node types — the read-only
+ * counterpart of {@link TypedEdgeCollection}.
+ */
+export type TypedStoreViewEdgeCollection<R extends EdgeRegistration> =
+  StoreViewEdgeCollection<
+    R["type"],
+    EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType,
+    EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
+  >;
+
+/** Mapped type of all read-only view node collections for a graph. */
+export type StoreViewNodeCollections<G extends GraphDef> = {
+  [K in keyof G["nodes"] & string]-?: StoreViewNodeCollection<
+    G["nodes"][K]["type"]
+  >;
+};
+
+/** Mapped type of all read-only view edge collections for a graph. */
+export type StoreViewEdgeCollections<G extends GraphDef> = {
+  [K in keyof G["edges"] & string]-?: TypedStoreViewEdgeCollection<
+    G["edges"][K]
+  >;
 };
 
 // ============================================================

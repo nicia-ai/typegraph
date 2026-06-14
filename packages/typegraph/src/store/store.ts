@@ -26,6 +26,7 @@ import {
   type NodeKinds,
 } from "../core/define-graph";
 import { resolveEmbeddingFields } from "../core/embedding";
+import { type ReadCoordinate } from "../core/temporal";
 import type { KindEntity, NodeId } from "../core/types";
 import {
   ConfigurationError,
@@ -74,6 +75,7 @@ import {
   type EdgeOperations,
   type NodeOperations,
 } from "./collection-factory";
+import { resolveTemporalReadParams } from "./collections/temporal-read-params";
 import { introspectSchema, type SchemaIntrospection } from "./introspect";
 import {
   computeIndexSignature,
@@ -116,6 +118,7 @@ import {
 } from "./operations";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import { StoreSearch } from "./search-facade";
+import { StoreView, type StoreViewCoordinate } from "./store-view";
 import {
   executeSubgraph,
   type SubgraphOptions,
@@ -573,8 +576,7 @@ export class Store<G extends GraphDef> {
         executeNodeDelete(ctx, kind, id, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
-      matchesTemporalMode: (row, options) =>
-        this.#matchesTemporalMode(row, options),
+      temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByConstraint: (
         kind,
@@ -647,8 +649,7 @@ export class Store<G extends GraphDef> {
       executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
       executeHardDelete: (id, backend) =>
         executeEdgeHardDelete(ctx, id, backend),
-      matchesTemporalMode: (row, options) =>
-        this.#matchesTemporalMode(row, options),
+      temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (
         kind,
@@ -717,6 +718,83 @@ export class Store<G extends GraphDef> {
    */
   query(): QueryBuilder<G> {
     return this.#createQueryForBackend(this.#backend);
+  }
+
+  /**
+   * Internal seam for {@link StoreView.query}: a query builder pinned to a
+   * view's {@link ReadCoordinate} with its temporal axis sealed
+   * (`.temporal()` throws). Not part of the stable public API — construct a
+   * view via {@link Store.view} / {@link Store.asOf} and call `.query()`.
+   */
+  sealedQuery(coordinate: ReadCoordinate): QueryBuilder<G> {
+    return this.#createQueryForBackend(this.#backend, coordinate);
+  }
+
+  // === Temporal Views ===
+
+  /**
+   * Returns a read-only {@link StoreView} pinned to a valid-time instant.
+   *
+   * The view routes every supported read — `nodes` / `edges` collections,
+   * `query()`, `subgraph()`, and the graph algorithms — through the
+   * `asOf` coordinate, so they observe the graph as it was valid at `T`.
+   * Writes stay on the live `Store`. Mirrors Datomic's `(d/as-of db t)`.
+   *
+   * @example
+   * ```typescript
+   * const past = store.asOf("2026-01-01T00:00:00.000Z");
+   * const alice = await past.nodes.Person.getById(aliceId);
+   * const names = await past
+   *   .query()
+   *   .from("Person", "p")
+   *   .whereNode("p", (p) => p.name.eq("Alice"))
+   *   .select((ctx) => ctx.p.name)
+   *   .execute();
+   * ```
+   *
+   * @param asOf - ISO-8601 timestamp to pin the valid-time coordinate to.
+   */
+  asOf(asOf: string): StoreView<G> {
+    return new StoreView(this, { mode: "asOf", asOf });
+  }
+
+  /**
+   * Returns a read-only {@link StoreView} pinned to an arbitrary public
+   * temporal mode. Use {@link Store.asOf} for the common valid-time case;
+   * reach for `view` to pin `"current"`, `"includeEnded"`, or
+   * `"includeTombstones"`.
+   *
+   * @example
+   * ```typescript
+   * const withTombstones = store.view({ mode: "includeTombstones" });
+   * const everyEverVersion = await withTombstones.nodes.Person.find();
+   * ```
+   *
+   * @param coordinate - The `(mode, asOf)` coordinate to pin. `asOf` is
+   *   required when `mode` is `"asOf"` and rejected for every other mode.
+   */
+  view(coordinate: StoreViewCoordinate): StoreView<G> {
+    return new StoreView(this, coordinate);
+  }
+
+  /**
+   * Returns a read-only {@link StoreView} pinned to the current instant,
+   * captured once at construction — a stable point-in-time snapshot. Unlike
+   * `store.view({ mode: "current" })` (which tracks "now" live and can read
+   * different surfaces against slightly different clocks), a snapshot pins one
+   * `asOf` timestamp, so every surface observes the same instant. Sugar for
+   * `store.asOf(new Date().toISOString())`; mirrors Datomic's `(d/db conn)`.
+   *
+   * @example
+   * ```typescript
+   * const snap = store.snapshot();
+   * // Every read on `snap` sees the graph as of one fixed instant.
+   * const a = await snap.nodes.Person.find();
+   * const r = await snap.reachable(rootId, { edges: ["knows"] });
+   * ```
+   */
+  snapshot(): StoreView<G> {
+    return this.asOf(nowIso());
   }
 
   // === Search ===
@@ -2031,36 +2109,48 @@ export class Store<G extends GraphDef> {
 
   // === Internal: Temporal Filtering ===
 
-  #matchesTemporalMode(
-    row: {
+  #temporalRowMatcher(options?: QueryOptions): (
+    row: Readonly<{
       deleted_at: string | undefined;
       valid_from: string | undefined;
       valid_to: string | undefined;
-    },
-    options?: QueryOptions,
-  ): boolean {
-    const mode = options?.temporalMode ?? this.#graph.defaults.temporalMode;
-    const asOf = options?.asOf ?? nowIso();
+    }>,
+  ) => boolean {
+    // Resolve the coordinate ONCE (via the shared resolveTemporalReadParams, so
+    // the in-memory getById/getByIds filter cannot drift from the SQL-side
+    // filter, and a non-canonical asOf is rejected here too). Returning a
+    // predicate lets getByIds pin one instant for the whole batch instead of
+    // recomputing nowIso() — and re-validating — per row.
+    const { temporalMode, asOf } = resolveTemporalReadParams(
+      options,
+      this.#graph.defaults.temporalMode,
+    );
 
-    switch (mode) {
-      case "current":
-      case "asOf": {
-        if (row.deleted_at) return false;
-        if (row.valid_from && asOf < row.valid_from) return false;
-        if (row.valid_to && asOf >= row.valid_to) return false;
-        return true;
+    return (row) => {
+      switch (temporalMode) {
+        case "current":
+        case "asOf": {
+          // resolveTemporalReadParams always resolves an instant for these modes.
+          if (row.deleted_at) return false;
+          if (asOf !== undefined && row.valid_from && asOf < row.valid_from)
+            return false;
+          if (asOf !== undefined && row.valid_to && asOf >= row.valid_to)
+            return false;
+          return true;
+        }
+        case "includeEnded": {
+          return !row.deleted_at;
+        }
+        case "includeTombstones": {
+          return true;
+        }
       }
-      case "includeEnded": {
-        return !row.deleted_at;
-      }
-      case "includeTombstones": {
-        return true;
-      }
-    }
+    };
   }
 
   #createQueryForBackend(
     backend: GraphBackend | TransactionBackend,
+    sealedCoordinate?: ReadCoordinate,
   ): QueryBuilder<G> {
     return createQueryBuilder<G>(this.graphId, this.#registry, {
       // TransactionBackend omits transaction/close, but query execution only needs
@@ -2069,6 +2159,7 @@ export class Store<G extends GraphDef> {
       dialect: backend.dialect,
       defaultTraversalExpansion: this.#defaultTraversalExpansion,
       ...(this.#schema !== undefined && { schema: this.#schema }),
+      ...(sealedCoordinate !== undefined && { sealedCoordinate }),
     });
   }
 }

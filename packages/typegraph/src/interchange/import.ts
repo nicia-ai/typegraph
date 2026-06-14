@@ -14,6 +14,7 @@ import {
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import { type Store } from "../store/store";
+import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
   type ImportError,
@@ -244,6 +245,32 @@ type ProcessResult =
   | { status: "skipped" }
   | { status: "error"; error: string };
 
+/**
+ * Validates an entity's validity-window timestamps against the canonical
+ * fixed-width UTC ISO-8601 contract that `create` / `update` enforce, so no
+ * import write path can persist a non-canonical `valid_from` / `valid_to` that
+ * later mis-sorts as text against an `asOf` read coordinate. The interchange
+ * schema enforces the same contract at the parse boundary, but `importGraph`
+ * accepts a pre-typed `GraphData` and does not re-parse it, so this is the
+ * guarantee for callers that bypass the schema. Returns a per-row error message
+ * (recorded in the import result) instead of throwing, so one malformed row
+ * does not abort the whole import.
+ */
+function validateValidityWindow(
+  entity: Readonly<{
+    validFrom?: string | undefined;
+    validTo?: string | undefined;
+  }>,
+): string | undefined {
+  try {
+    validateOptionalCanonicalIsoDate(entity.validFrom, "validFrom");
+    validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 async function processNode(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
@@ -266,6 +293,11 @@ async function processNode(
 
   if (!propsResult.success) {
     return { status: "error", error: propsResult.error };
+  }
+
+  const validityError = validateValidityWindow(node);
+  if (validityError !== undefined) {
+    return { status: "error", error: validityError };
   }
 
   // Check if node already exists
@@ -447,6 +479,11 @@ async function processEdge(
 
   if (!propsResult.success) {
     return { status: "error", error: propsResult.error };
+  }
+
+  const validityError = validateValidityWindow(edge);
+  if (validityError !== undefined) {
+    return { status: "error", error: validityError };
   }
 
   // Check if edge already exists

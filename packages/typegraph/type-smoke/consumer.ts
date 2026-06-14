@@ -161,7 +161,7 @@ void store.algorithms.degree(aliceId, {});
 // TemporalAlgorithmOptions composes into every algorithm's option type.
 const temporal: TemporalAlgorithmOptions = {
   temporalMode: "asOf",
-  asOf: "2024-01-01T00:00:00Z",
+  asOf: "2024-01-01T00:00:00.000Z",
 };
 void store.algorithms.shortestPath(aliceId, bobId, {
   edges: ["knows"],

@@ -14,6 +14,7 @@ export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerSetOperationIntegrationTests } from "./set-operations";
+export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerTemporalIntegrationTests } from "./temporal";
 export type { IntegrationTestContext } from "./test-context";
