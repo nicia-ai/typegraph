@@ -44,6 +44,19 @@ npx tsx examples/<example-name>.ts
 | [18-fhir-graph-merge.ts](./18-fhir-graph-merge.ts) | Branch and merge overlapping FHIR-style records into a canonical patient care graph with conflict and provenance reporting |
 | [19-incremental-merge.ts](./19-incremental-merge.ts) | Incrementally ingest a new source into a live graph with `mergeIncremental()` — recall an already-committed entity by its unique key (no duplicate), flag the conflict, and persist queryable provenance |
 
+### Time Travel & Bitemporal
+
+| Example | Description |
+|---------|-------------|
+| [20-bitemporal-time-travel.ts](./20-bitemporal-time-travel.ts) | Valid time (`store.asOf`) + recorded time (`store.asOfRecorded`, `history: true`): corrections, effective dating, and the bitemporal 2×2 — what TypeGraph captured as true at a recorded instant |
+| [21-agent-decision-replay.ts](./21-agent-decision-replay.ts) | Reconstruct the exact knowledge graph an AI agent saw at decision time and replay the *same* `query()` / `degree()` over it — point-in-time-correct reasoning for audit, eval, and debugging |
+| [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: pin an access graph to the breach instant and run `reachable()` to recover the true blast radius — including the over-permissive edge that was deleted afterward |
+
+Docs walkthroughs:
+[Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-time-travel)
+· [Agent Decision Replay](https://typegraph.dev/examples/agent-decision-replay)
+· [Breach Forensics](https://typegraph.dev/examples/breach-forensics)
+
 ### Backend Configuration
 
 | Example | Description |
@@ -136,3 +149,6 @@ Each example follows a consistent pattern:
 9. For production, see **10-postgresql** for backend configuration
 10. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
 11. For end-to-end application demos, see **14-research-copilot**
+12. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
+    then see **21-agent-decision-replay** (reconstruct what an agent saw) and
+    **22-breach-forensics** (bitemporal reachability)

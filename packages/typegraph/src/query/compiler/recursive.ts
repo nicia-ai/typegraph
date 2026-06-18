@@ -31,6 +31,7 @@ import {
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
+import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
 import { compileTypedJsonExtract } from "./typed-json-extract";
 import {
   addRequiredColumn,
@@ -124,6 +125,8 @@ function runRecursiveQueryPassPipeline(
     },
   });
   state = temporalPass.state;
+
+  assertRecordedQueryAstDoesNotUseCurrentIndexes(state.ast);
 
   const columnPruningPass = runCompilerPass(state, {
     name: "column_pruning",

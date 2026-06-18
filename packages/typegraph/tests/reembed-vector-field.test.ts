@@ -90,6 +90,19 @@ describe("parseDimensionMismatch", () => {
       actual: 16,
     });
   });
+
+  it("parses a postgres-js shaped object wrapped via .cause", () => {
+    // postgres-js surfaces its driver error as a plain object (not an Error)
+    // on the Drizzle wrapper's .cause. Reading `.message` off it must work —
+    // a naive String(link) yields "[object Object]" and the regex never matches.
+    const wrapped = new Error('Failed query: INSERT INTO "embeddings"', {
+      cause: { code: "22000", message: "expected 384 dimensions, not 512" },
+    });
+    expect(parseDimensionMismatch(wrapped)).toEqual({
+      expected: 384,
+      actual: 512,
+    });
+  });
 });
 
 describe("store.reembedVectorField (sqlite-vec)", () => {

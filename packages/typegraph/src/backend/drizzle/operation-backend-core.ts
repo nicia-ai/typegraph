@@ -8,6 +8,7 @@ import {
   StaleVersionError,
   UniquenessError,
 } from "../../errors";
+import { chunk as chunkArray } from "../../utils/array";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -36,7 +37,11 @@ import type {
   UpdateEdgeParams,
   UpdateNodeParams,
 } from "../types";
-import { type CommonOperationStrategy } from "./operations/strategy";
+import {
+  type CommonOperationStrategy,
+  createCachedTableExistence,
+  type TableExistenceCacheOptions,
+} from "./operations/strategy";
 import { nowIso as defaultNowIso } from "./row-mappers";
 
 /**
@@ -59,6 +64,7 @@ export type CommonOperationBackend = Pick<
   | "deleteNode"
   | "deleteUnique"
   | "edgeExistsBetween"
+  | "executeStatement"
   | "findEdgesByKind"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
@@ -149,22 +155,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   nowIso?: (() => string) | undefined;
   operationStrategy: CommonOperationStrategy;
   rowMappers: OperationBackendRowMappers;
+  tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
-
-function chunkArray<T>(
-  values: readonly T[],
-  size: number,
-): readonly (readonly T[])[] {
-  if (values.length <= size) {
-    return [values];
-  }
-
-  const chunks: T[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
-}
 
 function verifyExpectedActiveVersion(
   graphId: string,
@@ -187,6 +179,39 @@ export function createCommonOperationBackend(
   const { batchConfig, execution, operationStrategy, rowMappers } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
+  // The clear() existence pre-check is the only thing that probes these tables.
+  // Positive results are cached by default because on standard schemas the
+  // recorded DDL is stable; Postgres disables that cache because visibility is
+  // search_path-sensitive. Missing tables stay re-probable unless a caller opts
+  // into negative caching.
+  const requiredClearTableExists = createCachedTableExistence((tableName) =>
+    execution.execGet<Record<string, unknown>>(
+      operationStrategy.buildTableExists(tableName),
+    ),
+    options.tableExistenceCache,
+  );
+
+  async function runIgnorableClearStatement(
+    statement: Readonly<{
+      query: SQL;
+      ignoreMissingTable?: boolean;
+      requiredTableName?: string;
+    }>,
+  ): Promise<void> {
+    // The existence pre-check is the guard for tables that predate a schema
+    // addition (e.g. the recorded relations). It works in or out of a
+    // transaction, unlike a SAVEPOINT — which is invalid in autocommit mode on
+    // PostgreSQL and would break clear() on a non-transactional backend.
+    if (
+      statement.ignoreMissingTable === true &&
+      statement.requiredTableName !== undefined &&
+      !(await requiredClearTableExists(statement.requiredTableName))
+    ) {
+      return;
+    }
+    await execution.execRun(statement.query);
+  }
+
   // Returns 0 when no row is currently active — that's the sentinel
   // `expected: { kind: "initial" }` matches against.
   async function readActiveVersion(graphId: string): Promise<number> {
@@ -197,6 +222,10 @@ export function createCommonOperationBackend(
   }
 
   return {
+    async executeStatement(query: SQL): Promise<void> {
+      await execution.execRun(query);
+    },
+
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertNode(params, timestamp);
@@ -634,7 +663,7 @@ export function createCommonOperationBackend(
     async clearGraph(graphId: string): Promise<void> {
       const statements = operationStrategy.buildClearGraph(graphId);
       for (const statement of statements) {
-        await execution.execRun(statement);
+        await runIgnorableClearStatement(statement);
       }
     },
   };

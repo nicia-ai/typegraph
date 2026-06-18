@@ -1,8 +1,6 @@
 /**
  * ExecutableQuery - A query that can be executed, paginated, or streamed.
  */
-import { type SQL } from "drizzle-orm";
-
 import {
   type GraphBackend,
   type TransactionBackend,
@@ -10,6 +8,7 @@ import {
 import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
+import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   mergeEdgeKinds,
   type OrderSpec,
@@ -43,6 +42,7 @@ import {
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
 import { type FieldTypeInfo } from "../schema-introspector";
+import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
@@ -103,8 +103,9 @@ export class ExecutableQuery<
   readonly #selectFn: (
     context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>,
   ) => R;
-  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
-  #cachedOptimizedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedOptimizedCompiled: CompiledSelectSql | typeof NOT_COMPUTED =
+    NOT_COMPUTED;
   #cachedSelectiveFieldsForExecute:
     | readonly SelectiveField[]
     | typeof NOT_COMPUTED
@@ -342,7 +343,7 @@ export class ExecutableQuery<
    * Returns a Drizzle SQL object that can be executed directly
    * with db.all(), db.get(), etc.
    */
-  compile(): SQL {
+  compile(): CompiledSelectSql {
     if (this.#cachedCompiled !== NOT_COMPUTED) return this.#cachedCompiled;
     const ast = this.toAst();
     const compiled = compileQuery(
@@ -456,6 +457,18 @@ export class ExecutableQuery<
     return backend;
   }
 
+  #executeOnBackend<T>(
+    backend: GraphBackend | TransactionBackend,
+    promise: Promise<T>,
+    surface: string,
+  ): Promise<T> {
+    if (this.#state.recordedAsOf === undefined) return promise;
+    return withRecordedRelationsPrecondition(promise, {
+      dialect: backend.dialect,
+      surface,
+    });
+  }
+
   /**
    * Executes the query and returns typed results.
    *
@@ -473,6 +486,7 @@ export class ExecutableQuery<
           "Use store.query() or pass a backend to createQueryBuilder().",
       );
     }
+    const backend = this.#config.backend;
 
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
     if (hasParameterReferences(this.toAst())) {
@@ -489,8 +503,11 @@ export class ExecutableQuery<
 
     // Phase 2: Fall back to full fetch (existing behavior)
     const compiled = this.compile();
-    const rawRows =
-      await this.#config.backend.execute<Record<string, unknown>>(compiled);
+    const rawRows = await this.#executeOnBackend(
+      backend,
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-query",
+    );
 
     // Transform path columns for SQLite (converts "|id1|id2|" to ["id1", "id2"])
     const dialect = this.#config.dialect ?? "sqlite";
@@ -515,8 +532,9 @@ export class ExecutableQuery<
   async executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly R[]> {
+    const ast = this.toAst();
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
-    if (hasParameterReferences(this.toAst())) {
+    if (hasParameterReferences(ast)) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
@@ -530,7 +548,11 @@ export class ExecutableQuery<
 
     // Fall back to full fetch
     const compiled = this.compile();
-    const rawRows = await backend.execute<Record<string, unknown>>(compiled);
+    const rawRows = await this.#executeOnBackend(
+      backend,
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-batch-query",
+    );
     const dialect = this.#config.dialect ?? "sqlite";
     const rows = transformPathColumns(rawRows, this.#state, dialect);
 
@@ -555,7 +577,7 @@ export class ExecutableQuery<
     }
 
     // Build and compile optimized query (cached per instance)
-    let compiled: SQL;
+    let compiled: CompiledSelectSql;
     if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
       const baseAst = buildQueryAst(this.#config, this.#state);
       const selectiveAst = {
@@ -572,8 +594,12 @@ export class ExecutableQuery<
       compiled = this.#cachedOptimizedCompiled;
     }
 
-    const rawSelectiveRows =
-      await this.#requireBackend().execute<Record<string, unknown>>(compiled);
+    const backend = this.#requireBackend();
+    const rawSelectiveRows = await this.#executeOnBackend(
+      backend,
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-query",
+    );
     const dialect = this.#config.dialect ?? "sqlite";
     const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
 
@@ -613,7 +639,7 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    let compiled: SQL;
+    let compiled: CompiledSelectSql;
     if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
       const baseAst = buildQueryAst(this.#config, this.#state);
       const selectiveAst = {
@@ -630,8 +656,11 @@ export class ExecutableQuery<
       compiled = this.#cachedOptimizedCompiled;
     }
 
-    const rawSelectiveRows =
-      await backend.execute<Record<string, unknown>>(compiled);
+    const rawSelectiveRows = await this.#executeOnBackend(
+      backend,
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-batch-query",
+    );
     const dialect = this.#config.dialect ?? "sqlite";
     const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
 

@@ -112,8 +112,13 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless", () => {
 
     const db = drizzleNeon(pool as unknown as NeonPool);
     const backend = createPostgresBackend(db);
+    const executeRaw = backend.executeRaw;
+    expect(executeRaw).toBeDefined();
+    if (executeRaw === undefined) {
+      throw new Error("Postgres backend must expose executeRaw");
+    }
 
-    const rows = await backend.executeRaw!<{
+    const rows = await executeRaw<{
       created_at: string;
       name: string;
     }>("SELECT created_at, name FROM t WHERE id = $1", ["x"]);

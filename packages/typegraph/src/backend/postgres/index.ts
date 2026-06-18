@@ -67,6 +67,9 @@ export {
   edges,
   fulltext,
   nodes,
+  recordedClock,
+  recordedEdges,
+  recordedNodes,
   schemaVersions,
   uniques,
 } from "../drizzle/schema/postgres";

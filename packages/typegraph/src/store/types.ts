@@ -23,8 +23,20 @@ import {
 } from "../core/types";
 import type { TraversalExpansion } from "../query/ast";
 import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
-import { type SqlSchema } from "../query/compiler/schema";
+import {
+  type ExternalRecordedReadSource,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
+import type {
+  CURRENT_ONLY_READ_NAMES,
+  EDGE_BATCH_READ_NAMES,
+  EDGE_TEMPORAL_READ_NAMES,
+  EDGE_WRITE_NAMES,
+  NODE_TEMPORAL_READ_NAMES,
+  NODE_WRITE_NAMES,
+  RECORDED_POINT_READ_NAMES,
+} from "./collection-surface";
 
 // ============================================================
 // Row-to-Meta Field Mapping
@@ -174,12 +186,22 @@ export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 /**
  * Options for node and edge queries.
  */
-export type QueryOptions = Readonly<{
-  /** Temporal mode for the query */
-  temporalMode?: TemporalMode;
-  /** Specific timestamp for asOf queries */
-  asOf?: string;
+export type NoRecordedCoordinate = Readonly<{
+  /**
+   * Recorded/system-time coordinates are internal-only and supplied by
+   * RecordedStoreView. A public options object carrying this key is a type
+   * error even when the object is pre-bound before the call site.
+   */
+  recordedAsOf?: never;
 }>;
+
+export type QueryOptions = NoRecordedCoordinate &
+  Readonly<{
+    /** Temporal mode for the query */
+    temporalMode?: TemporalMode;
+    /** Specific timestamp for asOf queries */
+    asOf?: string;
+  }>;
 
 // ============================================================
 // Observability Hooks
@@ -270,13 +292,10 @@ export type StoreHooks = Readonly<{
 // Store Configuration
 // ============================================================
 
-/**
- * Options for creating a store.
- */
-export type StoreOptions = Readonly<{
+type BaseStoreOptions = Readonly<{
   /** Observability hooks for monitoring */
   hooks?: StoreHooks;
-  /** SQL schema configuration for custom table names */
+  /** SQL schema configuration from createSqlSchema(...) for custom table names */
   schema?: SqlSchema;
   /** Query default behaviors. */
   queryDefaults?: Readonly<{
@@ -284,6 +303,33 @@ export type StoreOptions = Readonly<{
     traversalExpansion?: TraversalExpansion;
   }>;
 }>;
+
+/**
+ * Store options without built-in recorded-time capture. A recorded read relation
+ * can still be bound explicitly for hosts that populate history externally.
+ */
+export type LiveStoreOptions = BaseStoreOptions &
+  Readonly<{
+    history?: false | undefined;
+    recordedRead?: ExternalRecordedReadSource | undefined;
+  }>;
+
+/**
+ * Store options with TypeGraph-managed recorded-time capture. `history: true`
+ * captures TypeGraph writes and binds TypeGraph's built-in recorded relation
+ * internally. Externally populated recorded read sources are read-only bindings
+ * and are intentionally accepted only by {@link LiveStoreOptions}.
+ */
+export type HistoryStoreOptions = BaseStoreOptions &
+  Readonly<{
+    history: true;
+    recordedRead?: never;
+  }>;
+
+/**
+ * Options for creating a store.
+ */
+export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 
 /**
  * A mutable handle to the current `Store`, used by `store.evolve(...)`
@@ -1017,45 +1063,11 @@ export type GraphEdgeCollections<G extends GraphDef> = {
 // StoreView read-only collection surfaces
 // ============================================================
 
-// ------------------------------------------------------------
-// Collection read / write split
-// ------------------------------------------------------------
-//
-// The live NodeCollection / EdgeCollection partition into buckets a
-// StoreView treats differently:
-//
-//   - temporal reads — honor the pinned coordinate (the view pins them, with
-//     the per-call temporal argument dropped);
-//   - current reads  — have no temporal axis, so the view delegates them on a
-//     `current` pin and refuses them on a temporal pin (they would otherwise
-//     silently return current data);
-//   - writes         — never available on a read-only view; and
-//   - batch reads    — deferred reads for `store.batch()`, absent from a view
-//     (no batch context).
-//
-// `Pick` validates every key against the live collection, and a `test-d`
-// conformance check asserts the buckets exactly partition it — so a new
-// method cannot be silently omitted from the view's surface decision, and a
-// new temporal read auto-appears (pinned) in the derived view type.
-
 /** Temporal-aware node reads — a {@link StoreView} pins these. */
 export type NodeTemporalReads<
   N extends NodeType,
   CN extends string = string,
-> = Pick<NodeCollection<N, CN>, "getById" | "getByIds" | "find" | "count">;
-
-/**
- * The method names of the current-state-only node reads (constraint / index
- * lookups). Single source of truth: {@link NodeCurrentReads} (the type) and the
- * `StoreView`'s runtime routing Set are both derived from this array, so adding
- * a current-only read here updates both at once — a new read cannot pass the
- * type partition yet be misrouted at runtime (refused as a write).
- */
-export const CURRENT_ONLY_READ_NAMES = [
-  "findByConstraint",
-  "bulkFindByConstraint",
-  "bulkFindByIndex",
-] as const;
+> = Pick<NodeCollection<N, CN>, (typeof NODE_TEMPORAL_READ_NAMES)[number]>;
 
 /**
  * Current-state-only node reads (constraint / index lookups). No temporal
@@ -1070,40 +1082,17 @@ export type NodeCurrentReads<
 /** Node writes — never available on a read-only {@link StoreView}. */
 export type NodeWrites<N extends NodeType, CN extends string = string> = Pick<
   NodeCollection<N, CN>,
-  | "create"
-  | "createFromRecord"
-  | "update"
-  | "delete"
-  | "hardDelete"
-  | "upsertById"
-  | "upsertByIdFromRecord"
-  | "bulkCreate"
-  | "bulkUpsertById"
-  | "bulkInsert"
-  | "bulkDelete"
-  | "getOrCreateByConstraint"
-  | "bulkGetOrCreateByConstraint"
+  (typeof NODE_WRITE_NAMES)[number]
 >;
 
-/**
- * Temporal-aware edge reads — a {@link StoreView} pins these. Unlike the node
- * collection, edges have no current-state-only reads: `findByEndpoints` honors
- * the temporal coordinate like `findFrom` / `findTo`, so every edge read is
- * pinnable.
- */
+/** Temporal-aware edge reads — a {@link StoreView} pins these. */
 export type EdgeTemporalReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
 > = Pick<
   EdgeCollection<E, From, To>,
-  | "getById"
-  | "getByIds"
-  | "find"
-  | "count"
-  | "findFrom"
-  | "findTo"
-  | "findByEndpoints"
+  (typeof EDGE_TEMPORAL_READ_NAMES)[number]
 >;
 
 /**
@@ -1114,29 +1103,14 @@ export type EdgeBatchReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<
-  EdgeCollection<E, From, To>,
-  "batchFindFrom" | "batchFindTo" | "batchFindByEndpoints"
->;
+> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
 
 /** Edge writes — never available on a read-only {@link StoreView}. */
 export type EdgeWrites<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<
-  EdgeCollection<E, From, To>,
-  | "create"
-  | "update"
-  | "delete"
-  | "hardDelete"
-  | "bulkCreate"
-  | "bulkUpsertById"
-  | "bulkInsert"
-  | "bulkDelete"
-  | "getOrCreateByEndpoints"
-  | "bulkGetOrCreateByEndpoints"
->;
+> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_WRITE_NAMES)[number]>;
 
 /**
  * The read-only node surface a {@link StoreView} exposes for one node kind.
@@ -1246,6 +1220,44 @@ export type StoreViewEdgeCollections<G extends GraphDef> = {
   >;
 };
 
+/** Recorded-time node point reads for one node kind. */
+export type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<
+  StoreViewNodeCollection<N>,
+  (typeof RECORDED_POINT_READ_NAMES)[number]
+>;
+
+/** Recorded-time edge point reads for one edge kind. */
+export type RecordedStoreViewEdgeCollection<
+  E extends AnyEdgeType,
+  From extends NodeType = NodeType,
+  To extends NodeType = NodeType,
+> = Pick<
+  StoreViewEdgeCollection<E, From, To>,
+  (typeof RECORDED_POINT_READ_NAMES)[number]
+>;
+
+/** Recorded-time edge collection derived from an `EdgeRegistration`. */
+export type TypedRecordedStoreViewEdgeCollection<R extends EdgeRegistration> =
+  RecordedStoreViewEdgeCollection<
+    R["type"],
+    EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType,
+    EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
+  >;
+
+/** Mapped type of all recorded-time node point-read collections. */
+export type RecordedStoreViewNodeCollections<G extends GraphDef> = {
+  [K in keyof G["nodes"] & string]-?: RecordedStoreViewNodeCollection<
+    G["nodes"][K]["type"]
+  >;
+};
+
+/** Mapped type of all recorded-time edge point-read collections. */
+export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
+  [K in keyof G["edges"] & string]-?: TypedRecordedStoreViewEdgeCollection<
+    G["edges"][K]
+  >;
+};
+
 // ============================================================
 // Transaction Context
 // ============================================================
@@ -1290,6 +1302,12 @@ export type StoreViewEdgeCollections<G extends GraphDef> = {
  * callback with no atomicity and there is no transaction to enlist.
  * Its type is the `AdoptedTransaction` union; cast to your concrete
  * Drizzle database type at the call site.
+ *
+ * When the store was created with `{ history: true }`, `tx.sql` is present but
+ * replaced by a fail-loud guard because raw SQL would bypass recorded-time
+ * capture. Use the typed `tx.nodes` / `tx.edges` collections inside
+ * `transaction()`, or use `store.withRecordedTransaction(externalTx, fn)` when
+ * the relational layer owns the transaction boundary.
  *
  * @example
  * ```typescript

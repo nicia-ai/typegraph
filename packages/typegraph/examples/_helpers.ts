@@ -14,3 +14,16 @@ export function createExampleBackend() {
   const { backend } = createLocalSqliteBackend();
   return backend;
 }
+
+type RecordedClock<Instant extends string> = Readonly<{
+  recordedNow: () => Promise<Instant | undefined>;
+}>;
+
+export async function requireRecordedNow<Instant extends string>(
+  store: RecordedClock<Instant>,
+  message = "expected recorded history",
+): Promise<Instant> {
+  const recordedNow = await store.recordedNow();
+  if (recordedNow === undefined) throw new Error(message);
+  return recordedNow;
+}

@@ -5,8 +5,10 @@
  * in the forward direction ("out"), reverse ("in"), or undirected ("both").
  */
 import type { EdgeKinds, GraphDef } from "../../core/define-graph";
+import type { RecordedInstant } from "../../core/temporal";
 import type { TemporalMode } from "../../core/types";
 import type { RecursiveCyclePolicy } from "../../query/ast";
+import type { NoRecordedCoordinate } from "../types";
 
 /**
  * Direction of edge traversal.
@@ -38,15 +40,22 @@ export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
  * mode. If neither option is supplied, the algorithm falls back to
  * `graph.defaults.temporalMode`.
  */
-export type TemporalAlgorithmOptions = Readonly<{
-  /** Temporal mode. Defaults to the graph's configured default. */
-  temporalMode?: TemporalMode;
-  /**
-   * ISO-8601 timestamp pinning the read. Required when `temporalMode` is
-   * `"asOf"`; rejected (throws `ValidationError`) for every other mode.
-   */
-  asOf?: string;
-}>;
+export type TemporalAlgorithmOptions = NoRecordedCoordinate &
+  Readonly<{
+    /** Temporal mode. Defaults to the graph's configured default. */
+    temporalMode?: TemporalMode;
+    /**
+     * ISO-8601 timestamp pinning the read. Required when `temporalMode` is
+     * `"asOf"`; rejected (throws `ValidationError`) for every other mode.
+     */
+    asOf?: string;
+  }>;
+
+export type InternalTemporalAlgorithmOptions = Omit<
+  TemporalAlgorithmOptions,
+  "recordedAsOf"
+> &
+  Readonly<{ recordedAsOf?: RecordedInstant }>;
 
 /**
  * Base options for traversal-style algorithms.
@@ -66,6 +75,10 @@ export type BaseTraversalOptions<G extends GraphDef> =
       /** Cycle policy (default: `"prevent"`). */
       cyclePolicy?: AlgorithmCyclePolicy;
     }>;
+
+export type InternalBaseTraversalOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<BaseTraversalOptions<G>, keyof TemporalAlgorithmOptions>;
 
 /**
  * A node reached during traversal, annotated with the shortest depth at which
@@ -103,6 +116,9 @@ export type ShortestPathResult = Readonly<{
  */
 export type ShortestPathOptions<G extends GraphDef> = BaseTraversalOptions<G>;
 
+export type InternalShortestPathOptions<G extends GraphDef> =
+  InternalBaseTraversalOptions<G>;
+
 /**
  * Options for `reachable`.
  *
@@ -115,6 +131,10 @@ export type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> &
     /** Exclude the source node from the result set (default: `false`). */
     excludeSource?: boolean;
   }>;
+
+export type InternalReachableOptions<G extends GraphDef> =
+  InternalBaseTraversalOptions<G> &
+    Omit<ReachableOptions<G>, keyof BaseTraversalOptions<G>>;
 
 /**
  * Options for `neighbors`.
@@ -135,6 +155,10 @@ export type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     cyclePolicy?: AlgorithmCyclePolicy;
   }>;
 
+export type InternalNeighborsOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<NeighborsOptions<G>, keyof TemporalAlgorithmOptions>;
+
 /**
  * Options for `degree`.
  *
@@ -151,3 +175,7 @@ export type DegreeOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     /** Direction (default: `"both"`). */
     direction?: TraversalDirection;
   }>;
+
+export type InternalDegreeOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<DegreeOptions<G>, keyof TemporalAlgorithmOptions>;

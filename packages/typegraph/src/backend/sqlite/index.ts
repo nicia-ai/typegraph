@@ -37,6 +37,9 @@ export {
   type CreateSqliteTablesOptions,
   edges,
   nodes,
+  recordedClock,
+  recordedEdges,
+  recordedNodes,
   schemaVersions,
   uniques,
 } from "../drizzle/schema/sqlite";

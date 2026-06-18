@@ -31,7 +31,7 @@ import {
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
-import type { SqlTableNames } from "../../query/compiler/schema";
+import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   buildFulltextCapabilities,
   fts5Strategy,
@@ -66,6 +66,7 @@ import {
   type SchemaVersionRow,
   type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
+  SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
   type TransactionOptions,
   type UpsertEmbeddingParams,
@@ -173,7 +174,6 @@ export type SqliteBackendOptions = Readonly<{
   capabilities?: Partial<BackendCapabilities>;
 }>;
 
-const SQLITE_MAX_BIND_PARAMETERS = 999;
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
 const SQLITE_NODE_INSERT_BATCH_SIZE = Math.max(
@@ -337,7 +337,7 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   executionAdapter: SqliteExecutionAdapter;
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   serializedQueue?: SerializedExecutionQueue;
-  tableNames: SqlTableNames;
+  tableNames: ResolvedSqlTableNames;
   fulltextStrategy: FulltextStrategy;
   /**
    * Active vector strategy, or `undefined` when the connection has no
@@ -361,7 +361,7 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   executionAdapter?: SqliteExecutionAdapter;
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   profileHints: SqliteExecutionProfileHints;
-  tableNames: SqlTableNames;
+  tableNames: ResolvedSqlTableNames;
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreateSqliteOperationBackendOptions}. */
   vectorStrategy?: VectorStrategy | undefined;
@@ -657,9 +657,12 @@ export function createSqliteBackend(
     ...options.capabilities,
   };
 
-  const tableNames: SqlTableNames = {
+  const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
+    recordedNodes: getTableName(tables.recordedNodes),
+    recordedEdges: getTableName(tables.recordedEdges),
+    recordedClock: getTableName(tables.recordedClock),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };

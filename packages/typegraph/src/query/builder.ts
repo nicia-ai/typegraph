@@ -11,10 +11,18 @@ import { type GraphDef } from "../core/define-graph";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   type CreateQueryBuilderOptions,
+  type EmptyAliasMap,
+  type EmptyEdgeAliasMap,
+  type EmptyRecursiveAliasMap,
   QueryBuilder,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type QueryCoordinateState,
 } from "./builder/index";
+import {
+  type QueryBuilderInternalContext,
+  registerQueryBuilderInternalContext,
+} from "./builder/internal-context";
 import { createSchemaIntrospector } from "./schema-introspector";
 
 // Re-export all classes
@@ -57,12 +65,16 @@ export type {
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EmptyAliasMap,
+  EmptyEdgeAliasMap,
+  EmptyRecursiveAliasMap,
   FieldAccessor,
   NodeAccessor,
   NodeAlias,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
@@ -95,11 +107,56 @@ export type {
  * });
  * ```
  */
+type InternalCreateQueryBuilderOptions = CreateQueryBuilderOptions &
+  QueryBuilderInternalContext;
+
+export type InitialQueryBuilder<
+  G extends GraphDef,
+  CoordinateState extends QueryCoordinateState = "open",
+> = QueryBuilder<
+  G,
+  EmptyAliasMap,
+  EmptyEdgeAliasMap,
+  EmptyRecursiveAliasMap,
+  CoordinateState
+>;
+
 export function createQueryBuilder<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   options?: CreateQueryBuilderOptions,
-): QueryBuilder<G> {
+): InitialQueryBuilder<G>;
+export function createQueryBuilder<G extends GraphDef>(
+  graphId: string,
+  registry: KindRegistry,
+  options?: CreateQueryBuilderOptions,
+): InitialQueryBuilder<G> {
+  return createQueryBuilderWithContext<G>(graphId, registry, options);
+}
+
+export function createInternalQueryBuilder<
+  G extends GraphDef,
+  CoordinateState extends QueryCoordinateState = "open",
+>(
+  graphId: string,
+  registry: KindRegistry,
+  options?: InternalCreateQueryBuilderOptions,
+): InitialQueryBuilder<G, CoordinateState> {
+  return createQueryBuilderWithContext<G, CoordinateState>(
+    graphId,
+    registry,
+    options,
+  );
+}
+
+function createQueryBuilderWithContext<
+  G extends GraphDef,
+  CoordinateState extends QueryCoordinateState = "open",
+>(
+  graphId: string,
+  registry: KindRegistry,
+  options?: InternalCreateQueryBuilderOptions,
+): InitialQueryBuilder<G, CoordinateState> {
   const schemaIntrospector = createSchemaIntrospector(
     registry.nodeKinds,
     registry.edgeKinds,
@@ -114,14 +171,20 @@ export function createQueryBuilder<G extends GraphDef>(
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),
+  };
+  registerQueryBuilderInternalContext(config, {
+    ...(options?.recordedReadBinding !== undefined && {
+      recordedReadBinding: options.recordedReadBinding,
+    }),
     ...(options?.sealedCoordinate !== undefined && {
       sealedCoordinate: options.sealedCoordinate,
     }),
-  };
+  });
 
   // A sealed coordinate (StoreView pin) seeds the temporal axis; `.temporal()`
   // then refuses to override it.
   const sealed = options?.sealedCoordinate?.valid;
+  const recorded = options?.sealedCoordinate?.recorded;
 
   const initialState: QueryBuilderState = {
     startAlias: "",
@@ -136,6 +199,7 @@ export function createQueryBuilder<G extends GraphDef>(
     offset: undefined,
     temporalMode: sealed?.mode ?? "current",
     asOf: sealed?.asOf,
+    recordedAsOf: recorded?.asOf,
     groupBy: undefined,
     having: undefined,
     fusion: undefined,
@@ -143,5 +207,8 @@ export function createQueryBuilder<G extends GraphDef>(
     dynamicEdgeAliases: new Set(),
   };
 
-  return new QueryBuilder(config, initialState);
+  return new QueryBuilder(config, initialState) as InitialQueryBuilder<
+    G,
+    CoordinateState
+  >;
 }

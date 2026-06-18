@@ -34,6 +34,8 @@ import {
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
+  registerRecordedReadBindingIntegrationTests,
+  registerRecordedTimeIntegrationTests,
   registerRecursiveIntegrationTests,
   registerSetOperationIntegrationTests,
   registerStoreViewIntegrationTests,
@@ -119,6 +121,8 @@ export function createIntegrationTestSuite(
     registerPredicateIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerTemporalIntegrationTests(context);
+    registerRecordedTimeIntegrationTests(context);
+    registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerEdgeOperationIntegrationTests(context);
     registerRecursiveIntegrationTests(context);

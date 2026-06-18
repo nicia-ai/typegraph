@@ -12,6 +12,7 @@ import {
   type NodeRow as BackendNodeRow,
   type TransactionBackend,
 } from "../backend/types";
+import { getRowsByIds } from "./row-fetch";
 
 /**
  * Fetches node rows by id into a Map keyed by id. Uses `backend.getNodes`
@@ -24,23 +25,11 @@ export async function getNodeRowsByIds(
   kind: string,
   ids: readonly string[],
 ): Promise<Map<string, BackendNodeRow>> {
-  const rowsById = new Map<string, BackendNodeRow>();
-  if (ids.length === 0) return rowsById;
-
-  if (backend.getNodes !== undefined) {
-    const rows = await backend.getNodes(graphId, kind, ids);
-    for (const row of rows) {
-      rowsById.set(row.id, row);
-    }
-    return rowsById;
-  }
-
-  const uniqueIds = [...new Set(ids)];
-  const rows = await Promise.all(
-    uniqueIds.map((id) => backend.getNode(graphId, kind, id)),
-  );
-  for (const row of rows) {
-    if (row !== undefined) rowsById.set(row.id, row);
-  }
-  return rowsById;
+  return getRowsByIds(ids, {
+    batch:
+      backend.getNodes === undefined ?
+        undefined
+      : (batchIds) => backend.getNodes!(graphId, kind, batchIds),
+    one: (id) => backend.getNode(graphId, kind, id),
+  });
 }

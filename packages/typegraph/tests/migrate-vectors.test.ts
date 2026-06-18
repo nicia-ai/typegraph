@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrateLegacyEmbeddings } from "../src/backend/migrate-vectors";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { isMissingTableError } from "../src/utils/sql-errors";
 
 const LEGACY_TABLE = "typegraph_node_embeddings";
@@ -95,11 +96,13 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
       fieldPath,
     );
     try {
-      const rows = await backend.execute<{ c: number }>(sql`
-        SELECT COUNT(*) AS c
-        FROM ${sql.raw(`"${table}"`)}
-        WHERE "graph_id" = ${graphId}
-      `);
+      const rows = await backend.execute<{ c: number }>(
+        asCompiledRowsSql(sql`
+          SELECT COUNT(*) AS c
+          FROM ${sql.raw(`"${table}"`)}
+          WHERE "graph_id" = ${graphId}
+        `),
+      );
       return rows[0]?.c ?? 0;
     } catch (error) {
       // Graph-scoped storage: a graph with no migrated embeddings has no

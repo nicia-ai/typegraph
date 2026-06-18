@@ -50,6 +50,9 @@ import { regconfig, tsvector } from "../columns/fulltext";
 export type PostgresTableNames = Readonly<{
   nodes: string;
   edges: string;
+  recordedNodes: string;
+  recordedEdges: string;
+  recordedClock: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -72,6 +75,9 @@ export type CreatePostgresTablesOptions = Readonly<{
 const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
+  recordedNodes: "typegraph_recorded_nodes",
+  recordedEdges: "typegraph_recorded_edges",
+  recordedClock: "typegraph_recorded_clock",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -179,6 +185,114 @@ export function createPostgresTables(
       ),
       ...buildPostgresEdgeIndexBuilders(t, indexes),
     ],
+  );
+
+  const recordedNodes = pgTable(
+    n.recordedNodes,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+      props: jsonb("props").notNull(),
+      version: integer("version").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedNodes}_entity_idx`).on(
+        t.graphId,
+        t.kind,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedNodes}_open_idx`).on(t.graphId, t.recordedTo),
+      index(`${n.recordedNodes}_valid_idx`).on(
+        t.graphId,
+        t.validFrom,
+        t.validTo,
+      ),
+    ],
+  );
+
+  const recordedEdges = pgTable(
+    n.recordedEdges,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      kind: text("kind").notNull(),
+      fromKind: text("from_kind").notNull(),
+      fromId: text("from_id").notNull(),
+      toKind: text("to_kind").notNull(),
+      toId: text("to_id").notNull(),
+      props: jsonb("props").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedEdges}_entity_idx`).on(
+        t.graphId,
+        t.kind,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_open_idx`).on(t.graphId, t.recordedTo),
+      index(`${n.recordedEdges}_from_idx`).on(
+        t.graphId,
+        t.fromKind,
+        t.fromId,
+        t.kind,
+        t.toKind,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_to_idx`).on(
+        t.graphId,
+        t.toKind,
+        t.toId,
+        t.kind,
+        t.fromKind,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_valid_idx`).on(
+        t.graphId,
+        t.validFrom,
+        t.validTo,
+      ),
+    ],
+  );
+
+  const recordedClock = pgTable(
+    n.recordedClock,
+    {
+      graphId: text("graph_id").notNull(),
+      recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
   const uniques = pgTable(
@@ -379,6 +493,9 @@ export function createPostgresTables(
   return {
     nodes,
     edges,
+    recordedNodes,
+    recordedEdges,
+    recordedClock,
     uniques,
     schemaVersions,
     indexMaterializations,
@@ -398,7 +515,16 @@ export const tables = createPostgresTables();
 /**
  * Convenience exports for default tables.
  */
-export const { nodes, edges, uniques, schemaVersions, fulltext } = tables;
+export const {
+  nodes,
+  edges,
+  recordedNodes,
+  recordedEdges,
+  recordedClock,
+  uniques,
+  schemaVersions,
+  fulltext,
+} = tables;
 
 /**
  * Type representing the tables object returned by createPostgresTables.

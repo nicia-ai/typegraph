@@ -93,7 +93,14 @@ async function setupTestDatabase(): Promise<void> {
 async function clearTestData(): Promise<void> {
   if (!sharedSql) return;
   await sharedSql.unsafe(
-    `TRUNCATE typegraph_node_fulltext,
+    `TRUNCATE typegraph_index_materializations,
+              typegraph_contribution_materializations,
+              typegraph_kind_removals,
+              typegraph_reconciliation_markers,
+              typegraph_node_fulltext,
+              typegraph_recorded_clock,
+              typegraph_recorded_nodes,
+              typegraph_recorded_edges,
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,

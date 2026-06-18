@@ -455,7 +455,9 @@ function createStore<G extends GraphDef>(
 | Option | Type | Description |
 |--------|------|-------------|
 | `hooks` | `StoreHooks` | Observability hooks for monitoring operations |
-| `schema` | `SqlSchema` | Custom table name configuration |
+| `history` | `boolean` | Enable built-in recorded / system-time capture: every committed TypeGraph node/edge write is captured into the recorded-time relations read by [`store.asOfRecorded(T)`](/queries/temporal#recorded-time-bitemporal) (default: `false`) |
+| `recordedRead` | `ExternalRecordedReadSource` | Bind an already-populated recorded relation for `store.asOfRecorded(T)` reads without enabling TypeGraph-managed capture. Must be created with `recordedRelation({ schema })` using a `createSqlSchema(...)` schema; the store validates those factory descriptors at runtime. Use `history: true` when TypeGraph should capture writes and advance `store.recordedNow()`. |
+| `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
 
 **Example:**
@@ -2039,6 +2041,57 @@ reason: the fulltext / vector index reflects current state only. (Edge
 
 See [Temporal queries](/queries/temporal#shared-coordinate-views-storeasof) for
 worked examples.
+
+#### Recorded time (`store.asOfRecorded`)
+
+With a store created with `{ history: true }` or an explicit `recordedRead`
+binding, `store.asOfRecorded(T)` returns a `RecordedStoreView` — a narrow
+read-only lens that reconstructs the graph as the recorded relation represented
+it at instant `T` (the system-time axis), composing with the valid-time
+coordinate above for bitemporal graph reads.
+
+```typescript
+store.asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
+// also: store.asOf(validT).asOfRecorded(recordedT)
+//       store.view({ mode }).asOfRecorded(recordedT)
+store.recordedNow(): Promise<RecordedInstant | undefined>;
+asRecordedInstant(value: string): RecordedInstant; // brand an external timestamp
+```
+
+- **`store.asOfRecorded(T)`** is diagonal sugar — the recorded *and* valid axes
+  both at `T`. Chain from `store.asOf(validT)` / `store.view({ mode })` to pin
+  the two axes independently.
+- **`T` is a `RecordedInstant`**, a branded canonical timestamp. It comes from
+  `store.recordedNow()` or `asRecordedInstant(...)`; a raw wall-clock string
+  (`new Date().toISOString()`) is a compile error. Recorded instants are
+  monotonic and can run briefly ahead of wall-clock time under bursty writes, so
+  a wall-clock value may sort before the most recent commits and silently omit
+  them — the brand prevents that at the type level.
+- **`store.recordedNow()`** returns the recorded high-water mark — the latest
+  captured recorded instant. After guarding the `undefined` case,
+  `store.asOfRecorded(checkpoint)` reconstructs everything committed so far. Use
+  it as a deterministic anchor instead of the wall clock. Returns `undefined`
+  before the first capture; throws if the store was not created with
+  `{ history: true }`.
+- **`recordedRead`** binds an externally populated recorded relation for reads
+  only. It does not capture TypeGraph writes, advance TypeGraph's recorded clock,
+  or make `store.recordedNow()` available. It must be created with
+  `recordedRelation({ schema })` using a `createSqlSchema(...)` schema and
+  cannot be combined with `history: true`.
+- The view exposes only **reconstructing** reads: `nodes` / `edges` point reads
+  (`getById` / `getByIds`), a sealed `query()`, `subgraph()`, and the graph
+  algorithms (`reachable` / `canReach` / `shortestPath` / `degree`). Broad
+  collection reads, `search`, and fulltext / vector predicates reject — those
+  indexes reflect current state only.
+- Built-in capture covers TypeGraph collection writes. Out-of-band database
+  writes and row-returning raw SQL paths are not captured into the recorded
+  relations.
+
+Adopt an external transaction under `history: true` with the callback form
+`store.withRecordedTransaction(externalTx, async (tx) => ...)`, which flushes
+capture before the caller commits; `store.withTransaction(...)` and raw `tx.sql`
+are refused. See [Recorded time](/queries/temporal#recorded-time-bitemporal) for
+the full guide.
 
 ## Observability Hooks
 

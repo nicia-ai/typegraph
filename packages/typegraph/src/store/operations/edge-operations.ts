@@ -4,6 +4,7 @@
  * Handles edge CRUD operations: create, update, delete.
  */
 import {
+  createBackendOverlay,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
@@ -31,6 +32,12 @@ import {
   checkCardinalityConstraint,
   type ConstraintContext,
 } from "../constraints";
+import {
+  edgeInsertDispatch,
+  runInsertBatch,
+  runInsertBatchReturning,
+  runInsertNoReturn,
+} from "../insert-dispatch";
 import { rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -266,15 +273,11 @@ function createEdgeBatchValidationBackend(
     }
   }
 
-  // Override specific methods on the backend for validation caching.
-  // The cast is necessary because spreading a union type (GraphBackend | TransactionBackend)
-  // produces an intersection of their members, which TypeScript can't narrow back to the union.
-  const validationBackend = {
-    ...backend,
+  const validationBackend = createBackendOverlay(backend, {
     getNode: getNodeCached,
     countEdgesFrom: countEdgesFromCached,
     edgeExistsBetween: edgeExistsBetweenCached,
-  } as GraphBackend | TransactionBackend;
+  } satisfies Partial<GraphBackend | TransactionBackend>);
 
   return {
     backend: validationBackend,
@@ -406,8 +409,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     if (shouldReturnRow) {
       row = await backend.insertEdge(prepared.insertParams);
     } else {
-      await (backend.insertEdgeNoReturn?.(prepared.insertParams) ??
-        backend.insertEdge(prepared.insertParams));
+      await runInsertNoReturn(
+        edgeInsertDispatch(backend),
+        prepared.insertParams,
+      );
     }
 
     if (row === undefined) return;
@@ -483,14 +488,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   const batchInsertParams = preparedCreates.map(
     (prepared) => prepared.insertParams,
   );
-  if (backend.insertEdgesBatch === undefined) {
-    for (const insertParams of batchInsertParams) {
-      await (backend.insertEdgeNoReturn?.(insertParams) ??
-        backend.insertEdge(insertParams));
-    }
-    return;
-  }
-  await backend.insertEdgesBatch(batchInsertParams);
+  await runInsertBatch(edgeInsertDispatch(backend), batchInsertParams);
 }
 
 /**
@@ -534,16 +532,10 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     (prepared) => prepared.insertParams,
   );
 
-  let rows: readonly BackendEdgeRow[];
-  if (backend.insertEdgesBatchReturning === undefined) {
-    const sequentialRows: BackendEdgeRow[] = [];
-    for (const insertParams of batchInsertParams) {
-      sequentialRows.push(await backend.insertEdge(insertParams));
-    }
-    rows = sequentialRows;
-  } else {
-    rows = await backend.insertEdgesBatchReturning(batchInsertParams);
-  }
+  const rows = await runInsertBatchReturning(
+    edgeInsertDispatch(backend),
+    batchInsertParams,
+  );
 
   return rows.map((row) => rowToEdge(row));
 }

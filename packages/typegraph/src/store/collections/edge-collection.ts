@@ -15,6 +15,7 @@ import { type AnyEdgeType, type TemporalMode } from "../../core/types";
 import { UnsupportedPredicateError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
+import { getEdgeRowsByIds } from "../edge-fetch";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -336,33 +337,16 @@ export function createEdgeCollection<
     ): Promise<readonly (Edge<E> | undefined)[]> {
       if (ids.length === 0) return [];
 
+      const rowsById = await getEdgeRowsByIds(backend, graphId, ids);
       // Resolve the coordinate once so the whole batch observes one instant.
       const matches = temporalRowMatcher(options);
-
-      if (backend.getEdges !== undefined) {
-        const rows = await backend.getEdges(graphId, ids);
-        const rowMap = new Map<string, (typeof rows)[number]>();
-        for (const row of rows) {
-          rowMap.set(row.id, row);
-        }
-        return ids.map((id) => {
-          const row = rowMap.get(id);
-          if (!row) return;
-          if (row.kind !== kind) return;
-          if (!matches(row)) return;
-          return narrowEdge<E>(rowToEdge(row));
-        });
-      }
-
-      return Promise.all(
-        ids.map(async (id) => {
-          const row = await backend.getEdge(graphId, id);
-          if (!row) return;
-          if (row.kind !== kind) return;
-          if (!matches(row)) return;
-          return narrowEdge<E>(rowToEdge(row));
-        }),
-      );
+      return ids.map((id) => {
+        const row = rowsById.get(id);
+        if (!row) return;
+        if (row.kind !== kind) return;
+        if (!matches(row)) return;
+        return narrowEdge<E>(rowToEdge(row));
+      });
     },
 
     async update(
@@ -534,24 +518,7 @@ export function createEdgeCollection<
         target: GraphBackend | TransactionBackend,
       ): Promise<Edge<E>[]> => {
         const ids = items.map((item) => item.id);
-        const existingMap = new Map<
-          string,
-          { deleted_at: string | undefined }
-        >();
-
-        if (target.getEdges === undefined) {
-          const rows = await Promise.all(
-            ids.map((id) => target.getEdge(graphId, id)),
-          );
-          for (const row of rows) {
-            if (row !== undefined) existingMap.set(row.id, row);
-          }
-        } else {
-          const rows = await target.getEdges(graphId, ids);
-          for (const row of rows) {
-            existingMap.set(row.id, row);
-          }
-        }
+        const existingMap = await getEdgeRowsByIds(target, graphId, ids);
 
         // Bucket items into creates and updates
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];

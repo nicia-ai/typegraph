@@ -41,7 +41,7 @@ import {
 import { PgDatabase, PgTransaction } from "drizzle-orm/pg-core";
 
 import { ConfigurationError } from "../../errors";
-import type { SqlTableNames } from "../../query/compiler/schema";
+import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import { quoteIdentifier } from "../../query/compiler/utils";
 import {
   buildFulltextCapabilities,
@@ -76,6 +76,7 @@ import {
   type IndexMaterializationRow,
   type KindRemovalRow,
   POSTGRES_CAPABILITIES,
+  POSTGRES_MAX_BIND_PARAMETERS,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
@@ -124,7 +125,10 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { createPostgresOperationStrategy } from "./operations/strategy";
+import {
+  createCachedTableExistence,
+  createPostgresOperationStrategy,
+} from "./operations/strategy";
 import {
   coerceNumericScore,
   createEdgeRowMapper,
@@ -226,7 +230,6 @@ export type PostgresBackendOptions = Readonly<{
   preparedStatementCacheMax?: number;
 }>;
 
-const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
 const POSTGRES_NODE_INSERT_BATCH_SIZE = Math.max(
@@ -330,16 +333,23 @@ export function createPostgresBackend(
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
-  const tableNames: SqlTableNames = {
+  const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
+    recordedNodes: getTableName(tables.recordedNodes),
+    recordedEdges: getTableName(tables.recordedEdges),
+    recordedClock: getTableName(tables.recordedClock),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
-  // ANALYZE statement on every call. Per-field vector tables are created
-  // lazily and live outside this base set, so they are not ANALYZEd here.
-  const analyzeStatement = sql`ANALYZE ${sql.join(
+  // ANALYZE statement on every call. The recorded relations are ANALYZEd
+  // separately under an existence guard (see refreshStatistics): a schema
+  // created before recorded-time history landed (bring-your-own-pool, no DDL
+  // re-run) has no recorded tables, and Postgres fails the whole ANALYZE if any
+  // named relation is missing. Per-field vector tables are created lazily and
+  // live outside this base set, so they are not ANALYZEd here.
+  const coreAnalyzeStatement = sql`ANALYZE ${sql.join(
     [
       tableNames.nodes,
       tableNames.edges,
@@ -348,6 +358,11 @@ export function createPostgresBackend(
     ].map((name) => quoteIdentifier(name)),
     sql`, `,
   )}`;
+  const recordedAnalyzeTables = [
+    tableNames.recordedNodes,
+    tableNames.recordedEdges,
+    tableNames.recordedClock,
+  ] as const;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
     fulltextStrategy,
@@ -363,6 +378,21 @@ export function createPostgresBackend(
     vectorStrategy,
     vectorSlotLatch,
   });
+
+  // Whether `tableName` currently exists, via the same catalog probe `clear()`
+  // uses — so refreshStatistics() never ANALYZEs a recorded relation that a
+  // bring-your-own-pool schema has not yet created. The Postgres probe is
+  // search_path-aware, so positive results are deliberately not cached by bare
+  // table name.
+  const recordedTableExists = createCachedTableExistence(
+    async (tableName) => {
+      const rows = await executionAdapter.execute<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      );
+      return rows[0];
+    },
+    { cacheExisting: false },
+  );
 
   /**
    * Runs `fn` inside a Postgres transaction, holding an
@@ -688,7 +718,28 @@ export function createPostgresBackend(
       // after a bulk load the planner can pick a reverse-index scan
       // with a filter (5ms forward traversal instead of 0.5ms) until
       // autovacuum catches up.
-      await db.execute(analyzeStatement);
+      await db.execute(coreAnalyzeStatement);
+      // The recorded relations may be absent on a schema created before
+      // recorded-time history landed (bring-your-own-pool, no DDL re-run).
+      // Postgres fails the entire ANALYZE if any named relation is missing, so
+      // ANALYZE only the recorded tables that exist.
+      const tablePresence = await Promise.all(
+        recordedAnalyzeTables.map(async (tableName) => ({
+          tableName,
+          exists: await recordedTableExists(tableName),
+        })),
+      );
+      const presentRecordedTables = tablePresence
+        .filter((entry) => entry.exists)
+        .map((entry) => entry.tableName);
+      if (presentRecordedTables.length > 0) {
+        await db.execute(
+          sql`ANALYZE ${sql.join(
+            presentRecordedTables.map((name) => quoteIdentifier(name)),
+            sql`, `,
+          )}`,
+        );
+      }
     },
 
     async commitSchemaVersion(
@@ -780,7 +831,7 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    */
   adapterOptions?: PostgresExecutionAdapterOptions | undefined;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
-  tableNames: SqlTableNames;
+  tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
   /**
@@ -800,7 +851,7 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   executionAdapter?: PostgresExecutionAdapter;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
-  tableNames: SqlTableNames;
+  tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
@@ -952,6 +1003,7 @@ function createPostgresOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    tableExistenceCache: { cacheExisting: false },
   });
 
   const executeCompiled = executionAdapter.executeCompiled;

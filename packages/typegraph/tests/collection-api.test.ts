@@ -7,7 +7,13 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, type EdgeId } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type EdgeId,
+  type NodeId,
+} from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type {
   AdoptedTransaction,
@@ -77,6 +83,21 @@ describe("Node Collections (SQLite)", () => {
 
   it("reuses node collection instances across repeated access", () => {
     expect(store.nodes.Person).toBe(store.nodes.Person);
+  });
+
+  it("passes Object prototype members through StoreView collection maps", () => {
+    const view = store.view({ mode: "current" });
+    const nodeToString: unknown = Reflect.get(view.nodes, "toString");
+    const edgeToString: unknown = Reflect.get(view.edges, "toString");
+
+    expect(typeof nodeToString).toBe("function");
+    expect(typeof edgeToString).toBe("function");
+    expect((nodeToString as () => string).call(view.nodes)).toBe(
+      "[object Object]",
+    );
+    expect((edgeToString as () => string).call(view.edges)).toBe(
+      "[object Object]",
+    );
   });
 
   describe("store.nodes.*.create()", () => {
@@ -198,6 +219,28 @@ describe("Node Collections (SQLite)", () => {
 
       const fetched = await store.nodes.Person.getById(person.id);
       expect(fetched).toBeUndefined();
+    });
+
+    it("does not open an empty top-level transaction for absent non-history deletes", async () => {
+      const baseBackend = backend;
+      let transactionCount = 0;
+      const observedBackend: GraphBackend = {
+        ...baseBackend,
+        async transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: Parameters<GraphBackend["transaction"]>[1],
+        ): Promise<T> {
+          transactionCount++;
+          return baseBackend.transaction(fn, options);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+      const missingId = "missing-person" as NodeId<typeof Person>;
+
+      await observedStore.nodes.Person.delete(missingId);
+      await observedStore.nodes.Person.hardDelete(missingId);
+
+      expect(transactionCount).toBe(0);
     });
   });
 

@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { sqlValueList } from "../../../query/compiler/predicate-utils";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
@@ -9,12 +10,7 @@ import type {
   InsertEdgeParams,
   UpdateEdgeParams,
 } from "../../types";
-import {
-  edgeColumnList,
-  quotedColumn,
-  sqlNull,
-  type Tables,
-} from "./shared";
+import { edgeColumnList, quotedColumn, sqlNull, type Tables } from "./shared";
 
 /**
  * Builds an INSERT query for an edge.
@@ -111,11 +107,7 @@ export function buildInsertEdgesBatchReturning(
  * Builds a SELECT query to get an edge by id.
  * Returns the edge regardless of deletion status (store layer handles filtering).
  */
-export function buildGetEdge(
-  tables: Tables,
-  graphId: string,
-  id: string,
-): SQL {
+export function buildGetEdge(tables: Tables, graphId: string, id: string): SQL {
   const { edges } = tables;
 
   return sql`
@@ -135,15 +127,11 @@ export function buildGetEdges(
   ids: readonly string[],
 ): SQL {
   const { edges } = tables;
-  const idPlaceholders = sql.join(
-    ids.map((edgeId) => sql`${edgeId}`),
-    sql`, `,
-  );
 
   return sql`
     SELECT * FROM ${edges}
     WHERE ${edges.graphId} = ${graphId}
-      AND ${edges.id} IN (${idPlaceholders})
+      AND ${edges.id} IN (${sqlValueList(ids)})
   `;
 }
 

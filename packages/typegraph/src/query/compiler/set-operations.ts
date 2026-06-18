@@ -22,6 +22,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import {
   CompilerInvariantError,
+  ConfigurationError,
   UnsupportedPredicateError,
 } from "../../errors";
 import type { SetOperationType } from "../ast";
@@ -61,6 +62,41 @@ type SetOperationPassState = Readonly<{
   logicalPlan: LogicalPlan | undefined;
   op: SetOperation;
 }>;
+
+type RecordedCoordinateKey = string;
+
+function queryRecordedCoordinateKey(ast: QueryAst): RecordedCoordinateKey {
+  return ast.recordedAsOf ?? "live";
+}
+
+function collectQueryRecordedCoordinateKeys(
+  query: ComposableQuery,
+  keys: Set<RecordedCoordinateKey>,
+): void {
+  if ("__type" in query) {
+    collectQueryRecordedCoordinateKeys(query.left, keys);
+    collectQueryRecordedCoordinateKeys(query.right, keys);
+    return;
+  }
+  keys.add(queryRecordedCoordinateKey(query));
+}
+
+function assertUniformSetOperationRecordedCoordinates(op: SetOperation): void {
+  const keys = new Set<RecordedCoordinateKey>();
+  collectQueryRecordedCoordinateKeys(op, keys);
+  if (keys.size <= 1) return;
+  throw new ConfigurationError(
+    "Cannot combine queries with different recorded-time coordinates in a set " +
+      "operation: each operand reads either the live tables or the recorded " +
+      "relation at one instant, so mixing live with recorded (or two different " +
+      "recorded instants) is rejected. Valid-time differences are allowed.",
+    { code: "SET_OPERATION_RECORDED_COORDINATE_MISMATCH" },
+    {
+      suggestion:
+        "Build every operand from the same Store or recorded StoreView coordinate before calling union/intersect/except.",
+    },
+  );
+}
 
 function runSetOperationPassPipeline(
   op: SetOperation,
@@ -124,6 +160,7 @@ export function compileSetOperation(
   compileQuery: QueryCompilerFunction,
   vectorStrategy?: VectorStrategy,
 ): SQL {
+  assertUniformSetOperationRecordedCoordinates(op);
   const passState = runSetOperationPassPipeline(
     op,
     graphId,

@@ -60,3 +60,6 @@ yarn-error.log
 .stryker-cache/
 reports/
 .gstack/
+
+# Local design scratch files
+/docs/design/

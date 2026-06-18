@@ -15,6 +15,17 @@ import {
 
 const EMPTY_PREDICATES: readonly NodePredicate[] = [];
 
+/**
+ * Builds a comma-separated bound-parameter list for an `IN (...)` clause. Each
+ * value is parameterized, never interpolated.
+ */
+export function sqlValueList(values: readonly string[]): SQL {
+  return sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  );
+}
+
 export type PredicateIndex = Readonly<{
   byAliasAndType: ReadonlyMap<string, readonly NodePredicate[]>;
 }>;
@@ -72,10 +83,7 @@ export function compileKindFilter(column: SQL, kinds: readonly string[]): SQL {
   if (kinds.length === 1) {
     return sql`${column} = ${kinds[0]}`;
   }
-  return sql`${column} IN (${sql.join(
-    kinds.map((kind) => sql`${kind}`),
-    sql`, `,
-  )})`;
+  return sql`${column} IN (${sqlValueList(kinds)})`;
 }
 
 export function getNodeKindsForAlias(

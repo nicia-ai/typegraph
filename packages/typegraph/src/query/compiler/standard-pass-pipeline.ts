@@ -23,6 +23,7 @@ import {
   type PredicateIndex,
 } from "./predicate-utils";
 import { type PredicateCompilerContext } from "./predicates";
+import { assertRecordedQueryDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
 import {
   addRequiredColumn,
   isIdFieldRef,
@@ -375,6 +376,12 @@ export function runStandardQueryPassPipeline(
     },
   });
   state = fulltextPass.state;
+
+  assertRecordedQueryDoesNotUseCurrentIndexes(
+    state.ast,
+    state.vectorPredicate,
+    state.fulltextPredicate,
+  );
 
   const fusionPass = runCompilerPass(state, {
     name: "fusion_config",

@@ -36,9 +36,12 @@ import {
   type EdgeAccessor,
   type EdgeAlias,
   type EdgeAliasMap,
+  type EmptyEdgeAliasMap,
+  type EmptyRecursiveAliasMap,
   type NodeAlias,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type QueryCoordinateState,
   type RecursiveAliasMap,
   type RecursiveTraversalOptions,
   type UniqueAlias,
@@ -149,16 +152,15 @@ function resolveAliasOption(
 export class TraversalBuilder<
   G extends GraphDef,
   Aliases extends AliasMap,
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty object for initial empty edge alias map
-  EdgeAliases extends EdgeAliasMap = {},
+  EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap,
   EK extends keyof G["edges"] & string = keyof G["edges"] & string,
   EA extends string = string,
   Dir extends TraversalDirection = "out",
   Optional extends boolean = false,
   DC extends boolean | string = false,
   PC extends boolean | string = false,
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases accumulated
-  RecAliases extends RecursiveAliasMap = {},
+  RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState = "open",
 > {
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
@@ -212,7 +214,8 @@ export class TraversalBuilder<
     Optional,
     O extends { depth: infer D extends boolean | string } ? D : DC,
     O extends { path: infer P extends boolean | string } ? P : PC,
-    RecAliases
+    RecAliases,
+    CoordinateState
   > {
     const minDepth = options?.minHops ?? this.#variableLength.minDepth;
     const maxDepth = options?.maxHops ?? this.#variableLength.maxDepth;
@@ -231,7 +234,19 @@ export class TraversalBuilder<
     const cyclePolicy =
       options?.cyclePolicy ?? this.#variableLength.cyclePolicy;
 
-    return new TraversalBuilder(
+    return new TraversalBuilder<
+      G,
+      Aliases,
+      EdgeAliases,
+      EK,
+      EA,
+      Dir,
+      Optional,
+      O extends { depth: infer D extends boolean | string } ? D : DC,
+      O extends { path: infer P extends boolean | string } ? P : PC,
+      RecAliases,
+      CoordinateState
+    >(
       this.#config,
       this.#state,
       this.#edgeKinds,
@@ -278,7 +293,8 @@ export class TraversalBuilder<
     Optional,
     DC,
     PC,
-    RecAliases
+    RecAliases,
+    CoordinateState
   > {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
@@ -291,7 +307,19 @@ export class TraversalBuilder<
       expression: predicate.__expr,
     };
 
-    return new TraversalBuilder(
+    return new TraversalBuilder<
+      G,
+      Aliases,
+      EdgeAliases,
+      EK,
+      EA,
+      Dir,
+      Optional,
+      DC,
+      PC,
+      RecAliases,
+      CoordinateState
+    >(
       this.#config,
       this.#state,
       this.#edgeKinds,
@@ -430,7 +458,8 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
   >;
 
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
@@ -441,7 +470,8 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
   >;
 
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
@@ -452,7 +482,8 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
   > {
     validateSqlIdentifier(alias);
 
@@ -468,7 +499,8 @@ export class TraversalBuilder<
       G,
       Aliases & Record<A, NodeAlias<NodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>
+      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      CoordinateState
     >;
   }
 
@@ -484,7 +516,8 @@ export class TraversalBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
-    RecAliases & BuildRecursiveAliases<DC, PC, A>
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
   > {
     validateSqlIdentifier(alias);
     if (!this.#config.registry.hasNodeType(kind)) {
@@ -508,7 +541,8 @@ export class TraversalBuilder<
       G,
       Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
-      RecAliases & BuildRecursiveAliases<DC, PC, A>
+      RecAliases & BuildRecursiveAliases<DC, PC, A>,
+      CoordinateState
     >;
   }
 

@@ -12,6 +12,8 @@ export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
+export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
+export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerSetOperationIntegrationTests } from "./set-operations";
 export { registerStoreViewIntegrationTests } from "./store-view";

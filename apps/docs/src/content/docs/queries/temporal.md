@@ -120,6 +120,191 @@ See the [`store.asOf` / `store.view`
 reference](/schemas-stores#temporal-views-storeasof-and-storeview) for the full
 surface.
 
+## Recorded Time (Bitemporal)
+
+The modes above query **valid time** — *when a fact was true in the world*
+(`validFrom` / `validTo`). Recorded time (also called **system time**) is the
+second axis — *when a fact was recorded by TypeGraph*. With the built-in
+captured relation, TypeGraph can run **bitemporal graph reads** for
+TypeGraph-managed writes: you can ask "what did TypeGraph reconstruct as true,
+as of a captured commit instant?" — including seeing values that were later
+corrected.
+
+Recorded-time capture is **opt-in** per store, because it writes a history row
+for every committed TypeGraph collection change:
+
+```typescript
+const store = createStore(graph, backend, { history: true });
+```
+
+With `history: true`, every committed TypeGraph node/edge write is captured into
+recorded-time relations (`typegraph_recorded_nodes` /
+`typegraph_recorded_edges`) stamped with a per-graph monotonic commit instant.
+Enable it on a **fresh graph**: there is no backfill, so an entity that already
+exists is first recorded the next time it is written through TypeGraph. Capture
+requires a transactional backend with statement execution (the built-in SQLite /
+PostgreSQL backends).
+
+Advanced hosts can bind an already-populated recorded relation for reads without
+using TypeGraph's writer wrapper:
+
+```typescript
+import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph";
+
+const recordedRead = recordedRelation({
+  schema: createSqlSchema({
+    recordedNodes: "audit_nodes",
+    recordedEdges: "audit_edges",
+  }),
+});
+
+const store = createStore(graph, backend, { recordedRead });
+```
+
+That option only supplies the read source for `asOfRecorded(T)` reconstruction.
+It does not capture writes, advance TypeGraph's recorded clock, or make
+`store.recordedNow()` available. If TypeGraph should own capture, use
+`history: true`. `recordedRead` must be created by `recordedRelation({ schema })`
+with a `createSqlSchema(...)` schema; the store validates those factory
+descriptors at runtime and rejects combining them with `history: true`.
+
+### Reading at a recorded instant
+
+`store.asOfRecorded(T)` reconstructs the graph as TypeGraph recorded it at
+instant `T`. `T` is a `RecordedInstant` — a branded canonical timestamp that
+originates from `store.recordedNow()` (below) or, for an event time you already
+hold, from `asRecordedInstant(...)`:
+
+```typescript
+import { asRecordedInstant } from "@nicia-ai/typegraph";
+
+const recorded = store.asOfRecorded(
+  asRecordedInstant("2024-06-01T12:00:00.000Z"),
+);
+
+const doc = await recorded.nodes.Document.getById(docId);
+const cited = await recorded.edges.cites.getByIds(citationIds);
+const reachable = await recorded.reachable(docId, { edges: ["cites"] });
+```
+
+A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
+**not** type-check, by design. Recorded instants are monotonic and can briefly
+run ahead of wall-clock time under bursty writes, so a wall-clock value may sort
+*before* the most recent commits and silently omit them. The brand turns that
+footgun into a compile error: to pin "as things stand right now"
+deterministically, use `store.recordedNow()` (the recorded high-water mark),
+then guard the `undefined` case before passing it to `store.asOfRecorded()`.
+
+```typescript
+await store.nodes.Document.update(docId, { title: "Revised" });
+const checkpoint = await store.recordedNow(); // a stable anchor for this state
+if (checkpoint === undefined) throw new Error("expected a recorded checkpoint");
+// ...later, however much the graph has changed:
+const asOfCheckpoint = store.asOfRecorded(checkpoint);
+```
+
+`recordedNow()` is **graph-global**, not scoped to any one caller or write. It is
+the single high-water mark for the whole graph, advanced by *every* committed
+capture from *any* writer. So a change in `recordedNow()` across two reads means
+"something committed to this graph in between" — **not** "the write I just made
+landed." Do not use a `recordedNow()` advance as a per-writer "did my write
+succeed?" signal: under any concurrent writer to the same graph it both misses
+dropped writes (another writer moved the clock) and misfires on no-op writes. To
+confirm a specific write committed, observe the write itself (e.g. its return
+value, or run it inside `store.transaction(...)` and act on success), not the
+global clock.
+
+Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it reads the
+recorded relation as of `T` *and* uses the same `T` for the valid-time axis. To
+pin the two axes independently — *what was valid at one instant, as TypeGraph
+captured it at another* — chain from a valid-time view:
+
+```typescript
+// The state valid on Jan 1, as TypeGraph recorded it on Jun 1
+// (e.g. after a correction was entered later).
+const corrected = store
+  .asOf("2024-01-01T00:00:00.000Z")
+  .asOfRecorded(asRecordedInstant("2024-06-01T12:00:00.000Z"));
+
+const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
+```
+
+`store.view({ mode }).asOfRecorded(T)` composes recorded time with any
+valid-time mode — e.g. `includeTombstones` to reconstruct soft-deleted rows at a
+recorded instant.
+
+### The recorded view surface
+
+A `RecordedStoreView` is a **narrow, reconstructing** read lens. It exposes only
+reads that can be faithfully rebuilt from the recorded relations:
+
+- **Point reads** — `nodes.<Kind>.getById` / `getByIds`, and the edge equivalents
+- **`query()`** — a sealed query builder over the recorded relations
+- **`subgraph()`** and the graph algorithms — `reachable`, `canReach`,
+  `shortestPath`, `degree`
+
+Broad collection reads (`find` / `count` / `findFrom` / …), `search`, and
+fulltext / vector predicates are **refused** with a `ConfigurationError` /
+`UnsupportedPredicateError`: the fulltext and vector indexes reflect *current*
+state only, so they cannot answer a recorded-time question. `T` must be a
+canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+
+### Writing with history enabled
+
+Capture flushes at transaction commit, so writes must go through the store's
+typed collections — use `store.transaction(...)` as usual:
+
+```typescript
+await store.transaction(async (tx) => {
+  await tx.nodes.Document.create({ title: "Draft" });
+});
+```
+
+Raw `tx.sql` is disabled under `history: true` (raw SQL would bypass capture),
+and `store.withTransaction(externalTx)` is replaced by the callback form
+`store.withRecordedTransaction(externalTx, async (tx) => { ... })`, which gives
+capture a flush point before your transaction commits. Out-of-band database
+writes and row-returning raw SQL paths are not audited by the built-in capture
+wrapper; use TypeGraph collection writes when the recorded relation is the
+source of truth.
+
+This is separate from `recordedRead`: a store created with a `recordedRead`
+binding can reconstruct from a relation populated by another system, but
+TypeGraph is not responsible for making that relation complete or atomic with
+live writes.
+
+#### Write cost: batch under `history: true`
+
+Each **un-batched** write under `history: true` becomes its own transaction —
+it allocates a recorded commit instant under a per-graph clock lock and flushes
+one history row at commit. So a tight loop of single `create`/`update`/`delete`
+calls pays that fixed cost once per call. Wrapping the same writes in one
+`store.transaction(...)` allocates **one** recorded instant for the whole batch
+and amortizes the overhead to roughly nothing.
+
+Measured per-op latency, identical workload with capture off vs on (history
+off → on; N = 400; reproduce with
+`pnpm --filter @nicia-ai/typegraph-benchmarks bench:recorded-write`):
+
+| Workload                       | SQLite | PostgreSQL |
+| ------------------------------ | -----: | ---------: |
+| create — un-batched (per op)   |  ~2.5× |      ~5.5× |
+| create — **batched in one txn** |  ~1.5× |      ~1.0× |
+| update — un-batched (per op)   |  ~2.8× |      ~6× |
+| soft delete — un-batched       |  ~1.7× |      ~1.9× |
+
+The takeaway: capture is opt-in and cheap when you batch. Under `history: true`,
+prefer `store.transaction(...)` for bulk writes; a loop of individual
+collection writes is the one pattern that pays the per-write multiple. (Stores
+created without `history: true` are unaffected — graph writes never touch the
+capture path.)
+
+> **Performance.** Recorded reads reconstruct from the history relations rather
+> than the live tables, so they are slower than current-state reads — most
+> noticeably for full-graph `subgraph` / algorithm reconstructions on
+> PostgreSQL. Reach for `asOfRecorded` for audit and point-in-time
+> reconstruction, not hot-path reads.
+
 ## Including Historical Data (includeEnded)
 
 View all versions, including superseded records:
@@ -338,3 +523,9 @@ async function getPreviousVersion(nodeId: string) {
 - [Filter](/queries/filter) - Filtering with predicates
 - [Traverse](/queries/traverse) - Graph traversals
 - [Execute](/queries/execute) - Running queries
+- [Bitemporal Time Travel](/examples/bitemporal-time-travel) - Valid time plus
+  recorded time in one runnable example
+- [Agent Decision Replay](/examples/agent-decision-replay) - Reconstruct the
+  exact graph an agent saw
+- [Breach Forensics](/examples/breach-forensics) - Traverse a reconstructed
+  access graph at the breach instant

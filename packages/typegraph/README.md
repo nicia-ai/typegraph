@@ -85,6 +85,37 @@ Docs: [Graph Merge](https://typegraph.dev/graph-merge)
 Examples: [FHIR Graph Merge](https://typegraph.dev/examples/fhir-graph-merge)
 · [Incremental Merge](https://typegraph.dev/examples/incremental-merge)
 
+## Bitemporal History
+
+TypeGraph supports valid-time reads and opt-in recorded-time reconstruction:
+
+- **Valid time** (`validFrom` / `validTo`, `store.asOf(T)`): when a fact is true
+  in the world.
+- **Recorded time** (`history: true`, `store.asOfRecorded(T)`): when the
+  TypeGraph store wrote that fact down.
+
+Together they answer what TypeGraph captured as true at a recorded commit
+instant for writes that go through TypeGraph's collections. Use this for
+audit trails, agent decision replay, policy effective dating, and incident
+forensics.
+
+```ts
+const store = createStore(graph, backend, { history: true });
+
+await store.nodes.Decision.create({ answer: "approve source A" });
+const decisionTime = await store.recordedNow();
+if (decisionTime === undefined) throw new Error("expected recorded history");
+
+const replay = store.asOfRecorded(decisionTime);
+const answer = await replay.nodes.Decision.getById(decisionId);
+```
+
+Docs: [Temporal queries](https://typegraph.dev/queries/temporal)
+
+Examples: [Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-time-travel)
+· [Agent Decision Replay](https://typegraph.dev/examples/agent-decision-replay)
+· [Breach Forensics](https://typegraph.dev/examples/breach-forensics)
+
 ## Performance Smoke Check
 
 The perf harness lives in `@nicia-ai/typegraph-benchmarks`; these commands delegate to it.

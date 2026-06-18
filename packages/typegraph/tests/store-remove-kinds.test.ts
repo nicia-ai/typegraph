@@ -15,10 +15,13 @@
  * the compile-time reference would resurrect the orphan on the next
  * deploy.
  */
+import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, KindNotFoundError } from "../src";
+import type { GraphBackend } from "../src/backend/types";
+import { RECORDED_MAX } from "../src/core/temporal";
 import {
   defineGraphExtension,
   KindHasReferentsError,
@@ -26,9 +29,48 @@ import {
 } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { planRemovals } from "../src/graph-extension/remove";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { migrateSchema } from "../src/schema/manager";
 import { createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
+
+type CountRow = Readonly<{ count: unknown }>;
+
+async function countOpenRecordedNodeRows(
+  backend: GraphBackend,
+  graphId: string,
+  kind: string,
+): Promise<number> {
+  const schema = createSqlSchema(backend.tableNames);
+  const rows = await backend.execute<CountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS count
+      FROM ${schema.recordedNodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${kind}
+        AND recorded_to = ${RECORDED_MAX}
+    `),
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+async function countRecordedNodeRows(
+  backend: GraphBackend,
+  graphId: string,
+  kind: string,
+): Promise<number> {
+  const schema = createSqlSchema(backend.tableNames);
+  const rows = await backend.execute<CountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS count
+      FROM ${schema.recordedNodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${kind}
+    `),
+  );
+  return Number(rows[0]?.count ?? 0);
+}
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -292,6 +334,66 @@ describe("Store.materializeRemovals", () => {
 
     const stillPending = await backend.getPendingKindRemovals!(baseGraph.id);
     expect(stillPending).toHaveLength(0);
+  });
+
+  it("closes recorded rows when materializing removals under history capture", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend, {
+      history: true,
+    });
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const tags = evolved.getNodeCollectionOrThrow("Tag");
+    await tags.create({ label: "alpha" });
+    await tags.create({ label: "beta" });
+    expect(await countOpenRecordedNodeRows(backend, baseGraph.id, "Tag")).toBe(
+      2,
+    );
+
+    const removed = await evolved.removeKinds(["Tag"]);
+    const result = await removed.materializeRemovals();
+
+    expect(result.results[0]?.status).toBe("removed");
+    expect(await countOpenRecordedNodeRows(backend, baseGraph.id, "Tag")).toBe(
+      0,
+    );
+  });
+
+  it("closes recorded rows by kind, preserves history, and is idempotent on retry", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend, {
+      history: true,
+    });
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const tags = evolved.getNodeCollectionOrThrow("Tag");
+    await tags.create({ label: "alpha" });
+    await tags.create({ label: "beta" });
+
+    const removed = await evolved.removeKinds(["Tag"]);
+    await removed.materializeRemovals();
+
+    // The live deletes commit before the recorded close, so the close must
+    // work from the kind (not ids read from the now-empty live tables).
+    expect(await countOpenRecordedNodeRows(backend, baseGraph.id, "Tag")).toBe(
+      0,
+    );
+    // History is closed, not deleted: the pre-removal state stays
+    // reconstructable.
+    expect(await countRecordedNodeRows(backend, baseGraph.id, "Tag")).toBe(2);
+
+    // Re-running recovers gracefully (the path a previously-failed close
+    // would take): no error, nothing left open.
+    await expect(removed.materializeRemovals()).resolves.toBeDefined();
+    expect(await countOpenRecordedNodeRows(backend, baseGraph.id, "Tag")).toBe(
+      0,
+    );
   });
 
   it("eager runs cleanup inline and removes data atomically with schema", async () => {

@@ -63,6 +63,20 @@ Queries compile to an AST before targeting SQL:
 - Type-checked at compile time
 - Query results have inferred types
 
+### 5. Temporal and Bitemporal History
+
+Every node and edge has a valid-time window (`validFrom` / `validTo`), so you
+can ask what was true at a domain instant with `.temporal("asOf", T)` or
+`store.asOf(T)`. Stores created with `{ history: true }` also capture recorded
+time for TypeGraph-managed writes, the system-time axis that remembers when the
+graph wrote each fact down. `store.asOfRecorded(T)` reconstructs what the graph
+captured at a recorded instant, and
+`store.asOf(validT).asOfRecorded(recordedT)` pins both axes independently.
+
+Use it for audit trails, agent decision replay, effective-dated policies, and
+breach forensics. See [Temporal queries](/queries/temporal) and the
+[Bitemporal Time Travel](/examples/bitemporal-time-travel) example.
+
 ## Design Philosophy
 
 ### Embedded, Not External
@@ -134,6 +148,14 @@ sources into a *live* graph without creating duplicates — the primitive for
 multi-agent knowledge-graph construction and continuous ingestion. See
 [Graph Merge](/graph-merge) for the full guide.
 
+Note: TypeGraph supports **bitemporal graph reads**. Valid time answers "when
+was this fact true in the domain?" Recorded time answers "when did the graph
+record it?" Together they reconstruct prior captured state after corrections, replay
+agent decisions against the graph they actually saw, and traverse access graphs
+at a breach instant for TypeGraph-managed writes. See
+[Temporal queries](/queries/temporal) and the
+[Agent Decision Replay](/examples/agent-decision-replay) example.
+
 ## Why TypeGraph?
 
 ### Compared to Graph Databases (Neo4j, Amazon Neptune)
@@ -203,6 +225,8 @@ TypeGraph is ideal for:
 - **RAG applications** combining graph traversal with vector search
 - **Multi-source ingestion & entity resolution** — reconcile parallel agent or
   importer outputs into one canonical graph with [graph merge](/graph-merge)
+- **Auditable AI systems and forensics** — reconstruct the graph an agent or
+  investigator saw at a recorded instant with [bitemporal reads](/queries/temporal#recorded-time-bitemporal)
 
 TypeGraph is not ideal for:
 

@@ -15,7 +15,7 @@ import type {
   GraphDef,
   NodeKinds,
 } from "../core/define-graph";
-import { resolveReadCoordinate } from "../core/temporal";
+import { type RecordedInstant, resolveReadCoordinate } from "../core/temporal";
 import type { KindEntity } from "../core/types";
 import type {
   AnyEdgeType,
@@ -26,7 +26,12 @@ import type {
 import type { RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
-import { DEFAULT_SQL_SCHEMA, type SqlSchema } from "../query/compiler/schema";
+import {
+  DEFAULT_SQL_SCHEMA,
+  type RecordedReadBinding,
+  recordedReadSchemaFor,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -38,6 +43,7 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../query/schema-introspector";
+import { asCompiledRowsSql } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
@@ -346,6 +352,8 @@ export type SubgraphOptions<
   temporalMode?: TemporalMode;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
   asOf?: string;
+  /** @internal Recorded coordinates are supplied by StoreView only. */
+  recordedAsOf?: never;
   /**
    * Optional field-level projection per node/edge kind.
    *
@@ -358,6 +366,23 @@ export type SubgraphOptions<
    */
   project?: P;
 }>;
+
+/**
+ * Subgraph options as seen by the internal executor: identical to the public
+ * {@link SubgraphOptions} except the recorded/system-time pin is a branded
+ * instant the StoreView seam supplies. The public surface keeps
+ * `recordedAsOf?: never`;
+ * recorded reads reach the executor only through `store.subgraphAtCoordinate`.
+ */
+export type InternalSubgraphOptions<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+> = Omit<SubgraphOptions<G, EK, NK, P>, "recordedAsOf"> &
+  Readonly<{
+    recordedAsOf?: RecordedInstant;
+  }>;
 
 /**
  * Union of all node result types in a subgraph, respecting projection.
@@ -417,8 +442,10 @@ type SubgraphContext = Readonly<{
   cyclePolicy: RecursiveCyclePolicy;
   temporalMode: TemporalMode;
   asOf: string | undefined;
+  recordedAsOf: RecordedInstant | undefined;
   dialect: DialectAdapter;
   schema: SqlSchema;
+  recordedReadBinding: RecordedReadBinding | undefined;
   backend: GraphBackend;
 }>;
 
@@ -462,7 +489,8 @@ export async function executeSubgraph<
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema | undefined;
-  options: SubgraphOptions<G, EK, NK, P>;
+  recordedReadBinding: RecordedReadBinding | undefined;
+  options: InternalSubgraphOptions<G, EK, NK, P>;
 }): Promise<SubgraphResult<G, NK, EK, P>> {
   const { options } = params;
   const { valid: coordinate } = resolveReadCoordinate(
@@ -470,6 +498,11 @@ export async function executeSubgraph<
     options.asOf,
   );
   const temporalMode = coordinate.mode;
+  // `recordedAsOf` reaches here only via the internal `subgraphAtCoordinate`
+  // seam; the public `store.subgraph` rejects it (typed `never`, runtime-guarded
+  // for JS callers) before this executor is reached.
+  const recordedAsOf = options.recordedAsOf;
+  const baseSchema = params.schema ?? DEFAULT_SQL_SCHEMA;
 
   const maxDepth = Math.min(
     options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
@@ -487,8 +520,15 @@ export async function executeSubgraph<
     cyclePolicy: options.cyclePolicy ?? "prevent",
     temporalMode,
     asOf: coordinate.asOf,
+    recordedAsOf,
     dialect: params.dialect,
-    schema: params.schema ?? DEFAULT_SQL_SCHEMA,
+    schema: recordedReadSchemaFor(
+      baseSchema,
+      recordedAsOf,
+      params.recordedReadBinding,
+      "recorded-subgraph",
+    ),
+    recordedReadBinding: params.recordedReadBinding,
     backend: params.backend,
   };
 
@@ -516,8 +556,13 @@ export async function executeSubgraph<
     includePath: false,
     temporalMode: ctx.temporalMode,
     ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
+    ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
     dialect: ctx.dialect,
-    schema: ctx.schema,
+    // Base schema: buildReachableCte derives the recorded swap from recordedAsOf.
+    schema: baseSchema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
   });
   const includedIdsCte = buildIncludedIdsCte(ctx);
 
@@ -686,6 +731,13 @@ async function fetchSubgraphNodes(
   includedIdsCte: SQL,
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphNodeFetchRow[]> {
+  const nodeTemporalFilter = compileTemporalFilter({
+    mode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
+    tableAlias: "n",
+    currentTimestamp: ctx.dialect.currentTimestamp(),
+  });
   const columns: SQL[] = [
     sql`n.kind`,
     sql`n.id`,
@@ -701,11 +753,11 @@ async function fetchSubgraphNodes(
     ...buildProjectedPropertyColumns("n", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND n.id IN (SELECT id FROM included_ids)`;
+  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND n.id IN (SELECT id FROM included_ids)`;
 
-  return ctx.backend.execute<SubgraphNodeFetchRow>(query) as Promise<
-    SubgraphNodeFetchRow[]
-  >;
+  return ctx.backend.execute<SubgraphNodeFetchRow>(
+    asCompiledRowsSql(query),
+  ) as Promise<SubgraphNodeFetchRow[]>;
 }
 
 async function fetchSubgraphEdges(
@@ -718,6 +770,7 @@ async function fetchSubgraphEdges(
   const edgeTemporalFilter = compileTemporalFilter({
     mode: ctx.temporalMode,
     asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
     tableAlias: "e",
     currentTimestamp: ctx.dialect.currentTimestamp(),
   });
@@ -741,9 +794,9 @@ async function fetchSubgraphEdges(
 
   const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
 
-  return ctx.backend.execute<SubgraphEdgeFetchRow>(query) as Promise<
-    SubgraphEdgeFetchRow[]
-  >;
+  return ctx.backend.execute<SubgraphEdgeFetchRow>(
+    asCompiledRowsSql(query),
+  ) as Promise<SubgraphEdgeFetchRow[]>;
 }
 
 function buildMetadataColumns(

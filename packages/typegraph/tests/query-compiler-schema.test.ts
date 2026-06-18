@@ -6,7 +6,11 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { createSqlSchema } from "../src/query/compiler/schema";
+import {
+  createSqlSchema,
+  requireSqlSchema,
+  type SqlSchema,
+} from "../src/query/compiler/schema";
 
 describe("createSqlSchema", () => {
   describe("default table names", () => {
@@ -25,6 +29,36 @@ describe("createSqlSchema", () => {
       expect(schema.nodesTable).toBeDefined();
       expect(schema.edgesTable).toBeDefined();
       expect(schema.fulltextTable).toBeDefined();
+    });
+
+    it("returns immutable schema descriptors", () => {
+      const schema = createSqlSchema();
+
+      expect(Object.isFrozen(schema)).toBe(true);
+      expect(Object.isFrozen(schema.tables)).toBe(true);
+      expect(() => {
+        (schema as { nodesTable?: unknown }).nodesTable = undefined;
+      }).toThrow(TypeError);
+      expect(() => {
+        (schema.tables as { nodes: string }).nodes = "changed_nodes";
+      }).toThrow(TypeError);
+    });
+
+    it("rejects structurally compatible objects that did not come from the factory", () => {
+      const schema = createSqlSchema();
+      const forged = {
+        tables: schema.tables,
+        nodesTable: schema.nodesTable,
+        edgesTable: schema.edgesTable,
+        recordedNodesTable: schema.recordedNodesTable,
+        recordedEdgesTable: schema.recordedEdgesTable,
+        recordedClockTable: schema.recordedClockTable,
+        fulltextTable: schema.fulltextTable,
+      } as unknown as SqlSchema;
+
+      expect(() => requireSqlSchema(forged, "test schema")).toThrow(
+        "test schema must be created with createSqlSchema(...)",
+      );
     });
   });
 

@@ -1,13 +1,44 @@
 /**
  * Tests for store.clear() API.
  */
+import { type SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import { createSqlSchema } from "../src/query/compiler/schema";
 import { createStore, createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
+
+function dropTableSql(tableName: string): string {
+  return `DROP TABLE "${tableName.replaceAll('"', '""')}"`;
+}
+
+function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
+  return {
+    ...base,
+    dialect: "postgres",
+    async transaction(fn, options) {
+      return base.transaction(
+        (tx, sqlHandle) =>
+          fn(
+            {
+              ...tx,
+              dialect: "postgres",
+              execute<T>(_query: SQL): Promise<readonly T[]> {
+                return Promise.resolve([
+                  { transaction_isolation: "serializable" } as T,
+                ]);
+              },
+            },
+            sqlHandle,
+          ),
+        options,
+      );
+    },
+  };
+}
 
 // ============================================================
 // Test Schema
@@ -158,5 +189,37 @@ describe("store.clear()", () => {
     const store = createStore(graph, backend);
     await store.clear();
     expect(await store.nodes.Person.count()).toBe(0);
+  });
+
+  it("clears databases created before recorded history tables existed", async () => {
+    const [initialized] = await createStoreWithSchema(graph, backend);
+    await initialized.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    const tableNames = backend.tableNames;
+    if (tableNames === undefined || backend.executeDdl === undefined) {
+      throw new Error("SQLite test backend should expose table names and DDL");
+    }
+    const schema = createSqlSchema(tableNames);
+    await backend.executeDdl(dropTableSql(schema.tables.recordedEdges));
+    await backend.executeDdl(dropTableSql(schema.tables.recordedNodes));
+    await backend.executeDdl(dropTableSql(schema.tables.recordedClock));
+
+    const runtimeStore = createStore(graph, backend);
+    await expect(runtimeStore.clear()).resolves.toBeUndefined();
+    expect(await runtimeStore.nodes.Person.count()).toBe(0);
+    expect(await backend.getActiveSchema(graph.id)).toBeUndefined();
+  });
+
+  it("bypasses recorded-capture transaction guards under history", async () => {
+    const historyStore = createStore(
+      graph,
+      withSerializablePostgresProbe(backend),
+      { history: true },
+    );
+
+    await expect(historyStore.clear()).resolves.toBeUndefined();
   });
 });

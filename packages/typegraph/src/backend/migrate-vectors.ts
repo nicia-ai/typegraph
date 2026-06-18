@@ -48,6 +48,7 @@ import {
   type EmbeddingMetric,
 } from "../core/embedding";
 import { EmbeddingDimensionChangedError } from "../errors";
+import { asCompiledRowsSql } from "../query/sql-intent";
 import { isMissingTableError } from "../utils/sql-errors";
 import { quotedTableName } from "./drizzle/operations/shared";
 import { LEGACY_EMBEDDINGS_TABLE_NAME } from "./drizzle/schema/sqlite";
@@ -376,7 +377,7 @@ async function readLegacyBatch(
     LIMIT ${params.batchSize}
   `;
 
-  return backend.execute<LegacyEmbeddingRow>(query);
+  return backend.execute<LegacyEmbeddingRow>(asCompiledRowsSql(query));
 }
 
 /**

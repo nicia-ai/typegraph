@@ -29,6 +29,10 @@ export {
 export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
+  type ExternalRecordedReadSource,
+  recordedRelation,
+  type RecordedRelationOptions,
+  type ResolvedSqlTableNames,
   type SqlSchema,
   type SqlTableNames,
 } from "./schema";
@@ -61,6 +65,7 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLimitOffsetClause,
@@ -95,6 +100,9 @@ import {
 } from "./recursive";
 import {
   DEFAULT_SQL_SCHEMA,
+  type RecordedReadBinding,
+  recordedReadSchemaFor,
+  requireSqlSchema,
   type SqlSchema,
   type VectorSlotMap,
 } from "./schema";
@@ -120,7 +128,7 @@ import {
 export type CompileQueryOptions = Readonly<{
   /** SQL dialect ("sqlite" or "postgres"). Defaults to "sqlite". */
   dialect?: SqlDialect | undefined;
-  /** SQL schema configuration for table names. Defaults to standard names. */
+  /** SQL schema configuration from createSqlSchema(...). Defaults to standard names. */
   schema?: SqlSchema | undefined;
   /**
    * Fulltext strategy override. When set, overrides the dialect's
@@ -149,6 +157,13 @@ export type CompileQueryOptions = Readonly<{
    * declare the field. Callers build it from the graph's node schemas.
    */
   vectorSlots?: VectorSlotMap | undefined;
+  /**
+   * Recorded read relation to use when the AST carries `recordedAsOf`.
+   * Supplying a recorded timestamp without this binding is rejected so the
+   * compiler never silently swaps to TypeGraph's built-in history tables when
+   * the store was only configured for live/valid-time reads.
+   */
+  recordedReadBinding?: RecordedReadBinding | undefined;
 }>;
 
 /**
@@ -181,19 +196,32 @@ export function compileQuery(
   ast: QueryAst,
   graphId: string,
   options: CompileQueryOptions | SqlDialect = "sqlite",
-): SQL {
+): CompiledSelectSql {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;
   const dialect = options_.dialect ?? "sqlite";
-  const schema = options_.schema ?? DEFAULT_SQL_SCHEMA;
+  const baseSchema =
+    options_.schema === undefined ?
+      DEFAULT_SQL_SCHEMA
+    : requireSqlSchema(options_.schema, "compileQuery schema");
+  const schema = recordedReadSchemaFor(
+    baseSchema,
+    ast.recordedAsOf,
+    options_.recordedReadBinding,
+    "recorded-query",
+  );
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
   const ctx: PredicateCompilerContext = {
     dialect: adapter,
     schema,
     compileQuery: (subAst, subGraphId) =>
-      compileQuery(subAst, subGraphId, propagateOptions(options_)),
+      compileQuery(
+        inheritRecordedAsOf(subAst, ast.recordedAsOf),
+        subGraphId,
+        propagateOptions(options_),
+      ),
     ...(options_.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: options_.vectorStrategy }),
@@ -207,13 +235,13 @@ export function compileQuery(
   if (hasVariableLengthTraversal(ast)) {
     const lowered = tryLowerSingleHopRecursiveTraversal(ast);
     if (lowered !== undefined) {
-      return compileStandardQuery(lowered, graphId, ctx);
+      return asCompiledSelectSql(compileStandardQuery(lowered, graphId, ctx));
     }
-    return compileVariableLengthQuery(ast, graphId, ctx);
+    return asCompiledSelectSql(compileVariableLengthQuery(ast, graphId, ctx));
   }
 
   // Standard query compilation
-  return compileStandardQuery(ast, graphId, ctx);
+  return asCompiledSelectSql(compileStandardQuery(ast, graphId, ctx));
 }
 
 function tryLowerSingleHopRecursiveTraversal(
@@ -259,19 +287,21 @@ export function compileSetOperation(
   op: SetOperation,
   graphId: string,
   options: CompileQueryOptions | SqlDialect = "sqlite",
-): SQL {
+): CompiledSelectSql {
   // Support legacy signature: compileSetOperation(op, graphId, dialect)
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;
   const dialect = options_.dialect ?? "sqlite";
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
-  return compileSetOp(
-    op,
-    graphId,
-    adapter,
-    (ast, gid) => compileQuery(ast, gid, propagateOptions(options_)),
-    options_.vectorStrategy,
+  return asCompiledSelectSql(
+    compileSetOp(
+      op,
+      graphId,
+      adapter,
+      (ast, gid) => compileQuery(ast, gid, propagateOptions(options_)),
+      options_.vectorStrategy,
+    ),
   );
 }
 
@@ -297,6 +327,57 @@ function resolveDialectAdapter(
   return { ...baseAdapter, fulltext: fulltextStrategy };
 }
 
+/**
+ * Reconciles the enclosing query's recorded-time pin with an EXISTS/IN
+ * subquery's so the whole statement reads one coordinate, never a silent mix
+ * of recorded and live tables. Symmetric with the uniformity guard on set
+ * operations ({@link assertUniformSetOperationRecordedCoordinates}):
+ *
+ * - **Recorded outer, unpinned subquery** — propagate the outer pin so the
+ *   subquery reads the recorded relations as of the same instant (a subquery
+ *   built from the live store carries none and would otherwise cross the axis
+ *   and skip the current-index guard).
+ * - **Recorded outer, differently-pinned subquery** — coordinate mismatch,
+ *   rejected.
+ * - **Live outer, recorded subquery** — also a mismatch: the subquery would
+ *   read the recorded relations while the outer reads live tables. Rejected
+ *   rather than silently honored, the same way the set-operation guard rejects
+ *   a live ∪ recorded mix.
+ */
+function inheritRecordedAsOf(
+  subAst: QueryAst,
+  recordedAsOf: string | undefined,
+): QueryAst {
+  if (recordedAsOf === undefined) {
+    if (subAst.recordedAsOf !== undefined) {
+      throw recordedSubqueryCoordinateMismatch(
+        "Cannot nest a recorded-time subquery inside a live query without a recorded-time coordinate.",
+      );
+    }
+    return subAst;
+  }
+  if (subAst.recordedAsOf === undefined) return { ...subAst, recordedAsOf };
+  if (subAst.recordedAsOf !== recordedAsOf) {
+    throw recordedSubqueryCoordinateMismatch(
+      "Cannot nest a subquery with a different recorded-time coordinate than the enclosing query.",
+    );
+  }
+  return subAst;
+}
+
+function recordedSubqueryCoordinateMismatch(
+  message: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    message,
+    { code: "SUBQUERY_TEMPORAL_COORDINATE_MISMATCH" },
+    {
+      suggestion:
+        "Build the subquery from the same Store or StoreView coordinate as the enclosing query.",
+    },
+  );
+}
+
 /** Forwards compile options into recursive sub-compile calls. */
 function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
   return {
@@ -312,6 +393,9 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
+    ...(options_.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: options_.recordedReadBinding }),
   };
 }
 

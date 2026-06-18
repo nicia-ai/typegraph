@@ -42,6 +42,7 @@ import {
 } from "./dynamic";
 import { ExecutableAggregateQuery } from "./executable-aggregate-query";
 import { ExecutableQuery } from "./executable-query";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
@@ -49,10 +50,14 @@ import {
   type EdgeAccessor,
   type EdgeAlias,
   type EdgeAliasMap,
+  type EmptyAliasMap,
+  type EmptyEdgeAliasMap,
+  type EmptyRecursiveAliasMap,
   type NodeAccessor,
   type NodeAlias,
   type QueryBuilderConfig,
   type QueryBuilderState,
+  type QueryCoordinateState,
   type RecursiveAliasMap,
   type SelectContext,
   type UniqueAlias,
@@ -171,6 +176,20 @@ function buildEdgeFields(
   ];
 }
 
+type TemporalMethod<
+  G extends GraphDef,
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  RecursiveAliases extends RecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState,
+> =
+  CoordinateState extends "open" ?
+    (
+      mode: TemporalMode,
+      asOf?: string,
+    ) => QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, "open">
+  : never;
+
 /**
  * The fluent query builder.
  *
@@ -181,19 +200,73 @@ function buildEdgeFields(
  */
 export class QueryBuilder<
   G extends GraphDef,
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty object for initial empty alias map
-  Aliases extends AliasMap = {},
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty object for initial empty edge alias map
-  EdgeAliases extends EdgeAliasMap = {},
-  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
-  RecursiveAliases extends RecursiveAliasMap = {},
+  Aliases extends AliasMap = EmptyAliasMap,
+  EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap,
+  RecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState = "open",
 > {
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
+  readonly temporal: TemporalMethod<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState) {
     this.#config = config;
     this.#state = state;
+    this.temporal = ((mode, asOf) =>
+      this.#setTemporal(mode, asOf)) as TemporalMethod<
+      G,
+      Aliases,
+      EdgeAliases,
+      RecursiveAliases,
+      CoordinateState
+    >;
+  }
+
+  /**
+   * Sets temporal mode.
+   *
+   * @param mode - The temporal mode to use
+   * @param asOf - Required timestamp for "asOf" mode (ISO 8601 string).
+   *   Rejected for every other mode — pinning an instant is only meaningful
+   *   in "asOf" mode, so `temporal("current", t)` is a caller error, not a
+   *   silently-dropped argument.
+   * @throws ValidationError if mode is "asOf" but no timestamp is provided, or
+   *   if an asOf is supplied with a non-"asOf" mode.
+   */
+  #setTemporal(
+    mode: TemporalMode,
+    asOf?: string,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, "open"> {
+    const { sealedCoordinate } = getQueryBuilderInternalContext(this.#config);
+    if (sealedCoordinate !== undefined) {
+      const coordinate = sealedCoordinate;
+      throw new ConfigurationError(
+        `.temporal() is not available on a StoreView query — the view's ` +
+          `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+          `Re-coordinate on the live Store via store.query() or store.view(...).`,
+        {
+          code: "STORE_VIEW_SEALED_QUERY",
+          ...coordinateContext(coordinate),
+          requestedMode: mode,
+        },
+      );
+    }
+    const coordinate = resolveReadCoordinate(
+      mode,
+      asOf,
+      `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
+    );
+    return new QueryBuilder(this.#config, {
+      ...this.#state,
+      temporalMode: coordinate.valid.mode,
+      asOf: coordinate.valid.asOf,
+    });
   }
 
   /**
@@ -210,7 +283,8 @@ export class QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
     EdgeAliases,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
@@ -221,7 +295,8 @@ export class QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
     EdgeAliases,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
@@ -232,7 +307,8 @@ export class QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
     EdgeAliases,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     // Validate alias to prevent SQL injection
     validateSqlIdentifier(alias);
@@ -267,7 +343,8 @@ export class QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeType>>,
     EdgeAliases,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     validateSqlIdentifier(alias);
     if (!this.#config.registry.hasNodeType(kind)) {
@@ -298,7 +375,7 @@ export class QueryBuilder<
   whereNode<A extends keyof Aliases & string>(
     alias: A,
     predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createNodeAccessor(alias);
     const predicate = predicateFunction(
       accessor as NodeAccessor<Aliases[A]["type"]>,
@@ -329,7 +406,7 @@ export class QueryBuilder<
     predicateFunction: (
       edge: EdgeAccessor<EdgeAliases[EA]["type"]>,
     ) => Predicate,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
       accessor as EdgeAccessor<EdgeAliases[EA]["type"]>,
@@ -377,7 +454,8 @@ export class QueryBuilder<
     false,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   /**
@@ -408,7 +486,8 @@ export class QueryBuilder<
     false,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   traverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -429,7 +508,8 @@ export class QueryBuilder<
     false,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     // Validate edge alias to prevent SQL injection
     validateSqlIdentifier(edgeAlias);
@@ -452,7 +532,19 @@ export class QueryBuilder<
         this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
       : [];
 
-    return new TraversalBuilder(
+    return new TraversalBuilder<
+      G,
+      Aliases,
+      EdgeAliases,
+      EK,
+      EA,
+      TraversalDirection,
+      false,
+      false,
+      false,
+      RecursiveAliases,
+      CoordinateState
+    >(
       this.#config,
       this.#state,
       edgeKinds,
@@ -486,7 +578,8 @@ export class QueryBuilder<
     false,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     return this.#beginDynamicTraversal(edgeKind, edgeAlias, false, options);
   }
@@ -520,7 +613,8 @@ export class QueryBuilder<
     true,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -541,7 +635,8 @@ export class QueryBuilder<
     true,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   >;
 
   optionalTraverse<EK extends keyof G["edges"] & string, EA extends string>(
@@ -562,7 +657,8 @@ export class QueryBuilder<
     true,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     // Validate edge alias to prevent SQL injection
     validateSqlIdentifier(edgeAlias);
@@ -585,7 +681,19 @@ export class QueryBuilder<
         this.#expandInverseTraversalEdgeKinds(edgeKinds, includeImplyingEdges)
       : [];
 
-    return new TraversalBuilder(
+    return new TraversalBuilder<
+      G,
+      Aliases,
+      EdgeAliases,
+      EK,
+      EA,
+      TraversalDirection,
+      true,
+      false,
+      false,
+      RecursiveAliases,
+      CoordinateState
+    >(
       this.#config,
       this.#state,
       edgeKinds,
@@ -621,7 +729,8 @@ export class QueryBuilder<
     true,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     return this.#beginDynamicTraversal(edgeKind, edgeAlias, true, options);
   }
@@ -652,7 +761,8 @@ export class QueryBuilder<
     Optional,
     false,
     false,
-    RecursiveAliases
+    RecursiveAliases,
+    CoordinateState
   > {
     validateSqlIdentifier(edgeAlias);
     if (!this.#config.registry.hasEdgeType(edgeKind)) {
@@ -685,7 +795,19 @@ export class QueryBuilder<
       ]),
     };
 
-    return new TraversalBuilder(
+    return new TraversalBuilder<
+      G,
+      Aliases,
+      EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, Optional>>,
+      string,
+      EA,
+      TraversalDirection,
+      Optional,
+      false,
+      false,
+      RecursiveAliases,
+      CoordinateState
+    >(
       this.#config,
       newState,
       edgeKinds,
@@ -808,7 +930,7 @@ export class QueryBuilder<
     alias: A,
     field: string,
     direction: SortDirection = "asc",
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
     const isEdge = edgeKindNames !== undefined;
     const isSystem =
@@ -856,7 +978,9 @@ export class QueryBuilder<
   /**
    * Limits the number of results.
    */
-  limit(n: number): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  limit(
+    n: number,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       limit: n,
@@ -866,50 +990,12 @@ export class QueryBuilder<
   /**
    * Offsets the results.
    */
-  offset(n: number): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  offset(
+    n: number,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       offset: n,
-    });
-  }
-
-  /**
-   * Sets temporal mode.
-   *
-   * @param mode - The temporal mode to use
-   * @param asOf - Required timestamp for "asOf" mode (ISO 8601 string).
-   *   Rejected for every other mode — pinning an instant is only meaningful
-   *   in "asOf" mode, so `temporal("current", t)` is a caller error, not a
-   *   silently-dropped argument.
-   * @throws ValidationError if mode is "asOf" but no timestamp is provided, or
-   *   if an asOf is supplied with a non-"asOf" mode.
-   */
-  temporal(
-    mode: TemporalMode,
-    asOf?: string,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
-    if (this.#config.sealedCoordinate !== undefined) {
-      const coordinate = this.#config.sealedCoordinate;
-      throw new ConfigurationError(
-        `.temporal() is not available on a StoreView query — the view's ` +
-          `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
-          `Re-coordinate on the live Store via store.query() or store.view(...).`,
-        {
-          code: "STORE_VIEW_SEALED_QUERY",
-          ...coordinateContext(coordinate),
-          requestedMode: mode,
-        },
-      );
-    }
-    const coordinate = resolveReadCoordinate(
-      mode,
-      asOf,
-      `Use .temporal("asOf", "2024-01-15T10:00:00.000Z") or .temporal("current") for current time.`,
-    );
-    return new QueryBuilder(this.#config, {
-      ...this.#state,
-      temporalMode: coordinate.valid.mode,
-      asOf: coordinate.valid.asOf,
     });
   }
 
@@ -923,7 +1009,7 @@ export class QueryBuilder<
   groupBy<A extends keyof Aliases & string>(
     alias: A,
     field: string,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const kindNames = this.#getKindNamesForAlias(alias);
     const typeInfo =
       kindNames ?
@@ -958,7 +1044,7 @@ export class QueryBuilder<
    */
   groupByNode<A extends keyof Aliases & string>(
     alias: A,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const fieldRefValue: FieldRef = {
       __type: "field_ref",
       alias,
@@ -985,7 +1071,7 @@ export class QueryBuilder<
    */
   having(
     predicate: PredicateExpression,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     return new QueryBuilder(this.#config, {
       ...this.#state,
       having: predicate,
@@ -1017,7 +1103,7 @@ export class QueryBuilder<
    */
   fuseWith(
     options: HybridFusionOptions,
-  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases> {
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     validateHybridFusionOptions(options);
     return new QueryBuilder(this.#config, {
       ...this.#state,
@@ -1056,9 +1142,27 @@ export class QueryBuilder<
     OutRecAliases extends RecursiveAliasMap = RecursiveAliases,
   >(
     fragment: (
-      builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases>,
-    ) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases>,
-  ): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases> {
+      builder: QueryBuilder<
+        G,
+        Aliases,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >,
+    ) => QueryBuilder<
+      G,
+      OutAliases,
+      OutEdgeAliases,
+      OutRecAliases,
+      CoordinateState
+    >,
+  ): QueryBuilder<
+    G,
+    OutAliases,
+    OutEdgeAliases,
+    OutRecAliases,
+    CoordinateState
+  > {
     return fragment(this);
   }
 

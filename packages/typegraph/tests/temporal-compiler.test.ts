@@ -128,6 +128,53 @@ describe("compileTemporalFilter", () => {
       expect(sql).not.toContain("ignored");
     });
   });
+
+  describe("recorded predicate", () => {
+    const recordedAsOf = "2024-03-04T05:06:07.000Z";
+
+    it("omits the recorded predicate when recordedAsOf is absent", () => {
+      const sql = getSqlString({ mode: "asOf", asOf: "2024-01-01T00:00:00Z" });
+
+      expect(sql).not.toContain("recorded_from");
+      expect(sql).not.toContain("recorded_to");
+    });
+
+    it("composes a half-open recorded interval onto the valid filter", () => {
+      const sql = getSqlString({
+        mode: "asOf",
+        asOf: "2024-01-01T00:00:00Z",
+        recordedAsOf,
+      });
+
+      // The valid filter is wrapped so the recorded conjunction binds correctly.
+      expect(sql.trim().startsWith("(")).toBe(true);
+      expect(sql).toContain("recorded_from <=");
+      expect(sql).toContain("< recorded_to");
+      // Half-open: `recorded_from <= R AND R < recorded_to`, so R appears twice.
+      const occurrences = (sql.match(new RegExp(recordedAsOf, "g")) ?? [])
+        .length;
+      expect(occurrences).toBe(2);
+    });
+
+    it("prefixes the recorded columns with the table alias", () => {
+      const sql = getSqlString({
+        mode: "current",
+        recordedAsOf,
+        tableAlias: "n",
+      });
+
+      expect(sql).toContain("n.recorded_from <=");
+      expect(sql).toContain("< n.recorded_to");
+    });
+
+    it("applies the recorded predicate even in includeTombstones mode", () => {
+      const sql = getSqlString({ mode: "includeTombstones", recordedAsOf });
+
+      expect(sql).toContain("1=1");
+      expect(sql).toContain("recorded_from <=");
+      expect(sql).toContain("< recorded_to");
+    });
+  });
 });
 
 // ============================================================
@@ -209,5 +256,18 @@ describe("extractTemporalOptions", () => {
       asOf: "2024-06-15T12:00:00.000Z",
       tableAlias: "e",
     });
+  });
+
+  it("passes through recordedAsOf from the ast", () => {
+    const ast = {
+      temporalMode: { mode: "asOf" as const, asOf: "2024-06-15T12:00:00.000Z" },
+      recordedAsOf: "2024-07-01T00:00:00.000Z",
+    };
+
+    const options = extractTemporalOptions(ast, "n");
+
+    expect(options.recordedAsOf).toBe("2024-07-01T00:00:00.000Z");
+    expect(options.mode).toBe("asOf");
+    expect(options.tableAlias).toBe("n");
   });
 });

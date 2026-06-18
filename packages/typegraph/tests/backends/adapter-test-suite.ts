@@ -16,6 +16,7 @@ import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { GraphBackend } from "../../src/backend/types";
+import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import type { SerializedSchema } from "../../src/schema/types";
 
 // ============================================================
@@ -1158,7 +1159,7 @@ export function createAdapterTestSuite(
 
           const query = sql`SELECT id, kind FROM typegraph_nodes WHERE graph_id = ${"test_graph"} AND kind = ${"Person"} AND deleted_at IS NULL`;
           const results = await backend.execute<{ id: string; kind: string }>(
-            query,
+            asCompiledRowsSql(query),
           );
 
           expect(results).toHaveLength(2);
