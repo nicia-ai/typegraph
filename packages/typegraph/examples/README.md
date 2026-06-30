@@ -52,9 +52,16 @@ npx tsx examples/<example-name>.ts
 | [21-agent-decision-replay.ts](./21-agent-decision-replay.ts) | Reconstruct the exact knowledge graph an AI agent saw at decision time and replay the *same* `query()` / `degree()` over it — point-in-time-correct reasoning for audit, eval, and debugging |
 | [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: pin an access graph to the breach instant and run `reachable()` to recover the true blast radius — including the over-permissive edge that was deleted afterward |
 
+### Provenance & Retraction
+
+| Example | Description |
+|---------|-------------|
+| [23-provenance-retraction.ts](./23-provenance-retraction.ts) | Retract bad scanner/vendor sources, keep facts with alternate support, close unsupported terminal facts, and replay the before/after belief state with recorded time |
+
 Docs walkthroughs:
 [Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-time-travel)
 · [Agent Decision Replay](https://typegraph.dev/examples/agent-decision-replay)
+· [Provenance Retraction](https://typegraph.dev/examples/provenance-retraction)
 · [Breach Forensics](https://typegraph.dev/examples/breach-forensics)
 
 ### Backend Configuration
@@ -152,3 +159,5 @@ Each example follows a consistent pattern:
 12. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
     then see **21-agent-decision-replay** (reconstruct what an agent saw) and
     **22-breach-forensics** (bitemporal reachability)
+13. For source lineage and belief transitions, run
+    **23-provenance-retraction**

@@ -15,6 +15,7 @@ const LLMS_SMALL_PAGES = new Set([
   "schema-evolution",
   "graph-extensions",
   "graph-merge",
+  "provenance",
   "integration",
   "multiple-graphs",
   "queries/overview",
@@ -51,6 +52,7 @@ const sidebar = [
       { label: "Evolving Schemas", slug: "schema-evolution" },
       { label: "Graph Extensions", slug: "graph-extensions" },
       { label: "Graph Merge", slug: "graph-merge" },
+      { label: "Provenance and Retraction", slug: "provenance" },
       { label: "Multiple Graphs", slug: "multiple-graphs" },
       { label: "Import/export", slug: "interchange" },
       { label: "Testing", slug: "testing" },
@@ -109,6 +111,10 @@ const sidebar = [
       {
         label: "Agent Decision Replay",
         slug: "examples/agent-decision-replay",
+      },
+      {
+        label: "Provenance Retraction",
+        slug: "examples/provenance-retraction",
       },
       {
         label: "Breach Forensics",

@@ -9,6 +9,7 @@ export default defineConfig({
     "indexes/index": "src/indexes/index.ts",
     "graph-extension/index": "src/graph-extension/index.ts",
     "graph-merge/index": "src/graph-merge/index.ts",
+    "provenance/index": "src/provenance/index.ts",
     "backend/sqlite/index": "src/backend/sqlite/index.ts",
     "backend/sqlite/local": "src/backend/sqlite/local.ts",
     "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",

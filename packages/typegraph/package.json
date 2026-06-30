@@ -42,6 +42,11 @@
       "import": "./dist/graph-merge/index.js",
       "require": "./dist/graph-merge/index.cjs"
     },
+    "./provenance": {
+      "types": "./dist/provenance/index.d.ts",
+      "import": "./dist/provenance/index.js",
+      "require": "./dist/provenance/index.cjs"
+    },
     "./sqlite": {
       "types": "./dist/backend/sqlite/index.d.ts",
       "import": "./dist/backend/sqlite/index.js",

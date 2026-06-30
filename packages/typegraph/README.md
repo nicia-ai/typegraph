@@ -116,6 +116,26 @@ Examples: [Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-tim
 · [Agent Decision Replay](https://typegraph.dev/examples/agent-decision-replay)
 · [Breach Forensics](https://typegraph.dev/examples/breach-forensics)
 
+## Provenance and Retraction
+
+TypeGraph ships source-lineage retraction as a dedicated subpath:
+
+```ts
+import { createRetractionCapability } from "@nicia-ai/typegraph/provenance";
+```
+
+Map ordinary graph kinds onto source, justification, fact, premise, and
+derivation roles. Retraction flips a source's boolean flag, recomputes
+well-founded support, keeps facts with alternate support current, and makes
+unsupported facts non-current. Source roles can cover multiple node kinds, and
+terminal fact kinds do not have to be valid premises. Because the capability
+requires `history: true`, recorded-time reads can replay what the graph believed
+before and after the transition.
+
+Docs: [Provenance and Retraction](https://typegraph.dev/provenance)
+
+Example: [Provenance Retraction](https://typegraph.dev/examples/provenance-retraction)
+
 ## Performance Smoke Check
 
 The perf harness lives in `@nicia-ai/typegraph-benchmarks`; these commands delegate to it.
