@@ -43,6 +43,9 @@ export function buildQueryAst(
       fields: state.projection,
     },
     temporalMode,
+    ...(state.recordedAsOf !== undefined && {
+      recordedAsOf: state.recordedAsOf,
+    }),
     ...(state.orderBy.length > 0 && { orderBy: state.orderBy }),
     ...(state.limit !== undefined && { limit: state.limit }),
     ...(state.offset !== undefined && { offset: state.offset }),

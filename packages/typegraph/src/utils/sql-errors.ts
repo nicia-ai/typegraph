@@ -19,11 +19,13 @@
  * `.message`, which on Postgres is just the SQL string.
  */
 
-const MISSING_TABLE_PATTERNS = [
-  "no such table", // SQLite
-  "does not exist", // PostgreSQL ("relation ... does not exist")
-  "SQLITE_ERROR", // D1 / Durable Objects error code
-] as const;
+import { ConfigurationError } from "../errors";
+
+const SQLITE_MISSING_TABLE_PATTERN = "no such table";
+const SQLITE_GENERIC_ERROR_CODE = "SQLITE_ERROR";
+const DRIZZLE_QUERY_ERROR_PREFIX = "Failed query:";
+const POSTGRES_UNDEFINED_RELATION_PATTERN =
+  /\b(?:relation|table)\s+"[^"]+"\s+does not exist\b/i;
 
 /**
  * SQLSTATE for PostgreSQL `undefined_table`. Preferred over the
@@ -38,6 +40,16 @@ const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
  * Yields an error and each error reachable by following `.cause`,
  * outermost first. `seen` guards the pathological cyclic-cause case so a
  * self-referential chain can't spin forever.
+ *
+ * The walk intentionally follows `.cause` through *non-`Error`* links, not just
+ * `Error` instances: postgres-js surfaces its driver error as a plain object
+ * (message + SQLSTATE `code`) on a Drizzle wrapper's `.cause`, so stopping at
+ * the first non-`Error` link would miss it (see the postgres-js test). A plain
+ * object is classified by its locale-independent SQLSTATE alone
+ * ({@link isPostgresUndefinedTable}); the looser SQLite message substring is
+ * consulted only for `Error` instances and raw strings
+ * ({@link missingTableMessage}), so an unrelated object in a cause chain that
+ * merely mentions one of those phrases is not mistaken for a missing table.
  */
 function* errorChain(error: unknown): Generator<unknown, void, void> {
   const seen = new Set<unknown>();
@@ -45,8 +57,15 @@ function* errorChain(error: unknown): Generator<unknown, void, void> {
   while (current !== undefined && current !== null && !seen.has(current)) {
     seen.add(current);
     yield current;
-    current = current instanceof Error ? current.cause : undefined;
+    current =
+      canReadProperty(current) ? Reflect.get(current, "cause") : undefined;
   }
+}
+
+function canReadProperty(value: unknown): value is object {
+  return (
+    (typeof value === "object" && value !== null) || typeof value === "function"
+  );
 }
 
 /**
@@ -55,23 +74,130 @@ function* errorChain(error: unknown): Generator<unknown, void, void> {
  */
 function isPostgresUndefinedTable(link: unknown): boolean {
   return (
-    typeof link === "object" &&
-    link !== null &&
-    "code" in link &&
-    (link as Readonly<{ code?: unknown }>).code ===
-      POSTGRES_UNDEFINED_TABLE_CODE
+    canReadProperty(link) &&
+    Reflect.get(link, "code") === POSTGRES_UNDEFINED_TABLE_CODE
   );
 }
 
+function messageProperty(link: unknown): string | undefined {
+  if (typeof link === "string") return link;
+  if (link instanceof Error) return link.message;
+  const message =
+    canReadProperty(link) ?
+      (Reflect.get(link, "message") as unknown)
+    : undefined;
+  return typeof message === "string" ? message : undefined;
+}
+
+function errorMessage(link: unknown): string {
+  return messageProperty(link) ?? String(link);
+}
+
+/**
+ * The message a SQLite missing-table substring match may be tested against — but
+ * only for `Error` instances and raw `string` links, never an arbitrary plain
+ * object.
+ *
+ * Generic "does not exist" is deliberately not substring-matched: PostgreSQL uses
+ * that phrase for undefined columns, functions, types, and relations. PostgreSQL
+ * missing tables are classified by SQLSTATE 42P01 when available, or by the
+ * narrower driver-message shape `relation/table "..." does not exist` when a
+ * bring-your-own driver omits SQLSTATE. SQLite does not expose a portable
+ * SQLSTATE here, so the narrow "no such table" engine message is still accepted.
+ */
+function missingTableMessage(link: unknown): string | undefined {
+  return typeof link === "string" || link instanceof Error ?
+      messageProperty(link)
+    : undefined;
+}
+
+function sqliteErrorCode(link: unknown): unknown {
+  if (!canReadProperty(link)) return undefined;
+  return Reflect.get(link, "code");
+}
+
+/**
+ * Cloudflare D1 / Durable Objects may surface a missing-table failure as the
+ * generic SQLite code with no detail. Accept the bare marker, but do not
+ * substring-match detailed `SQLITE_ERROR: ...` failures: those include syntax
+ * errors and bind-limit faults that must stay loud.
+ */
+function isBareSqliteErrorMarker(link: unknown): boolean {
+  const message = messageProperty(link);
+  if (message === SQLITE_GENERIC_ERROR_CODE) return true;
+  if (sqliteErrorCode(link) !== SQLITE_GENERIC_ERROR_CODE) return false;
+  return (
+    message === undefined ||
+    message === SQLITE_GENERIC_ERROR_CODE ||
+    message.includes(SQLITE_MISSING_TABLE_PATTERN)
+  );
+}
+
+function isPostgresUndefinedRelationMessage(link: unknown): boolean {
+  const message = errorMessage(link);
+  if (message.startsWith(DRIZZLE_QUERY_ERROR_PREFIX)) return false;
+  return POSTGRES_UNDEFINED_RELATION_PATTERN.test(message);
+}
+
 export function isMissingTableError(error: unknown): boolean {
+  // SQLSTATE 42P01 is locale-independent and structural, so it is honored on
+  // *every* link — including a plain driver-error object reached only by walking
+  // through a non-`Error` `.cause` (postgres-js).
+  //
+  // The SQLite message substring is honored only while every prior link in the
+  // chain was an `Error` (or the top-level string) — the reach of the
+  // pre-broadening walk, which stopped at the first non-`Error` `.cause`.
+  let everyPriorLinkWasError = true;
   for (const link of errorChain(error)) {
     if (isPostgresUndefinedTable(link)) return true;
-    const message = link instanceof Error ? link.message : String(link);
-    if (MISSING_TABLE_PATTERNS.some((pattern) => message.includes(pattern))) {
-      return true;
+    if (isPostgresUndefinedRelationMessage(link)) return true;
+    if (isBareSqliteErrorMarker(link)) return true;
+    if (everyPriorLinkWasError) {
+      const message = missingTableMessage(link);
+      if (message?.includes(SQLITE_MISSING_TABLE_PATTERN) === true) {
+        return true;
+      }
     }
+    if (!(link instanceof Error)) everyPriorLinkWasError = false;
   }
   return false;
+}
+
+function historyMissingRecordedRelationsError(
+  details: Record<string, unknown>,
+  cause: unknown,
+): ConfigurationError {
+  return new ConfigurationError(
+    "history: true requires the recorded-time relations to exist, but a recorded relation is missing.",
+    details,
+    {
+      cause,
+      suggestion:
+        "Create the recorded-time relations (typegraph_recorded_nodes, typegraph_recorded_edges, typegraph_recorded_clock) — e.g. re-run the generated migration SQL — on this database before enabling history capture.",
+    },
+  );
+}
+
+/**
+ * Converts missing recorded-relation failures into the actionable precondition
+ * error used by construction-time history checks. Capture paths use this after
+ * the live write has already succeeded inside the same transaction; recorded
+ * read paths use it when query/schema swapping reaches a recorded table that
+ * has not been materialized yet.
+ */
+export async function withRecordedRelationsPrecondition<T>(
+  promise: Promise<T>,
+  details: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await promise;
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+    throw historyMissingRecordedRelationsError(
+      { ...details, code: "RECORDED_RELATIONS_MISSING" },
+      error,
+    );
+  }
 }
 
 /**
@@ -93,7 +219,7 @@ export function parseDimensionMismatch(
   error: unknown,
 ): { expected: number; actual: number | undefined } | undefined {
   for (const link of errorChain(error)) {
-    const message = link instanceof Error ? link.message : String(link);
+    const message = errorMessage(link);
     const match = DIMENSION_MISMATCH_PATTERN.exec(message);
     if (match) {
       return {

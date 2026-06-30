@@ -24,7 +24,12 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, embedding } from "../../../src";
+import {
+  asCompiledRowsSql,
+  defineGraph,
+  defineNode,
+  embedding,
+} from "../../../src";
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
@@ -296,7 +301,9 @@ describe("Store-level vector paths under PGlite", () => {
     const readEfSearch = async () => {
       // missing_ok=true: returns NULL rather than erroring if the GUC is unset.
       const rows = await backend.execute<{ ef: string }>(
-        sql`SELECT current_setting('hnsw.ef_search', true) AS ef`,
+        asCompiledRowsSql(
+          sql`SELECT current_setting('hnsw.ef_search', true) AS ef`,
+        ),
       );
       return rows[0]?.ef;
     };

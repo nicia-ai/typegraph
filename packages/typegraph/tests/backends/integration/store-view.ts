@@ -15,8 +15,16 @@
  * - a `current` view ≡ the live store.
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ConfigurationError, ValidationError } from "../../../src";
+import {
+  ConfigurationError,
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  ValidationError,
+} from "../../../src";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationStore } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -29,6 +37,32 @@ const { PAST, BEFORE, EDGE_ENDED } = TEMPORAL_ANCHORS;
  * disjoint temporal images so the pin demonstrably changes results.
  */
 const AS_OF = BEFORE;
+
+const THEN_KIND = "then";
+const CATCH_KIND = "catch";
+
+const ThenNode = defineNode(THEN_KIND, {
+  schema: z.object({ name: z.string() }),
+});
+
+const CatchEdge = defineEdge(CATCH_KIND, {
+  schema: z.object({ label: z.string() }),
+});
+
+const interopProbeKindGraph = defineGraph({
+  id: "store_view_interop_probe_kind_names",
+  nodes: {
+    // eslint-disable-next-line unicorn/no-thenable -- regression: a real kind can be named "then".
+    [THEN_KIND]: { type: ThenNode },
+  },
+  edges: {
+    [CATCH_KIND]: {
+      type: CatchEdge,
+      from: [ThenNode],
+      to: [ThenNode],
+    },
+  },
+});
 
 type ViewFixture = Readonly<{
   /** Valid `[PAST, ∞)` — visible at `AS_OF` and now. */
@@ -134,6 +168,36 @@ export function registerStoreViewIntegrationTests(
           daveId,
         ] as never);
         expect(batch.map((node) => node?.name)).toEqual(["Carol", undefined]);
+      });
+
+      it("does not hide real kinds named like JS interop probes", async () => {
+        const [store] = await createStoreWithSchema(
+          interopProbeKindGraph,
+          context.getStore().backend,
+        );
+        const first = await store.nodes[THEN_KIND].create(
+          { name: "First" },
+          { validFrom: PAST },
+        );
+        const second = await store.nodes[THEN_KIND].create(
+          { name: "Second" },
+          { validFrom: PAST },
+        );
+        const edge = await store.edges[CATCH_KIND].create(
+          first,
+          second,
+          { label: "probe edge" },
+          { validFrom: PAST },
+        );
+        const past = store.asOf(AS_OF);
+        const pinnedFirst = await past.nodes[THEN_KIND].getById(first.id);
+        const pinnedEdge = await past.edges[CATCH_KIND].getById(edge.id);
+
+        expect(pinnedFirst?.name).toBe("First");
+        expect(pinnedEdge?.label).toBe("probe edge");
+        expect(
+          (past.nodes as unknown as { toJSON?: unknown }).toJSON,
+        ).toBeUndefined();
       });
 
       it("find / count observe the pinned-time image", async () => {
@@ -416,6 +480,20 @@ export function registerStoreViewIntegrationTests(
         expect("definitelyNotAMethod" in person).toBe(false);
       });
 
+      it("the `in` operator agrees with property access on search facades", () => {
+        const store = context.getStore();
+        const currentSearch = store.view({ mode: "current" }).search;
+        const pastSearch = store.asOf(AS_OF).search;
+
+        expect("fulltext" in currentSearch).toBe(true);
+        expect("vector" in currentSearch).toBe(true);
+        expect("hybrid" in currentSearch).toBe(true);
+        expect("rebuildFulltext" in currentSearch).toBe(true);
+        expect("fulltext" in pastSearch).toBe(true);
+        expect("then" in pastSearch).toBe(false);
+        expect("toString" in pastSearch).toBe(true);
+      });
+
       it("batchFindFrom honors temporal options under store.batch", async () => {
         const store = context.getStore();
         const { aliceId } = await seedViewFixture(store);
@@ -458,6 +536,30 @@ export function registerStoreViewIntegrationTests(
             {},
           ),
         ).toThrow(ConfigurationError);
+      });
+
+      it("refuses batch endpoint reads as reads, not writes", async () => {
+        const store = context.getStore();
+        const { aliceId } = await seedViewFixture(store);
+        const past = store.asOf(AS_OF);
+
+        // The typed view omits batch reads; a JS caller (or the widened dynamic
+        // surface) can still reach them, and they must refuse as a deferred read
+        // — never be mislabeled a write.
+        const batchReads = past.edges.knows as unknown as Readonly<{
+          batchFindFrom: (from: unknown) => unknown;
+        }>;
+        let thrown: unknown;
+        try {
+          batchReads.batchFindFrom({ kind: "Person", id: aliceId });
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(ConfigurationError);
+        const message = (thrown as ConfigurationError).message;
+        expect(message).toContain("store.batch");
+        // The refusal must NOT borrow the write-refusal wording.
+        expect(message).not.toContain("perform writes on the live Store");
       });
 
       it("exposes no transaction surface", () => {
@@ -625,13 +727,21 @@ export function registerStoreViewIntegrationTests(
 
         // The pinned query builder refuses to be re-coordinated — the view
         // owns the temporal axis (a capability-safe pinned read context).
-        expect(() => past.query().temporal("includeEnded")).toThrow(
-          ConfigurationError,
-        );
+        expect(() =>
+          (
+            past.query() as unknown as {
+              temporal: (mode: string) => unknown;
+            }
+          ).temporal("includeEnded"),
+        ).toThrow(ConfigurationError);
         // The seal is in builder config (threaded through every clone), so it
         // survives the fluent chain, not just the first hop.
         expect(() =>
-          past.query().from("Person", "p").temporal("current"),
+          (
+            past.query().from("Person", "p") as unknown as {
+              temporal: (mode: string) => unknown;
+            }
+          ).temporal("current"),
         ).toThrow(ConfigurationError);
       });
 

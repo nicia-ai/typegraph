@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asCompiledRowsSql,
   BackendDisposedError,
   defineEdge,
   defineGraph,
@@ -116,9 +117,9 @@ describe("SQLite Backend - Adapter Specific", () => {
             AND deleted_at IS NULL
         `;
 
-        await backend.execute<{ id: string }>(query);
-        await backend.execute<{ id: string }>(query);
-        await backend.execute<{ id: string }>(query);
+        await backend.execute<{ id: string }>(asCompiledRowsSql(query));
+        await backend.execute<{ id: string }>(asCompiledRowsSql(query));
+        await backend.execute<{ id: string }>(asCompiledRowsSql(query));
 
         expect(prepareCalls).toBe(1);
       } finally {

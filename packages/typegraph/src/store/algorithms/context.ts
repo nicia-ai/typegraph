@@ -1,9 +1,17 @@
 import { type GraphBackend } from "../../backend/types";
-import { resolveReadCoordinate } from "../../core/temporal";
+import {
+  assertValidRecordedInstant,
+  type RecordedInstant,
+  resolveReadCoordinate,
+} from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
-import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  type RecordedReadBinding,
+  recordedReadSchemaFor,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import {
   compileTemporalFilter,
   type TemporalFilterOptions,
@@ -19,12 +27,14 @@ export type AlgorithmContext = Readonly<{
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema;
+  recordedReadBinding: RecordedReadBinding | undefined;
   defaultTemporalMode: TemporalMode;
 }>;
 
 export type InternalTemporalOptions = Readonly<{
   temporalMode?: TemporalMode;
   asOf?: string;
+  recordedAsOf?: RecordedInstant;
 }>;
 
 export type InternalTraversalOptions = InternalTemporalOptions &
@@ -44,15 +54,42 @@ export type InternalTraversalOptions = InternalTemporalOptions &
 export function resolveTemporalOptions(
   ctx: AlgorithmContext,
   options: InternalTemporalOptions,
-): Readonly<{ temporalMode: TemporalMode; asOf?: string }> {
+): Readonly<{
+  temporalMode: TemporalMode;
+  asOf?: string;
+  recordedAsOf?: RecordedInstant;
+}> {
   const { valid } = resolveReadCoordinate(
     options.temporalMode ?? ctx.defaultTemporalMode,
     options.asOf,
   );
+  // `recordedAsOf` normally arrives pre-validated through StoreView's
+  // withRecordedCoordinate, but it is absent from the public algorithm option
+  // types, so validate here too: a type-unsafe caller that smuggles a
+  // non-canonical timestamp would otherwise be string-compared raw against
+  // recorded_from/recorded_to and return wrong rows on SQLite.
+  if (options.recordedAsOf !== undefined) {
+    assertValidRecordedInstant(options.recordedAsOf, "recordedAsOf");
+  }
   return {
     temporalMode: valid.mode,
     ...(valid.asOf !== undefined && { asOf: valid.asOf }),
+    ...(options.recordedAsOf === undefined ?
+      {}
+    : { recordedAsOf: options.recordedAsOf }),
   };
+}
+
+export function resolveReadSchema(
+  ctx: AlgorithmContext,
+  options: InternalTemporalOptions,
+): SqlSchema {
+  return recordedReadSchemaFor(
+    ctx.schema,
+    options.recordedAsOf,
+    ctx.recordedReadBinding,
+    "recorded-graph-algorithm",
+  );
 }
 
 /**
@@ -70,6 +107,7 @@ export function resolveTemporalFilter(
   const filterOptions: TemporalFilterOptions = {
     mode: resolved.temporalMode,
     asOf: resolved.asOf,
+    recordedAsOf: resolved.recordedAsOf,
     tableAlias,
     currentTimestamp: ctx.dialect.currentTimestamp(),
   };

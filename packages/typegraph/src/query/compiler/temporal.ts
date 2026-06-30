@@ -21,6 +21,8 @@ export type TemporalFilterOptions = Readonly<{
   tableAlias?: string | undefined;
   /** Optional execution-time current timestamp SQL expression */
   currentTimestamp?: SQL | undefined;
+  /** Recorded/system-time timestamp for recorded-pinned reads. */
+  recordedAsOf?: string | undefined;
 }>;
 
 /**
@@ -49,7 +51,7 @@ export type TemporalFilterOptions = Readonly<{
  * ```
  */
 export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
-  const { mode, asOf, tableAlias, currentTimestamp } = options;
+  const { mode, asOf, tableAlias, currentTimestamp, recordedAsOf } = options;
 
   // Build column references with optional prefix
   const prefix = tableAlias ? sql.raw(`${tableAlias}.`) : sql.raw("");
@@ -57,30 +59,49 @@ export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
   const validFrom = sql`${prefix}valid_from`;
   const validTo = sql`${prefix}valid_to`;
 
-  switch (mode) {
-    case "current": {
-      const now = currentTimestamp ?? sql`CURRENT_TIMESTAMP`;
-      return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
-    }
-
-    case "asOf": {
-      if (asOf === undefined) {
-        throw new Error(`asOf timestamp is required for temporal mode "asOf"`);
+  const validFilter = (() => {
+    switch (mode) {
+      case "current": {
+        // When pinned to a recorded instant, "current" valid-time means
+        // valid-current *as of that recorded instant* — not the wall clock at
+        // read time. Pinning here collapses
+        // view({mode:'current'}).asOfRecorded(rt) to the diagonal
+        // store.asOfRecorded(rt) and stops silently dropping rows that were
+        // valid-current when recorded but ended before the read.
+        const now =
+          recordedAsOf === undefined ?
+            (currentTimestamp ?? sql`CURRENT_TIMESTAMP`)
+          : sql`${recordedAsOf}`;
+        return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
       }
-      const timestamp = asOf;
-      return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${timestamp}) AND (${validTo} IS NULL OR ${validTo} > ${timestamp})`;
-    }
 
-    case "includeEnded": {
-      // Include records that have ended but not been deleted
-      return sql`${deletedAt} IS NULL`;
-    }
+      case "asOf": {
+        if (asOf === undefined) {
+          throw new Error(
+            `asOf timestamp is required for temporal mode "asOf"`,
+          );
+        }
+        const timestamp = asOf;
+        return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${timestamp}) AND (${validTo} IS NULL OR ${validTo} > ${timestamp})`;
+      }
 
-    case "includeTombstones": {
-      // Include everything, no filter
-      return sql.raw("1=1");
+      case "includeEnded": {
+        // Include records that have ended but not been deleted
+        return sql`${deletedAt} IS NULL`;
+      }
+
+      case "includeTombstones": {
+        // Include everything, no filter
+        return sql.raw("1=1");
+      }
     }
-  }
+  })();
+
+  if (recordedAsOf === undefined) return validFilter;
+
+  const recordedFrom = sql`${prefix}recorded_from`;
+  const recordedTo = sql`${prefix}recorded_to`;
+  return sql`(${validFilter}) AND ${recordedFrom} <= ${recordedAsOf} AND ${recordedAsOf} < ${recordedTo}`;
 }
 
 /**
@@ -91,12 +112,16 @@ export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
  * @returns TemporalFilterOptions for use with compileTemporalFilter
  */
 export function extractTemporalOptions(
-  ast: { temporalMode: { mode: TemporalMode; asOf?: string } },
+  ast: {
+    temporalMode: { mode: TemporalMode; asOf?: string };
+    recordedAsOf?: string;
+  },
   tableAlias?: string,
 ): TemporalFilterOptions {
   return {
     mode: ast.temporalMode.mode,
     asOf: ast.temporalMode.asOf,
+    recordedAsOf: ast.recordedAsOf,
     tableAlias,
   };
 }

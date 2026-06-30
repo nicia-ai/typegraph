@@ -4,30 +4,40 @@
  * Much of StoreView is a TypeScript contract: the entry points return a
  * `StoreView`, the read surfaces keep their result types, the per-call
  * temporal options are removed (the pin owns them), writes are absent, and
- * `asOfRecorded` is reserved for Unit 2.
+ * `asOfRecorded` returns the narrow recorded-time `RecordedStoreView`.
  */
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
 import {
+  asRecordedInstant,
+  createFragment,
   defineEdge,
   defineGraph,
   defineNode,
   type Edge,
   type EdgeBatchReads,
   type EdgeCollection,
+  type EdgeId,
   type EdgeTemporalReads,
   type EdgeWrites,
+  type EmptyEdgeAliasMap,
+  type EmptyRecursiveAliasMap,
   type Node,
+  type NodeAlias,
   type NodeCollection,
   type NodeCurrentReads,
   type NodeId,
   type NodeRef,
   type NodeTemporalReads,
   type NodeWrites,
-  type QueryBuilder,
+  type InitialQueryBuilder,
   type QueryOptions,
   type ReachableNode,
+  type RecordedInstant,
+  type RecordedStoreView,
+  type RecordedStoreViewEdgeCollection,
+  type RecordedStoreViewNodeCollection,
   type Store,
   type StoreSearch,
   type StoreView,
@@ -61,8 +71,12 @@ declare const view: StoreView<typeof graph>;
 declare const personId: NodeId<typeof Person>;
 declare const personRef: NodeRef<typeof Person>;
 declare const companyRef: NodeRef<typeof Company>;
+declare const worksAtId: EdgeId<typeof worksAt>;
+declare const recordedAnchor: RecordedInstant;
 
 const CANONICAL = "2024-01-01T00:00:00.000Z";
+const LEAKED_RECORDED_OPTIONS = { recordedAsOf: recordedAnchor };
+type PersonAliasMap = Readonly<Record<"p", NodeAlias<typeof Person>>>;
 
 // ============================================================
 // Entry points return a StoreView
@@ -83,8 +97,19 @@ expectError(store.view({ mode: "current", asOf: CANONICAL }));
 expectError(store.view({ mode: "includeEnded", asOf: CANONICAL }));
 expectError(store.view({ mode: "includeTombstones", asOf: CANONICAL }));
 
-// `asOfRecorded` is reserved for Unit 2 — not implemented.
+// `asOfRecorded` pins the recorded/system-time axis and returns the narrow
+// `RecordedStoreView` (reconstructing-safe reads only). The instant is branded —
+// see recorded-instant.test-d.ts for the full brand contract.
+expectType<RecordedStoreView<typeof graph>>(
+  store.asOfRecorded(asRecordedInstant(CANONICAL)),
+);
+// Diagonal sugar composes off a valid-time pin too.
+expectType<RecordedStoreView<typeof graph>>(
+  store.asOf(CANONICAL).asOfRecorded(asRecordedInstant(CANONICAL)),
+);
+// A raw string is rejected; the timestamp is required.
 expectError(store.asOfRecorded(CANONICAL));
+expectError(store.asOfRecorded());
 
 // ============================================================
 // Pinned coordinate
@@ -107,11 +132,71 @@ expectType<Promise<number>>(view.nodes.Person.count());
 expectAssignable<Promise<Edge<typeof worksAt>[]>>(
   view.edges.worksAt.findFrom(personRef),
 );
-expectType<QueryBuilder<typeof graph>>(view.query());
+expectType<InitialQueryBuilder<typeof graph, "sealed">>(view.query());
 expectType<StoreSearch<typeof graph>>(view.search);
 expectAssignable<Promise<readonly ReachableNode[]>>(
   view.reachable(personId, { edges: ["knows"] }),
 );
+
+// StoreView owns the read coordinate. Its query builder stays fluent for
+// predicates/projections, but callers cannot re-coordinate it with
+// `.temporal(...)`; only the live Store produces an open query builder.
+expectType<InitialQueryBuilder<typeof graph, "open">>(store.query());
+void store.query().temporal("current");
+expectError(view.query().temporal("current"));
+expectError(view.query().from("Person", "p").temporal("current"));
+expectError(
+  view
+    .query()
+    .from("Person", "p")
+    .traverse("knows", "k")
+    .to("Person", "friend")
+    .temporal("current"),
+);
+expectError(
+  view
+    .query()
+    .from("Person", "p")
+    .optionalTraverse("knows", "k")
+    .to("Person", "friend")
+    .temporal("current"),
+);
+expectError(
+  view
+    .query()
+    .from("Person", "p")
+    .traverseDynamic("knows", "k")
+    .toDynamic("Person", "friend")
+    .temporal("current"),
+);
+expectError(
+  view
+    .query()
+    .from("Person", "p")
+    .optionalTraverseDynamic("knows", "k")
+    .toDynamic("Person", "friend")
+    .temporal("current"),
+);
+
+const fragment = createFragment<typeof graph>();
+const personNameFragment = fragment<
+  PersonAliasMap,
+  PersonAliasMap,
+  EmptyEdgeAliasMap,
+  EmptyEdgeAliasMap,
+  EmptyRecursiveAliasMap,
+  EmptyRecursiveAliasMap
+>((query) => query.whereNode("p", ({ name }) => name.eq("Alice")));
+
+void store
+  .query()
+  .from("Person", "p")
+  .pipe(personNameFragment)
+  .temporal("current");
+expectError(
+  view.query().from("Person", "p").pipe(personNameFragment).temporal("current"),
+);
+expectError(fragment((query) => query.temporal("current")));
 
 // ============================================================
 // Per-call temporal options are removed — the pin owns the axis
@@ -128,6 +213,66 @@ expectError(
 expectError(view.degree(personId, { temporalMode: "asOf" }));
 expectError(
   view.subgraph(personId, { edges: ["knows"], temporalMode: "asOf" }),
+);
+expectError(
+  store.subgraph(personId, {
+    edges: ["knows"],
+    recordedAsOf: CANONICAL,
+  }),
+);
+
+// Public temporal options reject recorded-time coordinates even when the
+// object is pre-bound before the call site. This closes the excess-property
+// loophole where `{ recordedAsOf }` variables can otherwise sneak past the
+// inline object-literal check.
+expectError(store.nodes.Person.getById(personId, LEAKED_RECORDED_OPTIONS));
+expectError(store.nodes.Person.getByIds([personId], LEAKED_RECORDED_OPTIONS));
+expectError(store.nodes.Person.find(undefined, LEAKED_RECORDED_OPTIONS));
+expectError(store.nodes.Person.count(LEAKED_RECORDED_OPTIONS));
+expectError(store.edges.worksAt.getById(worksAtId, LEAKED_RECORDED_OPTIONS));
+expectError(store.edges.worksAt.getByIds([worksAtId], LEAKED_RECORDED_OPTIONS));
+expectError(store.edges.worksAt.find(undefined, LEAKED_RECORDED_OPTIONS));
+expectError(store.edges.worksAt.findFrom(personRef, LEAKED_RECORDED_OPTIONS));
+expectError(store.edges.worksAt.findTo(companyRef, LEAKED_RECORDED_OPTIONS));
+expectError(
+  store.edges.worksAt.findByEndpoints(
+    personRef,
+    companyRef,
+    undefined,
+    LEAKED_RECORDED_OPTIONS,
+  ),
+);
+expectError(
+  store.edges.worksAt.batchFindFrom(personRef, LEAKED_RECORDED_OPTIONS),
+);
+expectError(
+  store.edges.worksAt.batchFindTo(companyRef, LEAKED_RECORDED_OPTIONS),
+);
+expectError(
+  store.edges.worksAt.batchFindByEndpoints(
+    personRef,
+    companyRef,
+    undefined,
+    LEAKED_RECORDED_OPTIONS,
+  ),
+);
+expectError(
+  store.subgraph(personId, {
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.reachable(personId, {
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.degree(personId, {
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
 );
 
 // ============================================================
@@ -218,4 +363,67 @@ expectAssignable<Pinned<EdgeTemporalReads<typeof worksAt>>>(
 );
 expectAssignable<ViewEdgeTemporal>(
   {} as Pinned<EdgeTemporalReads<typeof worksAt>>,
+);
+
+// ============================================================
+// Conformance: RecordedStoreView's reconstructing surface does not drift from
+// StoreView's. The recorded view is a hand-written class (not a structural
+// `Pick<StoreView, …>`), so a shared method's signature could silently diverge
+// — these mutual-assignability checks turn any drift into a build break.
+// ============================================================
+
+type RecordedSharedKeys =
+  | "query"
+  | "subgraph"
+  | "reachable"
+  | "canReach"
+  | "shortestPath"
+  | "neighbors"
+  | "degree"
+  | "mode"
+  | "asOf";
+
+expectAssignable<Pick<StoreView<typeof graph>, RecordedSharedKeys>>(
+  {} as Pick<RecordedStoreView<typeof graph>, RecordedSharedKeys>,
+);
+expectAssignable<Pick<RecordedStoreView<typeof graph>, RecordedSharedKeys>>(
+  {} as Pick<StoreView<typeof graph>, RecordedSharedKeys>,
+);
+
+// ============================================================
+// Conformance: the recorded view's collections expose EXACTLY the two
+// reconstructing point reads, and those reads ARE StoreView's point reads.
+// Narrowness (the `keyof` checks) turns silently widening the recorded surface
+// back to include find / findFrom / etc. into a build break; the mutual
+// assignability locks each point read's signature to StoreView's, so a getById
+// change can't drift the two apart.
+// ============================================================
+
+expectType<"getById" | "getByIds">(
+  {} as keyof RecordedStoreViewNodeCollection<typeof Person>,
+);
+expectType<"getById" | "getByIds">(
+  {} as keyof RecordedStoreViewEdgeCollection<typeof worksAt>,
+);
+
+expectAssignable<
+  Pick<StoreViewNodeCollection<typeof Person>, "getById" | "getByIds">
+>({} as RecordedStoreViewNodeCollection<typeof Person>);
+expectAssignable<RecordedStoreViewNodeCollection<typeof Person>>(
+  {} as Pick<StoreViewNodeCollection<typeof Person>, "getById" | "getByIds">,
+);
+expectAssignable<
+  Pick<StoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">
+>({} as RecordedStoreViewEdgeCollection<typeof worksAt>);
+expectAssignable<RecordedStoreViewEdgeCollection<typeof worksAt>>(
+  {} as Pick<StoreViewEdgeCollection<typeof worksAt>, "getById" | "getByIds">,
+);
+
+// The recorded view's per-kind accessors yield exactly those narrow
+// collections, so the class wiring cannot drift from the collection types.
+expectAssignable<RecordedStoreViewNodeCollection<typeof Person>>(
+  {} as RecordedStoreView<typeof graph>["nodes"]["Person"],
+);
+expectAssignable<RecordedStoreViewEdgeCollection<typeof worksAt>>(
+  {} as RecordedStoreView<typeof graph>["edges"]["worksAt"],
 );

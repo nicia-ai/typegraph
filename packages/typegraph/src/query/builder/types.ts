@@ -12,7 +12,7 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type EmbeddingValue } from "../../core/embedding";
-import { type ReadCoordinate } from "../../core/temporal";
+import { type RecordedInstant } from "../../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
@@ -53,6 +53,8 @@ import {
 } from "./dynamic";
 
 export type { TraversalExpansion } from "../ast";
+
+export type QueryCoordinateState = "open" | "sealed";
 
 // ============================================================
 // Batch Query Interface
@@ -128,6 +130,7 @@ export type NodeAlias<
  * A map of alias names to their node aliases.
  */
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
+export type EmptyAliasMap = Readonly<Record<never, never>>;
 
 /**
  * An edge alias with its associated type and optional flag.
@@ -147,6 +150,7 @@ export type EdgeAlias<
 export type EdgeAliasMap = Readonly<
   Record<string, EdgeAlias<EdgeType, boolean>>
 >;
+export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 
 // ============================================================
 // Recursive Alias Types
@@ -163,6 +167,7 @@ export type RecursiveAlias<T extends "depth" | "path"> = Readonly<{ type: T }>;
 export type RecursiveAliasMap = Readonly<
   Record<string, RecursiveAlias<"depth" | "path">>
 >;
+export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 /**
  * Resolves a recursive alias marker to its runtime value type.
@@ -559,14 +564,8 @@ export type QueryBuilderConfig = Readonly<{
   defaultTraversalExpansion: TraversalExpansion;
   backend?: GraphBackend;
   dialect?: SqlDialect;
-  /** SQL schema configuration for custom table names. */
+  /** SQL schema configuration from createSqlSchema(...) for custom table names. */
   schema?: SqlSchema;
-  /**
-   * When set, the builder is pinned to a {@link StoreView}'s coordinate and
-   * its temporal axis is sealed: `.temporal(...)` throws. Threaded verbatim
-   * through every builder clone, so the seal survives the whole fluent chain.
-   */
-  sealedCoordinate?: ReadCoordinate;
 }>;
 
 /**
@@ -586,6 +585,7 @@ export type QueryBuilderState = Readonly<{
   offset: number | undefined;
   temporalMode: TemporalMode;
   asOf: string | undefined;
+  recordedAsOf?: RecordedInstant | undefined;
   groupBy: GroupBySpec | undefined;
   having: PredicateExpression | undefined;
   fusion: HybridFusionOptions | undefined;
@@ -607,14 +607,8 @@ export type CreateQueryBuilderOptions = Readonly<{
   backend?: GraphBackend;
   /** SQL dialect for compilation */
   dialect?: SqlDialect;
-  /** SQL schema configuration for custom table names */
+  /** SQL schema configuration from createSqlSchema(...) for custom table names */
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
-  /**
-   * Pin the builder to a {@link StoreView} coordinate and seal its temporal
-   * axis. Seeds the initial `temporalMode` / `asOf` and makes `.temporal(...)`
-   * throw. Used by `store.view(...).query()`.
-   */
-  sealedCoordinate?: ReadCoordinate;
 }>;

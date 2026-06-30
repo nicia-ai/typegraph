@@ -32,6 +32,7 @@ import {
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { isPresent } from "../utils/presence";
 
 // ============================================================
 // Uniqueness Validation
@@ -159,7 +160,7 @@ function evaluatePredicate(
   if (pred.op === "isNull") {
     return value === null || value === undefined;
   }
-  return value !== null && value !== undefined;
+  return isPresent(value);
 }
 
 /**

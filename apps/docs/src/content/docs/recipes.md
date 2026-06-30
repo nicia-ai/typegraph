@@ -10,7 +10,7 @@ end-to-end implementations, see [Examples](/examples/document-management).
 |---------|----------|
 | [RBAC](#role-based-access-control-rbac) | Permission checks through role hierarchies |
 | [Social Network](#social-network-followers--feeds) | Feeds, followers, friend recommendations |
-| [Content Versioning](#content-versioning-with-history) | Temporal queries and audit trails |
+| [Content Versioning](#content-versioning-with-history) | Valid-time history and bitemporal audit trails |
 | [Tagging System](#tagging-system) | Flexible categorization with tag clouds |
 | [Tree Navigation](#tree-navigation) | Hierarchical menus, org charts, file systems |
 | [Weighted Relationships](#weighted-relationships) | Scoring, relevance, confidence levels |
@@ -167,8 +167,12 @@ const recommendations = await store
 
 ## Content Versioning with History
 
-TypeGraph has built-in support for temporal data. Every node and edge tracks `valid_from` and
-`valid_to` timestamps, allowing you to travel through time without complex schema changes.
+TypeGraph has built-in support for temporal data. Every node and edge tracks
+`validFrom` and `validTo` timestamps, allowing you to travel through time
+without complex schema changes.
+For audit cases that need TypeGraph's captured state before a correction, enable
+recorded/system-time capture with `history: true` and use
+[`store.asOfRecorded(T)`](/queries/temporal#recorded-time-bitemporal).
 
 ### Enabling Temporal Mode
 
@@ -247,14 +251,31 @@ const history = await store
   .from("Article", "a")
   .temporal("includeEnded") // Include historical rows
   .whereNode("a", (a) => a.id.eq(article.id))
-  .orderBy("a", "valid_from", "desc")
+  .orderBy("a", "validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.valid_from,
-    validTo: ctx.a.valid_to,
+    validFrom: ctx.a.validFrom,
+    validTo: ctx.a.validTo,
   }))
   .execute();
 ```
+
+### Replaying a Recorded Belief
+
+When `history: true` is enabled, capture a recorded anchor after a decision or
+report, then replay the graph later even if rows were corrected or deleted:
+
+```typescript
+const checkpoint = await store.recordedNow();
+if (checkpoint === undefined) throw new Error("expected recorded history");
+
+const replay = store.asOfRecorded(checkpoint);
+const original = await replay.nodes.Article.getById(article.id);
+```
+
+See [Bitemporal Time Travel](/examples/bitemporal-time-travel) and
+[Agent Decision Replay](/examples/agent-decision-replay) for complete runnable
+examples.
 
 ## Tagging System
 

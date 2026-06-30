@@ -1,13 +1,12 @@
 /**
  * UnionableQuery - A query formed by combining multiple queries with set operations.
  */
-import { type SQL } from "drizzle-orm";
-
 import {
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
+import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   type ComposableQuery,
   type QueryAst,
@@ -20,6 +19,7 @@ import {
   compileSetOperation,
 } from "../compiler/index";
 import { mapResults } from "../execution";
+import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
 import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
@@ -30,6 +30,31 @@ import {
 } from "./types";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
+function executeOnBackend<T>(
+  backend: GraphBackend | TransactionBackend,
+  recordedAsOf: string | undefined,
+  promise: Promise<T>,
+  surface: string,
+): Promise<T> {
+  if (recordedAsOf === undefined) return promise;
+  return withRecordedRelationsPrecondition(promise, {
+    dialect: backend.dialect,
+    surface,
+  });
+}
+
+function recordedAsOfForComposableQuery(
+  query: ComposableQuery,
+): string | undefined {
+  if ("__type" in query) {
+    return (
+      recordedAsOfForComposableQuery(query.left) ??
+      recordedAsOfForComposableQuery(query.right)
+    );
+  }
+  return query.recordedAsOf;
+}
 
 // Forward declaration for ExecutableQuery to avoid circular imports
 // G and R are used for type compatibility with ExecutableQuery but not accessed in the interface body
@@ -64,7 +89,7 @@ type UnionableQueryState = Readonly<{
 export class UnionableQuery<G extends GraphDef, R> {
   readonly #config: QueryBuilderConfig;
   readonly #state: UnionableQueryState;
-  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: UnionableQueryState) {
     this.#config = config;
@@ -202,7 +227,7 @@ export class UnionableQuery<G extends GraphDef, R> {
   /**
    * Compiles the set operation to SQL.
    */
-  compile(): SQL {
+  compile(): CompiledSelectSql {
     if (this.#cachedCompiled !== NOT_COMPUTED) {
       return this.#cachedCompiled;
     }
@@ -230,16 +255,22 @@ export class UnionableQuery<G extends GraphDef, R> {
           "Use store.query() or pass a backend to createQueryBuilder().",
       );
     }
+    const backend = this.#config.backend;
 
-    if (composableQueryHasParameterReferences(this.toAst())) {
+    const ast = this.toAst();
+    if (composableQueryHasParameterReferences(ast)) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
     }
 
     const compiled = this.compile();
-    const rows =
-      await this.#config.backend.execute<Record<string, unknown>>(compiled);
+    const rows = await executeOnBackend(
+      backend,
+      recordedAsOfForComposableQuery(ast),
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-query",
+    );
 
     // Apply select function transformation if available
     if (this.#state.selectFn && this.#state.startAlias) {
@@ -262,14 +293,21 @@ export class UnionableQuery<G extends GraphDef, R> {
   async executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly R[]> {
-    if (composableQueryHasParameterReferences(this.toAst())) {
+    const ast = this.toAst();
+    if (composableQueryHasParameterReferences(ast)) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
     }
 
     const compiled = this.compile();
-    const rows = await backend.execute<Record<string, unknown>>(compiled);
+    const recordedAsOf = recordedAsOfForComposableQuery(ast);
+    const rows = await executeOnBackend(
+      backend,
+      recordedAsOf,
+      backend.execute<Record<string, unknown>>(compiled),
+      "recorded-batch-query",
+    );
 
     if (this.#state.selectFn && this.#state.startAlias) {
       return mapResults(

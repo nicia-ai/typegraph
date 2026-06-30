@@ -14,8 +14,10 @@ export {
   type EdgeTemporalReads,
   type EdgeWrites,
   type GetOrCreateAction,
+  type HistoryStoreOptions,
   type HookContext,
   type IfExistsMode,
+  type LiveStoreOptions,
   type Node,
   type NodeBulkFindByIndexOptions,
   type NodeCollection,
@@ -25,9 +27,14 @@ export {
   type NodeRef,
   type NodeTemporalReads,
   type NodeWrites,
+  type NoRecordedCoordinate,
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
+  type RecordedStoreViewEdgeCollection,
+  type RecordedStoreViewEdgeCollections,
+  type RecordedStoreViewNodeCollection,
+  type RecordedStoreViewNodeCollections,
   type StoreHooks,
   type StoreOptions,
   type StoreRef,
@@ -37,6 +44,7 @@ export {
   type StoreViewNodeCollections,
   type TransactionContext,
   type TypedEdgeCollection,
+  type TypedRecordedStoreViewEdgeCollection,
   type TypedStoreViewEdgeCollection,
   type UpdateEdgeInput,
   type UpdateNodeInput,
@@ -52,7 +60,7 @@ export type {
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,
 } from "./store-view";
-export { StoreView } from "./store-view";
+export { RecordedStoreView, StoreView } from "./store-view";
 
 // Subgraph extraction
 export type {
@@ -78,6 +86,11 @@ export type {
   ReclaimedVectorFieldEntry,
 } from "./materialize-removals";
 export type {
+  HistorySafeBackend,
+  HistorySafeTransactionBackend,
+  HistoryStore,
+  HistoryTransactionContext,
+  RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,

@@ -294,6 +294,39 @@ Temporal queries (`asOf`, `includeEnded`) work correctly but have some constrain
 - Historical data is only available if temporal fields (`validFrom`, `validTo`) were populated at creation time
 - Clock skew between application servers can affect temporal accuracy
 
+### Recorded / system time (`history: true`)
+
+Recorded-time capture (`createStore(graph, backend, { history: true })`) and
+`store.asOfRecorded(T)` add a second temporal axis with these constraints:
+
+- **Opt-in, no backfill.** Capture only sees changes committed after it is
+  enabled; an entity that already exists is first recorded the next time it is
+  written. Enable it on a fresh graph for complete history.
+- **TypeGraph-write capture.** Built-in capture records TypeGraph collection
+  writes only. Out-of-band database writes and row-returning raw SQL paths are
+  not captured into the recorded relations.
+- **Reconstructing reads only.** A recorded view exposes point reads
+  (`getById` / `getByIds`), `query()`, `subgraph()`, and the graph algorithms.
+  Broad collection reads (`find` / `count` / `findFrom`), `search`, and fulltext
+  / vector predicates are refused — those indexes reflect current state and
+  cannot answer a recorded-time query.
+- **Transactional backend required.** Capture needs a backend with atomic
+  transactions and statement execution — the built-in SQLite / PostgreSQL
+  backends qualify. A custom backend must implement `executeStatement` (optional
+  on the `GraphBackend` interface, but required once `history: true` is set) or
+  enabling capture throws a `ConfigurationError` at write time. Raw `tx.sql` is
+  disabled under `history: true`; adopt external transactions with
+  `store.withRecordedTransaction(...)` instead of `store.withTransaction(...)`.
+- **Reconstruction cost.** Recorded reads rebuild from the history relations and
+  are slower than live reads, most noticeably for full-graph subgraph /
+  algorithm reconstructions on PostgreSQL.
+- **PostgreSQL capture requires `READ COMMITTED`.** Every captured commit
+  advances a single recorded-clock row for the graph. TypeGraph refuses
+  PostgreSQL `REPEATABLE READ` / `SERIALIZABLE` history-capture transactions
+  because snapshot isolation cannot safely allocate that per-graph recorded
+  clock inside the captured transaction. Omit the transaction isolation option,
+  or set it to `read_committed`.
+
 ## Schema Migration Constraints
 
 Automatic migrations (`createStoreWithSchema`) only handle additive changes:

@@ -1,8 +1,16 @@
-import { expectAssignable, expectError, expectType } from "tsd";
+import {
+  expectAssignable,
+  expectError,
+  expectNotAssignable,
+  expectType,
+} from "tsd";
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 
 import {
+  asCompiledStatementSql,
   type BatchableQuery,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -10,12 +18,26 @@ import {
   type DynamicNodeCollection,
   type Edge,
   type EdgeId,
+  type ExternalRecordedReadSource,
+  type GraphBackend,
+  type HistorySafeBackend,
+  type HistorySafeTransactionBackend,
+  type HistoryStore,
+  type HistoryTransactionContext,
+  createQueryBuilder,
   getEdgeKinds,
   getNodeKinds,
   type KindAnnotations,
   type NodeId,
   type NodeRef,
+  recordedRelation,
+  type RecordedReadStore,
+  type ResolvedSqlTableNames,
+  createSqlSchema,
+  type SqlSchema,
+  type SqlTableNames,
   type Store,
+  type StoreOptions,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -59,6 +81,32 @@ const reportedBy = defineEdge("reportedBy", {
     ui: { showInTimeline: true },
   },
 });
+
+const legacyTableNames = {
+  nodes: "app_nodes",
+  edges: "app_edges",
+  fulltext: "app_fulltext",
+  uniques: "app_uniques",
+} satisfies SqlTableNames;
+expectAssignable<SqlTableNames>(legacyTableNames);
+const legacySchema = createSqlSchema(legacyTableNames);
+expectType<SqlSchema>(legacySchema);
+expectType<string>(legacySchema.tables.recordedNodes);
+expectType<string>(legacySchema.tables.recordedEdges);
+expectType<string>(legacySchema.tables.recordedClock);
+expectAssignable<ResolvedSqlTableNames>(legacySchema.tables);
+const structurallyCompatibleSchema = {
+  tables: legacySchema.tables,
+  nodesTable: legacySchema.nodesTable,
+  edgesTable: legacySchema.edgesTable,
+  recordedNodesTable: legacySchema.recordedNodesTable,
+  recordedEdgesTable: legacySchema.recordedEdgesTable,
+  recordedClockTable: legacySchema.recordedClockTable,
+  fulltextTable: legacySchema.fulltextTable,
+};
+expectNotAssignable<SqlSchema>(structurallyCompatibleSchema);
+const spreadSchema = { ...legacySchema };
+expectNotAssignable<SqlSchema>(spreadSchema);
 
 // KindAnnotations rejects non-JSON values at the type level.
 expectError(
@@ -136,10 +184,136 @@ const graph = defineGraph({
 });
 
 declare const store: Store<typeof graph>;
+declare const backend: GraphBackend;
+declare const registry: never;
 declare const worksAtId: EdgeId<typeof worksAt>;
 declare const worksAtEdge: Awaited<
   ReturnType<typeof store.edges.worksAt.create>
 >;
+
+// ============================================================
+// Store history / recorded-read public surface
+// ============================================================
+
+const externalRecordedSource = recordedRelation({ schema: legacySchema });
+expectType<ExternalRecordedReadSource>(externalRecordedSource);
+expectNotAssignable<ExternalRecordedReadSource>({
+  source: "external",
+  schema: legacySchema,
+});
+expectError(recordedRelation({ schema: structurallyCompatibleSchema }));
+expectError(
+  recordedRelation({ schema: legacySchema, source: "typegraph-capture" }),
+);
+expectError(
+  createStore(graph, backend, {
+    schema: structurallyCompatibleSchema,
+  }),
+);
+expectError(
+  createQueryBuilder<typeof graph>("public-api", registry, {
+    schema: structurallyCompatibleSchema,
+  }),
+);
+expectError(
+  createStore(graph, backend, {
+    recordedRead: { source: "external", schema: legacySchema },
+  }),
+);
+expectError(
+  createStore(graph, backend, {
+    recordedRead: { source: "typegraph-capture", schema: legacySchema },
+  }),
+);
+expectError(
+  createStore(graph, backend, {
+    history: true,
+    recordedRead: { source: "typegraph-capture", schema: legacySchema },
+  }),
+);
+
+const liveWithRecordedSource = createStore(graph, backend, {
+  recordedRead: externalRecordedSource,
+});
+expectAssignable<RecordedReadStore<typeof graph>>(liveWithRecordedSource);
+expectType<true>(liveWithRecordedSource.recordedReadBound);
+
+const historyStore = createStore(graph, backend, { history: true });
+expectAssignable<HistoryStore<typeof graph>>(historyStore);
+expectType<true>(historyStore.historyEnabled);
+expectType<true>(historyStore.recordedReadBound);
+expectAssignable<HistorySafeBackend>(historyStore.backend);
+
+// `history: true` means TypeGraph owns capture; external recorded bindings are
+// read-only sources and cannot be confused with built-in write capture.
+expectError(
+  createStore(graph, backend, {
+    history: true,
+    recordedRead: externalRecordedSource,
+  }),
+);
+expectError(
+  createStore(graph, backend, {
+    history: true,
+    recordedRead: undefined,
+  }),
+);
+
+const liveRecordedOptions = {
+  recordedRead: externalRecordedSource,
+} satisfies StoreOptions;
+void createStore(graph, backend, liveRecordedOptions);
+
+expectError(
+  createQueryBuilder<typeof graph>("public-api", registry, {
+    recordedReadBinding: externalRecordedSource,
+  }),
+);
+expectError(
+  createQueryBuilder<typeof graph>("public-api", registry, {
+    sealedCoordinate: { valid: { mode: "current" } },
+  }),
+);
+
+// Captured-history stores hide write-shaped raw SQL surfaces from their typed
+// backend property. Callers can still read via TypeGraph APIs, but cannot
+// accidentally bypass capture with raw statements on a history-enabled store.
+expectError(
+  historyStore.backend.executeStatement?.(
+    asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
+  ),
+);
+expectError(historyStore.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
+
+void historyStore.transaction(async (tx) => {
+  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
+  expectAssignable<HistorySafeTransactionBackend>(tx.backend);
+  expectError(tx.sql?.select());
+  expectError(
+    tx.backend.executeStatement?.(
+      asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
+    ),
+  );
+  expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
+});
+
+void historyStore.withRecordedTransaction({} as never, async (tx) => {
+  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
+  expectAssignable<HistorySafeTransactionBackend>(tx.backend);
+  expectError(tx.sql?.select());
+  expectError(
+    tx.backend.executeStatement?.(
+      asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
+    ),
+  );
+  expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
+});
+
+void store.transaction(async (tx) => {
+  expectType<typeof tx.sql>(tx.sql);
+  expectType<typeof tx.backend.executeStatement>(tx.backend.executeStatement);
+  expectType<typeof tx.backend.executeDdl>(tx.backend.executeDdl);
+});
 
 const nodeKinds = getNodeKinds(graph);
 const edgeKinds = getEdgeKinds(graph);

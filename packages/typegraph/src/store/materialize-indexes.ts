@@ -26,6 +26,7 @@
  *   retry.
  */
 
+import { type RawBackend } from "../backend/branded";
 import {
   type CreateVectorIndexParams,
   type GraphBackend,
@@ -89,7 +90,10 @@ export type MaterializeIndexesResult = Readonly<{
 type MaterializeIndexesContext = Readonly<{
   graph: GraphDef;
   graphId: string;
-  backend: GraphBackend;
+  // Index DDL runs at the top-level backend (CREATE INDEX CONCURRENTLY cannot
+  // run in a transaction) and writes no graph entities — it is the raw seam,
+  // not the capture wrapper. Passing the graph-write backend here is an error.
+  backend: RawBackend;
   schemaVersion: number;
 }>;
 

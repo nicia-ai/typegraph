@@ -6,9 +6,11 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import {
+  createBackendOverlay,
   type GraphBackend,
   type InsertNodeParams,
   type NodeRow as BackendNodeRow,
+  runOptionallyInTransaction,
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -48,6 +50,7 @@ import {
 import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
+import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -65,6 +68,12 @@ import {
   type FulltextSyncContext,
   syncFulltext,
 } from "../fulltext-sync";
+import {
+  nodeInsertDispatch,
+  runInsertBatch,
+  runInsertBatchReturning,
+  runInsertNoReturn,
+} from "../insert-dispatch";
 import { getNodeRowsByIds } from "../node-fetch";
 import { rowToNode } from "../row-mappers";
 import {
@@ -91,6 +100,7 @@ import {
 export type NodeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
+  historyEnabled: boolean;
   registry: KindRegistry;
   createOperationContext: (
     operation: "create" | "update" | "delete",
@@ -132,6 +142,16 @@ const CACHE_KEY_SEPARATOR = "\u0000";
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
   return `${graphId}${CACHE_KEY_SEPARATOR}${kind}${CACHE_KEY_SEPARATOR}${id}`;
+}
+
+function runInTopLevelTransactionForHistory<G extends GraphDef, T>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
+): Promise<T> {
+  return ctx.historyEnabled ?
+      runOptionallyInTransaction(backend, fn)
+    : fn(backend);
 }
 
 function buildUniqueCacheKey(
@@ -370,13 +390,10 @@ function createNodeBatchValidationBackend(
     }
   }
 
-  // The cast is necessary because spreading a union type (GraphBackend | TransactionBackend)
-  // produces an intersection of their members, which TypeScript can't narrow back to the union.
-  const validationBackend = {
-    ...backend,
+  const validationBackend = createBackendOverlay(backend, {
     getNode: getNodeCached,
     checkUnique: checkUniqueCached,
-  } as GraphBackend | TransactionBackend;
+  } satisfies Partial<GraphBackend | TransactionBackend>);
 
   return {
     backend: validationBackend,
@@ -760,27 +777,31 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
 
-  return ctx.withOperationHooks(opContext, async () => {
-    const prepared = await validateAndPrepareNodeCreate(
-      ctx,
-      input,
-      id,
-      backend,
-    );
+  return ctx.withOperationHooks(opContext, () =>
+    runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+      const prepared = await validateAndPrepareNodeCreate(
+        ctx,
+        input,
+        id,
+        target,
+      );
 
-    let row: BackendNodeRow | undefined;
-    if (shouldReturnRow) {
-      row = await backend.insertNode(prepared.insertParams);
-    } else {
-      await (backend.insertNodeNoReturn?.(prepared.insertParams) ??
-        backend.insertNode(prepared.insertParams));
-    }
+      let row: BackendNodeRow | undefined;
+      if (shouldReturnRow) {
+        row = await target.insertNode(prepared.insertParams);
+      } else {
+        await runInsertNoReturn(
+          nodeInsertDispatch(target),
+          prepared.insertParams,
+        );
+      }
 
-    await finalizeNodeCreate(ctx, prepared, backend);
+      await finalizeNodeCreate(ctx, prepared, target);
 
-    if (row === undefined) return;
-    return rowToNode(row);
-  });
+      if (row === undefined) return;
+      return rowToNode(row);
+    }),
+  );
 }
 
 export async function executeNodeCreate<G extends GraphDef>(
@@ -821,24 +842,19 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
-    ctx,
-    inputs,
-    backend,
-  );
+  await runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
+      ctx,
+      inputs,
+      target,
+    );
 
-  if (backend.insertNodesBatch === undefined) {
-    for (const insertParams of batchInsertParams) {
-      await (backend.insertNodeNoReturn?.(insertParams) ??
-        backend.insertNode(insertParams));
+    await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
+
+    for (const prepared of preparedCreates) {
+      await finalizeNodeCreate(ctx, prepared, target);
     }
-  } else {
-    await backend.insertNodesBatch(batchInsertParams);
-  }
-
-  for (const prepared of preparedCreates) {
-    await finalizeNodeCreate(ctx, prepared, backend);
-  }
+  });
 }
 
 /**
@@ -857,28 +873,24 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
-  const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
-    ctx,
-    inputs,
-    backend,
-  );
+  return runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+    const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
+      ctx,
+      inputs,
+      target,
+    );
 
-  let rows: readonly BackendNodeRow[];
-  if (backend.insertNodesBatchReturning === undefined) {
-    const sequentialRows: BackendNodeRow[] = [];
-    for (const insertParams of batchInsertParams) {
-      sequentialRows.push(await backend.insertNode(insertParams));
+    const rows = await runInsertBatchReturning(
+      nodeInsertDispatch(target),
+      batchInsertParams,
+    );
+
+    for (const prepared of preparedCreates) {
+      await finalizeNodeCreate(ctx, prepared, target);
     }
-    rows = sequentialRows;
-  } else {
-    rows = await backend.insertNodesBatchReturning(batchInsertParams);
-  }
 
-  for (const prepared of preparedCreates) {
-    await finalizeNodeCreate(ctx, prepared, backend);
-  }
-
-  return rows.map((row) => rowToNode(row));
+    return rows.map((row) => rowToNode(row));
+  });
 }
 
 // ============================================================
@@ -898,7 +910,9 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.id,
   );
   return ctx.withOperationHooks(opContext, () =>
-    performNodeUpdate(ctx, input, backend, options),
+    runInTopLevelTransactionForHistory(ctx, backend, (target) =>
+      performNodeUpdate(ctx, input, target, options),
+    ),
   );
 }
 
@@ -912,7 +926,9 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return performNodeUpdate(ctx, input, backend, options);
+  return runInTopLevelTransactionForHistory(ctx, backend, (target) =>
+    performNodeUpdate(ctx, input, target, options),
+  );
 }
 
 // ============================================================
@@ -929,32 +945,48 @@ export async function executeNodeDelete<G extends GraphDef>(
 
   return ctx.withOperationHooks(opContext, async () => {
     const registration = getNodeRegistration(ctx.graph, kind);
+    const preflight = await backend.getNode(ctx.graphId, kind, id);
+    if (!preflight || preflight.deleted_at) return;
 
-    const existing = await backend.getNode(ctx.graphId, kind, id);
-    if (!existing || existing.deleted_at) return;
+    // The cascade (connected edges, uniques, embeddings, fulltext, node) is not
+    // individually atomic, so wrap it in a transaction when the backend supports
+    // one — mirroring executeNodeHardDelete. Under recorded-time capture this
+    // also collapses the whole cascade into a single recorded commit instant
+    // instead of one instant per sub-write.
+    const softDelete = async (
+      target: GraphBackend | TransactionBackend,
+    ): Promise<void> => {
+      const existing = await target.getNode(ctx.graphId, kind, id);
+      if (!existing || existing.deleted_at) return;
 
-    const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
+      const existingProps = JSON.parse(existing.props) as Record<
+        string,
+        unknown
+      >;
 
-    await enforceDeleteBehavior(ctx, kind, id, "soft", backend, registration);
+      await enforceDeleteBehavior(ctx, kind, id, "soft", target, registration);
 
-    await backend.deleteNode({ graphId: ctx.graphId, kind, id });
+      await target.deleteNode({ graphId: ctx.graphId, kind, id });
 
-    await deleteUniquenessEntries(
-      createUniquenessContext(ctx.graphId, ctx.registry, backend),
-      kind,
-      existingProps,
-      registration.unique ?? [],
-    );
+      await deleteUniquenessEntries(
+        createUniquenessContext(ctx.graphId, ctx.registry, target),
+        kind,
+        existingProps,
+        registration.unique ?? [],
+      );
 
-    const nodeKind = registration.type;
-    await deleteNodeEmbeddings(
-      createEmbeddingSyncContext(ctx.graphId, kind, id, backend),
-      nodeKind.schema,
-    );
-    await deleteNodeFulltext(
-      createFulltextSyncContext(ctx.graphId, kind, id, backend),
-      nodeKind.schema,
-    );
+      const nodeKind = registration.type;
+      await deleteNodeEmbeddings(
+        createEmbeddingSyncContext(ctx.graphId, kind, id, target),
+        nodeKind.schema,
+      );
+      await deleteNodeFulltext(
+        createFulltextSyncContext(ctx.graphId, kind, id, target),
+        nodeKind.schema,
+      );
+    };
+
+    await runOptionallyInTransaction(backend, (target) => softDelete(target));
   });
 }
 
@@ -974,11 +1006,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
 
   return ctx.withOperationHooks(opContext, async () => {
     const registration = getNodeRegistration(ctx.graph, kind);
-
-    const existing = await backend.getNode(ctx.graphId, kind, id);
-    if (!existing) return;
-
-    await enforceDeleteBehavior(ctx, kind, id, "hard", backend, registration);
+    const preflight = await backend.getNode(ctx.graphId, kind, id);
+    if (!preflight) return;
 
     // The cascade (uniques, embeddings, edges, node) is not individually atomic,
     // so wrap in a transaction when the backend supports it. Embeddings live in
@@ -988,6 +1017,10 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     const hardDelete = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
+      const existing = await target.getNode(ctx.graphId, kind, id);
+      if (!existing) return;
+
+      await enforceDeleteBehavior(ctx, kind, id, "hard", target, registration);
       await target.hardDeleteNode({ graphId: ctx.graphId, kind, id });
       await deleteNodeEmbeddings(
         createEmbeddingSyncContext(ctx.graphId, kind, id, target),
@@ -995,9 +1028,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       );
     };
 
-    await ("transaction" in backend && backend.capabilities.transactions ?
-      backend.transaction(async (tx) => hardDelete(tx))
-    : hardDelete(backend));
+    await runOptionallyInTransaction(backend, (target) => hardDelete(target));
   });
 }
 
@@ -1578,7 +1609,9 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
     : sql`${probedSelect} ORDER BY probe_idx, "id"`;
 
   // 4. Execute, hydrate matched nodes, and group back to input positions.
-  const rawMatches = await backend.execute<ProbeMatch>(query);
+  const rawMatches = await backend.execute<ProbeMatch>(
+    asCompiledRowsSql(query),
+  );
   const matches =
     limitPerInput !== undefined && !capInSql ?
       capMatchesPerGroup(rawMatches, limitPerInput)

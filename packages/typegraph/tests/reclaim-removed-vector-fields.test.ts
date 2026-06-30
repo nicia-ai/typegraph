@@ -18,9 +18,9 @@
 import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { defineGraph } from "../src";
+import { asCompiledRowsSql, defineGraph } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import { type GraphBackend } from "../src/backend/types";
+import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema, type Store } from "../src/store/store";
 
@@ -80,7 +80,9 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
 
   async function tableExists(name: string): Promise<boolean> {
     const rows = await backend.execute<{ name: string }>(
-      sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${name}`,
+      asCompiledRowsSql(
+        sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${name}`,
+      ),
     );
     return rows.length > 0;
   }
@@ -206,20 +208,21 @@ describe("reclaimRemovedVectorFieldTables (sqlite-vec, end-to-end)", () => {
   });
 
   it("memoizes the reclaim history walk per active version (#12)", async () => {
-    const withField = await storeWithMaterializedEmbedding();
+    let calls = 0;
+    const observedBackend = createBackendOverlay(backend, {
+      getSchemaVersion(graphId, version) {
+        calls += 1;
+        return backend.getSchemaVersion(graphId, version);
+      },
+    });
+    const [store] = await createStoreWithSchema(baseGraph, observedBackend);
+    const withField = await store.evolve(addDocumentWithEmbedding);
+    await writeDocument(withField, { title: "a", embedding: [1, 0, 0] });
     const evolved = await withField.evolve(dropEmbeddingModifier);
 
     // Count schema-version reads to prove the second pass doesn't re-walk
     // history (reconcile's marker + reclaim's per-version memo both short-circuit).
-    const original = backend.getSchemaVersion.bind(backend);
-    let calls = 0;
-    (
-      backend as { getSchemaVersion: typeof backend.getSchemaVersion }
-    ).getSchemaVersion = (graphId, version) => {
-      calls += 1;
-      return original(graphId, version);
-    };
-
+    calls = 0;
     await evolved.materializeRemovals();
     const firstPassCalls = calls;
     calls = 0;

@@ -27,12 +27,15 @@ deployment.
 - Start with SQLite, move to PostgreSQL without changing your graph definition
 - Evolve the schema at runtime from agent-proposed JSON — no redeploy
   ([Graph Extensions](https://typegraph.dev/graph-extensions))
+- Reconstruct valid-time and recorded-time history with bitemporal reads
+  ([Temporal queries](https://typegraph.dev/queries/temporal))
 
 ## Best fit
 
 TypeGraph works well for:
 
 - Knowledge graphs and RAG context modeling
+- Auditable agent memory, decision replay, and bitemporal forensics
 - Identity/permissions and other relationship-heavy domain models
 - Applications that want graph semantics without extra infrastructure
 
@@ -111,6 +114,7 @@ For production schema management, see:
 - Overview: [What is TypeGraph?](https://typegraph.dev/overview)
 - Setup: [Getting Started](https://typegraph.dev/getting-started)
 - Query builder: [Queries Overview](https://typegraph.dev/queries/overview)
+- Temporal and bitemporal history: [Temporal queries](https://typegraph.dev/queries/temporal)
 - Application patterns: [Common Patterns](https://typegraph.dev/recipes)
 - Complete examples: [packages/typegraph/examples](packages/typegraph/examples/)
 - Project docs: [Testing](docs/TESTING.md), [Release Process](docs/RELEASE.md)

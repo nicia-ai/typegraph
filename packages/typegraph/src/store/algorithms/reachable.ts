@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { asCompiledRowsSql } from "../../query/sql-intent";
 import { buildReachableCte } from "../recursive-cte";
 import {
   type AlgorithmContext,
@@ -47,6 +48,9 @@ export async function executeReachable(
     ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
   });
 
   const sourceFilter =
@@ -54,7 +58,9 @@ export async function executeReachable(
 
   const query = sql`${cte} SELECT id, kind, MIN(depth) AS depth FROM reachable${sourceFilter} GROUP BY id, kind ORDER BY depth ASC, id ASC`;
 
-  const rows = await ctx.backend.execute<ReachableRow>(query);
+  const rows = await ctx.backend.execute<ReachableRow>(
+    asCompiledRowsSql(query),
+  );
   return rows.map((row) => ({
     id: row.id,
     kind: row.kind,
@@ -91,11 +97,16 @@ export async function executeCanReach(
     ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
   });
 
   const query = sql`${cte} SELECT 1 AS hit FROM reachable WHERE id = ${targetId} LIMIT 1`;
 
-  const rows = await ctx.backend.execute<Readonly<{ hit: number }>>(query);
+  const rows = await ctx.backend.execute<Readonly<{ hit: number }>>(
+    asCompiledRowsSql(query),
+  );
   return rows.length > 0;
 }
 
@@ -115,6 +126,9 @@ export async function executeNeighbors(
       temporalMode: options.temporalMode,
     }),
     ...(options.asOf !== undefined && { asOf: options.asOf }),
+    ...(options.recordedAsOf !== undefined && {
+      recordedAsOf: options.recordedAsOf,
+    }),
     excludeSource: true,
   });
 }

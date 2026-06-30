@@ -20,9 +20,16 @@
  * ```
  */
 import { type GraphDef } from "../../core/define-graph";
+import { type TraversalDirection } from "../ast";
 import { type QueryBuilder } from "./query-builder";
 import { type TraversalBuilder } from "./traversal-builder";
-import { type AliasMap, type EdgeAliasMap } from "./types";
+import {
+  type AliasMap,
+  type EdgeAliasMap,
+  type EmptyRecursiveAliasMap,
+  type QueryCoordinateState,
+  type RecursiveAliasMap,
+} from "./types";
 
 // ============================================================
 // Fragment Types
@@ -39,6 +46,8 @@ import { type AliasMap, type EdgeAliasMap } from "./types";
  * @typeParam OutAliases - Output alias map (what the fragment produces)
  * @typeParam InEdgeAliases - Input edge alias map
  * @typeParam OutEdgeAliases - Output edge alias map
+ * @typeParam InRecursiveAliases - Input recursive alias map
+ * @typeParam OutRecursiveAliases - Output recursive alias map
  */
 export type QueryFragment<
   G extends GraphDef,
@@ -46,9 +55,23 @@ export type QueryFragment<
   OutAliases extends AliasMap = InAliases,
   InEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
   OutEdgeAliases extends EdgeAliasMap = InEdgeAliases,
-> = (
-  builder: QueryBuilder<G, InAliases, InEdgeAliases>,
-) => QueryBuilder<G, OutAliases, OutEdgeAliases>;
+  InRecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
+  OutRecursiveAliases extends RecursiveAliasMap = InRecursiveAliases,
+> = <CoordinateState extends QueryCoordinateState>(
+  builder: QueryBuilder<
+    G,
+    InAliases,
+    InEdgeAliases,
+    InRecursiveAliases,
+    CoordinateState
+  >,
+) => QueryBuilder<
+  G,
+  OutAliases,
+  OutEdgeAliases,
+  OutRecursiveAliases,
+  CoordinateState
+>;
 
 /**
  * A flexible query fragment that works with any compatible builder.
@@ -62,9 +85,26 @@ export type FlexibleQueryFragment<
   AddedAliases extends AliasMap = AliasMap,
   RequiredEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
   AddedEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
-> = <Aliases extends RequiredAliases, EdgeAliases extends RequiredEdgeAliases>(
-  builder: QueryBuilder<G, Aliases, EdgeAliases>,
-) => QueryBuilder<G, Aliases & AddedAliases, EdgeAliases & AddedEdgeAliases>;
+> = <
+  Aliases extends RequiredAliases,
+  EdgeAliases extends RequiredEdgeAliases,
+  RecursiveAliases extends RecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState,
+>(
+  builder: QueryBuilder<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >,
+) => QueryBuilder<
+  G,
+  Aliases & AddedAliases,
+  EdgeAliases & AddedEdgeAliases,
+  RecursiveAliases,
+  CoordinateState
+>;
 
 /**
  * A traversal fragment that transforms a TraversalBuilder.
@@ -78,9 +118,27 @@ export type TraversalFragment<
   EA extends string,
   InAliases extends AliasMap = AliasMap,
   InEdgeAliases extends EdgeAliasMap = EdgeAliasMap,
-> = (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Direction type is context-dependent
-  builder: TraversalBuilder<G, InAliases, InEdgeAliases, EK, EA, any>,
+> = <
+  Dir extends TraversalDirection,
+  Optional extends boolean,
+  DC extends boolean | string,
+  PC extends boolean | string,
+  RecursiveAliases extends RecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState,
+>(
+  builder: TraversalBuilder<
+    G,
+    InAliases,
+    InEdgeAliases,
+    EK,
+    EA,
+    Dir,
+    Optional,
+    DC,
+    PC,
+    RecursiveAliases,
+    CoordinateState
+  >,
 ) => unknown;
 
 // ============================================================
@@ -126,11 +184,27 @@ function fragmentIdentity<
   OutAliases extends AliasMap,
   InEdgeAliases extends EdgeAliasMap,
   OutEdgeAliases extends EdgeAliasMap,
+  InRecursiveAliases extends RecursiveAliasMap,
+  OutRecursiveAliases extends RecursiveAliasMap,
 >(
-  fn: (
-    builder: QueryBuilder<G, InAliases, InEdgeAliases>,
-  ) => QueryBuilder<G, OutAliases, OutEdgeAliases>,
-): QueryFragment<G, InAliases, OutAliases, InEdgeAliases, OutEdgeAliases> {
+  fn: QueryFragment<
+    G,
+    InAliases,
+    OutAliases,
+    InEdgeAliases,
+    OutEdgeAliases,
+    InRecursiveAliases,
+    OutRecursiveAliases
+  >,
+): QueryFragment<
+  G,
+  InAliases,
+  OutAliases,
+  InEdgeAliases,
+  OutEdgeAliases,
+  InRecursiveAliases,
+  OutRecursiveAliases
+> {
   return fn;
 }
 
@@ -139,13 +213,31 @@ export function createFragment<G extends GraphDef>(): <
   OutAliases extends AliasMap,
   InEdgeAliases extends EdgeAliasMap,
   OutEdgeAliases extends EdgeAliasMap,
+  InRecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
+  OutRecursiveAliases extends RecursiveAliasMap = InRecursiveAliases,
 >(
-  fn: (
-    builder: QueryBuilder<G, InAliases, InEdgeAliases>,
-  ) => QueryBuilder<G, OutAliases, OutEdgeAliases>,
-) => QueryFragment<G, InAliases, OutAliases, InEdgeAliases, OutEdgeAliases> {
+  fn: QueryFragment<
+    G,
+    InAliases,
+    OutAliases,
+    InEdgeAliases,
+    OutEdgeAliases,
+    InRecursiveAliases,
+    OutRecursiveAliases
+  >,
+) => QueryFragment<
+  G,
+  InAliases,
+  OutAliases,
+  InEdgeAliases,
+  OutEdgeAliases,
+  InRecursiveAliases,
+  OutRecursiveAliases
+> {
   return fragmentIdentity;
 }
+
+type ErasedFragment = (builder: unknown) => unknown;
 
 /**
  * Combines multiple fragments into a single fragment.
@@ -172,7 +264,11 @@ export function composeFragments<
   A2 extends AliasMap,
   E1 extends EdgeAliasMap,
   E2 extends EdgeAliasMap,
->(f1: QueryFragment<G, A1, A2, E1, E2>): QueryFragment<G, A1, A2, E1, E2>;
+  R1 extends RecursiveAliasMap,
+  R2 extends RecursiveAliasMap,
+>(
+  f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>,
+): QueryFragment<G, A1, A2, E1, E2, R1, R2>;
 
 export function composeFragments<
   G extends GraphDef,
@@ -182,10 +278,13 @@ export function composeFragments<
   E1 extends EdgeAliasMap,
   E2 extends EdgeAliasMap,
   E3 extends EdgeAliasMap,
+  R1 extends RecursiveAliasMap,
+  R2 extends RecursiveAliasMap,
+  R3 extends RecursiveAliasMap,
 >(
-  f1: QueryFragment<G, A1, A2, E1, E2>,
-  f2: QueryFragment<G, A2, A3, E2, E3>,
-): QueryFragment<G, A1, A3, E1, E3>;
+  f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>,
+  f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>,
+): QueryFragment<G, A1, A3, E1, E3, R1, R3>;
 
 export function composeFragments<
   G extends GraphDef,
@@ -197,11 +296,15 @@ export function composeFragments<
   E2 extends EdgeAliasMap,
   E3 extends EdgeAliasMap,
   E4 extends EdgeAliasMap,
+  R1 extends RecursiveAliasMap,
+  R2 extends RecursiveAliasMap,
+  R3 extends RecursiveAliasMap,
+  R4 extends RecursiveAliasMap,
 >(
-  f1: QueryFragment<G, A1, A2, E1, E2>,
-  f2: QueryFragment<G, A2, A3, E2, E3>,
-  f3: QueryFragment<G, A3, A4, E3, E4>,
-): QueryFragment<G, A1, A4, E1, E4>;
+  f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>,
+  f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>,
+  f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>,
+): QueryFragment<G, A1, A4, E1, E4, R1, R4>;
 
 export function composeFragments<
   G extends GraphDef,
@@ -215,22 +318,23 @@ export function composeFragments<
   E3 extends EdgeAliasMap,
   E4 extends EdgeAliasMap,
   E5 extends EdgeAliasMap,
+  R1 extends RecursiveAliasMap,
+  R2 extends RecursiveAliasMap,
+  R3 extends RecursiveAliasMap,
+  R4 extends RecursiveAliasMap,
+  R5 extends RecursiveAliasMap,
 >(
-  f1: QueryFragment<G, A1, A2, E1, E2>,
-  f2: QueryFragment<G, A2, A3, E2, E3>,
-  f3: QueryFragment<G, A3, A4, E3, E4>,
-  f4: QueryFragment<G, A4, A5, E4, E5>,
-): QueryFragment<G, A1, A5, E1, E5>;
+  f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>,
+  f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>,
+  f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>,
+  f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>,
+): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
 
-export function composeFragments<G extends GraphDef>(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Variadic composition requires any
-  ...fragments: QueryFragment<G, any, any, any, any>[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Return type depends on input types
-): QueryFragment<G, any, any, any, any> {
-  return (builder) => {
+export function composeFragments(...fragments: readonly unknown[]): unknown {
+  return (builder: unknown) => {
     let result = builder;
     for (const fragment of fragments) {
-      result = fragment(result);
+      result = (fragment as ErasedFragment)(result);
     }
     return result;
   };
@@ -252,8 +356,7 @@ export function orderByFragment<G extends GraphDef, A extends string>(
   alias: A,
   field: string,
   direction: "asc" | "desc" = "asc",
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Flexible alias types
-): QueryFragment<G, any, any, any, any> {
+): FlexibleQueryFragment<G> {
   return (builder) => builder.orderBy(alias, field, direction);
 }
 
@@ -267,8 +370,7 @@ export function orderByFragment<G extends GraphDef, A extends string>(
  */
 export function limitFragment<G extends GraphDef>(
   n: number,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Flexible alias types
-): QueryFragment<G, any, any, any, any> {
+): FlexibleQueryFragment<G> {
   return (builder) => builder.limit(n);
 }
 
@@ -282,7 +384,6 @@ export function limitFragment<G extends GraphDef>(
  */
 export function offsetFragment<G extends GraphDef>(
   n: number,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Flexible alias types
-): QueryFragment<G, any, any, any, any> {
+): FlexibleQueryFragment<G> {
   return (builder) => builder.offset(n);
 }

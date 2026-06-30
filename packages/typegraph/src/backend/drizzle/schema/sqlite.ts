@@ -40,6 +40,9 @@ import { type IndexDeclaration } from "../../../indexes/types";
 export type SqliteTableNames = Readonly<{
   nodes: string;
   edges: string;
+  recordedNodes: string;
+  recordedEdges: string;
+  recordedClock: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -70,6 +73,9 @@ export type CreateSqliteTablesOptions = Readonly<{
 const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
+  recordedNodes: "typegraph_recorded_nodes",
+  recordedEdges: "typegraph_recorded_edges",
+  recordedClock: "typegraph_recorded_clock",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -177,6 +183,114 @@ export function createSqliteTables(
       ),
       ...buildSqliteEdgeIndexBuilders(t, indexes),
     ],
+  );
+
+  const recordedNodes = sqliteTable(
+    n.recordedNodes,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+      props: text("props").notNull(),
+      version: integer("version").notNull(),
+      validFrom: text("valid_from"),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+      recordedFrom: text("recorded_from").notNull(),
+      recordedTo: text("recorded_to").notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: text("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedNodes}_entity_idx`).on(
+        t.graphId,
+        t.kind,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedNodes}_open_idx`).on(t.graphId, t.recordedTo),
+      index(`${n.recordedNodes}_valid_idx`).on(
+        t.graphId,
+        t.validFrom,
+        t.validTo,
+      ),
+    ],
+  );
+
+  const recordedEdges = sqliteTable(
+    n.recordedEdges,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      kind: text("kind").notNull(),
+      fromKind: text("from_kind").notNull(),
+      fromId: text("from_id").notNull(),
+      toKind: text("to_kind").notNull(),
+      toId: text("to_id").notNull(),
+      props: text("props").notNull(),
+      validFrom: text("valid_from"),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+      recordedFrom: text("recorded_from").notNull(),
+      recordedTo: text("recorded_to").notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: text("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedEdges}_entity_idx`).on(
+        t.graphId,
+        t.kind,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_open_idx`).on(t.graphId, t.recordedTo),
+      index(`${n.recordedEdges}_from_idx`).on(
+        t.graphId,
+        t.fromKind,
+        t.fromId,
+        t.kind,
+        t.toKind,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_to_idx`).on(
+        t.graphId,
+        t.toKind,
+        t.toId,
+        t.kind,
+        t.fromKind,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedEdges}_valid_idx`).on(
+        t.graphId,
+        t.validFrom,
+        t.validTo,
+      ),
+    ],
+  );
+
+  const recordedClock = sqliteTable(
+    n.recordedClock,
+    {
+      graphId: text("graph_id").notNull(),
+      recordedAt: text("recorded_at").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
   const uniques = sqliteTable(
@@ -327,6 +441,9 @@ export function createSqliteTables(
   return {
     nodes,
     edges,
+    recordedNodes,
+    recordedEdges,
+    recordedClock,
     uniques,
     schemaVersions,
     indexMaterializations,
@@ -350,7 +467,15 @@ export const tables = createSqliteTables();
 /**
  * Convenience exports for default tables.
  */
-export const { nodes, edges, uniques, schemaVersions } = tables;
+export const {
+  nodes,
+  edges,
+  recordedNodes,
+  recordedEdges,
+  recordedClock,
+  uniques,
+  schemaVersions,
+} = tables;
 
 /**
  * Type representing the tables object returned by createSqliteTables.

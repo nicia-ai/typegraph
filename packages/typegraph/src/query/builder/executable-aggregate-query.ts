@@ -1,11 +1,10 @@
 /**
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
-import { type SQL } from "drizzle-orm";
-
 import { type GraphDef } from "../../core/define-graph";
 import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import {
@@ -39,7 +38,7 @@ export class ExecutableAggregateQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #fields: R;
-  #cachedCompiled: SQL | typeof NOT_COMPUTED = NOT_COMPUTED;
+  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R) {
     this.#config = config;
@@ -95,7 +94,7 @@ export class ExecutableAggregateQuery<
   /**
    * Compiles the query to a Drizzle SQL object.
    */
-  compile(): SQL {
+  compile(): CompiledSelectSql {
     if (this.#cachedCompiled !== NOT_COMPUTED) {
       return this.#cachedCompiled;
     }

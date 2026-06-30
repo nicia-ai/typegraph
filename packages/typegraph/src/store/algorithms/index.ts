@@ -1,8 +1,13 @@
 import { type GraphBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type TemporalMode } from "../../core/types";
-import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
+import {
+  createSqlSchema,
+  type RecordedReadBinding,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import { getDialect } from "../../query/dialect";
+import { assertNoRecordedCoordinate } from "../recorded-coordinate-guard";
 import { type AlgorithmContext } from "./context";
 import { executeDegree } from "./degree";
 import {
@@ -14,6 +19,11 @@ import { executeShortestPath } from "./shortest-path";
 import type {
   BaseTraversalOptions,
   DegreeOptions,
+  InternalBaseTraversalOptions,
+  InternalDegreeOptions,
+  InternalNeighborsOptions,
+  InternalReachableOptions,
+  InternalShortestPathOptions,
   NeighborsOptions,
   ReachableNode,
   ReachableOptions,
@@ -99,30 +109,75 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
   degree: (node: NodeIdentifier, options?: DegreeOptions<G>) => Promise<number>;
 }>;
 
+export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
+  shortestPath: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: InternalShortestPathOptions<G>,
+  ) => Promise<ShortestPathResult | undefined>;
+  reachable: (
+    from: NodeIdentifier,
+    options: InternalReachableOptions<G>,
+  ) => Promise<readonly ReachableNode[]>;
+  canReach: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: InternalBaseTraversalOptions<G>,
+  ) => Promise<boolean>;
+  neighbors: (
+    node: NodeIdentifier,
+    options: InternalNeighborsOptions<G>,
+  ) => Promise<readonly ReachableNode[]>;
+  degree: (
+    node: NodeIdentifier,
+    options?: InternalDegreeOptions<G>,
+  ) => Promise<number>;
+}>;
+
 export type CreateGraphAlgorithmsParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   schema: SqlSchema | undefined;
+  recordedReadBinding: RecordedReadBinding | undefined;
   defaultTemporalMode: TemporalMode;
+  allowRecordedAsOf?: boolean;
 }>;
+
+function assertRecordedAsOfInternalOnly(
+  options: unknown,
+  method: string,
+  allowRecordedAsOf: boolean,
+): void {
+  if (allowRecordedAsOf) return;
+  assertNoRecordedCoordinate(options, {
+    code: "ALGORITHM_RECORDED_ASOF_INTERNAL_ONLY",
+    message: `recordedAsOf is only available through store.asOfRecorded(...).${method}(...).`,
+    context: { method },
+    suggestion:
+      "Use store.asOfRecorded(recordedAt).reachable/shortestPath/canReach/neighbors/degree(...) instead of passing recordedAsOf directly.",
+  });
+}
 
 export function createGraphAlgorithms<G extends GraphDef>(
   params: CreateGraphAlgorithmsParams,
-): GraphAlgorithms<G> {
+): InternalGraphAlgorithms<G> {
+  const allowRecordedAsOf = params.allowRecordedAsOf === true;
   const ctx: AlgorithmContext = {
     graphId: params.graphId,
     backend: params.backend,
     dialect: getDialect(params.backend.dialect),
-    schema:
-      params.schema ??
-      (params.backend.tableNames ?
-        createSqlSchema(params.backend.tableNames)
-      : createSqlSchema()),
+    schema: params.schema ?? createSqlSchema(params.backend.tableNames),
+    recordedReadBinding: params.recordedReadBinding,
     defaultTemporalMode: params.defaultTemporalMode,
   };
 
   return {
     shortestPath(from, to, options) {
+      assertRecordedAsOfInternalOnly(
+        options,
+        "shortestPath",
+        allowRecordedAsOf,
+      );
       return executeShortestPath(
         ctx,
         resolveNodeId(from),
@@ -131,9 +186,11 @@ export function createGraphAlgorithms<G extends GraphDef>(
       );
     },
     reachable(from, options) {
+      assertRecordedAsOfInternalOnly(options, "reachable", allowRecordedAsOf);
       return executeReachable(ctx, resolveNodeId(from), options);
     },
     canReach(from, to, options) {
+      assertRecordedAsOfInternalOnly(options, "canReach", allowRecordedAsOf);
       return executeCanReach(
         ctx,
         resolveNodeId(from),
@@ -142,9 +199,11 @@ export function createGraphAlgorithms<G extends GraphDef>(
       );
     },
     neighbors(node, options) {
+      assertRecordedAsOfInternalOnly(options, "neighbors", allowRecordedAsOf);
       return executeNeighbors(ctx, resolveNodeId(node), options);
     },
     degree(node, options) {
+      assertRecordedAsOfInternalOnly(options, "degree", allowRecordedAsOf);
       return executeDegree(ctx, resolveNodeId(node), options ?? {});
     },
   };
@@ -154,6 +213,12 @@ export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,
   DegreeOptions,
+  InternalBaseTraversalOptions,
+  InternalDegreeOptions,
+  InternalNeighborsOptions,
+  InternalReachableOptions,
+  InternalShortestPathOptions,
+  InternalTemporalAlgorithmOptions,
   NeighborsOptions,
   PathNode,
   ReachableNode,

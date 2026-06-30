@@ -17,12 +17,12 @@ const version = package_.version;
         <a
           href="/changelog"
           class="inline-flex items-center gap-2 px-3 py-1 mb-6 rounded-full border border-primary/30 bg-primary/10 text-sm font-mono text-primary hover:bg-primary/15 hover:border-primary/50 transition-colors no-underline"
-          aria-label={`Version ${version} — Batched index lookup. See changelog.`}
+          aria-label={`Version ${version} - Bitemporal history. See changelog.`}
         >
           <span
             class="inline-block w-2 h-2 rounded-full bg-primary"
             aria-hidden="true"></span>
-          v{version} · Batched index lookup
+          v{version} · Bitemporal history
           <span class="opacity-70" aria-hidden="true">→</span>
         </a>
         <h1 class="text-5xl font-extrabold leading-[1.1] mb-6 tracking-tight">
@@ -81,14 +81,21 @@ const version = package_.version;
           id="ctab-evolve"
           aria-label="Runtime evolution example"
         />
+        <input
+          type="radio"
+          name="ctab"
+          id="ctab-temporal"
+          aria-label="Bitemporal history example"
+        />
 
         <div
-          class="code-tab-labels flex gap-1 border-b border-[#333] bg-[#252526] rounded-t-xl overflow-x-auto"
+          class="code-tab-labels flex gap-2 border border-b-0 border-[#333] bg-[#181818] rounded-t-xl p-2 overflow-x-auto"
           role="tablist"
         >
           <label for="ctab-basic">Basic</label>
           <label for="ctab-hybrid">Hybrid Search</label>
           <label for="ctab-evolve">Runtime Evolution</label>
+          <label for="ctab-temporal">Bitemporal</label>
         </div>
 
         <div
@@ -184,171 +191,370 @@ const version = package_.version;
   year:  2017,
 });</code></pre>
           </div>
+
+          <div class="code-panel code-panel-temporal p-6 overflow-x-auto">
+            <pre
+              class="m-0 font-mono text-sm leading-relaxed text-[#d4d4d4]"><code is:raw><span class="hl-keyword">import</span> { createStore, asRecordedInstant } <span class="hl-keyword">from</span> <span class="hl-string">"@nicia-ai/typegraph"</span>;
+
+<span class="hl-comment">// 1. Turn on recorded/system-time capture for committed writes.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">store</span> = createStore(graph, backend, { history: <span class="hl-keyword">true</span> });
+
+<span class="hl-comment">// 2. Capture a deterministic recorded-time anchor after an agent decides.</span>
+<span class="hl-keyword">await</span> store.nodes.Decision.create({ answer: <span class="hl-string">"approve source A"</span> });
+<span class="hl-keyword">const</span> <span class="hl-type">decisionTime</span> = <span class="hl-keyword">await</span> store.recordedNow();
+<span class="hl-keyword">if</span> (decisionTime === <span class="hl-keyword">undefined</span>) <span class="hl-keyword">throw new</span> Error(<span class="hl-string">"no recorded history yet"</span>);
+
+<span class="hl-comment">// 3. Later, replay the exact graph the agent saw.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">replay</span> = store.asOfRecorded(decisionTime);
+<span class="hl-keyword">const</span> <span class="hl-type">sameAnswer</span> = <span class="hl-keyword">await</span> replay
+  .query()
+  .from(<span class="hl-string">"Decision"</span>, <span class="hl-string">"d"</span>)
+  .select(ctx =&gt; ctx.d.answer)
+  .first();
+
+<span class="hl-comment">// Valid time and recorded time can be pinned independently.</span>
+<span class="hl-keyword">const</span> <span class="hl-type">whatWeKnewThen</span> = store
+  .asOf(<span class="hl-string">"2026-01-01T00:00:00.000Z"</span>)
+  .asOfRecorded(asRecordedInstant(<span class="hl-string">"2026-02-01T00:00:00.000Z"</span>));</code></pre>
+          </div>
         </div>
       </div>
     </section>
 
     <section class="py-24">
-      <div class="text-center mb-16">
-        <h2 class="text-4xl font-extrabold mb-4">Why TypeGraph?</h2>
-        <p class="text-xl text-text-muted max-w-[600px] mx-auto">
-          Build smarter applications with a database that understands your
-          domain.
+      <div class="text-center mb-14">
+        <p
+          class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4"
+        >
+          The graph lifecycle
+        </p>
+        <h2 class="text-4xl font-extrabold mb-4">
+          Stop stitching graph tools together.
+        </h2>
+        <p class="text-xl text-text-muted max-w-[760px] mx-auto">
+          Keep schema, search, reasoning, merge, and history in one typed
+          system.
         </p>
       </div>
-      <div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-8">
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="code" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Universal Schema
-          </h3>
-          <p class="text-text-muted">
-            Define your data model once with Zod. TypeGraph orchestrates your
-            database, API validation, and TypeScript types automatically. No
-            more syncing separate layers.
-          </p>
-        </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="sparkles" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            AI-Native Structure
-          </h3>
-          <p class="text-text-muted">
-            Built for RAG and agentic systems. Hybrid retrieval blends BM25
-            fulltext with vector similarity in a single query, and your ontology
-            gives LLMs the structured context they need.
-          </p>
-        </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="branch" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Runtime Schema Evolution
-          </h3>
-          <p class="text-text-muted">
-            Let agents propose new kinds and edges. <code
-              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
-              >store.evolve()</code
-            > commits reviewed extensions as durable schema versions — no codegen,
-            no redeploy.
-          </p>
+
+      <div class="relative">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           <a
-            href="https://github.com/pdlug/typegraph-clinical-demo"
-            class="inline-block mt-4 text-sm font-mono text-primary hover:text-primary-dark transition-colors"
-            >See it with a real LLM →</a
+            href="/overview"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
           >
-        </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="tree" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Smart Relationships
-          </h3>
-          <p class="text-text-muted">
-            Go beyond foreign keys. Model real-world logic with <code
-              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
-              >implies</code
-            >, <code
-              class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
-              >inverseOf</code
-            >, and transitive rules that the database understands and enforces.
-          </p>
-        </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="box" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Zero-Infrastructure Start
-          </h3>
-          <p class="text-text-muted">
-            Prototyping? Start with an in-memory or SQLite graph. Scaling? Swap
-            the adapter to PostgreSQL without changing a line of your
-            application logic.
-          </p>
-        </div>
-        <div
-          class="p-8 bg-bg-card rounded-2xl border border-border hover:-translate-y-1 hover:border-primary transition-transform duration-200"
-        >
-          <FeatureIcon icon="search" />
-          <h3 class="text-xl font-bold mb-3 text-text-main">
-            Type-Safe Query Builder
-          </h3>
-          <p class="text-text-muted">
-            Forget strict SQL strings. Build complex, multi-hop graph traversals
-            with a fluent TypeScript API that catches errors before you run
-            code.
-          </p>
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >01</span
+              >
+              <FeatureIcon icon="code" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Define</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Zod schemas for compile time type safety and runtime validation.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >defineGraph</code
+            >
+          </a>
+
+          <a
+            href="/semantic-search"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
+          >
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >02</span
+              >
+              <FeatureIcon icon="search" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Retrieve</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Typed query builders plus BM25, vector, graph, and hybrid
+              retrieval.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >search.hybrid</code
+            >
+          </a>
+
+          <a
+            href="/graph-algorithms"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
+          >
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >03</span
+              >
+              <FeatureIcon icon="tree" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Reason</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Ontology powered reasoning plus graph algorithms over the same
+              graph.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >store.algorithms</code
+            >
+          </a>
+
+          <a
+            href="/graph-extensions"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
+          >
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >04</span
+              >
+              <FeatureIcon icon="sparkles" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Evolve</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Update schema at runtime, or have agents propose the change for
+              review.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >store.evolve</code
+            >
+          </a>
+
+          <a
+            href="/graph-merge"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
+          >
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >05</span
+              >
+              <FeatureIcon icon="branch" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Merge</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Branch and merge safely with entity resolution, conflicts, and
+              provenance.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >merge</code
+            >
+          </a>
+
+          <a
+            href="/queries/temporal"
+            class="group relative z-10 p-6 bg-bg-card rounded-lg border border-border no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200 flex flex-col min-h-[260px] [&_svg]:mb-0"
+          >
+            <div class="flex items-center justify-between gap-3 mb-5">
+              <span
+                class="inline-flex items-center justify-center w-10 h-10 rounded-full bg-bg-main border border-border text-sm font-mono text-primary group-hover:border-primary transition-colors"
+                >06</span
+              >
+              <FeatureIcon icon="shield" />
+            </div>
+            <h3 class="text-xl font-bold text-text-main mb-3">Replay</h3>
+            <p class="text-text-muted leading-relaxed mb-6 grow">
+              Valid time and recorded time show who knew what when.
+            </p>
+            <code
+              class="inline-block self-start bg-primary/10 text-primary px-2 py-1 rounded text-xs font-mono"
+              >asOfRecorded</code
+            >
+          </a>
         </div>
       </div>
     </section>
 
-    <section class="py-24 bg-bg-card -mx-8 px-8">
+    <section class="pt-14 pb-20 bg-bg-card -mx-8 px-4 sm:px-8">
       <div class="max-w-[1200px] mx-auto">
-        <div class="text-center mb-16">
-          <h2 class="text-4xl font-extrabold mb-4">What can you build?</h2>
-          <p class="text-xl text-text-muted max-w-[600px] mx-auto">
-            TypeGraph excels where relationships matter most.
-          </p>
+        <div class="mb-8">
+          <div>
+            <p
+              class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4"
+            >
+              Example showcase
+            </p>
+            <h2 class="text-4xl font-extrabold mb-4">
+              Complete workflows, not toy demos.
+            </h2>
+          </div>
         </div>
-        <div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-8">
-          <div
-            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
+
+        <div class="grid grid-cols-1 lg:grid-cols-[1.15fr_0.85fr] gap-6">
+          <a
+            href="/examples/research-copilot"
+            class="group bg-bg-main border border-border rounded-lg p-8 md:p-10 no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200"
           >
-            <h3 class="text-2xl font-bold mb-4 text-text-main">
-              Knowledge Graphs for RAG
+            <h3 class="text-3xl font-extrabold text-text-main mb-4">
+              Research Copilot
             </h3>
-            <p class="text-text-muted mb-6 grow">
-              Feed your LLMs high-fidelity, structured context. Map documents to
-              concepts, authors, and entities — then retrieve with hybrid search
-              (vector + fulltext) and let agents extend the ontology when they
-              encounter new types.
-            </p>
-            <a
-              href="/examples/knowledge-graph-rag/"
-              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
-              >Build this &rarr;</a
+            <p
+              class="text-lg text-text-muted leading-relaxed max-w-[720px] mb-8"
             >
-          </div>
-          <div
-            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
-          >
-            <h3 class="text-2xl font-bold mb-4 text-text-main">
-              Complex Identity & Access
-            </h3>
-            <p class="text-text-muted mb-6 grow">
-              Model fine-grained permissions (ReBAC) with ease. Traverse
-              organizational hierarchies and group memberships in a single,
-              type-safe query.
+              A literature-review assistant over landmark ML papers. It blends
+              semantic retrieval, topic hierarchy expansion, citation-authority
+              ranking, shortest-path lineage, and collaborator discovery in one
+              SQLite graph.
             </p>
-            <a
-              href="/recipes/#role-based-access-control-rbac"
-              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
-              >Build this &rarr;</a
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5 mb-8">
+              <div class="border-t border-border pt-4">
+                <p class="font-mono text-xs text-primary mb-2">
+                  semantic retrieval
+                </p>
+                <p class="text-sm text-text-muted">
+                  Embedding fields rank papers against the query.
+                </p>
+              </div>
+              <div class="border-t border-border pt-4">
+                <p class="font-mono text-xs text-primary mb-2">
+                  ontology expansion
+                </p>
+                <p class="text-sm text-text-muted">
+                  Topic hierarchy traversal improves recall.
+                </p>
+              </div>
+              <div class="border-t border-border pt-4">
+                <p class="font-mono text-xs text-primary mb-2">
+                  graph algorithms
+                </p>
+                <p class="text-sm text-text-muted">
+                  Degree and shortest path explain why each paper matters.
+                </p>
+              </div>
+              <div class="border-t border-border pt-4">
+                <p class="font-mono text-xs text-primary mb-2">
+                  typed traversal
+                </p>
+                <p class="text-sm text-text-muted">
+                  The digest is assembled through the query builder.
+                </p>
+              </div>
+            </div>
+            <span
+              class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
+              >See the example →</span
             >
-          </div>
-          <div
-            class="bg-bg-main border border-border rounded-2xl p-8 relative overflow-hidden h-full flex flex-col before:absolute before:top-0 before:left-0 before:w-1 before:h-full before:bg-primary before:opacity-50"
-          >
-            <h3 class="text-2xl font-bold mb-4 text-text-main">
-              Recommendation Engines
-            </h3>
-            <p class="text-text-muted mb-6 grow">
-              Discover hidden connections. "Users who bought X also bought Y"
-              becomes a trivial graph traversal rather than a complex series of
-              SQL JOINs.
-            </p>
+          </a>
+
+          <div class="grid grid-cols-1 gap-4">
             <a
-              href="/examples/product-catalog"
-              class="inline-block text-primary font-semibold no-underline transition-transform duration-200 hover:translate-x-1 hover:underline self-start"
-              >Build this &rarr;</a
+              href="/examples/fhir-graph-merge"
+              class="group bg-bg-main border border-border rounded-lg p-6 no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200"
             >
+              <div class="flex items-center justify-between gap-4 mb-4">
+                <h3 class="text-xl font-bold text-text-main">
+                  FHIR Graph Merge
+                </h3>
+                <span
+                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
+                  >Merge</span
+                >
+              </div>
+              <p class="text-text-muted leading-relaxed mb-5">
+                Two ingestion agents disagree on patient identity. Branches
+                isolate writes; merge resolves duplicates, repoints clinical
+                edges, and reports provenance.
+              </p>
+              <div class="flex flex-wrap gap-2 mb-5">
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Branch stores</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Entity resolution</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Conflict report</span
+                >
+              </div>
+              <span
+                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
+                >See the example →</span
+              >
+            </a>
+
+            <a
+              href="/examples/agent-decision-replay"
+              class="group bg-bg-main border border-border rounded-lg p-6 no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200"
+            >
+              <div class="flex items-center justify-between gap-4 mb-4">
+                <h3 class="text-xl font-bold text-text-main">
+                  Agent Decision Replay
+                </h3>
+                <span
+                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
+                  >Replay</span
+                >
+              </div>
+              <p class="text-text-muted leading-relaxed mb-5">
+                Save a recorded-time anchor when the agent decides, then rerun
+                the same reasoning code against the exact graph it saw.
+              </p>
+              <div class="flex flex-wrap gap-2 mb-5">
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Recorded time</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Agent audit</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Graph algorithms</span
+                >
+              </div>
+              <span
+                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
+                >See the example →</span
+              >
+            </a>
+
+            <a
+              href="/examples/breach-forensics"
+              class="group bg-bg-main border border-border rounded-lg p-6 no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200"
+            >
+              <div class="flex items-center justify-between gap-4 mb-4">
+                <h3 class="text-xl font-bold text-text-main">
+                  Breach Forensics
+                </h3>
+                <span
+                  class="shrink-0 text-xs font-mono text-primary bg-primary/10 rounded-full px-3 py-1"
+                  >Forensics</span
+                >
+              </div>
+              <p class="text-text-muted leading-relaxed mb-5">
+                Pin the access graph to the compromise instant and traverse the
+                real blast radius after risky edges were revoked or deleted.
+              </p>
+              <div class="flex flex-wrap gap-2 mb-5">
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Bitemporal</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Reachability</span
+                >
+                <span
+                  class="text-xs font-mono text-text-muted bg-bg-card border border-border rounded px-2 py-1"
+                  >Access graph</span
+                >
+              </div>
+              <span
+                class="inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1"
+                >See the example →</span
+              >
+            </a>
           </div>
         </div>
       </div>
@@ -406,10 +612,12 @@ const version = package_.version;
   }
 
   .code-tab-labels label {
-    @apply cursor-pointer px-5 py-3 text-sm font-mono text-[#888] border-b-2 border-transparent transition-colors whitespace-nowrap;
+    @apply cursor-pointer shrink-0 rounded-md px-4 py-2.5 text-sm font-mono text-[#c8d1df] border border-[#3b3b3b] bg-[#242424] transition-colors whitespace-nowrap;
   }
   .code-tab-labels label:hover {
-    @apply text-[#d4d4d4];
+    color: white;
+    border-color: color-mix(in srgb, var(--color-primary) 60%, #3b3b3b);
+    background-color: #2b3240;
   }
 
   .code-panel {
@@ -420,14 +628,19 @@ const version = package_.version;
      precede the labels/panels they style for sibling selectors to work. */
   #ctab-basic:checked ~ .code-tab-panels .code-panel-basic,
   #ctab-hybrid:checked ~ .code-tab-panels .code-panel-hybrid,
-  #ctab-evolve:checked ~ .code-tab-panels .code-panel-evolve {
+  #ctab-evolve:checked ~ .code-tab-panels .code-panel-evolve,
+  #ctab-temporal:checked ~ .code-tab-panels .code-panel-temporal {
     display: block;
   }
   #ctab-basic:checked ~ .code-tab-labels label[for="ctab-basic"],
   #ctab-hybrid:checked ~ .code-tab-labels label[for="ctab-hybrid"],
-  #ctab-evolve:checked ~ .code-tab-labels label[for="ctab-evolve"] {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
+  #ctab-evolve:checked ~ .code-tab-labels label[for="ctab-evolve"],
+  #ctab-temporal:checked ~ .code-tab-labels label[for="ctab-temporal"] {
+    color: white;
+    border-color: var(--color-primary);
+    background-color: color-mix(in srgb, var(--color-primary) 22%, #242424);
+    box-shadow: inset 0 0 0 1px
+      color-mix(in srgb, var(--color-primary) 35%, transparent);
   }
 
   /* Keyboard focus ring on labels when the underlying radio is focused. */
@@ -437,9 +650,10 @@ const version = package_.version;
   }
   #ctab-basic:focus-visible ~ .code-tab-labels label[for="ctab-basic"],
   #ctab-hybrid:focus-visible ~ .code-tab-labels label[for="ctab-hybrid"],
-  #ctab-evolve:focus-visible ~ .code-tab-labels label[for="ctab-evolve"] {
+  #ctab-evolve:focus-visible ~ .code-tab-labels label[for="ctab-evolve"],
+  #ctab-temporal:focus-visible ~ .code-tab-labels label[for="ctab-temporal"] {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
 </style>

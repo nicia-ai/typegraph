@@ -9,6 +9,16 @@
 // ============================================================
 
 export type { FieldRef, OrderSpec, SortDirection } from "./ast";
+export {
+  asCompiledRowsSql,
+  asCompiledSelectSql,
+  asCompiledStatementSql,
+  type CompiledRowsSql,
+  type CompiledSelectSql,
+  type CompiledStatementSql,
+  type IntentSql,
+  type SqlIntent,
+} from "./sql-intent";
 
 // JSON Pointer types (part of nested object API)
 export type {
@@ -35,12 +45,17 @@ export type {
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EmptyAliasMap,
+  EmptyEdgeAliasMap,
+  EmptyRecursiveAliasMap,
   FieldAccessor,
+  InitialQueryBuilder,
   NodeAccessor,
   NodeAlias,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
@@ -130,6 +145,7 @@ export {
 export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
+  type ResolvedSqlTableNames,
   type SqlSchema,
   type SqlTableNames,
 } from "./compiler/schema";

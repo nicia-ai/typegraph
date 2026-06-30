@@ -17,6 +17,10 @@
     "bench:maintenance": "tsx src/maintenance-bench.ts",
     "prebench:maintenance:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "bench:maintenance:postgres": "tsx src/maintenance-bench.ts --backend=postgres",
+    "prebench:recorded-write": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:recorded-write": "tsx src/recorded-write-bench.ts",
+    "prebench:recorded-write:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:recorded-write:postgres": "tsx src/recorded-write-bench.ts --postgres",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

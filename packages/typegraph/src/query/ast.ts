@@ -603,6 +603,8 @@ export type QueryAst = Readonly<{
   predicates: readonly NodePredicate[];
   projection: Projection;
   temporalMode: TemporalOptions;
+  /** Recorded/system-time timestamp for recorded-pinned reads. */
+  recordedAsOf?: string;
   orderBy?: readonly OrderSpec[];
   limit?: number;
   offset?: number;

@@ -20,6 +20,7 @@ const LLMS_SMALL_PAGES = new Set([
   "queries/overview",
   "queries/filter",
   "queries/traverse",
+  "queries/temporal",
   "queries/execute",
   "semantic-search",
   "fulltext-search",
@@ -100,6 +101,18 @@ const sidebar = [
       {
         label: "Research Copilot",
         slug: "examples/research-copilot",
+      },
+      {
+        label: "Bitemporal Time Travel",
+        slug: "examples/bitemporal-time-travel",
+      },
+      {
+        label: "Agent Decision Replay",
+        slug: "examples/agent-decision-replay",
+      },
+      {
+        label: "Breach Forensics",
+        slug: "examples/breach-forensics",
       },
       {
         label: "Knowledge Graph for RAG",
@@ -203,6 +216,7 @@ export default defineConfig({
             "core-concepts*",
             "backend-setup*",
             "queries/overview*",
+            "queries/temporal*",
             "troubleshooting*",
             "errors*",
           ],

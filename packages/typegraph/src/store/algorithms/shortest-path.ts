@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { asCompiledRowsSql } from "../../query/sql-intent";
 import { normalizePath } from "../../utils";
 import { buildReachableCte } from "../recursive-cte";
 import {
@@ -8,6 +9,7 @@ import {
   DEFAULT_ALGORITHM_MAX_HOPS,
   type InternalTraversalOptions,
   resolveMaxHops,
+  resolveReadSchema,
   resolveTemporalFilter,
   resolveTemporalOptions,
 } from "./context";
@@ -56,6 +58,9 @@ export async function executeShortestPath(
     ...resolveTemporalOptions(ctx, options),
     dialect: ctx.dialect,
     schema: ctx.schema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
   });
 
   // `cycleCheck` returns TRUE when id is NOT in path; negating it yields the
@@ -72,7 +77,9 @@ export async function executeShortestPath(
 
   const query = sql`${cte}, hit AS (SELECT id, kind, depth, path FROM reachable WHERE id = ${targetId} ORDER BY depth ASC LIMIT 1) SELECT h.id AS hit_id, h.kind AS hit_kind, h.depth AS hit_depth, h.path AS hit_path, r.id AS node_id, r.kind AS node_kind FROM hit h LEFT JOIN reachable r ON ${pathContainsCheck}`;
 
-  const rows = await ctx.backend.execute<ShortestPathRow>(query);
+  const rows = await ctx.backend.execute<ShortestPathRow>(
+    asCompiledRowsSql(query),
+  );
   const first = rows[0];
   if (first === undefined) return undefined;
 
@@ -105,8 +112,9 @@ async function fetchNodeKind(
   options: InternalTraversalOptions,
 ): Promise<PathNode | undefined> {
   const temporalFilter = resolveTemporalFilter(ctx, options);
-  const query: SQL = sql`SELECT id, kind FROM ${ctx.schema.nodesTable} WHERE graph_id = ${ctx.graphId} AND id = ${nodeId} AND ${temporalFilter} LIMIT 1`;
-  const rows = await ctx.backend.execute<NodeKindRow>(query);
+  const schema = resolveReadSchema(ctx, options);
+  const query: SQL = sql`SELECT id, kind FROM ${schema.nodesTable} WHERE graph_id = ${ctx.graphId} AND id = ${nodeId} AND ${temporalFilter} LIMIT 1`;
+  const rows = await ctx.backend.execute<NodeKindRow>(asCompiledRowsSql(query));
   const row = rows[0];
   if (row === undefined) return undefined;
   return { id: row.id, kind: row.kind };

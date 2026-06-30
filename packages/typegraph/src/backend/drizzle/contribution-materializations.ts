@@ -26,11 +26,12 @@ import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { isMissingTableError } from "../../utils/sql-errors";
 import type { StrategyTableContribution } from "../table-contribution";
-import type {
-  ContributionMaterializationIdentity,
-  ContributionMaterializationRow,
-  RecordContributionMaterializationParams,
-  TransactionBackend,
+import {
+  type ContributionMaterializationIdentity,
+  type ContributionMaterializationRow,
+  createBackendOverlay,
+  type RecordContributionMaterializationParams,
+  type TransactionBackend,
 } from "../types";
 import { runtimeStrategyContributions } from "./ddl";
 import { formatPostgresTimestamp, nowIso } from "./row-mappers";
@@ -269,21 +270,21 @@ export function gateFulltextMethods(
   } = {};
 
   if (source.upsertFulltext) {
-    const raw = source.upsertFulltext;
+    const raw = source.upsertFulltext.bind(source);
     gated.upsertFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
   if (source.deleteFulltext) {
-    const raw = source.deleteFulltext;
+    const raw = source.deleteFulltext.bind(source);
     gated.deleteFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
   if (source.upsertFulltextBatch) {
-    const raw = source.upsertFulltextBatch;
+    const raw = source.upsertFulltextBatch.bind(source);
     gated.upsertFulltextBatch = async (params) => {
       // A genuine no-op call asserts nothing — the "empty input is
       // harmless" contract.
@@ -293,7 +294,7 @@ export function gateFulltextMethods(
     };
   }
   if (source.deleteFulltextBatch) {
-    const raw = source.deleteFulltextBatch;
+    const raw = source.deleteFulltextBatch.bind(source);
     gated.deleteFulltextBatch = async (params) => {
       if (params.nodeIds.length === 0) return;
       await assert(params.graphId);
@@ -301,7 +302,7 @@ export function gateFulltextMethods(
     };
   }
   if (source.fulltextSearch) {
-    const raw = source.fulltextSearch;
+    const raw = source.fulltextSearch.bind(source);
     gated.fulltextSearch = async (params) => {
       await assert(params.graphId);
       return raw(params);
@@ -309,7 +310,7 @@ export function gateFulltextMethods(
   }
   // Unconditional: the hard-delete cascade deletes from the fulltext
   // table even for graphs that declare no `searchable()` fields.
-  const rawHardDelete = source.hardDeleteNode;
+  const rawHardDelete = source.hardDeleteNode.bind(source);
   gated.hardDeleteNode = async (params) => {
     await assert(params.graphId);
     await rawHardDelete(params);
@@ -328,7 +329,10 @@ export function gateFulltext(
   tx: TransactionBackend,
   assert: (graphId: string) => Promise<void>,
 ): TransactionBackend {
-  return { ...tx, ...gateFulltextMethods(tx, assert) };
+  return createBackendOverlay<TransactionBackend>(
+    tx,
+    gateFulltextMethods(tx, assert),
+  );
 }
 
 // ============================================================

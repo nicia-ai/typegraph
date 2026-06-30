@@ -3,11 +3,39 @@
  */
 import {
   type ReadCoordinate,
+  type RecordedInstant,
   resolveReadCoordinate,
 } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
+import { assertNoRecordedCoordinate } from "../recorded-coordinate-guard";
 import { type QueryOptions } from "../types";
+
+type ValidReadParams = Omit<QueryOptions, "recordedAsOf">;
+
+export type InternalReadParams = ValidReadParams &
+  Readonly<{ recordedAsOf?: RecordedInstant }>;
+
+function validReadParams(coordinate: ReadCoordinate): ValidReadParams {
+  const { mode, asOf } = coordinate.valid;
+  return asOf === undefined ?
+      { temporalMode: mode }
+    : { temporalMode: mode, asOf };
+}
+
+export function withValidCoordinate(coordinate: ReadCoordinate): QueryOptions {
+  assertNoRecordedCoordinate(
+    coordinate.recorded === undefined ?
+      undefined
+    : { recordedAsOf: coordinate.recorded.asOf },
+    {
+      code: "RECORDED_COLLECTION_READ_UNSUPPORTED",
+      message:
+        "Collection reads on StoreView cannot carry recorded-time coordinates.",
+    },
+  );
+  return validReadParams(coordinate);
+}
 
 /**
  * Flattens a {@link ReadCoordinate} into the `QueryOptions` temporal argument
@@ -18,11 +46,11 @@ import { type QueryOptions } from "../types";
  * {@link ReadCoordinate}, only this function and the backend params change —
  * never the call sites.
  */
-export function withCoordinate(coordinate: ReadCoordinate): QueryOptions {
-  const { mode, asOf } = coordinate.valid;
-  return asOf === undefined ?
-      { temporalMode: mode }
-    : { temporalMode: mode, asOf };
+export function withCoordinate(coordinate: ReadCoordinate): InternalReadParams {
+  const valid = validReadParams(coordinate);
+  return coordinate.recorded === undefined ?
+      valid
+    : { ...valid, recordedAsOf: coordinate.recorded.asOf };
 }
 
 /**
@@ -50,9 +78,16 @@ export type TemporalReadParams = Readonly<{
  * them.
  */
 export function resolveTemporalReadParams(
-  options: Readonly<{ temporalMode?: TemporalMode; asOf?: string }> | undefined,
+  options: InternalReadParams | undefined,
   defaultTemporalMode: TemporalMode,
 ): TemporalReadParams {
+  assertNoRecordedCoordinate(options, {
+    code: "RECORDED_COLLECTION_READ_UNSUPPORTED",
+    message: "Broad collection reads cannot honor recorded-time coordinates.",
+    suggestion:
+      "Use store.asOfRecorded(...).nodes.Kind.getById/getByIds for point reads, or query() for recorded-time scans.",
+  });
+
   const { valid } = resolveReadCoordinate(
     options?.temporalMode ?? defaultTemporalMode,
     options?.asOf,
@@ -63,7 +98,10 @@ export function resolveTemporalReadParams(
     temporalMode: mode,
   } as const;
   if (mode === "current" || mode === "asOf") {
-    return { ...base, asOf: asOf ?? nowIso() };
+    return {
+      ...base,
+      asOf: asOf ?? nowIso(),
+    };
   }
   return base;
 }

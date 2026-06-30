@@ -11,6 +11,7 @@ import {
   vectorSlotKey,
   type VectorSlotMap,
 } from "../compiler/schema";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilderConfig } from "./types";
 
 export function buildCompileOptions(
@@ -18,6 +19,7 @@ export function buildCompileOptions(
 ): CompileQueryOptions {
   const fulltextStrategy = config.backend?.fulltextStrategy;
   const vectorStrategy = config.backend?.vectorStrategy;
+  const { recordedReadBinding } = getQueryBuilderInternalContext(config);
   return {
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
@@ -26,6 +28,7 @@ export function buildCompileOptions(
     ...(vectorStrategy === undefined ?
       {}
     : { vectorStrategy, vectorSlots: buildVectorSlots(config.registry) }),
+    ...(recordedReadBinding === undefined ? {} : { recordedReadBinding }),
   };
 }
 

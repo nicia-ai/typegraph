@@ -24,6 +24,7 @@ import {
   FieldAccessTracker,
 } from "../src/query/execution/field-tracker";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
+import { type CompiledRowsSql } from "../src/query/sql-intent";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -139,7 +140,7 @@ function createRecordingBackend(): Readonly<{
 
   const recordingBackend: GraphBackend = {
     ...backend,
-    execute: async <T>(query: SQL) => {
+    execute: async <T>(query: CompiledRowsSql) => {
       lastQuery = query;
       return backend.execute<T>(query);
     },

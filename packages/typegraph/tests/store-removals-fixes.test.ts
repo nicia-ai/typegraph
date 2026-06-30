@@ -20,15 +20,40 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createSqliteTables } from "../src/backend/sqlite";
+import { type GraphBackend } from "../src/backend/types";
 import { defineGraph, defineNode } from "../src/core";
+import { RECORDED_MAX } from "../src/core/temporal";
 import {
   defineGraphExtension,
   GRAPH_EXTENSION_ISSUE_CODES,
   GraphExtensionValidationError,
   INCOMPATIBLE_CHANGE_TYPES,
 } from "../src/graph-extension";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
+
+/**
+ * Wraps a backend so its NEXT `transaction(...)` rejects, then passes through.
+ * Recorded-time interval closes and live row cleanup for a removed kind share
+ * one `backend.transaction(...)`, so this injects a single atomic cleanup
+ * failure.
+ */
+function withOneShotTransactionFailure(
+  base: GraphBackend,
+  shouldFailNow: () => boolean,
+): GraphBackend {
+  return {
+    ...base,
+    async transaction(fn, options) {
+      if (shouldFailNow()) {
+        throw new Error("injected recorded-close failure");
+      }
+      return base.transaction(fn, options);
+    },
+  };
+}
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -77,6 +102,104 @@ describe("materializeRemovals against a DB missing typegraph_reconciliation_mark
     expect(result.results.every((entry) => entry.status === "removed")).toBe(
       true,
     );
+  });
+});
+
+// ============================================================
+// 1b. Recorded-close/live-delete transaction failure is atomic and retryable
+// ============================================================
+
+describe("materializeRemovals recorded cleanup transaction recovery (history)", () => {
+  it("keeps recorded intervals and live rows unchanged when the cleanup transaction fails", async () => {
+    // Pin the data/history atomicity contract: the recorded close and live row
+    // deletes share one transaction. A failed transaction must leave both sides
+    // unchanged, and the pending status row lets the next call retry the whole
+    // kind-keyed cleanup.
+    let failNextTransaction = false;
+    const base = createTestBackend();
+    const backend = withOneShotTransactionFailure(base, () => {
+      if (failNextTransaction) {
+        failNextTransaction = false;
+        return true;
+      }
+      return false;
+    });
+
+    const [store] = await createStoreWithSchema(baseGraph, backend, {
+      history: true,
+    });
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    // Two captured Tag nodes → two open recorded intervals. Tag is a graph
+    // extension kind, absent from the static graph type, so reach it dynamically.
+    const dynamicNodes = evolved.nodes as unknown as {
+      Tag: { create: (props: { label: string }) => Promise<unknown> };
+    };
+    await dynamicNodes.Tag.create({ label: "t1" });
+    await dynamicNodes.Tag.create({ label: "t2" });
+    const removed = await evolved.removeKinds(["Tag"]);
+
+    const schema = createSqlSchema(backend.tableNames);
+    const openTagIntervals = async (): Promise<number> => {
+      const rows = await backend.execute<{ open_count: number }>(
+        asCompiledRowsSql(sql`
+          SELECT COUNT(*) AS open_count
+          FROM ${schema.recordedNodesTable}
+          WHERE graph_id = ${baseGraph.id}
+            AND kind = 'Tag'
+            AND recorded_to = ${RECORDED_MAX}
+        `),
+      );
+      return rows[0]?.open_count ?? 0;
+    };
+    const liveTagRows = async (): Promise<number> => {
+      const rows = await backend.execute<{ live_count: number }>(
+        asCompiledRowsSql(sql`
+          SELECT COUNT(*) AS live_count
+          FROM ${schema.nodesTable}
+          WHERE graph_id = ${baseGraph.id}
+            AND kind = 'Tag'
+        `),
+      );
+      return rows[0]?.live_count ?? 0;
+    };
+
+    // Both intervals and both live rows are present before materialization.
+    expect(await openTagIntervals()).toBe(2);
+    expect(await liveTagRows()).toBe(2);
+
+    // Pass 1: the shared cleanup transaction rejects. The recorded intervals
+    // stay open, the live rows remain, and the kind stays pending for retry.
+    failNextTransaction = true;
+    const firstPass = await removed.materializeRemovals();
+    expect(firstPass.results.some((entry) => entry.status === "failed")).toBe(
+      true,
+    );
+    expect(await openTagIntervals()).toBe(2);
+    expect(await liveTagRows()).toBe(2);
+    const pendingAfterFailure = await backend.getPendingKindRemovals!(
+      baseGraph.id,
+    );
+    expect(pendingAfterFailure.some((row) => row.kindName === "Tag")).toBe(
+      true,
+    );
+
+    // Pass 2 (retry): the shared transaction closes intervals and deletes rows.
+    const secondPass = await removed.materializeRemovals();
+    expect(
+      secondPass.results.some(
+        (entry) => entry.kind === "Tag" && entry.status === "removed",
+      ),
+    ).toBe(true);
+    expect(await openTagIntervals()).toBe(0);
+    expect(await liveTagRows()).toBe(0);
+    const pendingAfterRetry = await backend.getPendingKindRemovals!(
+      baseGraph.id,
+    );
+    expect(pendingAfterRetry.some((row) => row.kindName === "Tag")).toBe(false);
   });
 });
 
@@ -243,7 +366,9 @@ describe("materializeRemovals against a backend with a custom `uniques` table", 
 
     // Pre-removal: a row exists in the custom uniques table.
     const beforeRows = await backend.execute<{ count: number }>(
-      sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
+      asCompiledRowsSql(
+        sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
+      ),
     );
     expect(beforeRows[0]!.count).toBeGreaterThan(0);
 
@@ -255,7 +380,9 @@ describe("materializeRemovals against a backend with a custom `uniques` table", 
 
     // Post-removal: the custom table is empty for this kind.
     const afterRows = await backend.execute<{ count: number }>(
-      sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
+      asCompiledRowsSql(
+        sql`SELECT COUNT(*) AS count FROM ${sql.identifier("myapp_uniques")} WHERE node_kind = 'Tag'`,
+      ),
     );
     expect(afterRows[0]!.count).toBe(0);
   });

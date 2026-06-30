@@ -6,11 +6,76 @@ import { validateCanonicalIsoDate } from "../utils/date";
 import { type TemporalMode } from "./types";
 
 /**
+ * Open-ended recorded-time sentinel. Chosen so SQLite text ordering and
+ * PostgreSQL `timestamptz` ordering both put every real commit instant before
+ * the open interval end.
+ */
+export const RECORDED_MAX = "9999-12-31T23:59:59.999Z";
+
+declare const RECORDED_INSTANT_BRAND: unique symbol;
+
+/**
+ * A canonical UTC ISO-8601 recorded-time instant (`YYYY-MM-DDTHH:mm:ss.sssZ`),
+ * nominally branded so it can only originate from a recorded-time source —
+ * {@link Store.recordedNow} or an explicit {@link asRecordedInstant} — never an
+ * ad-hoc wall-clock string.
+ *
+ * The recorded commit clock is a logical, monotonic per-graph instant that can
+ * run briefly ahead of wall time under bursty same-millisecond writes, so a raw
+ * `new Date().toISOString()` may sort *before* the most recent commits and
+ * silently omit them. The brand turns that footgun into a compile error:
+ * `store.asOfRecorded` accepts only a `RecordedInstant`, so a bare wall-clock
+ * string no longer type-checks — callers reach for `await store.recordedNow()`
+ * (the monotonic high-water mark) or {@link asRecordedInstant} instead.
+ */
+export type RecordedInstant = string & {
+  readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
+};
+
+export function assertValidRecordedInstant(value: string, path: string): void {
+  validateCanonicalIsoDate(value, path);
+  if (value >= RECORDED_MAX) {
+    throw new ValidationError(
+      `${path} must be before the recorded-time open sentinel ${RECORDED_MAX}.`,
+      {
+        issues: [
+          {
+            path,
+            message: `Expected a timestamp before ${RECORDED_MAX}, got "${value}"`,
+          },
+        ],
+      },
+      {
+        suggestion:
+          "Use a real recorded-time commit instant, not the open-interval sentinel.",
+      },
+    );
+  }
+}
+
+/**
+ * Brands a canonical UTC ISO-8601 string as a {@link RecordedInstant}.
+ *
+ * The escape hatch for an instant that round-trips through untyped storage:
+ * captured from {@link Store.recordedNow}, persisted as a plain string, read
+ * back, and replayed into `asOfRecorded`. Validates the canonical form eagerly —
+ * the same check `asOfRecorded` applies — so a malformed value fails here, at the
+ * brand site, rather than deeper in a read. Does *not* assert the instant is a
+ * real captured commit; it only guarantees the value is well-formed enough to
+ * compare correctly against the recorded relations.
+ *
+ * @throws {ValidationError} when `value` is not a canonical UTC ISO-8601 string.
+ */
+export function asRecordedInstant(value: string): RecordedInstant {
+  assertValidRecordedInstant(value, "asRecordedInstant");
+  return value as RecordedInstant;
+}
+
+/**
  * The single opaque temporal coordinate every pinned read is resolved
- * against. Today it carries only the valid-time axis; Unit 2 adds a sibling
- * `recorded` axis here, and because every surface injects the coordinate
- * through one helper ({@link withCoordinate}), a new axis lands on all
- * surfaces at once instead of splitting by surface.
+ * against. It carries the valid-time axis plus an optional recorded/system-time
+ * axis, so every surface can inject one coordinate object instead of threading
+ * each temporal dimension separately.
  */
 export type ReadCoordinate = Readonly<{
   /**
@@ -22,7 +87,8 @@ export type ReadCoordinate = Readonly<{
     /** Defined only when `mode` is `"asOf"`. */
     asOf?: string;
   }>;
-  // Unit 2 (recorded / system time): recorded?: Readonly<{ asOf?: string }>;
+  /** The recorded/system-time axis. Defined only for recorded-pinned views. */
+  recorded?: Readonly<{ asOf: RecordedInstant }>;
 }>;
 
 /**
@@ -66,6 +132,23 @@ export function resolveReadCoordinate(
     suggestion === undefined ? undefined : { suggestion },
   );
   return { valid: asOf === undefined ? { mode } : { mode, asOf } };
+}
+
+/**
+ * Adds a recorded/system-time pin to an existing valid-time coordinate.
+ * Direct `store.asOfRecorded(T)` passes the diagonal valid-time coordinate
+ * (`mode: "asOf", asOf: T`); `store.asOf(vt).asOfRecorded(rt)` passes the
+ * already-resolved valid coordinate and adds the recorded sibling.
+ */
+export function withRecordedCoordinate(
+  coordinate: ReadCoordinate,
+  recordedAsOf: RecordedInstant,
+): ReadCoordinate {
+  assertValidRecordedInstant(recordedAsOf, "asOfRecorded");
+  return {
+    ...coordinate,
+    recorded: { asOf: recordedAsOf },
+  };
 }
 
 /**
@@ -124,7 +207,11 @@ function assertValidAsOf(
  */
 export function describeCoordinate(coordinate: ReadCoordinate): string {
   const { mode, asOf } = coordinate.valid;
-  return asOf === undefined ? `mode "${mode}"` : `mode "${mode}" asOf ${asOf}`;
+  const valid =
+    asOf === undefined ? `mode "${mode}"` : `mode "${mode}" asOf ${asOf}`;
+  return coordinate.recorded === undefined ?
+      valid
+    : `${valid}, recorded asOf ${coordinate.recorded.asOf}`;
 }
 
 /**
@@ -135,5 +222,11 @@ export function coordinateContext(
   coordinate: ReadCoordinate,
 ): Record<string, unknown> {
   const { mode, asOf } = coordinate.valid;
-  return { temporalMode: mode, ...(asOf !== undefined && { asOf }) };
+  return {
+    temporalMode: mode,
+    ...(asOf !== undefined && { asOf }),
+    ...(coordinate.recorded === undefined ?
+      {}
+    : { recordedAsOf: coordinate.recorded.asOf }),
+  };
 }

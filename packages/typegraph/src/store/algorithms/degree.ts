@@ -1,9 +1,11 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
+import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
   type InternalTemporalOptions,
+  resolveReadSchema,
   resolveTemporalFilter,
 } from "./context";
 import type { TraversalDirection } from "./types";
@@ -29,16 +31,18 @@ export async function executeDegree(
   if (options.edges !== undefined) {
     whereClauses.push(compileKindFilter(sql.raw("kind"), options.edges));
   }
+  const schema = resolveReadSchema(ctx, options);
 
   // COUNT(DISTINCT id) collapses self-loops (from === to === nodeId) to a
   // single edge so they don't double-count under `"both"`.
   const countExpr =
     direction === "both" ? sql`COUNT(DISTINCT id)` : sql`COUNT(*)`;
 
-  const query = sql`SELECT ${countExpr} AS count FROM ${ctx.schema.edgesTable} WHERE ${sql.join(whereClauses, sql` AND `)}`;
+  const query = sql`SELECT ${countExpr} AS count FROM ${schema.edgesTable} WHERE ${sql.join(whereClauses, sql` AND `)}`;
 
-  const rows =
-    await ctx.backend.execute<Readonly<{ count: number | string }>>(query);
+  const rows = await ctx.backend.execute<Readonly<{ count: number | string }>>(
+    asCompiledRowsSql(query),
+  );
   return Number(rows[0]?.count ?? 0);
 }
 

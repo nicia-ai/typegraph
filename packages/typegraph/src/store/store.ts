@@ -11,6 +11,18 @@
 import type { z } from "zod";
 
 import {
+  asGraphWriteBackend,
+  asRawBackend,
+  type GraphWriteBackend,
+  type RawBackend,
+} from "../backend/branded";
+import {
+  createEdgeRowMapper,
+  createNodeRowMapper,
+  POSTGRES_ROW_MAPPER_CONFIG,
+  SQLITE_ROW_MAPPER_CONFIG,
+} from "../backend/drizzle/row-mappers";
+import {
   type AdoptedTransaction,
   type GraphBackend,
   runOptionallyInTransaction,
@@ -26,8 +38,20 @@ import {
   type NodeKinds,
 } from "../core/define-graph";
 import { resolveEmbeddingFields } from "../core/embedding";
-import { type ReadCoordinate } from "../core/temporal";
-import type { KindEntity, NodeId } from "../core/types";
+import {
+  asRecordedInstant,
+  type ReadCoordinate,
+  type RecordedInstant,
+  resolveReadCoordinate,
+  withRecordedCoordinate,
+} from "../core/temporal";
+import type {
+  AnyEdgeType,
+  EdgeId,
+  KindEntity,
+  NodeId,
+  NodeType,
+} from "../core/types";
 import {
   ConfigurationError,
   EagerMaterializationError,
@@ -47,10 +71,18 @@ import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
   type BatchResults,
-  createQueryBuilder,
-  type QueryBuilder,
+  createInternalQueryBuilder,
+  type InitialQueryBuilder,
+  type QueryCoordinateState,
 } from "../query/builder";
-import { createSqlSchema } from "../query/compiler/schema";
+import {
+  createRecordedReadBinding,
+  createSqlSchema,
+  type RecordedReadBinding,
+  requireExternalRecordedReadSource,
+  requireSqlSchema,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type VectorSlot } from "../query/dialect/vector-strategy";
 import { buildKindRegistry, type KindRegistry } from "../registry";
@@ -68,7 +100,11 @@ import {
 import { type SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { generateId } from "../utils/id";
-import { createGraphAlgorithms, type GraphAlgorithms } from "./algorithms";
+import {
+  createGraphAlgorithms,
+  type GraphAlgorithms,
+  type InternalGraphAlgorithms,
+} from "./algorithms";
 import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
@@ -116,11 +152,30 @@ import {
   executeNodeUpsertUpdate,
   type NodeOperationContext,
 } from "./operations";
+import {
+  assertRecordedCaptureTransactionIsolation,
+  createHistoryUnsafeSqlRef,
+  createRecordedBackend,
+  createRecordedTransactionScope,
+  readRecordedClock,
+  recordedCaptureRequiresCallbackTransactionError,
+  withRecordedRelationsPrecondition,
+} from "./recorded-capture";
+import { assertNoRecordedCoordinate } from "./recorded-coordinate-guard";
+import {
+  createRecordedReadService,
+  type RecordedReadService,
+} from "./recorded-read-service";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import { StoreSearch } from "./search-facade";
-import { StoreView, type StoreViewCoordinate } from "./store-view";
+import {
+  RecordedStoreView,
+  StoreView,
+  type StoreViewCoordinate,
+} from "./store-view";
 import {
   executeSubgraph,
+  type InternalSubgraphOptions,
   type SubgraphOptions,
   type SubgraphProject,
   type SubgraphResult,
@@ -128,9 +183,12 @@ import {
 import {
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
+  type Edge,
   type GraphEdgeCollections,
   type GraphNodeCollections,
+  type HistoryStoreOptions,
   type HookContext,
+  type LiveStoreOptions,
   type Node,
   type OperationHookContext,
   type QueryOptions,
@@ -183,6 +241,12 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
     code: "REEMBED_BEFORE_INITIALIZE",
   },
 };
+
+function rowMapperConfigFor(backend: GraphBackend | TransactionBackend) {
+  return backend.dialect === "postgres" ?
+      POSTGRES_ROW_MAPPER_CONFIG
+    : SQLITE_ROW_MAPPER_CONFIG;
+}
 
 // ============================================================
 // Store Class
@@ -257,10 +321,18 @@ export type ReembedVectorFieldResult = Readonly<{
 
 export class Store<G extends GraphDef> {
   readonly #graph: G;
-  readonly #backend: GraphBackend;
+  /**
+   * Bare backend for DDL, vector-storage, and bulk-materialization work that must
+   * bypass recorded capture. Graph-entity writes use `#backend` instead.
+   */
+  readonly #baseBackend: RawBackend;
+  readonly #backend: GraphWriteBackend;
+  readonly #captureEnabled: boolean;
+  readonly #recordedReadBinding: RecordedReadBinding | undefined;
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
+  readonly #recordedReads: RecordedReadService;
   readonly #schemaMetadata: StoreSchemaMetadata;
   readonly #defaultTraversalExpansion: TraversalExpansion;
   // Stored verbatim so `evolve()` can construct the next Store with
@@ -280,12 +352,51 @@ export class Store<G extends GraphDef> {
     schemaMetadata?: StoreSchemaMetadata,
   ) {
     this.#graph = graph;
-    this.#backend = backend;
+    this.#baseBackend = asRawBackend(backend);
+    this.#captureEnabled = options?.history === true;
+    // Resolve the schema before wrapping so recorded-time capture targets the
+    // same relations recorded reads do (the explicit `schema` option, not just
+    // `backend.tableNames`).
+    const explicitSchema =
+      options?.schema === undefined ?
+        undefined
+      : requireSqlSchema(options.schema, "store schema");
+    const resolvedSchema =
+      explicitSchema ??
+      (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
+    const readSchema = resolvedSchema ?? createSqlSchema(backend.tableNames);
+    if (this.#captureEnabled && options?.recordedRead !== undefined) {
+      throw new ConfigurationError(
+        "recordedRead cannot be combined with history: true.",
+        { code: "RECORDED_READ_CONFLICTS_WITH_HISTORY" },
+        {
+          suggestion:
+            "Use { history: true } for TypeGraph-managed capture, or omit history and pass { recordedRead: recordedRelation({ schema }) } for an externally populated recorded relation.",
+        },
+      );
+    }
+    const externalRecordedRead = requireExternalRecordedReadSource(
+      options?.recordedRead,
+    );
+    this.#recordedReadBinding =
+      this.#captureEnabled ?
+        createRecordedReadBinding(readSchema)
+      : externalRecordedRead;
+    this.#backend =
+      this.#captureEnabled ?
+        asGraphWriteBackend(createRecordedBackend(backend, resolvedSchema))
+      : asGraphWriteBackend(backend);
+    this.#schema = resolvedSchema;
+    const rowMapperConfig = rowMapperConfigFor(this.#backend);
+    this.#recordedReads = createRecordedReadService({
+      graphId: graph.id,
+      backend: this.#backend,
+      recordedReadBinding: this.#recordedReadBinding,
+      mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
+      mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
+    });
     this.#registry = buildKindRegistry(graph);
     this.#hooks = options?.hooks ?? {};
-    this.#schema =
-      options?.schema ??
-      (backend.tableNames ? createSqlSchema(backend.tableNames) : undefined);
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
     this.#options = options;
@@ -312,6 +423,24 @@ export class Store<G extends GraphDef> {
   /** The database backend */
   get backend(): GraphBackend {
     return this.#backend;
+  }
+
+  /**
+   * Whether recorded-time capture is enabled for this store.
+   *
+   * @internal
+   */
+  get historyEnabled(): boolean {
+    return this.#captureEnabled;
+  }
+
+  /**
+   * Whether this store has a recorded read relation bound for reconstruction.
+   *
+   * @internal
+   */
+  get recordedReadBound(): boolean {
+    return this.#recordedReadBinding !== undefined;
   }
 
   // === Collections ===
@@ -403,6 +532,7 @@ export class Store<G extends GraphDef> {
         graphId: this.graphId,
         backend: this.#backend,
         schema: this.#schema,
+        recordedReadBinding: this.#recordedReadBinding,
         defaultTemporalMode: this.#graph.defaults.temporalMode,
       });
     }
@@ -716,7 +846,7 @@ export class Store<G extends GraphDef> {
    *   .execute();
    * ```
    */
-  query(): QueryBuilder<G> {
+  query(): InitialQueryBuilder<G, "open"> {
     return this.#createQueryForBackend(this.#backend);
   }
 
@@ -726,8 +856,72 @@ export class Store<G extends GraphDef> {
    * (`.temporal()` throws). Not part of the stable public API — construct a
    * view via {@link Store.view} / {@link Store.asOf} and call `.query()`.
    */
-  sealedQuery(coordinate: ReadCoordinate): QueryBuilder<G> {
-    return this.#createQueryForBackend(this.#backend, coordinate);
+  sealedQuery(coordinate: ReadCoordinate): InitialQueryBuilder<G, "sealed"> {
+    return this.#createQueryForBackend(
+      this.#recordedReads.backendForCoordinate(coordinate, "recorded-query"),
+      coordinate,
+    );
+  }
+
+  #sqlSchema(): SqlSchema {
+    return this.#schema ?? createSqlSchema(this.#backend.tableNames);
+  }
+
+  /**
+   * Internal seam for {@link RecordedStoreView}: reconstruct a node point read
+   * from the recorded-time relation while preserving live getById ordering and
+   * duplicate-input behavior.
+   *
+   * @internal
+   */
+  async recordedNodeGetById<N extends NodeType>(
+    kind: string,
+    id: NodeId<N>,
+    coordinate: ReadCoordinate,
+  ): Promise<Node<N> | undefined> {
+    return this.#recordedReads.nodeGetById(kind, id, coordinate);
+  }
+
+  /**
+   * Internal seam for {@link RecordedStoreView}: reconstruct node point reads
+   * from the recorded-time relation while preserving input order.
+   *
+   * @internal
+   */
+  async recordedNodeGetByIds<N extends NodeType>(
+    kind: string,
+    ids: readonly NodeId<N>[],
+    coordinate: ReadCoordinate,
+  ): Promise<readonly (Node<N> | undefined)[]> {
+    return this.#recordedReads.nodeGetByIds(kind, ids, coordinate);
+  }
+
+  /**
+   * Internal seam for {@link RecordedStoreView}: reconstruct an edge point read
+   * from the recorded-time relation while preserving live getById behavior.
+   *
+   * @internal
+   */
+  async recordedEdgeGetById<E extends AnyEdgeType>(
+    kind: string,
+    id: EdgeId<E>,
+    coordinate: ReadCoordinate,
+  ): Promise<Edge<E> | undefined> {
+    return this.#recordedReads.edgeGetById(kind, id, coordinate);
+  }
+
+  /**
+   * Internal seam for {@link RecordedStoreView}: reconstruct edge point reads
+   * from the recorded-time relation while preserving input order.
+   *
+   * @internal
+   */
+  async recordedEdgeGetByIds<E extends AnyEdgeType>(
+    kind: string,
+    ids: readonly EdgeId<E>[],
+    coordinate: ReadCoordinate,
+  ): Promise<readonly (Edge<E> | undefined)[]> {
+    return this.#recordedReads.edgeGetByIds(kind, ids, coordinate);
   }
 
   // === Temporal Views ===
@@ -756,6 +950,77 @@ export class Store<G extends GraphDef> {
    */
   asOf(asOf: string): StoreView<G> {
     return new StoreView(this, { mode: "asOf", asOf });
+  }
+
+  /**
+   * Returns a narrow read-only view pinned to a recorded/system-time instant.
+   *
+   * Direct `store.asOfRecorded(T)` is diagonal bitemporal sugar: it reads the
+   * recorded-time relation as of `T` and uses the same `T` for the valid-time
+   * axis. Use `store.asOf(validT).asOfRecorded(recordedT)` when the valid and
+   * recorded axes should differ.
+   *
+   * The returned view exposes only reconstructing-safe reads: query,
+   * subgraph, graph algorithms, and collection point reads.
+   *
+   * Prefer `await store.recordedNow()` as the anchor over a wall-clock
+   * timestamp: recorded instants are monotonic and can run briefly ahead of the
+   * wall clock under bursty writes, so a `new Date().toISOString()` passed here
+   * may sort before the most recent commits and silently omit them.
+   */
+  asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
+    const validCoordinate = resolveReadCoordinate(
+      "asOf",
+      recordedAsOf,
+      "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
+    );
+    return new RecordedStoreView(
+      this,
+      withRecordedCoordinate(validCoordinate, recordedAsOf),
+    );
+  }
+
+  /**
+   * Returns the latest recorded-time instant captured for this graph — the
+   * recorded high-water mark. After guarding the `undefined` case,
+   * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
+   * deterministic anchor that avoids guessing with the wall clock (recorded
+   * instants are monotonic and can run briefly ahead of wall-clock time under
+   * bursty writes). Capture each anchor right after the writes it should cover.
+   *
+   * Returns `undefined` until the first write has been captured, so on a
+   * brand-new graph guard the composition — `asOfRecorded(undefined)` rejects
+   * (an instant is required) rather than reconstructing an empty view. Read the
+   * value first and only pass it to `asOfRecorded` once it is defined.
+   *
+   * **Graph-global, not caller-scoped.** This is the single high-water mark for
+   * the whole graph, advanced by every committed capture from any writer — not
+   * a per-write or per-caller value. An advance between two reads means
+   * "something committed to this graph in between," *not* "the write this caller
+   * just made landed." Do not use a `recordedNow()` advance as a "did my write
+   * succeed?" signal: under any concurrent writer to the same graph it both
+   * misses dropped writes and misfires on no-op writes. Confirm a specific write
+   * by observing the write itself (its return value, or `store.transaction(...)`
+   * success), not the global clock.
+   */
+  async recordedNow(): Promise<RecordedInstant | undefined> {
+    if (!this.#captureEnabled) {
+      throw new ConfigurationError(
+        "recordedNow() requires a store created with { history: true }.",
+        { code: "RECORDED_NOW_REQUIRES_HISTORY" },
+        {
+          suggestion:
+            "Create the store with createStore(graph, backend, { history: true }) to enable recorded-time capture.",
+        },
+      );
+    }
+    const recordedAt = await withRecordedRelationsPrecondition(
+      readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId),
+      { dialect: this.#backend.dialect, surface: "recorded-now" },
+    );
+    // The clock high-water mark is already a canonical recorded instant; brand
+    // it so `asOfRecorded` accepts it without the caller re-wrapping.
+    return recordedAt === undefined ? undefined : asRecordedInstant(recordedAt);
   }
 
   /**
@@ -882,7 +1147,11 @@ export class Store<G extends GraphDef> {
       ...BatchableQuery<unknown>[],
     ],
   >(...queries: Queries): Promise<BatchResults<Queries>> {
-    return runOptionallyInTransaction(this.#backend, async (target) => {
+    // batch() is read-only, so it routes through the uncaptured backend. Going
+    // through the capture wrapper would open a recorded-capture transaction
+    // scope — which demands executeStatement on the transaction target — for a
+    // path that performs no writes and needs no capture.
+    return runOptionallyInTransaction(this.#baseBackend, async (target) => {
       const results: unknown[] = [];
       for (const query of queries) {
         const result = await query.executeOn(target);
@@ -928,14 +1197,79 @@ export class Store<G extends GraphDef> {
     rootId: NodeId<AllNodeTypes<G>>,
     options: SubgraphOptions<G, EK, NK, P>,
   ): Promise<SubgraphResult<G, NK, EK, P>> {
+    // The public surface is valid-time only (`recordedAsOf` is typed `never`).
+    // Guard JS callers who bypass the type so a leaked recorded pin can't
+    // silently switch this read onto the recorded relation; recorded subgraph
+    // reads come through subgraphAtCoordinate (store.asOfRecorded(...).subgraph).
+    assertNoRecordedCoordinate(options, {
+      code: "SUBGRAPH_RECORDED_ASOF_INTERNAL_ONLY",
+      message:
+        "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
+      suggestion:
+        "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
+    });
+    // After the guard, the public read is just the coordinate path with no
+    // recorded pin — delegate so the executeSubgraph wiring lives in one place.
+    return this.subgraphAtCoordinate(rootId, options);
+  }
+
+  /**
+   * Internal seam for {@link StoreView} / {@link RecordedStoreView}: runs a
+   * subgraph with a coordinate already flattened into the options (including a
+   * recorded/system-time pin). Trusted caller — the public {@link Store.subgraph}
+   * is the guarded entry point.
+   *
+   * @internal
+   */
+  subgraphAtCoordinate<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    rootId: NodeId<AllNodeTypes<G>>,
+    options: InternalSubgraphOptions<G, EK, NK, P>,
+  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    const coordinate = resolveReadCoordinate(
+      options.temporalMode ?? this.#graph.defaults.temporalMode,
+      options.asOf,
+    );
+    const readCoordinate =
+      options.recordedAsOf === undefined ?
+        coordinate
+      : withRecordedCoordinate(coordinate, options.recordedAsOf);
     return executeSubgraph({
       graph: this.#graph,
       graphId: this.graphId,
       rootId,
-      backend: this.#backend,
+      backend: this.#recordedReads.backendForCoordinate(
+        readCoordinate,
+        "recorded-subgraph",
+      ),
       dialect: getDialect(this.#backend.dialect),
       schema: this.#schema,
+      recordedReadBinding: this.#recordedReadBinding,
       options,
+    });
+  }
+
+  /**
+   * Internal seam for StoreView graph algorithms at a pinned coordinate.
+   *
+   * @internal
+   */
+  algorithmsAtCoordinate(
+    coordinate: ReadCoordinate,
+  ): InternalGraphAlgorithms<G> {
+    return createGraphAlgorithms<G>({
+      graphId: this.graphId,
+      backend: this.#recordedReads.backendForCoordinate(
+        coordinate,
+        "recorded-graph-algorithm",
+      ),
+      schema: this.#schema,
+      recordedReadBinding: this.#recordedReadBinding,
+      defaultTemporalMode: this.#graph.defaults.temporalMode,
+      allowRecordedAsOf: coordinate.recorded !== undefined,
     });
   }
 
@@ -953,6 +1287,10 @@ export class Store<G extends GraphDef> {
    *   {@link Store.withTransaction}). See {@link TransactionContext}
    *   for per-backend semantics; it is `undefined` only on the
    *   non-transactional fallback.
+   *   When the store was created with `{ history: true }`, `tx.sql` is
+   *   replaced by a fail-loud guard because raw SQL would bypass
+   *   recorded-time capture; use the typed collections inside
+   *   `transaction()` or {@link Store.withRecordedTransaction}.
    *
    * @example
    * ```typescript
@@ -996,18 +1334,34 @@ export class Store<G extends GraphDef> {
    * @param options Optional {@link TransactionOptions} forwarded to the
    *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
    *   without isolation-level support ignore it; the non-transactional
-   *   fallback ignores it entirely.
+   *   fallback ignores it entirely. Stores created with `{ history: true }`
+   *   require read-committed semantics for PostgreSQL recorded-clock capture and
+   *   reject stronger snapshot isolation levels.
    */
-  async transaction<T>(
+  transaction<T>(
+    this: HistoryStore<G>,
+    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T>;
+
+  transaction<T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
     options?: TransactionOptions,
+  ): Promise<T>;
+
+  async transaction<T>(
+    fn:
+      | ((tx: TransactionContext<G>) => Promise<T>)
+      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
+    options?: TransactionOptions,
   ): Promise<T> {
+    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
     // Without a real transaction the tx-scoped collections would be
     // bound to the same backend as this.nodes/this.edges and exposing
     // the cached versions avoids rebuilding the proxies on every call.
     // An isolation-level request in `options` is equally meaningless here.
     if (!this.#backend.capabilities.transactions) {
-      return fn({
+      return invoke({
         nodes: this.nodes,
         edges: this.edges,
         backend: this.#backend,
@@ -1020,7 +1374,7 @@ export class Store<G extends GraphDef> {
     // never touches fulltext requires no fulltext initialization.
     return this.#backend.transaction(
       async (txBackend, sql) =>
-        fn(this.#buildTransactionContext(txBackend, sql)),
+        invoke(this.#buildTransactionContext(txBackend, sql)),
       options,
     );
   }
@@ -1067,9 +1421,18 @@ export class Store<G extends GraphDef> {
    * }); // one COMMIT / ROLLBACK across both layers
    * ```
    *
-   * @throws {ConfigurationError} when the backend cannot adopt an
-   *   external transaction — either it is not a Drizzle Postgres/SQLite
-   *   backend, or `backend.capabilities.transactions` is `false`
+   * Not available when the store was created with `{ history: true }`: a
+   * caller-owned transaction context would let writes happen after capture has
+   * lost its flush point, so this throws `ConfigurationError`
+   * (`RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`). Use
+   * {@link Store.withRecordedTransaction} on a history-enabled store, which
+   * adopts the same external transaction but flushes recorded-time capture
+   * before the caller commits.
+   *
+   * @throws {ConfigurationError} when the store has history capture enabled
+   *   (use {@link Store.withRecordedTransaction} instead), or when the backend
+   *   cannot adopt an external transaction — either it is not a Drizzle
+   *   Postgres/SQLite backend, or `backend.capabilities.transactions` is `false`
    *   (`drizzle-orm/neon-http`, Cloudflare D1, SQLite
    *   `transactionMode: "none"`). A non-atomic fallback is deliberately
    *   not offered here: the caller's relational write *would* still
@@ -1081,6 +1444,11 @@ export class Store<G extends GraphDef> {
    *   without emitting any DDL.
    */
   withTransaction(externalTx: AdoptedTransaction): TransactionContext<G> {
+    if (this.#captureEnabled) {
+      throw recordedCaptureRequiresCallbackTransactionError({
+        code: "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
+      });
+    }
     const adopt = this.#backend.adoptTransaction;
     if (!adopt) {
       throw new ConfigurationError(
@@ -1099,13 +1467,73 @@ export class Store<G extends GraphDef> {
   }
 
   /**
+   * Adopts a caller-owned transaction while giving recorded-time capture a
+   * flush point before the caller commits. Required when `history: true` is
+   * enabled because returning a long-lived transaction context would let writes
+   * happen after TypeGraph has lost the chance to close/open recorded rows.
+   *
+   * Capture flushes once, when `fn` resolves. The flush seals the capture
+   * session, so a graph write made through the transaction context *after* `fn`
+   * returns (e.g. retaining `tx` and writing once more before the caller's
+   * COMMIT) throws rather than committing uncaptured — the post-flush write
+   * cannot silently diverge history from live state.
+   */
+  withRecordedTransaction<T>(
+    this: HistoryStore<G>,
+    externalTx: AdoptedTransaction,
+    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+  ): Promise<T>;
+
+  withRecordedTransaction<T>(
+    externalTx: AdoptedTransaction,
+    fn: (tx: TransactionContext<G>) => Promise<T>,
+  ): Promise<T>;
+
+  async withRecordedTransaction<T>(
+    externalTx: AdoptedTransaction,
+    fn:
+      | ((tx: TransactionContext<G>) => Promise<T>)
+      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
+  ): Promise<T> {
+    const adopt = this.#baseBackend.adoptTransaction;
+    if (!adopt) {
+      throw new ConfigurationError(
+        "This backend cannot adopt an external transaction for recorded-time capture.",
+        { capability: "adoptTransaction" },
+        {
+          suggestion:
+            "Use a Drizzle PostgreSQL/SQLite backend with transaction support, or run writes through store.transaction(...).",
+        },
+      );
+    }
+    const txBackend = adopt(externalTx);
+    if (this.#captureEnabled) {
+      await assertRecordedCaptureTransactionIsolation(txBackend);
+    }
+    const scope =
+      this.#captureEnabled ?
+        createRecordedTransactionScope(txBackend, this.#sqlSchema())
+      : {
+          backend: txBackend,
+          flush: () => Promise.resolve(),
+        };
+    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const result = await invoke(
+      this.#buildTransactionContext(scope.backend, externalTx),
+    );
+    await scope.flush();
+    return result;
+  }
+
+  /**
    * Builds the `{ nodes, edges, sql }` projection bound to a
    * transaction-scoped backend. Shared verbatim by {@link transaction}
    * (TypeGraph opens the tx) and {@link withTransaction} (#134 — the
    * caller opened it) so both surfaces resolve collections, query
-   * factories, and the reused graph/registry identically. `sql` is the
-   * raw Drizzle handle bound to the same transaction (#140);
-   * `undefined` only on the non-transactional fallback.
+   * factories, and the reused graph/registry identically. When history capture
+   * is disabled, `sql` is the raw Drizzle handle bound to the same transaction
+   * (#140); when history capture is enabled it is replaced with a fail-loud
+   * guard because raw graph writes would bypass recorded-time capture.
    */
   #buildTransactionContext(
     txBackend: TransactionBackend,
@@ -1136,9 +1564,9 @@ export class Store<G extends GraphDef> {
       txEdgeOperations,
     );
 
-    return sql === undefined ?
-        { nodes, edges, backend: txBackend }
-      : { nodes, edges, sql, backend: txBackend };
+    if (sql === undefined) return { nodes, edges, backend: txBackend };
+    const exposedSql = this.#captureEnabled ? createHistoryUnsafeSqlRef() : sql;
+    return { nodes, edges, sql: exposedSql, backend: txBackend };
   }
 
   // === Graph Lifecycle ===
@@ -1159,9 +1587,9 @@ export class Store<G extends GraphDef> {
       await target.clearGraph(this.graphId);
     };
 
-    await (this.#backend.capabilities.transactions ?
-      this.#backend.transaction(async (tx) => doClear(tx))
-    : doClear(this.#backend));
+    await (this.#baseBackend.capabilities.transactions ?
+      this.#baseBackend.transaction(async (tx) => doClear(tx))
+    : doClear(this.#baseBackend));
 
     // `clearGraph` is graph-agnostic and can't reach the strategy-owned
     // per-`(kind, field)` vector tables, so reset them here — otherwise cleared
@@ -1183,7 +1611,7 @@ export class Store<G extends GraphDef> {
    * the in-memory registry (not the DB schema, which `clearGraph` just wiped).
    */
   async #clearVectorStorage(): Promise<void> {
-    const backend = this.#backend;
+    const backend = this.#baseBackend;
     const strategy = backend.vectorStrategy;
     if (strategy === undefined || backend.executeDdl === undefined) return;
 
@@ -1510,7 +1938,7 @@ export class Store<G extends GraphDef> {
       {
         graph: baseline,
         graphId: this.graphId,
-        backend: this.#backend,
+        backend: this.#baseBackend,
         schemaVersion: activeRow.version,
       },
       options ?? {},
@@ -1549,7 +1977,7 @@ export class Store<G extends GraphDef> {
       );
     }
     const { activeRow, baseline } = await this.#loadCaughtUp("reembed");
-    const backend = this.#backend;
+    const backend = this.#baseBackend;
     const strategy = backend.vectorStrategy;
     if (strategy === undefined || backend.executeDdl === undefined) {
       throw new ConfigurationError(
@@ -1842,7 +2270,12 @@ export class Store<G extends GraphDef> {
     options?: MaterializeRemovalsOptions,
   ): Promise<MaterializeRemovalsResult> {
     return materializeRemovalsImpl(
-      { graphId: this.graphId, backend: this.#backend },
+      {
+        graphId: this.graphId,
+        backend: this.#baseBackend,
+        captureRecordedRemovals: this.#captureEnabled,
+        ...(this.#captureEnabled && { recordedSchema: this.#sqlSchema() }),
+      },
       options ?? {},
     );
   }
@@ -2014,7 +2447,12 @@ export class Store<G extends GraphDef> {
     ref: StoreRef<Store<G>> | undefined,
     schemaMetadata: StoreSchemaMetadata = this.#schemaMetadata,
   ): Store<G> {
-    const next = new Store(graph, this.#backend, this.#options, schemaMetadata);
+    const next = new Store(
+      graph,
+      this.#baseBackend,
+      this.#options,
+      schemaMetadata,
+    );
     if (ref !== undefined) ref.current = next;
     return next;
   }
@@ -2037,6 +2475,7 @@ export class Store<G extends GraphDef> {
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      historyEnabled: this.#captureEnabled,
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
@@ -2148,25 +2587,74 @@ export class Store<G extends GraphDef> {
     };
   }
 
-  #createQueryForBackend(
+  #createQueryForBackend<CoordinateState extends QueryCoordinateState = "open">(
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
-  ): QueryBuilder<G> {
-    return createQueryBuilder<G>(this.graphId, this.#registry, {
-      // TransactionBackend omits transaction/close, but query execution only needs
-      // the read-path/query capabilities shared with GraphBackend.
-      backend: backend as GraphBackend,
-      dialect: backend.dialect,
-      defaultTraversalExpansion: this.#defaultTraversalExpansion,
-      ...(this.#schema !== undefined && { schema: this.#schema }),
-      ...(sealedCoordinate !== undefined && { sealedCoordinate }),
-    });
+  ): InitialQueryBuilder<G, CoordinateState> {
+    return createInternalQueryBuilder<G, CoordinateState>(
+      this.graphId,
+      this.#registry,
+      {
+        // TransactionBackend omits transaction/close, but query execution only needs
+        // the read-path/query capabilities shared with GraphBackend.
+        backend: backend as GraphBackend,
+        dialect: backend.dialect,
+        defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        ...(this.#schema !== undefined && { schema: this.#schema }),
+        ...(this.#recordedReadBinding !== undefined && {
+          recordedReadBinding: this.#recordedReadBinding,
+        }),
+        ...(sealedCoordinate !== undefined && { sealedCoordinate }),
+      },
+    );
   }
 }
 
 // ============================================================
 // Factory Function
 // ============================================================
+
+export type HistorySafeBackend = Omit<
+  GraphBackend,
+  "executeStatement" | "executeDdl"
+> &
+  Readonly<{
+    executeStatement?: never;
+    executeDdl?: never;
+  }>;
+
+export type HistorySafeTransactionBackend = Omit<
+  TransactionBackend,
+  "executeStatement" | "executeDdl"
+> &
+  Readonly<{
+    executeStatement?: never;
+    executeDdl?: never;
+  }>;
+
+export type HistoryTransactionContext<G extends GraphDef> = Omit<
+  TransactionContext<G>,
+  "backend" | "sql"
+> &
+  Readonly<{
+    backend: HistorySafeTransactionBackend;
+    sql?: never;
+  }>;
+
+export type RecordedReadStore<G extends GraphDef> = Store<G> &
+  Readonly<{
+    recordedReadBound: true;
+  }>;
+
+export type HistoryStore<G extends GraphDef> = Store<G> &
+  Readonly<{
+    backend: HistorySafeBackend;
+    historyEnabled: true;
+    recordedReadBound: true;
+  }>;
+
+type ExplicitRecordedReadLiveOptions = LiveStoreOptions &
+  Readonly<{ recordedRead: NonNullable<LiveStoreOptions["recordedRead"]> }>;
 
 /**
  * Creates a new Store instance.
@@ -2200,8 +2688,23 @@ export class Store<G extends GraphDef> {
 export function createStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: HistoryStoreOptions,
+): HistoryStore<G>;
+export function createStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: ExplicitRecordedReadLiveOptions,
+): RecordedReadStore<G>;
+export function createStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
   options?: StoreOptions,
-): Store<G> {
+): Store<G>;
+export function createStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options?: StoreOptions,
+): Store<G> | HistoryStore<G> | RecordedReadStore<G> {
   return new Store(graph, backend, options);
 }
 
@@ -2293,8 +2796,25 @@ export type {
 export async function createStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: HistoryStoreOptions & SchemaManagerOptions,
+): Promise<[HistoryStore<G>, SchemaValidationResult]>;
+export async function createStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: ExplicitRecordedReadLiveOptions & SchemaManagerOptions,
+): Promise<[RecordedReadStore<G>, SchemaValidationResult]>;
+export async function createStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
   options?: StoreOptions & SchemaManagerOptions,
-): Promise<[Store<G>, SchemaValidationResult]> {
+): Promise<[Store<G>, SchemaValidationResult]>;
+export async function createStoreWithSchema<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options?: StoreOptions & SchemaManagerOptions,
+): Promise<
+  [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
+> {
   // Fold any persisted graph extension into the graph BEFORE
   // constructing the Store. The prefetched row + parsed schema thread
   // through to ensureSchema so each Store boot pays for one DB round
@@ -2371,8 +2891,25 @@ export async function createStoreWithSchema<G extends GraphDef>(
 export async function createVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: HistoryStoreOptions,
+): Promise<[HistoryStore<G>, SchemaValidationResult]>;
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options: ExplicitRecordedReadLiveOptions,
+): Promise<[RecordedReadStore<G>, SchemaValidationResult]>;
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
   options?: StoreOptions,
-): Promise<[Store<G>, SchemaValidationResult]> {
+): Promise<[Store<G>, SchemaValidationResult]>;
+export async function createVerifiedStore<G extends GraphDef>(
+  graph: G,
+  backend: GraphBackend,
+  options?: StoreOptions,
+): Promise<
+  [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
+> {
   const {
     graph: merged,
     activeRow,

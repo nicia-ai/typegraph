@@ -14,6 +14,10 @@ import {
 import { type SqlTableNames } from "../query/compiler/schema";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { type VectorStrategy } from "../query/dialect/vector-strategy";
+import {
+  type CompiledRowsSql,
+  type CompiledStatementSql,
+} from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
 import {
   type AnyPgDatabase,
@@ -101,6 +105,26 @@ export type BackendCapabilities = Readonly<{
   transactions: boolean;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
+  /**
+   * Whether the backend's `execute()` supports `UPDATE … RETURNING`. Absent or
+   * `true` means supported (every engine TypeGraph ships — SQLite ≥ 3.35,
+   * PostgreSQL ≥ 8.2 — supports it). A custom backend whose engine cannot run
+   * `RETURNING` must set this to `false` so recorded-time history capture
+   * (`history: true`), which relies on `UPDATE … RETURNING` on its hot path,
+   * is refused up front instead of failing mid-flush.
+   */
+  returning?: boolean;
+  /**
+   * Maximum number of bound parameters the engine accepts in one statement.
+   * SQLite defaults to 999 (raisable at compile time via
+   * `SQLITE_MAX_VARIABLE_NUMBER`); PostgreSQL's wire protocol caps it at 65535.
+   * Recorded-time capture and recorded point reads size their multi-row
+   * statements to this ceiling — the same budget the backend's own batched
+   * inserts use — instead of a conservative dialect-blind constant. A custom
+   * build that raises the SQLite limit can override this here. Absent means the
+   * recorded-time fallback budget applies.
+   */
+  maxBindParameters?: number;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -705,29 +729,6 @@ export type AdoptedTransaction = AnyPgDatabase | AnySqliteDatabase;
 // ============================================================
 
 /**
- * Transaction backend — a backend scoped to a transaction.
- *
- * `commitSchemaVersion` and `setActiveVersion` are intentionally omitted:
- * the atomicity / CAS guarantees of those primitives depend on
- * dialect-specific write-locking (BEGIN IMMEDIATE on SQLite,
- * `pg_advisory_xact_lock` on Postgres) acquired by the top-level
- * backend wrappers, not the transaction itself. Calling them from a
- * user-supplied `backend.transaction(...)` callback would bypass that
- * locking and silently weaken the orphan-row crash window the primitive
- * exists to eliminate. Schema commits go through the top-level backend
- * methods only.
- */
-export type TransactionBackend = Omit<
-  GraphBackend,
-  | "transaction"
-  | "adoptTransaction"
-  | "close"
-  | "refreshStatistics"
-  | "commitSchemaVersion"
-  | "setActiveVersion"
->;
-
-/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -1116,7 +1117,15 @@ export type GraphBackend = Readonly<{
   refreshStatistics: () => Promise<void>;
 
   // === Query Execution ===
-  execute: <T>(query: SQL) => Promise<readonly T[]>;
+  execute: <T>(query: CompiledRowsSql) => Promise<readonly T[]>;
+
+  /**
+   * Execute a non-row-returning SQL statement bound to this backend or
+   * transaction. Optional because custom backends may only expose the public
+   * row-returning query path; features that need statement execution must
+   * capability-check and fail loudly.
+   */
+  executeStatement?: (query: CompiledStatementSql) => Promise<void>;
 
   /** Execute pre-compiled SQL text with bound parameters. Available on sync SQLite and pg backends. */
   executeRaw?: <T>(
@@ -1192,9 +1201,266 @@ export type GraphBackend = Readonly<{
   close: () => Promise<void>;
 }>;
 
+export type BackendIdentity = Pick<
+  GraphBackend,
+  | "dialect"
+  | "capabilities"
+  | "tableNames"
+  | "fulltextStrategy"
+  | "vectorStrategy"
+>;
+
+export type NodeEntityReadBackend = Pick<
+  GraphBackend,
+  "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind"
+>;
+
+export type NodeEntityWriteBackend = Pick<
+  GraphBackend,
+  | "insertNode"
+  | "insertNodeNoReturn"
+  | "insertNodesBatch"
+  | "insertNodesBatchReturning"
+  | "updateNode"
+  | "deleteNode"
+  | "hardDeleteNode"
+>;
+
+export type EdgeEntityReadBackend = Pick<
+  GraphBackend,
+  | "getEdge"
+  | "getEdges"
+  | "countEdgesFrom"
+  | "edgeExistsBetween"
+  | "findEdgesConnectedTo"
+  | "findEdgesByKind"
+  | "countEdgesByKind"
+>;
+
+export type EdgeEntityWriteBackend = Pick<
+  GraphBackend,
+  | "insertEdge"
+  | "insertEdgeNoReturn"
+  | "insertEdgesBatch"
+  | "insertEdgesBatchReturning"
+  | "updateEdge"
+  | "deleteEdge"
+  | "hardDeleteEdge"
+>;
+
+export type GraphEntityReadBackend = NodeEntityReadBackend &
+  EdgeEntityReadBackend;
+
+export type GraphEntityWriteBackend = NodeEntityWriteBackend &
+  EdgeEntityWriteBackend;
+
+export type UniqueConstraintBackend = Pick<
+  GraphBackend,
+  "insertUnique" | "deleteUnique" | "checkUnique" | "checkUniqueBatch"
+>;
+
+export type SchemaReadBackend = Pick<
+  GraphBackend,
+  "getActiveSchema" | "getSchemaVersion"
+>;
+
+export type SchemaCommitBackend = Pick<
+  GraphBackend,
+  "commitSchemaVersion" | "setActiveVersion"
+>;
+
+export type VectorOperationBackend = Pick<
+  GraphBackend,
+  | "upsertEmbedding"
+  | "deleteEmbedding"
+  | "vectorSearch"
+  | "createVectorIndex"
+  | "dropVectorIndex"
+>;
+
+export type FulltextOperationBackend = Pick<
+  GraphBackend,
+  | "upsertFulltext"
+  | "deleteFulltext"
+  | "upsertFulltextBatch"
+  | "deleteFulltextBatch"
+  | "fulltextSearch"
+>;
+
+export type IndexMaterializationBackend = Pick<
+  GraphBackend,
+  | "ensureIndexMaterializationsTable"
+  | "getIndexMaterialization"
+  | "getIndexMaterializations"
+  | "recordIndexMaterialization"
+>;
+
+export type ContributionMaterializationBackend = Pick<
+  GraphBackend,
+  | "ensureContributionMaterializationsTable"
+  | "getContributionMaterialization"
+  | "recordContributionMaterialization"
+  | "assertRuntimeContributionsInitialized"
+  | "ensureRuntimeContributions"
+  | "ensureFulltextTable"
+>;
+
+export type RemovalMaterializationBackend = Pick<
+  GraphBackend,
+  | "ensureKindRemovalsTable"
+  | "getPendingKindRemovals"
+  | "getAllKindRemovals"
+  | "recordKindRemoval"
+  | "ensureReconciliationMarkersTable"
+  | "getReconciliationMarker"
+  | "setReconciliationMarker"
+>;
+
+export type GraphLifecycleBackend = Pick<
+  GraphBackend,
+  "clearGraph" | "bootstrapTables"
+>;
+
+export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
+
+export type RawQueryExecutionBackend = Pick<
+  GraphBackend,
+  "executeRaw" | "compileSql"
+>;
+
+export type RawStatementExecutionBackend = Pick<
+  GraphBackend,
+  "executeStatement" | "executeDdl"
+>;
+
+export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
+
+export type BackendTransactions = Pick<
+  GraphBackend,
+  "transaction" | "adoptTransaction"
+>;
+
+export type BackendLifecycle = Pick<GraphBackend, "close">;
+
+/**
+ * Transaction backend — a backend scoped to a transaction.
+ *
+ * This is an explicit facet composition, not `Omit<GraphBackend, ...>`.
+ * New top-level-only backend methods therefore do not silently appear on
+ * transaction-scoped backends. `commitSchemaVersion`, `setActiveVersion`,
+ * `refreshStatistics`, `transaction`, `adoptTransaction`, and `close` stay
+ * deliberately absent: their guarantees depend on the top-level backend or
+ * lifecycle owner rather than an already-open transaction.
+ */
+export type TransactionBackend = Readonly<
+  BackendIdentity &
+    GraphEntityReadBackend &
+    GraphEntityWriteBackend &
+    UniqueConstraintBackend &
+    SchemaReadBackend &
+    VectorOperationBackend &
+    FulltextOperationBackend &
+    IndexMaterializationBackend &
+    ContributionMaterializationBackend &
+    RemovalMaterializationBackend &
+    GraphLifecycleBackend &
+    QueryExecutionBackend &
+    RawQueryExecutionBackend &
+    RawStatementExecutionBackend
+>;
+
+type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
+  Readonly<Record<Exclude<keyof O, keyof T>, never>>;
+
 // ============================================================
 // Managed Backend Helper
 // ============================================================
+
+/**
+ * Overlays selected backend methods without copying the backend object.
+ *
+ * Backend wrappers use this instead of object spread so custom class/proxy
+ * backends keep prototype methods, getters, private fields, and non-enumerable
+ * members. Delegated target methods are bound to the original target, while
+ * overlay methods keep the overlay object as their receiver.
+ */
+export function createBackendOverlay<
+  T extends object,
+  const O extends Partial<T> = Partial<T>,
+>(target: T, overlay: ExactBackendOverlay<T, O>): T {
+  const boundTargetMethods = new Map<PropertyKey, unknown>();
+
+  function hasOverlayProperty(property: PropertyKey): boolean {
+    return Object.hasOwn(overlay, property);
+  }
+
+  function targetValue(targetObject: T, property: PropertyKey): unknown {
+    const value = Reflect.get(targetObject, property, targetObject);
+    if (typeof value !== "function") return value;
+
+    const cached = boundTargetMethods.get(property);
+    if (cached !== undefined) return cached;
+
+    const method = value as (this: T, ...args: unknown[]) => unknown;
+    const bound = method.bind(targetObject);
+    boundTargetMethods.set(property, bound);
+    return bound;
+  }
+
+  return new Proxy(target, {
+    get(targetObject, property) {
+      if (hasOverlayProperty(property)) {
+        return Reflect.get(overlay, property, overlay);
+      }
+      return targetValue(targetObject, property);
+    },
+
+    has(targetObject, property) {
+      return (
+        hasOverlayProperty(property) || Reflect.has(targetObject, property)
+      );
+    },
+
+    ownKeys(targetObject) {
+      return [
+        ...new Set([
+          ...Reflect.ownKeys(targetObject),
+          ...Reflect.ownKeys(overlay),
+        ]),
+      ];
+    },
+
+    getOwnPropertyDescriptor(targetObject, property) {
+      if (hasOverlayProperty(property)) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(overlay, property);
+        if (descriptor === undefined) return;
+        return { ...descriptor, configurable: true };
+      }
+      return Reflect.getOwnPropertyDescriptor(targetObject, property);
+    },
+
+    set(targetObject, property, value) {
+      if (hasOverlayProperty(property)) {
+        return Reflect.set(overlay, property, value, overlay);
+      }
+      return Reflect.set(targetObject, property, value, targetObject);
+    },
+
+    defineProperty(targetObject, property, attributes) {
+      if (hasOverlayProperty(property)) {
+        return Reflect.defineProperty(overlay, property, attributes);
+      }
+      return Reflect.defineProperty(targetObject, property, attributes);
+    },
+
+    deleteProperty(targetObject, property) {
+      if (hasOverlayProperty(property)) {
+        return Reflect.deleteProperty(overlay, property);
+      }
+      return Reflect.deleteProperty(targetObject, property);
+    },
+  });
+}
 
 /**
  * Wraps a GraphBackend with idempotent close that also runs a teardown
@@ -1205,39 +1471,39 @@ export function wrapWithManagedClose(
   teardown: () => void | Promise<void>,
 ): GraphBackend {
   let isClosed = false;
-  return {
-    ...backend,
+  return createBackendOverlay(backend, {
     async close(): Promise<void> {
       if (isClosed) return;
       isClosed = true;
       await backend.close();
       await teardown();
     },
-  };
+  });
 }
 
 /**
- * Runs `fn` inside a transaction when the backend supports one, falling
- * through to a direct invocation otherwise. Lets call sites benefit from
- * atomicity on backends that have transactions while staying functional
- * on backends that don't (Cloudflare D1, `drizzle-orm/neon-http` over
- * HTTP). The single-statement race window is already implicit on any
- * backend that reports `transactions: false`; callers that cannot
- * tolerate it must branch on the capability themselves.
+ * Runs `fn` inside a transaction when given a top-level backend that supports
+ * one, falling through to a direct invocation otherwise. Lets call sites benefit
+ * from atomicity on backends that have transactions while staying functional on
+ * backends that don't (Cloudflare D1, `drizzle-orm/neon-http` over HTTP), and
+ * avoids opening nested transactions when the caller already holds a
+ * transaction-scoped backend. The single-statement race window is already
+ * implicit on any backend that reports `transactions: false`; callers that
+ * cannot tolerate it must branch on the capability themselves.
  *
  * Pass `fallback` only when the toplevel backend method would recurse
  * — pass the operation-level backend so the no-tx path doesn't loop
  * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
   fallback?: GraphBackend | TransactionBackend,
 ): Promise<T> {
-  if (!backend.capabilities.transactions) {
-    return fn(fallback ?? backend);
+  if ("transaction" in backend && backend.capabilities.transactions) {
+    return backend.transaction((tx) => fn(tx));
   }
-  return backend.transaction((tx) => fn(tx));
+  return fn(fallback ?? backend);
 }
 
 // ============================================================
@@ -1486,11 +1752,27 @@ export type CountEdgesByKindParams = Readonly<{
 // ============================================================
 
 /**
+ * Default per-statement bound-parameter ceiling for SQLite. The compiled-in
+ * `SQLITE_MAX_VARIABLE_NUMBER` has historically defaulted to 999. Single source
+ * of truth for {@link SQLITE_CAPABILITIES} and the SQLite backend's batch math.
+ */
+export const SQLITE_MAX_BIND_PARAMETERS = 999;
+
+/**
+ * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
+ * source of truth for {@link POSTGRES_CAPABILITIES} and the Postgres backend's
+ * batch math.
+ */
+export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
+
+/**
  * Default capabilities for SQLite.
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = {
   transactions: true, // SQLite supports transactions
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
+  returning: true, // SQLite has supported RETURNING since 3.35.0
+  maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
 };
 
 /**
@@ -1499,4 +1781,6 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = {
 export const POSTGRES_CAPABILITIES: BackendCapabilities = {
   transactions: true, // PostgreSQL supports transactions
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
+  returning: true, // PostgreSQL has supported RETURNING since 8.2
+  maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
 };

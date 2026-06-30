@@ -1,6 +1,7 @@
-import { type SQL } from "drizzle-orm";
+import { type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import { isPresent } from "../../../utils/presence";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
@@ -31,7 +32,7 @@ import type {
 } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
-import { buildClearGraph } from "./clear";
+import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
@@ -159,7 +160,8 @@ export type CommonOperationStrategy = Readonly<{
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
-  buildClearGraph: (graphId: string) => readonly SQL[];
+  buildTableExists: (tableName: string) => SQL;
+  buildClearGraph: (graphId: string) => readonly ClearGraphStatement[];
 }>;
 
 /**
@@ -300,9 +302,84 @@ function createCommonOperationStrategy(
     ): Readonly<{ activateVersion: SQL; deactivateAll: SQL }> {
       return buildSetActiveSchema(tables, graphId, version, dialect);
     },
-    buildClearGraph(graphId: string): readonly SQL[] {
+    buildTableExists(tableName: string): SQL {
+      if (dialect === "postgres") {
+        // `pg_table_is_visible` resolves visibility through the session
+        // `search_path` — exactly how the unqualified DELETE / ANALYZE this
+        // probe guards resolves `tableName`. Scoping to `current_schema()`
+        // instead would report the table missing whenever it lives in a
+        // search_path schema that is not the current one (a shared-schema /
+        // multi-tenant deployment), skipping a statement that would in fact
+        // have hit the table — a guard narrower than what it protects.
+        return sql`
+          SELECT c.relname AS table_name
+          FROM pg_catalog.pg_class AS c
+          WHERE c.relname = ${tableName}
+            AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            AND pg_catalog.pg_table_is_visible(c.oid)
+          LIMIT 1
+        `;
+      }
+      return sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`;
+    },
+    buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
       return buildClearGraph(tables, graphId);
     },
+  };
+}
+
+/**
+ * Interprets the row returned by {@link CommonOperationStrategy.buildTableExists}.
+ * The probe selects a single non-null column only when the table is present, so
+ * an absent row — or a row whose columns are all null — means the table does not
+ * exist. Shared by `clear()` and `refreshStatistics()` so the two callers can't
+ * drift on how the probe result is read.
+ */
+export function tableExistsFromRow(
+  row: Record<string, unknown> | undefined,
+): boolean {
+  if (row === undefined) return false;
+  return Object.values(row).some((value) => isPresent(value));
+}
+
+/**
+ * Wraps a {@link CommonOperationStrategy.buildTableExists} probe in a
+ * per-instance cache. A table confirmed present is cached by default for the
+ * backend's lifetime, but callers may disable positive caching when the probe is
+ * sensitive to session state such as PostgreSQL `search_path`. Missing tables
+ * stay re-probable by default so a later focused bootstrap that creates one is
+ * picked up; callers on a non-DDL path can opt into negative caching. Shared by
+ * `clear()`'s ignore-missing guard and `refreshStatistics()`'s recorded ANALYZE
+ * so the two cannot drift on caching or on how the probe row is read.
+ *
+ * `probe` runs the existence query and returns the single result row (or
+ * `undefined`); the caller supplies it because the two sites execute through
+ * different adapters (a single-row `execGet` vs. a row-array `execute`).
+ */
+export type TableExistenceCacheOptions = Readonly<{
+  cacheExisting?: boolean | undefined;
+  cacheMissing?: boolean | undefined;
+}>;
+
+export function createCachedTableExistence(
+  probe: (tableName: string) => Promise<Record<string, unknown> | undefined>,
+  options?: TableExistenceCacheOptions,
+): (tableName: string) => Promise<boolean> {
+  const cacheExisting = options?.cacheExisting !== false;
+  const cacheMissing = options?.cacheMissing === true;
+  const confirmedExisting = new Set<string>();
+  const confirmedMissing = new Set<string>();
+  return async function tableExists(tableName: string): Promise<boolean> {
+    if (confirmedExisting.has(tableName)) return true;
+    if (confirmedMissing.has(tableName)) return false;
+    const exists = tableExistsFromRow(await probe(tableName));
+    if (exists && cacheExisting) {
+      confirmedExisting.add(tableName);
+    }
+    if (!exists && cacheMissing) {
+      confirmedMissing.add(tableName);
+    }
+    return exists;
   };
 }
 

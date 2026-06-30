@@ -116,6 +116,9 @@ async function setupTestDatabase(): Promise<void> {
   if (!sharedPool) return;
 
   await sharedPool.query(`
+    DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
+    DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
+    DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
     DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
     DROP TABLE IF EXISTS typegraph_edges CASCADE;
     DROP TABLE IF EXISTS typegraph_nodes CASCADE;
@@ -160,9 +163,18 @@ async function clearTestData(): Promise<void> {
   // Fulltext tables have no FKs to typegraph_nodes, so truncating the
   // parent tables alone leaves orphaned rows that leak into subsequent
   // integration tests (particularly fulltext search, where orphan rows
-  // can outrank fresh ones and cause missing hits).
+  // can outrank fresh ones and cause missing hits). The materialization
+  // status tables also carry graph-id scoped completion markers, so stale
+  // rows there can make a fresh graph cleanup look already completed.
   await sharedPool.query(
-    `TRUNCATE typegraph_node_fulltext,
+    `TRUNCATE typegraph_index_materializations,
+              typegraph_contribution_materializations,
+              typegraph_kind_removals,
+              typegraph_reconciliation_markers,
+              typegraph_node_fulltext,
+              typegraph_recorded_clock,
+              typegraph_recorded_nodes,
+              typegraph_recorded_edges,
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,
@@ -515,6 +527,200 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           DROP TABLE IF EXISTS tg_custom_nodes CASCADE;
           DROP TABLE IF EXISTS tg_custom_schema_versions CASCADE;
         `);
+      }
+    });
+
+    it("tolerates a schema created before the recorded-time history tables existed", async (ctx) => {
+      // A bring-your-own-pool database whose DDL predates recorded-time history
+      // has no recorded relations. ANALYZE fails the whole statement on a
+      // missing relation, so refreshStatistics() must skip the absent ones
+      // rather than throw — the forward-compat guarantee clear() already makes.
+      const { pool } = requirePostgres(ctx);
+      const legacyTables = createPostgresTables({
+        nodes: "tg_legacy_nodes",
+        edges: "tg_legacy_edges",
+        uniques: "tg_legacy_uniques",
+        fulltext: "tg_legacy_fulltext",
+        schemaVersions: "tg_legacy_schema_versions",
+        recordedNodes: "tg_legacy_recorded_nodes",
+        recordedEdges: "tg_legacy_recorded_edges",
+        recordedClock: "tg_legacy_recorded_clock",
+      });
+      const legacyDdl = generatePostgresDDL(legacyTables);
+      const dropRecorded = `
+        DROP TABLE IF EXISTS tg_legacy_recorded_edges CASCADE;
+        DROP TABLE IF EXISTS tg_legacy_recorded_nodes CASCADE;
+        DROP TABLE IF EXISTS tg_legacy_recorded_clock CASCADE;
+      `;
+      try {
+        for (const statement of legacyDdl) {
+          await pool.query(statement);
+        }
+        await pool.query(dropRecorded);
+        const legacyBackend = createPostgresBackend(drizzle(pool), {
+          tables: legacyTables,
+        });
+        await expect(
+          legacyBackend.refreshStatistics(),
+        ).resolves.toBeUndefined();
+      } finally {
+        await pool.query(`
+          ${dropRecorded}
+          DROP TABLE IF EXISTS tg_legacy_fulltext CASCADE;
+          DROP TABLE IF EXISTS tg_legacy_uniques CASCADE;
+          DROP TABLE IF EXISTS tg_legacy_edges CASCADE;
+          DROP TABLE IF EXISTS tg_legacy_nodes CASCADE;
+          DROP TABLE IF EXISTS tg_legacy_schema_versions CASCADE;
+        `);
+      }
+    });
+
+    it("re-probes recorded tables that are created after an earlier missing refresh", async (ctx) => {
+      const { pool } = requirePostgres(ctx);
+      const tableNames = {
+        nodes: "tg_reprobe_nodes",
+        edges: "tg_reprobe_edges",
+        recordedNodes: "tg_reprobe_recorded_nodes",
+        recordedEdges: "tg_reprobe_recorded_edges",
+        recordedClock: "tg_reprobe_recorded_clock",
+        uniques: "tg_reprobe_uniques",
+        schemaVersions: "tg_reprobe_schema_versions",
+        fulltext: "tg_reprobe_fulltext",
+        indexMaterializations: "tg_reprobe_index_materializations",
+        contributionMaterializations:
+          "tg_reprobe_contribution_materializations",
+        kindRemovals: "tg_reprobe_kind_removals",
+        reconciliationMarkers: "tg_reprobe_reconciliation_markers",
+      } as const;
+      const reprobeTables = createPostgresTables(tableNames);
+      const ddl = generatePostgresDDL(reprobeTables);
+      const dropRecorded = `
+        DROP TABLE IF EXISTS tg_reprobe_recorded_edges CASCADE;
+        DROP TABLE IF EXISTS tg_reprobe_recorded_nodes CASCADE;
+        DROP TABLE IF EXISTS tg_reprobe_recorded_clock CASCADE;
+      `;
+      try {
+        for (const statement of ddl) {
+          await pool.query(statement);
+        }
+        await pool.query(dropRecorded);
+        const backend = createPostgresBackend(drizzle(pool), {
+          tables: reprobeTables,
+        });
+
+        await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+        for (const statement of ddl) {
+          await pool.query(statement);
+        }
+        await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+
+        await pool.query("SELECT pg_stat_clear_snapshot()");
+        const stats = await pool.query<{
+          relname: string;
+          last_analyze: Date | null;
+        }>(
+          `
+          SELECT relname, last_analyze
+          FROM pg_stat_all_tables
+          WHERE schemaname = 'public'
+            AND relname = ANY($1::text[])
+        `,
+          [
+            [
+              tableNames.recordedNodes,
+              tableNames.recordedEdges,
+              tableNames.recordedClock,
+            ],
+          ],
+        );
+        expect(stats.rows).toHaveLength(3);
+        expect(stats.rows.every((row) => row.last_analyze !== null)).toBe(true);
+      } finally {
+        await pool.query(`
+          DROP TABLE IF EXISTS tg_reprobe_fulltext CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_recorded_edges CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_recorded_nodes CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_recorded_clock CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_uniques CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_edges CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_nodes CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_schema_versions CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_index_materializations CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_contribution_materializations CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_kind_removals CASCADE;
+          DROP TABLE IF EXISTS tg_reprobe_reconciliation_markers CASCADE;
+        `);
+      }
+    });
+
+    it("does not reuse recorded-table existence across search_path schemas", async (ctx) => {
+      requirePostgres(ctx);
+
+      const tenantA = "tg_cache_tenant_a";
+      const tenantB = "tg_cache_tenant_b";
+      const tableNames = {
+        nodes: "tg_search_path_nodes",
+        edges: "tg_search_path_edges",
+        recordedNodes: "tg_search_path_recorded_nodes",
+        recordedEdges: "tg_search_path_recorded_edges",
+        recordedClock: "tg_search_path_recorded_clock",
+        uniques: "tg_search_path_uniques",
+        schemaVersions: "tg_search_path_schema_versions",
+        fulltext: "tg_search_path_fulltext",
+        indexMaterializations: "tg_search_path_index_materializations",
+        contributionMaterializations:
+          "tg_search_path_contribution_materializations",
+        kindRemovals: "tg_search_path_kind_removals",
+        reconciliationMarkers: "tg_search_path_reconciliation_markers",
+      } as const;
+      const tables = createPostgresTables(tableNames);
+      const ddl = generatePostgresDDL(tables);
+      const tenantPool = new Pool({
+        connectionString: TEST_DATABASE_URL,
+        max: 1,
+      });
+      const backend = createPostgresBackend(drizzle(tenantPool), { tables });
+
+      async function setSearchPath(schemaName: string): Promise<void> {
+        await tenantPool.query(`SET search_path TO "${schemaName}", public`);
+      }
+
+      async function createSchemaTables(schemaName: string): Promise<void> {
+        await tenantPool.query(`CREATE SCHEMA "${schemaName}"`);
+        await setSearchPath(schemaName);
+        for (const statement of ddl) {
+          await tenantPool.query(statement);
+        }
+      }
+
+      try {
+        await tenantPool.query(`DROP SCHEMA IF EXISTS "${tenantA}" CASCADE`);
+        await tenantPool.query(`DROP SCHEMA IF EXISTS "${tenantB}" CASCADE`);
+
+        await createSchemaTables(tenantA);
+        await createSchemaTables(tenantB);
+        await tenantPool.query(`
+          DROP TABLE IF EXISTS ${tableNames.recordedEdges} CASCADE;
+          DROP TABLE IF EXISTS ${tableNames.recordedNodes} CASCADE;
+          DROP TABLE IF EXISTS ${tableNames.recordedClock} CASCADE;
+        `);
+
+        await setSearchPath(tenantA);
+        await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+        await expect(backend.clearGraph("search_path_cache")).resolves.toBe(
+          undefined,
+        );
+
+        await setSearchPath(tenantB);
+        await expect(backend.refreshStatistics()).resolves.toBeUndefined();
+        await expect(backend.clearGraph("search_path_cache")).resolves.toBe(
+          undefined,
+        );
+      } finally {
+        await tenantPool.query("RESET search_path");
+        await tenantPool.query(`DROP SCHEMA IF EXISTS "${tenantA}" CASCADE`);
+        await tenantPool.query(`DROP SCHEMA IF EXISTS "${tenantB}" CASCADE`);
+        await tenantPool.end();
       }
     });
   });

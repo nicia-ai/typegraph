@@ -47,6 +47,9 @@ describe("custom table names", () => {
   const CUSTOM_NAMES = {
     nodes: "app_nodes",
     edges: "app_edges",
+    recordedNodes: "app_recorded_nodes",
+    recordedEdges: "app_recorded_edges",
+    recordedClock: "app_recorded_clock",
     fulltext: "app_fulltext",
     uniques: "app_uniques",
   } as const;
@@ -57,6 +60,9 @@ describe("custom table names", () => {
     const tables = createSqliteTables({
       nodes: CUSTOM_NAMES.nodes,
       edges: CUSTOM_NAMES.edges,
+      recordedNodes: CUSTOM_NAMES.recordedNodes,
+      recordedEdges: CUSTOM_NAMES.recordedEdges,
+      recordedClock: CUSTOM_NAMES.recordedClock,
       fulltext: CUSTOM_NAMES.fulltext,
       uniques: CUSTOM_NAMES.uniques,
     });
@@ -150,6 +156,9 @@ describe("custom table names", () => {
     expect(defaultBackend.tableNames).toEqual({
       nodes: "typegraph_nodes",
       edges: "typegraph_edges",
+      recordedNodes: "typegraph_recorded_nodes",
+      recordedEdges: "typegraph_recorded_edges",
+      recordedClock: "typegraph_recorded_clock",
       fulltext: "typegraph_node_fulltext",
       uniques: "typegraph_node_uniques",
     });

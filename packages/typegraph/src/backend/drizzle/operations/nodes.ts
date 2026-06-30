@@ -1,17 +1,13 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { sqlValueList } from "../../../query/compiler/predicate-utils";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
   InsertNodeParams,
   UpdateNodeParams,
 } from "../../types";
-import {
-  nodeColumnList,
-  quotedColumn,
-  sqlNull,
-  type Tables,
-} from "./shared";
+import { nodeColumnList, quotedColumn, sqlNull, type Tables } from "./shared";
 
 /**
  * Builds an INSERT query for a node.
@@ -133,16 +129,12 @@ export function buildGetNodes(
   ids: readonly string[],
 ): SQL {
   const { nodes } = tables;
-  const idPlaceholders = sql.join(
-    ids.map((nodeId) => sql`${nodeId}`),
-    sql`, `,
-  );
 
   return sql`
     SELECT * FROM ${nodes}
     WHERE ${nodes.graphId} = ${graphId}
       AND ${nodes.kind} = ${kind}
-      AND ${nodes.id} IN (${idPlaceholders})
+      AND ${nodes.id} IN (${sqlValueList(ids)})
   `;
 }
 

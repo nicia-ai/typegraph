@@ -40,6 +40,31 @@ export function registerSetOperationIntegrationTests(
       ]);
     });
 
+    it("executes set operations across different valid-time coordinates", async () => {
+      const store = context.getStore();
+      const asOfAfterSeed = new Date(Date.now() + 1000).toISOString();
+      const currentTech = store
+        .query()
+        .from("Company", "c")
+        .whereNode("c", (c) => c.industry.eq("Tech"))
+        .select((ctx) => ctx.c.name);
+      const historicalHealthcare = store
+        .asOf(asOfAfterSeed)
+        .query()
+        .from("Company", "c")
+        .whereNode("c", (c) => c.industry.eq("Healthcare"))
+        .select((ctx) => ctx.c.name);
+
+      const results = await currentTech.union(historicalHealthcare).execute();
+
+      expect(results.toSorted()).toEqual([
+        "BioMed",
+        "DataInc",
+        "HealthFirst",
+        "TechCorp",
+      ]);
+    });
+
     it("executes INTERSECT of two queries", async () => {
       const store = context.getStore();
       // All companies

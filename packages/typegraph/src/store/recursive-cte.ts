@@ -1,9 +1,14 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
 import { type RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
-import { type SqlSchema } from "../query/compiler/schema";
+import {
+  type RecordedReadBinding,
+  recordedReadSchemaFor,
+  type SqlSchema,
+} from "../query/compiler/schema";
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
 import { type TraversalDirection } from "./algorithms/types";
@@ -24,8 +29,16 @@ type BuildReachableCteOptions = Readonly<{
   temporalMode: TemporalMode;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
   asOf?: string;
+  /** Recorded/system-time timestamp for recorded-pinned reads. */
+  recordedAsOf?: RecordedInstant;
   dialect: DialectAdapter;
+  /**
+   * The base (live-table) schema. The recorded-relation swap is derived here
+   * from `recordedAsOf`, so the table source and the recorded interval predicate
+   * cannot drift — callers pass their base schema and need not pre-resolve it.
+   */
   schema: SqlSchema;
+  recordedReadBinding?: RecordedReadBinding;
 }>;
 
 export function buildReachableCte(options: BuildReachableCteOptions): SQL {
@@ -38,15 +51,27 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
   const nodeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
+    recordedAsOf: options.recordedAsOf,
     tableAlias: "n",
     currentTimestamp,
   });
   const edgeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
+    recordedAsOf: options.recordedAsOf,
     tableAlias: "e",
     currentTimestamp,
   });
+  // Derive the read schema from the same `recordedAsOf` that drives the temporal
+  // filters above: when a recorded pin is set the node/edge sources become the
+  // recorded relations, matching the `recorded_from/to` interval predicate. One
+  // derivation means the table source and the predicate cannot disagree.
+  const schema = recordedReadSchemaFor(
+    options.schema,
+    options.recordedAsOf,
+    options.recordedReadBinding,
+    "recorded-recursive-cte",
+  );
 
   const initialPath =
     trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
@@ -64,7 +89,7 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${options.schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
+  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
 
   const recursiveColumns: SQL[] = [
     sql`n.id`,
@@ -92,7 +117,7 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     whereClauses: recursiveWhere,
     direction: options.direction,
     forceWorktableOuterJoinOrder,
-    schema: options.schema,
+    schema,
   });
 
   return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;

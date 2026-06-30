@@ -37,6 +37,9 @@ export {
   isExternalRefSchema,
 } from "./external-ref";
 
+// Recorded-time instant brand (the typed anchor for store.asOfRecorded)
+export { asRecordedInstant, type RecordedInstant } from "./temporal";
+
 // Graph definition
 export {
   type AllEdgeTypes,

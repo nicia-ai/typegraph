@@ -55,16 +55,18 @@ const ogImageAlt =
   </head>
   <body>
     <nav
-      class="flex justify-between items-center py-6 px-8 max-w-[1200px] mx-auto"
+      class="flex flex-wrap justify-center sm:justify-between items-center gap-4 sm:gap-8 py-6 px-4 sm:px-8 max-w-[1200px] mx-auto"
     >
       <a
         href="/"
-        class="text-2xl font-extrabold text-text-main no-underline flex items-center gap-3"
+        class="text-xl sm:text-2xl font-extrabold text-text-main no-underline flex items-center gap-3"
       >
-        <img src="/favicon.svg" alt="" class="w-14 h-14" />
+        <img src="/favicon.svg" alt="" class="w-10 h-10 sm:w-14 sm:h-14" />
         TypeGraph
       </a>
-      <div class="flex gap-8">
+      <div
+        class="flex flex-wrap justify-center gap-4 sm:gap-8 text-sm sm:text-base"
+      >
         <a
           href="/overview"
           class="text-text-muted font-semibold hover:text-primary transition-colors"

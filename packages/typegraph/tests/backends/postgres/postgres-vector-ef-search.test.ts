@@ -32,7 +32,7 @@ import { z } from "zod";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { embedding } from "../../../src/core/embedding";
-import { defineGraph, defineNode } from "../../../src/index";
+import { asCompiledRowsSql, defineGraph, defineNode } from "../../../src/index";
 import { createStoreWithSchema } from "../../../src/store";
 
 const TEST_DATABASE_URL =
@@ -139,7 +139,9 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
 
       const readEfSearch = async () => {
         const rows = await backend.execute<{ ef: string }>(
-          sql`SELECT current_setting('hnsw.ef_search') AS ef`,
+          asCompiledRowsSql(
+            sql`SELECT current_setting('hnsw.ef_search') AS ef`,
+          ),
         );
         return rows[0]?.ef;
       };
@@ -168,7 +170,9 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
     await backend.transaction(async (tx) => {
       const readEfSearch = async () => {
         const rows = await tx.execute<{ ef: string }>(
-          sql`SELECT current_setting('hnsw.ef_search') AS ef`,
+          asCompiledRowsSql(
+            sql`SELECT current_setting('hnsw.ef_search') AS ef`,
+          ),
         );
         return rows[0]?.ef;
       };

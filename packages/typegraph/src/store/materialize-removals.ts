@@ -8,17 +8,23 @@
  * commits are atomic and fast, data work is bounded by row count and
  * deferrable / parallelizable.
  */
+import { sql } from "drizzle-orm";
+
+import { type RawBackend } from "../backend/branded";
 import {
   type GraphBackend,
   type KindRemovalRow,
   type RecordKindRemovalParams,
+  type TransactionBackend,
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
+import { createSqlSchema, type SqlSchema } from "../query/compiler/schema";
 import type {
   VectorSlot,
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
+import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import { nowIso } from "../utils/date";
 import { isMissingTableError } from "../utils/sql-errors";
@@ -26,6 +32,7 @@ import {
   ensureFocusedStatusTable,
   runMaterialization,
 } from "./materialize-shared";
+import { closeRecordedHardDeletedKind } from "./recorded-capture";
 
 const ENTITY_KINDS: readonly KindEntity[] = ["node", "edge"];
 
@@ -91,7 +98,28 @@ export type MaterializeRemovalsResult = Readonly<{
 
 type MaterializeRemovalsContext = Readonly<{
   graphId: string;
+  // Bulk kind-removal deletes live rows directly and closes recorded intervals
+  // by kind — it deliberately bypasses the per-row capture wrapper, so it takes
+  // the raw seam. Passing the graph-write backend here is a type error.
+  backend: RawBackend;
+  captureRecordedRemovals?: boolean;
+  // The store's resolved SQL schema, so recorded-interval closes target the
+  // same relations recorded reads do (honoring a custom `schema` option, not
+  // just `backend.tableNames`). Falls back to the backend's table names.
+  recordedSchema?: SqlSchema;
+}>;
+
+type MaterializeOneContext = Readonly<{
   backend: GraphBackend;
+  graphId: string;
+  nodesTable: string;
+  edgesTable: string;
+  fulltextTable: string;
+  uniquesTable: string;
+  captureRecordedRemovals: boolean;
+  // Resolved once per removal pass (not per kind) and threaded into each
+  // recorded-interval close. Undefined when recorded capture is off.
+  recordedSchema: SqlSchema | undefined;
 }>;
 
 export async function materializeRemovals(
@@ -151,6 +179,7 @@ export async function materializeRemovals(
   const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
 
+  const captureRecordedRemovals = context.captureRecordedRemovals === true;
   const ctx = {
     backend,
     graphId,
@@ -158,6 +187,11 @@ export async function materializeRemovals(
     edgesTable,
     fulltextTable,
     uniquesTable,
+    captureRecordedRemovals,
+    recordedSchema:
+      captureRecordedRemovals ?
+        (context.recordedSchema ?? createSqlSchema(backend.tableNames))
+      : undefined,
   } as const;
 
   // Each kind targets a disjoint row set (DELETEs filtered by kindName),
@@ -320,54 +354,12 @@ function kindRemovalKey(
 
 async function materializeOne(
   row: KindRemovalRow,
-  ctx: Readonly<{
-    backend: GraphBackend;
-    graphId: string;
-    nodesTable: string;
-    edgesTable: string;
-    fulltextTable: string;
-    uniquesTable: string;
-  }>,
+  ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
-  const executeDdl = ctx.backend.executeDdl!;
   const recordKindRemoval = ctx.backend.recordKindRemoval!;
   try {
-    // Build the per-row DELETEs. For a removed node kind: drop the
-    // primary rows, every edge referencing it (via from_kind / to_kind
-    // — those would otherwise dangle), the secondary tables that
-    // partition by node_kind (fulltext, uniques), plus the strategy's
-    // typed per-`(kind, field)` embedding tables. Without the secondary
-    // cleanup, repeated remove/re-add cycles accumulate dead rows that
-    // fulltext / unique / vector lookups still scan. For a removed edge
-    // kind: only the edges table needs cleanup. All statements target
-    // disjoint row sets — issued in parallel.
-    const deletes: Promise<void>[] = [];
-    const graphLit = literal(ctx.graphId);
-    const kindLit = literal(row.kindName);
-    if (row.entity === "node") {
-      deletes.push(
-        executeDdl(
-          `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
-        ),
-        executeDdl(
-          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
-        ),
-        executeDdl(
-          `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-        ),
-        executeDdl(
-          `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-        ),
-        ...buildEmbeddingTableCleanup(ctx, row),
-      );
-    } else {
-      deletes.push(
-        executeDdl(
-          `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
-        ),
-      );
-    }
-    await Promise.all(deletes);
+    await closeRecordedAndDeleteLiveRows(ctx, row);
+    await Promise.all(buildEmbeddingTableCleanup(ctx, row));
 
     const removedAt = nowIso();
     await recordKindRemoval({
@@ -402,6 +394,89 @@ async function materializeOne(
       error,
     };
   }
+}
+
+/**
+ * Closes recorded-time intervals for a hard-removed kind and deletes the live
+ * rows in one transaction. Without the shared transaction, a crash after the
+ * recorded close but before the live deletes leaves broad live reads able to see
+ * rows whose kind the active schema has removed.
+ *
+ * Tolerates absent recorded relations exactly as `clear()` and
+ * `refreshStatistics()` do: a history-enabled store whose recorded tables
+ * predate recorded-time history (bring-your-own-pool, no DDL re-run) skips only
+ * the close, then still deletes the live rows. A no-op close when
+ * recorded-removal capture is off.
+ */
+async function closeRecordedAndDeleteLiveRows(
+  ctx: MaterializeOneContext,
+  row: KindRemovalRow,
+): Promise<void> {
+  const deleteStatements = buildRemovedKindLiveDeleteStatements(ctx, row);
+  if (!ctx.captureRecordedRemovals || ctx.recordedSchema === undefined) {
+    await executeDeleteStatements(ctx.backend, deleteStatements);
+    return;
+  }
+
+  const recordedSchema = ctx.recordedSchema;
+  try {
+    await ctx.backend.transaction(async (target) => {
+      await closeRecordedHardDeletedKind(
+        target,
+        recordedSchema,
+        ctx.graphId,
+        { entity: row.entity, kind: row.kindName },
+        false,
+      );
+      await executeDeleteStatements(target, deleteStatements);
+    });
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+    await executeDeleteStatements(ctx.backend, deleteStatements);
+  }
+}
+
+function buildRemovedKindLiveDeleteStatements(
+  ctx: MaterializeOneContext,
+  row: KindRemovalRow,
+): readonly string[] {
+  const graphLit = literal(ctx.graphId);
+  const kindLit = literal(row.kindName);
+  if (row.entity === "node") {
+    return [
+      `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
+      `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+    ];
+  }
+  return [
+    `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+  ];
+}
+
+async function executeDeleteStatements(
+  target: GraphBackend | TransactionBackend,
+  statements: readonly string[],
+): Promise<void> {
+  if (target.executeStatement !== undefined) {
+    await Promise.all(
+      statements.map((statement) =>
+        target.executeStatement!(asCompiledStatementSql(sql.raw(statement))),
+      ),
+    );
+    return;
+  }
+
+  if (target.executeDdl === undefined) {
+    throw new ConfigurationError(
+      "store.materializeRemovals() requires a backend that can execute cleanup statements.",
+      { code: "MATERIALIZE_REMOVALS_BACKEND_UNSUPPORTED" },
+    );
+  }
+  await Promise.all(
+    statements.map((statement) => target.executeDdl!(statement)),
+  );
 }
 
 /**
@@ -555,7 +630,7 @@ async function reclaimRemovedVectorFieldTables(
   // Memoize per (backend, graphId:version); an evolve bumps the version and
   // invalidates. Only fully-successful passes are cached (a failed drop must be
   // retried), and the cache is in-process so a fresh backend re-walks once.
-  const cacheKey = `${graphId} ${activeRow.version}`;
+  const cacheKey = `${graphId}\u0000${activeRow.version}`;
   let perBackend = reclaimCache.get(backend);
   const cached = perBackend?.get(cacheKey);
   if (cached !== undefined) return cached;
