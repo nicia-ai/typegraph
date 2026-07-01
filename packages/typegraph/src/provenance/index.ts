@@ -2,20 +2,18 @@ import type { EdgeRow, NodeRow } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
-import { asCompiledRowsSql } from "../query/sql-intent";
 import type {
   DynamicNodeCollection,
   HistorySafeTransactionBackend,
   HistoryStore,
   HistoryTransactionContext,
 } from "../store";
-import { deleteNodeEmbeddings, syncEmbeddings } from "../store/embedding-sync";
-import { deleteNodeFulltext, syncFulltext } from "../store/fulltext-sync";
-import { recordedClockAdvisoryLockSql } from "../store/recorded-capture";
 import {
-  deleteUniquenessEntries,
-  insertUniquenessEntries,
-} from "../store/uniqueness";
+  applyNodeResurrect,
+  applyNodeSoftDelete,
+} from "../store/operations/node-write-pipeline";
+import { lockRecordedGraphWrite } from "../store/recorded-capture";
+import { isPlainObject } from "../utils/object";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";
 const KEY_SEPARATOR = "\u0000";
@@ -181,8 +179,8 @@ function keyToRef<
   G extends GraphDef = GraphDef,
   K extends NodeKind<G> = NodeKind<G>,
 >(key: string): ProvenanceNodeRef<G, K> {
-  const [kind, id] = key.split(KEY_SEPARATOR);
-  if (kind === undefined || id === undefined) {
+  const separatorIndex = key.indexOf(KEY_SEPARATOR);
+  if (separatorIndex === -1) {
     throw new ConfigurationError(
       "Invalid provenance identity key.",
       { key },
@@ -192,6 +190,8 @@ function keyToRef<
       },
     );
   }
+  const kind = key.slice(0, separatorIndex);
+  const id = key.slice(separatorIndex + KEY_SEPARATOR.length);
   return { kind, id } as ProvenanceNodeRef<G, K>;
 }
 
@@ -206,13 +206,13 @@ function sortedReferences<
 
 function parseNodeProps(row: NodeRow): Record<string, unknown> {
   const parsed = JSON.parse(row.props) as unknown;
-  if (typeof parsed !== "object" || parsed === null) {
+  if (!isPlainObject(parsed)) {
     throw new ConfigurationError(
       `Node ${row.kind}/${row.id} props are not an object.`,
       { kind: row.kind, id: row.id },
     );
   }
-  return parsed as Record<string, unknown>;
+  return parsed;
 }
 
 function sourceRetractedState(
@@ -440,22 +440,18 @@ async function readRoles(
   graphId: string,
   config: NormalizedConfig,
 ): Promise<ProvenanceRows> {
-  const justificationRows = await findNodeRows(
-    backend,
-    graphId,
-    config.justificationKind,
-    false,
-  );
-  const factRowsByKind = await Promise.all(
-    config.factKinds.map((kind) => findNodeRows(backend, graphId, kind, true)),
-  );
+  const [justificationRows, factRowsByKind, premiseEdges, deriveEdges] =
+    await Promise.all([
+      findNodeRows(backend, graphId, config.justificationKind, false),
+      Promise.all(
+        config.factKinds.map((kind) =>
+          findNodeRows(backend, graphId, kind, true),
+        ),
+      ),
+      findEdgeRows(backend, graphId, config.premiseOfKind),
+      findEdgeRows(backend, graphId, config.derivesKind),
+    ]);
   const factRows = factRowsByKind.flat();
-  const premiseEdges = await findEdgeRows(
-    backend,
-    graphId,
-    config.premiseOfKind,
-  );
-  const deriveEdges = await findEdgeRows(backend, graphId, config.derivesKind);
 
   return {
     justifications: rowsByKey(justificationRows),
@@ -481,6 +477,7 @@ function appendGroupedValue(
     groups.set(key, [value]);
     return;
   }
+  if (group.includes(value)) return;
   group.push(value);
 }
 
@@ -519,11 +516,24 @@ function buildSupportEdges(
   };
 }
 
-async function computeSupport(
+/**
+ * The whole-graph read a support computation needs: the role rows, the support
+ * edges derived from them, and the (non-retracted-visible) source rows. Loaded
+ * once per transition so `before` and `after` snapshots share one read instead
+ * of scanning the entire provenance graph twice — the graph structure is
+ * identical across a transition, only source availability changes.
+ */
+type SupportGraph = Readonly<{
+  roles: ProvenanceRows;
+  supportEdges: SupportEdges;
+  sourceRows: readonly NodeRow[];
+}>;
+
+async function loadSupportGraph(
   backend: HistorySafeTransactionBackend,
   graphId: string,
   config: NormalizedConfig,
-): Promise<SupportSnapshot> {
+): Promise<SupportGraph> {
   const roles = await readRoles(backend, graphId, config);
   const supportEdges = buildSupportEdges(config, roles);
   const sourceRowsByKind = await Promise.all(
@@ -531,14 +541,33 @@ async function computeSupport(
       findNodeRows(backend, graphId, kind, false),
     ),
   );
-  const sourceRows = sourceRowsByKind.flat();
+  return { roles, supportEdges, sourceRows: sourceRowsByKind.flat() };
+}
+
+function availableSourceKeys(
+  sourceRows: readonly NodeRow[],
+  retractedField: string,
+): Set<string> {
   const available = new Set<string>();
   for (const row of sourceRows) {
-    if (sourceRetractedState(row, config.retractedField) === "available") {
+    if (sourceRetractedState(row, retractedField) === "available") {
       available.add(rowKey(row));
     }
   }
+  return available;
+}
 
+/**
+ * The pure TMS fixpoint: given the loaded graph and the set of available
+ * (non-retracted) source keys, derive which facts are supported and believed.
+ * No I/O — the same {@link SupportGraph} feeds both the pre- and post-transition
+ * snapshots with different availability sets.
+ */
+function computeSupportSnapshot(
+  graph: Pick<SupportGraph, "roles" | "supportEdges">,
+  available: ReadonlySet<string>,
+): SupportSnapshot {
+  const { roles, supportEdges } = graph;
   const supported = new Set<string>();
   const inSet = new Set<string>(available);
   const firingJustifications = new Set<string>();
@@ -551,7 +580,6 @@ async function computeSupport(
       if (firingJustifications.has(justificationKey)) continue;
       const premises =
         supportEdges.premisesByJustification.get(justificationKey) ?? [];
-      if (premises.length === 0) continue;
       if (!allPremisesSupported(premises, inSet)) continue;
 
       firingJustifications.add(justificationKey);
@@ -587,6 +615,18 @@ async function computeSupport(
       return computeAffectedFactKeys(target, roles, supportEdges);
     },
   };
+}
+
+async function computeSupport(
+  backend: HistorySafeTransactionBackend,
+  graphId: string,
+  config: NormalizedConfig,
+): Promise<SupportSnapshot> {
+  const graph = await loadSupportGraph(backend, graphId, config);
+  return computeSupportSnapshot(
+    graph,
+    availableSourceKeys(graph.sourceRows, config.retractedField),
+  );
 }
 
 function isPremiseKind(config: NormalizedConfig, kind: string): boolean {
@@ -680,6 +720,7 @@ async function synchronizeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
   graphId: string,
+  config: NormalizedConfig,
   snapshot: SupportSnapshot,
 ): Promise<void> {
   for (const [key, row] of snapshot.facts) {
@@ -689,7 +730,7 @@ async function synchronizeFactCurrency<G extends GraphDef>(
       continue;
     }
     if (row.deleted_at !== undefined) continue;
-    await closeFactCurrency(backend, store, graphId, row);
+    await closeFactCurrency(backend, store, graphId, config, row);
   }
 }
 
@@ -709,25 +750,31 @@ async function closeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
   graphId: string,
+  config: NormalizedConfig,
   row: NodeRow,
 ): Promise<void> {
-  const registration = getFactRegistration(store, row);
-  const props = parseNodeProps(row);
-  await backend.deleteNode({ graphId, kind: row.kind, id: row.id });
-  await deleteUniquenessEntries(
-    { graphId, registry: store.registry, backend },
-    row.kind,
-    props,
-    registration.unique ?? [],
-  );
-  await deleteNodeEmbeddings(
-    { graphId, nodeKind: row.kind, nodeId: row.id, backend },
-    registration.type.schema,
-  );
-  await deleteNodeFulltext(
-    { graphId, nodeKind: row.kind, nodeId: row.id, backend },
-    registration.type.schema,
-  );
+  await store.runNodeOperationHooks("delete", row.kind, row.id, async () => {
+    const registration = getFactRegistration(store, row);
+    // The canonical soft-delete cascade (delete-behavior enforcement, tombstone,
+    // uniqueness/embedding/fulltext cleanup), told to treat this fact's own
+    // provenance edges as non-structural so they survive for a later reopen.
+    await applyNodeSoftDelete(
+      { graphId, registry: store.registry },
+      {
+        kind: row.kind,
+        id: row.id,
+        schema: registration.type.schema,
+        existingProps: parseNodeProps(row),
+        uniqueConstraints: registration.unique ?? [],
+        onDelete: registration.onDelete,
+      },
+      backend,
+      {
+        isNonStructuralEdge: (edge) =>
+          isFactCurrencyProvenanceEdge(config, row, edge),
+      },
+    );
+  });
 }
 
 async function reopenFactCurrency<G extends GraphDef>(
@@ -736,41 +783,44 @@ async function reopenFactCurrency<G extends GraphDef>(
   graphId: string,
   row: NodeRow,
 ): Promise<void> {
-  const registration = getFactRegistration(store, row);
-  const props = parseNodeProps(row);
-  await insertUniquenessEntries(
-    { graphId, registry: store.registry, backend },
-    row.kind,
-    row.id,
-    props,
-    registration.unique ?? [],
-  );
-  await backend.updateNode({
-    graphId,
-    kind: row.kind,
-    id: row.id,
-    props,
-    clearDeleted: true,
+  await store.runNodeOperationHooks("update", row.kind, row.id, async () => {
+    const registration = getFactRegistration(store, row);
+    // The delete removed this fact's uniqueness entries, so reopen re-checks and
+    // re-inserts them (rather than the diff-based update path) before clearing
+    // the tombstone and re-syncing embeddings/fulltext.
+    await applyNodeResurrect(
+      { graphId, registry: store.registry },
+      {
+        kind: row.kind,
+        id: row.id,
+        schema: registration.type.schema,
+        props: parseNodeProps(row),
+        uniqueConstraints: registration.unique ?? [],
+      },
+      backend,
+    );
   });
-  await syncEmbeddings(
-    { graphId, nodeKind: row.kind, nodeId: row.id, backend },
-    registration.type.schema,
-    props,
-  );
-  await syncFulltext(
-    { graphId, nodeKind: row.kind, nodeId: row.id, backend },
-    registration.type.schema,
-    props,
-  );
 }
 
-async function acquireGraphWriteGate(
-  backend: HistorySafeTransactionBackend,
-  graphId: string,
-): Promise<void> {
-  if (backend.dialect !== "postgres") return;
-  await backend.execute(
-    asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
+function isFactCurrencyProvenanceEdge(
+  config: NormalizedConfig,
+  row: NodeRow,
+  edge: EdgeRow,
+): boolean {
+  if (
+    edge.kind === config.derivesKind &&
+    edge.from_kind === config.justificationKind &&
+    edge.to_kind === row.kind &&
+    edge.to_id === row.id
+  ) {
+    return true;
+  }
+
+  return (
+    edge.kind === config.premiseOfKind &&
+    edge.from_kind === row.kind &&
+    edge.from_id === row.id &&
+    edge.to_kind === config.justificationKind
   );
 }
 
@@ -820,31 +870,58 @@ async function runTransition<
   }
 
   return store.transaction(async (tx) => {
-    await acquireGraphWriteGate(tx.backend, store.graphId);
-    const sourceRows: SourceRow<G>[] = [];
-    for (const source of uniqueSources) {
-      const sourceRow = await tx.backend.getNode(
-        store.graphId,
-        source.kind,
-        source.id,
-      );
+    await lockRecordedGraphWrite(tx.backend, store.graphId);
+    const rows = await Promise.all(
+      uniqueSources.map((source) =>
+        tx.backend.getNode(store.graphId, source.kind, source.id),
+      ),
+    );
+    const sourceRows = uniqueSources.map((source, index): SourceRow<G> => {
+      const sourceRow = rows[index];
       if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
         throw new NodeNotFoundError(source.kind, source.id);
       }
-      sourceRows.push({ source, row: sourceRow });
-    }
+      return { source, row: sourceRow };
+    });
 
-    const before = await computeSupport(tx.backend, store.graphId, config);
+    // Load the provenance graph once. Its structure (justifications, facts,
+    // premise/derive edges) is identical before and after the transition — only
+    // source availability changes — so the pre- and post-flip snapshots share
+    // this read instead of scanning the whole graph twice per retraction.
+    const supportGraph = await loadSupportGraph(
+      tx.backend,
+      store.graphId,
+      config,
+    );
+    const availableBefore = availableSourceKeys(
+      supportGraph.sourceRows,
+      config.retractedField,
+    );
+    const before = computeSupportSnapshot(supportGraph, availableBefore);
+
     const nextState: SourceRetractedState =
       retracted ? "retracted" : "available";
+    const availableAfter = new Set(availableBefore);
     for (const { source, row } of sourceRows) {
       const currentState = sourceRetractedState(row, config.retractedField);
-      if (currentState !== nextState) {
-        await setSourceRetractionState(tx, config, source, retracted);
+      if (currentState === nextState) continue;
+      await setSourceRetractionState(tx, config, source, retracted);
+      // Mirror the flip in the in-memory availability so `after` matches the
+      // source rows now persisted, without re-reading the whole graph.
+      if (nextState === "available") {
+        availableAfter.add(refKey(source));
+      } else {
+        availableAfter.delete(refKey(source));
       }
     }
-    const after = await computeSupport(tx.backend, store.graphId, config);
-    await synchronizeFactCurrency(tx.backend, store, store.graphId, after);
+    const after = computeSupportSnapshot(supportGraph, availableAfter);
+    await synchronizeFactCurrency(
+      tx.backend,
+      store,
+      store.graphId,
+      config,
+      after,
+    );
     return buildReport<G, FactKind, JustificationKind>(
       before,
       after,
@@ -929,7 +1006,7 @@ export function createRetractionCapability<
 
     async holding() {
       return store.transaction(async (tx) => {
-        await acquireGraphWriteGate(tx.backend, store.graphId);
+        await lockRecordedGraphWrite(tx.backend, store.graphId);
         const snapshot = await computeSupport(
           tx.backend,
           store.graphId,

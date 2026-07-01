@@ -10,7 +10,6 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   type NodeRow as BackendNodeRow,
-  runOptionallyInTransaction,
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -32,7 +31,6 @@ import {
   NodeConstraintNotFoundError,
   NodeIndexNotFoundError,
   NodeNotFoundError,
-  RestrictedDeleteError,
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
@@ -59,16 +57,6 @@ import {
   type ConstraintContext,
 } from "../constraints";
 import {
-  deleteNodeEmbeddings,
-  type EmbeddingSyncContext,
-  syncEmbeddings,
-} from "../embedding-sync";
-import {
-  deleteNodeFulltext,
-  type FulltextSyncContext,
-  syncFulltext,
-} from "../fulltext-sync";
-import {
   nodeInsertDispatch,
   runInsertBatch,
   runInsertBatchReturning,
@@ -87,11 +75,15 @@ import {
 } from "../types";
 import {
   checkUniquenessConstraints,
-  deleteUniquenessEntries,
-  insertUniquenessEntries,
   type UniquenessContext,
-  updateUniquenessEntries,
 } from "../uniqueness";
+import {
+  applyNodeHardDelete,
+  applyNodeInsertSideEffects,
+  applyNodeSoftDelete,
+  applyNodeUpdate,
+} from "./node-write-pipeline";
+import { runInWriteTransaction } from "./write-transaction";
 
 // ============================================================
 // Types
@@ -126,8 +118,6 @@ type NodeCreatePrepared = Readonly<{
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
 type CachedUniqueRow = Awaited<ReturnType<GraphBackend["checkUnique"]>>;
 
-type DeleteMode = "soft" | "hard";
-
 // ============================================================
 // Helper Functions
 // ============================================================
@@ -142,16 +132,6 @@ const CACHE_KEY_SEPARATOR = "\u0000";
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
   return `${graphId}${CACHE_KEY_SEPARATOR}${kind}${CACHE_KEY_SEPARATOR}${id}`;
-}
-
-function runInTopLevelTransactionForHistory<G extends GraphDef, T>(
-  ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
-): Promise<T> {
-  return ctx.historyEnabled ?
-      runOptionallyInTransaction(backend, fn)
-    : fn(backend);
 }
 
 function buildUniqueCacheKey(
@@ -246,24 +226,6 @@ function createUniquenessContext(
   backend: GraphBackend | TransactionBackend,
 ): UniquenessContext {
   return { graphId, registry, backend };
-}
-
-function createEmbeddingSyncContext(
-  graphId: string,
-  nodeKind: string,
-  nodeId: string,
-  backend: GraphBackend | TransactionBackend,
-): EmbeddingSyncContext {
-  return { graphId, nodeKind, nodeId, backend };
-}
-
-function createFulltextSyncContext(
-  graphId: string,
-  nodeKind: string,
-  nodeId: string,
-  backend: GraphBackend | TransactionBackend,
-): FulltextSyncContext {
-  return { graphId, nodeKind, nodeId, backend };
 }
 
 // ============================================================
@@ -470,29 +432,16 @@ async function finalizeNodeCreate<G extends GraphDef>(
   prepared: NodeCreatePrepared,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
-  await insertUniquenessEntries(
-    createUniquenessContext(ctx.graphId, ctx.registry, backend),
-    prepared.kind,
-    prepared.id,
-    prepared.validatedProps,
-    prepared.uniqueConstraints,
-  );
-
-  await syncEmbeddings(
-    createEmbeddingSyncContext(
-      ctx.graphId,
-      prepared.kind,
-      prepared.id,
-      backend,
-    ),
-    prepared.nodeKind.schema,
-    prepared.validatedProps,
-  );
-
-  await syncFulltext(
-    createFulltextSyncContext(ctx.graphId, prepared.kind, prepared.id, backend),
-    prepared.nodeKind.schema,
-    prepared.validatedProps,
+  await applyNodeInsertSideEffects(
+    { graphId: ctx.graphId, registry: ctx.registry },
+    {
+      kind: prepared.kind,
+      id: prepared.id,
+      schema: prepared.nodeKind.schema,
+      props: prepared.validatedProps,
+      uniqueConstraints: prepared.uniqueConstraints,
+    },
+    backend,
   );
 }
 
@@ -530,107 +479,22 @@ async function performNodeUpdate<G extends GraphDef>(
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
-  await updateUniquenessEntries(
-    createUniquenessContext(ctx.graphId, ctx.registry, backend),
-    kind,
-    id,
-    existingProps,
-    validatedProps,
-    registration.unique ?? [],
-  );
-
-  const updateParams: {
-    graphId: string;
-    kind: string;
-    id: string;
-    props: Record<string, unknown>;
-    validTo?: string;
-    incrementVersion?: boolean;
-    clearDeleted?: boolean;
-  } = {
-    graphId: ctx.graphId,
-    kind,
-    id,
-    props: validatedProps,
-    incrementVersion: true,
-  };
-  if (validTo !== undefined) updateParams.validTo = validTo;
-  if (options?.clearDeleted) updateParams.clearDeleted = true;
-
-  const row = await backend.updateNode(updateParams);
-
-  await syncEmbeddings(
-    createEmbeddingSyncContext(ctx.graphId, kind, id, backend),
-    nodeKind.schema,
-    validatedProps,
-  );
-
-  await syncFulltext(
-    createFulltextSyncContext(ctx.graphId, kind, id, backend),
-    nodeKind.schema,
-    validatedProps,
+  const row = await applyNodeUpdate(
+    { graphId: ctx.graphId, registry: ctx.registry },
+    {
+      kind,
+      id,
+      schema: nodeKind.schema,
+      existingProps,
+      validatedProps,
+      uniqueConstraints: registration.unique ?? [],
+      ...(validTo !== undefined && { validTo }),
+      ...(options?.clearDeleted && { clearDeleted: true }),
+    },
+    backend,
   );
 
   return rowToNode(row);
-}
-
-// ============================================================
-// Shared Delete Pipeline
-//
-// Soft and hard delete share the same delete-behavior logic
-// (restrict / cascade / disconnect). The only differences are:
-// - whether soft-deleted nodes are skippable (soft) or deletable (hard)
-// - which backend method removes edges and the node itself
-// ============================================================
-
-async function enforceDeleteBehavior<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  kind: string,
-  id: string,
-  mode: DeleteMode,
-  backend: GraphBackend | TransactionBackend,
-  registration: ReturnType<typeof getNodeRegistration>,
-): Promise<void> {
-  const deleteBehavior = registration.onDelete ?? "restrict";
-  const connectedEdges = await backend.findEdgesConnectedTo({
-    graphId: ctx.graphId,
-    nodeKind: kind,
-    nodeId: id,
-  });
-
-  if (connectedEdges.length === 0) return;
-
-  switch (deleteBehavior) {
-    case "restrict": {
-      const edgeKinds = [...new Set(connectedEdges.map((edge) => edge.kind))];
-      throw new RestrictedDeleteError({
-        nodeKind: kind,
-        nodeId: id,
-        edgeCount: connectedEdges.length,
-        edgeKinds,
-      });
-    }
-
-    case "cascade":
-    case "disconnect": {
-      // Both behaviors remove connected edges. "cascade" signals intent to
-      // remove dependent data; "disconnect" signals intent to sever the
-      // relationship. The effect is identical because edges cannot exist
-      // without both endpoints.
-      for (const edge of connectedEdges) {
-        await (mode === "hard" ?
-          backend.hardDeleteEdge({
-            graphId: ctx.graphId,
-            id: edge.id,
-          })
-        : backend.deleteEdge({
-            graphId: ctx.graphId,
-            id: edge.id,
-          }));
-      }
-      break;
-    }
-  }
 }
 
 // ============================================================
@@ -778,7 +642,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const shouldReturnRow = options?.returnRow ?? true;
 
   return ctx.withOperationHooks(opContext, () =>
-    runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+    runInWriteTransaction(ctx, backend, async (target) => {
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
@@ -842,7 +706,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  await runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+  await runInWriteTransaction(ctx, backend, async (target) => {
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
@@ -873,7 +737,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
-  return runInTopLevelTransactionForHistory(ctx, backend, async (target) => {
+  return runInWriteTransaction(ctx, backend, async (target) => {
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
@@ -910,7 +774,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.id,
   );
   return ctx.withOperationHooks(opContext, () =>
-    runInTopLevelTransactionForHistory(ctx, backend, (target) =>
+    runInWriteTransaction(ctx, backend, (target) =>
       performNodeUpdate(ctx, input, target, options),
     ),
   );
@@ -926,7 +790,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return runInTopLevelTransactionForHistory(ctx, backend, (target) =>
+  return runInWriteTransaction(ctx, backend, (target) =>
     performNodeUpdate(ctx, input, target, options),
   );
 }
@@ -943,51 +807,35 @@ export async function executeNodeDelete<G extends GraphDef>(
 ): Promise<void> {
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, async () => {
-    const registration = getNodeRegistration(ctx.graph, kind);
-    const preflight = await backend.getNode(ctx.graphId, kind, id);
-    if (!preflight || preflight.deleted_at) return;
+  return ctx.withOperationHooks(opContext, () =>
+    runInWriteTransaction(ctx, backend, async (target) => {
+      const registration = getNodeRegistration(ctx.graph, kind);
+      const preflight = await target.getNode(ctx.graphId, kind, id);
+      if (!preflight || preflight.deleted_at) return;
 
-    // The cascade (connected edges, uniques, embeddings, fulltext, node) is not
-    // individually atomic, so wrap it in a transaction when the backend supports
-    // one — mirroring executeNodeHardDelete. Under recorded-time capture this
-    // also collapses the whole cascade into a single recorded commit instant
-    // instead of one instant per sub-write.
-    const softDelete = async (
-      target: GraphBackend | TransactionBackend,
-    ): Promise<void> => {
-      const existing = await target.getNode(ctx.graphId, kind, id);
-      if (!existing || existing.deleted_at) return;
-
-      const existingProps = JSON.parse(existing.props) as Record<
+      // The cascade (connected edges, uniques, embeddings, fulltext, node) is
+      // not individually atomic, so it runs in one write transaction. Under
+      // recorded-time capture this also collapses the cascade into a single
+      // recorded commit instant instead of one instant per sub-write.
+      const existingProps = JSON.parse(preflight.props) as Record<
         string,
         unknown
       >;
 
-      await enforceDeleteBehavior(ctx, kind, id, "soft", target, registration);
-
-      await target.deleteNode({ graphId: ctx.graphId, kind, id });
-
-      await deleteUniquenessEntries(
-        createUniquenessContext(ctx.graphId, ctx.registry, target),
-        kind,
-        existingProps,
-        registration.unique ?? [],
+      await applyNodeSoftDelete(
+        { graphId: ctx.graphId, registry: ctx.registry },
+        {
+          kind,
+          id,
+          schema: registration.type.schema,
+          existingProps,
+          uniqueConstraints: registration.unique ?? [],
+          onDelete: registration.onDelete,
+        },
+        target,
       );
-
-      const nodeKind = registration.type;
-      await deleteNodeEmbeddings(
-        createEmbeddingSyncContext(ctx.graphId, kind, id, target),
-        nodeKind.schema,
-      );
-      await deleteNodeFulltext(
-        createFulltextSyncContext(ctx.graphId, kind, id, target),
-        nodeKind.schema,
-      );
-    };
-
-    await runOptionallyInTransaction(backend, (target) => softDelete(target));
-  });
+    }),
+  );
 }
 
 /**
@@ -1004,32 +852,28 @@ export async function executeNodeHardDelete<G extends GraphDef>(
 ): Promise<void> {
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, async () => {
-    const registration = getNodeRegistration(ctx.graph, kind);
-    const preflight = await backend.getNode(ctx.graphId, kind, id);
-    if (!preflight) return;
+  return ctx.withOperationHooks(opContext, () =>
+    runInWriteTransaction(ctx, backend, async (target) => {
+      const registration = getNodeRegistration(ctx.graph, kind);
+      const preflight = await target.getNode(ctx.graphId, kind, id);
+      if (!preflight) return;
 
-    // The cascade (uniques, embeddings, edges, node) is not individually atomic,
-    // so wrap in a transaction when the backend supports it. Embeddings live in
-    // strategy-owned per-`(kind, field)` tables, so they are cleaned up here —
-    // through `deleteNodeEmbeddings` → `backend.deleteEmbedding` — rather than
-    // in the backend's graph-agnostic `hardDeleteNode` cascade.
-    const hardDelete = async (
-      target: GraphBackend | TransactionBackend,
-    ): Promise<void> => {
-      const existing = await target.getNode(ctx.graphId, kind, id);
-      if (!existing) return;
-
-      await enforceDeleteBehavior(ctx, kind, id, "hard", target, registration);
-      await target.hardDeleteNode({ graphId: ctx.graphId, kind, id });
-      await deleteNodeEmbeddings(
-        createEmbeddingSyncContext(ctx.graphId, kind, id, target),
-        registration.type.schema,
+      // The cascade (edges, node, embeddings) is not individually atomic, so it
+      // runs in one write transaction. Embeddings live in strategy-owned
+      // per-`(kind, field)` tables, so they are cleaned up here rather than in
+      // the backend's graph-agnostic `hardDeleteNode` cascade.
+      await applyNodeHardDelete(
+        { graphId: ctx.graphId, registry: ctx.registry },
+        {
+          kind,
+          id,
+          schema: registration.type.schema,
+          onDelete: registration.onDelete,
+        },
+        target,
       );
-    };
-
-    await runOptionallyInTransaction(backend, (target) => hardDelete(target));
-  });
+    }),
+  );
 }
 
 // ============================================================
