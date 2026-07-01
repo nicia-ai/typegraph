@@ -7,13 +7,21 @@
 import type { z } from "zod";
 
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import { validateEdgeEndpoints } from "../constraints";
 import {
   getEdgeKinds,
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
+import { UniquenessError } from "../errors";
+import { type KindRegistry } from "../registry/kind-registry";
+import {
+  applyNodeInsertSideEffects,
+  applyNodeUpdate,
+} from "../store/operations/node-write-pipeline";
 import { type Store } from "../store/store";
+import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
@@ -66,6 +74,7 @@ export async function importGraph<G extends GraphDef>(
   const graph = store.graph;
   const graphId = store.graphId;
   const backend = store.backend;
+  const registry = store.registry;
 
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
@@ -80,6 +89,7 @@ export async function importGraph<G extends GraphDef>(
       await processNodes(
         tx,
         graphId,
+        registry,
         data.nodes,
         nodeSchemas,
         options,
@@ -90,6 +100,7 @@ export async function importGraph<G extends GraphDef>(
       await processEdges(
         tx,
         graphId,
+        registry,
         data.edges,
         edgeSchemas,
         nodeSchemas,
@@ -103,6 +114,7 @@ export async function importGraph<G extends GraphDef>(
     await processNodes(
       backend,
       graphId,
+      registry,
       data.nodes,
       nodeSchemas,
       options,
@@ -113,6 +125,7 @@ export async function importGraph<G extends GraphDef>(
     await processEdges(
       backend,
       graphId,
+      registry,
       data.edges,
       edgeSchemas,
       nodeSchemas,
@@ -142,8 +155,6 @@ type NodeSchemaEntry = Readonly<{
 type EdgeSchemaEntry = Readonly<{
   registration: EdgeRegistration;
   schema: z.ZodObject<z.ZodRawShape>;
-  fromKinds: ReadonlySet<string>;
-  toKinds: ReadonlySet<string>;
 }>;
 
 function buildNodeSchemaMap(
@@ -172,8 +183,6 @@ function buildEdgeSchemaMap(
     map.set(kindName, {
       registration,
       schema: registration.type.schema,
-      fromKinds: new Set(registration.from.map((node) => node.kind)),
-      toKinds: new Set(registration.to.map((node) => node.kind)),
     });
   }
 
@@ -187,6 +196,7 @@ function buildEdgeSchemaMap(
 async function processNodes(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
+  registry: KindRegistry,
   nodes: readonly InterchangeNode[],
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ImportOptions,
@@ -203,6 +213,7 @@ async function processNodes(
       const importResult = await processNode(
         backend,
         graphId,
+        registry,
         node,
         schemas,
         options,
@@ -274,6 +285,7 @@ function validateValidityWindow(
 async function processNode(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
+  registry: KindRegistry,
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ImportOptions,
@@ -300,6 +312,10 @@ async function processNode(
     return { status: "error", error: validityError };
   }
 
+  const { registration } = schemaEntry;
+  const uniqueConstraints = registration.unique ?? [];
+  const writeContext = { graphId, registry };
+
   // Check if node already exists
   const existing = await backend.getNode(graphId, node.kind, node.id);
 
@@ -315,20 +331,58 @@ async function processNode(
         };
       }
       case "update": {
-        await backend.updateNode({
-          graphId,
-          kind: node.kind,
-          id: node.id,
-          props: propsResult.data,
-          incrementVersion: true,
-          ...(node.validTo !== undefined && { validTo: node.validTo }),
-        });
+        // Route through the shared write step so the update maintains
+        // uniqueness entries, embeddings, and fulltext — the collection API's
+        // integrity, which a raw backend.updateNode would skip. A uniqueness
+        // conflict is reported per-row (updateUniquenessEntries throws before
+        // the row is written, so no partial write escapes).
+        const existingProps = JSON.parse(existing.props) as Record<
+          string,
+          unknown
+        >;
+        try {
+          await applyNodeUpdate(
+            writeContext,
+            {
+              kind: node.kind,
+              id: node.id,
+              schema: registration.type.schema,
+              existingProps,
+              validatedProps: propsResult.data,
+              uniqueConstraints,
+              ...(node.validTo !== undefined && { validTo: node.validTo }),
+            },
+            backend,
+          );
+        } catch (error) {
+          if (error instanceof UniquenessError) {
+            return { status: "error", error: error.message };
+          }
+          throw error;
+        }
         return { status: "updated" };
       }
     }
   }
 
-  // Create new node
+  // Create new node. Pre-check uniqueness (as the collection create does) so a
+  // conflict is a per-row error rather than an orphaned node row, then apply the
+  // integrity side effects the raw backend.insertNode would otherwise bypass.
+  try {
+    await checkUniquenessConstraints(
+      { graphId, registry, backend },
+      node.kind,
+      node.id,
+      propsResult.data,
+      uniqueConstraints,
+    );
+  } catch (error) {
+    if (error instanceof UniquenessError) {
+      return { status: "error", error: error.message };
+    }
+    throw error;
+  }
+
   await backend.insertNode({
     graphId,
     kind: node.kind,
@@ -337,6 +391,17 @@ async function processNode(
     ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
     ...(node.validTo !== undefined && { validTo: node.validTo }),
   });
+  await applyNodeInsertSideEffects(
+    writeContext,
+    {
+      kind: node.kind,
+      id: node.id,
+      schema: registration.type.schema,
+      props: propsResult.data,
+      uniqueConstraints,
+    },
+    backend,
+  );
 
   return { status: "created" };
 }
@@ -348,6 +413,7 @@ async function processNode(
 async function processEdges(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
+  registry: KindRegistry,
   edges: readonly InterchangeEdge[],
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
@@ -365,6 +431,7 @@ async function processEdges(
       const importResult = await processEdge(
         backend,
         graphId,
+        registry,
         edge,
         edgeSchemas,
         nodeSchemas,
@@ -402,6 +469,7 @@ async function processEdges(
 async function processEdge(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
+  registry: KindRegistry,
   edge: InterchangeEdge,
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
@@ -414,7 +482,7 @@ async function processEdge(
     return { status: "error", error: `Unknown edge kind: ${edge.kind}` };
   }
 
-  // Validate endpoint kinds
+  // Validate endpoint kinds exist
   if (!nodeSchemas.has(edge.from.kind)) {
     return {
       status: "error",
@@ -425,18 +493,20 @@ async function processEdge(
     return { status: "error", error: `Unknown to node kind: ${edge.to.kind}` };
   }
 
-  // Validate endpoint kinds are allowed for this edge type
-  if (!schemaEntry.fromKinds.has(edge.from.kind)) {
-    return {
-      status: "error",
-      error: `Edge ${edge.kind} does not allow from kind: ${edge.from.kind}`,
-    };
-  }
-  if (!schemaEntry.toKinds.has(edge.to.kind)) {
-    return {
-      status: "error",
-      error: `Edge ${edge.kind} does not allow to kind: ${edge.to.kind}`,
-    };
+  // Validate endpoint kinds are allowed for this edge type. Uses the shared,
+  // subclass-aware check (registry.isAssignableTo) that the collection API uses,
+  // so an edge whose endpoint is a subclass of a declared kind — legal in the
+  // store and emitted verbatim by export — imports cleanly instead of being
+  // rejected by an exact-kind comparison.
+  const endpointError = validateEdgeEndpoints(
+    edge.kind,
+    edge.from.kind,
+    edge.to.kind,
+    schemaEntry.registration,
+    registry,
+  );
+  if (endpointError !== undefined) {
+    return { status: "error", error: endpointError.message };
   }
 
   // Validate references exist (in DB or in import batch)

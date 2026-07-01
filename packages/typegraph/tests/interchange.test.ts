@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import { UniquenessError } from "../src/errors";
 import {
   exportGraph,
   type GraphData,
@@ -661,5 +662,96 @@ describe("Canonical validity-window validation", () => {
     expect(
       await targetStore.nodes.Person.getById("person-1" as never),
     ).toBeUndefined();
+  });
+});
+
+// ============================================================
+// Import Integrity (uniqueness side-table maintenance)
+// ============================================================
+
+const UniquePerson = defineNode("Person", {
+  schema: z.object({
+    name: z.string(),
+    email: z.string(),
+  }),
+});
+
+const uniqueGraph = defineGraph({
+  id: "interchange_unique_test",
+  nodes: {
+    Person: {
+      type: UniquePerson,
+      unique: [
+        {
+          name: "email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+describe("Interchange import integrity", () => {
+  it("writes uniqueness entries so a later create detects the conflict", async () => {
+    const source = createStore(uniqueGraph, createTestBackend());
+    await source.nodes.Person.create({
+      name: "Alice",
+      email: "alice@example.com",
+    });
+    const exported = await exportGraph(source);
+
+    const target = createStore(uniqueGraph, createTestBackend());
+    const result = await importGraph(
+      target,
+      exported,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
+
+    // The imported node's uniqueness entry must exist, so creating another
+    // Person with the same email is rejected. Before the write-pipeline
+    // migration, import skipped the side-table write and this create would
+    // have succeeded — a silent duplicate the store believes is impossible.
+    await expect(
+      target.nodes.Person.create({
+        name: "Alice II",
+        email: "alice@example.com",
+      }),
+    ).rejects.toThrow(UniquenessError);
+  });
+
+  it("rejects a duplicate unique value within a single import", async () => {
+    const source = createStore(uniqueGraph, createTestBackend());
+    await source.nodes.Person.create({ name: "A", email: "a@example.com" });
+    await source.nodes.Person.create({ name: "B", email: "b@example.com" });
+    const exported = await exportGraph(source);
+
+    // Force both exported people to share an email — a duplicate the store's
+    // uniqueness constraint forbids. The second import row must fail its
+    // uniqueness check (against the first row's just-written entry) rather than
+    // import cleanly.
+    const duplicated: GraphData = {
+      ...exported,
+      nodes: exported.nodes.map((node) => ({
+        ...node,
+        properties: { ...node.properties, email: "same@example.com" },
+      })),
+    };
+
+    const target = createStore(uniqueGraph, createTestBackend());
+    const result = await importGraph(
+      target,
+      duplicated,
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.nodes.created).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.entityType).toBe("node");
   });
 });
