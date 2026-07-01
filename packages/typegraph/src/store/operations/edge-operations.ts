@@ -685,6 +685,11 @@ export async function executeEdgeDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  // Gate outside the transaction so an absent/tombstoned edge never opens an
+  // empty one (costly on libsql, where a transaction opens a fresh connection).
+  const gate = await backend.getEdge(ctx.graphId, id);
+  if (!gate || gate.deleted_at) return;
+
   return runInWriteTransaction(ctx, backend, async (target) => {
     // Get edge first to know the kind for the hook context
     const existing = await target.getEdge(ctx.graphId, id);
@@ -719,6 +724,11 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  // Gate outside the transaction so an absent edge never opens an empty one
+  // (see executeEdgeDelete).
+  const gate = await backend.getEdge(ctx.graphId, id);
+  if (!gate) return;
+
   return runInWriteTransaction(ctx, backend, async (target) => {
     // Get edge first to know the kind for the hook context
     const existing = await target.getEdge(ctx.graphId, id);

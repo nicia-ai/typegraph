@@ -807,8 +807,16 @@ export async function executeNodeDelete<G extends GraphDef>(
 ): Promise<void> {
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, async (target) => {
+  return ctx.withOperationHooks(opContext, async () => {
+    // Gate outside the transaction: an absent or already-tombstoned node is a
+    // no-op, so skip opening a write transaction for it (empty transactions are
+    // costly on libsql, where a transaction opens a fresh connection). The
+    // cascade re-reads inside the transaction, so a node concurrently deleted
+    // between this gate and the write lock is still handled correctly.
+    const gate = await backend.getNode(ctx.graphId, kind, id);
+    if (!gate || gate.deleted_at) return;
+
+    await runInWriteTransaction(ctx, backend, async (target) => {
       const registration = getNodeRegistration(ctx.graph, kind);
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (!preflight || preflight.deleted_at) return;
@@ -834,8 +842,8 @@ export async function executeNodeDelete<G extends GraphDef>(
         },
         target,
       );
-    }),
-  );
+    });
+  });
 }
 
 /**
@@ -852,8 +860,13 @@ export async function executeNodeHardDelete<G extends GraphDef>(
 ): Promise<void> {
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, async (target) => {
+  return ctx.withOperationHooks(opContext, async () => {
+    // Gate outside the transaction so an absent node never opens an empty one
+    // (see executeNodeDelete). The cascade re-reads inside the transaction.
+    const gate = await backend.getNode(ctx.graphId, kind, id);
+    if (!gate) return;
+
+    await runInWriteTransaction(ctx, backend, async (target) => {
       const registration = getNodeRegistration(ctx.graph, kind);
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (!preflight) return;
@@ -872,8 +885,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         },
         target,
       );
-    }),
-  );
+    });
+  });
 }
 
 // ============================================================

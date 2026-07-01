@@ -3,22 +3,18 @@
  *
  * A node/edge mutation is a cascade of steps — the core row write plus its
  * integrity side effects (uniqueness, embeddings, fulltext) or its delete
- * behavior (restrict / cascade / disconnect). Under recorded-time capture the
- * cascade runs inside one top-level transaction so it commits atomically and
- * collapses into a single recorded commit instant, and the per-graph write lock
- * is taken inside that transaction so capture serializes.
+ * behavior (restrict / cascade / disconnect). Those steps are individually
+ * atomic but not collectively atomic, so the cascade runs inside one top-level
+ * transaction whether or not recorded-time capture is enabled: a mid-cascade
+ * failure then rolls back the whole operation instead of leaving a half-applied
+ * write (e.g. an inserted node whose uniqueness/embedding/fulltext rows were
+ * never written, or a uniqueness conflict that leaves an orphaned node row).
+ * Under history capture the per-graph write lock is additionally taken inside
+ * that transaction so recorded capture serializes.
  *
  * Both {@link NodeOperationContext} and {@link EdgeOperationContext} route their
- * mutations through this one helper, replacing the byte-identical
- * per-file copies that previously drifted independently.
- *
- * Note: without history capture the cascade is *not* wrapped here — the steps
- * run directly against the backend, matching the pre-existing behavior. Making
- * that boundary unconditional (so a mid-cascade failure can never orphan a node
- * on a plain store) is a deliberate follow-up: on the async libsql driver the
- * SQLite backend's serialized-write queue is absent, so opening a transaction
- * per mutation collides with `SQLITE_BUSY`. Closing the atomicity gap therefore
- * has to land together with that backend serialization fix, not here.
+ * mutations through this one helper, replacing the byte-identical per-file
+ * copies that previously drifted independently.
  */
 import {
   type GraphBackend,
@@ -38,24 +34,27 @@ export type WriteTransactionContext = Readonly<{
 }>;
 
 /**
- * Runs a graph-entity mutation cascade under the store's transaction boundary.
+ * Runs a graph-entity mutation cascade inside a single top-level transaction.
  *
- * With recorded-time capture enabled the cascade runs inside one transaction
- * (opened by {@link runOptionallyInTransaction} when the backend is
- * transactional; a nested {@link TransactionBackend} omits `.transaction`, so it
- * runs directly rather than nesting), and the per-graph write lock is taken
- * before any row work — matching the acquire order the recorded clock lock
- * depends on to avoid a circular wait. Without capture the cascade runs
- * directly against the backend.
+ * On a transactional backend the cascade shares one transaction so it commits
+ * or rolls back atomically. A nested {@link TransactionBackend} (already inside
+ * `store.transaction(...)`) omits `.transaction`, so
+ * {@link runOptionallyInTransaction} runs `fn` directly against it rather than
+ * opening a nested transaction. Non-transactional backends (Cloudflare D1,
+ * `drizzle-orm/neon-http`) also run `fn` directly — they cannot offer
+ * atomicity, which is documented on the store's write surface.
+ *
+ * Under history capture the per-graph write lock is taken inside the
+ * transaction before any row work, matching the acquire order the recorded
+ * clock lock depends on to avoid a circular wait.
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
   backend: GraphBackend | TransactionBackend,
   fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
 ): Promise<T> {
-  if (!ctx.historyEnabled) return fn(backend);
   return runOptionallyInTransaction(backend, async (target) => {
-    await lockRecordedGraphWrite(target, ctx.graphId);
+    if (ctx.historyEnabled) await lockRecordedGraphWrite(target, ctx.graphId);
     return fn(target);
   });
 }
