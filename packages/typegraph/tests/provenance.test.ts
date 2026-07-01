@@ -11,6 +11,7 @@ import {
   embedding,
   type HistoryStore,
   recordedRelation,
+  RestrictedDeleteError,
   searchable,
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
@@ -40,6 +41,10 @@ const EmbeddedFact = defineNode("EmbeddedFact", {
   schema: z.object({ vector: embedding(3) }),
 });
 
+const Note = defineNode("Note", {
+  schema: z.object({ label: z.string() }),
+});
+
 const ScannerSource = defineNode("ScannerSource", {
   schema: z.object({
     label: z.string(),
@@ -60,6 +65,7 @@ const Justification = defineNode("Justification", {
 
 const premiseOf = defineEdge("premiseOf");
 const derives = defineEdge("derives");
+const attachedTo = defineEdge("attachedTo");
 
 const graph = defineGraph({
   id: "provenance_contract",
@@ -213,6 +219,68 @@ const embeddedFactConfig = {
   source: { kind: "Source" },
   justification: { kind: "Justification" },
   fact: { kinds: ["EmbeddedFact"] },
+  premiseOf: { kind: "premiseOf" },
+  derives: { kind: "derives" },
+} as const;
+
+const restrictedAttachedFactGraph = defineGraph({
+  id: "provenance_restricted_attached_fact_contract",
+  nodes: {
+    Source: { type: Source },
+    Fact: { type: Fact },
+    Justification: { type: Justification },
+    Note: { type: Note },
+  },
+  edges: {
+    premiseOf: {
+      type: premiseOf,
+      from: [Source, Fact],
+      to: [Justification],
+    },
+    derives: {
+      type: derives,
+      from: [Justification],
+      to: [Fact],
+    },
+    attachedTo: {
+      type: attachedTo,
+      from: [Fact],
+      to: [Note],
+    },
+  },
+});
+
+const disconnectAttachedFactGraph = defineGraph({
+  id: "provenance_disconnect_attached_fact_contract",
+  nodes: {
+    Source: { type: Source },
+    Fact: { type: Fact, onDelete: "disconnect" },
+    Justification: { type: Justification },
+    Note: { type: Note },
+  },
+  edges: {
+    premiseOf: {
+      type: premiseOf,
+      from: [Source, Fact],
+      to: [Justification],
+    },
+    derives: {
+      type: derives,
+      from: [Justification],
+      to: [Fact],
+    },
+    attachedTo: {
+      type: attachedTo,
+      from: [Fact],
+      to: [Note],
+    },
+  },
+});
+
+const attachedFactConfig = {
+  source: { kind: "Source" },
+  justification: { kind: "Justification" },
+  fact: { kinds: ["Fact"] },
   premiseOf: { kind: "premiseOf" },
   derives: { kind: "derives" },
 } as const;
@@ -430,6 +498,287 @@ describe("provenance retraction contract", () => {
 
     expect(vendorReport.died).toEqual([{ kind: "Fact", id: "fact-a" }]);
     await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
+  });
+
+  it("correctly loses support when its two independent sources are retracted concurrently", async () => {
+    // #187 regression: concurrent transitions on a graph must be fully
+    // serialized so a fact supported by two disjoint justification chains
+    // never observes a torn cross-table read (one chain's premise/derive
+    // rows from before the other's commit, source rows from after it).
+    // Without serialization, a concurrent pair like this could each
+    // conclude the OTHER source was still available and leave the fact
+    // incorrectly believed.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(multiSourceGraph, backend, {
+      history: true,
+    });
+    const { scannerSource, vendorSource, fact } =
+      await seedMultiSourceSupport(store);
+    const provenance = createRetractionCapability(store, multiSourceConfig);
+
+    const [scannerReport, vendorReport] = await Promise.all([
+      provenance.retract(scannerSource),
+      provenance.retract(vendorSource),
+    ]);
+
+    const died = [...scannerReport.died, ...vendorReport.died];
+    expect(died).toEqual([{ kind: "Fact", id: "fact-a" }]);
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
+  });
+
+  it("supports no-premise justifications as axioms", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const fact = await store.nodes.Fact.create(
+      { label: "axiom-fact" },
+      { id: "axiom-fact" },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "axiom-justification" },
+      { id: "axiom-justification" },
+    );
+    await store.edges.derives.create(
+      justification,
+      fact,
+      {},
+      { id: "axiom-derives" },
+    );
+    const provenance = createRetractionCapability(store, config);
+
+    await expect(provenance.holding()).resolves.toEqual([
+      { kind: "Fact", id: "axiom-fact" },
+    ]);
+  });
+
+  it("preserves node IDs containing NUL bytes in reports", async () => {
+    const separator = "\u0000";
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const source = await store.nodes.Source.create(
+      { label: "source-a", retracted: false },
+      { id: `source${separator}a` },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "fact-a" },
+      { id: `fact${separator}a` },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: `justification${separator}a` },
+    );
+    await store.edges.premiseOf.create(
+      source,
+      justification,
+      {},
+      { id: "premise-with-nul" },
+    );
+    await store.edges.derives.create(
+      justification,
+      fact,
+      {},
+      { id: "derives-with-nul" },
+    );
+    const provenance = createRetractionCapability(store, config);
+
+    const report = await provenance.retract(source);
+
+    expect(report.died).toEqual([{ kind: "Fact", id: `fact${separator}a` }]);
+  });
+
+  it("deduplicates repeated derives edges in survivedVia reports", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const sourceA = await store.nodes.Source.create(
+      { label: "source-a", retracted: false },
+      { id: "source-a" },
+    );
+    const sourceB = await store.nodes.Source.create(
+      { label: "source-b", retracted: false },
+      { id: "source-b" },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "fact-a" },
+      { id: "fact-a" },
+    );
+    const justificationA = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: "justification-a" },
+    );
+    const justificationB = await store.nodes.Justification.create(
+      { label: "justification-b" },
+      { id: "justification-b" },
+    );
+    await store.edges.premiseOf.create(
+      sourceA,
+      justificationA,
+      {},
+      { id: "premise-a" },
+    );
+    await store.edges.premiseOf.create(
+      sourceB,
+      justificationB,
+      {},
+      { id: "premise-b" },
+    );
+    await store.edges.derives.create(
+      justificationA,
+      fact,
+      {},
+      { id: "derives-a" },
+    );
+    await store.edges.derives.create(
+      justificationB,
+      fact,
+      {},
+      { id: "derives-b-1" },
+    );
+    await store.edges.derives.create(
+      justificationB,
+      fact,
+      {},
+      { id: "derives-b-2" },
+    );
+    const provenance = createRetractionCapability(store, config);
+
+    const report = await provenance.retract(sourceA);
+
+    expect(report.survivedVia).toEqual([
+      {
+        fact: { kind: "Fact", id: "fact-a" },
+        via: [{ kind: "Justification", id: "justification-b" }],
+      },
+    ]);
+  });
+
+  it("runs fact currency hooks and increments fact version on reopen", async () => {
+    const operations: string[] = [];
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+      hooks: {
+        onOperationStart: (ctx) => {
+          operations.push(
+            `${ctx.operation}:${ctx.entity}:${ctx.kind}:${ctx.id}`,
+          );
+        },
+      },
+    });
+    const { source, fact } = await seedLinearSupport(store);
+    const provenance = createRetractionCapability(store, config);
+    operations.length = 0;
+
+    await provenance.retract(source);
+
+    expect(operations).toContain("update:node:Source:source-a");
+    expect(operations).toContain("delete:node:Fact:fact-a");
+    operations.length = 0;
+
+    await provenance.unRetract(source);
+
+    expect(operations).toContain("update:node:Source:source-a");
+    expect(operations).toContain("update:node:Fact:fact-a");
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
+      id: "fact-a",
+      meta: expect.objectContaining({ version: 2 }),
+    });
+  });
+
+  it("enforces restrict behavior for non-provenance fact edges", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      restrictedAttachedFactGraph,
+      backend,
+      { history: true },
+    );
+    const source = await store.nodes.Source.create(
+      { label: "source-a", retracted: false },
+      { id: "source-a" },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "fact-a" },
+      { id: "fact-a" },
+    );
+    const note = await store.nodes.Note.create(
+      { label: "attached-note" },
+      { id: "note-a" },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: "justification-a" },
+    );
+    await store.edges.premiseOf.create(source, justification, {}, { id: "p1" });
+    await store.edges.derives.create(justification, fact, {}, { id: "d1" });
+    const attached = await store.edges.attachedTo.create(
+      fact,
+      note,
+      {},
+      { id: "attached-a" },
+    );
+    const provenance = createRetractionCapability(store, attachedFactConfig);
+
+    await expect(provenance.retract(source)).rejects.toThrow(
+      RestrictedDeleteError,
+    );
+
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
+      id: "fact-a",
+    });
+    await expect(store.nodes.Source.getById(source.id)).resolves.toMatchObject({
+      retracted: false,
+    });
+    await expect(
+      backend.getEdge(store.graphId, attached.id),
+    ).resolves.toMatchObject({ deleted_at: undefined });
+  });
+
+  it("disconnects non-provenance fact edges while preserving provenance edges", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(
+      disconnectAttachedFactGraph,
+      backend,
+      { history: true },
+    );
+    const source = await store.nodes.Source.create(
+      { label: "source-a", retracted: false },
+      { id: "source-a" },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "fact-a" },
+      { id: "fact-a" },
+    );
+    const note = await store.nodes.Note.create(
+      { label: "attached-note" },
+      { id: "note-a" },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: "justification-a" },
+    );
+    await store.edges.premiseOf.create(source, justification, {}, { id: "p1" });
+    await store.edges.derives.create(justification, fact, {}, { id: "d1" });
+    const attached = await store.edges.attachedTo.create(
+      fact,
+      note,
+      {},
+      { id: "attached-a" },
+    );
+    const provenance = createRetractionCapability(store, attachedFactConfig);
+
+    await provenance.retract(source);
+
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
+    await expect(
+      backend.getEdge(store.graphId, attached.id),
+    ).resolves.toMatchObject({ deleted_at: expect.any(String) });
+    await expect(store.edges.derives.find({ to: fact })).resolves.toHaveLength(
+      1,
+    );
   });
 
   it("releases and restores uniqueness sidecars when fact currency changes", async () => {

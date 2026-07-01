@@ -137,18 +137,16 @@ still knows when they were believed:
 
 ```typescript
 const beforeVendorRetraction = await store.recordedNow();
+if (beforeVendorRetraction === undefined) throw new Error("expected history");
 
 await provenance.retract(vendor);
 
 const afterVendorRetraction = await store.recordedNow();
+if (afterVendorRetraction === undefined) throw new Error("expected history");
 
-const before = await store
-  .asOfRecorded(beforeVendorRetraction)
-  .nodes.DeployDecision.getById(blockDeploy.id);
+const before = await store.asOfRecorded(beforeVendorRetraction).nodes.DeployDecision.getById(blockDeploy.id);
 
-const after = await store
-  .asOfRecorded(afterVendorRetraction)
-  .nodes.DeployDecision.getById(blockDeploy.id);
+const after = await store.asOfRecorded(afterVendorRetraction).nodes.DeployDecision.getById(blockDeploy.id);
 ```
 
 ## Sample Output

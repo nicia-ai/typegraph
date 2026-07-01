@@ -137,16 +137,14 @@ const report = await provenance.retractMany([
 ## Recorded time
 
 Retraction uses TypeGraph-managed writes, so before and after states are visible
-through recorded-time reads. Capture is scoped to TypeGraph-managed writes; it
-does not claim to observe out-of-band database mutations.
+through recorded-time reads. On PostgreSQL, provenance transitions serialize
+with TypeGraph-managed history writes on the same graph before computing and
+applying fact currency. Capture is scoped to TypeGraph-managed writes; it does
+not claim to observe out-of-band database mutations.
 
 ```typescript
-const factBefore = before
-  ? await store.asOfRecorded(before).nodes.Fact.getById(factId)
-  : undefined;
-const factAfter = after
-  ? await store.asOfRecorded(after).nodes.Fact.getById(factId)
-  : undefined;
+const factBefore = before ? await store.asOfRecorded(before).nodes.Fact.getById(factId) : undefined;
+const factAfter = after ? await store.asOfRecorded(after).nodes.Fact.getById(factId) : undefined;
 ```
 
 Use `holding()` when you only need the current well-founded believed facts:
