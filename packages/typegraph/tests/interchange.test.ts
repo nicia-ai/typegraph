@@ -694,6 +694,41 @@ const uniqueGraph = defineGraph({
   edges: {},
 });
 
+const TwoUniquePerson = defineNode("Person", {
+  schema: z.object({
+    name: z.string(),
+    email: z.string(),
+    username: z.string(),
+  }),
+});
+
+// Two independent unique constraints; `email` is declared first so a per-
+// constraint update would mutate its sidecar before reaching the conflicting
+// `username`.
+const twoUniqueGraph = defineGraph({
+  id: "interchange_two_unique_test",
+  nodes: {
+    Person: {
+      type: TwoUniquePerson,
+      unique: [
+        {
+          name: "email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+        {
+          name: "username",
+          fields: ["username"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
 describe("Interchange import integrity", () => {
   it("writes uniqueness entries so a later create detects the conflict", async () => {
     const source = createStore(uniqueGraph, createTestBackend());
@@ -793,6 +828,57 @@ describe("Interchange import integrity", () => {
     await expect(
       target.nodes.Person.create({ name: "C", email: "a@example.com" }),
     ).rejects.toThrow(UniquenessError);
+  });
+
+  it("preflights all unique constraints before mutating any sidecar (onConflict: update)", async () => {
+    // Source doc updates person-a to email c@example.com (free) AND username
+    // "buser" (held by person-b) — the first constraint would change cleanly, the
+    // second conflicts.
+    const source = createStore(twoUniqueGraph, createTestBackend());
+    await source.nodes.Person.create(
+      { name: "A", email: "c@example.com", username: "buser" },
+      { id: "person-a" },
+    );
+    const document = await exportGraph(source);
+
+    const target = createStore(twoUniqueGraph, createTestBackend());
+    await target.nodes.Person.create(
+      { name: "A", email: "a@example.com", username: "auser" },
+      { id: "person-a" },
+    );
+    await target.nodes.Person.create(
+      { name: "B", email: "b@example.com", username: "buser" },
+      { id: "person-b" },
+    );
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "update" }),
+    );
+
+    // The username conflict is reported per-row; nothing is applied.
+    expect(result.success).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+
+    // The EARLIER (email) constraint must not have been touched. Before the
+    // two-phase preflight, updateUniquenessEntries mutated email's sidecar before
+    // reaching the conflicting username, so both of these went wrong:
+    //   - person-a's old email key was released (this create wrongly succeeded);
+    await expect(
+      target.nodes.Person.create({
+        name: "C",
+        email: "a@example.com",
+        username: "cuser",
+      }),
+    ).rejects.toThrow(UniquenessError);
+    //   - and c@example.com was wrongly reserved for person-a (this failed).
+    const created = await target.nodes.Person.create({
+      name: "D",
+      email: "c@example.com",
+      username: "duser",
+    });
+    expect(created.email).toBe("c@example.com");
   });
 });
 
