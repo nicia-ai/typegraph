@@ -41,6 +41,11 @@ import {
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
 } from "../../../src/store/recorded-capture";
+import {
+  createGate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "../../concurrency-utils";
 
 const TEST_DATABASE_URL =
   process.env.POSTGRES_URL ??
@@ -65,9 +70,7 @@ beforeAll(async () => {
   });
   try {
     await candidate.query("SELECT 1");
-    pool = candidate;
-    isPostgresAvailable = true;
-    await pool.query(`
+    await candidate.query(`
       DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
@@ -76,8 +79,17 @@ beforeAll(async () => {
       DROP TABLE IF EXISTS typegraph_nodes CASCADE;
       DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
     `);
-    await pool.query(generatePostgresMigrationSQL());
-  } catch {
+    await candidate.query(generatePostgresMigrationSQL());
+    // Publish the pool only once connection AND schema setup have succeeded;
+    // a partial publish would run every test against an already-ended pool
+    // instead of skipping, masking the real setup error.
+    pool = candidate;
+    isPostgresAvailable = true;
+  } catch (error) {
+    console.error(
+      "provenance-advisory-lock: Postgres setup failed; skipping suite.",
+      error,
+    );
     // eslint-disable-next-line @typescript-eslint/no-empty-function
     await candidate.end().catch(() => {});
   }
@@ -197,22 +209,6 @@ async function createMultiSourceGraphStore(
     history: true,
   });
   return store;
-}
-
-const TIMEOUT_SENTINEL = Symbol("timeout");
-
-async function raceTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-): Promise<T | typeof TIMEOUT_SENTINEL> {
-  return Promise.race([
-    promise,
-    new Promise<typeof TIMEOUT_SENTINEL>((resolve) =>
-      setTimeout(() => {
-        resolve(TIMEOUT_SENTINEL);
-      }, ms),
-    ),
-  ]);
 }
 
 async function acquireLock(client: PoolClient, lockSql: SQL): Promise<void> {
@@ -371,29 +367,23 @@ describe("recorded graph-write advisory lock (Postgres)", () => {
     // then reaches the separate recorded-clock lock at flush. Provenance must
     // wait at the graph-write gate instead of forming a cycle against the
     // writer's late clock allocation.
-    let releaseWriterGate: (() => void) | undefined;
-    let confirmWriterLocked: (() => void) | undefined;
-    const writerGate = new Promise<void>((resolve) => {
-      releaseWriterGate = resolve;
-    });
-    const writerLocked = new Promise<void>((resolve) => {
-      confirmWriterLocked = resolve;
-    });
+    const writerGate = createGate();
+    const writerLocked = createGate();
     const writer = store.transaction(async (tx) => {
       await tx.nodes.Source.update(source.id, { label: "changed" });
-      confirmWriterLocked?.();
-      await writerGate;
+      writerLocked.open();
+      await writerGate.opened;
     });
 
     // Wait until the writer has taken the source row lock before provenance
     // tries to touch the same row.
-    await writerLocked;
+    await writerLocked.opened;
     const retraction = provenance.retract(source);
 
     // Let the writer proceed to its own flush/commit while provenance is
     // blocked on the graph-write gate it holds.
     await new Promise((resolve) => setTimeout(resolve, 100));
-    releaseWriterGate?.();
+    writerGate.open();
 
     await expect(Promise.all([writer, retraction])).resolves.toBeDefined();
   }, 10_000);
