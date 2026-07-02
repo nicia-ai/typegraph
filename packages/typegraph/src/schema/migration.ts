@@ -8,6 +8,7 @@ import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
 import { canonicalEqual } from "./canonical";
 import {
+  type JsonSchema,
   type SerializedEdgeDef,
   type SerializedNodeDef,
   type SerializedOntology,
@@ -323,27 +324,10 @@ function diffNodeDef(
 
   // Check property schema changes
   if (!canonicalEqual(before.properties, after.properties)) {
-    // Determine if properties were added or removed
-    const beforeProps = before.properties.properties ?? {};
-    const afterProps = after.properties.properties ?? {};
-    const beforeRequired = new Set(before.properties.required);
-    const afterRequired = new Set(after.properties.required);
-
-    const addedProps = Object.keys(afterProps).filter(
-      (p) => !(p in beforeProps),
-    );
-    const removedProps = Object.keys(beforeProps).filter(
-      (p) => !(p in afterProps),
-    );
-    const newRequired = [...afterRequired].filter(
-      (p) => !beforeRequired.has(p),
-    );
-
-    const { severity, details } = computePropertyChangeSeverity(
+    const { severity, details } = classifyPropertyChanges(
       name,
-      removedProps,
-      addedProps,
-      newRequired,
+      before.properties,
+      after.properties,
     );
 
     changes.push({
@@ -395,36 +379,99 @@ function diffNodeDef(
 }
 
 /**
- * Computes the severity and details message for property changes.
+ * A comparable token for a property's JSON-Schema type. A change here
+ * (`string` → `number`, or scalar → union / enum / const) means existing
+ * JSON-encoded props no longer satisfy the declared type, which no data-free
+ * migration can reconcile.
  */
-function computePropertyChangeSeverity(
-  name: string,
-  removedProps: readonly string[],
-  addedProps: readonly string[],
-  newRequired: readonly string[],
+function propertyTypeSignature(schema: JsonSchema): string {
+  if (schema.type !== undefined) return JSON.stringify(schema.type);
+  if (schema.const !== undefined) return "const";
+  if (schema.enum !== undefined) return "enum";
+  if (schema.anyOf !== undefined) return "anyOf";
+  if (schema.oneOf !== undefined) return "oneOf";
+  if (schema.allOf !== undefined) return "allOf";
+  return "unknown";
+}
+
+/**
+ * Classifies a change to a node/edge's property JSON-Schema. Props are stored
+ * as a single JSON column with no per-field DDL, so the schema is enforced only
+ * at the application layer — a diff-based migration cannot rewrite existing
+ * rows. A change is therefore:
+ *
+ *  - **breaking** when existing rows can no longer satisfy the new schema and
+ *    no data-free migration fixes it: a removed property, an in-place property
+ *    *type* change, or a newly required property. `ensureSchema` refuses to
+ *    auto-migrate these (throws `MigrationError` with the data actions).
+ *  - **warning** when a shared property's constraints changed without a type
+ *    change (a tightened bound may reject existing data). Surfaced in the diff
+ *    but still auto-migrates, so legitimate loosening is not blocked.
+ *  - **safe** when only new optional properties were added.
+ *
+ * Conservative on the type axis: a scalar → union *widening* is reported
+ * breaking (a false positive the operator acknowledges) rather than risk
+ * misclassifying a genuine narrowing as safe. Constraint tightening within the
+ * same type is the one residual that still auto-migrates as a warning.
+ */
+function classifyPropertyChanges(
+  kind: string,
+  before: JsonSchema,
+  after: JsonSchema,
 ): { severity: ChangeSeverity; details: string } {
-  if (removedProps.length > 0) {
+  const beforeProps = before.properties ?? {};
+  const afterProps = after.properties ?? {};
+  const beforeRequired = new Set(before.required);
+  const afterRequired = new Set(after.required);
+
+  const removed = Object.keys(beforeProps).filter((p) => !(p in afterProps));
+  const added = Object.keys(afterProps).filter((p) => !(p in beforeProps));
+  const newRequired = [...afterRequired].filter((p) => !beforeRequired.has(p));
+
+  const typeChanged: string[] = [];
+  const constraintChanged: string[] = [];
+  for (const [property, beforeProperty] of Object.entries(beforeProps)) {
+    const afterProperty = afterProps[property];
+    if (afterProperty === undefined) continue; // removed — handled below
+    if (canonicalEqual(beforeProperty, afterProperty)) continue;
+    if (propertyTypeSignature(beforeProperty) === propertyTypeSignature(afterProperty)) {
+      constraintChanged.push(property);
+    } else {
+      typeChanged.push(property);
+    }
+  }
+
+  if (removed.length > 0) {
     return {
       severity: "breaking",
-      details: `Properties removed from "${name}": ${removedProps.join(", ")}`,
+      details: `Properties removed from "${kind}": ${removed.join(", ")}`,
+    };
+  }
+  if (typeChanged.length > 0) {
+    return {
+      severity: "breaking",
+      details: `Property types changed in "${kind}": ${typeChanged.join(", ")}`,
     };
   }
   if (newRequired.length > 0) {
     return {
       severity: "breaking",
-      details: `New required properties in "${name}": ${newRequired.join(", ")}`,
+      details: `New required properties in "${kind}": ${newRequired.join(", ")}`,
     };
   }
-  if (addedProps.length > 0) {
+  if (constraintChanged.length > 0) {
+    return {
+      severity: "warning",
+      details: `Property constraints changed in "${kind}": ${constraintChanged.join(", ")}`,
+    };
+  }
+  if (added.length > 0) {
     return {
       severity: "safe",
-      details: `Properties added to "${name}": ${addedProps.join(", ")}`,
+      details: `Properties added to "${kind}": ${added.join(", ")}`,
     };
   }
-  return {
-    severity: "safe",
-    details: `Properties changed in "${name}"`,
-  };
+  return { severity: "safe", details: `Properties changed in "${kind}"` };
 }
 
 // ============================================================
@@ -528,11 +575,16 @@ function diffEdgeDef(
 
   // Check properties
   if (!canonicalEqual(before.properties, after.properties)) {
+    const { severity, details } = classifyPropertyChanges(
+      name,
+      before.properties,
+      after.properties,
+    );
     changes.push({
       type: "modified",
       kind: name,
-      severity: "safe",
-      details: `Properties changed for "${name}"`,
+      severity,
+      details,
       before,
       after,
     });
