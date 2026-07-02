@@ -736,29 +736,34 @@ describe("Property change classification", () => {
 
     const diff = await getSchemaChanges(backend, graphV2);
     expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.nodes[0]).toMatchObject({ kind: "Person", severity: "breaking" });
-    expect(diff!.nodes[0]!.details).toContain("type");
+    expect(diff!.nodes[0]).toMatchObject({
+      kind: "Person",
+      severity: "breaking",
+    });
+    expect(diff!.nodes[0]!.details).toContain("age");
 
     await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
       MigrationError,
     );
   });
 
-  it("classifies a same-type constraint change as a non-blocking warning", async () => {
+  it("classifies a tightened same-type constraint as breaking", async () => {
     const backend = createTestBackend();
     const graphV1 = defineGraph({
       id: "propconstraint_test",
       nodes: {
         Person: {
-          type: defineNode("Person", { schema: z.object({ name: z.string() }) }),
+          type: defineNode("Person", {
+            schema: z.object({ name: z.string() }),
+          }),
         },
       },
       edges: {},
     });
     await createStoreWithSchema(graphV1, backend);
 
-    // Tightened constraint, same type — surfaced as a warning but not blocked,
-    // so a legitimate loosening also stays auto-migratable.
+    // Adding a minLength is a tightening: existing shorter strings no longer
+    // satisfy the schema. Must not auto-migrate.
     const graphV2 = defineGraph({
       id: "propconstraint_test",
       nodes: {
@@ -772,9 +777,169 @@ describe("Property change classification", () => {
     });
 
     const diff = await getSchemaChanges(backend, graphV2);
-    expect(diff!.hasBreakingChanges).toBe(false);
-    expect(diff!.nodes[0]).toMatchObject({ kind: "Person", severity: "warning" });
+    expect(diff!.hasBreakingChanges).toBe(true);
+    expect(diff!.nodes[0]).toMatchObject({
+      kind: "Person",
+      severity: "breaking",
+    });
+    await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
+      MigrationError,
+    );
+  });
 
+  it("classifies a NESTED object property type change as breaking", async () => {
+    const backend = createTestBackend();
+    const graphV1 = defineGraph({
+      id: "propnested_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ profile: z.object({ age: z.string() }) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    // Only the nested `profile.age` changes type; the top-level `profile` token
+    // stays "object". A shallow token comparison would miss this.
+    const graphV2 = defineGraph({
+      id: "propnested_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ profile: z.object({ age: z.number() }) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+    expect(diff!.hasBreakingChanges).toBe(true);
+    expect(diff!.nodes[0]).toMatchObject({
+      kind: "Person",
+      severity: "breaking",
+    });
+    await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
+      MigrationError,
+    );
+  });
+
+  it("classifies an array item type change as breaking", async () => {
+    const backend = createTestBackend();
+    const graphV1 = defineGraph({
+      id: "proparray_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ tags: z.array(z.string()) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    const graphV2 = defineGraph({
+      id: "proparray_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ tags: z.array(z.number()) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+    expect(diff!.hasBreakingChanges).toBe(true);
+    expect(diff!.nodes[0]).toMatchObject({
+      kind: "Person",
+      severity: "breaking",
+    });
+    await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
+      MigrationError,
+    );
+  });
+
+  it("classifies enum narrowing as breaking", async () => {
+    const backend = createTestBackend();
+    const graphV1 = defineGraph({
+      id: "propenum_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ role: z.enum(["admin", "user", "guest"]) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    // Dropping enum members: existing rows holding "guest" no longer validate.
+    const graphV2 = defineGraph({
+      id: "propenum_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ role: z.enum(["admin", "user"]) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+    expect(diff!.hasBreakingChanges).toBe(true);
+    expect(diff!.nodes[0]).toMatchObject({
+      kind: "Person",
+      severity: "breaking",
+    });
+    await expect(createStoreWithSchema(graphV2, backend)).rejects.toThrow(
+      MigrationError,
+    );
+  });
+
+  it("classifies an added OPTIONAL nested property as safe (not over-restrictive)", async () => {
+    const backend = createTestBackend();
+    const graphV1 = defineGraph({
+      id: "propnestedadd_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({ profile: z.object({ age: z.number() }) }),
+          }),
+        },
+      },
+      edges: {},
+    });
+    await createStoreWithSchema(graphV1, backend);
+
+    // Adding an optional field inside a nested object cannot invalidate existing
+    // rows, so it must remain auto-migratable.
+    const graphV2 = defineGraph({
+      id: "propnestedadd_test",
+      nodes: {
+        Person: {
+          type: defineNode("Person", {
+            schema: z.object({
+              profile: z.object({
+                age: z.number(),
+                nickname: z.string().optional(),
+              }),
+            }),
+          }),
+        },
+      },
+      edges: {},
+    });
+
+    const diff = await getSchemaChanges(backend, graphV2);
+    expect(diff!.hasBreakingChanges).toBe(false);
     const [, result] = await createStoreWithSchema(graphV2, backend);
     expect(result.status).toBe("migrated");
   });
@@ -789,7 +954,9 @@ describe("Property change classification", () => {
       nodes: { Person: { type: PersonNode } },
       edges: {
         worksAt: {
-          type: defineEdge("worksAt", { schema: z.object({ years: z.string() }) }),
+          type: defineEdge("worksAt", {
+            schema: z.object({ years: z.string() }),
+          }),
           from: [PersonNode],
           to: [PersonNode],
         },
@@ -802,7 +969,9 @@ describe("Property change classification", () => {
       nodes: { Person: { type: PersonNode } },
       edges: {
         worksAt: {
-          type: defineEdge("worksAt", { schema: z.object({ years: z.number() }) }),
+          type: defineEdge("worksAt", {
+            schema: z.object({ years: z.number() }),
+          }),
           from: [PersonNode],
           to: [PersonNode],
         },
@@ -811,7 +980,10 @@ describe("Property change classification", () => {
 
     const diff = await getSchemaChanges(backend, graphV2);
     expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.edges[0]).toMatchObject({ kind: "worksAt", severity: "breaking" });
+    expect(diff!.edges[0]).toMatchObject({
+      kind: "worksAt",
+      severity: "breaking",
+    });
   });
 
   it("classifies an edge property removal as breaking", async () => {
@@ -824,7 +996,9 @@ describe("Property change classification", () => {
       nodes: { Person: { type: PersonNode } },
       edges: {
         worksAt: {
-          type: defineEdge("worksAt", { schema: z.object({ role: z.string() }) }),
+          type: defineEdge("worksAt", {
+            schema: z.object({ role: z.string() }),
+          }),
           from: [PersonNode],
           to: [PersonNode],
         },
@@ -847,6 +1021,9 @@ describe("Property change classification", () => {
 
     const diff = await getSchemaChanges(backend, graphV2);
     expect(diff!.hasBreakingChanges).toBe(true);
-    expect(diff!.edges[0]).toMatchObject({ kind: "worksAt", severity: "breaking" });
+    expect(diff!.edges[0]).toMatchObject({
+      kind: "worksAt",
+      severity: "breaking",
+    });
   });
 });

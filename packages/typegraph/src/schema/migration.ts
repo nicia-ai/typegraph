@@ -395,24 +395,111 @@ function propertyTypeSignature(schema: JsonSchema): string {
 }
 
 /**
+ * Non-constraining JSON-Schema keywords: changing them cannot invalidate an
+ * existing stored value, so a diff limited to these is safe.
+ */
+const NON_CONSTRAINING_KEYWORDS = new Set([
+  "description",
+  "title",
+  "default",
+  "$schema",
+]);
+
+/** A copy of `schema` with the non-constraining keywords removed. */
+function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
+  const stripped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (!NON_CONSTRAINING_KEYWORDS.has(key)) stripped[key] = value;
+  }
+  return stripped;
+}
+
+function isObjectSchema(schema: JsonSchema): boolean {
+  return schema.type === "object" || schema.properties !== undefined;
+}
+
+/**
+ * Whether replacing property schema `before` with `after` can invalidate an
+ * existing stored value — i.e. whether the change is breaking. Deliberately
+ * conservative: it returns `false` (safe) only for changes it can prove are
+ * non-breaking, and `true` for everything else.
+ *
+ * Provably safe: a metadata-only change; an object whose nested change is itself
+ * safe (recursively) with no removed or newly-required nested property (so
+ * adding an optional nested field stays safe). Everything else — a changed type
+ * token, an array whose items changed, an enum/const change, a composition
+ * change, or any constraint change on a scalar — is treated as breaking. This
+ * mirrors how the top-level property diff classifies node/edge properties, so a
+ * change nested inside an object, array, or enum is caught the same way a
+ * top-level one is (rather than passing as a non-blocking warning and
+ * auto-migrating over rows that no longer satisfy the schema).
+ */
+function isBreakingPropertyChange(
+  before: JsonSchema,
+  after: JsonSchema,
+): boolean {
+  if (canonicalEqual(stripSchemaMetadata(before), stripSchemaMetadata(after))) {
+    return false;
+  }
+  if (propertyTypeSignature(before) !== propertyTypeSignature(after)) {
+    return true;
+  }
+  if (isObjectSchema(before) && isObjectSchema(after)) {
+    return isBreakingObjectSchemaChange(before, after);
+  }
+  // Same top-level token, but a constraining change the recursion above does not
+  // model (array items, enum/const values, composition members, scalar bounds).
+  // Cannot prove it is a loosening, so treat it as breaking.
+  return true;
+}
+
+/** Recursive breaking-change check for two object JSON-Schemas. */
+function isBreakingObjectSchemaChange(
+  before: JsonSchema,
+  after: JsonSchema,
+): boolean {
+  const beforeProps = before.properties ?? {};
+  const afterProps = after.properties ?? {};
+  const beforeRequired = new Set(before.required);
+  const afterRequired = new Set(after.required);
+
+  for (const key of Object.keys(beforeProps)) {
+    if (!(key in afterProps)) return true; // nested property removed
+  }
+  for (const key of afterRequired) {
+    if (!beforeRequired.has(key)) return true; // nested property newly required
+  }
+  for (const [key, beforeChild] of Object.entries(beforeProps)) {
+    const afterChild = afterProps[key];
+    if (afterChild === undefined) continue; // removal already handled above
+    if (isBreakingPropertyChange(beforeChild, afterChild)) return true;
+  }
+  return false; // only additive optional / provably-safe nested changes
+}
+
+/**
  * Classifies a change to a node/edge's property JSON-Schema. Props are stored
  * as a single JSON column with no per-field DDL, so the schema is enforced only
  * at the application layer — a diff-based migration cannot rewrite existing
- * rows. A change is therefore:
+ * rows. A change is therefore only ever **breaking** or **safe**:
  *
- *  - **breaking** when existing rows can no longer satisfy the new schema and
- *    no data-free migration fixes it: a removed property, an in-place property
- *    *type* change, or a newly required property. `ensureSchema` refuses to
+ *  - **breaking** when existing rows can no longer be proven to satisfy the new
+ *    schema and no data-free migration fixes it: a removed property, a newly
+ *    required property, or a shared property whose schema changed in a way that
+ *    is not provably a loosening (a changed type token, a changed array item
+ *    schema, an enum/const/composition change, a scalar constraint change, or a
+ *    breaking change nested inside an object). `ensureSchema` refuses to
  *    auto-migrate these (throws `MigrationError` with the data actions).
- *  - **warning** when a shared property's constraints changed without a type
- *    change (a tightened bound may reject existing data). Surfaced in the diff
- *    but still auto-migrates, so legitimate loosening is not blocked.
- *  - **safe** when only new optional properties were added.
+ *  - **safe** when the only changes are new optional properties, metadata-only
+ *    edits, or additive optional fields nested inside an object.
  *
- * Conservative on the type axis: a scalar → union *widening* is reported
- * breaking (a false positive the operator acknowledges) rather than risk
- * misclassifying a genuine narrowing as safe. Constraint tightening within the
- * same type is the one residual that still auto-migrates as a warning.
+ * Deliberately conservative: a change is called safe only when
+ * {@link isBreakingPropertyChange} can prove it non-breaking, so an ambiguous
+ * change (e.g. a scalar → union *widening*, or a same-type constraint change)
+ * is reported breaking — a false positive the operator acknowledges — rather
+ * than risk auto-migrating over rows that no longer satisfy the schema. There
+ * is no "warning" bucket: an unproven change blocks rather than silently
+ * migrating.
  */
 function classifyPropertyChanges(
   kind: string,
@@ -428,16 +515,15 @@ function classifyPropertyChanges(
   const added = Object.keys(afterProps).filter((p) => !(p in beforeProps));
   const newRequired = [...afterRequired].filter((p) => !beforeRequired.has(p));
 
-  const typeChanged: string[] = [];
-  const constraintChanged: string[] = [];
+  // A shared property whose schema changed in a way that can invalidate existing
+  // rows (type/shape change, a breaking nested/array/enum/constraint change).
+  const breakingProps: string[] = [];
   for (const [property, beforeProperty] of Object.entries(beforeProps)) {
     const afterProperty = afterProps[property];
     if (afterProperty === undefined) continue; // removed — handled below
-    if (canonicalEqual(beforeProperty, afterProperty)) continue;
-    if (propertyTypeSignature(beforeProperty) === propertyTypeSignature(afterProperty)) {
-      constraintChanged.push(property);
-    } else {
-      typeChanged.push(property);
+    if (canonicalEqual(beforeProperty, afterProperty)) continue; // unchanged
+    if (isBreakingPropertyChange(beforeProperty, afterProperty)) {
+      breakingProps.push(property);
     }
   }
 
@@ -447,10 +533,10 @@ function classifyPropertyChanges(
       details: `Properties removed from "${kind}": ${removed.join(", ")}`,
     };
   }
-  if (typeChanged.length > 0) {
+  if (breakingProps.length > 0) {
     return {
       severity: "breaking",
-      details: `Property types changed in "${kind}": ${typeChanged.join(", ")}`,
+      details: `Property schemas changed incompatibly in "${kind}": ${breakingProps.join(", ")}`,
     };
   }
   if (newRequired.length > 0) {
@@ -459,18 +545,14 @@ function classifyPropertyChanges(
       details: `New required properties in "${kind}": ${newRequired.join(", ")}`,
     };
   }
-  if (constraintChanged.length > 0) {
-    return {
-      severity: "warning",
-      details: `Property constraints changed in "${kind}": ${constraintChanged.join(", ")}`,
-    };
-  }
   if (added.length > 0) {
     return {
       severity: "safe",
       details: `Properties added to "${kind}": ${added.join(", ")}`,
     };
   }
+  // Only provably non-breaking property changes remain (metadata, additive
+  // optional nested fields, a widened/loosened shape the checks above cleared).
   return { severity: "safe", details: `Properties changed in "${kind}"` };
 }
 
