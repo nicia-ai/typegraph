@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { param as parameter } from "../../../src";
 import {
   seedDocumentsForArrayPredicates,
   seedDocumentsForObjectPredicates,
@@ -308,6 +309,44 @@ export function registerPredicateIntegrationTests(
         .select((ctx) => ctx.p.name)
         .execute();
       expect(backslash.toSorted()).toEqual([String.raw`path\to\file`]);
+    });
+
+    it("honors backslash escapes in raw like/ilike patterns (direct/prepared parity)", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({ name: "a_b", email: "und@test.com" });
+      await store.nodes.Person.create({ name: "axb", email: "wild@test.com" });
+
+      // Raw `like`: `\_` must be a literal underscore on every backend. Without
+      // the ESCAPE clause on SQLite (no default escape char) this matched
+      // nothing — diverging from Postgres and from the parameterized path.
+      const literal = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.like(String.raw`a\_b`))
+        .select((ctx) => ctx.p.name)
+        .execute();
+      expect(literal.toSorted()).toEqual(["a_b"]);
+
+      // Same pattern through a bound parameter must agree with the literal path.
+      const prepared = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.like(parameter("pattern")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+      const parameterized = await prepared.execute({
+        pattern: String.raw`a\_b`,
+      });
+      expect(parameterized.toSorted()).toEqual(["a_b"]);
+
+      // Case-insensitive `ilike` honors the same escape, case-folded.
+      const insensitive = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.ilike(String.raw`A\_B`))
+        .select((ctx) => ctx.p.name)
+        .execute();
+      expect(insensitive.toSorted()).toEqual(["a_b"]);
     });
   });
 

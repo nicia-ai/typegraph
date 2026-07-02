@@ -14,16 +14,18 @@
 import { type SQL, sql } from "drizzle-orm";
 
 /**
- * The backslash escape character shared by the pattern builders and the
- * {@link likeEscapeClause}. They must stay in sync: the builders prefix
- * wildcards with this character, and the clause tells SQL to treat it as an
- * escape.
+ * The backslash escape character used by the JS pattern builder
+ * (`compileStringPattern` in `compiler/predicates.ts`) to prefix the literal
+ * `%`, `_`, and `\` in user input. It must match the character declared by
+ * {@link likeEscapeClause}: the builder prefixes wildcards with this character,
+ * and the clause tells SQL to treat it as the escape. Both are backslash.
  */
 export const LIKE_ESCAPE_CHARACTER = "\\";
 
 /**
- * `ESCAPE '\'` clause appended to every compiled `LIKE` / `ILIKE` predicate.
- * The single backslash inside the quotes is a literal in both PostgreSQL
- * (with `standard_conforming_strings`, the default) and SQLite.
+ * `ESCAPE '\'` clause appended to every compiled `LIKE` / `ILIKE` predicate,
+ * declaring {@link LIKE_ESCAPE_CHARACTER} as the escape character. The single
+ * backslash inside the quotes is a literal in both PostgreSQL (with
+ * `standard_conforming_strings`, the default) and SQLite.
  */
 export const likeEscapeClause: SQL = sql`ESCAPE '\\'`;
