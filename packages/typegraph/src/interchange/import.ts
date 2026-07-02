@@ -9,7 +9,6 @@ import type { z } from "zod";
 import {
   type GraphBackend,
   isLiveNodeRow,
-  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../backend/types";
 import { validateEdgeEndpoints } from "../constraints";
@@ -25,11 +24,8 @@ import {
   applyNodeInsertSideEffects,
   applyNodeUpdate,
 } from "../store/operations/node-write-pipeline";
-import { lockRecordedGraphWrite } from "../store/recorded-capture";
-import {
-  type GraphWriteLock,
-  uncapturedGraphWriteLock,
-} from "../store/recorded-capture/clock";
+import { runInWriteTransaction } from "../store/operations/write-transaction";
+import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
@@ -93,18 +89,11 @@ export async function importGraph<G extends GraphDef>(
   // Track imported node IDs for reference validation
   const importedNodeIds = new Set<string>();
 
-  // One transaction on a transactional backend; runs directly otherwise
-  // (runOptionallyInTransaction is exactly this capability gate).
-  await runOptionallyInTransaction(backend, async (target) => {
-    // Under history capture the per-graph write lock must precede ANY row
-    // work in this transaction — including the uniqueness-sidecar writes the
-    // update path performs before its first captured row write — matching
-    // the lock-before-rows acquire order every other writer follows. The
-    // returned evidence token is what the node write pipeline requires.
-    const lock =
-      store.historyEnabled ?
-        await lockRecordedGraphWrite(target, graphId)
-      : uncapturedGraphWriteLock(graphId);
+  // One transaction on a transactional backend; runs directly otherwise, with
+  // the per-graph write lock taken before any row work — see
+  // runInWriteTransaction for the shared lock-before-rows contract every
+  // writer follows.
+  await runInWriteTransaction(store, backend, async (target, lock) => {
     await processNodes(
       target,
       graphId,
@@ -229,8 +218,11 @@ async function processNodes(
         }
         case "skipped": {
           result.nodes.skipped++;
-          // Still track as available for edge references
-          importedNodeIds.add(makeNodeKey(node.kind, node.id));
+          // A live skipped row is still a valid edge endpoint; a tombstone
+          // is not.
+          if (importResult.liveTarget) {
+            importedNodeIds.add(makeNodeKey(node.kind, node.id));
+          }
           break;
         }
         case "error": {
@@ -250,8 +242,38 @@ async function processNodes(
 type ProcessResult =
   | { status: "created" }
   | { status: "updated" }
-  | { status: "skipped" }
+  /**
+   * `liveTarget` distinguishes "skipped because a LIVE row already exists"
+   * (a valid edge endpoint) from "skipped because the row is a tombstone"
+   * (which must NOT be recorded as available — a live edge pointing at a
+   * soft-deleted node violates the endpoint-liveness invariant the
+   * collection API enforces).
+   */
+  | { status: "skipped"; liveTarget: boolean }
   | { status: "error"; error: string };
+
+type UniquenessGuardResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; error: string }>;
+
+/**
+ * Runs `fn` and reports a `UniquenessError` as a per-row result instead of
+ * letting it abort the whole import — the same recovery both the node
+ * uniqueness pre-check and the update path need. Any other error still
+ * propagates.
+ */
+async function catchUniquenessError<T>(
+  fn: () => Promise<T>,
+): Promise<UniquenessGuardResult<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (error) {
+    if (error instanceof UniquenessError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
+}
 
 /**
  * Validates an entity's validity-window timestamps against the canonical
@@ -320,7 +342,7 @@ async function processNode(
   if (existing) {
     switch (options.onConflict) {
       case "skip": {
-        return { status: "skipped" };
+        return { status: "skipped", liveTarget: isLiveNodeRow(existing) };
       }
       case "error": {
         return {
@@ -335,15 +357,15 @@ async function processNode(
           // recreate uniqueness/embedding/fulltext rows for a node that
           // stays invisible — a uniqueness reservation held by a tombstoned
           // node would block live creates of the same value.
-          return { status: "skipped" };
+          return { status: "skipped", liveTarget: false };
         }
         // Route through the shared write step so the update maintains
         // uniqueness entries, embeddings, and fulltext — the collection API's
         // integrity, which a raw backend.updateNode would skip. A uniqueness
         // conflict is reported per-row (updateUniquenessEntries throws before
         // the row is written, so no partial write escapes).
-        try {
-          await applyNodeUpdate(
+        const updateResult = await catchUniquenessError(() =>
+          applyNodeUpdate(
             writeContext,
             {
               existing,
@@ -353,12 +375,10 @@ async function processNode(
               ...(node.validTo !== undefined && { validTo: node.validTo }),
             },
             backend,
-          );
-        } catch (error) {
-          if (error instanceof UniquenessError) {
-            return { status: "error", error: error.message };
-          }
-          throw error;
+          ),
+        );
+        if (!updateResult.ok) {
+          return { status: "error", error: updateResult.error };
         }
         return { status: "updated" };
       }
@@ -368,19 +388,17 @@ async function processNode(
   // Create new node. Pre-check uniqueness (as the collection create does) so a
   // conflict is a per-row error rather than an orphaned node row, then apply the
   // integrity side effects the raw backend.insertNode would otherwise bypass.
-  try {
-    await checkUniquenessConstraints(
+  const uniquenessResult = await catchUniquenessError(() =>
+    checkUniquenessConstraints(
       { graphId, registry, backend },
       node.kind,
       node.id,
       propsResult.data,
       uniqueConstraints,
-    );
-  } catch (error) {
-    if (error instanceof UniquenessError) {
-      return { status: "error", error: error.message };
-    }
-    throw error;
+    ),
+  );
+  if (!uniquenessResult.ok) {
+    return { status: "error", error: uniquenessResult.error };
   }
 
   await backend.insertNode({
@@ -514,14 +532,17 @@ async function processEdge(
     const fromKey = makeNodeKey(edge.from.kind, edge.from.id);
     const toKey = makeNodeKey(edge.to.kind, edge.to.id);
 
-    // Check import batch first, then DB
+    // Check import batch first, then DB. The DB row must be LIVE: getNode
+    // returns tombstones, and inserting an edge whose endpoint is
+    // soft-deleted would bypass the endpoint-liveness invariant the
+    // collection API enforces.
     if (!importedNodeIds.has(fromKey)) {
       const fromExists = await backend.getNode(
         graphId,
         edge.from.kind,
         edge.from.id,
       );
-      if (!fromExists) {
+      if (fromExists === undefined || !isLiveNodeRow(fromExists)) {
         return {
           status: "error",
           error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
@@ -531,7 +552,7 @@ async function processEdge(
 
     if (!importedNodeIds.has(toKey)) {
       const toExists = await backend.getNode(graphId, edge.to.kind, edge.to.id);
-      if (!toExists) {
+      if (toExists === undefined || !isLiveNodeRow(toExists)) {
         return {
           status: "error",
           error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
@@ -562,7 +583,10 @@ async function processEdge(
   if (existing) {
     switch (options.onConflict) {
       case "skip": {
-        return { status: "skipped" };
+        return {
+          status: "skipped",
+          liveTarget: existing.deleted_at === undefined,
+        };
       }
       case "error": {
         return { status: "error", error: `Edge already exists: ${edge.id}` };
@@ -570,7 +594,9 @@ async function processEdge(
       case "update": {
         // Same contract as nodes: import never resurrects a tombstone, and
         // the backend's update targets live rows only.
-        if (existing.deleted_at !== undefined) return { status: "skipped" };
+        if (existing.deleted_at !== undefined) {
+          return { status: "skipped", liveTarget: false };
+        }
         await backend.updateEdge({
           graphId,
           id: edge.id,

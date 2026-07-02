@@ -65,7 +65,7 @@ export function runInWriteTransaction<T>(
     const lock =
       ctx.historyEnabled ?
         await lockRecordedGraphWrite(target, ctx.graphId)
-      : uncapturedGraphWriteLock(ctx.graphId);
+      : uncapturedGraphWriteLock();
     return fn(target, lock);
   });
 }

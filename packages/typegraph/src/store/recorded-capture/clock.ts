@@ -71,11 +71,15 @@ declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
  */
 export type GraphWriteLock = Readonly<{
   [GRAPH_WRITE_LOCK_BRAND]: true;
-  graphId: string;
 }>;
 
-function graphWriteLockEvidence(graphId: string): GraphWriteLock {
-  return { graphId } as GraphWriteLock;
+// The brand is compile-time only (a `unique symbol` with no runtime value —
+// see the `declare const` above), so the token carries no actual per-call
+// data and every acquisition can share this one frozen empty instance.
+const GRAPH_WRITE_LOCK_EVIDENCE = Object.freeze({}) as GraphWriteLock;
+
+function graphWriteLockEvidence(): GraphWriteLock {
+  return GRAPH_WRITE_LOCK_EVIDENCE;
 }
 
 /**
@@ -84,19 +88,19 @@ function graphWriteLockEvidence(graphId: string): GraphWriteLock {
  * the target store is not capture-enabled — do not use it to skip the lock
  * on a history store.
  */
-export function uncapturedGraphWriteLock(graphId: string): GraphWriteLock {
-  return graphWriteLockEvidence(graphId);
+export function uncapturedGraphWriteLock(): GraphWriteLock {
+  return graphWriteLockEvidence();
 }
 
 export async function lockRecordedGraphWrite(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   graphId: string,
 ): Promise<GraphWriteLock> {
-  if (target.dialect !== "postgres") return graphWriteLockEvidence(graphId);
+  if (target.dialect !== "postgres") return graphWriteLockEvidence();
   await target.execute(
     asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
   );
-  return graphWriteLockEvidence(graphId);
+  return graphWriteLockEvidence();
 }
 
 export async function lockRecordedGraphWrites(

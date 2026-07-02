@@ -881,6 +881,84 @@ describe("Interchange import integrity", () => {
     expect(created.email).toBe("c@example.com");
   });
 
+  it("never creates a live edge pointing at a tombstoned batch node", async () => {
+    // Target: person-a exists but is soft-deleted.
+    const target = createStore(testGraph, createTestBackend());
+    await target.nodes.Person.create({ name: "A" }, { id: "person-a" });
+    await target.nodes.Person.delete("person-a" as never);
+
+    // Document: person-a (will be tombstone-skipped), person-b (created),
+    // and an edge person-a -> person-b.
+    const source = createStore(testGraph, createTestBackend());
+    const personA = await source.nodes.Person.create(
+      { name: "A" },
+      { id: "person-a" },
+    );
+    const personB = await source.nodes.Person.create(
+      { name: "B" },
+      { id: "person-b" },
+    );
+    await source.edges.knows.create(personA, personB, {}, { id: "knows-ab" });
+    const document = await exportGraph(source);
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "update" }),
+    );
+
+    // The tombstone skip must NOT count person-a as an available edge
+    // endpoint: the edge is rejected per-row instead of silently violating
+    // the endpoint-liveness invariant the collection API enforces.
+    expect(result.nodes.skipped).toBe(1);
+    expect(result.nodes.created).toBe(1);
+    expect(result.edges.created).toBe(0);
+    expect(result.success).toBe(false);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({ entityType: "edge" });
+    await expect(
+      target.edges.knows.getById("knows-ab" as never),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects edges referencing tombstoned nodes outside the batch", async () => {
+    // Target: person-a exists only as a tombstone and is NOT in the import
+    // document, so the reference check falls back to the database — which
+    // must require a LIVE row.
+    const target = createStore(testGraph, createTestBackend());
+    await target.nodes.Person.create({ name: "A" }, { id: "person-a" });
+    await target.nodes.Person.delete("person-a" as never);
+
+    const source = createStore(testGraph, createTestBackend());
+    const personB = await source.nodes.Person.create(
+      { name: "B" },
+      { id: "person-b" },
+    );
+    const document = await exportGraph(source);
+    const withEdge: GraphData = {
+      ...document,
+      edges: [
+        {
+          kind: "knows",
+          id: "knows-ab",
+          from: { kind: "Person", id: "person-a" },
+          to: { kind: "Person", id: personB.id },
+          properties: {},
+        },
+      ],
+    };
+
+    const result = await importGraph(
+      target,
+      withEdge,
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.edges.created).toBe(0);
+    expect(result.success).toBe(false);
+    expect(result.errors[0]?.error).toContain("From node not found");
+  });
+
   it("skips tombstoned nodes without touching their sidecars (onConflict: update)", async () => {
     // Source doc: person-a with a new email.
     const source = createStore(uniqueGraph, createTestBackend());
