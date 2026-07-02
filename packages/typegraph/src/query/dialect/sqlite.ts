@@ -8,6 +8,7 @@ import { sql } from "drizzle-orm";
 
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { fts5Strategy } from "./fulltext-strategy";
+import { likeEscapeClause } from "./like-escape";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -182,8 +183,10 @@ export const sqliteDialect: DialectAdapter = {
 
   ilike(column, pattern) {
     // SQLite LIKE is case-insensitive for ASCII by default, but we use
-    // LOWER() for consistency with non-ASCII characters
-    return sql`LOWER(${column}) LIKE LOWER(${pattern})`;
+    // LOWER() for consistency with non-ASCII characters. SQLite has no default
+    // LIKE escape character, so declare backslash explicitly to honor the
+    // escaping the compiler applies to the pattern (parity with Postgres).
+    return sql`LOWER(${column}) LIKE LOWER(${pattern}) ${likeEscapeClause}`;
   },
 
   // ============================================================

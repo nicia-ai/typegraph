@@ -260,6 +260,52 @@ export function registerPredicateIntegrationTests(
 
       expect(results).toContain("Special User");
     });
+
+    it("treats %, _, and backslash as literals in contains/startsWith (LIKE escape parity)", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create({
+        name: "Discount 100% off",
+        email: "pct@test.com",
+      });
+      await store.nodes.Person.create({
+        name: "Discount 100X off",
+        email: "pctwild@test.com",
+      });
+      await store.nodes.Person.create({ name: "id_42", email: "us@test.com" });
+      await store.nodes.Person.create({ name: "idX42", email: "uswild@test.com" });
+      await store.nodes.Person.create({
+        name: String.raw`path\to\file`,
+        email: "bs@test.com",
+      });
+
+      // A literal % must not act as a multi-char wildcard. Before the ESCAPE
+      // fix this returned nothing on SQLite (no default LIKE escape char).
+      const percent = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains("100%"))
+        .select((ctx) => ctx.p.name)
+        .execute();
+      expect(percent.toSorted()).toEqual(["Discount 100% off"]);
+
+      // A literal _ must not act as a single-char wildcard.
+      const underscore = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.contains("id_"))
+        .select((ctx) => ctx.p.name)
+        .execute();
+      expect(underscore.toSorted()).toEqual(["id_42"]);
+
+      // A literal backslash must match a backslash, not act as an escape char.
+      const backslash = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.startsWith(String.raw`path\to`))
+        .select((ctx) => ctx.p.name)
+        .execute();
+      expect(backslash.toSorted()).toEqual([String.raw`path\to\file`]);
+    });
   });
 
   describe("Array Predicates", () => {

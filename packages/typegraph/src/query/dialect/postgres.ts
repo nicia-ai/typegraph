@@ -8,6 +8,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { tsvectorStrategy } from "./fulltext-strategy";
+import { likeEscapeClause } from "./like-escape";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -174,8 +175,10 @@ export const postgresDialect: DialectAdapter = {
   // ============================================================
 
   ilike(column, pattern) {
-    // PostgreSQL has native ILIKE operator
-    return sql`${column} ILIKE ${pattern}`;
+    // PostgreSQL has native ILIKE operator. Declaring backslash as the escape
+    // character is a no-op (it is the LIKE default) but keeps the emitted SQL
+    // identical in intent to SQLite, which has no default escape character.
+    return sql`${column} ILIKE ${pattern} ${likeEscapeClause}`;
   },
 
   // ============================================================

@@ -22,6 +22,7 @@ import {
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
+import { likeEscapeClause } from "../dialect/like-escape";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import {
@@ -321,7 +322,12 @@ function convertValueForSql(value: unknown, dialect: DialectAdapter): unknown {
  * Compiles a string pattern for LIKE operations.
  */
 function compileStringPattern(op: string, pattern: string): string {
+  // Escape the backslash first so the wildcards we prefix below aren't
+  // double-escaped, then neutralize the LIKE wildcards. Mirrors
+  // escapeLikePatternParameter for the parameterized path. The emitted
+  // LIKE/ILIKE declares backslash as its ESCAPE character (see likeEscapeClause).
   const escaped = pattern
+    .replaceAll("\\", String.raw`\\`)
     .replaceAll("%", String.raw`\%`)
     .replaceAll("_", String.raw`\_`);
 
@@ -455,7 +461,7 @@ export function compilePredicateExpression(
         ) {
           return dialect.ilike(field, pattern);
         }
-        return sql`${field} LIKE ${pattern}`;
+        return sql`${field} LIKE ${pattern} ${likeEscapeClause}`;
       }
 
       const pattern = compileStringPattern(expr.op, expr.pattern);
