@@ -72,6 +72,38 @@ export function canonicalValueKey(value: JsonValue): string {
 }
 
 /**
+ * A stable fingerprint of a committed edge's mergeable state — its endpoints,
+ * liveness, and canonical props. The incremental lost-update guard captures this
+ * for every target edge at plan time and re-derives it inside the commit
+ * transaction; a mismatch means the committed edge drifted in the plan→commit
+ * window, so applying the plan (built from the plan-time value) would silently
+ * overwrite that change. Edges carry no `version` column, so this content
+ * fingerprint is the node-`version` analogue for the edge half of the guard.
+ *
+ * @param edge Endpoints, liveness, and PARSED props (never a JSON string).
+ * @returns A canonical string; equal iff the two edge states are mergeably equal.
+ */
+export function edgeStateSignature(
+  edge: Readonly<{
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    live: boolean;
+    props: Readonly<Record<string, unknown>>;
+  }>,
+): string {
+  return JSON.stringify([
+    edge.fromKind,
+    edge.fromId,
+    edge.toKind,
+    edge.toId,
+    edge.live,
+    canonicalizeProps(edge.props),
+  ]);
+}
+
+/**
  * Parses a stored row's JSON `props` string into the PARSED plain object that
  * {@link canonicalizeProps} requires. Malformed JSON, a non-object, or an array
  * all collapse to `{}` — a parse error never escapes. Backend-written rows hold

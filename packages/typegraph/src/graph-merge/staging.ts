@@ -98,12 +98,19 @@ export type StagingSet = Readonly<{
   deletedEdges: readonly StagedDeletedEdge[];
   /**
    * `(kind, id) -> version` for the nodes of the branch named by
-   * `stageBranches`' `captureNodeVersionsFor` argument, observed by that
+   * `stageBranches`' `captureTargetStateFor` argument, observed by that
    * branch's diff enumeration. Empty when no branch was requested. The
    * incremental merge captures the committed target branch here to use as the
    * plan-time baseline for its commit-time lost-update guard.
    */
   targetNodeVersions: ReadonlyMap<MergeKey, number>;
+  /**
+   * `(kind, id) -> edge content signature` for the edges of the same captured
+   * branch. The edge-half analogue of {@link targetNodeVersions} (edges carry no
+   * version, so the guard fingerprints their content). Empty when no branch was
+   * requested.
+   */
+  targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
 }>;
 
 /**
@@ -181,7 +188,7 @@ function groupByKind<
 export async function stageBranches<G extends GraphDef>(
   baseStore: Store<G>,
   branches: readonly GraphBranch<G>[],
-  captureNodeVersionsFor?: BranchId,
+  captureTargetStateFor?: BranchId,
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
   const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
@@ -193,11 +200,13 @@ export async function stageBranches<G extends GraphDef>(
   const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
 
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
+  let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
   for (const branch of branches) {
     const diff = await diffAgainstBase(baseStore, branch.store);
     const branchId = branch.id;
-    if (branchId === captureNodeVersionsFor) {
+    if (branchId === captureTargetStateFor) {
       targetNodeVersions = diff.forkNodeVersions;
+      targetEdgeSignatures = diff.forkEdgeSignatures;
     }
 
     for (const node of diff.nodes.new) {
@@ -236,5 +245,6 @@ export async function stageBranches<G extends GraphDef>(
       compareByKindIdBranch(left, right),
     ),
     targetNodeVersions,
+    targetEdgeSignatures,
   };
 }
