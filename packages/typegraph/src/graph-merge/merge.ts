@@ -1528,8 +1528,15 @@ async function resolveMerge<G extends GraphDef>(
   }
 
   try {
-    // (2) stage the provenance-tagged union of every branch's diff.
-    const staging = await stageBranches(store, branches);
+    // (2) stage the provenance-tagged union of every branch's diff. For the
+    // incremental path, capture the committed target branch's node versions from
+    // its diff enumeration — the plan-time baseline for the commit-time
+    // lost-update guard (assertInheritedTargetUnchanged).
+    const staging = await stageBranches(
+      store,
+      branches,
+      incremental?.targetBranchId,
+    );
 
     // Capture the stable branch order ONCE (never wall-clock).
     const preferredBranchId = incremental?.targetBranchId;
@@ -1615,6 +1622,7 @@ async function resolveMerge<G extends GraphDef>(
           plannedBaseMatchKeys: new Set(
             candidates.data.baseMembers.map((member) => mergeKeyOf(member)),
           ),
+          targetNodeVersions: staging.targetNodeVersions,
         });
 
     // (10) assemble the report. The full provenance records are always built in the
@@ -2269,6 +2277,14 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
   options: NormalizedMergeOptions<G>;
   introspectionKinds: ReadonlyMap<string, readonly UniqueIntrospection[]>;
   plannedBaseMatchKeys: ReadonlySet<MergeKey>;
+  /**
+   * `(kind, id) -> version` for every committed target node observed while
+   * planning (the target-branch diff enumeration). The commit-time guard
+   * re-reads the rows the plan writes and refuses if any inherited row's version
+   * advanced in the plan→commit window — a concurrent write the stale plan would
+   * otherwise overwrite (lost update).
+   */
+  targetNodeVersions: ReadonlyMap<MergeKey, number>;
 }>;
 
 /**
@@ -2375,6 +2391,67 @@ async function assertBaseResolutionStable<G extends GraphDef>(
 }
 
 /**
+ * The inherited-target-row half of the incremental TOCTOU guard. The plan folds
+ * the live target in as a preferred branch and resolves inherited modifications
+ * against the target rows it enumerated OUTSIDE this transaction. If a committed
+ * row the plan overwrites was modified in the plan→commit window, applying the
+ * plan would discard that write (a silent lost update) — the per-row write
+ * guards only check resurrection / lossy strips, not that the row still holds
+ * the value the plan merged from.
+ *
+ * For every planned node write whose id was an observed target row, this
+ * re-reads the current committed version through the tx snapshot and refuses the
+ * plan if it advanced (or the row vanished). SERIALIZABLE + retry then re-plans
+ * against the now-committed value, exactly as the snapshot path's
+ * {@link assertTargetUnchanged} does for full-graph drift.
+ */
+async function assertInheritedTargetUnchanged<G extends GraphDef>(
+  nodesApi: TxNodes,
+  guard: IncrementalCommitGuard<G>,
+  plan: MergePlan<G>,
+): Promise<void> {
+  const { targetNodeVersions } = guard;
+  if (targetNodeVersions.size === 0) {
+    return;
+  }
+  const idsByKind = new Map<string, AnyNodeId[]>();
+  for (const write of plannedNodeWrites(plan)) {
+    if (!targetNodeVersions.has(write.identity)) {
+      continue; // not a committed target row observed at plan time
+    }
+    const bucket = idsByKind.get(write.kind) ?? [];
+    bucket.push(write.id);
+    idsByKind.set(write.kind, bucket);
+  }
+  for (const [kind, ids] of idsByKind) {
+    const rows = await nodeCollection(nodesApi, kind).getByIds(
+      ids,
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, id] of ids.entries()) {
+      const expected = targetNodeVersions.get(mergeKey(kind, id))!;
+      const current = rows[index];
+      if (current?.meta.version === expected) {
+        continue;
+      }
+      throw new BaseVersionMismatchError(
+        `mergeIncremental() observed committed node "${id}" (kind "${kind}") at version ${expected} while planning, but it changed before the commit transaction; the resolved plan no longer describes the live target and was not applied.`,
+        {
+          details: {
+            id,
+            kind,
+            expectedVersion: expected,
+            currentVersion: current?.meta.version,
+          },
+          suggestion:
+            "Re-run mergeIncremental(); the re-planned merge resolves the inherited modifications against the now-committed rows.",
+        },
+      );
+    }
+  }
+}
+
+/**
  * The full incremental commit path (§6.6). The planner has already folded the live
  * target in as a preferred synthetic branch, so this path preflights destructive
  * row hazards inside the target transaction and then applies the normal merge plan.
@@ -2404,6 +2481,9 @@ async function commitIncrementalPlan<G extends GraphDef>(
       // plan if a matching committed row appeared in the window. `tx` exposes
       // the same `.nodes` collection record a `BaseLookupStore` needs.
       await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
+      // Inherited-row TOCTOU guard: refuse if a committed row the plan
+      // overwrites changed since it was observed at plan time (lost update).
+      await assertInheritedTargetUnchanged(nodesApi, guard, plan);
       await validateIncrementalNodeWrites(target, nodesApi, plan);
       await validateIncrementalEdgeWrites(target, edgesApi, plan);
       return applyMergePlan(plan, nodesApi, edgesApi);

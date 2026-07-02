@@ -27,7 +27,7 @@
  *   than one branch, so the ordering is total and stable.
  */
 
-import { compareStrings } from "./node-key";
+import { compareStrings, type MergeKey } from "./node-key";
 import type {
   ChangedEdge,
   ChangedNode,
@@ -96,6 +96,14 @@ export type StagingSet = Readonly<{
   modifiedEdges: readonly StagedModifiedEdge[];
   /** Deleted inherited edges (one entry per (id, branch) deletion). */
   deletedEdges: readonly StagedDeletedEdge[];
+  /**
+   * `(kind, id) -> version` for the nodes of the branch named by
+   * `stageBranches`' `captureNodeVersionsFor` argument, observed by that
+   * branch's diff enumeration. Empty when no branch was requested. The
+   * incremental merge captures the committed target branch here to use as the
+   * plan-time baseline for its commit-time lost-update guard.
+   */
+  targetNodeVersions: ReadonlyMap<MergeKey, number>;
 }>;
 
 /**
@@ -173,6 +181,7 @@ function groupByKind<
 export async function stageBranches<G extends GraphDef>(
   baseStore: Store<G>,
   branches: readonly GraphBranch<G>[],
+  captureNodeVersionsFor?: BranchId,
 ): Promise<StagingSet> {
   const newNodes: (StagedNewNode & { kind: string; id: string })[] = [];
   const modifiedNodes: (StagedModifiedNode & { kind: string; id: string })[] =
@@ -183,9 +192,13 @@ export async function stageBranches<G extends GraphDef>(
     [];
   const deletedEdges: (StagedDeletedEdge & { kind: string; id: string })[] = [];
 
+  let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   for (const branch of branches) {
     const diff = await diffAgainstBase(baseStore, branch.store);
     const branchId = branch.id;
+    if (branchId === captureNodeVersionsFor) {
+      targetNodeVersions = diff.forkNodeVersions;
+    }
 
     for (const node of diff.nodes.new) {
       newNodes.push({ branchId, node, kind: node.kind, id: node.id });
@@ -222,5 +235,6 @@ export async function stageBranches<G extends GraphDef>(
     deletedEdges: [...deletedEdges].sort((left, right) =>
       compareByKindIdBranch(left, right),
     ),
+    targetNodeVersions,
   };
 }

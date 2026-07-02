@@ -26,6 +26,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
+import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
 import { mergeIncremental } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
@@ -276,6 +277,103 @@ describe.each(backendMatrix())(
       }
       const [patient] = await target.nodes.Patient.find();
       expect(patient?.name).toBe("Anna R.");
+    });
+
+    it("REFUSES the commit when an inherited row the plan overwrites changed in the window", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const [base] = await forkPoint.nodes.Patient.bulkCreate([
+        { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
+      ]);
+      const provider = await forkOf(forkPoint);
+      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      const target = await emptyStore();
+      await target.nodes.Patient.bulkCreate([
+        { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
+      ]);
+
+      // Concurrent write to the SAME inherited row inside the plan→commit
+      // window: it bumps the committed version, so the plan's merged value is
+      // stale. `injected` flips before the write so the transaction the write
+      // itself opens does not re-enter the injection.
+      const original = target.transaction.bind(target);
+      let injected = false;
+      (target as { transaction: unknown }).transaction = async (
+        fn: unknown,
+        opts: unknown,
+      ) => {
+        if (!injected) {
+          injected = true;
+          await target.nodes.Patient.update(base!.id, {
+            name: "Concurrent Edit",
+          });
+        }
+        return (original as (f: unknown, o: unknown) => unknown)(fn, opts);
+      };
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+      }
+
+      // The stale plan applied nothing; the concurrent edit survives (no lost
+      // update). Before this guard, the plan silently overwrote it with "Anna R.".
+      (target as { transaction: unknown }).transaction = original;
+      const [patient] = await target.nodes.Patient.find();
+      expect(patient?.name).toBe("Concurrent Edit");
+    });
+
+    it("TOLERATES a window write to an UNRELATED row the plan does not touch", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const [base] = await forkPoint.nodes.Patient.bulkCreate([
+        { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
+      ]);
+      const provider = await forkOf(forkPoint);
+      await provider.store.nodes.Patient.update(base!.id, { name: "Anna R." });
+      const target = await emptyStore();
+      await target.nodes.Patient.bulkCreate([
+        { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
+      ]);
+
+      // A window write that inserts a DIFFERENT patient the plan never observed
+      // or writes — incremental merge is defined against an advancing target, so
+      // this must commit cleanly.
+      const original = target.transaction.bind(target);
+      let injected = false;
+      (target as { transaction: unknown }).transaction = async (
+        fn: unknown,
+        opts: unknown,
+      ) => {
+        if (!injected) {
+          injected = true;
+          await target.nodes.Patient.bulkCreate([
+            { id: "unrelated-1", props: { name: "Someone Else", mrn: "MRN-2" } },
+          ]);
+        }
+        return (original as (f: unknown, o: unknown) => unknown)(fn, opts);
+      };
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isOk(result)).toBe(true);
+      (target as { transaction: unknown }).transaction = original;
+      const ana = (await target.nodes.Patient.find()).find(
+        (patient) => patient.id === base!.id,
+      );
+      expect(ana?.name).toBe("Anna R.");
     });
 
     it("APPLIES an inherited node deletion when the target is unchanged", async () => {

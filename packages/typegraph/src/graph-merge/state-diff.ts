@@ -25,7 +25,7 @@
  */
 
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
-import { compareStrings } from "./node-key";
+import { compareStrings, type MergeKey,mergeKey } from "./node-key";
 import type {
   EdgeId,
   GraphBackend,
@@ -152,6 +152,14 @@ export type StateDiff = Readonly<{
     modified: readonly ModifiedEdge[];
     deleted: readonly DeletedEdge[];
   }>;
+  /**
+   * `(kind, id) -> version` for every fork-store node observed during this diff
+   * (live and soft-deleted). Captured from the same enumeration the diff reads,
+   * so it is the fork's exact observed state — the incremental merge uses the
+   * target branch's map as the plan-time baseline for its commit-time
+   * lost-update guard (see assertInheritedTargetUnchanged in merge.ts).
+   */
+  forkNodeVersions: ReadonlyMap<MergeKey, number>;
 }>;
 
 /**
@@ -395,6 +403,9 @@ export async function diffAgainstBase<G extends GraphDef>(
   const newNodes: ChangedNode[] = [];
   const modifiedNodes: ModifiedNode[] = [];
   const deletedNodes: DeletedNode[] = [];
+  // Version snapshot of the fork store as observed by THIS diff's enumeration
+  // (the same read the plan resolves against), keyed by merge identity.
+  const forkNodeVersions = new Map<MergeKey, number>();
 
   for (const kind of nodeKinds) {
     const baseRows = await enumerateAllNodes(
@@ -407,6 +418,9 @@ export async function diffAgainstBase<G extends GraphDef>(
       forkStore.graphId,
       kind,
     );
+    for (const row of forkRows) {
+      forkNodeVersions.set(mergeKey(kind, row.id), row.version);
+    }
     const delta = diffNodeKind(kind, baseRows, forkRows);
     for (const entry of delta.new) {
       newNodes.push(entry);
@@ -457,5 +471,6 @@ export async function diffAgainstBase<G extends GraphDef>(
       modified: modifiedEdges.sort((left, right) => byId(left, right)),
       deleted: deletedEdges.sort((left, right) => byId(left, right)),
     },
+    forkNodeVersions,
   };
 }
