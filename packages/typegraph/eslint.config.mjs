@@ -10,6 +10,35 @@ const DIALECT_SEAM_MESSAGE =
   "(src/backend) may branch on dialect for DDL/migration; the query compiler " +
   "must not.";
 
+const LOCALE_API_MESSAGE =
+  "Locale-dependent APIs (localeCompare / toLocale* / Intl) vary with the " +
+  "host's ICU configuration, so two processes can order or format the same " +
+  "values differently — turning 'sorted' lock-acquisition sequences into " +
+  "cross-process deadlocks and making result ordering flap between " +
+  "environments. Use compareStrings from src/utils/compare (or toSorted() " +
+  "with no comparator) for deterministic code-unit ordering.";
+
+// Determinism guardrail for the whole library source. NOTE: flat-config rule
+// entries REPLACE, not merge — any later block that sets no-restricted-syntax
+// for a subset of src must spread these selectors back in (see the query
+// compiler block below).
+const DETERMINISM_RESTRICTIONS = [
+  {
+    selector:
+      'CallExpression > MemberExpression.callee[property.name="localeCompare"]',
+    message: LOCALE_API_MESSAGE,
+  },
+  {
+    selector:
+      "CallExpression > MemberExpression.callee[property.name=/^toLocale/]",
+    message: LOCALE_API_MESSAGE,
+  },
+  {
+    selector: 'MemberExpression[object.name="Intl"]',
+    message: LOCALE_API_MESSAGE,
+  },
+];
+
 export default [
   ...createLibraryConfig(import.meta.dirname, {
     ignores: [
@@ -69,15 +98,27 @@ export default [
     },
   },
 
+  // Determinism guardrail: no locale-dependent APIs anywhere in the library
+  // source.
+  {
+    files: ["src/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", ...DETERMINISM_RESTRICTIONS],
+    },
+  },
+
   // Backend parity guardrail. The query compiler is a single shared path; the
   // only sanctioned place for a dialect difference is a DialectAdapter member.
   // Inline `=== "sqlite"` / `case "postgres"` branching reintroduces the
   // parallel-path failure mode that hid the set-operation gap, so ban it here.
+  // (Spreads DETERMINISM_RESTRICTIONS back in: this block REPLACES the src/**
+  // no-restricted-syntax entry for query-compiler files.)
   {
     files: ["src/query/**/*.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",
+        ...DETERMINISM_RESTRICTIONS,
         {
           selector:
             "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
