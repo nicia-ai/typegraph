@@ -580,23 +580,19 @@ export function createNodeCollection<
       props: z.input<N["schema"]>,
       options?: NodeGetOrCreateByConstraintOptions,
     ): Promise<NodeGetOrCreateByConstraintResult<N>> {
-      const execute = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<NodeGetOrCreateByConstraintResult<N>> => {
-        const result = await executeGetOrCreateByConstraint(
-          kind,
-          constraintName,
-          props,
-          target,
-          options,
-        );
-        return result as NodeGetOrCreateByConstraintResult<N>;
-      };
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) => execute(txBackend));
-      }
-      return execute(backend);
+      // No enclosing transaction: the found path is a pure read and must not
+      // pay for one, and each write leg (create / upsert) opens its own
+      // hooked transaction — nesting them here would fire their hooks before
+      // this wrapper's COMMIT. Race convergence lives in
+      // executeGetOrCreateByConstraint (re-probe on a create collision).
+      const result = await executeGetOrCreateByConstraint(
+        kind,
+        constraintName,
+        props,
+        backend,
+        options,
+      );
+      return result as NodeGetOrCreateByConstraintResult<N>;
     },
 
     async bulkGetOrCreateByConstraint(

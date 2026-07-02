@@ -103,8 +103,11 @@ without being valid premise endpoints.
 ## Retraction
 
 `retract(source)` sets the source flag, recomputes support from the current
-provenance graph, and makes unsupported facts non-current without deleting
-provenance edges.
+provenance graph, and makes unsupported facts non-current. A transition only
+touches facts reachable from the flipped sources, and closing a fact is a
+belief-status change, not a domain delete: none of the fact's edges are
+deleted (its `onDelete` behavior is not enforced), so `unRetract` restores the
+fact exactly as it was.
 
 ```typescript
 const before = await store.recordedNow();

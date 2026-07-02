@@ -7,6 +7,7 @@ import {
   createBackendOverlay,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
+  type GraphReadBackend,
   type InsertEdgeParams,
   type TransactionBackend,
 } from "../../backend/types";
@@ -46,7 +47,10 @@ import {
   type IfExistsMode,
   type OperationHookContext,
 } from "../types";
-import { runInWriteTransaction } from "./write-transaction";
+import {
+  runHookedWriteOperation,
+  runInWriteTransaction,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -399,29 +403,22 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
 
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, async (target) => {
-      const prepared = await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        id,
-        target,
+  return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
+    const prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target);
+
+    let row: BackendEdgeRow | undefined;
+    if (shouldReturnRow) {
+      row = await target.insertEdge(prepared.insertParams);
+    } else {
+      await runInsertNoReturn(
+        edgeInsertDispatch(target),
+        prepared.insertParams,
       );
+    }
 
-      let row: BackendEdgeRow | undefined;
-      if (shouldReturnRow) {
-        row = await target.insertEdge(prepared.insertParams);
-      } else {
-        await runInsertNoReturn(
-          edgeInsertDispatch(target),
-          prepared.insertParams,
-        );
-      }
-
-      if (row === undefined) return;
-      return rowToEdge(row);
-    }),
-  );
+    if (row === undefined) return;
+    return rowToEdge(row);
+  });
 }
 
 /**
@@ -562,62 +559,60 @@ export async function executeEdgeUpdate<G extends GraphDef>(
 ): Promise<Edge> {
   const id = input.id;
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    // Get existing edge first to get the kind for the hook context
+  // Read outside the transaction: the hook context needs the edge kind, and
+  // hooks must WRAP the transaction (matching node operations and edge
+  // create) so onOperationEnd reports success only after COMMIT — a hook
+  // that fires inside the transaction would report success for a write that
+  // a failed commit then rolls back. An absent edge also never opens an empty
+  // transaction. The body re-reads inside the transaction, so a concurrent
+  // delete between this gate and the write lock is still handled correctly.
+  const gate = await backend.getEdge(ctx.graphId, id);
+  if (!gate || gate.deleted_at) {
+    throw new EdgeNotFoundError("unknown", id);
+  }
+
+  const opContext = ctx.createOperationContext("update", "edge", gate.kind, id);
+
+  return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
     const existing = await target.getEdge(ctx.graphId, id);
     if (!existing || existing.deleted_at) {
       throw new EdgeNotFoundError("unknown", id);
     }
 
-    const opContext = ctx.createOperationContext(
-      "update",
-      "edge",
-      existing.kind,
+    // Get registration for schema validation
+    const registration = getEdgeRegistration(ctx.graph, existing.kind);
+    const edgeKind = registration.type;
+
+    // Merge props
+    const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
+    const mergedProps = { ...existingProps, ...input.props };
+
+    // Validate merged props with full context
+    const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
+      kind: existing.kind,
+      operation: "update",
       id,
-    );
-
-    return ctx.withOperationHooks(opContext, async () => {
-      // Get registration for schema validation
-      const registration = getEdgeRegistration(ctx.graph, existing.kind);
-      const edgeKind = registration.type;
-
-      // Merge props
-      const existingProps = JSON.parse(existing.props) as Record<
-        string,
-        unknown
-      >;
-      const mergedProps = { ...existingProps, ...input.props };
-
-      // Validate merged props with full context
-      const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
-        kind: existing.kind,
-        operation: "update",
-        id,
-      });
-
-      // Validate temporal fields
-      const validTo = validateOptionalCanonicalIsoDate(
-        input.validTo,
-        "validTo",
-      );
-
-      // Update edge - conditionally include optional fields
-      const updateParams: {
-        graphId: string;
-        id: string;
-        props: Record<string, unknown>;
-        validTo?: string;
-      } = {
-        graphId: ctx.graphId,
-        id,
-        props: validatedProps,
-      };
-      if (validTo !== undefined) updateParams.validTo = validTo;
-
-      const row = await target.updateEdge(updateParams);
-
-      return rowToEdge(row);
     });
+
+    // Validate temporal fields
+    const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+
+    // Update edge - conditionally include optional fields
+    const updateParams: {
+      graphId: string;
+      id: string;
+      props: Record<string, unknown>;
+      validTo?: string;
+    } = {
+      graphId: ctx.graphId,
+      id,
+      props: validatedProps,
+    };
+    if (validTo !== undefined) updateParams.validTo = validTo;
+
+    const row = await target.updateEdge(updateParams);
+
+    return rowToEdge(row);
   });
 }
 
@@ -686,30 +681,24 @@ export async function executeEdgeDelete<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
   // Gate outside the transaction so an absent/tombstoned edge never opens an
-  // empty one (costly on libsql, where a transaction opens a fresh connection).
+  // empty one; the gate row also supplies the kind for the hook context,
+  // because hooks must WRAP the transaction (matching node operations and
+  // edge create) so onOperationEnd reports success only after COMMIT.
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate || gate.deleted_at) return;
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    // Get edge first to know the kind for the hook context
+  const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
+
+  return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
     const existing = await target.getEdge(ctx.graphId, id);
     if (!existing || existing.deleted_at) {
       // Already deleted - nothing to do
       return;
     }
 
-    const opContext = ctx.createOperationContext(
-      "delete",
-      "edge",
-      existing.kind,
+    await target.deleteEdge({
+      graphId: ctx.graphId,
       id,
-    );
-
-    return ctx.withOperationHooks(opContext, async () => {
-      await target.deleteEdge({
-        graphId: ctx.graphId,
-        id,
-      });
     });
   });
 }
@@ -724,31 +713,23 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
-  // Gate outside the transaction so an absent edge never opens an empty one
-  // (see executeEdgeDelete).
+  // Gate outside the transaction so an absent edge never opens an empty one;
+  // hooks wrap the transaction (see executeEdgeDelete).
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate) return;
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    // Get edge first to know the kind for the hook context
+  const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
+
+  return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
     const existing = await target.getEdge(ctx.graphId, id);
     if (!existing) {
       // Doesn't exist - nothing to do
       return;
     }
 
-    const opContext = ctx.createOperationContext(
-      "delete",
-      "edge",
-      existing.kind,
+    await target.hardDeleteEdge({
+      graphId: ctx.graphId,
       id,
-    );
-
-    return ctx.withOperationHooks(opContext, async () => {
-      await target.hardDeleteEdge({
-        graphId: ctx.graphId,
-        id,
-      });
     });
   });
 }
@@ -913,7 +894,7 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
   fromId: string,
   toKind: string,
   toId: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: GraphReadBackend,
   options?: Readonly<{
     matchOn?: readonly string[];
     props?: Record<string, unknown>;
@@ -971,22 +952,48 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     ifExists?: IfExistsMode;
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    const ifExists = options?.ifExists ?? "return";
-    const matchOn = options?.matchOn ?? [];
+  const ifExists = options?.ifExists ?? "return";
+  const matchOn = options?.matchOn ?? [];
 
-    const registration = getEdgeRegistration(ctx.graph, kind);
-    const edgeKind = registration.type;
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  const edgeKind = registration.type;
 
-    // Validate props
-    const validatedProps = validateEdgeProps(edgeKind.schema, props, {
+  // Validate props
+  const validatedProps = validateEdgeProps(edgeKind.schema, props, {
+    kind,
+    operation: "create",
+  });
+
+  // Validate matchOn fields
+  validateMatchOnFields(edgeKind.schema, matchOn, kind);
+
+  // Probe outside the transaction: with ifExists "return", the common found
+  // path performs no write, so it must not pay for a write transaction
+  // (BEGIN IMMEDIATE on SQLite, the per-graph advisory lock under history).
+  // The transactional body re-queries, so a concurrent create between this
+  // probe and the write lock is still handled correctly.
+  if (ifExists === "return") {
+    const probeRows = await backend.findEdgesByKind({
+      graphId: ctx.graphId,
       kind,
-      operation: "create",
+      fromKind,
+      fromId,
+      toKind,
+      toId,
+      excludeDeleted: false,
+      temporalMode: "includeTombstones",
     });
+    const { liveRow: probedLiveRow } = findMatchingEdge(
+      probeRows,
+      matchOn,
+      validatedProps,
+    );
+    if (probedLiveRow !== undefined) {
+      return { edge: rowToEdge(probedLiveRow), action: "found" };
+    }
+  }
 
-    // Validate matchOn fields
-    validateMatchOnFields(edgeKind.schema, matchOn, kind);
-
+  return runInWriteTransaction(ctx, backend, async (target) => {
     // Query all edges of this kind between (from, to) including tombstones
     const candidateRows = await target.findEdgesByKind({
       graphId: ctx.graphId,
@@ -1087,80 +1094,84 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]> {
   if (items.length === 0) return [];
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    const ifExists = options?.ifExists ?? "return";
-    const matchOn = options?.matchOn ?? [];
+  const ifExists = options?.ifExists ?? "return";
+  const matchOn = options?.matchOn ?? [];
 
-    const registration = getEdgeRegistration(ctx.graph, kind);
-    const edgeKind = registration.type;
-    const cardinality = registration.cardinality ?? "many";
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  const edgeKind = registration.type;
+  const cardinality = registration.cardinality ?? "many";
 
-    // Validate matchOn fields once
-    validateMatchOnFields(edgeKind.schema, matchOn, kind);
+  // Validate matchOn fields once
+  validateMatchOnFields(edgeKind.schema, matchOn, kind);
 
-    // Step 1: Validate all props and compute composite keys
-    const validated: {
-      fromKind: string;
-      fromId: string;
-      toKind: string;
-      toId: string;
-      validatedProps: Record<string, unknown>;
-      compositeKey: string;
-      endpointKey: string;
-    }[] = [];
+  // Step 1: Validate all props and compute composite keys
+  const validated: {
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    validatedProps: Record<string, unknown>;
+    compositeKey: string;
+    endpointKey: string;
+  }[] = [];
 
-    for (const item of items) {
-      const validatedProps = validateEdgeProps(edgeKind.schema, item.props, {
-        kind,
-        operation: "create",
-      });
+  for (const item of items) {
+    const validatedProps = validateEdgeProps(edgeKind.schema, item.props, {
+      kind,
+      operation: "create",
+    });
 
-      const compositeKey = buildEdgeCompositeKey(
-        item.fromKind,
-        item.fromId,
-        item.toKind,
-        item.toId,
-        validatedProps,
-        matchOn,
-      );
-      const endpointKey = buildEndpointPairKey(
-        item.fromKind,
-        item.fromId,
-        item.toKind,
-        item.toId,
-      );
+    const compositeKey = buildEdgeCompositeKey(
+      item.fromKind,
+      item.fromId,
+      item.toKind,
+      item.toId,
+      validatedProps,
+      matchOn,
+    );
+    const endpointKey = buildEndpointPairKey(
+      item.fromKind,
+      item.fromId,
+      item.toKind,
+      item.toId,
+    );
 
-      validated.push({
-        fromKind: item.fromKind,
-        fromId: item.fromId,
-        toKind: item.toKind,
-        toId: item.toId,
-        validatedProps,
-        compositeKey,
-        endpointKey,
+    validated.push({
+      fromKind: item.fromKind,
+      fromId: item.fromId,
+      toKind: item.toKind,
+      toId: item.toId,
+      validatedProps,
+      compositeKey,
+      endpointKey,
+    });
+  }
+
+  // Step 2: Group by unique endpoint pair
+  const uniqueEndpoints = new Map<
+    string,
+    { fromKind: string; fromId: string; toKind: string; toId: string }
+  >();
+  for (const entry of validated) {
+    if (!uniqueEndpoints.has(entry.endpointKey)) {
+      uniqueEndpoints.set(entry.endpointKey, {
+        fromKind: entry.fromKind,
+        fromId: entry.fromId,
+        toKind: entry.toKind,
+        toId: entry.toId,
       });
     }
+  }
 
-    // Step 2: Group by unique endpoint pair and query edges
-    const uniqueEndpoints = new Map<
-      string,
-      { fromKind: string; fromId: string; toKind: string; toId: string }
-    >();
-    for (const entry of validated) {
-      if (!uniqueEndpoints.has(entry.endpointKey)) {
-        uniqueEndpoints.set(entry.endpointKey, {
-          fromKind: entry.fromKind,
-          fromId: entry.fromId,
-          toKind: entry.toKind,
-          toId: entry.toId,
-        });
-      }
-    }
-
-    // Fetch all candidate rows, grouped by endpoint pair
+  // Fetch all candidate rows, grouped by endpoint pair. Shared by the
+  // outside-transaction probe (reading the root backend) and the
+  // transactional body (re-reading through the transaction target).
+  async function fetchRowsByEndpoint(
+    reader: GraphReadBackend,
+  ): Promise<ReadonlyMap<string, readonly BackendEdgeRow[]>> {
     const rowsByEndpoint = new Map<string, readonly BackendEdgeRow[]>();
     for (const [endpointKey, endpoint] of uniqueEndpoints) {
-      const rows = await target.findEdgesByKind({
+      const rows = await reader.findEdgesByKind({
         graphId: ctx.graphId,
         kind,
         fromKind: endpoint.fromKind,
@@ -1172,26 +1183,43 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       });
       rowsByEndpoint.set(endpointKey, rows);
     }
+    return rowsByEndpoint;
+  }
 
-    // Step 3: Partition into toCreate, toFetch, and duplicates
-    interface CreateEntry {
-      index: number;
-      input: CreateEdgeInput;
-    }
-    interface FetchEntry {
-      index: number;
-      row: BackendEdgeRow;
-      isDeleted: boolean;
-      validatedProps: Record<string, unknown>;
-      fromKind: string;
-      fromId: string;
-      toKind: string;
-      toId: string;
-    }
+  interface CreateEntry {
+    index: number;
+    input: CreateEdgeInput;
+  }
+  interface FetchEntry {
+    index: number;
+    row: BackendEdgeRow;
+    isDeleted: boolean;
+    validatedProps: Record<string, unknown>;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+  }
+  interface DuplicateEntry {
+    index: number;
+    sourceIndex: number;
+  }
+  interface Result {
+    readonly edge: Edge;
+    readonly action: GetOrCreateAction;
+  }
 
+  // Step 3: Partition into toCreate, toFetch, and duplicates
+  function partitionEntries(
+    rowsByEndpoint: ReadonlyMap<string, readonly BackendEdgeRow[]>,
+  ): Readonly<{
+    toCreate: CreateEntry[];
+    toFetch: FetchEntry[];
+    duplicateOf: DuplicateEntry[];
+  }> {
     const toCreate: CreateEntry[] = [];
     const toFetch: FetchEntry[] = [];
-    const duplicateOf: { index: number; sourceIndex: number }[] = [];
+    const duplicateOf: DuplicateEntry[] = [];
     const seenKeys = new Map<string, number>();
 
     for (const [index, entry] of validated.entries()) {
@@ -1241,10 +1269,36 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       }
     }
 
-    interface Result {
-      readonly edge: Edge;
-      readonly action: GetOrCreateAction;
+    return { toCreate, toFetch, duplicateOf };
+  }
+
+  // Probe outside the transaction: with ifExists "return" and every entry
+  // matching a live edge, the whole call performs no write, so it must not
+  // pay for a write transaction (BEGIN IMMEDIATE on SQLite, the per-graph
+  // advisory lock under history). The transactional body re-queries, so a
+  // concurrent write between this probe and the write lock is still handled
+  // correctly.
+  if (ifExists === "return") {
+    const probe = partitionEntries(await fetchRowsByEndpoint(backend));
+    const allFoundLive =
+      probe.toCreate.length === 0 &&
+      probe.toFetch.every((entry) => !entry.isDeleted);
+    if (allFoundLive) {
+      const found: Result[] = Array.from({ length: items.length });
+      for (const entry of probe.toFetch) {
+        found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+      }
+      for (const { index, sourceIndex } of probe.duplicateOf) {
+        found[index] = { edge: found[sourceIndex]!.edge, action: "found" };
+      }
+      return found;
     }
+  }
+
+  return runInWriteTransaction(ctx, backend, async (target) => {
+    const { toCreate, toFetch, duplicateOf } = partitionEntries(
+      await fetchRowsByEndpoint(target),
+    );
     const results: Result[] = Array.from({ length: items.length });
 
     // Step 4: Execute creates in batch

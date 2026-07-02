@@ -8,7 +8,8 @@
  * delete-behavior enforcement over connected edges. These steps are shared by
  * the canonical collection operations (create / update / delete) and by
  * provenance retraction, which drives the same close/reopen of a fact node's
- * currency but must treat its own justification edges as non-structural.
+ * currency but skips delete-behavior enforcement so every connected edge
+ * survives for a later reopen.
  *
  * The steps assume they run inside a write transaction (see
  * {@link runInWriteTransaction}); they perform no transaction management of
@@ -17,9 +18,10 @@
 import { type z } from "zod";
 
 import {
-  type EdgeRow,
   type GraphBackend,
+  type LiveNodeRow,
   type NodeRow,
+  type TombstonedNodeRow,
   type TransactionBackend,
 } from "../../backend/types";
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
@@ -27,6 +29,7 @@ import { RestrictedDeleteError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { deleteNodeEmbeddings, syncEmbeddings } from "../embedding-sync";
 import { deleteNodeFulltext, syncFulltext } from "../fulltext-sync";
+import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   checkUniquenessConstraints,
   deleteUniquenessEntries,
@@ -36,27 +39,34 @@ import {
 
 type Backend = GraphBackend | TransactionBackend;
 
-/** The graph-scoped state the node write steps need. */
+/**
+ * The graph-scoped state the node write steps need. `lock` is compile-time
+ * evidence that the per-graph write-lock discipline was satisfied BEFORE any
+ * row work (see {@link GraphWriteLock}): the pipeline performs no locking of
+ * its own, so requiring the token here makes "sidecar write before lock" a
+ * type error at the call site instead of a lock-order inversion in review.
+ */
 export type NodeWriteContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
+  lock: GraphWriteLock;
 }>;
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
 type NodeDeleteMode = "soft" | "hard";
 
 /**
- * Tunes which connected edges delete-behavior enforcement considers.
+ * Tunes how a delete treats the node's connected edges.
  *
- * By default every connected edge is structural — it blocks a `restrict` node
- * and is removed under `cascade` / `disconnect`. Provenance retraction supplies
- * {@link NodeDeletePolicy.isNonStructuralEdge} to exclude its own
- * `derives` / `premiseOf` edges, so closing a fact's currency neither trips
- * `restrict` on those edges nor deletes them (they must survive for a later
- * reopen).
+ * By default delete behavior is enforced: connected edges block a `restrict`
+ * node and are removed under `cascade` / `disconnect`. Provenance retraction
+ * passes `enforceDeleteBehavior: false` — closing a fact's currency is a
+ * belief-status change, not a domain delete, so its edges neither block the
+ * close nor get removed; they survive untouched so a later reopen is an exact
+ * inverse.
  */
 export type NodeDeletePolicy = Readonly<{
-  isNonStructuralEdge?: (edge: EdgeRow) => boolean;
+  enforceDeleteBehavior: boolean;
 }>;
 
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
@@ -78,10 +88,10 @@ function nodeSyncContext(
 }
 
 /**
- * Enforces a node's delete behavior against its connected edges. Structural
- * edges (per {@link NodeDeletePolicy}) either block the delete (`restrict`) or
- * are removed alongside the node (`cascade` / `disconnect`); non-structural
- * edges are left untouched.
+ * Enforces a node's delete behavior against its connected edges: they block
+ * the delete (`restrict`) or are removed alongside the node (`cascade` /
+ * `disconnect`). Skipped entirely when the caller's {@link NodeDeletePolicy}
+ * disables enforcement.
  */
 async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
@@ -94,26 +104,23 @@ async function enforceNodeDeleteBehavior(
   backend: Backend,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
+  if (policy?.enforceDeleteBehavior === false) return;
   const behavior = args.onDelete ?? "restrict";
   const connectedEdges = await backend.findEdgesConnectedTo({
     graphId: ctx.graphId,
     nodeKind: args.kind,
     nodeId: args.id,
   });
-  const structuralEdges =
-    policy?.isNonStructuralEdge === undefined ?
-      connectedEdges
-    : connectedEdges.filter((edge) => !policy.isNonStructuralEdge!(edge));
 
-  if (structuralEdges.length === 0) return;
+  if (connectedEdges.length === 0) return;
 
   switch (behavior) {
     case "restrict": {
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
-        edgeCount: structuralEdges.length,
-        edgeKinds: [...new Set(structuralEdges.map((edge) => edge.kind))],
+        edgeCount: connectedEdges.length,
+        edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
       });
     }
 
@@ -123,7 +130,7 @@ async function enforceNodeDeleteBehavior(
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
       // without both endpoints.
-      for (const edge of structuralEdges) {
+      for (const edge of connectedEdges) {
         await (args.mode === "hard" ?
           backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
         : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
@@ -168,32 +175,70 @@ export async function applyNodeInsertSideEffects(
   );
 }
 
+function parseRowProps(row: NodeRow): Record<string, unknown> {
+  return JSON.parse(row.props) as Record<string, unknown>;
+}
+
 /**
- * Applies a node update: diff-based uniqueness maintenance, the core row
- * update, then embedding and fulltext sync. Returns the updated row.
+ * The row a node update targets. A plain update runs live-row side effects
+ * (uniqueness diff, embedding/fulltext sync), so it must be handed a
+ * {@link LiveNodeRow}; only an explicit `clearDeleted: true` resurrecting
+ * upsert may target a possibly-tombstoned row. Encoding the pairing as a
+ * union makes "live-row update pipeline on a tombstoned row" a type error.
+ */
+export type NodeUpdateTarget =
+  | Readonly<{ existing: LiveNodeRow; clearDeleted?: false }>
+  | Readonly<{ existing: NodeRow; clearDeleted: true }>;
+
+/**
+ * Applies a node update: uniqueness maintenance (diff-based for a live row;
+ * check-and-reinsert for a resurrecting update, whose entries the soft delete
+ * removed), the core row update, then embedding and fulltext sync. Returns
+ * the updated row.
  */
 export async function applyNodeUpdate(
   ctx: NodeWriteContext,
   args: Readonly<{
-    kind: string;
-    id: string;
     schema: z.ZodType;
-    existingProps: Record<string, unknown>;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     validTo?: string;
-    clearDeleted?: boolean;
-  }>,
+  }> &
+    NodeUpdateTarget,
   backend: Backend,
 ): Promise<NodeRow> {
-  await updateUniquenessEntries(
-    uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.existingProps,
-    args.validatedProps,
-    args.uniqueConstraints,
-  );
+  const { kind, id } = args.existing;
+  if (args.existing.deleted_at === undefined) {
+    await updateUniquenessEntries(
+      uniquenessContext(ctx, backend),
+      kind,
+      id,
+      parseRowProps(args.existing),
+      args.validatedProps,
+      args.uniqueConstraints,
+    );
+  } else {
+    // Resurrecting update (clearDeleted on a tombstoned row): the soft delete
+    // already removed this node's uniqueness entries, so the diff-based path
+    // would skip an unchanged key entirely and the resurrected node would
+    // hold NO reservation — a later create could then silently duplicate the
+    // value. Re-check and re-insert for the new props instead, exactly as
+    // applyNodeResurrect does.
+    await checkUniquenessConstraints(
+      uniquenessContext(ctx, backend),
+      kind,
+      id,
+      args.validatedProps,
+      args.uniqueConstraints,
+    );
+    await insertUniquenessEntries(
+      uniquenessContext(ctx, backend),
+      kind,
+      id,
+      args.validatedProps,
+      args.uniqueConstraints,
+    );
+  }
 
   const updateParams: {
     graphId: string;
@@ -205,8 +250,8 @@ export async function applyNodeUpdate(
     clearDeleted?: boolean;
   } = {
     graphId: ctx.graphId,
-    kind: args.kind,
-    id: args.id,
+    kind,
+    id,
     props: args.validatedProps,
     incrementVersion: true,
   };
@@ -216,12 +261,12 @@ export async function applyNodeUpdate(
   const row = await backend.updateNode(updateParams);
 
   await syncEmbeddings(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
     args.validatedProps,
   );
   await syncFulltext(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
     args.validatedProps,
   );
@@ -232,43 +277,44 @@ export async function applyNodeUpdate(
 /**
  * Applies a node soft delete: delete-behavior enforcement, the tombstone
  * write, then removal of uniqueness entries, embeddings, and fulltext.
+ * Requires a {@link LiveNodeRow}: deleting an already-tombstoned row would
+ * re-run sidecar cleanup against entries the first delete already removed.
  */
 export async function applyNodeSoftDelete(
   ctx: NodeWriteContext,
   args: Readonly<{
-    kind: string;
-    id: string;
+    existing: LiveNodeRow;
     schema: z.ZodType;
-    existingProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     onDelete: DeleteBehavior | undefined;
   }>,
   backend: Backend,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
+  const { kind, id } = args.existing;
   await enforceNodeDeleteBehavior(
     ctx,
-    { kind: args.kind, id: args.id, mode: "soft", onDelete: args.onDelete },
+    { kind, id, mode: "soft", onDelete: args.onDelete },
     backend,
     policy,
   );
   await backend.deleteNode({
     graphId: ctx.graphId,
-    kind: args.kind,
-    id: args.id,
+    kind,
+    id,
   });
   await deleteUniquenessEntries(
     uniquenessContext(ctx, backend),
-    args.kind,
-    args.existingProps,
+    kind,
+    parseRowProps(args.existing),
     args.uniqueConstraints,
   );
   await deleteNodeEmbeddings(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
   );
   await deleteNodeFulltext(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
   );
 }
@@ -289,13 +335,11 @@ export async function applyNodeHardDelete(
     onDelete: DeleteBehavior | undefined;
   }>,
   backend: Backend,
-  policy?: NodeDeletePolicy,
 ): Promise<void> {
   await enforceNodeDeleteBehavior(
     ctx,
     { kind: args.kind, id: args.id, mode: "hard", onDelete: args.onDelete },
     backend,
-    policy,
   );
   await backend.hardDeleteNode({
     graphId: ctx.graphId,
@@ -309,7 +353,7 @@ export async function applyNodeHardDelete(
 }
 
 /**
- * Reopens a soft-deleted node with a known set of props (no merge, no
+ * Reopens a soft-deleted node with its stored props (no merge, no
  * re-validation): re-checks and re-inserts uniqueness entries (the delete
  * removed them), clears the tombstone, then re-syncs embeddings and fulltext.
  * Used by provenance to reinstate a fact whose currency is restored. Returns
@@ -321,45 +365,45 @@ export async function applyNodeHardDelete(
 export async function applyNodeResurrect(
   ctx: NodeWriteContext,
   args: Readonly<{
-    kind: string;
-    id: string;
+    existing: TombstonedNodeRow;
     schema: z.ZodType;
-    props: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
   }>,
   backend: Backend,
 ): Promise<NodeRow> {
+  const { kind, id } = args.existing;
+  const props = parseRowProps(args.existing);
   await checkUniquenessConstraints(
     uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.props,
+    kind,
+    id,
+    props,
     args.uniqueConstraints,
   );
   await insertUniquenessEntries(
     uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.props,
+    kind,
+    id,
+    props,
     args.uniqueConstraints,
   );
   const row = await backend.updateNode({
     graphId: ctx.graphId,
-    kind: args.kind,
-    id: args.id,
-    props: args.props,
+    kind,
+    id,
+    props,
     incrementVersion: true,
     clearDeleted: true,
   });
   await syncEmbeddings(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
-    args.props,
+    props,
   );
   await syncFulltext(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, kind, id, backend),
     args.schema,
-    args.props,
+    props,
   );
   return row;
 }

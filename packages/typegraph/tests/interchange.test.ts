@@ -880,10 +880,50 @@ describe("Interchange import integrity", () => {
     });
     expect(created.email).toBe("c@example.com");
   });
+
+  it("skips tombstoned nodes without touching their sidecars (onConflict: update)", async () => {
+    // Source doc: person-a with a new email.
+    const source = createStore(uniqueGraph, createTestBackend());
+    await source.nodes.Person.create(
+      { name: "A", email: "new@example.com" },
+      { id: "person-a" },
+    );
+    const document = await exportGraph(source);
+
+    // Target: person-a existed, then was soft-deleted — the delete removed
+    // its uniqueness entry (and any embedding/fulltext rows).
+    const target = createStore(uniqueGraph, createTestBackend());
+    await target.nodes.Person.create(
+      { name: "A", email: "old@example.com" },
+      { id: "person-a" },
+    );
+    await target.nodes.Person.delete("person-a" as never);
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "update" }),
+    );
+
+    // Import never resurrects a tombstone: the row is skipped, stays
+    // tombstoned, and no uniqueness reservation is made for it — a live
+    // create of the same value has to succeed.
+    expect(result.success).toBe(true);
+    expect(result.nodes.updated).toBe(0);
+    expect(result.nodes.skipped).toBe(1);
+    await expect(
+      target.nodes.Person.getById("person-a" as never),
+    ).resolves.toBeUndefined();
+    const created = await target.nodes.Person.create({
+      name: "C",
+      email: "new@example.com",
+    });
+    expect(created.email).toBe("new@example.com");
+  });
 });
 
 // ============================================================
-// Import Property Transforms (onUnknownProperty: "allow")
+// Import Property Fidelity (onUnknownProperty: "allow")
 // ============================================================
 
 const TransformDocument = defineNode("Doc", {
@@ -899,8 +939,8 @@ const transformGraph = defineGraph({
   edges: {},
 });
 
-describe("Interchange import property transforms", () => {
-  it("applies schema transforms/defaults under onUnknownProperty: allow", async () => {
+describe("Interchange import property fidelity", () => {
+  it("preserves properties verbatim under onUnknownProperty: allow", async () => {
     const store = createStore(transformGraph, createTestBackend());
     const data: GraphData = {
       formatVersion: "1.0",
@@ -910,8 +950,6 @@ describe("Interchange import property transforms", () => {
         {
           kind: "Doc",
           id: "d1",
-          // Untrimmed title, omitted status (has a default), plus an unknown
-          // field that "allow" must preserve.
           properties: { title: "  hello  ", extra: "keepme" },
         },
       ],
@@ -926,10 +964,15 @@ describe("Interchange import property transforms", () => {
     expect(result.success).toBe(true);
     expect(result.nodes.created).toBe(1);
 
+    // "allow" is the fidelity-preserving strategy: the schema validates the
+    // known fields, but the given properties are persisted byte-for-byte —
+    // no transform re-application, no default injection — so an
+    // export→import round trip cannot mutate stored values (a re-applied
+    // non-idempotent transform would corrupt them). Use "strip" for a
+    // normalizing import.
     const document = await store.nodes.Doc.getById("d1" as never);
-    // Before the fix, "allow" persisted the raw input, so the transform and
-    // default were skipped (title stayed "  hello  ", status was absent).
-    expect(document?.title).toBe("hello");
-    expect((document as unknown as { status?: string }).status).toBe("draft");
+    expect(document?.title).toBe("  hello  ");
+    expect((document as unknown as { status?: string }).status).toBeUndefined();
+    expect((document as unknown as { extra?: string }).extra).toBe("keepme");
   });
 });

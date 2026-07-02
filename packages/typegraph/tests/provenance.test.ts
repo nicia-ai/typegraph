@@ -11,7 +11,6 @@ import {
   embedding,
   type HistoryStore,
   recordedRelation,
-  RestrictedDeleteError,
   searchable,
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
@@ -689,7 +688,7 @@ describe("provenance retraction contract", () => {
     });
   });
 
-  it("enforces restrict behavior for non-provenance fact edges", async () => {
+  it("closes fact currency without enforcing restrict delete behavior", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(
       restrictedAttachedFactGraph,
@@ -722,22 +721,21 @@ describe("provenance retraction contract", () => {
     );
     const provenance = createRetractionCapability(store, attachedFactConfig);
 
-    await expect(provenance.retract(source)).rejects.toThrow(
-      RestrictedDeleteError,
-    );
+    // Closing a fact's currency is a belief-status change, not a domain
+    // delete: `restrict` does not block it, and the fact's edges survive.
+    const report = await provenance.retract(source);
 
-    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
-      id: "fact-a",
-    });
+    expect(report.died).toEqual([{ kind: "Fact", id: "fact-a" }]);
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
     await expect(store.nodes.Source.getById(source.id)).resolves.toMatchObject({
-      retracted: false,
+      retracted: true,
     });
     await expect(
       backend.getEdge(store.graphId, attached.id),
     ).resolves.toMatchObject({ deleted_at: undefined });
   });
 
-  it("disconnects non-provenance fact edges while preserving provenance edges", async () => {
+  it("preserves non-provenance fact edges across a retract/unRetract round trip", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(
       disconnectAttachedFactGraph,
@@ -773,12 +771,184 @@ describe("provenance retraction contract", () => {
     await provenance.retract(source);
 
     await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
+    // Delete behavior (`disconnect`) is not enforced for a currency close:
+    // the attached edge survives untouched so unRetract is an exact inverse.
     await expect(
       backend.getEdge(store.graphId, attached.id),
-    ).resolves.toMatchObject({ deleted_at: expect.any(String) });
+    ).resolves.toMatchObject({ deleted_at: undefined });
     await expect(store.edges.derives.find({ to: fact })).resolves.toHaveLength(
       1,
     );
+
+    await provenance.unRetract(source);
+
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
+      id: "fact-a",
+    });
+    await expect(
+      store.edges.attachedTo.find({ from: fact }),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("leaves unsupported facts outside the transition's reach untouched", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const { source } = await seedLinearSupport(store);
+    // A fact created ahead of its justification links: live but unsupported.
+    const pending = await store.nodes.Fact.create(
+      { label: "pending" },
+      { id: "fact-pending" },
+    );
+    const provenance = createRetractionCapability(store, config);
+
+    const report = await provenance.retract(source);
+
+    expect(report.died).toEqual([{ kind: "Fact", id: "fact-a" }]);
+    // The unlinked fact is not reachable from the retracted source, so the
+    // transition must not tombstone it.
+    await expect(store.nodes.Fact.getById(pending.id)).resolves.toMatchObject({
+      id: "fact-pending",
+    });
+  });
+
+  it("closes before reopening so a unique key can move between affected facts", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(uniqueFactGraph, backend, {
+      history: true,
+    });
+    const provenance = createRetractionCapability(store, uniqueFactConfig);
+
+    // factB holds the unique code, supported by sourceB; retract it.
+    const sourceB = await store.nodes.Source.create(
+      { label: "source-b", retracted: false },
+      { id: "source-b" },
+    );
+    const factB = await store.nodes.UniqueFact.create(
+      { code: "CVE-2026-0002" },
+      { id: "unique-fact-b" },
+    );
+    const justificationB = await store.nodes.Justification.create(
+      { label: "justification-b" },
+      { id: "justification-b" },
+    );
+    await store.edges.premiseOf.create(
+      sourceB,
+      justificationB,
+      {},
+      { id: "pb" },
+    );
+    await store.edges.derives.create(justificationB, factB, {}, { id: "db" });
+    await provenance.retract(sourceB);
+    await expect(
+      store.nodes.UniqueFact.getById(factB.id),
+    ).resolves.toBeUndefined();
+
+    // factA takes over the released code, supported by sourceA. Its
+    // justification also derives factB, making factB reachable from sourceA.
+    const sourceA = await store.nodes.Source.create(
+      { label: "source-a", retracted: false },
+      { id: "source-a" },
+    );
+    const factA = await store.nodes.UniqueFact.create(
+      { code: "CVE-2026-0002" },
+      { id: "unique-fact-z" },
+    );
+    const justificationA = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: "justification-a" },
+    );
+    await store.edges.premiseOf.create(
+      sourceA,
+      justificationA,
+      {},
+      { id: "pa" },
+    );
+    await store.edges.derives.create(justificationA, factA, {}, { id: "da" });
+    // Link the closed factB back into sourceA's justification and give it
+    // independent support. The collection API refuses edges to a tombstoned
+    // endpoint, so these arrive via the raw backend — the same shape a raw
+    // write or interchange import produces. No transition has run since, so
+    // factB is still tombstoned despite being supported.
+    const sourceC = await store.nodes.Source.create(
+      { label: "source-c", retracted: false },
+      { id: "source-c" },
+    );
+    const justificationC = await store.nodes.Justification.create(
+      { label: "justification-c" },
+      { id: "justification-c" },
+    );
+    await store.edges.premiseOf.create(
+      sourceC,
+      justificationC,
+      {},
+      { id: "pc" },
+    );
+    await backend.insertEdge({
+      graphId: store.graphId,
+      id: "dab",
+      kind: "derives",
+      fromKind: "Justification",
+      fromId: justificationA.id,
+      toKind: "UniqueFact",
+      toId: factB.id,
+      props: {},
+    });
+    await backend.insertEdge({
+      graphId: store.graphId,
+      id: "dcb",
+      kind: "derives",
+      fromKind: "Justification",
+      fromId: justificationC.id,
+      toKind: "UniqueFact",
+      toId: factB.id,
+      props: {},
+    });
+
+    // Retracting sourceA closes factA (releasing the code) and reopens the
+    // still-supported factB (re-claiming it). Reopening first would hit the
+    // code factA still holds — closes must run first.
+    const report = await provenance.retract(sourceA);
+
+    expect(report.died).toEqual([{ kind: "UniqueFact", id: "unique-fact-z" }]);
+    await expect(
+      store.nodes.UniqueFact.getById(factA.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.nodes.UniqueFact.getById(factB.id),
+    ).resolves.toMatchObject({ code: "CVE-2026-0002" });
+  });
+
+  it("treats validity-expired sources as unavailable support", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const expired = await store.nodes.Source.create(
+      { label: "expired-source", retracted: false },
+      { id: "source-expired", validTo: "2020-01-01T00:00:00.000Z" },
+    );
+    const fact = await store.nodes.Fact.create(
+      { label: "fact-a" },
+      { id: "fact-a" },
+    );
+    const justification = await store.nodes.Justification.create(
+      { label: "justification-a" },
+      { id: "justification-a" },
+    );
+    await store.edges.premiseOf.create(
+      expired,
+      justification,
+      {},
+      { id: "p1" },
+    );
+    await store.edges.derives.create(justification, fact, {}, { id: "d1" });
+    const provenance = createRetractionCapability(store, config);
+
+    // The source's validity ended, so — matching the collection API's
+    // current-time reads — it supports nothing and the fact is not believed.
+    await expect(provenance.holding()).resolves.toEqual([]);
   });
 
   it("releases and restores uniqueness sidecars when fact currency changes", async () => {

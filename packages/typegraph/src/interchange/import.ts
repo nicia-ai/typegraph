@@ -8,6 +8,7 @@ import type { z } from "zod";
 
 import {
   type GraphBackend,
+  isLiveNodeRow,
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../backend/types";
@@ -24,6 +25,11 @@ import {
   applyNodeInsertSideEffects,
   applyNodeUpdate,
 } from "../store/operations/node-write-pipeline";
+import { lockRecordedGraphWrite } from "../store/recorded-capture";
+import {
+  type GraphWriteLock,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
@@ -90,6 +96,15 @@ export async function importGraph<G extends GraphDef>(
   // One transaction on a transactional backend; runs directly otherwise
   // (runOptionallyInTransaction is exactly this capability gate).
   await runOptionallyInTransaction(backend, async (target) => {
+    // Under history capture the per-graph write lock must precede ANY row
+    // work in this transaction — including the uniqueness-sidecar writes the
+    // update path performs before its first captured row write — matching
+    // the lock-before-rows acquire order every other writer follows. The
+    // returned evidence token is what the node write pipeline requires.
+    const lock =
+      store.historyEnabled ?
+        await lockRecordedGraphWrite(target, graphId)
+      : uncapturedGraphWriteLock(graphId);
     await processNodes(
       target,
       graphId,
@@ -100,6 +115,7 @@ export async function importGraph<G extends GraphDef>(
       result,
       errors,
       importedNodeIds,
+      lock,
     );
     await processEdges(
       target,
@@ -182,6 +198,7 @@ async function processNodes(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  lock: GraphWriteLock,
 ): Promise<void> {
   const batchSize = options.batchSize;
 
@@ -196,6 +213,7 @@ async function processNodes(
         node,
         schemas,
         options,
+        lock,
       );
 
       switch (importResult.status) {
@@ -268,6 +286,7 @@ async function processNode(
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ImportOptions,
+  lock: GraphWriteLock,
 ): Promise<ProcessResult> {
   // Validate kind exists
   const schemaEntry = schemas.get(node.kind);
@@ -293,7 +312,7 @@ async function processNode(
 
   const { registration } = schemaEntry;
   const uniqueConstraints = registration.unique ?? [];
-  const writeContext = { graphId, registry };
+  const writeContext = { graphId, registry, lock };
 
   // Check if node already exists
   const existing = await backend.getNode(graphId, node.kind, node.id);
@@ -310,23 +329,25 @@ async function processNode(
         };
       }
       case "update": {
+        if (!isLiveNodeRow(existing)) {
+          // A soft-deleted node is not updatable: import never resurrects a
+          // tombstone, and running the live-row update pipeline here would
+          // recreate uniqueness/embedding/fulltext rows for a node that
+          // stays invisible — a uniqueness reservation held by a tombstoned
+          // node would block live creates of the same value.
+          return { status: "skipped" };
+        }
         // Route through the shared write step so the update maintains
         // uniqueness entries, embeddings, and fulltext — the collection API's
         // integrity, which a raw backend.updateNode would skip. A uniqueness
         // conflict is reported per-row (updateUniquenessEntries throws before
         // the row is written, so no partial write escapes).
-        const existingProps = JSON.parse(existing.props) as Record<
-          string,
-          unknown
-        >;
         try {
           await applyNodeUpdate(
             writeContext,
             {
-              kind: node.kind,
-              id: node.id,
+              existing,
               schema: registration.type.schema,
-              existingProps,
               validatedProps: propsResult.data,
               uniqueConstraints,
               ...(node.validTo !== undefined && { validTo: node.validTo }),
@@ -547,6 +568,9 @@ async function processEdge(
         return { status: "error", error: `Edge already exists: ${edge.id}` };
       }
       case "update": {
+        // Same contract as nodes: import never resurrects a tombstone, and
+        // the backend's update targets live rows only.
+        if (existing.deleted_at !== undefined) return { status: "skipped" };
         await backend.updateEdge({
           graphId,
           id: edge.id,
@@ -627,12 +651,13 @@ function validateProperties(
           };
         }
         case "allow": {
-          // Validate, keep extra properties, but still apply the schema's
-          // transforms/defaults/coercions to the known fields. Overlaying the
-          // parsed data onto the raw properties gives transformed known fields
-          // AND preserved unknown ones — otherwise `allow` would persist raw,
-          // un-transformed known values that `strip` and the normal create path
-          // both normalize (a fidelity divergence by conflict strategy).
+          // Validate the known fields, then return the ORIGINAL properties
+          // verbatim — unknown keys preserved, known values byte-for-byte.
+          // Exported data already carries post-transform values, so
+          // re-applying schema transforms here would corrupt every
+          // export→import round trip whose transforms are not idempotent.
+          // "allow" is the fidelity-preserving strategy; "strip" (and the
+          // create path) remain the normalizing ones.
           const result = schema.safeParse(properties);
           if (!result.success) {
             return {
@@ -640,7 +665,7 @@ function validateProperties(
               error: formatZodError(result.error),
             };
           }
-          return { success: true, data: { ...properties, ...result.data } };
+          return { success: true, data: properties };
         }
       }
     }

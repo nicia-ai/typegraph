@@ -1,4 +1,12 @@
-import type { EdgeRow, NodeRow } from "../backend/types";
+import {
+  type EdgeRow,
+  type GraphReadBackend,
+  isLiveNodeRow,
+  isTombstonedNodeRow,
+  type LiveNodeRow,
+  type NodeRow,
+  type TombstonedNodeRow,
+} from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
@@ -12,6 +20,10 @@ import {
   applyNodeResurrect,
   applyNodeSoftDelete,
 } from "../store/operations/node-write-pipeline";
+import { lockRecordedGraphWrite } from "../store/recorded-capture";
+import { type GraphWriteLock } from "../store/recorded-capture/clock";
+import { compareStrings } from "../utils/compare";
+import { nowIso } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";
@@ -201,7 +213,7 @@ function sortedReferences<
   K extends NodeKind<G> = NodeKind<G>,
 >(keys: Iterable<string>): ProvenanceNodeRef<G, K>[] {
   return [...keys]
-    .toSorted((left, right) => left.localeCompare(right))
+    .toSorted((left, right) => compareStrings(left, right))
     .map((key) => keyToRef<G, K>(key));
 }
 
@@ -333,7 +345,7 @@ function duplicateValues(values: readonly string[]): string[] {
     }
     seen.add(value);
   }
-  return [...duplicates].toSorted((left, right) => left.localeCompare(right));
+  return [...duplicates].toSorted((left, right) => compareStrings(left, right));
 }
 
 function assertNodeKind<G extends GraphDef>(
@@ -407,50 +419,95 @@ function assertEdgeEndpoints<G extends GraphDef>(
   }
 }
 
+/**
+ * Whether a row's validity window contains `asOf`. The JS mirror of the SQL
+ * `"current"`-mode predicate, for role reads that must include tombstoned
+ * rows (which `"current"` cannot express) yet still respect validity.
+ * Canonical fixed-width UTC ISO strings compare correctly as text.
+ */
+function isValidAt(
+  row: Pick<NodeRow, "valid_from" | "valid_to">,
+  asOf: string,
+): boolean {
+  return (
+    (row.valid_from === undefined || row.valid_from <= asOf) &&
+    (row.valid_to === undefined || row.valid_to > asOf)
+  );
+}
+
+/**
+ * Provenance reads follow the store's currency semantics: a source,
+ * justification, or support edge counts only while currently valid (the
+ * default `"current"` read mode), so a validity-expired source no longer
+ * supports anything and `holding()` agrees with the collection API about
+ * which facts are currently believed. Fact rows additionally need their
+ * tombstones — a reopen candidate is by definition soft-deleted — so they
+ * are loaded with tombstones and filtered to the same validity instant.
+ */
 async function findNodeRows(
-  backend: HistorySafeTransactionBackend,
+  backend: GraphReadBackend,
   graphId: string,
   kind: string,
-  includeTombstones: boolean,
+  options: Readonly<{ includeTombstones: boolean; asOf: string }>,
 ): Promise<readonly NodeRow[]> {
+  if (options.includeTombstones) {
+    const rows = await backend.findNodesByKind({
+      graphId,
+      kind,
+      excludeDeleted: false,
+      temporalMode: "includeTombstones",
+      orderBy: "id",
+    });
+    return rows.filter((row) => isValidAt(row, options.asOf));
+  }
   return backend.findNodesByKind({
     graphId,
     kind,
-    excludeDeleted: !includeTombstones,
-    temporalMode: includeTombstones ? "includeTombstones" : "includeEnded",
+    excludeDeleted: true,
+    temporalMode: "current",
+    asOf: options.asOf,
     orderBy: "id",
   });
 }
 
 async function findEdgeRows(
-  backend: HistorySafeTransactionBackend,
+  backend: GraphReadBackend,
   graphId: string,
   kind: string,
+  asOf: string,
 ): Promise<readonly EdgeRow[]> {
   return backend.findEdgesByKind({
     graphId,
     kind,
     excludeDeleted: true,
-    temporalMode: "includeEnded",
+    temporalMode: "current",
+    asOf,
     orderBy: "id",
   });
 }
 
 async function readRoles(
-  backend: HistorySafeTransactionBackend,
+  backend: GraphReadBackend,
   graphId: string,
   config: NormalizedConfig,
+  asOf: string,
 ): Promise<ProvenanceRows> {
   const [justificationRows, factRowsByKind, premiseEdges, deriveEdges] =
     await Promise.all([
-      findNodeRows(backend, graphId, config.justificationKind, false),
+      findNodeRows(backend, graphId, config.justificationKind, {
+        includeTombstones: false,
+        asOf,
+      }),
       Promise.all(
         config.factKinds.map((kind) =>
-          findNodeRows(backend, graphId, kind, true),
+          findNodeRows(backend, graphId, kind, {
+            includeTombstones: true,
+            asOf,
+          }),
         ),
       ),
-      findEdgeRows(backend, graphId, config.premiseOfKind),
-      findEdgeRows(backend, graphId, config.derivesKind),
+      findEdgeRows(backend, graphId, config.premiseOfKind, asOf),
+      findEdgeRows(backend, graphId, config.derivesKind, asOf),
     ]);
   const factRows = factRowsByKind.flat();
 
@@ -531,15 +588,18 @@ type SupportGraph = Readonly<{
 }>;
 
 async function loadSupportGraph(
-  backend: HistorySafeTransactionBackend,
+  backend: GraphReadBackend,
   graphId: string,
   config: NormalizedConfig,
 ): Promise<SupportGraph> {
-  const roles = await readRoles(backend, graphId, config);
+  // One read instant for every role read, so the whole snapshot shares a
+  // single "currently valid" coordinate.
+  const asOf = nowIso();
+  const roles = await readRoles(backend, graphId, config, asOf);
   const supportEdges = buildSupportEdges(config, roles);
   const sourceRowsByKind = await Promise.all(
     config.sourceKinds.map((kind) =>
-      findNodeRows(backend, graphId, kind, false),
+      findNodeRows(backend, graphId, kind, { includeTombstones: false, asOf }),
     ),
   );
   return { roles, supportEdges, sourceRows: sourceRowsByKind.flat() };
@@ -621,7 +681,7 @@ function computeSupportSnapshot(
 }
 
 async function computeSupport(
-  backend: HistorySafeTransactionBackend,
+  backend: GraphReadBackend,
   graphId: string,
   config: NormalizedConfig,
 ): Promise<SupportSnapshot> {
@@ -686,9 +746,8 @@ function buildReport<
 >(
   before: SupportSnapshot,
   after: SupportSnapshot,
-  sources: readonly ProvenanceNodeRef<G>[],
+  affected: ReadonlySet<string>,
 ): RetractionReport<G, FactKind, JustificationKind> {
-  const affected = after.affectedFactKeys(sources);
   const believedBefore = [...before.believedFactKeys];
   const died = sortedReferences<G, FactKind>(
     believedBefore.filter((key) => !after.supportedFactKeys.has(key)),
@@ -698,7 +757,7 @@ function buildReport<
   );
   const survivedVia = [...affected]
     .filter((key) => after.supportedFactKeys.has(key))
-    .toSorted((left, right) => left.localeCompare(right))
+    .toSorted((left, right) => compareStrings(left, right))
     .map((key) => ({
       fact: keyToRef<G, FactKind>(key),
       via: sortedReferences<G, JustificationKind>(
@@ -708,21 +767,38 @@ function buildReport<
   return { died, survivedVia, unaffected };
 }
 
+/**
+ * Brings fact currency in line with the post-transition support snapshot —
+ * but only for the facts the transition could have affected (those reachable
+ * from the flipped sources through justification edges). Facts outside that
+ * set are never touched: an unsupported live fact elsewhere in the graph
+ * (e.g. one whose justification edges have not been linked yet) is not this
+ * transition's business, and silently tombstoning it would be invisible data
+ * loss the report cannot even mention.
+ *
+ * Closes run before reopens: a reopen re-checks uniqueness, and the unique
+ * key it needs may still be held by a fact this same transition is about to
+ * close — closing first makes a legal transition order-independent.
+ */
 async function synchronizeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
   graphId: string,
-  config: NormalizedConfig,
   snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+  lock: GraphWriteLock,
 ): Promise<void> {
   for (const [key, row] of snapshot.facts) {
-    if (snapshot.supportedFactKeys.has(key)) {
-      if (row.deleted_at === undefined) continue;
-      await reopenFactCurrency(backend, store, graphId, row);
-      continue;
-    }
-    if (row.deleted_at !== undefined) continue;
-    await closeFactCurrency(backend, store, graphId, config, row);
+    if (!affected.has(key)) continue;
+    if (snapshot.supportedFactKeys.has(key)) continue;
+    if (!isLiveNodeRow(row)) continue;
+    await closeFactCurrency(backend, store, graphId, row, lock);
+  }
+  for (const [key, row] of snapshot.facts) {
+    if (!affected.has(key)) continue;
+    if (!snapshot.supportedFactKeys.has(key)) continue;
+    if (!isTombstonedNodeRow(row)) continue;
+    await reopenFactCurrency(backend, store, graphId, row, lock);
   }
 }
 
@@ -742,29 +818,27 @@ async function closeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
   graphId: string,
-  config: NormalizedConfig,
-  row: NodeRow,
+  row: LiveNodeRow,
+  lock: GraphWriteLock,
 ): Promise<void> {
   await store.runNodeOperationHooks("delete", row.kind, row.id, async () => {
     const registration = getFactRegistration(store, row);
-    // The canonical soft-delete cascade (delete-behavior enforcement, tombstone,
-    // uniqueness/embedding/fulltext cleanup), told to treat this fact's own
-    // provenance edges as non-structural so they survive for a later reopen.
+    // The canonical soft-delete steps (tombstone, uniqueness/embedding/
+    // fulltext cleanup) WITHOUT delete-behavior enforcement: closing a
+    // fact's currency is a belief-status change, not a domain delete, so
+    // its connected edges neither block the close (`restrict`) nor get
+    // removed (`cascade` / `disconnect`). Every edge survives untouched,
+    // making a later reopen an exact inverse of this close.
     await applyNodeSoftDelete(
-      { graphId, registry: store.registry },
+      { graphId, registry: store.registry, lock },
       {
-        kind: row.kind,
-        id: row.id,
+        existing: row,
         schema: registration.type.schema,
-        existingProps: parseNodeProps(row),
         uniqueConstraints: registration.unique ?? [],
         onDelete: registration.onDelete,
       },
       backend,
-      {
-        isNonStructuralEdge: (edge) =>
-          isFactCurrencyProvenanceEdge(config, row, edge),
-      },
+      { enforceDeleteBehavior: false },
     );
   });
 }
@@ -773,7 +847,8 @@ async function reopenFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
   graphId: string,
-  row: NodeRow,
+  row: TombstonedNodeRow,
+  lock: GraphWriteLock,
 ): Promise<void> {
   await store.runNodeOperationHooks("update", row.kind, row.id, async () => {
     const registration = getFactRegistration(store, row);
@@ -781,39 +856,15 @@ async function reopenFactCurrency<G extends GraphDef>(
     // re-inserts them (rather than the diff-based update path) before clearing
     // the tombstone and re-syncing embeddings/fulltext.
     await applyNodeResurrect(
-      { graphId, registry: store.registry },
+      { graphId, registry: store.registry, lock },
       {
-        kind: row.kind,
-        id: row.id,
+        existing: row,
         schema: registration.type.schema,
-        props: parseNodeProps(row),
         uniqueConstraints: registration.unique ?? [],
       },
       backend,
     );
   });
-}
-
-function isFactCurrencyProvenanceEdge(
-  config: NormalizedConfig,
-  row: NodeRow,
-  edge: EdgeRow,
-): boolean {
-  if (
-    edge.kind === config.derivesKind &&
-    edge.from_kind === config.justificationKind &&
-    edge.to_kind === row.kind &&
-    edge.to_id === row.id
-  ) {
-    return true;
-  }
-
-  return (
-    edge.kind === config.premiseOfKind &&
-    edge.from_kind === row.kind &&
-    edge.from_id === row.id &&
-    edge.to_kind === config.justificationKind
-  );
 }
 
 function getTransactionNodeCollection<G extends GraphDef>(
@@ -862,9 +913,13 @@ async function runTransition<
   }
 
   return store.transaction(async (tx) => {
-    // `store.transaction` already takes the per-graph recorded-write lock when
-    // capture is enabled, and this capability requires `history: true`, so the
-    // lock is held before this callback runs — no explicit re-acquire needed.
+    // Serialize the whole read-compute-write transition per graph BEFORE the
+    // first read. `store.transaction` itself takes no lock (write operations
+    // acquire it at their own boundaries), but a transition's support
+    // snapshot must not race a concurrent transition or history write, so
+    // the per-graph write lock is acquired explicitly up front. The token is
+    // the evidence the currency-sync pipeline steps require.
+    const lock = await lockRecordedGraphWrite(tx.backend, store.graphId);
     const rows = await Promise.all(
       uniqueSources.map((source) =>
         tx.backend.getNode(store.graphId, source.kind, source.id),
@@ -909,18 +964,16 @@ async function runTransition<
       }
     }
     const after = computeSupportSnapshot(supportGraph, availableAfter);
+    const affected = after.affectedFactKeys(uniqueSources);
     await synchronizeFactCurrency(
       tx.backend,
       store,
       store.graphId,
-      config,
       after,
+      affected,
+      lock,
     );
-    return buildReport<G, FactKind, JustificationKind>(
-      before,
-      after,
-      uniqueSources,
-    );
+    return buildReport<G, FactKind, JustificationKind>(before, after, affected);
   });
 }
 
@@ -982,7 +1035,11 @@ export function createRetractionCapability<
 
     async holding() {
       return store.transaction(async (tx) => {
-        // Lock already held by `store.transaction` under capture (see runTransition).
+        // Same explicit lock as runTransition: the support computation reads
+        // several relations, and PostgreSQL's READ COMMITTED gives each
+        // statement its own snapshot — without the lock a concurrent
+        // transition could commit between those reads and tear the view.
+        await lockRecordedGraphWrite(tx.backend, store.graphId);
         const snapshot = await computeSupport(
           tx.backend,
           store.graphId,

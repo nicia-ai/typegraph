@@ -1373,12 +1373,18 @@ export class Store<G extends GraphDef> {
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
-    return this.#backend.transaction(async (txBackend, sql) => {
-      if (this.#captureEnabled) {
-        await lockRecordedGraphWrite(txBackend, this.graphId);
-      }
-      return invoke(this.#buildTransactionContext(txBackend, sql));
-    }, options);
+    //
+    // No per-graph write lock here either: under history capture the lock is
+    // taken at each write boundary (runInWriteTransaction before any row work;
+    // the recorded overlay before each row write), so a transaction whose
+    // callback only reads never serializes against writers. Callers that need
+    // read-before-write serialization across the whole callback (provenance
+    // transitions) acquire the lock explicitly at callback start.
+    return this.#backend.transaction(
+      async (txBackend, sql) =>
+        invoke(this.#buildTransactionContext(txBackend, sql)),
+      options,
+    );
   }
 
   /**

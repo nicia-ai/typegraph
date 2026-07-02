@@ -9,6 +9,7 @@ import type { GraphBackend } from "../src/backend/types";
 import {
   CardinalityError,
   NodeConstraintNotFoundError,
+  UniquenessError,
   ValidationError,
 } from "../src/errors";
 import { createStore } from "../src/store";
@@ -165,6 +166,33 @@ describe("store.nodes.*.getOrCreateByConstraint()", () => {
     expect(second.node.id).toBe(first.node.id);
     expect(second.node.role).toBe("resurrected");
     expect(second.node.meta.deletedAt).toBeUndefined();
+  });
+
+  it("a resurrected node retains its uniqueness reservation", async () => {
+    const store = createStore(graph, backend);
+
+    const first = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      { entityType: "Person", name: "Alice", role: "eng" },
+    );
+    await store.nodes.Entity.delete(first.node.id);
+
+    const second = await store.nodes.Entity.getOrCreateByConstraint(
+      "entity_key",
+      { entityType: "Person", name: "Alice", role: "back" },
+    );
+    expect(second.action).toBe("resurrected");
+
+    // The soft delete removed the node's uniqueness entries; the resurrect
+    // must re-insert them (the diff-based update path would skip an unchanged
+    // key), or this create would silently duplicate the unique value.
+    await expect(
+      store.nodes.Entity.create({
+        entityType: "Person",
+        name: "Alice",
+        role: "dupe",
+      }),
+    ).rejects.toThrow(UniquenessError);
   });
 
   it("throws NodeConstraintNotFoundError for invalid constraint name", async () => {

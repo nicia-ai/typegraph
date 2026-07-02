@@ -9,6 +9,7 @@ import {
   createBackendOverlay,
   type GraphBackend,
   type InsertNodeParams,
+  isLiveNodeRow,
   type NodeRow as BackendNodeRow,
   type TransactionBackend,
   type UniqueRow,
@@ -31,6 +32,7 @@ import {
   NodeConstraintNotFoundError,
   NodeIndexNotFoundError,
   NodeNotFoundError,
+  UniquenessError,
   ValidationError,
 } from "../../errors";
 import { validateNodeProps } from "../../errors/validation";
@@ -63,6 +65,7 @@ import {
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { getNodeRowsByIds } from "../node-fetch";
+import { type GraphWriteLock } from "../recorded-capture/clock";
 import { rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
@@ -83,7 +86,10 @@ import {
   applyNodeSoftDelete,
   applyNodeUpdate,
 } from "./node-write-pipeline";
-import { runInWriteTransaction } from "./write-transaction";
+import {
+  runHookedWriteOperation,
+  runInWriteTransaction,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -431,9 +437,10 @@ async function finalizeNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   prepared: NodeCreatePrepared,
   backend: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
 ): Promise<void> {
   await applyNodeInsertSideEffects(
-    { graphId: ctx.graphId, registry: ctx.registry },
+    { graphId: ctx.graphId, registry: ctx.registry, lock },
     {
       kind: prepared.kind,
       id: prepared.id,
@@ -457,15 +464,14 @@ async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpdateNodeInput,
   backend: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   const { kind, id } = input;
   const registration = getNodeRegistration(ctx.graph, kind);
 
   const existing = await backend.getNode(ctx.graphId, kind, id);
-  if (!existing || (existing.deleted_at && !options?.clearDeleted)) {
-    throw new NodeNotFoundError(kind, id);
-  }
+  if (!existing) throw new NodeNotFoundError(kind, id);
 
   const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
   const mergedProps = { ...existingProps, ...input.props };
@@ -479,21 +485,31 @@ async function performNodeUpdate<G extends GraphDef>(
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
+  const writeContext = { graphId: ctx.graphId, registry: ctx.registry, lock };
+  const shared = {
+    schema: nodeKind.schema,
+    validatedProps,
+    uniqueConstraints: registration.unique ?? [],
+    ...(validTo !== undefined && { validTo }),
+  };
+
+  // A resurrecting upsert (clearDeleted) may target a tombstoned row; a plain
+  // update must prove the row live — see NodeUpdateTarget.
+  if (options?.clearDeleted) {
+    const row = await applyNodeUpdate(
+      writeContext,
+      { ...shared, existing, clearDeleted: true },
+      backend,
+    );
+    return rowToNode(row);
+  }
+
+  if (!isLiveNodeRow(existing)) throw new NodeNotFoundError(kind, id);
   const row = await applyNodeUpdate(
-    { graphId: ctx.graphId, registry: ctx.registry },
-    {
-      kind,
-      id,
-      schema: nodeKind.schema,
-      existingProps,
-      validatedProps,
-      uniqueConstraints: registration.unique ?? [],
-      ...(validTo !== undefined && { validTo }),
-      ...(options?.clearDeleted && { clearDeleted: true }),
-    },
+    writeContext,
+    { ...shared, existing },
     backend,
   );
-
   return rowToNode(row);
 }
 
@@ -641,8 +657,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
 
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, async (target) => {
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    async (target, lock) => {
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
@@ -660,11 +679,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         );
       }
 
-      await finalizeNodeCreate(ctx, prepared, target);
+      await finalizeNodeCreate(ctx, prepared, target, lock);
 
       if (row === undefined) return;
       return rowToNode(row);
-    }),
+    },
   );
 }
 
@@ -706,7 +725,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  await runInWriteTransaction(ctx, backend, async (target) => {
+  await runInWriteTransaction(ctx, backend, async (target, lock) => {
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
@@ -716,7 +735,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
 
     for (const prepared of preparedCreates) {
-      await finalizeNodeCreate(ctx, prepared, target);
+      await finalizeNodeCreate(ctx, prepared, target, lock);
     }
   });
 }
@@ -737,7 +756,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
+  return runInWriteTransaction(ctx, backend, async (target, lock) => {
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
@@ -750,7 +769,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     );
 
     for (const prepared of preparedCreates) {
-      await finalizeNodeCreate(ctx, prepared, target);
+      await finalizeNodeCreate(ctx, prepared, target, lock);
     }
 
     return rows.map((row) => rowToNode(row));
@@ -773,10 +792,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.kind,
     input.id,
   );
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, (target) =>
-      performNodeUpdate(ctx, input, target, options),
-    ),
+  return runHookedWriteOperation(ctx, opContext, backend, (target, lock) =>
+    performNodeUpdate(ctx, input, target, lock, options),
   );
 }
 
@@ -790,8 +807,8 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return runInWriteTransaction(ctx, backend, (target) =>
-    performNodeUpdate(ctx, input, target, options),
+  return runInWriteTransaction(ctx, backend, (target, lock) =>
+    performNodeUpdate(ctx, input, target, lock, options),
   );
 }
 
@@ -805,45 +822,41 @@ export async function executeNodeDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  // Gate outside hooks and transaction (matching edge deletes): an absent or
+  // already-tombstoned node is a no-op, so it neither fires hooks nor opens a
+  // write transaction (empty transactions are costly on libsql). The cascade
+  // re-reads inside the transaction, so a node concurrently deleted between
+  // this gate and the write lock is still handled correctly.
+  const gate = await backend.getNode(ctx.graphId, kind, id);
+  if (!gate || gate.deleted_at) return;
+
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, async () => {
-    // Gate outside the transaction: an absent or already-tombstoned node is a
-    // no-op, so skip opening a write transaction for it (empty transactions are
-    // costly on libsql, where a transaction opens a fresh connection). The
-    // cascade re-reads inside the transaction, so a node concurrently deleted
-    // between this gate and the write lock is still handled correctly.
-    const gate = await backend.getNode(ctx.graphId, kind, id);
-    if (!gate || gate.deleted_at) return;
-
-    await runInWriteTransaction(ctx, backend, async (target) => {
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    async (target, lock) => {
       const registration = getNodeRegistration(ctx.graph, kind);
       const preflight = await target.getNode(ctx.graphId, kind, id);
-      if (!preflight || preflight.deleted_at) return;
+      if (!preflight || !isLiveNodeRow(preflight)) return;
 
       // The cascade (connected edges, uniques, embeddings, fulltext, node) is
       // not individually atomic, so it runs in one write transaction. Under
       // recorded-time capture this also collapses the cascade into a single
       // recorded commit instant instead of one instant per sub-write.
-      const existingProps = JSON.parse(preflight.props) as Record<
-        string,
-        unknown
-      >;
-
       await applyNodeSoftDelete(
-        { graphId: ctx.graphId, registry: ctx.registry },
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
         {
-          kind,
-          id,
+          existing: preflight,
           schema: registration.type.schema,
-          existingProps,
           uniqueConstraints: registration.unique ?? [],
           onDelete: registration.onDelete,
         },
         target,
       );
-    });
-  });
+    },
+  );
 }
 
 /**
@@ -858,25 +871,29 @@ export async function executeNodeHardDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  // Gate outside hooks and transaction so an absent node neither fires hooks
+  // nor opens an empty transaction (see executeNodeDelete). The cascade
+  // re-reads inside the transaction.
+  const gate = await backend.getNode(ctx.graphId, kind, id);
+  if (!gate) return;
+
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return ctx.withOperationHooks(opContext, async () => {
-    // Gate outside the transaction so an absent node never opens an empty one
-    // (see executeNodeDelete). The cascade re-reads inside the transaction.
-    const gate = await backend.getNode(ctx.graphId, kind, id);
-    if (!gate) return;
-
-    await runInWriteTransaction(ctx, backend, async (target) => {
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    async (target, lock) => {
       const registration = getNodeRegistration(ctx.graph, kind);
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (!preflight) return;
 
-      // The cascade (edges, node, embeddings) is not individually atomic, so it
-      // runs in one write transaction. Embeddings live in strategy-owned
-      // per-`(kind, field)` tables, so they are cleaned up here rather than in
-      // the backend's graph-agnostic `hardDeleteNode` cascade.
+      // The cascade (edges, node, embeddings) is not individually atomic, so
+      // it runs in one write transaction. Embeddings live in strategy-owned
+      // per-`(kind, field)` tables, so they are cleaned up here rather than
+      // in the backend's graph-agnostic `hardDeleteNode` cascade.
       await applyNodeHardDelete(
-        { graphId: ctx.graphId, registry: ctx.registry },
+        { graphId: ctx.graphId, registry: ctx.registry, lock },
         {
           kind,
           id,
@@ -885,8 +902,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         },
         target,
       );
-    });
-  });
+    },
+  );
 }
 
 // ============================================================
@@ -933,59 +950,75 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     ctx.registry,
   );
 
-  const existingUniqueRow = await findUniqueRowAcrossKinds(
-    backend,
-    ctx.graphId,
-    constraint.name,
-    key,
-    kindsToCheck,
-    true,
-  );
-
-  if (existingUniqueRow === undefined) {
-    const node = await executeNodeCreate(
-      ctx,
-      { kind, props: validatedProps },
+  // The probe runs outside any transaction (the found path is a pure read),
+  // and each write leg opens its own hooked transaction. A concurrent create
+  // can therefore reserve the key between the probe and the create — that
+  // surfaces as UniquenessError, and the caller retries the probe once to
+  // converge on the row the winner created.
+  async function attempt(): Promise<
+    Readonly<{ node: Node; action: GetOrCreateAction }>
+  > {
+    const existingUniqueRow = await findUniqueRowAcrossKinds(
       backend,
+      ctx.graphId,
+      constraint.name,
+      key,
+      kindsToCheck,
+      true,
     );
-    return { node, action: "created" };
+
+    if (existingUniqueRow === undefined) {
+      const node = await executeNodeCreate(
+        ctx,
+        { kind, props: validatedProps },
+        backend,
+      );
+      return { node, action: "created" };
+    }
+
+    // Fetch using concrete_kind (may differ from requested kind
+    // when scope is "kindWithSubClasses" and the match is on a sibling/parent kind)
+    const existingRow = await backend.getNode(
+      ctx.graphId,
+      existingUniqueRow.concrete_kind,
+      existingUniqueRow.node_id,
+    );
+
+    if (existingRow === undefined) {
+      const node = await executeNodeCreate(
+        ctx,
+        { kind, props: validatedProps },
+        backend,
+      );
+      return { node, action: "created" };
+    }
+
+    const isSoftDeleted = existingRow.deleted_at !== undefined;
+
+    if (isSoftDeleted || ifExists === "update") {
+      const concreteKind = existingUniqueRow.concrete_kind;
+      const node = await executeNodeUpsertUpdate(
+        ctx,
+        {
+          kind: concreteKind,
+          id: existingRow.id as UpdateNodeInput["id"],
+          props: validatedProps,
+        },
+        backend,
+        { clearDeleted: isSoftDeleted },
+      );
+      return { node, action: isSoftDeleted ? "resurrected" : "updated" };
+    }
+
+    return { node: rowToNode(existingRow), action: "found" };
   }
 
-  // Fetch using concrete_kind (may differ from requested kind
-  // when scope is "kindWithSubClasses" and the match is on a sibling/parent kind)
-  const existingRow = await backend.getNode(
-    ctx.graphId,
-    existingUniqueRow.concrete_kind,
-    existingUniqueRow.node_id,
-  );
-
-  if (existingRow === undefined) {
-    const node = await executeNodeCreate(
-      ctx,
-      { kind, props: validatedProps },
-      backend,
-    );
-    return { node, action: "created" };
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!(error instanceof UniquenessError)) throw error;
+    return attempt();
   }
-
-  const isSoftDeleted = existingRow.deleted_at !== undefined;
-
-  if (isSoftDeleted || ifExists === "update") {
-    const concreteKind = existingUniqueRow.concrete_kind;
-    const node = await executeNodeUpsertUpdate(
-      ctx,
-      {
-        kind: concreteKind,
-        id: existingRow.id as UpdateNodeInput["id"],
-        props: validatedProps,
-      },
-      backend,
-      { clearDeleted: isSoftDeleted },
-    );
-    return { node, action: isSoftDeleted ? "resurrected" : "updated" };
-  }
-
-  return { node: rowToNode(existingRow), action: "found" };
 }
 
 // ============================================================
