@@ -78,13 +78,14 @@ import {
 } from "../types";
 import {
   checkUniquenessConstraints,
-  type UniquenessContext,
+  createUniquenessContext,
 } from "../uniqueness";
 import {
   applyNodeHardDelete,
   applyNodeInsertSideEffects,
   applyNodeSoftDelete,
   applyNodeUpdate,
+  createNodeWriteContext,
 } from "./node-write-pipeline";
 import {
   runHookedWriteOperation,
@@ -224,14 +225,6 @@ function resolveConstraint<G extends GraphDef>(
     throw new NodeConstraintNotFoundError(constraintName, kind);
   }
   return constraint;
-}
-
-function createUniquenessContext(
-  graphId: string,
-  registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
-): UniquenessContext {
-  return { graphId, registry, backend };
 }
 
 // ============================================================
@@ -440,7 +433,7 @@ async function finalizeNodeCreate<G extends GraphDef>(
   lock: GraphWriteLock,
 ): Promise<void> {
   await applyNodeInsertSideEffects(
-    { graphId: ctx.graphId, registry: ctx.registry, lock },
+    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
     {
       kind: prepared.kind,
       id: prepared.id,
@@ -485,7 +478,7 @@ async function performNodeUpdate<G extends GraphDef>(
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 
-  const writeContext = { graphId: ctx.graphId, registry: ctx.registry, lock };
+  const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
@@ -846,7 +839,7 @@ export async function executeNodeDelete<G extends GraphDef>(
       // recorded-time capture this also collapses the cascade into a single
       // recorded commit instant instead of one instant per sub-write.
       await applyNodeSoftDelete(
-        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
         {
           existing: preflight,
           schema: registration.type.schema,
@@ -893,7 +886,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       // per-`(kind, field)` tables, so they are cleaned up here rather than
       // in the backend's graph-agnostic `hardDeleteNode` cascade.
       await applyNodeHardDelete(
-        { graphId: ctx.graphId, registry: ctx.registry, lock },
+        createNodeWriteContext(ctx.graphId, ctx.registry, lock),
         {
           kind,
           id,

@@ -404,10 +404,19 @@ function byId<T extends Readonly<{ id: string }>>(left: T, right: T): number {
  * base). The diff is keyed by id and sorted by `(kind, id)` so its shape is a
  * pure function of the stores' content, independent of enumeration order. No
  * branch tag is attached here — provenance tagging happens in T7 (staging).
+ *
+ * @param captureForkState Whether to populate {@link StateDiff.forkNodeVersions}
+ *   / {@link StateDiff.forkEdgeSignatures}. `stageBranches` only ever keeps these
+ *   maps for the one branch matching `captureTargetStateFor`, and computing the
+ *   edge signatures (canonicalizing props + stringifying every edge) is real
+ *   work — so callers that don't need them for this branch can skip it. Defaults
+ *   to `true` so direct callers (e.g. tests) get the full diff without having to
+ *   know this parameter exists.
  */
 export async function diffAgainstBase<G extends GraphDef>(
   baseStore: Store<G>,
   forkStore: Store<G>,
+  captureForkState = true,
 ): Promise<StateDiff> {
   const graph = baseStore.graph;
   const nodeKinds = getNodeKinds(graph);
@@ -431,8 +440,10 @@ export async function diffAgainstBase<G extends GraphDef>(
       forkStore.graphId,
       kind,
     );
-    for (const row of forkRows) {
-      forkNodeVersions.set(mergeKey(kind, row.id), row.version);
+    if (captureForkState) {
+      for (const row of forkRows) {
+        forkNodeVersions.set(mergeKey(kind, row.id), row.version);
+      }
     }
     const delta = diffNodeKind(kind, baseRows, forkRows);
     for (const entry of delta.new) {
@@ -465,18 +476,20 @@ export async function diffAgainstBase<G extends GraphDef>(
       forkStore.graphId,
       kind,
     );
-    for (const row of forkRows) {
-      forkEdgeSignatures.set(
-        mergeKey(kind, row.id),
-        edgeStateSignature({
-          fromKind: row.from_kind,
-          fromId: row.from_id,
-          toKind: row.to_kind,
-          toId: row.to_id,
-          live: isLive(row),
-          props: parseRowProps(row.props),
-        }),
-      );
+    if (captureForkState) {
+      for (const row of forkRows) {
+        forkEdgeSignatures.set(
+          mergeKey(kind, row.id),
+          edgeStateSignature({
+            fromKind: row.from_kind,
+            fromId: row.from_id,
+            toKind: row.to_kind,
+            toId: row.to_id,
+            live: isLive(row),
+            props: parseRowProps(row.props),
+          }),
+        );
+      }
     }
     const delta = diffEdgeKind(kind, baseRows, forkRows);
     for (const entry of delta.new) {

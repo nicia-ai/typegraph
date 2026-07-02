@@ -32,6 +32,7 @@ import { deleteNodeFulltext, syncFulltext } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   checkUniquenessConstraints,
+  createUniquenessContext,
   deleteUniquenessEntries,
   insertUniquenessEntries,
   updateUniquenessEntries,
@@ -52,6 +53,15 @@ export type NodeWriteContext = Readonly<{
   lock: GraphWriteLock;
 }>;
 
+/** Builds a {@link NodeWriteContext} — the one constructor every call site shares. */
+export function createNodeWriteContext(
+  graphId: string,
+  registry: KindRegistry,
+  lock: GraphWriteLock,
+): NodeWriteContext {
+  return { graphId, registry, lock };
+}
+
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
 type NodeDeleteMode = "soft" | "hard";
 
@@ -70,7 +80,7 @@ export type NodeDeletePolicy = Readonly<{
 }>;
 
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
-  return { graphId: ctx.graphId, registry: ctx.registry, backend };
+  return createUniquenessContext(ctx.graphId, ctx.registry, backend);
 }
 
 /**
@@ -163,16 +173,18 @@ export async function applyNodeInsertSideEffects(
     args.props,
     args.uniqueConstraints,
   );
-  await syncEmbeddings(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
-    args.schema,
-    args.props,
-  );
-  await syncFulltext(
-    nodeSyncContext(ctx, args.kind, args.id, backend),
-    args.schema,
-    args.props,
-  );
+  await Promise.all([
+    syncEmbeddings(
+      nodeSyncContext(ctx, args.kind, args.id, backend),
+      args.schema,
+      args.props,
+    ),
+    syncFulltext(
+      nodeSyncContext(ctx, args.kind, args.id, backend),
+      args.schema,
+      args.props,
+    ),
+  ]);
 }
 
 function parseRowProps(row: NodeRow): Record<string, unknown> {
@@ -260,16 +272,18 @@ export async function applyNodeUpdate(
 
   const row = await backend.updateNode(updateParams);
 
-  await syncEmbeddings(
-    nodeSyncContext(ctx, kind, id, backend),
-    args.schema,
-    args.validatedProps,
-  );
-  await syncFulltext(
-    nodeSyncContext(ctx, kind, id, backend),
-    args.schema,
-    args.validatedProps,
-  );
+  await Promise.all([
+    syncEmbeddings(
+      nodeSyncContext(ctx, kind, id, backend),
+      args.schema,
+      args.validatedProps,
+    ),
+    syncFulltext(
+      nodeSyncContext(ctx, kind, id, backend),
+      args.schema,
+      args.validatedProps,
+    ),
+  ]);
 
   return row;
 }
@@ -395,15 +409,9 @@ export async function applyNodeResurrect(
     incrementVersion: true,
     clearDeleted: true,
   });
-  await syncEmbeddings(
-    nodeSyncContext(ctx, kind, id, backend),
-    args.schema,
-    props,
-  );
-  await syncFulltext(
-    nodeSyncContext(ctx, kind, id, backend),
-    args.schema,
-    props,
-  );
+  await Promise.all([
+    syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
+    syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
+  ]);
   return row;
 }

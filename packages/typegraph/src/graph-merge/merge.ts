@@ -1532,14 +1532,10 @@ async function resolveMerge<G extends GraphDef>(
     // incremental path, capture the committed target branch's node versions from
     // its diff enumeration — the plan-time baseline for the commit-time
     // lost-update guard (assertInheritedTargetUnchanged).
-    const staging = await stageBranches(
-      store,
-      branches,
-      incremental?.targetBranchId,
-    );
+    const preferredBranchId = incremental?.targetBranchId;
+    const staging = await stageBranches(store, branches, preferredBranchId);
 
     // Capture the stable branch order ONCE (never wall-clock).
-    const preferredBranchId = incremental?.targetBranchId;
     const branchIds = branches.map((branch) => branch.id);
     const branchOrder =
       preferredBranchId === undefined ?
@@ -2402,6 +2398,9 @@ async function assertBaseResolutionStable<G extends GraphDef>(
 /** A `(kind, id)` the plan will mutate whose identity was an observed target row. */
 type InheritedTargetRef = Readonly<{ kind: string; id: string }>;
 
+/** Anything keyed by {@link MergeKey} that can answer a membership check. */
+type MergeKeyMembership = Readonly<{ has(key: MergeKey): boolean }>;
+
 /**
  * Buckets the plan's inherited-target mutations by kind, deduped by identity, for
  * a single batched re-read per kind. `identities` filters to the rows observed at
@@ -2411,7 +2410,7 @@ type InheritedTargetRef = Readonly<{ kind: string; id: string }>;
  */
 function bucketInheritedRefsByKind(
   refs: Iterable<InheritedTargetRef>,
-  identities: ReadonlySet<MergeKey>,
+  identities: MergeKeyMembership,
 ): ReadonlyMap<string, readonly string[]> {
   const seen = new Set<MergeKey>();
   const idsByKind = new Map<string, string[]>();
@@ -2426,6 +2425,47 @@ function bucketInheritedRefsByKind(
     idsByKind.set(ref.kind, bucket);
   }
   return idsByKind;
+}
+
+/**
+ * The version-check (nodes) and signature-check (edges) halves of the
+ * incremental TOCTOU guard share one skeleton — bucket refs by kind, batch-fetch
+ * the current rows, compare each against its plan-time baseline, and throw on
+ * the first mismatch. `Row` is the fetched row shape and `Expected` the
+ * comparable baseline value (a node version or an edge content signature).
+ */
+async function assertInheritedUnchanged<Row, Expected>(
+  args: Readonly<{
+    refs: readonly InheritedTargetRef[];
+    expected: ReadonlyMap<MergeKey, Expected>;
+    fetchRows: (
+      kind: string,
+      ids: readonly string[],
+    ) => Promise<readonly (Row | undefined)[]>;
+    deriveValue: (row: Row | undefined) => Expected | undefined;
+    buildError: (
+      id: string,
+      kind: string,
+      expected: Expected,
+      current: Expected | undefined,
+    ) => Error;
+  }>,
+): Promise<void> {
+  if (args.expected.size === 0) {
+    return;
+  }
+  const idsByKind = bucketInheritedRefsByKind(args.refs, args.expected);
+  for (const [kind, ids] of idsByKind) {
+    const rows = await args.fetchRows(kind, ids);
+    for (const [index, id] of ids.entries()) {
+      const expected = args.expected.get(mergeKey(kind, id))!;
+      const current = args.deriveValue(rows[index]);
+      if (current === expected) {
+        continue;
+      }
+      throw args.buildError(id, kind, expected, current);
+    }
+  }
 }
 
 /**
@@ -2450,8 +2490,12 @@ async function assertInheritedTargetUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  await assertInheritedNodesUnchanged(nodesApi, guard, plan);
-  await assertInheritedEdgesUnchanged(edgesApi, guard, plan);
+  // Disjoint collections (nodes vs. edges) with no shared state — safe to run
+  // concurrently.
+  await Promise.all([
+    assertInheritedNodesUnchanged(nodesApi, guard, plan),
+    assertInheritedEdgesUnchanged(edgesApi, guard, plan),
+  ]);
 }
 
 /** Version-checks every committed target node the plan writes or deletes. */
@@ -2460,46 +2504,33 @@ async function assertInheritedNodesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const { targetNodeVersions } = guard;
-  if (targetNodeVersions.size === 0) {
-    return;
-  }
   const nodeRefs: InheritedTargetRef[] = plannedNodeWrites(plan).map(
     (write) => ({ kind: write.kind, id: write.id }),
   );
   for (const [identity, kind] of plan.nodeDeletions) {
     nodeRefs.push({ kind, id: idOf(identity) });
   }
-  const idsByKind = bucketInheritedRefsByKind(
-    nodeRefs,
-    new Set(targetNodeVersions.keys()),
-  );
-  for (const [kind, ids] of idsByKind) {
-    const rows = await nodeCollection(nodesApi, kind).getByIds(
-      ids,
-      INCLUDE_TOMBSTONES,
-    );
-    for (const [index, id] of ids.entries()) {
-      const expected = targetNodeVersions.get(mergeKey(kind, id))!;
-      const current = rows[index];
-      if (current?.meta.version === expected) {
-        continue;
-      }
-      throw new BaseVersionMismatchError(
+  await assertInheritedUnchanged<Node, number>({
+    refs: nodeRefs,
+    expected: guard.targetNodeVersions,
+    fetchRows: (kind, ids) =>
+      nodeCollection(nodesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
+    deriveValue: (row) => row?.meta.version,
+    buildError: (id, kind, expected, current) =>
+      new BaseVersionMismatchError(
         `mergeIncremental() observed committed node "${id}" (kind "${kind}") at version ${expected} while planning, but it changed before the commit transaction; the resolved plan no longer describes the live target and was not applied.`,
         {
           details: {
             id,
             kind,
             expectedVersion: expected,
-            currentVersion: current?.meta.version,
+            currentVersion: current,
           },
           suggestion:
             "Re-run mergeIncremental(); the re-planned merge resolves the inherited modifications against the now-committed rows.",
         },
-      );
-    }
-  }
+      ),
+  });
 }
 
 /**
@@ -2514,10 +2545,6 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const { targetEdgeSignatures } = guard;
-  if (targetEdgeSignatures.size === 0) {
-    return;
-  }
   const edgeRefs: InheritedTargetRef[] = plan.mergedEdges.map((edge) => ({
     kind: edge.kind,
     id: edge.id,
@@ -2525,42 +2552,32 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
   for (const [identity, kind] of plan.edgeDeletions) {
     edgeRefs.push({ kind, id: idOf(identity) });
   }
-  const idsByKind = bucketInheritedRefsByKind(
-    edgeRefs,
-    new Set(targetEdgeSignatures.keys()),
-  );
-  for (const [kind, ids] of idsByKind) {
-    const rows = await edgeCollection(edgesApi, kind).getByIds(
-      ids,
-      INCLUDE_TOMBSTONES,
-    );
-    for (const [index, id] of ids.entries()) {
-      const expected = targetEdgeSignatures.get(mergeKey(kind, id))!;
-      const current = rows[index];
-      const currentSignature =
-        current === undefined ? undefined : (
-          edgeStateSignature({
-            fromKind: current.fromKind,
-            fromId: current.fromId,
-            toKind: current.toKind,
-            toId: current.toId,
-            live: current.meta.deletedAt === undefined,
-            props: edgeProps(current),
-          })
-        );
-      if (currentSignature === expected) {
-        continue;
-      }
-      throw new BaseVersionMismatchError(
+  await assertInheritedUnchanged<Edge, string>({
+    refs: edgeRefs,
+    expected: guard.targetEdgeSignatures,
+    fetchRows: (kind, ids) =>
+      edgeCollection(edgesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
+    deriveValue: (row) =>
+      row === undefined ? undefined : (
+        edgeStateSignature({
+          fromKind: row.fromKind,
+          fromId: row.fromId,
+          toKind: row.toKind,
+          toId: row.toId,
+          live: row.meta.deletedAt === undefined,
+          props: edgeProps(row),
+        })
+      ),
+    buildError: (id, kind) =>
+      new BaseVersionMismatchError(
         `mergeIncremental() observed committed edge "${id}" (kind "${kind}") while planning, but its endpoints, liveness, or props changed before the commit transaction; the resolved plan no longer describes the live target and was not applied.`,
         {
           details: { id, kind },
           suggestion:
             "Re-run mergeIncremental(); the re-planned merge resolves the inherited modifications against the now-committed rows.",
         },
-      );
-    }
-  }
+      ),
+  });
 }
 
 /**

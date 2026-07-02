@@ -358,10 +358,13 @@ function compileStringPattern(op: string, pattern: string): string {
 }
 
 /**
- * Escapes wildcard characters in a SQL pattern parameter.
+ * Escapes wildcard characters in a SQL pattern parameter. Mirrors
+ * `compileStringPattern`'s escaping for the literal-pattern path, both driven
+ * by the same {@link LIKE_ESCAPE_CHARACTER} so they can't drift apart.
  */
 function escapeLikePatternParameter(parameter: SQL): SQL {
-  return sql`REPLACE(REPLACE(REPLACE(${parameter}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')`;
+  const doubledEscape = `${LIKE_ESCAPE_CHARACTER}${LIKE_ESCAPE_CHARACTER}`;
+  return sql`REPLACE(REPLACE(REPLACE(${parameter}, ${LIKE_ESCAPE_CHARACTER}, ${doubledEscape}), '%', ${`${LIKE_ESCAPE_CHARACTER}%`}), '_', ${`${LIKE_ESCAPE_CHARACTER}_`})`;
 }
 
 /**

@@ -21,7 +21,10 @@
  * WHICH nodes share an identity, never the ordering among genuinely distinct ids.
  */
 
+
 import type { NodeId, NodeType } from "./typegraph-internal";
+
+
 
 /** The `(kind, id)` separator: a NUL byte (0x00), absent from schema kind names. */
 const SEPARATOR = String.fromCharCode(0);
@@ -48,19 +51,6 @@ export function mergeKey(kind: string, id: string): MergeKey {
     );
   }
   return `${kind}${SEPARATOR}${id}` as MergeKey;
-}
-
-/**
- * Lexicographic comparator over two strings (node/edge ids, kinds, property names,
- * bucket keys, branches). The single shared total-order primitive the merge pipeline's
- * deterministic sorts are built on.
- */
-export function compareStrings(left: string, right: string): number {
-  return (
-    left < right ? -1
-    : left > right ? 1
-    : 0
-  );
 }
 
 /** Builds the composite identity key for any object carrying a `kind` and `id`. */
@@ -103,3 +93,5 @@ export function compareMergeKeys(left: MergeKey, right: MergeKey): number {
     : 0
   );
 }
+
+export {compareStrings} from "../utils/compare";

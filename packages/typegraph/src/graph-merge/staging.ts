@@ -202,8 +202,12 @@ export async function stageBranches<G extends GraphDef>(
   let targetNodeVersions: ReadonlyMap<MergeKey, number> = new Map();
   let targetEdgeSignatures: ReadonlyMap<MergeKey, string> = new Map();
   for (const branch of branches) {
-    const diff = await diffAgainstBase(baseStore, branch.store);
     const branchId = branch.id;
+    const diff = await diffAgainstBase(
+      baseStore,
+      branch.store,
+      branchId === captureTargetStateFor,
+    );
     if (branchId === captureTargetStateFor) {
       targetNodeVersions = diff.forkNodeVersions;
       targetEdgeSignatures = diff.forkEdgeSignatures;

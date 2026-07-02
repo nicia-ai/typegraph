@@ -22,6 +22,15 @@ export type UniquenessContext = Readonly<{
   backend: GraphBackend | TransactionBackend;
 }>;
 
+/** Builds a {@link UniquenessContext} — the one constructor every call site shares. */
+export function createUniquenessContext(
+  graphId: string,
+  registry: KindRegistry,
+  backend: GraphBackend | TransactionBackend,
+): UniquenessContext {
+  return { graphId, registry, backend };
+}
+
 /**
  * Checks uniqueness constraints for a new or existing node.
  *
