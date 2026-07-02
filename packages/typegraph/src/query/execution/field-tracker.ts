@@ -8,6 +8,7 @@
 
 import type { KindEntity } from "../../core/types";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../../system-fields";
+import { compareStrings } from "../../utils/compare";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
 import {
@@ -277,9 +278,9 @@ export function buildSelectiveFields(
       };
     })
     .toSorted((a, b) => {
-      const aliasCompare = a.alias.localeCompare(b.alias);
+      const aliasCompare = compareStrings(a.alias, b.alias);
       if (aliasCompare !== 0) return aliasCompare;
-      return a.field.localeCompare(b.field);
+      return compareStrings(a.field, b.field);
     });
 }
 

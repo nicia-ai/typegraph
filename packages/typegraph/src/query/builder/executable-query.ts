@@ -8,6 +8,7 @@ import {
 import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import { UnsupportedPredicateError, ValidationError } from "../../errors";
+import { compareStrings } from "../../utils/compare";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
   mergeEdgeKinds,
@@ -828,9 +829,9 @@ export class ExecutableQuery<
     }
 
     return result.toSorted((a, b) => {
-      const aliasCompare = a.alias.localeCompare(b.alias);
+      const aliasCompare = compareStrings(a.alias, b.alias);
       if (aliasCompare !== 0) return aliasCompare;
-      return a.field.localeCompare(b.field);
+      return compareStrings(a.field, b.field);
     });
   }
 

@@ -1105,8 +1105,9 @@ export function buildStandardHybridRrfOrderBy(
   // Deterministic tiebreak on the CTE-projected node_id. At least one of
   // the two CTEs always has a non-NULL node_id for any row returned by
   // the LEFT JOIN-union shape, so COALESCE always resolves. This matches
-  // `store.search.hybrid`'s JS-side `localeCompare(nodeId)` tiebreak so
-  // the two paths produce identical top-k under ties.
+  // `store.search.hybrid`'s JS-side code-unit `compareStrings(nodeId)`
+  // tiebreak so the two paths produce identical top-k under ties (SQLite
+  // BINARY collation is code-unit order for the ASCII id alphabet).
   const idTiebreak = sql.raw(
     `COALESCE(${FULLTEXT_CTE_ALIAS}.node_id, ${EMBEDDINGS_CTE_ALIAS}.node_id) ASC`,
   );

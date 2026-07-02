@@ -24,6 +24,7 @@ import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
 import { type KindRegistry } from "../registry/kind-registry";
+import { compareStrings } from "../utils/compare";
 import { getEmbeddingFields } from "./embedding-sync";
 import { rowToNode } from "./row-mappers";
 import { type Node } from "./types";
@@ -467,7 +468,8 @@ export async function executeHybridSearch<N = Node>(
 
   const ranked = [...fused.values()]
     .toSorted(
-      (a, b) => b.fusedScore - a.fusedScore || a.nodeId.localeCompare(b.nodeId),
+      (a, b) =>
+        b.fusedScore - a.fusedScore || compareStrings(a.nodeId, b.nodeId),
     )
     .slice(0, options.limit);
 

@@ -57,14 +57,46 @@ export function recordedGraphWriteAdvisoryLockSql(graphId: string): SQL {
   );
 }
 
+declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
+
+/**
+ * Compile-time evidence that the per-graph write-lock discipline was
+ * satisfied BEFORE any row work in the current transaction — either the
+ * advisory lock was actually acquired ({@link lockRecordedGraphWrite}, on a
+ * capture-enabled Postgres store) or the store provably needs no lock
+ * ({@link uncapturedGraphWriteLock}). Functions that perform captured row
+ * writes (the node write pipeline) require this token as a parameter, so
+ * "sidecar write before lock" is a compile error rather than a lock-order
+ * inversion found in review.
+ */
+export type GraphWriteLock = Readonly<{
+  [GRAPH_WRITE_LOCK_BRAND]: true;
+  graphId: string;
+}>;
+
+function graphWriteLockEvidence(graphId: string): GraphWriteLock {
+  return { graphId } as GraphWriteLock;
+}
+
+/**
+ * Evidence constructor for stores WITHOUT history capture, where no
+ * advisory lock exists to acquire. Calling this is an explicit claim that
+ * the target store is not capture-enabled — do not use it to skip the lock
+ * on a history store.
+ */
+export function uncapturedGraphWriteLock(graphId: string): GraphWriteLock {
+  return graphWriteLockEvidence(graphId);
+}
+
 export async function lockRecordedGraphWrite(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   graphId: string,
-): Promise<void> {
-  if (target.dialect !== "postgres") return;
+): Promise<GraphWriteLock> {
+  if (target.dialect !== "postgres") return graphWriteLockEvidence(graphId);
   await target.execute(
     asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
   );
+  return graphWriteLockEvidence(graphId);
 }
 
 export async function lockRecordedGraphWrites(
@@ -72,9 +104,11 @@ export async function lockRecordedGraphWrites(
   graphIds: Iterable<string>,
 ): Promise<void> {
   if (target.dialect !== "postgres") return;
-  const uniqueGraphIds = [...new Set(graphIds)].toSorted((left, right) =>
-    left.localeCompare(right),
-  );
+  // Codepoint sort, NOT localeCompare: every process must acquire multi-graph
+  // locks in the same order, and locale-sensitive collation varies with the
+  // host's ICU configuration — two processes sorting the same ids differently
+  // would take the same lock pair in opposite orders and deadlock.
+  const uniqueGraphIds = [...new Set(graphIds)].toSorted();
   for (const graphId of uniqueGraphIds) {
     await lockRecordedGraphWrite(target, graphId);
   }

@@ -7,7 +7,7 @@
  */
 
 import type { KindEntity } from "../../core/types";
-import { normalizePath } from "../../utils";
+import { compareStrings, normalizePath } from "../../utils";
 import { mergeEdgeKinds, type SelectiveField, type Traversal } from "../ast";
 import type {
   AliasMap,
@@ -268,7 +268,7 @@ function buildAliasPlans(
   }
 
   // Keep plan iteration stable.
-  return plans.toSorted((a, b) => a.alias.localeCompare(b.alias));
+  return plans.toSorted((a, b) => compareStrings(a.alias, b.alias));
 }
 
 // ============================================================

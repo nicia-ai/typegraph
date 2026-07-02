@@ -152,6 +152,47 @@ export type NodeRow = Readonly<{
 }>;
 
 /**
+ * A {@link NodeRow} proven live (not soft-deleted). Functions that must only
+ * ever touch live rows — the live-row update pipeline, soft delete — take
+ * this type so a caller holding a possibly-tombstoned row is forced through
+ * {@link isLiveNodeRow} first, instead of silently running live-row side
+ * effects (uniqueness reservations, embedding/fulltext sync) for a row that
+ * stays invisible.
+ */
+export type LiveNodeRow = NodeRow & Readonly<{ deleted_at: undefined }>;
+
+/**
+ * A {@link NodeRow} proven soft-deleted. A resurrect targets exactly this
+ * shape; see {@link isTombstonedNodeRow}.
+ */
+export type TombstonedNodeRow = NodeRow & Readonly<{ deleted_at: string }>;
+
+export function isLiveNodeRow(row: NodeRow): row is LiveNodeRow {
+  return row.deleted_at === undefined;
+}
+
+export function isTombstonedNodeRow(row: NodeRow): row is TombstonedNodeRow {
+  return row.deleted_at !== undefined;
+}
+
+/**
+ * The read-only slice of a backend. Give this type to code that is
+ * semantically a read — probes, gates, support-graph loads — so a read path
+ * structurally CANNOT open a write transaction, mutate rows, or execute raw
+ * SQL: those members do not exist on the type. Extend the pick as read paths
+ * need more of the read surface.
+ */
+export type GraphReadBackend = Pick<
+  GraphBackend,
+  | "dialect"
+  | "getNode"
+  | "getEdge"
+  | "findNodesByKind"
+  | "findEdgesByKind"
+  | "findEdgesConnectedTo"
+>;
+
+/**
  * A row from the typegraph_edges table.
  */
 export type EdgeRow = Readonly<{

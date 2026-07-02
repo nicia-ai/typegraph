@@ -22,6 +22,11 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { lockRecordedGraphWrite } from "../recorded-capture";
+import {
+  type GraphWriteLock,
+  uncapturedGraphWriteLock,
+} from "../recorded-capture/clock";
+import { type OperationHookContext } from "../types";
 
 /**
  * The slice of an operation context {@link runInWriteTransaction} needs: the
@@ -51,10 +56,54 @@ export type WriteTransactionContext = Readonly<{
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
   backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    lock: GraphWriteLock,
+  ) => Promise<T>,
 ): Promise<T> {
   return runOptionallyInTransaction(backend, async (target) => {
-    if (ctx.historyEnabled) await lockRecordedGraphWrite(target, ctx.graphId);
-    return fn(target);
+    const lock =
+      ctx.historyEnabled ?
+        await lockRecordedGraphWrite(target, ctx.graphId)
+      : uncapturedGraphWriteLock(ctx.graphId);
+    return fn(target, lock);
   });
+}
+
+/**
+ * The slice of an operation context {@link runHookedWriteOperation} needs:
+ * the {@link WriteTransactionContext} plus the hook wrapper. Both
+ * `NodeOperationContext` and `EdgeOperationContext` satisfy it.
+ */
+export type HookedWriteOperationContext = WriteTransactionContext &
+  Readonly<{
+    withOperationHooks: <T>(
+      ctx: OperationHookContext,
+      fn: () => Promise<T>,
+    ) => Promise<T>;
+  }>;
+
+/**
+ * The one sanctioned composition for a hooked, non-batch write operation:
+ * operation hooks WRAP the write transaction, so `onOperationEnd` observes a
+ * durably committed result and a failed COMMIT surfaces through `onError` —
+ * a hook that fired inside the transaction would report success for a write
+ * the rollback then discards. Every hooked node/edge mutation routes through
+ * this helper; composing `withOperationHooks` and `runInWriteTransaction` by
+ * hand invites exactly the inverted nesting this exists to prevent.
+ * (Batch operations skip hooks deliberately and call
+ * {@link runInWriteTransaction} directly.)
+ */
+export function runHookedWriteOperation<T>(
+  ctx: HookedWriteOperationContext,
+  opContext: OperationHookContext,
+  backend: GraphBackend | TransactionBackend,
+  body: (
+    target: GraphBackend | TransactionBackend,
+    lock: GraphWriteLock,
+  ) => Promise<T>,
+): Promise<T> {
+  return ctx.withOperationHooks(opContext, () =>
+    runInWriteTransaction(ctx, backend, body),
+  );
 }
