@@ -5,7 +5,10 @@
  * Follows Better Auth's pattern: users provide a configured Drizzle instance
  * and run migrations to create TypeGraph tables.
  */
+import { existsSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
@@ -1070,5 +1073,78 @@ describe("SQLite backend.vectorSearch", () => {
         limit: 0,
       }),
     ).rejects.toThrow(/positive integer/);
+  });
+});
+
+// ============================================================
+// Business transaction locking (better-sqlite3, file-backed)
+// ============================================================
+
+function temporaryDbPath(): string {
+  return path.join(
+    tmpdir(),
+    `typegraph-lock-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.db`,
+  );
+}
+
+function removeDbFiles(dbPath: string): void {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    if (existsSync(dbPath + suffix)) unlinkSync(dbPath + suffix);
+  }
+}
+
+describe("SQLite Backend - business transaction write lock", () => {
+  it("takes the reserved write lock at BEGIN (BEGIN IMMEDIATE), before the first write", async () => {
+    // Regression for the sync ("sql") business-transaction path: it opened a
+    // deferred BEGIN, so the write lock was only acquired on the first write and
+    // a read-then-write could fail with "database is locked" against a writer on
+    // another connection. It now opens BEGIN IMMEDIATE, like schema writes and
+    // the async libsql/Drizzle path, holding the lock for the whole transaction.
+    const dbPath = temporaryDbPath();
+    const { backend } = createLocalSqliteBackend({ path: dbPath });
+
+    let signalInside!: () => void;
+    const inside = new Promise<void>((resolve) => {
+      signalInside = resolve;
+    });
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    // Open a business transaction whose callback does NO write. BEGIN runs before
+    // the callback, so once `inside` resolves the reserved write lock is either
+    // held (BEGIN IMMEDIATE) or not (deferred BEGIN, no write yet).
+    const txDone = backend.transaction(async () => {
+      signalInside();
+      await barrier;
+    });
+    await inside;
+
+    let probeTookLock = false;
+    try {
+      // A second connection tries to take the write lock with a short busy
+      // timeout. It must fail: the open transaction already holds it. Under the
+      // old deferred BEGIN this would wrongly succeed (no lock held yet).
+      const probe = new Database(dbPath);
+      try {
+        probe.pragma("busy_timeout = 100");
+        probe.exec("BEGIN IMMEDIATE");
+        probeTookLock = true;
+        probe.exec("ROLLBACK");
+      } catch {
+        // BEGIN IMMEDIATE threw (busy): the open transaction holds the lock, so
+        // probeTookLock stays false.
+      } finally {
+        probe.close();
+      }
+    } finally {
+      release();
+      await txDone;
+      await backend.close();
+      removeDbFiles(dbPath);
+    }
+
+    expect(probeTookLock).toBe(false);
   });
 });

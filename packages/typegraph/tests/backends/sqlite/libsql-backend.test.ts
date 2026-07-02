@@ -10,11 +10,23 @@ import path from "node:path";
 
 import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { wrapWithManagedClose } from "../../../src/backend/types";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
+
+const ConcurrencyPerson = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const concurrencyGraph = defineGraph({
+  id: "libsql_concurrency",
+  nodes: { Person: { type: ConcurrencyPerson } },
+  edges: {},
+});
 
 // ============================================================
 // Temp File Helpers
@@ -96,6 +108,55 @@ describe("libsql Backend - Specific", () => {
     // Client is still usable after backend creation — not closed by the factory
     const result = await client.execute("SELECT 1 AS value");
     expect(result.rows[0]!.value).toBe(1);
+    client.close();
+  });
+
+  // Regression: concurrent write transactions on one async libsql connection
+  // used to open overlapping BEGINs and fail with SQLITE_BUSY. The per-backend
+  // serialized queue must order them (temp file — libsql transactions open a
+  // separate connection, which destroys an in-memory database).
+  it("serializes concurrent write transactions without SQLITE_BUSY", async () => {
+    const dbPath = createTemporaryDbPath();
+    const client = createClient({ url: `file:${dbPath}` });
+    const { backend } = await createLibsqlBackend(client);
+    const [store] = await createStoreWithSchema(concurrencyGraph, backend);
+
+    const count = 24;
+    await Promise.all(
+      Array.from({ length: count }, (_, index) =>
+        store.transaction(async (tx) => {
+          await tx.nodes.Person.create({ name: `P${index}` });
+        }),
+      ),
+    );
+
+    const people = await store.nodes.Person.find({ limit: count + 10 });
+    expect(people).toHaveLength(count);
+
+    await backend.close();
+    client.close();
+  });
+
+  // Regression: with the mutation cascade wrapped in a transaction on every
+  // store (not only history stores), concurrent plain creates each open a
+  // transaction. They must serialize rather than collide with SQLITE_BUSY.
+  it("runs concurrent non-history creates without SQLITE_BUSY", async () => {
+    const dbPath = createTemporaryDbPath();
+    const client = createClient({ url: `file:${dbPath}` });
+    const { backend } = await createLibsqlBackend(client);
+    const [store] = await createStoreWithSchema(concurrencyGraph, backend);
+
+    const count = 24;
+    await Promise.all(
+      Array.from({ length: count }, (_, index) =>
+        store.nodes.Person.create({ name: `N${index}` }),
+      ),
+    );
+
+    const people = await store.nodes.Person.find({ limit: count + 10 });
+    expect(people).toHaveLength(count);
+
+    await backend.close();
     client.close();
   });
 });

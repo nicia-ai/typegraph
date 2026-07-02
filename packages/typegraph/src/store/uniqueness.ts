@@ -150,6 +150,26 @@ export async function updateUniquenessEntries(
   newProps: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
 ): Promise<void> {
+  // A single constraint's sidecar change, computed once every changed key has
+  // been proven free (pass 1) and applied only afterwards (pass 2). `oldKey`
+  // (undefined = nothing to release) is deleted; `newKey` (undefined = nothing
+  // to reserve) is inserted.
+  type PendingUniqueMutation = Readonly<{
+    constraintName: string;
+    oldKey: string | undefined;
+    newKey: string | undefined;
+  }>;
+
+  // Pass 1 — preflight EVERY changed constraint before mutating any sidecar. A
+  // node can carry several unique constraints; mutating them one at a time would
+  // let a later constraint's conflict throw AFTER earlier sidecars were already
+  // changed, and a caller that catches UniquenessError and still commits the
+  // transaction (e.g. importGraph's onConflict: "update", which reports the
+  // conflict per-row) would leave those earlier sidecars mutated while the row
+  // stays unchanged. Checking every new key first means the throw happens with
+  // zero writes. Checks are independent per `constraintName`, so a constraint's
+  // preflight is unaffected by the still-unapplied mutations of the others.
+  const pending: PendingUniqueMutation[] = [];
   for (const constraint of constraints) {
     const oldApplies = checkWherePredicate(constraint, oldProps);
     const newApplies = checkWherePredicate(constraint, newProps);
@@ -173,17 +193,7 @@ export async function updateUniquenessEntries(
       continue;
     }
 
-    // Delete old entry if constraint used to apply
-    if (oldApplies && oldKey !== undefined) {
-      await ctx.backend.deleteUnique({
-        graphId: ctx.graphId,
-        nodeKind: kind,
-        constraintName: constraint.name,
-        key: oldKey,
-      });
-    }
-
-    // Check and insert new entry if constraint now applies
+    // Check the new key for conflicts with OTHER nodes.
     if (newApplies && newKey !== undefined) {
       const kindsToCheck = getKindsForUniquenessCheck(
         kind,
@@ -191,7 +201,6 @@ export async function updateUniquenessEntries(
         ctx.registry,
       );
 
-      // Check for conflicts with other nodes
       for (const kindToCheck of kindsToCheck) {
         const existing = await ctx.backend.checkUnique({
           graphId: ctx.graphId,
@@ -210,13 +219,32 @@ export async function updateUniquenessEntries(
           });
         }
       }
+    }
 
-      // Insert new uniqueness entry
+    pending.push({ constraintName: constraint.name, oldKey, newKey });
+  }
+
+  // Pass 2 — every changed key is proven free, so releasing the old entries and
+  // reserving the new ones can no longer fail on a duplicate mid-way. Release
+  // all before reserving all, so a value moving between this node's constraints
+  // is never transiently double-held.
+  for (const mutation of pending) {
+    if (mutation.oldKey !== undefined) {
+      await ctx.backend.deleteUnique({
+        graphId: ctx.graphId,
+        nodeKind: kind,
+        constraintName: mutation.constraintName,
+        key: mutation.oldKey,
+      });
+    }
+  }
+  for (const mutation of pending) {
+    if (mutation.newKey !== undefined) {
       await ctx.backend.insertUnique({
         graphId: ctx.graphId,
         nodeKind: kind,
-        constraintName: constraint.name,
-        key: newKey,
+        constraintName: mutation.constraintName,
+        key: mutation.newKey,
         nodeId: id,
         concreteKind: kind,
       });

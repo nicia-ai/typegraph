@@ -670,7 +670,20 @@ export function createSqliteBackend(
     tables,
     fulltextStrategy,
   );
-  const serializedQueue = isSync ? createSerializedExecutionQueue() : undefined;
+  // Serialize top-level operations per backend for both synchronous drivers
+  // (better-sqlite3 / do-sqlite) and the async `drizzle` mode (libsql). SQLite
+  // is single-writer, and two concurrent `transaction()` calls on one async
+  // connection open overlapping BEGINs and collide with SQLITE_BUSY; the queue
+  // makes each top-level operation — including a whole transaction — run to
+  // completion before the next starts. It is deadlock-free because a
+  // transaction's inner reads/writes run on the tx-scoped backend, which does
+  // not carry the queue (see CreateSqliteTransactionBackendOptions). `none`
+  // drivers (D1 / neon-http) have no transactions and manage their own
+  // concurrency, so they stay unqueued.
+  const serializedQueue =
+    isSync || transactionMode === "drizzle" ?
+      createSerializedExecutionQueue()
+    : undefined;
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
@@ -1136,7 +1149,14 @@ export function createSqliteBackend(
             vectorStrategy,
             vectorSlotLatch,
           });
-          db.run(sql`BEGIN`);
+          // BEGIN IMMEDIATE, matching runSchemaWriteTransaction and the
+          // "drizzle" branch below: take the reserved write lock at the start of
+          // the transaction rather than on first write. A deferred BEGIN lets a
+          // read-then-write upgrade the lock mid-transaction, which fails
+          // immediately with "database is locked" against a writer on another
+          // connection (the serialized queue only orders writes within THIS
+          // backend); IMMEDIATE instead waits on SQLite's busy timeout.
+          db.run(sql`BEGIN IMMEDIATE`);
 
           try {
             const result = await fn(
@@ -1161,13 +1181,18 @@ export function createSqliteBackend(
         );
       }
 
-      // transactionMode === "drizzle"
+      // transactionMode === "drizzle". Open with BEGIN IMMEDIATE (the same
+      // behavior runSchemaWriteTransaction uses) so the reserved write lock is
+      // taken at the start of the transaction rather than on first write — a
+      // deferred BEGIN would let a read-then-write race the lock upgrade and
+      // fail with SQLITE_BUSY. The serialized queue orders transactions within
+      // this backend; the immediate lock covers contention across connections.
       return runWithSerializedQueue(
         serializedQueue,
         async () =>
-          db.transaction(async (tx) =>
-            fn(bindTransactionBackend(tx), tx),
-          ) as Promise<T>,
+          db.transaction(async (tx) => fn(bindTransactionBackend(tx), tx), {
+            behavior: "immediate",
+          }) as Promise<T>,
       );
     },
 
@@ -1230,9 +1255,9 @@ function createTransactionBackend(
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    ...(options.vectorStrategy === undefined
-      ? {}
-      : { vectorSlotLatch: createVectorSlotLatch() }),
+    ...(options.vectorStrategy === undefined ?
+      {}
+    : { vectorSlotLatch: createVectorSlotLatch() }),
   });
 }
 

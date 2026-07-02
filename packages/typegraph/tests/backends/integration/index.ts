@@ -12,6 +12,7 @@ export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerPredicateIntegrationTests } from "./predicates";
+export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";

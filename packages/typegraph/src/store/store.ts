@@ -157,6 +157,7 @@ import {
   createHistoryUnsafeSqlRef,
   createRecordedBackend,
   createRecordedTransactionScope,
+  lockRecordedGraphWrite,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   withRecordedRelationsPrecondition,
@@ -1372,11 +1373,12 @@ export class Store<G extends GraphDef> {
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
-    return this.#backend.transaction(
-      async (txBackend, sql) =>
-        invoke(this.#buildTransactionContext(txBackend, sql)),
-      options,
-    );
+    return this.#backend.transaction(async (txBackend, sql) => {
+      if (this.#captureEnabled) {
+        await lockRecordedGraphWrite(txBackend, this.graphId);
+      }
+      return invoke(this.#buildTransactionContext(txBackend, sql));
+    }, options);
   }
 
   /**
@@ -1517,6 +1519,9 @@ export class Store<G extends GraphDef> {
           backend: txBackend,
           flush: () => Promise.resolve(),
         };
+    if (this.#captureEnabled) {
+      await lockRecordedGraphWrite(scope.backend, this.graphId);
+    }
     const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
     const result = await invoke(
       this.#buildTransactionContext(scope.backend, externalTx),
@@ -2490,6 +2495,7 @@ export class Store<G extends GraphDef> {
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      historyEnabled: this.#captureEnabled,
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
@@ -2523,6 +2529,23 @@ export class Store<G extends GraphDef> {
       kind,
       id,
     };
+  }
+
+  /**
+   * @internal Runs a graph-owned node mutation through the store's operation
+   * hook lifecycle when the mutation cannot use the public collection verb
+   * directly.
+   */
+  runNodeOperationHooks<T>(
+    operation: "create" | "update" | "delete",
+    kind: string,
+    id: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return this.#withOperationHooks(
+      this.#createOperationContext(operation, "node", kind, id),
+      fn,
+    );
   }
 
   async #withOperationHooks<T>(

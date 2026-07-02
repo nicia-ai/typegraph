@@ -26,6 +26,7 @@ import { type GraphBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   recordedClockAdvisoryLockSql,
+  recordedGraphWriteAdvisoryLockSql,
   toCanonicalIso,
 } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";
@@ -83,6 +84,28 @@ describe("recorded commit clock", () => {
       /pg_advisory_xact_lock\(\s*hashtext\(\$1\), hashtext\(\$2\)\s*\)/u,
     );
     expect(compiled.params).toEqual(["typegraph:recorded-clock", "graph-1"]);
+  });
+
+  it("uses a namespace distinct from the graph-write lock", () => {
+    // Graph writes take their advisory lock before graph row reads/writes;
+    // recorded-clock allocation takes its lock at flush after live writes. A
+    // shared namespace would recreate the original acquire-order inversion.
+    const recordedClockParams = new PgDialect().sqlToQuery(
+      recordedClockAdvisoryLockSql("graph-1"),
+    ).params;
+    const graphWriteParams = new PgDialect().sqlToQuery(
+      recordedGraphWriteAdvisoryLockSql("graph-1"),
+    ).params;
+
+    expect(recordedClockParams).toEqual([
+      "typegraph:recorded-clock",
+      "graph-1",
+    ]);
+    expect(graphWriteParams).toEqual([
+      "typegraph:recorded-graph-write",
+      "graph-1",
+    ]);
+    expect(graphWriteParams[0]).not.toBe(recordedClockParams[0]);
   });
 
   it("allocates distinct, both-observable instants for same-millisecond commits", async () => {
