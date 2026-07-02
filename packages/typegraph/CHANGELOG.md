@@ -1,5 +1,53 @@
 # @nicia-ai/typegraph
 
+## 0.33.1
+
+### Patch Changes
+
+- [#191](https://github.com/nicia-ai/typegraph/pull/191) [`2cad229`](https://github.com/nicia-ai/typegraph/commit/2cad2293f2d937aff7f53a1318525814eeb05533) Thanks [@pdlug](https://github.com/pdlug)! - Guard `mergeIncremental()` against inherited-row lost updates. The incremental
+  commit path re-checked new-row identity resolution and per-row resurrect/strip
+  hazards, but not whether a committed row the plan mutates still held the value
+  the plan merged against — so a concurrent write to an inherited row between
+  planning (reads taken outside the transaction) and commit was silently
+  discarded. The commit now re-reads, in-transaction, every committed target row
+  the plan will change and aborts with a retryable `BaseVersionMismatchError` if it
+  drifted, matching the snapshot merge path's TOCTOU contract. This covers all four
+  mutating paths: node writes and node deletions (checked by `version`), and edge
+  upserts and edge deletions (checked by a content signature over endpoints,
+  liveness, and canonical props, since edges carry no version column).
+
+- [#189](https://github.com/nicia-ai/typegraph/pull/189) [`fe21158`](https://github.com/nicia-ai/typegraph/commit/fe2115836d084a86613ae94a4403651d8316713a) Thanks [@pdlug](https://github.com/pdlug)! - Classify incompatible property-schema changes as breaking schema migrations. The
+  migration diff previously compared only the top-level JSON-Schema token of each
+  property, so a changed property type (e.g. `string` → `number`), a changed array
+  item type (`string[]` → `number[]`), a narrowed enum, or a type change nested
+  inside an object all auto-migrated silently as a non-blocking warning, leaving
+  stored rows that no longer satisfy the declared schema; edge property changes
+  were unconditionally treated as safe. Node and edge property diffs now share one
+  recursive, conservative classifier: a change is `safe` only when it can be proven
+  non-breaking (a new optional property, a metadata-only edit, or an additive
+  optional field nested inside an object). Everything else — a removed property, a
+  newly required property, an in-place type change, a changed array item schema, an
+  enum/const/composition change, a same-type constraint change, or a breaking
+  change nested inside an object — is `breaking` and blocks auto-migration. The
+  `warning` severity is no longer emitted for property changes.
+
+- [#190](https://github.com/nicia-ai/typegraph/pull/190) [`1bfa9c2`](https://github.com/nicia-ai/typegraph/commit/1bfa9c28d04f03b9f82e23bf0a97417aba544767) Thanks [@pdlug](https://github.com/pdlug)! - Fix two silent query-correctness bugs. Keyset pagination (`paginate`/`stream`)
+  now appends a unique `id` tiebreaker to the ORDER BY so a non-unique sort no
+  longer drops equal-key rows across pages. And every compiled `LIKE`/`ILIKE` now
+  emits `ESCAPE '\'` — including the case-sensitive `like` path, which previously
+  omitted it — so escaped `%`/`_`/`\` match literally on SQLite as they already
+  did on PostgreSQL, in both the auto-escaped operators
+  (`contains`/`startsWith`/`endsWith`) and raw `like`/`ilike` patterns, and
+  whether the pattern is a literal or a bound parameter (previously SQLite had no
+  default LIKE escape character, so the two backends — and the direct vs prepared
+  paths — diverged).
+
+- [#192](https://github.com/nicia-ai/typegraph/pull/192) [`2af3a06`](https://github.com/nicia-ai/typegraph/commit/2af3a065d9d54b0ac89c32dc27d637a4eedc58cf) Thanks [@pdlug](https://github.com/pdlug)! - Type-check the remaining StoreView read-name buckets. `CURRENT_ONLY_READ_NAMES`
+  and `EDGE_BATCH_READ_NAMES` were plain `as const` arrays while every sibling
+  bucket carried a `satisfies readonly (keyof Collection)[]` guard, so a renamed
+  or mistyped method in those two would have gone uncaught at compile time. All
+  six buckets are now checked against the live collection keys. Compile-time only.
+
 ## 0.33.0
 
 ### Minor Changes
