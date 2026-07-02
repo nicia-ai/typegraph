@@ -19,6 +19,7 @@ import {
   type TemporalMode,
 } from "../../core/types";
 import {
+  CardinalityError,
   DatabaseOperationError,
   EdgeNotFoundError,
   EndpointNotFoundError,
@@ -546,6 +547,61 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 }
 
 /**
+ * Shared edge-update body: re-reads the edge inside the transaction, merges
+ * and validates props, and writes. A plain update requires a live edge; a
+ * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
+ */
+async function performEdgeUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  input: {
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validTo?: string;
+  },
+  target: GraphBackend | TransactionBackend,
+  options?: Readonly<{ clearDeleted?: boolean }>,
+): Promise<Edge> {
+  const id = input.id;
+
+  const existing = await target.getEdge(ctx.graphId, id);
+  if (!existing || (!options?.clearDeleted && existing.deleted_at)) {
+    throw new EdgeNotFoundError("unknown", id);
+  }
+
+  const registration = getEdgeRegistration(ctx.graph, existing.kind);
+  const edgeKind = registration.type;
+
+  const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
+  const mergedProps = { ...existingProps, ...input.props };
+
+  const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
+    kind: existing.kind,
+    operation: "update",
+    id,
+  });
+
+  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+
+  const updateParams: {
+    graphId: string;
+    id: string;
+    props: Record<string, unknown>;
+    validTo?: string;
+    clearDeleted?: boolean;
+  } = {
+    graphId: ctx.graphId,
+    id,
+    props: validatedProps,
+  };
+  if (validTo !== undefined) updateParams.validTo = validTo;
+  if (options?.clearDeleted) updateParams.clearDeleted = true;
+
+  const row = await target.updateEdge(updateParams);
+
+  return rowToEdge(row);
+}
+
+/**
  * Executes an edge update operation.
  */
 export async function executeEdgeUpdate<G extends GraphDef>(
@@ -573,47 +629,9 @@ export async function executeEdgeUpdate<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("update", "edge", gate.kind, id);
 
-  return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
-    const existing = await target.getEdge(ctx.graphId, id);
-    if (!existing || existing.deleted_at) {
-      throw new EdgeNotFoundError("unknown", id);
-    }
-
-    // Get registration for schema validation
-    const registration = getEdgeRegistration(ctx.graph, existing.kind);
-    const edgeKind = registration.type;
-
-    // Merge props
-    const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
-    const mergedProps = { ...existingProps, ...input.props };
-
-    // Validate merged props with full context
-    const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
-      kind: existing.kind,
-      operation: "update",
-      id,
-    });
-
-    // Validate temporal fields
-    const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-
-    // Update edge - conditionally include optional fields
-    const updateParams: {
-      graphId: string;
-      id: string;
-      props: Record<string, unknown>;
-      validTo?: string;
-    } = {
-      graphId: ctx.graphId,
-      id,
-      props: validatedProps,
-    };
-    if (validTo !== undefined) updateParams.validTo = validTo;
-
-    const row = await target.updateEdge(updateParams);
-
-    return rowToEdge(row);
-  });
+  return runHookedWriteOperation(ctx, opContext, backend, (target) =>
+    performEdgeUpdate(ctx, input, target),
+  );
 }
 
 /**
@@ -630,46 +648,9 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Edge> {
-  const id = input.id;
-
-  return runInWriteTransaction(ctx, backend, async (target) => {
-    const existing = await target.getEdge(ctx.graphId, id);
-    if (!existing) {
-      throw new EdgeNotFoundError("unknown", id);
-    }
-
-    const registration = getEdgeRegistration(ctx.graph, existing.kind);
-    const edgeKind = registration.type;
-
-    const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
-    const mergedProps = { ...existingProps, ...input.props };
-
-    const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
-      kind: existing.kind,
-      operation: "update",
-      id,
-    });
-
-    const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
-
-    const updateParams: {
-      graphId: string;
-      id: string;
-      props: Record<string, unknown>;
-      validTo?: string;
-      clearDeleted?: boolean;
-    } = {
-      graphId: ctx.graphId,
-      id,
-      props: validatedProps,
-    };
-    if (validTo !== undefined) updateParams.validTo = validTo;
-    if (options?.clearDeleted) updateParams.clearDeleted = true;
-
-    const row = await target.updateEdge(updateParams);
-
-    return rowToEdge(row);
-  });
+  return runInWriteTransaction(ctx, backend, (target) =>
+    performEdgeUpdate(ctx, input, target, options),
+  );
 }
 
 /**
@@ -993,9 +974,17 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     }
   }
 
-  return runInWriteTransaction(ctx, backend, async (target) => {
+  // No enclosing transaction: each write leg opens its own (hooked, for the
+  // create leg) transaction. An outer transaction here would make the nested
+  // operation run directly inside it and fire its success hooks before THIS
+  // wrapper's COMMIT — the durability contract hooks promise would be false.
+  // A concurrent create that wins between the lookup and the write surfaces
+  // as a cardinality conflict and is converged by one retry of the lookup.
+  async function attempt(): Promise<
+    Readonly<{ edge: Edge; action: GetOrCreateAction }>
+  > {
     // Query all edges of this kind between (from, to) including tombstones
-    const candidateRows = await target.findEdgesByKind({
+    const candidateRows = await backend.findEdgesByKind({
       graphId: ctx.graphId,
       kind,
       fromKind,
@@ -1022,7 +1011,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         toId,
         props: validatedProps,
       };
-      const edge = await executeEdgeCreate(ctx, input, target);
+      const edge = await executeEdgeCreate(ctx, input, backend);
       return { edge, action: "created" };
     }
 
@@ -1035,7 +1024,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       const edge = await executeEdgeUpsertUpdate(
         ctx,
         { id: liveRow.id, props: validatedProps },
-        target,
+        backend,
       );
       return { edge, action: "updated" };
     }
@@ -1050,7 +1039,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     const constraintContext: ConstraintContext = {
       graphId: ctx.graphId,
       registry: ctx.registry,
-      backend: target,
+      backend,
     };
     await checkCardinalityConstraint(
       constraintContext,
@@ -1066,11 +1055,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     const edge = await executeEdgeUpsertUpdate(
       ctx,
       { id: matchedDeletedRow.id, props: validatedProps },
-      target,
+      backend,
       { clearDeleted: true },
     );
     return { edge, action: "resurrected" };
-  });
+  }
+
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!(error instanceof CardinalityError)) throw error;
+    return attempt();
+  }
 }
 
 /**

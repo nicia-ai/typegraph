@@ -279,12 +279,25 @@ export type StoreHooks = Readonly<{
   ) => void;
   /** Called before a CRUD operation starts */
   onOperationStart?: (ctx: OperationHookContext) => void;
-  /** Called after a CRUD operation completes */
+  /**
+   * Called after a CRUD operation completes AND is durably committed. For a
+   * top-level operation that is when its own transaction commits; for an
+   * operation inside `store.transaction`, emission is deferred until the
+   * enclosing transaction commits — if that commit fails, the operation is
+   * reported through `onError` instead. (Inside an adopted transaction —
+   * `withTransaction` / `withRecordedTransaction` — the commit belongs to
+   * the caller and cannot be observed, so this fires when the operation
+   * completes within the still-open transaction.)
+   */
   onOperationEnd?: (
     ctx: OperationHookContext,
     result: Readonly<{ durationMs: number }>,
   ) => void;
-  /** Called when an error occurs */
+  /**
+   * Called when an operation fails — including an operation that completed
+   * inside a `store.transaction` whose commit then failed and rolled it
+   * back.
+   */
   onError?: (ctx: HookContext, error: Error) => void;
 }>;
 
@@ -1329,6 +1342,26 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
    * is the store's plain backend — reads work, but there is no snapshot.
    */
   backend: TransactionBackend;
+  /**
+   * Runtime string-keyed node collection access, mirroring
+   * `Store.getNodeCollection` — for callers (e.g. provenance) that resolve a
+   * kind dynamically rather than through the static `nodes.<Kind>` property.
+   * Returns `undefined` when `kind` is not registered in this graph.
+   */
+  getNodeCollection(kind: string): DynamicNodeCollection | undefined;
+  /**
+   * @internal Runs a graph-owned node mutation through this transaction's
+   * operation-hook lifecycle when the mutation cannot use a public collection
+   * verb directly (provenance fact close/reopen). Routed through the
+   * transaction's hook runner, so a successful operation's `onOperationEnd`
+   * is deferred until the transaction commits.
+   */
+  runNodeOperationHooks<T>(
+    operation: "create" | "update" | "delete",
+    kind: string,
+    id: string,
+    fn: () => Promise<T>,
+  ): Promise<T>;
 }>;
 
 // ============================================================

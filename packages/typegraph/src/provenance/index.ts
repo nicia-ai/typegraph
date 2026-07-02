@@ -19,6 +19,7 @@ import type {
 import {
   applyNodeResurrect,
   applyNodeSoftDelete,
+  createNodeWriteContext,
 } from "../store/operations/node-write-pipeline";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
@@ -68,30 +69,32 @@ export type ProvenanceRetractionConfig<G extends GraphDef = GraphDef> =
     derives: Readonly<{ kind: EdgeKind<G> }>;
   }>;
 
+/**
+ * Extracts the node kind(s) referenced by a provenance role config, whether
+ * declared as a single `{ kind }` or a `{ kinds }` array. Falls back to the
+ * full `NodeKind<G>` union when neither shape is present (e.g. a role config
+ * that also carries unrelated fields, matched structurally).
+ */
+type KindsFromRef<G extends GraphDef, Ref> =
+  Ref extends Readonly<{ kind: infer K }> ? Extract<K, NodeKind<G>>
+  : Ref extends Readonly<{ kinds: readonly (infer K)[] }> ?
+    Extract<K, NodeKind<G>>
+  : NodeKind<G>;
+
 type SourceKindsFromConfig<
   G extends GraphDef,
   C extends ProvenanceRetractionConfig<G>,
-> =
-  C["source"] extends Readonly<{ kind: infer K }> ? Extract<K, NodeKind<G>>
-  : C["source"] extends Readonly<{ kinds: readonly (infer K)[] }> ?
-    Extract<K, NodeKind<G>>
-  : NodeKind<G>;
+> = KindsFromRef<G, C["source"]>;
 
 type FactKindsFromConfig<
   G extends GraphDef,
   C extends ProvenanceRetractionConfig<G>,
-> =
-  C["fact"] extends Readonly<{ kinds: readonly (infer K)[] }> ?
-    Extract<K, NodeKind<G>>
-  : NodeKind<G>;
+> = KindsFromRef<G, C["fact"]>;
 
 type JustificationKindFromConfig<
   G extends GraphDef,
   C extends ProvenanceRetractionConfig<G>,
-> =
-  C["justification"] extends Readonly<{ kind: infer K }> ?
-    Extract<K, NodeKind<G>>
-  : NodeKind<G>;
+> = KindsFromRef<G, C["justification"]>;
 
 export type SurvivedVia<
   G extends GraphDef = GraphDef,
@@ -288,13 +291,17 @@ function normalizeConfig<G extends GraphDef>(
     });
   }
 
-  for (const kind of sourceKinds) assertNodeKind(graph, kind, "source");
-  assertNodeKind(graph, justificationKind, "justification");
-  for (const kind of factKinds) assertNodeKind(graph, kind, "fact");
+  for (const kind of sourceKinds) {
+    assertKind(graph.nodes, kind, "source", "node", graph.id);
+  }
+  assertKind(graph.nodes, justificationKind, "justification", "node", graph.id);
+  for (const kind of factKinds) {
+    assertKind(graph.nodes, kind, "fact", "node", graph.id);
+  }
   for (const kind of sourceKinds)
     assertSourceField(graph, kind, retractedField);
-  assertEdgeKind(graph, premiseOfKind, "premiseOf");
-  assertEdgeKind(graph, derivesKind, "derives");
+  assertKind(graph.edges, premiseOfKind, "premiseOf", "edge", graph.id);
+  assertKind(graph.edges, derivesKind, "derives", "edge", graph.id);
 
   if (
     factKinds.some(
@@ -348,27 +355,17 @@ function duplicateValues(values: readonly string[]): string[] {
   return [...duplicates].toSorted((left, right) => compareStrings(left, right));
 }
 
-function assertNodeKind<G extends GraphDef>(
-  graph: G,
+function assertKind(
+  records: Readonly<Record<string, unknown>>,
   kind: string,
   role: string,
+  noun: "node" | "edge",
+  graphId: string,
 ): void {
-  if (Object.hasOwn(graph.nodes, kind)) return;
+  if (Object.hasOwn(records, kind)) return;
   throw new ConfigurationError(
-    `Provenance ${role} kind "${kind}" is not a node kind in this graph.`,
-    { role, kind, graphId: graph.id },
-  );
-}
-
-function assertEdgeKind<G extends GraphDef>(
-  graph: G,
-  kind: string,
-  role: string,
-): void {
-  if (Object.hasOwn(graph.edges, kind)) return;
-  throw new ConfigurationError(
-    `Provenance ${role} kind "${kind}" is not an edge kind in this graph.`,
-    { role, kind, graphId: graph.id },
+    `Provenance ${role} kind "${kind}" is not a ${noun} kind in this graph.`,
+    { role, kind, graphId },
   );
 }
 
@@ -780,26 +777,66 @@ function buildReport<
  * key it needs may still be held by a fact this same transition is about to
  * close — closing first makes a legal transition order-independent.
  */
+/**
+ * Runs `action` over every fact row in `snapshot` that is both affected by the
+ * transition and matches `isTargetKey`/`isTargetRow`, concurrently — the
+ * matched rows are independent facts, so there is no ordering dependency
+ * within a single pass (only between the close pass and the reopen pass,
+ * which the caller sequences).
+ */
+async function forEachAffectedFact<T extends NodeRow>(
+  snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+  isTargetKey: (key: string) => boolean,
+  isTargetRow: (row: NodeRow) => row is T,
+  action: (row: T) => Promise<void>,
+): Promise<void> {
+  const rows: T[] = [];
+  for (const [key, row] of snapshot.facts) {
+    if (!affected.has(key)) continue;
+    if (!isTargetKey(key)) continue;
+    if (!isTargetRow(row)) continue;
+    rows.push(row);
+  }
+  await Promise.all(rows.map((row) => action(row)));
+}
+
+/**
+ * The transaction-scoped hook lifecycle fact close/reopen runs through —
+ * `HistoryTransactionContext["runNodeOperationHooks"]`. Using the
+ * transaction's runner (not the store's) defers each fact's success hook
+ * until the transition's COMMIT, so hooks never report a closed or reopened
+ * fact that a failed commit then rolls back.
+ */
+type RunNodeOperationHooks = <T>(
+  operation: "create" | "update" | "delete",
+  kind: string,
+  id: string,
+  fn: () => Promise<T>,
+) => Promise<T>;
+
 async function synchronizeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
-  graphId: string,
+  runHooks: RunNodeOperationHooks,
   snapshot: SupportSnapshot,
   affected: ReadonlySet<string>,
   lock: GraphWriteLock,
 ): Promise<void> {
-  for (const [key, row] of snapshot.facts) {
-    if (!affected.has(key)) continue;
-    if (snapshot.supportedFactKeys.has(key)) continue;
-    if (!isLiveNodeRow(row)) continue;
-    await closeFactCurrency(backend, store, graphId, row, lock);
-  }
-  for (const [key, row] of snapshot.facts) {
-    if (!affected.has(key)) continue;
-    if (!snapshot.supportedFactKeys.has(key)) continue;
-    if (!isTombstonedNodeRow(row)) continue;
-    await reopenFactCurrency(backend, store, graphId, row, lock);
-  }
+  await forEachAffectedFact(
+    snapshot,
+    affected,
+    (key) => !snapshot.supportedFactKeys.has(key),
+    isLiveNodeRow,
+    (row) => closeFactCurrency(backend, store, runHooks, row, lock),
+  );
+  await forEachAffectedFact(
+    snapshot,
+    affected,
+    (key) => snapshot.supportedFactKeys.has(key),
+    isTombstonedNodeRow,
+    (row) => reopenFactCurrency(backend, store, runHooks, row, lock),
+  );
 }
 
 function getFactRegistration<G extends GraphDef>(
@@ -817,11 +854,11 @@ function getFactRegistration<G extends GraphDef>(
 async function closeFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
-  graphId: string,
+  runHooks: RunNodeOperationHooks,
   row: LiveNodeRow,
   lock: GraphWriteLock,
 ): Promise<void> {
-  await store.runNodeOperationHooks("delete", row.kind, row.id, async () => {
+  await runHooks("delete", row.kind, row.id, async () => {
     const registration = getFactRegistration(store, row);
     // The canonical soft-delete steps (tombstone, uniqueness/embedding/
     // fulltext cleanup) WITHOUT delete-behavior enforcement: closing a
@@ -830,7 +867,7 @@ async function closeFactCurrency<G extends GraphDef>(
     // removed (`cascade` / `disconnect`). Every edge survives untouched,
     // making a later reopen an exact inverse of this close.
     await applyNodeSoftDelete(
-      { graphId, registry: store.registry, lock },
+      createNodeWriteContext(store.graphId, store.registry, lock),
       {
         existing: row,
         schema: registration.type.schema,
@@ -846,17 +883,17 @@ async function closeFactCurrency<G extends GraphDef>(
 async function reopenFactCurrency<G extends GraphDef>(
   backend: HistorySafeTransactionBackend,
   store: HistoryStore<G>,
-  graphId: string,
+  runHooks: RunNodeOperationHooks,
   row: TombstonedNodeRow,
   lock: GraphWriteLock,
 ): Promise<void> {
-  await store.runNodeOperationHooks("update", row.kind, row.id, async () => {
+  await runHooks("update", row.kind, row.id, async () => {
     const registration = getFactRegistration(store, row);
     // The delete removed this fact's uniqueness entries, so reopen re-checks and
     // re-inserts them (rather than the diff-based update path) before clearing
     // the tombstone and re-syncing embeddings/fulltext.
     await applyNodeResurrect(
-      { graphId, registry: store.registry, lock },
+      createNodeWriteContext(store.graphId, store.registry, lock),
       {
         existing: row,
         schema: registration.type.schema,
@@ -871,10 +908,7 @@ function getTransactionNodeCollection<G extends GraphDef>(
   tx: HistoryTransactionContext<G>,
   kind: string,
 ): DynamicNodeCollection {
-  const collections = tx.nodes as unknown as Readonly<
-    Record<string, DynamicNodeCollection | undefined>
-  >;
-  const collection = collections[kind];
+  const collection = tx.getNodeCollection(kind);
   if (collection !== undefined) return collection;
   throw new ConfigurationError(
     `Provenance source kind "${kind}" is not available on this transaction.`,
@@ -968,7 +1002,7 @@ async function runTransition<
     await synchronizeFactCurrency(
       tx.backend,
       store,
-      store.graphId,
+      tx.runNodeOperationHooks,
       after,
       affected,
       lock,

@@ -255,7 +255,50 @@ describe("hook contract: success is reported only after COMMIT", () => {
       name: "edge hardDelete",
       run: (store) => store.edges.knows.hardDelete("knows-1" as never),
     },
+    {
+      name: "edge getOrCreateByEndpoints (creating)",
+      run: (store) =>
+        store.edges.knows.getOrCreateByEndpoints(
+          { kind: "Person", id: "person-b" } as never,
+          { kind: "Person", id: "person-a" } as never,
+          { weight: 5 },
+        ),
+    },
   ];
+
+  it("operations inside store.transaction defer success hooks to COMMIT", async () => {
+    const { store, failing, events } = await buildStore();
+    events.length = 0;
+
+    failing.arm();
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.nodes.Person.create(
+          { name: "C", email: "c@example.com", bio: "gamma" },
+          { id: "person-c" },
+        );
+      }),
+    ).rejects.toThrow(InjectedCommitFailure);
+    failing.disarm();
+
+    // The nested create completed inside the transaction, but the commit
+    // failed: its success must be converted into onError, never reported as
+    // onOperationEnd.
+    expect(events).toContain("start:create:node");
+    expect(events.some((event) => event.startsWith("end:"))).toBe(false);
+    expect(events).toContain("error:InjectedCommitFailure");
+
+    events.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create(
+        { name: "C", email: "c@example.com", bio: "gamma" },
+        { id: "person-c" },
+      );
+      // Completed inside the callback, but not yet committed: no end event.
+      expect(events.some((event) => event.startsWith("end:"))).toBe(false);
+    });
+    expect(events).toContain("end:create:node");
+  });
 
   for (const operation of operations) {
     it(`${operation.name}: commit failure reports onError, never onOperationEnd, and rolls back`, async () => {

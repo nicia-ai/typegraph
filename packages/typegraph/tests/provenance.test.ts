@@ -16,6 +16,10 @@ import {
 import { createSqliteTables } from "../src/backend/sqlite";
 import { createRetractionCapability } from "../src/provenance";
 import { createTestBackend } from "./test-utils";
+import {
+  createCommitFailingBackend,
+  InjectedCommitFailure,
+} from "./trace-backend";
 
 const Source = defineNode("Source", {
   schema: z.object({
@@ -686,6 +690,48 @@ describe("provenance retraction contract", () => {
       id: "fact-a",
       meta: expect.objectContaining({ version: 2 }),
     });
+  });
+
+  it("reports transition hooks only after the transaction commits", async () => {
+    const failing = createCommitFailingBackend(createTestBackend());
+    const events: string[] = [];
+    const [store] = await createStoreWithSchema(graph, failing.backend, {
+      history: true,
+      hooks: {
+        onOperationStart: (ctx) => {
+          events.push(`start:${ctx.operation}:${ctx.kind}`);
+        },
+        onOperationEnd: (ctx) => {
+          events.push(`end:${ctx.operation}:${ctx.kind}`);
+        },
+        onError: (ctx, error) => {
+          events.push(`error:${error.name}`);
+        },
+      },
+    });
+    const { source, fact } = await seedLinearSupport(store);
+    const provenance = createRetractionCapability(store, config);
+    events.length = 0;
+
+    failing.arm();
+    await expect(provenance.retract(source)).rejects.toThrow(
+      InjectedCommitFailure,
+    );
+    failing.disarm();
+
+    // The transition rolled back: the source flip and the fact close ran
+    // inside the transaction, so their success hooks must be converted to
+    // onError — never reported as onOperationEnd.
+    expect(events.some((event) => event.startsWith("end:"))).toBe(false);
+    expect(events).toContain("error:InjectedCommitFailure");
+    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
+      id: "fact-a",
+    });
+
+    events.length = 0;
+    await provenance.retract(source);
+    expect(events).toContain("end:update:Source");
+    expect(events).toContain("end:delete:Fact");
   });
 
   it("closes fact currency without enforcing restrict delete behavior", async () => {
