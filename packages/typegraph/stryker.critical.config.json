@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker/master/packages/core/schema/stryker-schema.json",
+  "packageManager": "pnpm",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "mutate": [
+    "src/provenance/**/*.ts",
+    "src/interchange/import.ts",
+    "src/store/operations/node-write-pipeline.ts",
+    "src/store/operations/write-transaction.ts",
+    "src/store/uniqueness.ts",
+    "src/store/recorded-capture/clock.ts"
+  ],
+  "ignorePatterns": ["dist", "node_modules"],
+  "reporters": ["html", "clear-text", "progress"],
+  "htmlReporter": {
+    "fileName": "reports/mutation-critical/index.html"
+  },
+  "thresholds": {
+    "high": 90,
+    "low": 80,
+    "break": 75
+  },
+  "timeoutMS": 60000,
+  "concurrency": 4,
+  "coverageAnalysis": "perTest",
+  "incremental": true,
+  "incrementalFile": ".stryker-cache/incremental-critical.json"
+}
