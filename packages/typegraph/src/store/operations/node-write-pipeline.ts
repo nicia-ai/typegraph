@@ -63,16 +63,12 @@ function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
   return { graphId: ctx.graphId, registry: ctx.registry, backend };
 }
 
-function embeddingContext(
-  ctx: NodeWriteContext,
-  kind: string,
-  id: string,
-  backend: Backend,
-) {
-  return { graphId: ctx.graphId, nodeKind: kind, nodeId: id, backend };
-}
-
-function fulltextContext(
+/**
+ * The `(graphId, nodeKind, nodeId, backend)` context shared by the embedding and
+ * fulltext sync helpers — `EmbeddingSyncContext` and `FulltextSyncContext` are
+ * structurally identical, so one builder serves both.
+ */
+function nodeSyncContext(
   ctx: NodeWriteContext,
   kind: string,
   id: string,
@@ -161,12 +157,12 @@ export async function applyNodeInsertSideEffects(
     args.uniqueConstraints,
   );
   await syncEmbeddings(
-    embeddingContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.props,
   );
   await syncFulltext(
-    fulltextContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.props,
   );
@@ -220,12 +216,12 @@ export async function applyNodeUpdate(
   const row = await backend.updateNode(updateParams);
 
   await syncEmbeddings(
-    embeddingContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.validatedProps,
   );
   await syncFulltext(
-    fulltextContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.validatedProps,
   );
@@ -268,11 +264,11 @@ export async function applyNodeSoftDelete(
     args.uniqueConstraints,
   );
   await deleteNodeEmbeddings(
-    embeddingContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
   );
   await deleteNodeFulltext(
-    fulltextContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
   );
 }
@@ -307,7 +303,7 @@ export async function applyNodeHardDelete(
     id: args.id,
   });
   await deleteNodeEmbeddings(
-    embeddingContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
   );
 }
@@ -356,12 +352,12 @@ export async function applyNodeResurrect(
     clearDeleted: true,
   });
   await syncEmbeddings(
-    embeddingContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.props,
   );
   await syncFulltext(
-    fulltextContext(ctx, args.kind, args.id, backend),
+    nodeSyncContext(ctx, args.kind, args.id, backend),
     args.schema,
     args.props,
   );

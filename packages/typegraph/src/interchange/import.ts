@@ -6,7 +6,11 @@
  */
 import type { z } from "zod";
 
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  runOptionallyInTransaction,
+  type TransactionBackend,
+} from "../backend/types";
 import { validateEdgeEndpoints } from "../constraints";
 import {
   getEdgeKinds,
@@ -83,36 +87,11 @@ export async function importGraph<G extends GraphDef>(
   // Track imported node IDs for reference validation
   const importedNodeIds = new Set<string>();
 
-  // Process in transaction if supported
-  if (backend.capabilities.transactions) {
-    await backend.transaction(async (tx) => {
-      await processNodes(
-        tx,
-        graphId,
-        registry,
-        data.nodes,
-        nodeSchemas,
-        options,
-        result,
-        errors,
-        importedNodeIds,
-      );
-      await processEdges(
-        tx,
-        graphId,
-        registry,
-        data.edges,
-        edgeSchemas,
-        nodeSchemas,
-        options,
-        result,
-        errors,
-        importedNodeIds,
-      );
-    });
-  } else {
+  // One transaction on a transactional backend; runs directly otherwise
+  // (runOptionallyInTransaction is exactly this capability gate).
+  await runOptionallyInTransaction(backend, async (target) => {
     await processNodes(
-      backend,
+      target,
       graphId,
       registry,
       data.nodes,
@@ -123,7 +102,7 @@ export async function importGraph<G extends GraphDef>(
       importedNodeIds,
     );
     await processEdges(
-      backend,
+      target,
       graphId,
       registry,
       data.edges,
@@ -134,7 +113,7 @@ export async function importGraph<G extends GraphDef>(
       errors,
       importedNodeIds,
     );
-  }
+  });
 
   return {
     ...result,

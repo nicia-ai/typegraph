@@ -12,7 +12,6 @@ import {
   applyNodeResurrect,
   applyNodeSoftDelete,
 } from "../store/operations/node-write-pipeline";
-import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import { isPlainObject } from "../utils/object";
 
 const DEFAULT_RETRACTED_FIELD = "retracted";
@@ -149,7 +148,9 @@ type SupportSnapshot = Readonly<{
   supportedFactKeys: ReadonlySet<string>;
   believedFactKeys: ReadonlySet<string>;
   firingJustificationKeysByFact: ReadonlyMap<string, readonly string[]>;
-  affectedFactKeys: (source: ProvenanceNodeRef) => ReadonlySet<string>;
+  affectedFactKeys: (
+    sources: readonly ProvenanceNodeRef[],
+  ) => ReadonlySet<string>;
 }>;
 
 type SourceRetractedState = "retracted" | "available";
@@ -611,8 +612,10 @@ function computeSupportSnapshot(
     supportedFactKeys: supported,
     believedFactKeys: believed,
     firingJustificationKeysByFact,
-    affectedFactKeys(target: ProvenanceNodeRef): ReadonlySet<string> {
-      return computeAffectedFactKeys(target, roles, supportEdges);
+    affectedFactKeys(
+      targets: readonly ProvenanceNodeRef[],
+    ): ReadonlySet<string> {
+      return computeAffectedFactKeys(targets, roles, supportEdges);
     },
   };
 }
@@ -644,12 +647,14 @@ function allPremisesSupported(
 }
 
 function computeAffectedFactKeys(
-  source: ProvenanceNodeRef,
+  sources: readonly ProvenanceNodeRef[],
   roles: ProvenanceRows,
   supportEdges: SupportEdges,
 ): ReadonlySet<string> {
   const affected = new Set<string>();
-  const frontier = [refKey(source)];
+  // Seed the BFS with every source at once: the union of facts reachable from
+  // any source falls out of one traversal, instead of one BFS per source.
+  const frontier = sources.map((source) => refKey(source));
   const seen = new Set<string>(frontier);
 
   while (frontier.length > 0) {
@@ -683,7 +688,7 @@ function buildReport<
   after: SupportSnapshot,
   sources: readonly ProvenanceNodeRef<G>[],
 ): RetractionReport<G, FactKind, JustificationKind> {
-  const affected = affectedFactKeysForSources(after, sources);
+  const affected = after.affectedFactKeys(sources);
   const believedBefore = [...before.believedFactKeys];
   const died = sortedReferences<G, FactKind>(
     believedBefore.filter((key) => !after.supportedFactKeys.has(key)),
@@ -701,19 +706,6 @@ function buildReport<
       ),
     }));
   return { died, survivedVia, unaffected };
-}
-
-function affectedFactKeysForSources(
-  snapshot: SupportSnapshot,
-  sources: readonly ProvenanceNodeRef[],
-): ReadonlySet<string> {
-  const affected = new Set<string>();
-  for (const source of sources) {
-    for (const factKey of snapshot.affectedFactKeys(source)) {
-      affected.add(factKey);
-    }
-  }
-  return affected;
 }
 
 async function synchronizeFactCurrency<G extends GraphDef>(
@@ -870,7 +862,9 @@ async function runTransition<
   }
 
   return store.transaction(async (tx) => {
-    await lockRecordedGraphWrite(tx.backend, store.graphId);
+    // `store.transaction` already takes the per-graph recorded-write lock when
+    // capture is enabled, and this capability requires `history: true`, so the
+    // lock is held before this callback runs — no explicit re-acquire needed.
     const rows = await Promise.all(
       uniqueSources.map((source) =>
         tx.backend.getNode(store.graphId, source.kind, source.id),
@@ -967,46 +961,28 @@ export function createRetractionCapability<
   }
   const normalized = normalizeConfig(store.graph, config);
 
+  // The four retract verbs differ only in one/many source shape and the target
+  // retracted flag; the generics are fixed by the config, so hoist one call.
+  const transition = (
+    sources: readonly ProvenanceNodeRef<G, SourceKindsFromConfig<G, C>>[],
+    retracted: boolean,
+  ) =>
+    runTransition<
+      G,
+      SourceKindsFromConfig<G, C>,
+      FactKindsFromConfig<G, C>,
+      JustificationKindFromConfig<G, C>
+    >(store, normalized, sources, retracted);
+
   return {
-    retract(source) {
-      return runTransition<
-        G,
-        SourceKindsFromConfig<G, C>,
-        FactKindsFromConfig<G, C>,
-        JustificationKindFromConfig<G, C>
-      >(store, normalized, [source], true);
-    },
-
-    retractMany(sources) {
-      return runTransition<
-        G,
-        SourceKindsFromConfig<G, C>,
-        FactKindsFromConfig<G, C>,
-        JustificationKindFromConfig<G, C>
-      >(store, normalized, sources, true);
-    },
-
-    unRetract(source) {
-      return runTransition<
-        G,
-        SourceKindsFromConfig<G, C>,
-        FactKindsFromConfig<G, C>,
-        JustificationKindFromConfig<G, C>
-      >(store, normalized, [source], false);
-    },
-
-    unRetractMany(sources) {
-      return runTransition<
-        G,
-        SourceKindsFromConfig<G, C>,
-        FactKindsFromConfig<G, C>,
-        JustificationKindFromConfig<G, C>
-      >(store, normalized, sources, false);
-    },
+    retract: (source) => transition([source], true),
+    retractMany: (sources) => transition(sources, true),
+    unRetract: (source) => transition([source], false),
+    unRetractMany: (sources) => transition(sources, false),
 
     async holding() {
       return store.transaction(async (tx) => {
-        await lockRecordedGraphWrite(tx.backend, store.graphId);
+        // Lock already held by `store.transaction` under capture (see runTransition).
         const snapshot = await computeSupport(
           tx.backend,
           store.graphId,
