@@ -36,7 +36,7 @@ export const CURRENT_ONLY_READ_NAMES = [
   "findByConstraint",
   "bulkFindByConstraint",
   "bulkFindByIndex",
-] as const;
+] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
 /** Node write method names: never available on a read-only StoreView. */
 export const NODE_WRITE_NAMES = [
@@ -75,7 +75,11 @@ export const EDGE_BATCH_READ_NAMES = [
   "batchFindFrom",
   "batchFindTo",
   "batchFindByEndpoints",
-] as const;
+] as const satisfies readonly (keyof EdgeCollection<
+  AnyEdgeType,
+  NodeType,
+  NodeType
+>)[];
 
 /** Edge write method names: never available on a read-only StoreView. */
 export const EDGE_WRITE_NAMES = [
