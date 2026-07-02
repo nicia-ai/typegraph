@@ -45,9 +45,7 @@ import {
 } from "./recorded-capture/guards";
 
 export {
-  graphAdvisoryLockSql,
   lockRecordedGraphWrite,
-  lockRecordedGraphWrites,
   readRecordedClock,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,

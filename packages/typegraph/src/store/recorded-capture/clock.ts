@@ -37,7 +37,7 @@ const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
  * Sharing one key across those two acquire-order positions creates a circular
  * wait under ordinary concurrent load.
  */
-export function graphAdvisoryLockSql(namespace: string, graphId: string): SQL {
+function graphAdvisoryLockSql(namespace: string, graphId: string): SQL {
   return sql`
     SELECT pg_advisory_xact_lock(
       hashtext(${namespace}),

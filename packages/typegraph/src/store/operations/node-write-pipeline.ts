@@ -43,7 +43,7 @@ export type NodeWriteContext = Readonly<{
 }>;
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
-export type NodeDeleteMode = "soft" | "hard";
+type NodeDeleteMode = "soft" | "hard";
 
 /**
  * Tunes which connected edges delete-behavior enforcement considers.
@@ -87,7 +87,7 @@ function fulltextContext(
  * are removed alongside the node (`cascade` / `disconnect`); non-structural
  * edges are left untouched.
  */
-export async function enforceNodeDeleteBehavior(
+async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
   args: Readonly<{
     kind: string;
