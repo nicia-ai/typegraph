@@ -57,25 +57,34 @@ If you need atomic writes from an edge runtime, use
 `drizzle-orm/neon-serverless` (WebSocket-backed Pool) instead of
 `drizzle-orm/neon-http`.
 
-## libsql In-Memory Transactions
+## libsql Single-Connection Transactions
 
-When using `@libsql/client` with `file::memory:`, transactions destroy the in-memory
-database. This happens because libsql opens a new connection for each transaction, and
-each connection to `:memory:` gets its own database
+For local `@libsql/client` connections (`file:` paths and `file::memory:`),
+`createLibsqlBackend` frames transactions with raw `BEGIN IMMEDIATE`/`COMMIT`
+statements on the client's single stable connection. It deliberately avoids
+`client.transaction()`, which hands the client's connection to the transaction
+and lazily opens a new one afterwards — for an in-memory database that new
+connection is a fresh, empty database
 ([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)).
+In-memory databases therefore work for all operations, including transactions.
+Remote Turso connections (`libsql://`, `http(s)://`) run each transaction on
+its own stream via the driver.
 
-**Workaround:** Use a file-based database (`file:path.db`) or a remote Turso URL when
-transactions are needed. In-memory databases work fine for all non-transactional operations.
+The trade-off of a single connection: a store-level operation awaited from
+**inside** a `store.transaction` callback (on the root store, rather than the
+`tx` context) can never run — the open transaction occupies the backend's
+serialized execution slot until it completes — so the backend rejects it with
+a `ConfigurationError` instead of deadlocking.
 
 ```typescript
-// ❌ Transactions break with in-memory
+// ✅ In-memory works, including transactions
 const client = createClient({ url: "file::memory:" });
 
-// ✅ Use a file path instead
-const client = createClient({ url: "file:app.db" });
-
-// ✅ Or a remote Turso URL
-const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
+// ❌ Root-store access inside a transaction callback throws
+await store.transaction(async (tx) => {
+  await store.nodes.Person.find(); // ConfigurationError — use tx.nodes
+  await tx.nodes.Person.find(); // ✅ transaction-scoped access
+});
 ```
 
 ## Recursive Traversal Depth

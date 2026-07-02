@@ -75,8 +75,15 @@ export type LibsqlBackendResult = Readonly<{
 /**
  * Creates a TypeGraph backend backed by `@libsql/client`.
  *
- * Handles DDL execution and configures the correct execution profile
- * (`isSync: false`, `transactionMode: "drizzle"`). The caller retains
+ * Handles DDL execution and configures the correct execution profile.
+ * Local clients (`client.protocol === "file"`, covering `file:` paths and
+ * `:memory:` databases) run transactions as raw BEGIN/COMMIT statements on
+ * the client's single stable connection (`transactionMode: "sql"`):
+ * `client.transaction()` permanently hands that connection to the
+ * transaction and lazily opens a fresh one afterwards, which for an
+ * in-memory database is a fresh, empty database. Remote clients (`http` /
+ * `ws`) run each transaction on its own stream via Drizzle's
+ * `db.transaction()` (`transactionMode: "drizzle"`). The caller retains
  * ownership of the client and is responsible for closing it.
  *
  * @param client - An `@libsql/client` Client instance
@@ -105,7 +112,7 @@ export async function createLibsqlBackend(
   const backend = createSqliteBackend(db, {
     executionProfile: {
       isSync: false,
-      transactionMode: "drizzle",
+      transactionMode: client.protocol === "file" ? "sql" : "drizzle",
     },
     tables,
     // libSQL ships native vector search in core — no extension to load —

@@ -12,7 +12,12 @@ import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  ConfigurationError,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { wrapWithManagedClose } from "../../../src/backend/types";
 import { createAdapterTestSuite } from "../adapter-test-suite";
@@ -32,9 +37,10 @@ const concurrencyGraph = defineGraph({
 // Temp File Helpers
 // ============================================================
 
-// libsql transactions open a separate connection, which destroys
-// in-memory databases (tursodatabase/libsql-client-ts#229).
-// Use temp files so the shared suites' transaction tests work.
+// Temp files exercise the persistent-file layout the shared suites assume.
+// (In-memory databases also work — local clients frame transactions with raw
+// BEGIN/COMMIT instead of client.transaction(), which would abandon the
+// connection: tursodatabase/libsql-client-ts#229 — see the specific tests.)
 
 const temporaryFiles: string[] = [];
 
@@ -132,6 +138,55 @@ describe("libsql Backend - Specific", () => {
 
     const people = await store.nodes.Person.find({ limit: count + 10 });
     expect(people).toHaveLength(count);
+
+    await backend.close();
+    client.close();
+  });
+
+  // Regression: local libsql clients must never route through
+  // client.transaction(), which permanently hands the client's connection to
+  // the transaction and lazily opens a fresh — empty — database afterwards
+  // (tursodatabase/libsql-client-ts#229). With raw BEGIN/COMMIT framing, the
+  // documented in-memory setup survives transactional writes.
+  it("supports in-memory databases across transactional writes", async () => {
+    const client = createClient({ url: "file::memory:" });
+    const { backend } = await createLibsqlBackend(client);
+    const [store] = await createStoreWithSchema(concurrencyGraph, backend);
+
+    await store.nodes.Person.create({ name: "InMemory" });
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "InTx" });
+    });
+
+    const people = await store.nodes.Person.find({ limit: 10 });
+    expect(people.map((person) => person.name).toSorted()).toEqual([
+      "InMemory",
+      "InTx",
+    ]);
+
+    await backend.close();
+    client.close();
+  });
+
+  // A root-store operation awaited inside a transaction callback can never
+  // run — the transaction holds the backend's serialized execution slot for
+  // its whole duration — so the queue rejects the submission with a typed
+  // error instead of deadlocking.
+  it("rejects root-store access inside a transaction callback", async () => {
+    const client = createClient({ url: "file::memory:" });
+    const { backend } = await createLibsqlBackend(client);
+    const [store] = await createStoreWithSchema(concurrencyGraph, backend);
+
+    await expect(
+      store.transaction(async () => {
+        await store.nodes.Person.find({ limit: 1 });
+      }),
+    ).rejects.toThrow(ConfigurationError);
+
+    // The failed transaction rolled back cleanly; the store remains usable.
+    await store.nodes.Person.create({ name: "AfterRollback" });
+    const people = await store.nodes.Person.find({ limit: 10 });
+    expect(people).toHaveLength(1);
 
     await backend.close();
     client.close();

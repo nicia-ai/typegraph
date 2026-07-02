@@ -224,9 +224,61 @@ function pendingForever<T>(): Promise<T> {
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 function noop(): void {}
 
+/**
+ * Tracks which serialized queue (if any) the current async execution is
+ * running a task for, so a re-entrant submission — a root-backend operation
+ * awaited from inside a transaction already occupying the same queue — can be
+ * rejected with a typed error instead of deadlocking (the enclosing task holds
+ * the queue slot until it completes, so the inner operation can never run).
+ *
+ * AsyncLocalStorage is loaded lazily and optionally: it is available on Node
+ * and on Cloudflare workers with the `nodejs_als` compatibility flag, and a
+ * runtime without it simply skips the detection (the queue behaves as before).
+ */
+type QueueTaskContext = Readonly<{
+  getStore: () => unknown;
+  run: <T>(store: object, callback: () => T) => T;
+}>;
+
+let queueTaskContext: QueueTaskContext | undefined;
+
+async function loadQueueTaskContext(): Promise<void> {
+  try {
+    const asyncHooks = await import("node:async_hooks");
+    queueTaskContext = new asyncHooks.AsyncLocalStorage<object>();
+  } catch {
+    // AsyncLocalStorage unavailable on this runtime: re-entrant submissions
+    // stay undetected, matching the queue's previous behavior.
+  }
+}
+
+// eslint-disable-next-line unicorn/prefer-top-level-await -- the dual CJS/ESM build cannot use top-level await
+void loadQueueTaskContext();
+
+function rejectReentrantQueueSubmission(): Promise<never> {
+  return Promise.reject(
+    new ConfigurationError(
+      "This operation was awaited from inside a transaction running on the " +
+        "same SQLite backend and would deadlock: the transaction holds the " +
+        "backend's serialized execution slot until it completes, so the " +
+        "operation could never run.",
+      { backend: "sqlite", capability: "concurrentRootAccess" },
+      {
+        suggestion:
+          "Inside a store.transaction callback, use the transaction-scoped " +
+          "context (tx.nodes / tx.edges / tx.backend) instead of the root " +
+          "store or backend, or move the operation outside the transaction.",
+      },
+    ),
+  );
+}
+
 function createSerializedExecutionQueue(): SerializedExecutionQueue {
   let tail: Promise<unknown> = Promise.resolve();
   let disposed = false;
+  // Unique per queue: a task running on THIS queue must not submit back to it,
+  // but may freely submit to a different backend's queue.
+  const taskMarker: object = {};
 
   function isDisposed(): boolean {
     return disposed;
@@ -239,6 +291,9 @@ function createSerializedExecutionQueue(): SerializedExecutionQueue {
 
     runExclusive<T>(task: () => Promise<T>): Promise<T> {
       if (isDisposed()) return Promise.reject(new BackendDisposedError());
+      if (queueTaskContext?.getStore() === taskMarker) {
+        return rejectReentrantQueueSubmission();
+      }
 
       // When disposed, runTask returns a never-settling promise so that no
       // rejection propagates through the 7+ async wrappers between this
@@ -256,7 +311,10 @@ function createSerializedExecutionQueue(): SerializedExecutionQueue {
       const runTask = async (): Promise<T> => {
         if (isDisposed()) return pendingForever<T>();
         try {
-          return await task();
+          const context = queueTaskContext;
+          return context === undefined ? await task() : (
+              await context.run(taskMarker, () => task())
+            );
         } catch (error) {
           if (isDisposed()) return pendingForever<T>();
           throw error;
@@ -670,20 +728,20 @@ export function createSqliteBackend(
     tables,
     fulltextStrategy,
   );
-  // Serialize top-level operations per backend for both synchronous drivers
-  // (better-sqlite3 / do-sqlite) and the async `drizzle` mode (libsql). SQLite
-  // is single-writer, and two concurrent `transaction()` calls on one async
-  // connection open overlapping BEGINs and collide with SQLITE_BUSY; the queue
-  // makes each top-level operation — including a whole transaction — run to
-  // completion before the next starts. It is deadlock-free because a
-  // transaction's inner reads/writes run on the tx-scoped backend, which does
-  // not carry the queue (see CreateSqliteTransactionBackendOptions). `none`
-  // drivers (D1 / neon-http) have no transactions and manage their own
-  // concurrency, so they stay unqueued.
+  // Serialize top-level operations per backend on every transaction-capable
+  // mode ("sql", "drizzle", "do-sqlite"). SQLite is single-writer, and two
+  // concurrent `transaction()` calls on one connection open overlapping BEGINs
+  // and collide with SQLITE_BUSY; the queue makes each top-level operation —
+  // including a whole transaction — run to completion before the next starts.
+  // A transaction's inner reads/writes run on the tx-scoped backend, which
+  // does not carry the queue (see CreateSqliteTransactionBackendOptions);
+  // awaiting a ROOT-backend operation from inside the transaction callback
+  // would deadlock, so the queue rejects such re-entrant submissions with a
+  // typed error (see rejectReentrantQueueSubmission). `none` drivers (D1 /
+  // neon-http) have no transactions and manage their own concurrency, so they
+  // stay unqueued.
   const serializedQueue =
-    isSync || transactionMode === "drizzle" ?
-      createSerializedExecutionQueue()
-    : undefined;
+    transactionMode === "none" ? undefined : createSerializedExecutionQueue();
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
@@ -757,19 +815,19 @@ export function createSqliteBackend(
           db,
           executionAdapter,
           operationStrategy,
-          profileHints: { isSync: true },
+          profileHints: { isSync },
           tableNames,
           fulltextStrategy,
           vectorStrategy,
           vectorSlotLatch,
         });
-        db.run(sql`BEGIN IMMEDIATE`);
+        await db.run(sql`BEGIN IMMEDIATE`);
         try {
           const result = await fn(txBackend);
-          db.run(sql`COMMIT`);
+          await db.run(sql`COMMIT`);
           return result;
         } catch (error) {
-          db.run(sql`ROLLBACK`);
+          await db.run(sql`ROLLBACK`);
           throw error;
         }
       });
@@ -1138,12 +1196,16 @@ export function createSqliteBackend(
           // with manual BEGIN/COMMIT on the *outer* `db`, so it must
           // reuse that connection's already-built `executionAdapter`
           // rather than synthesize a fresh one for a distinct handle.
+          // Serves sync drivers AND local libsql connections: both keep
+          // one stable connection, where raw BEGIN/COMMIT composes and
+          // Drizzle's `db.transaction()` (which for libsql abandons the
+          // client's connection — fatal for `:memory:`) must be avoided.
           const txBackend = createTransactionBackend({
             capabilities,
             db,
             executionAdapter,
             operationStrategy,
-            profileHints: { isSync: true },
+            profileHints: { isSync },
             tableNames,
             fulltextStrategy,
             vectorStrategy,
@@ -1156,7 +1218,7 @@ export function createSqliteBackend(
           // immediately with "database is locked" against a writer on another
           // connection (the serialized queue only orders writes within THIS
           // backend); IMMEDIATE instead waits on SQLite's busy timeout.
-          db.run(sql`BEGIN IMMEDIATE`);
+          await db.run(sql`BEGIN IMMEDIATE`);
 
           try {
             const result = await fn(
@@ -1166,10 +1228,10 @@ export function createSqliteBackend(
               ),
               db,
             );
-            db.run(sql`COMMIT`);
+            await db.run(sql`COMMIT`);
             return result;
           } catch (error) {
-            db.run(sql`ROLLBACK`);
+            await db.run(sql`ROLLBACK`);
             throw error;
           }
         });

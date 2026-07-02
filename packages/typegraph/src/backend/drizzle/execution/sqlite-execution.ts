@@ -39,10 +39,14 @@ type DatabaseWithSession = Readonly<{
 /**
  * Controls how the backend manages SQLite transactions.
  *
- * - `"sql"`:     TypeGraph issues BEGIN / COMMIT / ROLLBACK SQL directly.
- *                Default for sync drivers (better-sqlite3, bun:sqlite).
+ * - `"sql"`:     TypeGraph issues BEGIN / COMMIT / ROLLBACK SQL directly on
+ *                the connection. Default for sync drivers (better-sqlite3,
+ *                bun:sqlite); also selected by `createLibsqlBackend` for
+ *                local `@libsql/client` connections (`file:` / `:memory:`),
+ *                whose `client.transaction()` permanently abandons the
+ *                current connection — fatal for an in-memory database.
  * - `"drizzle"`: Delegates to Drizzle's `db.transaction()` method.
- *                Default for async drivers (libsql, sql.js).
+ *                Default for async drivers (remote libsql/Turso, sql.js).
  * - `"do-sqlite"`: Delegates to the Cloudflare Durable Objects async
  *                storage transaction runner (`db.$client.transaction`,
  *                i.e. `ctx.storage.transaction(async ...)`). Drizzle's
