@@ -272,7 +272,10 @@ export function registerPredicateIntegrationTests(
         email: "pctwild@test.com",
       });
       await store.nodes.Person.create({ name: "id_42", email: "us@test.com" });
-      await store.nodes.Person.create({ name: "idX42", email: "uswild@test.com" });
+      await store.nodes.Person.create({
+        name: "idX42",
+        email: "uswild@test.com",
+      });
       await store.nodes.Person.create({
         name: String.raw`path\to\file`,
         email: "bs@test.com",
