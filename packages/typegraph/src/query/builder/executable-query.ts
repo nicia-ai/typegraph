@@ -932,7 +932,7 @@ export class ExecutableQuery<
   }
 
   #recordOrderByFieldsForPagination(tracker: FieldAccessTracker): boolean {
-    for (const spec of this.#state.orderBy) {
+    for (const spec of this.#paginationOrderBy()) {
       const field = spec.field;
 
       // System field (e.g., id, kind) — path is ["id"] or ["kind"]
@@ -974,7 +974,7 @@ export class ExecutableQuery<
       row,
       selectiveFields,
     );
-    return buildCursorFromRow(contextRow, this.#state.orderBy, direction);
+    return buildCursorFromRow(contextRow, this.#paginationOrderBy(), direction);
   }
 
   #buildCursorContextFromSelectiveRow(
@@ -998,7 +998,7 @@ export class ExecutableQuery<
 
     const cursorContext: Record<string, unknown> = {};
 
-    for (const spec of this.#state.orderBy) {
+    for (const spec of this.#paginationOrderBy()) {
       const alias = spec.field.alias;
       const jsonPointer = spec.field.jsonPointer;
 
@@ -1101,6 +1101,37 @@ export class ExecutableQuery<
   }
 
   /**
+   * The ORDER BY used for keyset pagination: the caller's ORDER BY plus a final
+   * unique tiebreaker on the start alias's `id`. Without a unique final key, a
+   * non-unique sort (e.g. `orderBy("p", "age")` with many equal ages) makes the
+   * keyset predicate `age > lastAge` skip every not-yet-returned equal-age row,
+   * silently losing data across pages. The start node's `id` is unique and
+   * always projected, so appending it gives a total order that page boundaries
+   * can split cleanly. Skipped when the caller already orders by the start
+   * alias's `id` (the sort is already total). Every pagination read of ORDER BY
+   * — the emitted sort, the cursor predicate, cursor encoding, and cursor
+   * validation — routes through here so the extra column stays consistent across
+   * the standard and selective-field-optimized paths.
+   */
+  #paginationOrderBy(): readonly OrderSpec[] {
+    const orderBy = this.#state.orderBy;
+    const startAlias = this.#state.startAlias;
+    const alreadyTotal = orderBy.some(
+      (spec) =>
+        spec.field.alias === startAlias &&
+        spec.field.path.length === 1 &&
+        spec.field.path[0] === "id" &&
+        spec.field.jsonPointer === undefined,
+    );
+    if (alreadyTotal) return orderBy;
+    const tiebreaker: OrderSpec = {
+      field: { __type: "field_ref", alias: startAlias, path: ["id"] },
+      direction: "asc",
+    };
+    return [...orderBy, tiebreaker];
+  }
+
+  /**
    * Executes a paginated query using cursor-based keyset pagination.
    *
    * Cursor pagination is efficient for large datasets as it avoids OFFSET.
@@ -1146,7 +1177,7 @@ export class ExecutableQuery<
     let cursorData: CursorData | undefined;
     if (cursor) {
       cursorData = decodeCursor(cursor);
-      validateCursorColumns(cursorData, this.#state.orderBy);
+      validateCursorColumns(cursorData, this.#paginationOrderBy());
     }
 
     // Fetch limit + 1 to detect if there are more pages
@@ -1191,7 +1222,7 @@ export class ExecutableQuery<
     return buildPaginatedResult(
       data,
       orderedRows,
-      this.#state.orderBy,
+      this.#paginationOrderBy(),
       limit,
       hasMore,
       isBackward,
@@ -1248,7 +1279,7 @@ export class ExecutableQuery<
     const ast = this.toAst();
 
     // Adjust ORDER BY for backward pagination (reverse all directions)
-    let orderBy = this.#state.orderBy;
+    let orderBy = this.#paginationOrderBy();
     if (direction === "backward") {
       orderBy = orderBy.map((spec) => ({
         ...spec,
@@ -1262,7 +1293,7 @@ export class ExecutableQuery<
     if (cursorData) {
       const cursorPredicate = buildCursorPredicate(
         cursorData,
-        this.#state.orderBy,
+        this.#paginationOrderBy(),
         direction,
         this.#state.startAlias,
       );

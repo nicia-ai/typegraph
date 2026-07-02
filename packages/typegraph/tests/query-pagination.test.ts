@@ -386,3 +386,65 @@ describe("Streaming", () => {
     ).toThrow(ValidationError);
   });
 });
+
+describe("Pagination with a non-unique sort key", () => {
+  it("returns every row across pages when the sort column has ties", async () => {
+    const store = createTestStore();
+    // Every person shares one age: the sort key is non-unique, so a keyset
+    // predicate over `age` alone (`age > lastAge`) would skip every
+    // not-yet-returned equal-age row. The id tiebreaker must keep the page
+    // boundary total.
+    const created = [];
+    for (let index = 1; index <= 25; index++) {
+      created.push(
+        await store.nodes.Person.create({
+          name: `Person_${String(index).padStart(2, "0")}`,
+          age: 30,
+        }),
+      );
+    }
+
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const result = await store
+        .query()
+        .from("Person", "p")
+        .orderBy("p", "age")
+        .select((ctx) => ctx.p)
+        .paginate({ first: 5, ...(cursor ? { after: cursor } : {}) });
+      for (const person of result.data) seen.add(person.id);
+      if (!result.hasNextPage) break;
+      cursor = result.nextCursor!;
+    }
+
+    expect([...seen].toSorted()).toEqual(
+      created.map((person) => person.id).toSorted(),
+    );
+  });
+
+  it("streams every row exactly once when the sort column has ties", async () => {
+    const store = createTestStore();
+    const created = [];
+    for (let index = 1; index <= 30; index++) {
+      created.push(
+        await store.nodes.Person.create({ name: `P${index}`, age: 40 }),
+      );
+    }
+
+    const seen: string[] = [];
+    for await (const person of store
+      .query()
+      .from("Person", "p")
+      .orderBy("p", "age")
+      .select((ctx) => ctx.p)
+      .stream({ batchSize: 7 })) {
+      seen.push(person.id);
+    }
+
+    expect(seen.length).toBe(30); // no rows dropped, none repeated
+    expect([...new Set(seen)].toSorted()).toEqual(
+      created.map((person) => person.id).toSorted(),
+    );
+  });
+});
