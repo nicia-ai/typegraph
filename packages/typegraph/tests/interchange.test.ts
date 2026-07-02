@@ -755,3 +755,55 @@ describe("Interchange import integrity", () => {
     expect(result.errors[0]?.entityType).toBe("node");
   });
 });
+
+// ============================================================
+// Import Property Transforms (onUnknownProperty: "allow")
+// ============================================================
+
+const TransformDocument = defineNode("Doc", {
+  schema: z.object({
+    title: z.string().transform((value) => value.trim()),
+    status: z.string().default("draft"),
+  }),
+});
+
+const transformGraph = defineGraph({
+  id: "interchange_transform_test",
+  nodes: { Doc: { type: TransformDocument } },
+  edges: {},
+});
+
+describe("Interchange import property transforms", () => {
+  it("applies schema transforms/defaults under onUnknownProperty: allow", async () => {
+    const store = createStore(transformGraph, createTestBackend());
+    const data: GraphData = {
+      formatVersion: "1.0",
+      exportedAt: "2024-01-01T00:00:00.000Z",
+      source: { type: "external" },
+      nodes: [
+        {
+          kind: "Doc",
+          id: "d1",
+          // Untrimmed title, omitted status (has a default), plus an unknown
+          // field that "allow" must preserve.
+          properties: { title: "  hello  ", extra: "keepme" },
+        },
+      ],
+      edges: [],
+    };
+
+    const result = await importGraph(
+      store,
+      data,
+      importOptions({ onConflict: "error", onUnknownProperty: "allow" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
+
+    const document = await store.nodes.Doc.getById("d1" as never);
+    // Before the fix, "allow" persisted the raw input, so the transform and
+    // default were skipped (title stayed "  hello  ", status was absent).
+    expect(document?.title).toBe("hello");
+    expect((document as unknown as { status?: string }).status).toBe("draft");
+  });
+});

@@ -648,7 +648,12 @@ function validateProperties(
           };
         }
         case "allow": {
-          // Validate but allow extra properties through
+          // Validate, keep extra properties, but still apply the schema's
+          // transforms/defaults/coercions to the known fields. Overlaying the
+          // parsed data onto the raw properties gives transformed known fields
+          // AND preserved unknown ones — otherwise `allow` would persist raw,
+          // un-transformed known values that `strip` and the normal create path
+          // both normalize (a fidelity divergence by conflict strategy).
           const result = schema.safeParse(properties);
           if (!result.success) {
             return {
@@ -656,8 +661,7 @@ function validateProperties(
               error: formatZodError(result.error),
             };
           }
-          // Return original properties (including unknown ones)
-          return { success: true, data: properties };
+          return { success: true, data: { ...properties, ...result.data } };
         }
       }
     }
