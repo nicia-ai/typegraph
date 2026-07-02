@@ -25,7 +25,7 @@
  */
 
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
-import { compareStrings, type MergeKey,mergeKey } from "./node-key";
+import { compareStrings, type MergeKey, mergeKey } from "./node-key";
 import type {
   EdgeId,
   GraphBackend,

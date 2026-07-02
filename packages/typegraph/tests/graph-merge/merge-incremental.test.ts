@@ -355,7 +355,10 @@ describe.each(backendMatrix())(
         if (!injected) {
           injected = true;
           await target.nodes.Patient.bulkCreate([
-            { id: "unrelated-1", props: { name: "Someone Else", mrn: "MRN-2" } },
+            {
+              id: "unrelated-1",
+              props: { name: "Someone Else", mrn: "MRN-2" },
+            },
           ]);
         }
         return (original as (f: unknown, o: unknown) => unknown)(fn, opts);
