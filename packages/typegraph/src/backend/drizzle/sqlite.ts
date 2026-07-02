@@ -1149,7 +1149,14 @@ export function createSqliteBackend(
             vectorStrategy,
             vectorSlotLatch,
           });
-          db.run(sql`BEGIN`);
+          // BEGIN IMMEDIATE, matching runSchemaWriteTransaction and the
+          // "drizzle" branch below: take the reserved write lock at the start of
+          // the transaction rather than on first write. A deferred BEGIN lets a
+          // read-then-write upgrade the lock mid-transaction, which fails
+          // immediately with "database is locked" against a writer on another
+          // connection (the serialized queue only orders writes within THIS
+          // backend); IMMEDIATE instead waits on SQLite's busy timeout.
+          db.run(sql`BEGIN IMMEDIATE`);
 
           try {
             const result = await fn(
@@ -1183,10 +1190,9 @@ export function createSqliteBackend(
       return runWithSerializedQueue(
         serializedQueue,
         async () =>
-          db.transaction(
-            async (tx) => fn(bindTransactionBackend(tx), tx),
-            { behavior: "immediate" },
-          ) as Promise<T>,
+          db.transaction(async (tx) => fn(bindTransactionBackend(tx), tx), {
+            behavior: "immediate",
+          }) as Promise<T>,
       );
     },
 
@@ -1249,9 +1255,9 @@ function createTransactionBackend(
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    ...(options.vectorStrategy === undefined
-      ? {}
-      : { vectorSlotLatch: createVectorSlotLatch() }),
+    ...(options.vectorStrategy === undefined ?
+      {}
+    : { vectorSlotLatch: createVectorSlotLatch() }),
   });
 }
 
