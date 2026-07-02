@@ -754,6 +754,46 @@ describe("Interchange import integrity", () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]?.entityType).toBe("node");
   });
+
+  it("a failed unique update preserves the old key (onConflict: update)", async () => {
+    // Source doc: person-a now carries b@example.com — the conflicting update.
+    const source = createStore(uniqueGraph, createTestBackend());
+    await source.nodes.Person.create(
+      { name: "A", email: "b@example.com" },
+      { id: "person-a" },
+    );
+    const document = await exportGraph(source);
+
+    // Target: person-a reserves a@example.com, person-b reserves b@example.com.
+    const target = createStore(uniqueGraph, createTestBackend());
+    await target.nodes.Person.create(
+      { name: "A", email: "a@example.com" },
+      { id: "person-a" },
+    );
+    await target.nodes.Person.create(
+      { name: "B", email: "b@example.com" },
+      { id: "person-b" },
+    );
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "update" }),
+    );
+
+    // Updating person-a to b@example.com conflicts with person-b — reported as a
+    // per-row error, not applied.
+    expect(result.success).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+
+    // person-a must STILL reserve a@example.com. Before the fix,
+    // updateUniquenessEntries deleted the old key before the conflict check and
+    // the import swallowed the throw, so this create wrongly succeeded — a
+    // silent loss of person-a's uniqueness reservation.
+    await expect(
+      target.nodes.Person.create({ name: "C", email: "a@example.com" }),
+    ).rejects.toThrow(UniquenessError);
+  });
 });
 
 // ============================================================

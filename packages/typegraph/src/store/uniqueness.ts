@@ -173,17 +173,11 @@ export async function updateUniquenessEntries(
       continue;
     }
 
-    // Delete old entry if constraint used to apply
-    if (oldApplies && oldKey !== undefined) {
-      await ctx.backend.deleteUnique({
-        graphId: ctx.graphId,
-        nodeKind: kind,
-        constraintName: constraint.name,
-        key: oldKey,
-      });
-    }
-
-    // Check and insert new entry if constraint now applies
+    // Preflight the new key BEFORE releasing the old one. A conflict must throw
+    // without having deleted the node's existing reservation, so a caller that
+    // catches UniquenessError and still commits the transaction (e.g.
+    // importGraph's onConflict: "update", which reports the conflict per-row)
+    // cannot leave the node holding its old value with no uniqueness entry.
     if (newApplies && newKey !== undefined) {
       const kindsToCheck = getKindsForUniquenessCheck(
         kind,
@@ -210,8 +204,20 @@ export async function updateUniquenessEntries(
           });
         }
       }
+    }
 
-      // Insert new uniqueness entry
+    // The new key is proven free, so releasing the old entry and reserving the
+    // new one can no longer fail on a duplicate mid-way.
+    if (oldApplies && oldKey !== undefined) {
+      await ctx.backend.deleteUnique({
+        graphId: ctx.graphId,
+        nodeKind: kind,
+        constraintName: constraint.name,
+        key: oldKey,
+      });
+    }
+
+    if (newApplies && newKey !== undefined) {
       await ctx.backend.insertUnique({
         graphId: ctx.graphId,
         nodeKind: kind,
