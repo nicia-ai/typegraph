@@ -1,5 +1,151 @@
 # @nicia-ai/typegraph
 
+## 0.34.0
+
+### Minor Changes
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Add the `@nicia-ai/typegraph/provenance` subpath for provenance-backed source
+  retraction. The first slice maps user graph kinds to source, justification,
+  fact, premise, and derivation roles; supports multiple source node kinds and
+  terminal fact kinds; requires `{ history: true }`; applies TypeGraph-managed
+  belief transitions by making unsupported facts non-current; and keeps
+  recorded-time replay available before and after retraction. A transition only
+  touches facts reachable from the flipped sources, and closing a fact's currency
+  is a belief-status change rather than a domain delete — the fact's edges are
+  left untouched (no `restrict`/`cascade`/`disconnect` enforcement), so
+  `unRetract` is an exact inverse of `retract`. PostgreSQL transitions serialize
+  with TypeGraph-managed history writes on the same graph; out-of-band SQL
+  remains outside recorded capture.
+
+### Patch Changes
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Stop opening a write transaction on `getOrCreateByConstraint`'s found path.
+  The single-item node getOrCreate wrapped its whole body — probe included — in
+  a transaction, so the common "already exists" case paid for `BEGIN IMMEDIATE`
+  on SQLite (and, under history capture, the per-graph advisory lock on
+  Postgres), and the nested create's operation hooks fired inside that outer
+  transaction, reporting success before a COMMIT that could still fail. The
+  probe now runs as a pure read; the create and update/resurrect legs each open
+  their own (hooked) transaction, so `onOperationEnd` means durably committed. A
+  concurrent create that reserves the key between the probe and the insert
+  surfaces as a uniqueness conflict and is converged by a single re-probe. The
+  bulk variant keeps its one enclosing transaction (atomic batch, hooks skipped
+  by design). Edge `getOrCreateByEndpoints` gets the same probe-first shape.
+
+- [#191](https://github.com/nicia-ai/typegraph/pull/191) [`2cad229`](https://github.com/nicia-ai/typegraph/commit/2cad2293f2d937aff7f53a1318525814eeb05533) Thanks [@pdlug](https://github.com/pdlug)! - Guard `mergeIncremental()` against inherited-row lost updates. The incremental
+  commit path re-checked new-row identity resolution and per-row resurrect/strip
+  hazards, but not whether a committed row the plan mutates still held the value
+  the plan merged against — so a concurrent write to an inherited row between
+  planning (reads taken outside the transaction) and commit was silently
+  discarded. The commit now re-reads, in-transaction, every committed target row
+  the plan will change and aborts with a retryable `BaseVersionMismatchError` if it
+  drifted, matching the snapshot merge path's TOCTOU contract. This covers all four
+  mutating paths: node writes and node deletions (checked by `version`), and edge
+  upserts and edge deletions (checked by a content signature over endpoints,
+  liveness, and canonical props, since edges carry no version column).
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - `importGraph(..., { onConflict: "update" })` now skips soft-deleted target rows
+  instead of failing. Import never resurrects a tombstone: a node or edge that
+  exists only as a tombstone counts as `skipped`, keeps its tombstone, and gets no
+  uniqueness/embedding/fulltext side effects (a uniqueness reservation held by a
+  tombstoned node would block live creates of the same value). Previously the
+  update path attempted a live-row update that threw and aborted the whole
+  import. `onUnknownProperty: "allow"` is also pinned as the fidelity-preserving
+  strategy: it validates known fields but persists the given properties
+  byte-for-byte — no transform re-application, no default injection — so an
+  export→import round trip cannot corrupt values whose schema transforms are not
+  idempotent; use `"strip"` for a normalizing import.
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Fix a uniqueness-reservation corruption on a conflicting node update.
+  `updateUniquenessEntries` mutated one constraint's sidecar at a time — releasing
+  the old key before proving the new one free — so a caller that catches the
+  resulting `UniquenessError` and still commits the transaction (notably
+  `importGraph(..., { onConflict: "update" })`, which reports the conflict per row)
+  left the node's already-mutated sidecars in a corrupt state: an earlier
+  constraint's old key released (letting a later create silently duplicate it) or a
+  new key wrongly reserved, while the row itself stayed unchanged. The update now
+  runs in two passes — preflight every changed constraint's new key first, then
+  apply all sidecar deletes and inserts only after every key is proven free — so a
+  conflict throws with zero partial writes, for every caller of the shared
+  node-write pipeline and for nodes with any number of unique constraints.
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Make in-memory libsql databases safe across transactions, and fail loud on
+  re-entrant root access. Local `@libsql/client` connections (`file:` paths and
+  `file::memory:`) now frame transactions with raw `BEGIN IMMEDIATE`/`COMMIT` on
+  the client's single stable connection instead of `client.transaction()`, which
+  permanently hands that connection to the transaction and lazily opens a fresh —
+  for `:memory:`, empty — database afterwards
+  (tursodatabase/libsql-client-ts#229). Remote Turso connections keep using the
+  driver's per-stream transactions. Separately, a store-level operation awaited
+  from inside a `store.transaction` callback on the same SQLite backend (root
+  store instead of the `tx` context) used to deadlock permanently — the open
+  transaction holds the backend's serialized execution slot — and is now rejected
+  with a `ConfigurationError` that points at the transaction-scoped context.
+
+- [#189](https://github.com/nicia-ai/typegraph/pull/189) [`fe21158`](https://github.com/nicia-ai/typegraph/commit/fe2115836d084a86613ae94a4403651d8316713a) Thanks [@pdlug](https://github.com/pdlug)! - Classify incompatible property-schema changes as breaking schema migrations. The
+  migration diff previously compared only the top-level JSON-Schema token of each
+  property, so a changed property type (e.g. `string` → `number`), a changed array
+  item type (`string[]` → `number[]`), a narrowed enum, or a type change nested
+  inside an object all auto-migrated silently as a non-blocking warning, leaving
+  stored rows that no longer satisfy the declared schema; edge property changes
+  were unconditionally treated as safe. Node and edge property diffs now share one
+  recursive, conservative classifier: a change is `safe` only when it can be proven
+  non-breaking (a new optional property, a metadata-only edit, or an additive
+  optional field nested inside an object). Everything else — a removed property, a
+  newly required property, an in-place type change, a changed array item schema, an
+  enum/const/composition change, a same-type constraint change, or a breaking
+  change nested inside an object — is `breaking` and blocks auto-migration. The
+  `warning` severity is no longer emitted for property changes.
+
+- [#190](https://github.com/nicia-ai/typegraph/pull/190) [`1bfa9c2`](https://github.com/nicia-ai/typegraph/commit/1bfa9c28d04f03b9f82e23bf0a97417aba544767) Thanks [@pdlug](https://github.com/pdlug)! - Fix two silent query-correctness bugs. Keyset pagination (`paginate`/`stream`)
+  now appends a unique `id` tiebreaker to the ORDER BY so a non-unique sort no
+  longer drops equal-key rows across pages. And every compiled `LIKE`/`ILIKE` now
+  emits `ESCAPE '\'` — including the case-sensitive `like` path, which previously
+  omitted it — so escaped `%`/`_`/`\` match literally on SQLite as they already
+  did on PostgreSQL, in both the auto-escaped operators
+  (`contains`/`startsWith`/`endsWith`) and raw `like`/`ilike` patterns, and
+  whether the pattern is a literal or a bound parameter (previously SQLite had no
+  default LIKE escape character, so the two backends — and the direct vs prepared
+  paths — diverged).
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Fix a uniqueness-reservation loss on node resurrection. Resurrecting a
+  soft-deleted node through `getOrCreateByConstraint` (or any
+  `clearDeleted: true` upsert) ran the diff-based uniqueness maintenance, which
+  skips a key that did not change — but the soft delete had already removed the
+  node's uniqueness entries, so the resurrected node held NO reservation and a
+  later `create` with the same unique value silently succeeded, duplicating it.
+  A resurrecting update now re-checks and re-inserts the entries for its new
+  props, exactly as the provenance reopen path does.
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Open SQLite business-write transactions with `BEGIN IMMEDIATE` on the sync
+  (better-sqlite3) path, matching schema writes and the async libsql/Drizzle path.
+  A deferred `BEGIN` acquired the reserved write lock only on the first write, so a
+  read-then-write inside a transaction could fail with "database is locked" against
+  a writer on another connection to the same file; taking the lock at the start of
+  the transaction lets SQLite's busy timeout wait for it instead. The per-backend
+  serialized write queue continues to order a single backend's own transactions.
+
+- [#192](https://github.com/nicia-ai/typegraph/pull/192) [`2af3a06`](https://github.com/nicia-ai/typegraph/commit/2af3a065d9d54b0ac89c32dc27d637a4eedc58cf) Thanks [@pdlug](https://github.com/pdlug)! - Type-check the remaining StoreView read-name buckets. `CURRENT_ONLY_READ_NAMES`
+  and `EDGE_BATCH_READ_NAMES` were plain `as const` arrays while every sibling
+  bucket carried a `satisfies readonly (keyof Collection)[]` guard, so a renamed
+  or mistyped method in those two would have gone uncaught at compile time. All
+  six buckets are now checked against the live collection keys. Compile-time only.
+
+- [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Operation hooks now mean "durably committed" everywhere. `onOperationEnd`
+  previously fired when an operation completed, even when that operation ran
+  inside an enclosing transaction whose COMMIT later failed — so hook consumers
+  (metrics, cache invalidation, audit logs) were told a rolled-back write
+  succeeded. Operations inside `store.transaction` now defer their success
+  hooks until the transaction commits, and a failed transaction converts every
+  completed operation's pending success into `onError`. Edge
+  `getOrCreateByEndpoints` no longer wraps its write legs in an outer
+  transaction (each leg commits — and reports — on its own, with a
+  probe/create race converged by one retry), and provenance transitions route
+  their source-flip and per-fact hooks through the same deferred lifecycle.
+  Inside an adopted transaction (`withTransaction` /
+  `withRecordedTransaction`) the commit belongs to the caller and cannot be
+  observed; hooks there keep firing at operation completion, as documented.
+
 ## 0.33.0
 
 ### Minor Changes
