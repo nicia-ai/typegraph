@@ -24,7 +24,6 @@ import { describe, expect, it } from "vitest";
 
 /** True when the running engine round-trips escaped object keys correctly. */
 function engineRoundTripsEscapedKeys(): boolean {
-   
   JSON.parse(String.raw`{"a":1,"\\":2}`);
   const keys = Object.keys(JSON.parse(String.raw`{"a":1,"\"":2}`));
   return keys.length === 2 && keys[1] === '"';
