@@ -252,20 +252,22 @@ defineNodeIndex(Person, { fields: ["email"] });
 defineNodeIndex(Person, { fields: ["createdScore"] });
 ```
 
-### GIN indexes (array and object containment — PostgreSQL only)
+### GIN indexes (array containment — PostgreSQL only)
 
-TypeGraph compiles array predicates to PostgreSQL's JSONB containment operator (`@>`), which is
-optimized by GIN indexes. If you filter on array properties, create a GIN index on the `props`
-column:
+TypeGraph compiles array predicates to PostgreSQL's JSONB containment operator over the field's
+extraction expression — `(props #> ARRAY['tags']) @> $1`. Declare a containment index with
+`method: "gin"` and TypeGraph emits the matching **expression GIN** (`jsonb_path_ops`):
 
-```sql
--- Covers ALL array containment queries on Person nodes
-CREATE INDEX idx_person_props_gin ON typegraph_nodes
-  USING GIN (props)
-  WHERE graph_id = 'my_graph' AND kind = 'Person' AND deleted_at IS NULL;
+```typescript
+const personTags = defineNodeIndex(Person, {
+  fields: ["tags"],
+  method: "gin",
+});
+// materialized via store.materializeIndexes():
+// CREATE INDEX ... USING GIN (("props" #> ARRAY['tags']) jsonb_path_ops);
 ```
 
-This single GIN index accelerates all of the following predicates:
+The index accelerates all containment predicates on that field:
 
 ```typescript
 // contains: does the tags array include "typescript"?
@@ -278,29 +280,54 @@ This single GIN index accelerates all of the following predicates:
 .whereNode("p", (p) => p.tags.containsAny(["typescript", "graphql"]))
 ```
 
-Unlike B-tree expression indexes, a single GIN index covers queries on **any** JSON path within
-`props` — you don't need a separate index per field.
+:::caution[Whole-column `GIN (props)` does not work]
+PostgreSQL matches expression indexes structurally. A whole-column
+`CREATE INDEX ... USING GIN (props)` serves `props @> …` — **not** the
+per-field `(props #> ARRAY['tags']) @> …` expressions TypeGraph compiles,
+so such an index is never used. Declare `method: "gin"` per field (or
+hand-write the same expression form) instead.
+:::
 
 :::note[SQLite]
-SQLite has no GIN equivalent. Array containment queries on SQLite use `json_each()` scans,
-which can't be indexed. If array filtering is performance-critical, consider PostgreSQL.
+SQLite has no GIN equivalent; `materializeIndexes()` reports gin/trigram
+declarations as `skipped` there. Array containment on SQLite uses
+`json_each()` scans, which can't be indexed.
 :::
+
+### Trigram indexes (substring and case-insensitive matching — PostgreSQL only)
+
+`contains` / `startsWith` / `endsWith` / `ilike` on string fields compile to
+`ILIKE` on PostgreSQL, which a B-tree can never serve for infix patterns.
+Declare `method: "trigram"` and TypeGraph emits an expression GIN with
+`gin_trgm_ops` (installing the `pg_trgm` extension on first
+materialization):
+
+```typescript
+const personName = defineNodeIndex(Person, {
+  fields: ["name"],
+  method: "trigram",
+});
+// CREATE INDEX ... USING GIN (("props" #>> ARRAY['name']) gin_trgm_ops);
+
+.whereNode("p", (p) => p.name.contains("smith"))   // served by the index
+.whereNode("p", (p) => p.name.ilike("%SMITH%"))    // also served
+```
+
+On SQLite these declarations are `skipped` — SQLite's substring-search
+story is [FTS5 fulltext](/search/fulltext) via `searchable()` fields.
+
+GIN-family methods take exactly one field and don't support `unique`,
+`coveringFields`, or `where`; the query's `graph_id` / `kind` filters apply
+as residual conditions over the index's candidate rows.
 
 ### Combining B-tree and GIN
 
-For tables where you filter on both scalar fields (equality, range) and array fields (containment),
-use both index types:
+For kinds where you filter on both scalar fields (equality, range) and array or substring
+predicates, declare both index types:
 
-```sql
--- B-tree for scalar equality + ordering
-CREATE INDEX idx_person_email ON typegraph_nodes
-  (graph_id, kind, ((props #>> ARRAY['email'])))
-  WHERE deleted_at IS NULL;
-
--- GIN for array containment
-CREATE INDEX idx_person_props_gin ON typegraph_nodes
-  USING GIN (props)
-  WHERE graph_id = 'my_graph' AND kind = 'Person' AND deleted_at IS NULL;
+```typescript
+const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+const personTags = defineNodeIndex(Person, { fields: ["tags"], method: "gin" });
 ```
 
 PostgreSQL's query planner can use both indexes together via a BitmapAnd scan when a query filters
@@ -359,7 +386,7 @@ const profiler = new QueryProfiler({
 
 - `defineNodeIndex` / `defineEdgeIndex` generate B-tree expression indexes for **scalar** properties
   (`string`, `number`, `boolean`, `Date`). For array containment queries, create
-  [GIN indexes](#gin-indexes-array-and-object-containment--postgresql-only) manually.
+  [GIN indexes](#gin-indexes-array-containment--postgresql-only) manually.
 - GIN indexes are PostgreSQL-only. SQLite has no equivalent for JSON containment acceleration.
 - Embedding fields live in per-`(graphId, kind, field)` vector tables (`tg_vec_*`) and are indexed
   through `store.materializeIndexes()` (pgvector builds an HNSW / IVFFlat ANN index; sqlite-vec and

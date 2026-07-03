@@ -34,6 +34,32 @@ export type IndexScope =
   | "none";
 
 // ============================================================
+// Index Access Method
+// ============================================================
+
+/**
+ * Index access method for relational (node/edge) index declarations.
+ *
+ * - `"btree"` — the default ordered index over the compiled extraction
+ *   expressions; serves equality/range predicates and `orderBy`.
+ * - `"gin"` — a PostgreSQL expression GIN over the field's jsonb value
+ *   (`jsonb_path_ops`); serves the array containment predicates
+ *   (`contains` / `containsAll` / `containsAny` on array fields), which a
+ *   btree can never serve. Skipped on SQLite.
+ * - `"trigram"` — a PostgreSQL expression GIN over the field's text value
+ *   (`gin_trgm_ops`, requires the `pg_trgm` extension); serves substring
+ *   and case-insensitive matches (`contains` / `startsWith` / `endsWith` /
+ *   `like` / `ilike` on string fields). Skipped on SQLite, whose substring
+ *   search story is FTS5 fulltext.
+ *
+ * `"gin"` and `"trigram"` take exactly one field and reject `unique`,
+ * `coveringFields`, and `where`; `scope` (and edge `direction`) prefix
+ * columns do not apply — the query's `graph_id` / `kind` equality filters
+ * are applied as residual conditions over the index's candidate rows.
+ */
+export type RelationalIndexMethod = "btree" | "gin" | "trigram";
+
+// ============================================================
 // Partial Index WHERE DSL (portable AST)
 // ============================================================
 
@@ -174,6 +200,8 @@ export type NodeIndexConfig<N extends NodeType> = Readonly<{
   name?: string | undefined;
   scope?: IndexScope | undefined;
   where?: IndexWhereInput<NodeIndexWhereBuilder<N>> | undefined;
+  /** Index access method. Default: `"btree"`. See {@link RelationalIndexMethod}. */
+  method?: RelationalIndexMethod | undefined;
 }>;
 
 export type EdgeIndexDirection = "out" | "in" | "none";
@@ -193,6 +221,8 @@ export type EdgeIndexConfig<E extends AnyEdgeType> = Readonly<{
    */
   direction?: EdgeIndexDirection | undefined;
   where?: IndexWhereInput<EdgeIndexWhereBuilder<E>> | undefined;
+  /** Index access method. Default: `"btree"`. See {@link RelationalIndexMethod}. */
+  method?: RelationalIndexMethod | undefined;
 }>;
 
 // ============================================================
@@ -246,6 +276,13 @@ type IndexDeclarationBase = Readonly<{
   unique: boolean;
   scope: IndexScope;
   where: IndexWhereExpression | undefined;
+  /**
+   * Index access method. Absent means `"btree"` — canonicalized by
+   * absence (like `origin`) so serialized declarations and
+   * materialization signatures from before this field existed stay
+   * byte-identical.
+   */
+  method?: Exclude<RelationalIndexMethod, "btree">;
 }>;
 
 export type NodeIndexDeclaration = IndexDeclarationBase &

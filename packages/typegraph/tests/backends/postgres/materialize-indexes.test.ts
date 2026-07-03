@@ -234,5 +234,101 @@ describe("Postgres store.materializeIndexes — status table", () => {
   });
 });
 
+describe("Postgres store.materializeIndexes — GIN-family methods", () => {
+  const Article = defineNode("Article", {
+    schema: z.object({
+      title: z.string(),
+      tags: z.array(z.string()),
+    }),
+  });
+
+  function buildGinGraph() {
+    return defineGraph({
+      id: "pg_gin_method_test",
+      nodes: { Article: { type: Article } },
+      edges: {},
+      indexes: [
+        defineNodeIndex(Article, {
+          fields: ["tags"],
+          method: "gin",
+          name: "idx_tg_article_tags_gin",
+        }),
+        defineNodeIndex(Article, {
+          fields: ["title"],
+          method: "trigram",
+          name: "idx_tg_article_title_trgm",
+        }),
+      ],
+    });
+  }
+
+  it("creates gin and trigram expression indexes and is idempotent", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(buildGinGraph(), backend);
+
+    const first = await store.materializeIndexes();
+    expect(first.results.map((entry) => entry.status).toSorted()).toEqual([
+      "created",
+      "created",
+    ]);
+
+    const second = await store.materializeIndexes();
+    expect(
+      second.results.every((entry) => entry.status === "alreadyMaterialized"),
+    ).toBe(true);
+
+    // Physically present with the expected access method and the pg_trgm
+    // extension installed by the trigram materialization.
+    const indexRows = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE indexname IN ('idx_tg_article_tags_gin', 'idx_tg_article_title_trgm')`,
+    );
+    expect(indexRows.rows).toHaveLength(2);
+    for (const row of indexRows.rows) {
+      expect(row.indexdef).toContain("USING gin");
+    }
+    const extension = await pool.query(
+      `SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'`,
+    );
+    expect(extension.rows).toHaveLength(1);
+  });
+
+  it("keeps containment and substring queries correct with the indexes in place", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(buildGinGraph(), backend);
+    await store.materializeIndexes();
+
+    await store.nodes.Article.create({
+      title: "Postgres indexing deep dive",
+      tags: ["databases", "postgres"],
+    });
+    await store.nodes.Article.create({
+      title: "Cooking with cast iron",
+      tags: ["cooking"],
+    });
+
+    const tagged = await store
+      .query()
+      .from("Article", "a")
+      .whereNode("a", (article) => article.tags.contains("postgres"))
+      .select(({ a }) => ({ title: a.title }))
+      .execute();
+    expect(tagged.map((row) => row.title)).toEqual([
+      "Postgres indexing deep dive",
+    ]);
+
+    const substring = await store
+      .query()
+      .from("Article", "a")
+      .whereNode("a", (article) => article.title.contains("INDEXING"))
+      .select(({ a }) => ({ title: a.title }))
+      .execute();
+    expect(substring.map((row) => row.title)).toEqual([
+      "Postgres indexing deep dive",
+    ]);
+  });
+});
+
 // Used to keep the import linter happy when the suite skips entirely.
 void generatePostgresDDL;

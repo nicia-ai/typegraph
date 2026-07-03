@@ -223,6 +223,8 @@ function serializeNodeIndexDeclaration(
     unique: declaration.unique,
     scope: declaration.scope,
     where: declaration.where,
+    // `method: "btree"` is canonicalized by absence, like `origin` below.
+    ...(declaration.method === undefined ? {} : { method: declaration.method }),
     // `origin: "compile-time"` is the default and is omitted from the
     // canonical form (absence == compile-time). Only `runtime` is
     // emitted explicitly so the restart loader can route the declaration
@@ -246,6 +248,8 @@ function serializeEdgeIndexDeclaration(
     unique: declaration.unique,
     scope: declaration.scope,
     where: declaration.where,
+    // `method: "btree"` is canonicalized by absence, like `origin`.
+    ...(declaration.method === undefined ? {} : { method: declaration.method }),
     ...(declaration.origin === "runtime" ? { origin: "runtime" as const } : {}),
   };
 }

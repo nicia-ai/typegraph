@@ -347,6 +347,23 @@ async function materializeRelationalIndex(
   schemaVersion: number,
   existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
 ): Promise<MaterializeIndexesEntry> {
+  // GIN-family methods are PostgreSQL expression GINs; SQLite has no
+  // equivalent (its substring-search story is FTS5 fulltext), so the
+  // declaration is recognized and intentionally not acted on — same
+  // contract as vector indexes on engines without vector support.
+  if (declaration.method !== undefined && dialect !== "postgres") {
+    return {
+      indexName: declaration.name,
+      entity: declaration.entity,
+      kind: declaration.kind,
+      status: "skipped",
+      reason:
+        `Index method "${declaration.method}" requires PostgreSQL ` +
+        `(expression GIN${declaration.method === "trigram" ? " + pg_trgm" : ""}); ` +
+        "SQLite serves substring search via FTS5 fulltext instead.",
+    };
+  }
+
   const ddl = generateIndexDDL(declaration, dialect, ddlOptions);
   const targetTable =
     declaration.entity === "node" ?
@@ -361,7 +378,15 @@ async function materializeRelationalIndex(
     statusKey: declaration.name,
     signature,
     driftLabel: "Index",
-    run: () => backend.executeDdl!(ddl),
+    run: async () => {
+      if (declaration.method === "trigram") {
+        // gin_trgm_ops lives in the pg_trgm extension (contrib — present
+        // on stock Postgres and the hosted variants). Idempotent, and a
+        // permission failure surfaces as this index's `failed` entry.
+        await backend.executeDdl!("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+      }
+      await backend.executeDdl!(ddl);
+    },
     existingByStatusKey,
   });
 }

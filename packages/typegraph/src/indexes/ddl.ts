@@ -75,6 +75,9 @@ function generateTableIndexDDL(
   tableName: string,
   options: GenerateIndexDdlOptions,
 ): string {
+  if (index.method !== undefined) {
+    return generateGinFamilyIndexDDL(index, dialect, tableName, options);
+  }
   const ifNotExists = options.ifNotExists ?? true;
   const propsColumn = sql.raw('"props"');
   const systemColumn = (column: SystemColumnName): SQL =>
@@ -111,6 +114,47 @@ function generateTableIndexDDL(
   const whereClause = whereSql ? ` WHERE ${whereSql}` : "";
 
   return `CREATE ${unique}INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} (${keySql})${whereClause};`;
+}
+
+/**
+ * DDL for the GIN-family methods (`"gin"` / `"trigram"`) — a PostgreSQL
+ * expression GIN over the declaration's single field.
+ *
+ * The indexed expression is built from the SAME dialect extraction the
+ * query compiler emits for the field (`jsonExtract` → `"props" #> ARRAY[…]`
+ * for containment, `jsonExtractText` → `#>>` for text), because Postgres
+ * matches expression indexes structurally: `(props #> ARRAY['tags']) @> $1`
+ * and `(props #>> ARRAY['name']) ILIKE $1 ESCAPE '\'` both hit their GIN
+ * (verified against parameterized prepared statements). No scope prefix
+ * columns, uniqueness, or partial clause: a GIN indexes one expression, and
+ * the query's `graph_id` / `kind` equality filters apply as residual
+ * conditions over the candidate rows.
+ */
+function generateGinFamilyIndexDDL(
+  index: RelationalIndexDeclaration,
+  dialect: SqlDialect,
+  tableName: string,
+  options: GenerateIndexDdlOptions,
+): string {
+  if (dialect !== "postgres") {
+    throw new Error(
+      `Index "${index.name}" declares method "${index.method}", which ` +
+        "requires PostgreSQL. materializeIndexes() reports such " +
+        "declarations as skipped on SQLite instead of calling this.",
+    );
+  }
+  const adapter = getDialect(dialect);
+  const propsColumn = sql.raw('"props"');
+  const pointer = index.fields[0]!;
+  const expression =
+    index.method === "gin" ?
+      adapter.jsonExtract(propsColumn, pointer)
+    : adapter.jsonExtractText(propsColumn, pointer);
+  const operatorClass =
+    index.method === "gin" ? "jsonb_path_ops" : "gin_trgm_ops";
+  const concurrent = options.concurrent === true ? "CONCURRENTLY " : "";
+  const ifNotExistsSql = (options.ifNotExists ?? true) ? "IF NOT EXISTS " : "";
+  return `CREATE INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} USING GIN ((${sqlToInlineString(expression, dialect)}) ${operatorClass});`;
 }
 
 function quoteIdentifier(identifier: string): string {

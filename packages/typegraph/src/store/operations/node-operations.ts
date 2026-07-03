@@ -1423,6 +1423,17 @@ function resolveNodeIndex<G extends GraphDef>(
     throw new NodeIndexNotFoundError(indexName, kind);
   }
 
+  // GIN-family indexes serve containment / substring predicates, not the
+  // equality probes bulkFindByIndex compiles — targeting one here would
+  // silently probe with the wrong extraction semantics.
+  if (declaration.method !== undefined) {
+    throw new ConfigurationError(
+      `bulkFindByIndex cannot probe index "${indexName}" (method ` +
+        `"${declaration.method}"): only btree indexes serve equality probes.`,
+      { indexName, kind, method: declaration.method },
+    );
+  }
+
   return declaration;
 }
 

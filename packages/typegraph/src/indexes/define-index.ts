@@ -41,6 +41,7 @@ import {
   type NodeIndexConfig,
   type NodeIndexDeclaration,
   type NodeIndexWhereBuilder,
+  type RelationalIndexMethod,
   type SystemColumnName,
 } from "./types";
 
@@ -65,7 +66,9 @@ export function defineNodeIndex<N extends NodeType>(
       config.fields,
       schemaIntrospector,
       "fields",
-      { allowEmpty: false },
+      // GIN containment indexes exist precisely for array/object fields,
+      // which the btree guard otherwise rejects.
+      { allowEmpty: false, allowJsonFields: config.method === "gin" },
     );
 
   const { pointers: coveringFields, valueTypes: coveringFieldValueTypes } =
@@ -82,21 +85,31 @@ export function defineNodeIndex<N extends NodeType>(
     createNodeWhereBuilder(node, schemaIntrospector),
   );
 
+  const method = resolveAdvancedIndexMethod(config.method, {
+    fieldCount: fields.length,
+    fieldValueType: fieldValueTypes[0],
+    coveringFieldCount: coveringFields.length,
+    unique,
+    hasWhere: where !== undefined,
+  });
+
+  const defaultName = generateDefaultIndexName({
+    kind: "node",
+    kindName: node.kind,
+    unique,
+    scope,
+    direction: "none",
+    fields,
+    coveringFields,
+  });
   const name =
     config.name ??
-    generateDefaultIndexName({
-      kind: "node",
-      kindName: node.kind,
-      unique,
-      scope,
-      direction: "none",
-      fields,
-      coveringFields,
-    });
+    (method === undefined ? defaultName : `${defaultName}_${method}`);
 
   // `origin` is intentionally omitted: `"compile-time"` is the default
   // and is canonicalized by absence so the serialized form stays
-  // byte-identical for legacy graphs.
+  // byte-identical for legacy graphs. `method` follows the same rule
+  // (absence == "btree").
   return {
     entity: "node",
     kind: node.kind,
@@ -108,6 +121,7 @@ export function defineNodeIndex<N extends NodeType>(
     unique,
     scope,
     where,
+    ...(method === undefined ? {} : { method }),
   };
 }
 
@@ -130,7 +144,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
       config.fields,
       schemaIntrospector,
       "fields",
-      { allowEmpty: false },
+      { allowEmpty: false, allowJsonFields: config.method === "gin" },
     );
 
   const { pointers: coveringFields, valueTypes: coveringFieldValueTypes } =
@@ -147,17 +161,26 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     createEdgeWhereBuilder(edge, schemaIntrospector),
   );
 
+  const method = resolveAdvancedIndexMethod(config.method, {
+    fieldCount: fields.length,
+    fieldValueType: fieldValueTypes[0],
+    coveringFieldCount: coveringFields.length,
+    unique,
+    hasWhere: where !== undefined,
+  });
+
+  const defaultName = generateDefaultIndexName({
+    kind: "edge",
+    kindName: edge.kind,
+    unique,
+    scope,
+    direction,
+    fields,
+    coveringFields,
+  });
   const name =
     config.name ??
-    generateDefaultIndexName({
-      kind: "edge",
-      kindName: edge.kind,
-      unique,
-      scope,
-      direction,
-      fields,
-      coveringFields,
-    });
+    (method === undefined ? defaultName : `${defaultName}_${method}`);
 
   return {
     entity: "edge",
@@ -171,7 +194,57 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     scope,
     direction,
     where,
+    ...(method === undefined ? {} : { method }),
   };
+}
+
+/**
+ * Validates and canonicalizes a declaration's index method. `"btree"` (or
+ * absent) canonicalizes to `undefined` so serialized declarations and
+ * materialization signatures from before `method` existed stay
+ * byte-identical. GIN-family methods index one expression and have no
+ * ordered key columns, so multi-field, covering, unique, and partial
+ * variants are rejected at declaration time rather than failing as
+ * confusing DDL errors at materialization time.
+ */
+function resolveAdvancedIndexMethod(
+  method: RelationalIndexMethod | undefined,
+  details: Readonly<{
+    fieldCount: number;
+    fieldValueType: ValueType | undefined;
+    coveringFieldCount: number;
+    unique: boolean;
+    hasWhere: boolean;
+  }>,
+): Exclude<RelationalIndexMethod, "btree"> | undefined {
+  const resolved = method ?? "btree";
+  if (resolved === "btree") return undefined;
+  if (details.fieldCount !== 1) {
+    throw new Error(
+      `Index method "${resolved}" requires exactly one field (a GIN indexes one expression), got ${details.fieldCount}`,
+    );
+  }
+  if (resolved === "gin" && details.fieldValueType === "string") {
+    throw new Error(
+      'Index method "gin" serves array/object containment; for substring or case-insensitive matching on a string field use method: "trigram"',
+    );
+  }
+  if (details.coveringFieldCount > 0) {
+    throw new Error(
+      `Index method "${resolved}" does not support coveringFields (GIN indexes cannot serve index-only scans over extra columns)`,
+    );
+  }
+  if (details.unique) {
+    throw new Error(
+      `Index method "${resolved}" does not support unique (GIN indexes cannot enforce uniqueness)`,
+    );
+  }
+  if (details.hasWhere) {
+    throw new Error(
+      `Index method "${resolved}" does not support a partial where clause`,
+    );
+  }
+  return resolved;
 }
 
 // ============================================================
@@ -502,16 +575,23 @@ function assertNoOverlap(
   }
 }
 
-function assertIndexableValueType(valueType: ValueType, context: string): void {
+function assertIndexableValueType(
+  valueType: ValueType,
+  context: string,
+  options: Readonly<{ allowJsonFields: boolean }>,
+): void {
   if (valueType === "embedding") {
     throw new Error(
       `Cannot create props index for embedding field (${context}); embedding() fields are indexed automatically in the vector strategy's per-(kind, field) storage`,
     );
   }
 
-  if (valueType === "array" || valueType === "object") {
+  if (
+    (valueType === "array" || valueType === "object") &&
+    !options.allowJsonFields
+  ) {
     throw new Error(
-      `Cannot create btree props index for ${valueType} field (${context}); use a GIN/JSON index strategy instead`,
+      `Cannot create btree props index for ${valueType} field (${context}); use method: "gin" instead`,
     );
   }
 }
@@ -526,7 +606,7 @@ function normalizeNodeIndexFieldsOrThrow<N extends NodeType>(
   inputs: readonly IndexFieldInput<z.infer<N["schema"]>>[],
   schemaIntrospector: ReturnType<typeof createSchemaIntrospector>,
   label: string,
-  options: Readonly<{ allowEmpty: boolean }>,
+  options: Readonly<{ allowEmpty: boolean; allowJsonFields?: boolean }>,
 ): NormalizedIndexFields {
   if (inputs.length === 0 && options.allowEmpty) {
     return { pointers: [], valueTypes: [] };
@@ -543,7 +623,9 @@ function normalizeNodeIndexFieldsOrThrow<N extends NodeType>(
       pointer,
       schemaIntrospector,
     );
-    assertIndexableValueType(info.valueType, `node "${node.kind}" ${pointer}`);
+    assertIndexableValueType(info.valueType, `node "${node.kind}" ${pointer}`, {
+      allowJsonFields: options.allowJsonFields ?? false,
+    });
     pointers.push(pointer);
     valueTypes.push(info.valueType);
   }
@@ -558,7 +640,7 @@ function normalizeEdgeIndexFieldsOrThrow<E extends AnyEdgeType>(
   inputs: readonly IndexFieldInput<z.infer<E["schema"]>>[],
   schemaIntrospector: ReturnType<typeof createSchemaIntrospector>,
   label: string,
-  options: Readonly<{ allowEmpty: boolean }>,
+  options: Readonly<{ allowEmpty: boolean; allowJsonFields?: boolean }>,
 ): NormalizedIndexFields {
   if (inputs.length === 0 && options.allowEmpty) {
     return { pointers: [], valueTypes: [] };
@@ -575,7 +657,9 @@ function normalizeEdgeIndexFieldsOrThrow<E extends AnyEdgeType>(
       pointer,
       schemaIntrospector,
     );
-    assertIndexableValueType(info.valueType, `edge "${edge.kind}" ${pointer}`);
+    assertIndexableValueType(info.valueType, `edge "${edge.kind}" ${pointer}`, {
+      allowJsonFields: options.allowJsonFields ?? false,
+    });
     pointers.push(pointer);
     valueTypes.push(info.valueType);
   }

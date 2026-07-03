@@ -31,8 +31,12 @@ export function buildPostgresNodeIndexBuilders(
   table: NodeIndexTable,
   indexes: readonly IndexDeclaration[],
 ): readonly PgIndexBuilder[] {
+  // GIN-family declarations (method: "gin" / "trigram") are
+  // materialize-only — like pgvector ANN indexes, they are a pure
+  // materialization concern and never ride the Drizzle table extras.
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndexDeclaration => index.entity === "node",
+    (index): index is NodeIndexDeclaration =>
+      index.entity === "node" && index.method === undefined,
   );
 
   return nodeIndexes.map((index) => {
@@ -70,7 +74,8 @@ export function buildPostgresEdgeIndexBuilders(
   indexes: readonly IndexDeclaration[],
 ): readonly PgIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndexDeclaration => index.entity === "edge",
+    (index): index is EdgeIndexDeclaration =>
+      index.entity === "edge" && index.method === undefined,
   );
 
   return edgeIndexes.map((index) => {
@@ -199,8 +204,12 @@ export function buildSqliteNodeIndexBuilders(
   table: NodeIndexTable,
   indexes: readonly IndexDeclaration[],
 ): readonly SqliteIndexBuilder[] {
+  // GIN-family declarations (method: "gin" / "trigram") are
+  // materialize-only — like pgvector ANN indexes, they are a pure
+  // materialization concern and never ride the Drizzle table extras.
   const nodeIndexes = indexes.filter(
-    (index): index is NodeIndexDeclaration => index.entity === "node",
+    (index): index is NodeIndexDeclaration =>
+      index.entity === "node" && index.method === undefined,
   );
 
   return nodeIndexes.map((index) => {
@@ -239,7 +248,8 @@ export function buildSqliteEdgeIndexBuilders(
   indexes: readonly IndexDeclaration[],
 ): readonly SqliteIndexBuilder[] {
   const edgeIndexes = indexes.filter(
-    (index): index is EdgeIndexDeclaration => index.entity === "edge",
+    (index): index is EdgeIndexDeclaration =>
+      index.entity === "edge" && index.method === undefined,
   );
 
   return edgeIndexes.map((index) => {
