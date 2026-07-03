@@ -109,6 +109,15 @@ async function seedLegacy(
         row.embedding.length,
       ],
     );
+    // vectorSearch computes top-k over LIVE nodes only, so the migrated
+    // embeddings need live node rows to rank through the search path.
+    await pool.query(
+      `INSERT INTO "typegraph_nodes"
+         ("graph_id", "kind", "id", "props", "version", "created_at", "updated_at")
+       VALUES ($1, $2, $3, '{}', 1, now(), now())
+       ON CONFLICT DO NOTHING`,
+      [row.graphId, row.nodeKind, row.nodeId],
+    );
   }
 }
 

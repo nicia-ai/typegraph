@@ -926,53 +926,120 @@ function createPostgresOperationBackend(
     );
   }
 
+  /** One transaction-local GUC override applied around a vector SELECT. */
+  type SearchGucOverride = Readonly<{ name: string; value: string }>;
+
+  // Probed once per backend instance: `hnsw.iterative_scan` exists on
+  // pgvector >= 0.8. Probing the GUC directly is unreliable — extension
+  // GUCs register only once the extension library has loaded into the
+  // session, so a fresh pooled connection reports NULL even on 0.8+.
+  // `pg_extension.extversion` is connection-independent truth.
+  let hnswIterativeScanProbe: Promise<boolean> | undefined;
+  function hnswIterativeScanSupported(): Promise<boolean> {
+    hnswIterativeScanProbe ??= (async () => {
+      try {
+        const [row] = await execAll<{ v: string | null }>(
+          sql`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`,
+        );
+        if (typeof row?.v !== "string") return false;
+        const [major = 0, minor = 0] = row.v
+          .split(".")
+          .map((part) => Number.parseInt(part, 10));
+        return major > 0 || (major === 0 && minor >= 8);
+      } catch {
+        return false;
+      }
+    })();
+    return hnswIterativeScanProbe;
+  }
+
   /**
-   * Runs the vector SELECT, applying `hnsw.ef_search` transaction-locally
-   * when requested. `SET LOCAL` only takes effect inside an explicit
-   * transaction — issued in autocommit it rolls off with the statement
-   * and the next pooled query (notably under transaction-mode pgbouncer)
-   * sees the session default again. So when `efSearch` is set we bundle
-   * `BEGIN; SET LOCAL …; SELECT …; COMMIT;` onto one connection. When
-   * absent we take the unchanged single-statement fast path and open no
-   * transaction.
+   * The transaction-local GUC overrides for one vector search:
+   *
+   * - `hnsw.ef_search` when the caller supplied `efSearch` (validated
+   *   upstream; warned-and-skipped on transactionless drivers, where
+   *   `SET LOCAL` cannot be scoped).
+   * - `hnsw.iterative_scan = strict_order` on HNSW slots (pgvector >= 0.8):
+   *   the search SQL constrains results to live candidate nodes (and
+   *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
+   *   candidates BEFORE those filters — so a filter-heavy neighborhood can
+   *   under-fill top-k. The iterative scan keeps yielding until `LIMIT`
+   *   rows pass, making the filtered search exact. `strict_order`
+   *   preserves the distance ordering the plan relies on (`relaxed_order`
+   *   may emit slightly out of order beneath our LIMIT). On older pgvector
+   *   the search stays `ef_search`-bounded — documented caveat.
+   */
+  async function vectorSearchGucOverrides(
+    params: VectorSearchParams,
+  ): Promise<readonly SearchGucOverride[]> {
+    const overrides: SearchGucOverride[] = [];
+    if (params.efSearch !== undefined) {
+      if (capabilities.transactions) {
+        overrides.push({
+          name: "hnsw.ef_search",
+          value: String(params.efSearch),
+        });
+      } else {
+        warnEfSearchUnsupported();
+      }
+    }
+    if (
+      params.indexType === "hnsw" &&
+      capabilities.transactions &&
+      (await hnswIterativeScanSupported())
+    ) {
+      overrides.push({ name: "hnsw.iterative_scan", value: "strict_order" });
+    }
+    return overrides;
+  }
+
+  /**
+   * Runs the vector SELECT, applying the given GUC overrides
+   * transaction-locally. `SET LOCAL` semantics (via
+   * `set_config(name, value, is_local => true)`, the parameterizable form)
+   * only take effect inside an explicit transaction — issued in autocommit
+   * they roll off with the statement and the next pooled query (notably
+   * under transaction-mode pgbouncer) sees the session default again. So
+   * with overrides present we bundle `BEGIN; SET …; SELECT …; COMMIT;`
+   * onto one connection. With none we take the unchanged single-statement
+   * fast path and open no transaction.
    */
   async function runVectorSearch(
-    efSearch: number | undefined,
+    overrides: readonly SearchGucOverride[],
     query: SQL,
   ): Promise<readonly VectorSearchRow[]> {
-    if (efSearch === undefined) {
+    if (overrides.length === 0) {
       return execAll<VectorSearchRow>(query);
     }
-    if (!capabilities.transactions) {
-      warnEfSearchUnsupported();
-      return execAll<VectorSearchRow>(query);
-    }
-    // `SET` cannot be parameterized; `efSearch` is validated as an
-    // integer in 1..MAX_HNSW_EF_SEARCH before we get here, so inlining
-    // it is injection-safe.
-    const setEfSearch = sql.raw(`SET LOCAL hnsw.ef_search = ${efSearch}`);
     if (db instanceof PgTransaction) {
       // Already inside the caller's transaction (low-level
       // backend.transaction / adoptTransaction). `executionAdapter` is
       // bound to this tx client, but SET LOCAL persists to the end of the
       // caller's transaction — leaking the override into their later
       // vector searches and breaking the per-search contract. Snapshot
-      // the current frontier, apply the override, then restore it once
-      // the SELECT has materialized so the override stays scoped to this
+      // the current values, apply the overrides, then restore them once
+      // the SELECT has materialized so the overrides stay scoped to this
       // one search.
-      const [setting] = await execAll<{ ef_search: string }>(
-        sql`SELECT current_setting('hnsw.ef_search') AS ef_search`,
-      );
-      await execRun(setEfSearch);
+      const snapshots: SearchGucOverride[] = [];
+      for (const override of overrides) {
+        const [setting] = await execAll<{ v: string }>(
+          sql`SELECT current_setting(${override.name}) AS v`,
+        );
+        if (setting !== undefined) {
+          snapshots.push({ name: override.name, value: setting.v });
+        }
+        await execRun(
+          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
+        );
+      }
       const rows = await execAll<VectorSearchRow>(query);
       // Restore only on success: a failed SELECT aborts the caller's
-      // transaction, so its rollback discards the SET LOCAL anyway and a
+      // transaction, so its rollback discards the overrides anyway and a
       // restore here would just fail against the aborted tx, masking the
-      // real error. `set_config(_, _, true)` is the parameterizable form
-      // of SET LOCAL.
-      if (setting !== undefined) {
+      // real error.
+      for (const snapshot of snapshots) {
         await execRun(
-          sql`SELECT set_config('hnsw.ef_search', ${setting.ef_search}, true)`,
+          sql`SELECT set_config(${snapshot.name}, ${snapshot.value}, true)`,
         );
       }
       return rows;
@@ -982,7 +1049,11 @@ function createPostgresOperationBackend(
       // SELECT keeps the server-side prepared-statement fast path and the
       // driver result-shape normalization, rather than a bespoke execute.
       const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
-      await txAdapter.execute(setEfSearch);
+      for (const override of overrides) {
+        await txAdapter.execute(
+          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
+        );
+      }
       return txAdapter.execute<VectorSearchRow>(query);
     });
   }
@@ -1131,14 +1202,19 @@ function createPostgresOperationBackend(
         ): Promise<readonly VectorSearchResult[]> {
           assertVectorSearchLimit(params.limit);
           // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
-          // before `runVectorSearch` inlines it into `SET LOCAL`.
+          // before `runVectorSearch` applies it via `set_config`.
           assertPgvectorEfSearch(params.efSearch);
           const slot = vectorSlotFromParams(params);
           await ensureVectorSlotStorage(slot);
-          const query = vectorStrategy.buildSearch(slot, params);
+          const query = vectorStrategy.buildSearch(
+            slot,
+            params,
+            operationStrategy.buildLiveNodeIds(params.graphId, params.nodeKind),
+          );
+          const gucOverrides = await vectorSearchGucOverrides(params);
           let rows: readonly { node_id: string; score: number }[];
           try {
-            rows = await runVectorSearch(params.efSearch, query);
+            rows = await runVectorSearch(gucOverrides, query);
           } catch (error) {
             // A query vector whose dimension no longer matches the stored
             // column surfaces the same typed error as the write path.

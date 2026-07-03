@@ -222,6 +222,14 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
       metric: "cosine" as const,
     };
 
+    // vectorSearch computes top-k over LIVE nodes only, so the embedding
+    // needs a live node row backing it.
+    await backend.insertNode({
+      graphId: GRAPH,
+      kind: "Document",
+      id: "d1",
+      props: {},
+    });
     // First write ensures only brute-force storage. A later schema change can
     // keep the same dimension while switching the slot to ANN-backed `hnsw`;
     // the backend must run the hnsw ensure path so `vector_top_k` has an index.

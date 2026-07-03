@@ -72,7 +72,7 @@ import {
   buildInsertSchema,
   buildSetActiveSchema,
 } from "./schema";
-import type { Tables } from "./shared";
+import { liveNodeIdsSubquery, type Tables } from "./shared";
 import {
   buildCheckUnique,
   buildCheckUniqueBatch,
@@ -101,6 +101,12 @@ export type CommonOperationStrategy = Readonly<{
     params: DeleteFulltextBatchParams,
   ) => readonly SQL[];
   buildFulltextSearch: (params: FulltextSearchParams) => SQL;
+  /**
+   * Subquery of live node ids for one `(graphId, nodeKind)` — the candidate
+   * set passed to `VectorStrategy.buildSearch` so vector top-k, like the
+   * fulltext search above, is computed over live rows in SQL.
+   */
+  buildLiveNodeIds: (graphId: string, nodeKind: string) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodeNoReturn: (
     params: InsertNodeParams,
@@ -283,7 +289,14 @@ function createCommonOperationStrategy(
     ): readonly SQL[] =>
       fulltextStrategy.buildBatchDelete(fulltextTable, params),
     buildFulltextSearch: (params: FulltextSearchParams): SQL =>
-      buildFulltextSearch(fulltextTable, params, fulltextStrategy),
+      buildFulltextSearch(
+        fulltextTable,
+        params,
+        fulltextStrategy,
+        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind),
+      ),
+    buildLiveNodeIds: (graphId: string, nodeKind: string): SQL =>
+      liveNodeIdsSubquery(tables.nodes, graphId, nodeKind),
   };
 
   return {

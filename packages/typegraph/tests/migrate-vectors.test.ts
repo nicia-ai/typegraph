@@ -81,6 +81,13 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
           vec_f32(${JSON.stringify(row.embedding)}), ${row.embedding.length}, ${TS}, ${TS}
         )
       `);
+      // vectorSearch computes top-k over LIVE nodes only, so the migrated
+      // embeddings need live node rows to rank through the search path.
+      db.run(sql`
+        INSERT OR IGNORE INTO "typegraph_nodes"
+          ("graph_id", "kind", "id", "props", "version", "created_at", "updated_at")
+        VALUES (${row.graphId}, ${row.nodeKind}, ${row.nodeId}, '{}', 1, ${TS}, ${TS})
+      `);
     }
   }
 

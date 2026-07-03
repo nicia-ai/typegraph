@@ -217,7 +217,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
     ];
   },
 
-  buildSearch(slot, params: VectorSearchParams): SQL {
+  buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
     const table = this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath);
     const quoted = quotedTableName(table);
     const embeddingColumn = sql`${quoted}."embedding"`;
@@ -241,9 +241,21 @@ export const libsqlVectorStrategy: VectorStrategy = {
           vectorMinScoreCondition(distance, params.metric, params.minScore),
         );
       }
+      // `vector_top_k` is a table function with no filter pushdown, so a
+      // candidate filter can only be applied AFTER the ANN retrieval.
+      // Over-fetch the DiskANN k to leave headroom for filtered-out rows;
+      // recall is bounded by the over-fetch (same caveat class as the
+      // multi-graph note above, documented on the interface).
+      if (candidates !== undefined) {
+        conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
+      }
+      const annK =
+        candidates === undefined ?
+          params.limit
+        : params.limit * CANDIDATE_FILTER_OVERFETCH;
       return sql`
         SELECT ${quoted}."node_id" AS node_id, ${score} AS score
-        FROM vector_top_k(${indexName}, ${query}, ${params.limit})
+        FROM vector_top_k(${indexName}, ${query}, ${annK})
         JOIN ${quoted} ON ${quoted}.rowid = id
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY ${distance} ASC
@@ -253,6 +265,9 @@ export const libsqlVectorStrategy: VectorStrategy = {
 
     // Brute-force scan.
     const conditions: SQL[] = [sql`${quoted}."graph_id" = ${params.graphId}`];
+    if (candidates !== undefined) {
+      conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
+    }
     if (params.minScore !== undefined) {
       conditions.push(
         vectorMinScoreCondition(distance, params.metric, params.minScore),
@@ -303,6 +318,15 @@ export const libsqlVectorStrategy: VectorStrategy = {
     return statements;
   },
 };
+
+/**
+ * DiskANN over-fetch multiplier applied when a candidate filter is present:
+ * `vector_top_k` cannot pre-filter, so fetch `4k` neighbors and filter after.
+ * Mirrors the hybrid facade's 4x over-fetch. Recall for the filtered search
+ * is bounded by this headroom — if more than `3k` of the top `4k` neighbors
+ * are filtered out, fewer than `k` rows return.
+ */
+const CANDIDATE_FILTER_OVERFETCH = 4;
 
 function libsqlIndexName(slot: VectorSlot): string {
   return vectorPhysicalName(

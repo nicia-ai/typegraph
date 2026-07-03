@@ -255,3 +255,148 @@ describe("Postgres efSearch — transaction-less backend", () => {
     }
   });
 });
+
+/**
+ * Whether the connected pgvector defines `hnsw.iterative_scan` (>= 0.8).
+ * The assertions that require it degrade to a skip on older servers so
+ * external POSTGRES_URL runners don't fail on a version difference. Probed
+ * via extversion — the GUC itself registers only after the extension
+ * library loads into a session.
+ */
+async function iterativeScanAvailable(pool: Pool): Promise<boolean> {
+  const result = await pool.query<{ v: string | null }>(
+    "SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'",
+  );
+  const version = result.rows[0]?.v;
+  if (typeof version !== "string") return false;
+  const [major = 0, minor = 0] = version
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  return major > 0 || (major === 0 && minor >= 8);
+}
+
+describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches", () => {
+  it("applies strict_order transaction-locally on HNSW searches and skips brute-force slots", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    if (!(await iterativeScanAvailable(pool))) {
+      ctx.skip();
+      return;
+    }
+    await seed(pool, "iter_scan_apply");
+
+    // `set_config` is fully parameterized (`SELECT set_config($1, $2, true)`),
+    // so the GUC name only appears in the bind params — capture both.
+    const statements: { query: string; params: unknown[] }[] = [];
+    const backend = createPostgresBackend(
+      drizzle(pool, {
+        logger: {
+          logQuery(query: string, params: unknown[]) {
+            statements.push({ query, params });
+          },
+        },
+      }),
+    );
+
+    const params = {
+      graphId: "iter_scan_apply",
+      nodeKind: "Doc",
+      fieldPath: "embedding",
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      dimensions: 4,
+      limit: 3,
+    } as const;
+
+    await backend.vectorSearch!({ ...params, indexType: "hnsw" });
+    const hnswSetCalls = statements.filter((statement) =>
+      statement.query.includes("set_config"),
+    );
+    expect(
+      hnswSetCalls.some(
+        (statement) =>
+          statement.params[0] === "hnsw.iterative_scan" &&
+          statement.params[1] === "strict_order",
+      ),
+      "HNSW search must apply hnsw.iterative_scan = strict_order",
+    ).toBe(true);
+
+    statements.length = 0;
+    await backend.vectorSearch!({ ...params, indexType: "none" });
+    expect(
+      statements.filter((statement) => statement.query.includes("set_config")),
+      "brute-force slot must not touch GUCs",
+    ).toEqual([]);
+  });
+
+  it("does not leak hnsw.iterative_scan to the next query on the same connection", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    if (!(await iterativeScanAvailable(pool))) {
+      ctx.skip();
+      return;
+    }
+    const pinned = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    try {
+      await seed(pinned, "iter_scan_leak");
+      const backend = createPostgresBackend(drizzle(pinned));
+
+      const readIterativeScan = async () => {
+        const result = await pinned.query<{ v: string }>(
+          "SELECT current_setting('hnsw.iterative_scan') AS v",
+        );
+        return result.rows[0]?.v;
+      };
+
+      const baseline = await readIterativeScan();
+      await backend.vectorSearch!({
+        graphId: "iter_scan_leak",
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        queryEmbedding: [1, 0, 0, 0],
+        metric: "cosine",
+        dimensions: 4,
+        indexType: "hnsw",
+        limit: 3,
+      });
+      const afterSearch = await readIterativeScan();
+
+      expect(baseline).toBeDefined();
+      expect(afterSearch).toBe(baseline);
+      expect(afterSearch).not.toBe("strict_order");
+    } finally {
+      await pinned.end();
+    }
+  });
+
+  it("restores the setting inside a caller transaction", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    if (!(await iterativeScanAvailable(pool))) {
+      ctx.skip();
+      return;
+    }
+    const { backend } = await seed(pool, "iter_scan_tx");
+
+    await backend.transaction(async (tx) => {
+      const readIterativeScan = async () => {
+        const rows = await tx.execute<{ v: string }>(
+          asCompiledRowsSql(
+            sql`SELECT current_setting('hnsw.iterative_scan') AS v`,
+          ),
+        );
+        return rows[0]?.v;
+      };
+      const baseline = await readIterativeScan();
+      await tx.vectorSearch!({
+        graphId: "iter_scan_tx",
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        queryEmbedding: [1, 0, 0, 0],
+        metric: "cosine",
+        dimensions: 4,
+        indexType: "hnsw",
+        limit: 3,
+      });
+      expect(await readIterativeScan()).toBe(baseline);
+      expect(await readIterativeScan()).not.toBe("strict_order");
+    });
+  });
+});

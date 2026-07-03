@@ -726,9 +726,11 @@ async function fetchNodesByIds(
   if (backend.getNodes) {
     const rows = await backend.getNodes(graphId, nodeKind, ids);
     for (const row of rows) {
-      // `getNodes` returns rows regardless of deleted_at. If the fulltext
-      // or embedding index has drifted (a stale row for a soft-deleted
-      // node), skip it here so search never resurrects tombstones.
+      // `getNodes` returns rows regardless of deleted_at. The search SQL
+      // already constrains top-k to live nodes; this skip is
+      // defense-in-depth for the window between the search statement and
+      // this hydration read (they are separate transactions, so a
+      // concurrent delete can land in between).
       if (row.deleted_at !== undefined) continue;
       map.set(row.id, rowToNode(row));
     }

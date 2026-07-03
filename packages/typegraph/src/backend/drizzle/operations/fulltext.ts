@@ -25,6 +25,7 @@ export function buildFulltextSearch(
   tableName: string,
   params: FulltextSearchParams,
   strategy: FulltextStrategy,
+  candidates?: SQL,
 ): SQL {
   assertValidSearchParams(params);
 
@@ -50,6 +51,13 @@ export function buildFulltextSearch(
   ];
   if (params.minScore !== undefined) {
     conditions.push(sql`${rankExpression} >= ${params.minScore}`);
+  }
+  // Liveness pushdown: rank only rows whose node is live, so top-k can never
+  // be crowded out by index drift (side-table rows for tombstoned nodes).
+  // Plain WHERE on both engines — exact, no over-fetch (neither tsvector nor
+  // FTS5 MATCH is a top-k table function; LIMIT applies after filtering).
+  if (candidates !== undefined) {
+    conditions.push(sql`"node_id" IN (${candidates})`);
   }
 
   const snippetExpr =

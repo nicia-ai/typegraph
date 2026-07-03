@@ -777,6 +777,14 @@ describe("SQLite backend.vectorSearch", () => {
       }>[],
     ): Promise<void> {
       for (const row of rows) {
+        // vectorSearch computes top-k over LIVE nodes only, so each
+        // embedding needs a live node row backing it.
+        await backend.insertNode({
+          graphId,
+          kind: nodeKind,
+          id: row.nodeId,
+          props: {},
+        });
         await upsertEmbedding({
           graphId,
           nodeKind,

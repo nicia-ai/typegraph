@@ -186,8 +186,21 @@ export interface VectorStrategy {
    * shared convention (cosine → similarity `1 - distance`; l2 /
    * inner_product → raw distance), so `coerceVectorScore` / fusion stay
    * dialect-neutral.
+   *
+   * `candidates`, when provided, is a subquery yielding the node ids
+   * eligible to appear in results (the backend passes its live-node-ids
+   * subquery so top-k is computed over live rows in SQL — see
+   * `liveNodeIdsSubquery`). Strategies whose ANN form cannot take the
+   * filter directly must over-fetch and post-filter, documenting the
+   * recall bound. A custom strategy that ignores the argument keeps the
+   * pre-pushdown behavior: tombstoned ids are dropped after top-k during
+   * hydration, so results can shrink below `limit` under index drift.
    */
-  buildSearch(slot: VectorSlot, params: VectorSearchParams): SQL;
+  buildSearch(
+    slot: VectorSlot,
+    params: VectorSearchParams,
+    candidates?: SQL,
+  ): SQL;
 
   /**
    * The distance expression over the slot's embedding column, used by the

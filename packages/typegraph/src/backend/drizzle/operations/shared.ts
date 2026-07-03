@@ -26,6 +26,21 @@ export function quotedTableName(tableName: string): SQL {
   return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
 }
 
+/**
+ * Subquery yielding the ids of LIVE nodes of one kind — the candidate set a
+ * facade search statement is allowed to return. Passed into the fulltext and
+ * vector search builders so top-k is computed over live rows in SQL, instead
+ * of ranking side-table rows first and dropping tombstones after (which
+ * silently shrinks results below `limit` under index drift).
+ */
+export function liveNodeIdsSubquery(
+  nodes: Tables["nodes"],
+  graphId: string,
+  nodeKind: string,
+): SQL {
+  return sql`SELECT ${nodes.id} FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${nodes.deletedAt} IS NULL`;
+}
+
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {
   return sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
 }

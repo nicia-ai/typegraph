@@ -660,7 +660,11 @@ function createSqliteOperationBackend(
           assertVectorSearchLimit(params.limit);
           const slot = vectorSlotFromParams(params);
           await ensureVectorSlotStorage(slot);
-          const query = vectorStrategy.buildSearch(slot, params);
+          const query = vectorStrategy.buildSearch(
+            slot,
+            params,
+            operationStrategy.buildLiveNodeIds(params.graphId, params.nodeKind),
+          );
           let rows: readonly { node_id: string; score: number }[];
           try {
             rows = await execAll<{ node_id: string; score: number }>(query);

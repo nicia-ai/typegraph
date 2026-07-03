@@ -215,6 +215,14 @@ nearest-neighbor (DiskANN) indexes via `libsql_vector_idx` + `vector_top_k`.
 Supported metrics are `cosine` and `l2` (no `inner_product`), matching the
 sqlite-vec feature set.
 
+One caveat specific to DiskANN: `vector_top_k` is a table function with no
+filter pushdown, so the liveness filter every search applies (only
+non-deleted nodes may rank — see below) runs *after* ANN retrieval.
+TypeGraph over-fetches 4× `limit` neighbors to leave headroom; if more than
+3×`limit` of those neighbors are filtered out, fewer than `limit` results
+return. pgvector and sqlite-vec apply the filter inside the index scan and
+do not share this bound.
+
 ### Supported Distance Metrics
 
 | Metric | PostgreSQL | SQLite (sqlite-vec) | libSQL / Turso | Description |
@@ -233,6 +241,16 @@ Graph-scoping means several graphs in one database can declare the same
 `kind`+`field` at different dimensions without collision. This is transparent
 to queries — `.similarTo()`, `store.search.vector`, and `store.search.hybrid`
 read it for you.
+
+### Deleted nodes never rank
+
+Every facade search (`store.search.vector` / `fulltext` / `hybrid`) computes
+its top-k over live nodes only: the search SQL constrains candidates to
+non-deleted node ids, so a stale embedding or fulltext row — one whose node
+was tombstoned by a writer that bypassed the store's cleanup — can neither
+surface in results nor crowd live rows out of the top-k. You always get
+`limit` results when at least `limit` live matches exist (on libSQL DiskANN,
+subject to the over-fetch bound above).
 
 ### Changing an embedding dimension
 

@@ -259,7 +259,7 @@ export const sqliteVecStrategy: VectorStrategy = {
     ];
   },
 
-  buildSearch(slot, params: VectorSearchParams): SQL {
+  buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
     const table = quotedTableName(
       this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
     );
@@ -288,6 +288,12 @@ export const sqliteVecStrategy: VectorStrategy = {
           vectorMinScoreCondition(distance, params.metric, params.minScore),
         );
       }
+      // vec0 KNN accepts primary-key `IN (SELECT ...)` pushdown (verified on
+      // sqlite-vec v0.1.9): the filter constrains the KNN candidate set
+      // itself, so `k` live results come back — exact, no over-fetch.
+      if (candidates !== undefined) {
+        conditions.push(sql`${table}."node_id" IN (${candidates})`);
+      }
       return sql`
         SELECT ${table}."node_id" AS node_id, ${score} AS score
         FROM ${table}
@@ -298,6 +304,9 @@ export const sqliteVecStrategy: VectorStrategy = {
 
     // Brute-force scan: no MATCH, so LIMIT is allowed (and required).
     const conditions: SQL[] = [sql`${table}."graph_id" = ${params.graphId}`];
+    if (candidates !== undefined) {
+      conditions.push(sql`${table}."node_id" IN (${candidates})`);
+    }
     if (params.minScore !== undefined) {
       conditions.push(
         vectorMinScoreCondition(distance, params.metric, params.minScore),

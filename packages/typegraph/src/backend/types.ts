@@ -942,6 +942,16 @@ export type GraphBackend = Readonly<{
    */
   upsertEmbeddingBatch?: (params: UpsertEmbeddingBatchParams) => Promise<void>;
   deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
+  /**
+   * KNN search over one `(nodeKind, fieldPath)` slot. Top-k is computed
+   * over LIVE nodes only: the search SQL constrains candidates to
+   * non-tombstoned node ids, so index drift (embedding rows whose node was
+   * deleted outside the store pipeline) can neither surface nor crowd live
+   * rows out of the top-k. Exact on pgvector (>= 0.8 via
+   * `hnsw.iterative_scan`; `ef_search`-bounded below) and sqlite-vec;
+   * libSQL's DiskANN over-fetches 4x and post-filters (recall bounded by
+   * that headroom).
+   */
   vectorSearch?: (
     params: VectorSearchParams,
   ) => Promise<readonly VectorSearchResult[]>;
@@ -961,6 +971,11 @@ export type GraphBackend = Readonly<{
    * per-row `deleteFulltext` when unset.
    */
   deleteFulltextBatch?: (params: DeleteFulltextBatchParams) => Promise<void>;
+  /**
+   * Ranked fulltext search over one node kind. Like `vectorSearch`, top-k
+   * is computed over LIVE nodes only (exact on both engines — plain WHERE,
+   * no top-k table function involved).
+   */
   fulltextSearch?: (
     params: FulltextSearchParams,
   ) => Promise<readonly FulltextSearchResult[]>;
