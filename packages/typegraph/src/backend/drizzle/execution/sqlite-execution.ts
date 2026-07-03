@@ -18,6 +18,18 @@ const DEFAULT_PREPARED_STATEMENT_CACHE_MAX = 256;
 
 type PreparedAllStatement = Readonly<{
   all: (...params: readonly unknown[]) => readonly unknown[];
+  /**
+   * Executes a statement that returns no rows. better-sqlite3 and
+   * bun:sqlite both expose it; better-sqlite3 additionally REQUIRES it for
+   * non-reader statements (`all()` on those throws).
+   */
+  run?: (...params: readonly unknown[]) => unknown;
+  /**
+   * better-sqlite3's "does this statement return rows" flag. bun:sqlite
+   * has no equivalent; `undefined` is treated as non-reader on the run
+   * path (bun's `run()` accepts any statement).
+   */
+  reader?: boolean;
 }>;
 
 type SqliteClientWithPrepare = Readonly<{
@@ -94,6 +106,13 @@ export type SqliteExecutionAdapter = Readonly<
   SqlExecutionAdapter & {
     clearStatementCache: () => void;
     profile: SqliteExecutionProfile;
+    /**
+     * Executes a compiled statement that returns no rows through the
+     * prepared-statement cache. Present only on synchronous drivers with a
+     * preparable client — the CRUD write path falls back to drizzle's
+     * `db.run()` when absent.
+     */
+    executeCompiledRun?: (compiledQuery: CompiledSqlQuery) => Promise<void>;
   }
 >;
 
@@ -344,6 +363,25 @@ export function createSqliteExecutionAdapter(
       return Promise.resolve(rows as readonly TRow[]);
     }
 
+    function executeCompiledRun(compiledQuery: CompiledSqlQuery): Promise<void> {
+      const preparedStatement = getOrCreatePreparedStatement(
+        statementCache,
+        client,
+        compiledQuery.sql,
+        statementCacheMax,
+      );
+      // better-sqlite3 rejects run() on reader statements and all() on
+      // non-reader statements, so pick by the statement's own flag; a
+      // client without run() (or without the reader flag but returning
+      // rows) drains through all() and discards.
+      if (preparedStatement.run === undefined || preparedStatement.reader === true) {
+        preparedStatement.all(...compiledQuery.params);
+      } else {
+        preparedStatement.run(...compiledQuery.params);
+      }
+      return Promise.resolve();
+    }
+
     return {
       clearStatementCache() {
         statementCache.clear();
@@ -354,6 +392,7 @@ export function createSqliteExecutionAdapter(
         return executeCompiled<TRow>(compiledQuery);
       },
       executeCompiled,
+      executeCompiledRun,
       prepare(sqlText: string): PreparedSqlStatement {
         return createPreparedStatementExecutor(
           client,

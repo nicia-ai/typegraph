@@ -481,29 +481,48 @@ function createSqliteOperationBackend(
     vectorSlotLatch,
   } = options;
 
+  // CRUD statements route through the execution adapter's compiled path on
+  // synchronous drivers so a repeated operation shape re-binds parameters
+  // against a cached prepared statement instead of re-preparing through
+  // drizzle's session on every call. Async drivers (remote libsql, D1)
+  // have no statement cache and keep the drizzle fallback.
+  const compiledExecute = executionAdapter.executeCompiled;
+  const compiledRun = executionAdapter.executeCompiledRun;
+
   function execGet<T>(query: SQL): Promise<T | undefined> {
-    // Workaround: drizzle-team/drizzle-orm#1049 — db.get() crashes with
-    // the libsql driver when no rows match (normalizeRow receives undefined).
-    // Using db.all()[0] avoids the crash for all drivers.
+    // Fallback uses db.all()[0], not db.get(): drizzle-team/drizzle-orm#1049
+    // — db.get() crashes with the libsql driver when no rows match
+    // (normalizeRow receives undefined).
     //
-    // All three exec helpers use `await` unconditionally rather than
+    // The fallback branches use `await` unconditionally rather than
     // `instanceof Promise` because Drizzle returns SQLiteRaw thenables
     // that are NOT Promise instances (drizzle-team/drizzle-orm#2275).
     return runWithSerializedQueue(serializedQueue, async () => {
-      const rows = await db.all(query);
-      return (rows as T[])[0];
+      if (compiledExecute === undefined) {
+        const rows = await db.all(query);
+        return (rows as T[])[0];
+      }
+      const rows = await compiledExecute<T>(executionAdapter.compile(query));
+      return rows[0];
     });
   }
 
   function execAll<T>(query: SQL): Promise<T[]> {
     return runWithSerializedQueue(serializedQueue, async () => {
-      return await db.all(query);
+      if (compiledExecute === undefined) {
+        return await db.all(query);
+      }
+      return [...(await compiledExecute<T>(executionAdapter.compile(query)))];
     });
   }
 
   function execRun(query: SQL): Promise<void> {
     return runWithSerializedQueue(serializedQueue, async () => {
-      await db.run(query);
+      if (compiledRun === undefined) {
+        await db.run(query);
+        return;
+      }
+      await compiledRun(executionAdapter.compile(query));
     });
   }
 
@@ -874,6 +893,22 @@ export function createSqliteBackend(
   }
 
   /**
+   * Executes a transaction-frame statement (BEGIN IMMEDIATE / COMMIT /
+   * ROLLBACK) through the prepared-statement cache when the driver has one.
+   * These are the hottest statements on the per-write path (every single
+   * write is its own transaction). Local libsql also uses "sql" transaction
+   * mode but is async (no compiled path) and keeps the drizzle fallback.
+   */
+  async function runFrameStatement(query: SQL): Promise<void> {
+    const compiledRun = executionAdapter.executeCompiledRun;
+    if (compiledRun === undefined) {
+      await db.run(query);
+      return;
+    }
+    await compiledRun(executionAdapter.compile(query));
+  }
+
+  /**
    * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
    * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
    * is serialized against concurrent writers — a deferred BEGIN would let
@@ -910,13 +945,13 @@ export function createSqliteBackend(
           vectorStrategy,
           vectorSlotLatch,
         });
-        await db.run(sql`BEGIN IMMEDIATE`);
+        await runFrameStatement(sql`BEGIN IMMEDIATE`);
         try {
           const result = await fn(txBackend);
-          await db.run(sql`COMMIT`);
+          await runFrameStatement(sql`COMMIT`);
           return result;
         } catch (error) {
-          await db.run(sql`ROLLBACK`);
+          await runFrameStatement(sql`ROLLBACK`);
           throw error;
         }
       });
@@ -1307,7 +1342,7 @@ export function createSqliteBackend(
           // immediately with "database is locked" against a writer on another
           // connection (the serialized queue only orders writes within THIS
           // backend); IMMEDIATE instead waits on SQLite's busy timeout.
-          await db.run(sql`BEGIN IMMEDIATE`);
+          await runFrameStatement(sql`BEGIN IMMEDIATE`);
 
           try {
             const result = await fn(
@@ -1317,10 +1352,10 @@ export function createSqliteBackend(
               ),
               db,
             );
-            await db.run(sql`COMMIT`);
+            await runFrameStatement(sql`COMMIT`);
             return result;
           } catch (error) {
-            await db.run(sql`ROLLBACK`);
+            await runFrameStatement(sql`ROLLBACK`);
             throw error;
           }
         });
