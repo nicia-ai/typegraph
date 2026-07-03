@@ -15,7 +15,7 @@
 import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { GraphBackend } from "../../src/backend/types";
+import { type GraphBackend, rowPropsToObject } from "../../src/backend/types";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import type { SerializedSchema } from "../../src/schema/types";
 
@@ -120,7 +120,7 @@ export function createAdapterTestSuite(
         expect(inserted.created_at).toBeDefined();
         expect(inserted.updated_at).toBeDefined();
 
-        const props = JSON.parse(inserted.props);
+        const props = rowPropsToObject(inserted.props);
         expect(props.name).toBe("Alice");
         expect(props.email).toBe("alice@example.com");
 
@@ -281,7 +281,7 @@ export function createAdapterTestSuite(
         });
 
         expect(updated.version).toBe(1);
-        const props = JSON.parse(updated.props);
+        const props = rowPropsToObject(updated.props);
         expect(props.name).toBe("Alice Updated");
       });
 
@@ -302,7 +302,7 @@ export function createAdapterTestSuite(
         });
 
         expect(updated.version).toBe(2);
-        const props = JSON.parse(updated.props);
+        const props = rowPropsToObject(updated.props);
         expect(props.name).toBe("Alice Updated");
         expect(props.age).toBe(30);
       });
@@ -388,8 +388,8 @@ export function createAdapterTestSuite(
 
         expect(person).toBeDefined();
         expect(company).toBeDefined();
-        expect(JSON.parse(person!.props).name).toBe("Alice");
-        expect(JSON.parse(company!.props).name).toBe("Acme");
+        expect(rowPropsToObject(person!.props).name).toBe("Alice");
+        expect(rowPropsToObject(company!.props).name).toBe("Acme");
       });
 
       it("handles nodes in different graphs", async () => {
@@ -410,8 +410,8 @@ export function createAdapterTestSuite(
         const fromA = await backend.getNode("graph_a", "Person", "person-1");
         const fromB = await backend.getNode("graph_b", "Person", "person-1");
 
-        expect(JSON.parse(fromA!.props).name).toBe("Alice");
-        expect(JSON.parse(fromB!.props).name).toBe("Bob");
+        expect(rowPropsToObject(fromA!.props).name).toBe("Alice");
+        expect(rowPropsToObject(fromB!.props).name).toBe("Bob");
       });
     });
 
@@ -440,7 +440,7 @@ export function createAdapterTestSuite(
         expect(inserted.to_id).toBe("company-1");
         expect(inserted.deleted_at).toBeUndefined();
 
-        const props = JSON.parse(inserted.props);
+        const props = rowPropsToObject(inserted.props);
         expect(props.role).toBe("Engineer");
 
         // Retrieve
@@ -609,7 +609,7 @@ export function createAdapterTestSuite(
           props: { role: "Senior Engineer", startDate: "2024-01-01" },
         });
 
-        const props = JSON.parse(updated.props);
+        const props = rowPropsToObject(updated.props);
         expect(props.role).toBe("Senior Engineer");
         expect(props.startDate).toBe("2024-01-01");
       });
@@ -690,8 +690,8 @@ export function createAdapterTestSuite(
         const fromA = await backend.getEdge("graph_a", "edge-1");
         const fromB = await backend.getEdge("graph_b", "edge-1");
 
-        expect(JSON.parse(fromA!.props).graph).toBe("a");
-        expect(JSON.parse(fromB!.props).graph).toBe("b");
+        expect(rowPropsToObject(fromA!.props).graph).toBe("a");
+        expect(rowPropsToObject(fromB!.props).graph).toBe("b");
       });
     });
 

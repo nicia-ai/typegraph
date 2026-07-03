@@ -3,7 +3,7 @@
  *
  * Exports nodes and edges from a store to the interchange format.
  */
-import { type GraphBackend } from "../backend/types";
+import { type GraphBackend, rowPropsToObject } from "../backend/types";
 import {
   getEdgeKinds,
   getNodeKinds,
@@ -117,7 +117,7 @@ async function exportNodesOfKind(
     const node: InterchangeNode = {
       kind: row.kind,
       id: row.id,
-      properties: JSON.parse(row.props) as Record<string, unknown>,
+      properties: rowPropsToObject(row.props),
     };
 
     if (options.includeTemporal) {
@@ -169,7 +169,7 @@ async function exportEdgesOfKind(
         kind: row.to_kind,
         id: row.to_id,
       },
-      properties: JSON.parse(row.props) as Record<string, unknown>,
+      properties: rowPropsToObject(row.props),
     };
 
     if (options.includeTemporal) {

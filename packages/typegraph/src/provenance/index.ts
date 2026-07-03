@@ -5,6 +5,7 @@ import {
   isTombstonedNodeRow,
   type LiveNodeRow,
   type NodeRow,
+  rowPropsToObject,
   type TombstonedNodeRow,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
@@ -221,7 +222,7 @@ function sortedReferences<
 }
 
 function parseNodeProps(row: NodeRow): Record<string, unknown> {
-  const parsed = JSON.parse(row.props) as unknown;
+  const parsed = rowPropsToObject(row.props) as unknown;
   if (!isPlainObject(parsed)) {
     throw new ConfigurationError(
       `Node ${row.kind}/${row.id} props are not an object.`,

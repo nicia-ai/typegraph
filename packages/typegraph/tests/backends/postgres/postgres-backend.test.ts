@@ -29,6 +29,7 @@ import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
+import { rowPropsToObject } from "../../../src/backend/types";
 import { createStore } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -451,14 +452,11 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
         props: complexProps,
       });
 
-      const parsed = JSON.parse(inserted.props);
-      expect(parsed.name).toBe("Alice");
-      expect(parsed.nested.a).toBe(1);
-      expect(parsed.nested.b).toEqual([2, 3]);
-      expect(parsed.array).toEqual(["x", "y"]);
+      const parsed = rowPropsToObject(inserted.props);
+      expect(parsed).toEqual(complexProps);
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
-      const fetchedProps = JSON.parse(fetched!.props);
+      const fetchedProps = rowPropsToObject(fetched!.props);
       expect(fetchedProps).toEqual(complexProps);
     });
   });

@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import {
@@ -45,7 +46,7 @@ async function snapshotPeople(
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({
       id: row.id,
-      name: (JSON.parse(row.props) as Record<string, unknown>).name,
+      name: rowPropsToObject(row.props).name,
     }))
     .sort((left, right) =>
       left.id < right.id ? -1
@@ -67,7 +68,7 @@ async function snapshotEdges(
       id: row.id,
       from: row.from_id,
       to: row.to_id,
-      since: (JSON.parse(row.props) as Record<string, unknown>).since,
+      since: rowPropsToObject(row.props).since,
     }))
     .sort((left, right) =>
       left.id < right.id ? -1

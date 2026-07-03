@@ -14,6 +14,7 @@ import { type z } from "zod";
 import {
   type GraphBackend,
   type NodeRow,
+  rowPropsToObject,
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../backend/types";
@@ -262,7 +263,7 @@ function processPage(schema: z.ZodType, rows: readonly NodeRow[]): PageResult {
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(row.props);
+      parsed = rowPropsToObject(row.props);
     } catch {
       skipped += 1;
       skippedIds.push(row.id);

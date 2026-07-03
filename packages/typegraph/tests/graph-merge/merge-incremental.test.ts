@@ -25,6 +25,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
 import { mergeIncremental } from "../../src/graph-merge/merge";
@@ -1097,7 +1098,7 @@ describe.each(backendMatrix())(
         "base-ana",
       );
       expect(row).toBeDefined();
-      const props = JSON.parse(row!.props) as Record<string, unknown>;
+      const props = rowPropsToObject(row!.props);
       expect(props.legacyCode).toBe("KEEP-ME");
       expect(props.tag).toBeUndefined();
     });

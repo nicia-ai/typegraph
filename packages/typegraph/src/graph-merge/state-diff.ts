@@ -8,8 +8,9 @@
  * the backend with `excludeDeleted: false` and read the raw `NodeRow`/`EdgeRow`.
  *
  * Row representation contract (verified against `NodeRow`/`EdgeRow`):
- *   - `props` is a JSON STRING — every comparison `JSON.parse`s it before
- *     `canonicalizeProps`, never feeding the raw string to the serializer (that
+ *   - `props` is a JSON string (SQLite) or a driver-parsed object (Postgres
+ *     jsonb) — every comparison routes it through `parseRowProps` before
+ *     `canonicalizeProps`, never feeding a raw string to the serializer (that
  *     would key on incidental string-literal order, not canonical structure).
  *   - `deleted_at` is a field, `undefined` for live rows. Liveness is
  *     `row.deleted_at === undefined`.
@@ -52,7 +53,7 @@ export type NodeRow = Readonly<{
   graph_id: string;
   kind: string;
   id: string;
-  props: string;
+  props: string | Readonly<Record<string, unknown>>;
   version: number;
   valid_from: string | undefined;
   valid_to: string | undefined;
@@ -70,7 +71,7 @@ export type EdgeRow = Readonly<{
   from_id: string;
   to_kind: string;
   to_id: string;
-  props: string;
+  props: string | Readonly<Record<string, unknown>>;
   valid_from: string | undefined;
   valid_to: string | undefined;
   created_at: string;

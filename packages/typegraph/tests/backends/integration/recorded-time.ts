@@ -25,9 +25,10 @@ import {
   searchable,
   type StoreSearch,
 } from "../../../src";
-import type {
-  GraphBackend,
-  TransactionBackend,
+import {
+  type GraphBackend,
+  rowPropsToJsonText,
+  type TransactionBackend,
 } from "../../../src/backend/types";
 import { RECORDED_MAX } from "../../../src/core/temporal";
 import { type ReadCoordinate } from "../../../src/core/temporal";
@@ -2602,7 +2603,10 @@ export function registerRecordedTimeIntegrationTests(
 
       expect(
         returnedEdges
-          .map((edge) => `${edge.graph_id}:${edge.id}:${edge.props}`)
+          .map(
+            (edge) =>
+              `${edge.graph_id}:${edge.id}:${rowPropsToJsonText(edge.props)}`,
+          )
           .toSorted(),
       ).toEqual([
         `${storeA.graphId}:${sharedEdgeId}:{"since":"graph-a"}`,

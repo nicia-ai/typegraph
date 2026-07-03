@@ -26,6 +26,7 @@
 import type { GraphDef, Store } from "@nicia-ai/typegraph";
 import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph";
 
+import { rowPropsToObject } from "../../../src/backend/types";
 import { canonicalizeProps } from "../../../src/graph-merge/canonical-props";
 import {
   enumerateAllEdges,
@@ -306,7 +307,7 @@ export async function normalizeGraph<G extends GraphDef>(
       if (row.deleted_at !== undefined) {
         continue;
       }
-      const props = JSON.parse(row.props) as Record<string, unknown>;
+      const props = rowPropsToObject(row.props);
       nodes.push({ id: row.id, kind: row.kind, props: canonicalProps(props) });
     }
   }
@@ -318,7 +319,7 @@ export async function normalizeGraph<G extends GraphDef>(
       if (row.deleted_at !== undefined) {
         continue;
       }
-      const props = JSON.parse(row.props) as Record<string, unknown>;
+      const props = rowPropsToObject(row.props);
       edges.push({
         id: row.id,
         kind: row.kind,

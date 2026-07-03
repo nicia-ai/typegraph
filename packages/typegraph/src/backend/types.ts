@@ -136,13 +136,35 @@ export type BackendCapabilities = Readonly<{
 // ============================================================
 
 /**
+ * A node/edge row's `props` column as the driver returned it: SQLite always
+ * yields the JSON text; PostgreSQL drivers yield the jsonb value already
+ * parsed. Keeping the driver's shape avoids a per-row
+ * parse→stringify→re-parse round trip on the PostgreSQL read path —
+ * consumers normalize through {@link rowPropsToObject} /
+ * {@link rowPropsToJsonText} at the point of use.
+ */
+export type RowProps = string | Readonly<Record<string, unknown>>;
+
+/** The row's props as an object, parsing only when the driver gave text. */
+export function rowPropsToObject(props: RowProps): Record<string, unknown> {
+  return typeof props === "string" ?
+      (JSON.parse(props) as Record<string, unknown>)
+    : props;
+}
+
+/** The row's props as JSON text, serializing only when the driver gave an object. */
+export function rowPropsToJsonText(props: RowProps): string {
+  return typeof props === "string" ? props : JSON.stringify(props);
+}
+
+/**
  * A row from the typegraph_nodes table.
  */
 export type NodeRow = Readonly<{
   graph_id: string;
   kind: string;
   id: string;
-  props: string; // JSON string
+  props: RowProps;
   version: number;
   valid_from: string | undefined;
   valid_to: string | undefined;
@@ -203,7 +225,7 @@ export type EdgeRow = Readonly<{
   from_id: string;
   to_kind: string;
   to_id: string;
-  props: string; // JSON string
+  props: RowProps;
   valid_from: string | undefined;
   valid_to: string | undefined;
   created_at: string;

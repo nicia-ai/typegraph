@@ -16,7 +16,7 @@
  */
 import { sql } from "drizzle-orm";
 
-import type { GraphBackend } from "../src/backend/types";
+import { type GraphBackend, rowPropsToObject } from "../src/backend/types";
 import type { GraphDef } from "../src/core/define-graph";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import type { Store } from "../src/store/store";
@@ -116,7 +116,7 @@ export async function dumpObservableState<G extends GraphDef>(
       nodes.push({
         kind: row.kind,
         id: row.id,
-        props: JSON.parse(row.props) as Record<string, unknown>,
+        props: rowPropsToObject(row.props),
         deleted: row.deleted_at !== undefined,
       });
     }
@@ -139,7 +139,7 @@ export async function dumpObservableState<G extends GraphDef>(
         fromId: row.from_id,
         toKind: row.to_kind,
         toId: row.to_id,
-        props: JSON.parse(row.props) as Record<string, unknown>,
+        props: rowPropsToObject(row.props),
         deleted: row.deleted_at !== undefined,
       });
     }

@@ -11,6 +11,7 @@ import {
   type InsertNodeParams,
   isLiveNodeRow,
   type NodeRow as BackendNodeRow,
+  rowPropsToObject,
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -564,7 +565,7 @@ async function performNodeUpdate<G extends GraphDef>(
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
-  const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
+  const existingProps = rowPropsToObject(existing.props);
   const mergedProps = { ...existingProps, ...input.props };
 
   const nodeKind = registration.type;

@@ -9,6 +9,7 @@ import {
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  rowPropsToObject,
   type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
@@ -571,7 +572,7 @@ async function performEdgeUpdate<G extends GraphDef>(
   const registration = getEdgeRegistration(ctx.graph, existing.kind);
   const edgeKind = registration.type;
 
-  const existingProps = JSON.parse(existing.props) as Record<string, unknown>;
+  const existingProps = rowPropsToObject(existing.props);
   const mergedProps = { ...existingProps, ...input.props };
 
   const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
@@ -838,7 +839,7 @@ function findMatchingEdge(
 
   for (const row of rows) {
     if (matchOn.length > 0) {
-      const rowProps = JSON.parse(row.props) as Record<string, unknown>;
+      const rowProps = rowPropsToObject(row.props);
       const matches = matchOn.every(
         (field) =>
           stableStringify(rowProps[field]) ===

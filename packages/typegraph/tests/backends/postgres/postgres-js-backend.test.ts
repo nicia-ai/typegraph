@@ -20,6 +20,7 @@ import { z } from "zod";
 import { count, defineEdge, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { rowPropsToObject } from "../../../src/backend/types";
 import { createStore } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -221,12 +222,11 @@ describe("postgres-js driver — coercion sanity", () => {
       props: complexProps,
     });
 
-    // Backend's row contract stores `props` as a JSON string — drivers must
-    // agree on this wire-level representation so downstream JSON.parse is
-    // idempotent regardless of whether jsonb came back parsed or as text.
-    expect(typeof inserted.props).toBe("string");
-    const parsed = JSON.parse(inserted.props);
-    expect(parsed).toEqual(complexProps);
+    // Backend's row contract carries `props` as RowProps — a JSON string OR a
+    // driver-parsed object. postgres-js auto-parses jsonb, so the object must
+    // survive the row-mapper without a stringify/parse round trip and
+    // normalize identically through rowPropsToObject.
+    expect(rowPropsToObject(inserted.props)).toEqual(complexProps);
 
     const fetched = await backend.getNode(
       "postgres_js_test",
@@ -234,8 +234,7 @@ describe("postgres-js driver — coercion sanity", () => {
       "person-1",
     );
     expect(fetched).toBeDefined();
-    expect(typeof fetched!.props).toBe("string");
-    expect(JSON.parse(fetched!.props)).toEqual(complexProps);
+    expect(rowPropsToObject(fetched!.props)).toEqual(complexProps);
   });
 
   it("returns aggregate counts as plain numbers (not BigInt)", async (ctx) => {
@@ -294,7 +293,7 @@ describe("postgres-js driver — coercion sanity", () => {
 
     const fetched = await backend.getNode("postgres_js_test", "Person", "tx-1");
     expect(fetched).toBeDefined();
-    expect(JSON.parse(fetched!.props).name).toBe("Alice");
+    expect(rowPropsToObject(fetched!.props).name).toBe("Alice");
   });
 });
 

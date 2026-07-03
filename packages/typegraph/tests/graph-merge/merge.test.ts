@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
 import { merge } from "../../src/graph-merge/merge";
@@ -129,7 +130,7 @@ async function livePatients(
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => {
-      const props = JSON.parse(row.props) as Record<string, unknown>;
+      const props = rowPropsToObject(row.props);
       return { id: row.id, name: props.name, mrn: props.mrn };
     })
     .sort((left, right) =>
@@ -657,7 +658,7 @@ describe.each(backendMatrix())("merge — FHIR care graph [$name]", (entry) => {
       "Patient",
     );
     const merged = rows.find((row) => row.id === origin.id)!;
-    expect((JSON.parse(merged.props) as { birthDate: string }).birthDate).toBe(
+    expect(rowPropsToObject(merged.props).birthDate).toBe(
       "2000-12-31", // B's edit survived too
     );
   });
@@ -769,7 +770,7 @@ describe.each(backendMatrix())(
       );
       const live = rows.filter((row) => row.deleted_at === undefined);
       expect(live).toHaveLength(1);
-      const props = JSON.parse(live[0]!.props) as Record<string, unknown>;
+      const props = rowPropsToObject(live[0]!.props);
       expect(props.since).toBe("2020");
       expect(props.note).toBeUndefined();
     });

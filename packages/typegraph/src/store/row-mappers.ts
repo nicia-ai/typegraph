@@ -6,6 +6,7 @@
 import {
   type EdgeRow as BackendEdgeRow,
   type NodeRow as BackendNodeRow,
+  rowPropsToObject,
 } from "../backend/types";
 import {
   filterReservedKeys,
@@ -42,7 +43,7 @@ function nullToUndefined<T>(value: T | null | undefined): T | undefined {
  * Null values from database are normalized to undefined.
  */
 export function rowToNode(row: NodeRow): Node {
-  const rawProps = JSON.parse(row.props) as Record<string, unknown>;
+  const rawProps = rowPropsToObject(row.props);
   const props = filterReservedKeys(rawProps, RESERVED_NODE_KEYS);
   return {
     kind: row.kind,
@@ -81,7 +82,7 @@ export function rowToNodeMeta(
  * Null values from database are normalized to undefined.
  */
 export function rowToEdge(row: EdgeRow): Edge {
-  const rawProps = JSON.parse(row.props) as Record<string, unknown>;
+  const rawProps = rowPropsToObject(row.props);
   const props = filterReservedKeys(rawProps, RESERVED_EDGE_KEYS);
   return {
     id: row.id,

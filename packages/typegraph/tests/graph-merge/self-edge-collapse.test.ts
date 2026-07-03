@@ -22,6 +22,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import { merge } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
@@ -97,7 +98,7 @@ async function livePersons(
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => {
-      const props = JSON.parse(row.props) as Record<string, unknown>;
+      const props = rowPropsToObject(row.props);
       return { id: row.id, name: props.name };
     })
     .sort((left, right) =>

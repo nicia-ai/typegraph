@@ -3,7 +3,7 @@
  */
 
 import { DatabaseOperationError } from "../../errors";
-import type { EdgeRow, NodeRow, SchemaVersionRow, UniqueRow } from "../types";
+import { type EdgeRow, type NodeRow, rowPropsToJsonText, type SchemaVersionRow, type UniqueRow } from "../types";
 
 function requireTimestamp(value: string | undefined, field: string): string {
   if (value === undefined) {
@@ -79,10 +79,18 @@ export function coerceNumericScore(value: number | string): number {
 }
 
 /**
- * Normalizes a JSON column that may be returned as a parsed object (JSONB) or string.
+ * Normalizes a JSON column that may be returned as a parsed object (JSONB)
+ * or string. PostgreSQL drivers hand jsonb back already parsed — keep the
+ * object instead of re-stringifying it, so the read path pays zero JSON
+ * work per row (consumers normalize via rowPropsToObject /
+ * rowPropsToJsonText at the point of use). SQLite text passes through.
  */
-function normalizeJsonColumn(value: unknown): string {
-  return typeof value === "string" ? value : JSON.stringify(value ?? {});
+function normalizeJsonColumn(value: unknown): string | Record<string, unknown> {
+  if (typeof value === "string") return value;
+  if (value !== null && typeof value === "object") {
+    return value as Record<string, unknown>;
+  }
+  return JSON.stringify(value ?? {});
 }
 
 /**
@@ -95,7 +103,7 @@ function normalizeJsonColumn(value: unknown): string {
  */
 type DialectRowMapperConfig = Readonly<{
   formatTimestamp: (value: unknown) => string | undefined;
-  normalizeJson: (value: unknown) => string;
+  normalizeJson: (value: unknown) => string | Record<string, unknown>;
 }>;
 
 /**
@@ -200,7 +208,7 @@ export function createSchemaVersionRowMapper(
       graph_id: asString(row.graph_id, "graph_id"),
       version: asNumber(row.version, "version"),
       schema_hash: asString(row.schema_hash, "schema_hash"),
-      schema_doc: config.normalizeJson(row.schema_doc),
+      schema_doc: rowPropsToJsonText(config.normalizeJson(row.schema_doc)),
       created_at: requireTimestamp(config.formatTimestamp(row.created_at), "created_at"),
       is_active: isActive,
     };

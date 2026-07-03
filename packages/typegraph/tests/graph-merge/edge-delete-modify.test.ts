@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import { merge } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
@@ -67,7 +68,7 @@ async function liveLinks(
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({
       id: row.id,
-      props: JSON.parse(row.props) as Record<string, unknown>,
+      props: rowPropsToObject(row.props),
     }));
 }
 

@@ -21,6 +21,7 @@ import {
   type GraphBackend,
   type LiveNodeRow,
   type NodeRow,
+  rowPropsToObject,
   type TombstonedNodeRow,
   type TransactionBackend,
 } from "../../backend/types";
@@ -249,7 +250,7 @@ export async function applyNodeInsertSideEffectsBatch(
 }
 
 function parseRowProps(row: NodeRow): Record<string, unknown> {
-  return JSON.parse(row.props) as Record<string, unknown>;
+  return rowPropsToObject(row.props);
 }
 
 /**

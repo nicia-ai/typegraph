@@ -104,21 +104,27 @@ export function edgeStateSignature(
 }
 
 /**
- * Parses a stored row's JSON `props` string into the PARSED plain object that
- * {@link canonicalizeProps} requires. Malformed JSON, a non-object, or an array
- * all collapse to `{}` — a parse error never escapes. Backend-written rows hold
- * valid JSON, but an external / legacy / truncated `props` value must not crash a
- * state diff or a base-version fingerprint. Centralized so the diff and the
- * fingerprint can never disagree on what a malformed row parses to.
+ * Normalizes a stored row's `props` — a JSON string on SQLite, an
+ * already-parsed object on Postgres (jsonb rows arrive driver-parsed) — into
+ * the plain object that {@link canonicalizeProps} requires. Malformed JSON, a
+ * non-object, or an array all collapse to `{}` — a parse error never escapes.
+ * Backend-written rows hold valid JSON, but an external / legacy / truncated
+ * `props` value must not crash a state diff or a base-version fingerprint.
+ * Centralized so the diff and the fingerprint can never disagree on what a
+ * malformed row parses to.
  */
 export function parseRowProps(
-  props: string,
+  props: string | Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(props);
-  } catch {
-    return {};
+  if (typeof props === "string") {
+    try {
+      parsed = JSON.parse(props);
+    } catch {
+      return {};
+    }
+  } else {
+    parsed = props;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {};

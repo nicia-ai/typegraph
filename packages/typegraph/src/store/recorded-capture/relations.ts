@@ -4,6 +4,7 @@ import { sqlNull } from "../../backend/drizzle/operations/shared";
 import {
   type EdgeRow,
   type NodeRow,
+  rowPropsToJsonText,
   type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX } from "../../core/temporal";
@@ -152,7 +153,7 @@ function recordedCommonCells<Row extends NodeRow | EdgeRow>(): Record<
     graph_id: (row) => sql`${row.graph_id}`,
     id: (row) => sql`${row.id}`,
     kind: (row) => sql`${row.kind}`,
-    props: (row) => sql`${row.props}`,
+    props: (row) => sql`${rowPropsToJsonText(row.props)}`,
     valid_from: (row) => sql`${sqlNull(row.valid_from)}`,
     valid_to: (row) => sql`${sqlNull(row.valid_to)}`,
     created_at: (row) => sql`${row.created_at}`,
