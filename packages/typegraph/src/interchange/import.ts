@@ -21,7 +21,13 @@ import { type EdgeRegistration, type NodeRegistration } from "../core/types";
 import { UniquenessError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  createNodeBatchValidationBackend,
+  type NodeCreateDraft,
+  primeBatchValidationCaches,
+} from "../store/operations/node-operations";
+import {
   applyNodeInsertSideEffects,
+  applyNodeInsertSideEffectsBatch,
   applyNodeUpdate,
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
@@ -225,9 +231,272 @@ async function processNodes(
 
   for (let index = 0; index < nodes.length; index += batchSize) {
     const batch = nodes.slice(index, index + batchSize);
+    await processNodeSlice(
+      backend,
+      graphId,
+      registry,
+      batch,
+      schemas,
+      options,
+      result,
+      errors,
+      importedNodeIds,
+      lock,
+    );
+  }
+}
 
-    for (const node of batch) {
-      const importResult = await processNode(
+function recordNodeOutcome(
+  node: InterchangeNode,
+  outcome: ProcessResult,
+  result: ImportResult,
+  errors: ImportError[],
+  importedNodeIds: Set<string>,
+): void {
+  switch (outcome.status) {
+    case "created": {
+      result.nodes.created++;
+      importedNodeIds.add(makeNodeKey(node.kind, node.id));
+      break;
+    }
+    case "updated": {
+      result.nodes.updated++;
+      importedNodeIds.add(makeNodeKey(node.kind, node.id));
+      break;
+    }
+    case "skipped": {
+      result.nodes.skipped++;
+      // A live skipped row is still a valid edge endpoint; a tombstone
+      // is not.
+      if (outcome.liveTarget) {
+        importedNodeIds.add(makeNodeKey(node.kind, node.id));
+      }
+      break;
+    }
+    case "error": {
+      errors.push({
+        entityType: "node",
+        kind: node.kind,
+        id: node.id,
+        error: outcome.error,
+      });
+      break;
+    }
+  }
+}
+
+type NodeImportCandidate = Readonly<{
+  node: InterchangeNode;
+  schemaEntry: NodeSchemaEntry;
+  props: Record<string, unknown>;
+  draft: NodeCreateDraft;
+}>;
+
+/**
+ * Processes one batchSize slice of nodes with batched round trips:
+ * one `getNodes` per kind for existence, one `checkUniqueBatch` per
+ * (constraint, kind) for uniqueness pre-checks (both priming the shared
+ * batch validation caches), then one multi-row insert and one batched
+ * side-effect pass for the accepted creates. Per-row semantics are
+ * unchanged — conflicts route by `onConflict`, a uniqueness conflict is a
+ * per-row error entry, and rows repeating an id already seen in the slice
+ * defer to the per-row path after the flush (so they observe the first
+ * occurrence's row exactly as the sequential implementation did).
+ */
+async function processNodeSlice(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  registry: KindRegistry,
+  batch: readonly InterchangeNode[],
+  schemas: ReadonlyMap<string, NodeSchemaEntry>,
+  options: ImportOptions,
+  result: ImportResult,
+  errors: ImportError[],
+  importedNodeIds: Set<string>,
+  lock: GraphWriteLock,
+): Promise<void> {
+  const record = (node: InterchangeNode, outcome: ProcessResult): void => {
+    recordNodeOutcome(node, outcome, result, errors, importedNodeIds);
+  };
+
+  // Pass 1 (synchronous): kind + property + validity validation, and
+  // in-slice duplicate deferral.
+  const candidates: NodeImportCandidate[] = [];
+  const deferred: InterchangeNode[] = [];
+  const seenKeys = new Set<string>();
+  for (const node of batch) {
+    const schemaEntry = schemas.get(node.kind);
+    if (!schemaEntry) {
+      record(node, {
+        status: "error",
+        error: `Unknown node kind: ${node.kind}`,
+      });
+      continue;
+    }
+    const propsResult = validateProperties(
+      node.properties,
+      schemaEntry.schema,
+      options.onUnknownProperty,
+    );
+    if (!propsResult.success) {
+      record(node, { status: "error", error: propsResult.error });
+      continue;
+    }
+    const validityError = validateValidityWindow(node);
+    if (validityError !== undefined) {
+      record(node, { status: "error", error: validityError });
+      continue;
+    }
+    const key = makeNodeKey(node.kind, node.id);
+    if (seenKeys.has(key)) {
+      deferred.push(node);
+      continue;
+    }
+    seenKeys.add(key);
+    candidates.push({
+      node,
+      schemaEntry,
+      props: propsResult.data,
+      draft: {
+        kind: node.kind,
+        id: node.id,
+        nodeKind: schemaEntry.registration.type,
+        uniqueConstraints: schemaEntry.registration.unique ?? [],
+        validatedProps: propsResult.data,
+        validFrom: node.validFrom,
+        validTo: node.validTo,
+      },
+    });
+  }
+
+  // Prime the validation caches with batched reads, then route each row
+  // against memory in input order.
+  const {
+    backend: validationBackend,
+    registerPendingNode,
+    registerPendingUniqueEntries,
+    seedNodeRow,
+    seedUniqueRow,
+  } = createNodeBatchValidationBackend(graphId, registry, backend);
+  await primeBatchValidationCaches(
+    { graphId, registry },
+    candidates.map((candidate) => candidate.draft),
+    backend,
+    { seedNodeRow, seedUniqueRow },
+  );
+
+  const writeContext = { graphId, registry, lock };
+  const accepted: NodeImportCandidate[] = [];
+  for (const candidate of candidates) {
+    const { node, schemaEntry, props } = candidate;
+    const uniqueConstraints = schemaEntry.registration.unique ?? [];
+    const existing = await validationBackend.getNode(
+      graphId,
+      node.kind,
+      node.id,
+    );
+
+    if (existing) {
+      switch (options.onConflict) {
+        case "skip": {
+          record(node, {
+            status: "skipped",
+            liveTarget: isLiveNodeRow(existing),
+          });
+          break;
+        }
+        case "error": {
+          record(node, {
+            status: "error",
+            error: `Node already exists: ${node.kind}:${node.id}`,
+          });
+          break;
+        }
+        case "update": {
+          if (!isLiveNodeRow(existing)) {
+            // Import never resurrects a tombstone — see processNode.
+            record(node, { status: "skipped", liveTarget: false });
+            break;
+          }
+          const updateResult = await catchUniquenessError(() =>
+            applyNodeUpdate(
+              writeContext,
+              {
+                existing,
+                schema: schemaEntry.registration.type.schema,
+                validatedProps: props,
+                uniqueConstraints,
+                ...(node.validTo !== undefined && { validTo: node.validTo }),
+              },
+              backend,
+            ),
+          );
+          record(
+            node,
+            updateResult.ok ?
+              { status: "updated" }
+            : { status: "error", error: updateResult.error },
+          );
+          break;
+        }
+      }
+      continue;
+    }
+
+    const uniquenessResult = await catchUniquenessError(() =>
+      checkUniquenessConstraints(
+        { graphId, registry, backend: validationBackend },
+        node.kind,
+        node.id,
+        props,
+        uniqueConstraints,
+      ),
+    );
+    if (!uniquenessResult.ok) {
+      record(node, { status: "error", error: uniquenessResult.error });
+      continue;
+    }
+
+    registerPendingNode(buildImportInsertParams(graphId, candidate));
+    registerPendingUniqueEntries(node.kind, node.id, props, uniqueConstraints);
+    accepted.push(candidate);
+  }
+
+  // Flush the accepted creates: one multi-row insert, then the batched
+  // side effects (uniqueness entries, fulltext, embeddings).
+  if (accepted.length > 0) {
+    const insertParamsList = accepted.map((candidate) =>
+      buildImportInsertParams(graphId, candidate),
+    );
+    if (backend.insertNodesBatch === undefined) {
+      for (const params of insertParamsList) {
+        await backend.insertNode(params);
+      }
+    } else {
+      await backend.insertNodesBatch(insertParamsList);
+    }
+    await applyNodeInsertSideEffectsBatch(
+      writeContext,
+      accepted.map((candidate) => ({
+        kind: candidate.node.kind,
+        id: candidate.node.id,
+        schema: candidate.schemaEntry.registration.type.schema,
+        props: candidate.props,
+        uniqueConstraints: candidate.schemaEntry.registration.unique ?? [],
+      })),
+      backend,
+    );
+    for (const candidate of accepted) {
+      record(candidate.node, { status: "created" });
+    }
+  }
+
+  // In-slice duplicate ids run per-row AFTER the flush so they observe the
+  // first occurrence's committed row, exactly as the sequential path did.
+  for (const node of deferred) {
+    record(
+      node,
+      await processNode(
         backend,
         graphId,
         registry,
@@ -235,40 +504,24 @@ async function processNodes(
         schemas,
         options,
         lock,
-      );
-
-      switch (importResult.status) {
-        case "created": {
-          result.nodes.created++;
-          importedNodeIds.add(makeNodeKey(node.kind, node.id));
-          break;
-        }
-        case "updated": {
-          result.nodes.updated++;
-          importedNodeIds.add(makeNodeKey(node.kind, node.id));
-          break;
-        }
-        case "skipped": {
-          result.nodes.skipped++;
-          // A live skipped row is still a valid edge endpoint; a tombstone
-          // is not.
-          if (importResult.liveTarget) {
-            importedNodeIds.add(makeNodeKey(node.kind, node.id));
-          }
-          break;
-        }
-        case "error": {
-          errors.push({
-            entityType: "node",
-            kind: node.kind,
-            id: node.id,
-            error: importResult.error,
-          });
-          break;
-        }
-      }
-    }
+      ),
+    );
   }
+}
+
+function buildImportInsertParams(
+  graphId: string,
+  candidate: NodeImportCandidate,
+): Parameters<GraphBackend["insertNode"]>[0] {
+  const { node, props } = candidate;
+  return {
+    graphId,
+    kind: node.kind,
+    id: node.id,
+    props,
+    ...(node.validFrom !== undefined && { validFrom: node.validFrom }),
+    ...(node.validTo !== undefined && { validTo: node.validTo }),
+  };
 }
 
 type ProcessResult =
@@ -475,9 +728,290 @@ async function processEdges(
 
   for (let index = 0; index < edges.length; index += batchSize) {
     const batch = edges.slice(index, index + batchSize);
+    await processEdgeSlice(
+      backend,
+      graphId,
+      registry,
+      batch,
+      edgeSchemas,
+      nodeSchemas,
+      options,
+      result,
+      errors,
+      importedNodeIds,
+    );
+  }
+}
 
-    for (const edge of batch) {
-      const importResult = await processEdge(
+function recordEdgeOutcome(
+  edge: InterchangeEdge,
+  outcome: ProcessResult,
+  result: ImportResult,
+  errors: ImportError[],
+): void {
+  switch (outcome.status) {
+    case "created": {
+      result.edges.created++;
+      break;
+    }
+    case "updated": {
+      result.edges.updated++;
+      break;
+    }
+    case "skipped": {
+      result.edges.skipped++;
+      break;
+    }
+    case "error": {
+      errors.push({
+        entityType: "edge",
+        kind: edge.kind,
+        id: edge.id,
+        error: outcome.error,
+      });
+      break;
+    }
+  }
+}
+
+type EdgeImportCandidate = Readonly<{
+  edge: InterchangeEdge;
+  props: Record<string, unknown>;
+}>;
+
+/**
+ * Processes one batchSize slice of edges with batched round trips: one
+ * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
+ * existence, and one multi-row insert for the accepted creates. Per-row
+ * semantics are unchanged; duplicate ids within a slice defer to the
+ * per-row path after the flush.
+ */
+async function processEdgeSlice(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  registry: KindRegistry,
+  batch: readonly InterchangeEdge[],
+  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
+  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
+  options: ImportOptions,
+  result: ImportResult,
+  errors: ImportError[],
+  importedNodeIds: Set<string>,
+): Promise<void> {
+  const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
+    recordEdgeOutcome(edge, outcome, result, errors);
+  };
+
+  // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
+  // property, and validity validation, plus in-slice duplicate deferral.
+  const candidates: EdgeImportCandidate[] = [];
+  const deferred: InterchangeEdge[] = [];
+  const seenIds = new Set<string>();
+  for (const edge of batch) {
+    const schemaEntry = edgeSchemas.get(edge.kind);
+    if (!schemaEntry) {
+      record(edge, {
+        status: "error",
+        error: `Unknown edge kind: ${edge.kind}`,
+      });
+      continue;
+    }
+    if (!nodeSchemas.has(edge.from.kind)) {
+      record(edge, {
+        status: "error",
+        error: `Unknown from node kind: ${edge.from.kind}`,
+      });
+      continue;
+    }
+    if (!nodeSchemas.has(edge.to.kind)) {
+      record(edge, {
+        status: "error",
+        error: `Unknown to node kind: ${edge.to.kind}`,
+      });
+      continue;
+    }
+    const endpointError = validateEdgeEndpoints(
+      edge.kind,
+      edge.from.kind,
+      edge.to.kind,
+      schemaEntry.registration,
+      registry,
+    );
+    if (endpointError !== undefined) {
+      record(edge, { status: "error", error: endpointError.message });
+      continue;
+    }
+    const propsResult = validateProperties(
+      edge.properties,
+      schemaEntry.schema,
+      options.onUnknownProperty,
+    );
+    if (!propsResult.success) {
+      record(edge, { status: "error", error: propsResult.error });
+      continue;
+    }
+    const validityError = validateValidityWindow(edge);
+    if (validityError !== undefined) {
+      record(edge, { status: "error", error: validityError });
+      continue;
+    }
+    if (seenIds.has(edge.id)) {
+      deferred.push(edge);
+      continue;
+    }
+    seenIds.add(edge.id);
+    candidates.push({ edge, props: propsResult.data });
+  }
+
+  // Batch the endpoint-liveness reads: one getNodes per endpoint kind for
+  // every key the import itself didn't create. Falls back to per-row
+  // getNode inside the routing loop when the backend lacks getNodes.
+  const liveEndpointKeys = new Set<string>();
+  const checkedEndpointKeys = new Set<string>();
+  if (options.validateReferences && backend.getNodes !== undefined) {
+    const idsByKind = new Map<string, Set<string>>();
+    for (const { edge } of candidates) {
+      for (const endpoint of [edge.from, edge.to]) {
+        const key = makeNodeKey(endpoint.kind, endpoint.id);
+        if (importedNodeIds.has(key) || checkedEndpointKeys.has(key)) continue;
+        checkedEndpointKeys.add(key);
+        const ids = idsByKind.get(endpoint.kind) ?? new Set<string>();
+        ids.add(endpoint.id);
+        idsByKind.set(endpoint.kind, ids);
+      }
+    }
+    for (const [kind, ids] of idsByKind) {
+      const rows = await backend.getNodes(graphId, kind, [...ids]);
+      for (const row of rows) {
+        if (isLiveNodeRow(row)) {
+          liveEndpointKeys.add(makeNodeKey(kind, row.id));
+        }
+      }
+    }
+  }
+
+  const endpointIsLive = async (endpoint: {
+    kind: string;
+    id: string;
+  }): Promise<boolean> => {
+    const key = makeNodeKey(endpoint.kind, endpoint.id);
+    if (importedNodeIds.has(key)) return true;
+    if (checkedEndpointKeys.has(key)) return liveEndpointKeys.has(key);
+    const row = await backend.getNode(graphId, endpoint.kind, endpoint.id);
+    return row !== undefined && isLiveNodeRow(row);
+  };
+
+  // Batch the existence reads. Falls back to per-row getEdge when the
+  // backend lacks getEdges.
+  const existingById = new Map<
+    string,
+    Awaited<ReturnType<GraphBackend["getEdge"]>>
+  >();
+  if (candidates.length > 0 && backend.getEdges !== undefined) {
+    const rows = await backend.getEdges(
+      graphId,
+      candidates.map((candidate) => candidate.edge.id),
+    );
+    for (const row of rows) {
+      existingById.set(row.id, row);
+    }
+    for (const { edge } of candidates) {
+      if (!existingById.has(edge.id)) existingById.set(edge.id, undefined);
+    }
+  }
+
+  const accepted: EdgeImportCandidate[] = [];
+  for (const candidate of candidates) {
+    const { edge, props } = candidate;
+
+    if (options.validateReferences) {
+      if (!(await endpointIsLive(edge.from))) {
+        record(edge, {
+          status: "error",
+          error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
+        });
+        continue;
+      }
+      if (!(await endpointIsLive(edge.to))) {
+        record(edge, {
+          status: "error",
+          error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
+        });
+        continue;
+      }
+    }
+
+    const existing =
+      existingById.has(edge.id) ?
+        existingById.get(edge.id)
+      : await backend.getEdge(graphId, edge.id);
+
+    if (existing) {
+      switch (options.onConflict) {
+        case "skip": {
+          record(edge, {
+            status: "skipped",
+            liveTarget: existing.deleted_at === undefined,
+          });
+          break;
+        }
+        case "error": {
+          record(edge, {
+            status: "error",
+            error: `Edge already exists: ${edge.id}`,
+          });
+          break;
+        }
+        case "update": {
+          if (existing.deleted_at !== undefined) {
+            record(edge, { status: "skipped", liveTarget: false });
+            break;
+          }
+          await backend.updateEdge({
+            graphId,
+            id: edge.id,
+            props,
+            ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+          });
+          record(edge, { status: "updated" });
+          break;
+        }
+      }
+      continue;
+    }
+
+    accepted.push(candidate);
+  }
+
+  if (accepted.length > 0) {
+    const insertParamsList = accepted.map(({ edge, props }) => ({
+      graphId,
+      id: edge.id,
+      kind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props,
+      ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
+      ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+    }));
+    if (backend.insertEdgesBatch === undefined) {
+      for (const params of insertParamsList) {
+        await backend.insertEdge(params);
+      }
+    } else {
+      await backend.insertEdgesBatch(insertParamsList);
+    }
+    for (const candidate of accepted) {
+      record(candidate.edge, { status: "created" });
+    }
+  }
+
+  for (const edge of deferred) {
+    record(
+      edge,
+      await processEdge(
         backend,
         graphId,
         registry,
@@ -486,32 +1020,8 @@ async function processEdges(
         nodeSchemas,
         options,
         importedNodeIds,
-      );
-
-      switch (importResult.status) {
-        case "created": {
-          result.edges.created++;
-          break;
-        }
-        case "updated": {
-          result.edges.updated++;
-          break;
-        }
-        case "skipped": {
-          result.edges.skipped++;
-          break;
-        }
-        case "error": {
-          errors.push({
-            entityType: "edge",
-            kind: edge.kind,
-            id: edge.id,
-            error: importResult.error,
-          });
-          break;
-        }
-      }
-    }
+      ),
+    );
   }
 }
 

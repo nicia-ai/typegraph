@@ -43,6 +43,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { chunk as chunkArray } from "../../utils/array";
 import { isMissingTableError } from "../../utils/sql-errors";
 import {
   type AdoptedTransaction,
@@ -69,6 +70,7 @@ import {
   SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
   type TransactionOptions,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
@@ -83,6 +85,7 @@ import {
 } from "./execution/sqlite-execution";
 import {
   createVectorSlotLatch,
+  EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
   vectorSlotFromCreateIndexParams,
   vectorSlotFromDropIndexParams,
@@ -179,6 +182,7 @@ const EDGE_INSERT_PARAM_COUNT = 12;
 const GET_NODES_FIXED_PARAM_COUNT = 2;
 const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
+const UNIQUE_INSERT_PARAM_COUNT = 6;
 
 /**
  * Batch chunk sizes for the SQLite operation backend, derived from the
@@ -191,6 +195,7 @@ export type SqliteBatchChunkSizes = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  uniqueInsertBatchSize: number;
 }>;
 
 /**
@@ -222,6 +227,10 @@ export function computeSqliteBatchChunkSizes(
     nodeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    uniqueInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / UNIQUE_INSERT_PARAM_COUNT),
     ),
   };
 }
@@ -553,6 +562,59 @@ function createSqliteOperationBackend(
           try {
             for (const statement of statements) {
               await execRun(statement);
+            }
+          } catch (error) {
+            throw mapVectorWriteError(error, params);
+          }
+        },
+        async upsertEmbeddingBatch(
+          params: UpsertEmbeddingBatchParams,
+        ): Promise<void> {
+          if (params.rows.length === 0) return;
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          // Last-write-wins dedupe: a multi-row upsert cannot affect one
+          // row twice.
+          const rowsById = new Map(
+            params.rows.map((row) => [row.nodeId, row] as const),
+          );
+          const rows = [...rowsById.values()];
+          const chunkSize = Math.max(
+            1,
+            Math.floor(
+              (capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS) /
+                EMBEDDING_UPSERT_PARAM_COUNT,
+            ),
+          );
+          const timestamp = nowIso();
+          try {
+            for (const chunk of chunkArray(rows, chunkSize)) {
+              const statements =
+                vectorStrategy.buildUpsertBatch === undefined ?
+                  chunk.flatMap((row) =>
+                    vectorStrategy.buildUpsert(
+                      slot,
+                      {
+                        graphId: params.graphId,
+                        nodeKind: params.nodeKind,
+                        nodeId: row.nodeId,
+                        fieldPath: params.fieldPath,
+                        embedding: row.embedding,
+                        dimensions: params.dimensions,
+                        metric: params.metric,
+                        indexType: params.indexType,
+                      },
+                      timestamp,
+                    ),
+                  )
+                : vectorStrategy.buildUpsertBatch(
+                    slot,
+                    { ...params, rows: chunk },
+                    timestamp,
+                  );
+              for (const statement of statements) {
+                await execRun(statement);
+              }
             }
           } catch (error) {
             throw mapVectorWriteError(error, params);

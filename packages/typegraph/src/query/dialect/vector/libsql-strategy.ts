@@ -24,6 +24,7 @@ import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
   type VectorMetric,
@@ -172,6 +173,34 @@ export const libsqlVectorStrategy: VectorStrategy = {
         VALUES (${params.graphId}, ${params.nodeId}, ${value}, ${timestamp}, ${timestamp})
         ON CONFLICT ("graph_id", "node_id")
         DO UPDATE SET "embedding" = ${value}, "updated_at" = ${timestamp}
+      `,
+    ];
+  },
+
+  buildUpsertBatch(
+    slot,
+    params: UpsertEmbeddingBatchParams,
+    timestamp,
+  ): readonly SQL[] {
+    const table = quotedTableName(
+      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    const valueRows = sql.join(
+      params.rows.map(
+        (row) =>
+          sql`(${params.graphId}, ${row.nodeId}, ${vector32Literal(row.embedding, "embedding")}, ${timestamp}, ${timestamp})`,
+      ),
+      sql`, `,
+    );
+    // `excluded."embedding"` reuses the row's already-converted F32_BLOB
+    // value, so the multi-row form needs no per-row conversion in the
+    // update arm (unlike buildUpsert's single bound value).
+    return [
+      sql`
+        INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+        VALUES ${valueRows}
+        ON CONFLICT ("graph_id", "node_id")
+        DO UPDATE SET "embedding" = excluded."embedding", "updated_at" = excluded."updated_at"
       `,
     ];
   },

@@ -34,6 +34,7 @@ import { type SQL, sql } from "drizzle-orm";
 import { type StrategyTableContribution } from "../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
   type VectorIndexType,
@@ -148,6 +149,19 @@ export interface VectorStrategy {
   buildUpsert(
     slot: VectorSlot,
     params: UpsertEmbeddingParams,
+    timestamp: string,
+  ): readonly SQL[];
+
+  /**
+   * Emits the statement(s) that upsert MANY embeddings into the slot's
+   * storage in multi-row form. Optional — the backend falls back to one
+   * {@link buildUpsert} per row when unset. The backend guarantees the
+   * rows carry distinct `nodeId`s and fit the connection's bound-parameter
+   * budget (it chunks before calling).
+   */
+  buildUpsertBatch?(
+    slot: VectorSlot,
+    params: UpsertEmbeddingBatchParams,
     timestamp: string,
   ): readonly SQL[];
 

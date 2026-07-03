@@ -58,6 +58,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { chunk as chunkArray } from "../../utils/array";
 import { isMissingTableError } from "../../utils/sql-errors";
 import {
   type AdoptedTransaction,
@@ -84,6 +85,7 @@ import {
   type SetActiveVersionParams,
   type TransactionBackend,
   type TransactionOptions,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
@@ -144,6 +146,7 @@ import {
 } from "./schema/postgres";
 import {
   createVectorSlotLatch,
+  EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
   vectorSlotFromCreateIndexParams,
   vectorSlotFromDropIndexParams,
@@ -252,6 +255,11 @@ const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
 const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
   1,
   POSTGRES_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+);
+const UNIQUE_INSERT_PARAM_COUNT = 6;
+const POSTGRES_UNIQUE_INSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / UNIQUE_INSERT_PARAM_COUNT),
 );
 
 // ============================================================
@@ -996,6 +1004,7 @@ function createPostgresOperationBackend(
       getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
       getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
       nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
+      uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
     },
     execution: {
       execAll,
@@ -1041,6 +1050,60 @@ function createPostgresOperationBackend(
           try {
             for (const statement of statements) {
               await execRun(statement);
+            }
+          } catch (error) {
+            throw mapVectorWriteError(error, params);
+          }
+        },
+
+        async upsertEmbeddingBatch(
+          params: UpsertEmbeddingBatchParams,
+        ): Promise<void> {
+          if (params.rows.length === 0) return;
+          const slot = vectorSlotFromParams(params);
+          await ensureVectorSlotStorage(slot);
+          // Last-write-wins dedupe: a multi-row upsert cannot affect one
+          // row twice.
+          const rowsById = new Map(
+            params.rows.map((row) => [row.nodeId, row] as const),
+          );
+          const rows = [...rowsById.values()];
+          const chunkSize = Math.max(
+            1,
+            Math.floor(
+              (capabilities.maxBindParameters ??
+                POSTGRES_MAX_BIND_PARAMETERS) / EMBEDDING_UPSERT_PARAM_COUNT,
+            ),
+          );
+          const timestamp = nowIso();
+          try {
+            for (const chunk of chunkArray(rows, chunkSize)) {
+              const statements =
+                vectorStrategy.buildUpsertBatch === undefined ?
+                  chunk.flatMap((row) =>
+                    vectorStrategy.buildUpsert(
+                      slot,
+                      {
+                        graphId: params.graphId,
+                        nodeKind: params.nodeKind,
+                        nodeId: row.nodeId,
+                        fieldPath: params.fieldPath,
+                        embedding: row.embedding,
+                        dimensions: params.dimensions,
+                        metric: params.metric,
+                        indexType: params.indexType,
+                      },
+                      timestamp,
+                    ),
+                  )
+                : vectorStrategy.buildUpsertBatch(
+                    slot,
+                    { ...params, rows: chunk },
+                    timestamp,
+                  );
+              for (const statement of statements) {
+                await execRun(statement);
+              }
             }
           } catch (error) {
             throw mapVectorWriteError(error, params);

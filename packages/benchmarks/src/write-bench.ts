@@ -187,6 +187,25 @@ const SHAPES: readonly WriteShape[] = [
     },
   },
   {
+    // Same rows as write:doc-create but through bulkCreate — the shape
+    // that exercises batched sidecar sync (fulltext + embeddings).
+    label: "write:bulk-doc-create",
+    ops: DOC_CREATE_OPS,
+    prepare: (store) => {
+      const inputs = Array.from({ length: DOC_CREATE_OPS }, () => ({
+        props: {
+          title: nextId("bulkdoc"),
+          body: DOC_BODY,
+          category: "bench",
+          embedding: buildEmbedding(),
+        },
+      }));
+      return async () => {
+        await store.nodes.Doc.bulkCreate(inputs);
+      };
+    },
+  },
+  {
     label: "write:import",
     ops: IMPORT_NODE_COUNT + IMPORT_EDGE_COUNT,
     prepare: (store) => {

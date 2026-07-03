@@ -3,7 +3,11 @@
  *
  * Handles checking, inserting, updating, and deleting uniqueness constraint entries.
  */
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  type InsertUniqueParams,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   checkWherePredicate,
   computeUniqueKey,
@@ -110,6 +114,53 @@ export async function insertUniquenessEntries(
       nodeId: id,
       concreteKind: kind,
     });
+  }
+}
+
+/**
+ * Inserts uniqueness entries for a batch of newly created nodes through one
+ * `insertUniqueBatch` call (falling back to per-entry `insertUnique` when
+ * the backend lacks the batch primitive). Same conflict semantics as the
+ * per-node path: the first entry whose key a different live node holds
+ * throws `UniquenessError`.
+ */
+export async function insertUniquenessEntriesBatch(
+  ctx: UniquenessContext,
+  items: readonly Readonly<{
+    kind: string;
+    id: string;
+    props: Record<string, unknown>;
+    constraints: readonly UniqueConstraint[];
+  }>[],
+): Promise<void> {
+  const entries: InsertUniqueParams[] = [];
+  for (const item of items) {
+    for (const constraint of item.constraints) {
+      if (!checkWherePredicate(constraint, item.props)) {
+        continue;
+      }
+      entries.push({
+        graphId: ctx.graphId,
+        nodeKind: item.kind,
+        constraintName: constraint.name,
+        key: computeUniqueKey(
+          item.props,
+          constraint.fields,
+          constraint.collation,
+        ),
+        nodeId: item.id,
+        concreteKind: item.kind,
+      });
+    }
+  }
+  if (entries.length === 0) return;
+
+  if (ctx.backend.insertUniqueBatch !== undefined) {
+    await ctx.backend.insertUniqueBatch(entries);
+    return;
+  }
+  for (const entry of entries) {
+    await ctx.backend.insertUnique(entry);
   }
 }
 

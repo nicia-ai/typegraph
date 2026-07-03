@@ -191,6 +191,77 @@ export async function syncFulltext(
 }
 
 /**
+ * Syncs the fulltext rows for a batch of same-kind node creates through
+ * one `upsertFulltextBatch` call (falling back to per-row `upsertFulltext`
+ * when the backend lacks the batch primitive). Mirrors `syncFulltext`
+ * per row: computed content upserts, empty content deletes any stale row
+ * when the schema declares searchable fields.
+ */
+export async function syncFulltextBatchForKind(
+  args: Readonly<{
+    graphId: string;
+    nodeKind: string;
+    backend: GraphBackend | TransactionBackend;
+  }>,
+  schema: z.ZodType,
+  items: readonly Readonly<{
+    nodeId: string;
+    props: Record<string, unknown>;
+  }>[],
+): Promise<void> {
+  const { graphId, nodeKind, backend } = args;
+  if (!backend.upsertFulltext || !backend.deleteFulltext) {
+    return;
+  }
+
+  const rows: { nodeId: string; content: string; language: string }[] = [];
+  const emptyContentIds: string[] = [];
+  const hasSearchableFields = getSearchableFields(schema).length > 0;
+  for (const item of items) {
+    const computed = computeFulltextContent(schema, item.props);
+    if (computed !== undefined) {
+      rows.push({
+        nodeId: item.nodeId,
+        content: computed.content,
+        language: computed.language,
+      });
+    } else if (hasSearchableFields) {
+      emptyContentIds.push(item.nodeId);
+    }
+  }
+
+  if (rows.length > 0) {
+    if (backend.upsertFulltextBatch === undefined) {
+      for (const row of rows) {
+        await backend.upsertFulltext({
+          graphId,
+          nodeKind,
+          nodeId: row.nodeId,
+          content: row.content,
+          language: row.language,
+        });
+      }
+    } else {
+      await backend.upsertFulltextBatch({ graphId, nodeKind, rows });
+    }
+  }
+
+  if (emptyContentIds.length > 0) {
+    if (backend.deleteFulltextBatch === undefined) {
+      for (const nodeId of emptyContentIds) {
+        await backend.deleteFulltext({ graphId, nodeKind, nodeId });
+      }
+    } else {
+      await backend.deleteFulltextBatch({
+        graphId,
+        nodeKind,
+        nodeIds: emptyContentIds,
+      });
+    }
+  }
+}
+
+/**
  * Deletes the fulltext row for a node.
  * Called on soft-delete; hard-delete is handled by the backend cascade.
  */

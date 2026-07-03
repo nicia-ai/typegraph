@@ -58,6 +58,7 @@ import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
   type VectorMetric,
@@ -209,6 +210,39 @@ export const sqliteVecStrategy: VectorStrategy = {
       sql`
         INSERT INTO ${table} ("node_id", "graph_id", "created_at", "updated_at", "embedding")
         VALUES (${params.nodeId}, ${params.graphId}, ${timestamp}, ${timestamp}, ${value})
+      `,
+    ];
+  },
+
+  buildUpsertBatch(
+    slot,
+    params: UpsertEmbeddingBatchParams,
+    timestamp,
+  ): readonly SQL[] {
+    const table = quotedTableName(
+      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    // Same DELETE + INSERT upsert emulation as buildUpsert, in multi-row
+    // form: one IN-list delete, one multi-row insert.
+    const nodeIds = sql.join(
+      params.rows.map((row) => sql`${row.nodeId}`),
+      sql`, `,
+    );
+    const valueRows = sql.join(
+      params.rows.map(
+        (row) =>
+          sql`(${row.nodeId}, ${params.graphId}, ${timestamp}, ${timestamp}, ${vecF32Literal(row.embedding, "embedding")})`,
+      ),
+      sql`, `,
+    );
+    return [
+      sql`
+        DELETE FROM ${table}
+        WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${nodeIds})
+      `,
+      sql`
+        INSERT INTO ${table} ("node_id", "graph_id", "created_at", "updated_at", "embedding")
+        VALUES ${valueRows}
       `,
     ];
   },

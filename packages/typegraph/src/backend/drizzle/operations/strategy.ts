@@ -79,6 +79,7 @@ import {
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
   buildInsertUnique,
+  buildInsertUniqueBatch,
 } from "./uniques";
 
 export type CommonOperationStrategy = Readonly<{
@@ -149,6 +150,7 @@ export type CommonOperationStrategy = Readonly<{
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
   buildCountEdgesByKind: (params: CountEdgesByKindParams) => SQL;
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
+  buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
   buildHardDeleteUniquesByNode: (graphId: string, nodeId: string) => SQL;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
@@ -289,6 +291,9 @@ function createCommonOperationStrategy(
     ...fulltextBuilders,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
+    },
+    buildInsertUniqueBatch(entries: readonly InsertUniqueParams[]): SQL {
+      return buildInsertUniqueBatch(tables, dialect, entries);
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);

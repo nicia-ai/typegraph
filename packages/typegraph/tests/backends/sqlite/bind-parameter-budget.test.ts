@@ -106,6 +106,7 @@ describe("computeSqliteBatchChunkSizes", () => {
       getEdgesChunkSize: 998,
       getNodesChunkSize: 997,
       nodeInsertBatchSize: 111,
+      uniqueInsertBatchSize: 166,
     });
   });
 
@@ -116,6 +117,7 @@ describe("computeSqliteBatchChunkSizes", () => {
       getEdgesChunkSize: 32_765,
       getNodesChunkSize: 32_764,
       nodeInsertBatchSize: 3640,
+      uniqueInsertBatchSize: 5461,
     });
   });
 
@@ -126,6 +128,7 @@ describe("computeSqliteBatchChunkSizes", () => {
       getEdgesChunkSize: 1,
       getNodesChunkSize: 1,
       nodeInsertBatchSize: 1,
+      uniqueInsertBatchSize: 1,
     });
   });
 });

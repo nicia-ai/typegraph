@@ -83,6 +83,7 @@ import {
 import {
   applyNodeHardDelete,
   applyNodeInsertSideEffects,
+  applyNodeInsertSideEffectsBatch,
   applyNodeSoftDelete,
   applyNodeUpdate,
   createNodeWriteContext,
@@ -236,7 +237,7 @@ function resolveConstraint<G extends GraphDef>(
 // in the batch can see earlier ones during validation.
 // ============================================================
 
-function createNodeBatchValidationBackend(
+export function createNodeBatchValidationBackend(
   graphId: string,
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
@@ -248,6 +249,13 @@ function createNodeBatchValidationBackend(
     id: string,
     props: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
+  ) => void;
+  seedNodeRow: (kind: string, id: string, row: CachedNodeRow) => void;
+  seedUniqueRow: (
+    kind: string,
+    constraintName: string,
+    key: string,
+    row: CachedUniqueRow,
   ) => void;
 }> {
   const nodeCache = new Map<string, CachedNodeRow>();
@@ -351,6 +359,29 @@ function createNodeBatchValidationBackend(
     }
   }
 
+  // Seed functions let batch preparation prime the caches from one
+  // getNodes / checkUniqueBatch round trip instead of a per-row probe.
+  // Seeding an absent result (`undefined`) is meaningful — it marks the
+  // key as known-missing so the per-row check skips the backend read.
+  // Existing entries are never overwritten: a pending registration or an
+  // earlier lookup always wins.
+  function seedNodeRow(kind: string, id: string, row: CachedNodeRow): void {
+    const cacheKey = buildNodeCacheKey(graphId, kind, id);
+    if (nodeCache.has(cacheKey)) return;
+    nodeCache.set(cacheKey, row);
+  }
+
+  function seedUniqueRow(
+    kind: string,
+    constraintName: string,
+    key: string,
+    row: CachedUniqueRow,
+  ): void {
+    const cacheKey = buildUniqueCacheKey(graphId, kind, constraintName, key);
+    if (uniqueCache.has(cacheKey)) return;
+    uniqueCache.set(cacheKey, row);
+  }
+
   const validationBackend = createBackendOverlay(backend, {
     getNode: getNodeCached,
     checkUnique: checkUniqueCached,
@@ -360,6 +391,8 @@ function createNodeBatchValidationBackend(
     backend: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
+    seedNodeRow,
+    seedUniqueRow,
   };
 }
 
@@ -367,12 +400,28 @@ function createNodeBatchValidationBackend(
 // Shared Create Pipeline
 // ============================================================
 
-async function validateAndPrepareNodeCreate<G extends GraphDef>(
+/**
+ * The synchronous half of create preparation: kind resolution, Zod
+ * validation, and date validation. Produces everything the async
+ * constraint checks need, so batch preparation can validate every input
+ * first and then prime the validation caches with batched reads before
+ * running {@link finishNodeCreatePreparation} per row.
+ */
+export type NodeCreateDraft = Readonly<{
+  kind: string;
+  id: string;
+  nodeKind: NodeType;
+  uniqueConstraints: readonly UniqueConstraint[];
+  validatedProps: Record<string, unknown>;
+  validFrom: string | undefined;
+  validTo: string | undefined;
+}>;
+
+function draftNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   id: string,
-  backend: GraphBackend | TransactionBackend,
-): Promise<NodeCreatePrepared> {
+): NodeCreateDraft {
   const kind = input.kind;
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
@@ -382,11 +431,24 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
     operation: "create",
   });
 
-  const validFrom = validateOptionalCanonicalIsoDate(
-    input.validFrom,
-    "validFrom",
-  );
-  const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
+  return {
+    kind,
+    id,
+    nodeKind,
+    uniqueConstraints: registration.unique ?? [],
+    validatedProps,
+    validFrom: validateOptionalCanonicalIsoDate(input.validFrom, "validFrom"),
+    validTo: validateOptionalCanonicalIsoDate(input.validTo, "validTo"),
+  };
+}
+
+/** The async half: existence, disjointness, and uniqueness checks. */
+async function finishNodeCreatePreparation<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  draft: NodeCreateDraft,
+  backend: GraphBackend | TransactionBackend,
+): Promise<NodeCreatePrepared> {
+  const { kind, id, validatedProps, uniqueConstraints } = draft;
 
   const existingNode = await backend.getNode(ctx.graphId, kind, id);
   if (existingNode && !existingNode.deleted_at) {
@@ -400,7 +462,6 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   };
   await checkDisjointnessConstraint(constraintContext, kind, id);
 
-  const uniqueConstraints = registration.unique ?? [];
   await checkUniquenessConstraints(
     createUniquenessContext(ctx.graphId, ctx.registry, backend),
     kind,
@@ -412,7 +473,7 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   return {
     kind,
     id,
-    nodeKind,
+    nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
     insertParams: buildInsertNodeParams(
@@ -420,10 +481,47 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
       kind,
       id,
       validatedProps,
-      validFrom,
-      validTo,
+      draft.validFrom,
+      draft.validTo,
     ),
   };
+}
+
+async function validateAndPrepareNodeCreate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: CreateNodeInput,
+  id: string,
+  backend: GraphBackend | TransactionBackend,
+): Promise<NodeCreatePrepared> {
+  return finishNodeCreatePreparation(
+    ctx,
+    draftNodeCreate(ctx, input, id),
+    backend,
+  );
+}
+
+/**
+ * Batched {@link finalizeNodeCreate}: applies every prepared create's
+ * side effects through the batch pipeline (one uniqueness batch, one
+ * fulltext/embedding batch per kind) instead of a per-row statement fan.
+ */
+async function finalizeNodeCreateBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  preparedCreates: readonly NodeCreatePrepared[],
+  backend: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
+): Promise<void> {
+  await applyNodeInsertSideEffectsBatch(
+    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+    preparedCreates.map((prepared) => ({
+      kind: prepared.kind,
+      id: prepared.id,
+      schema: prepared.nodeKind.schema,
+      props: prepared.validatedProps,
+      uniqueConstraints: prepared.uniqueConstraints,
+    })),
+    backend,
+  );
 }
 
 async function finalizeNodeCreate<G extends GraphDef>(
@@ -513,6 +611,98 @@ async function performNodeUpdate<G extends GraphDef>(
 // validate-and-register loop. This extracts it.
 // ============================================================
 
+/**
+ * Primes the batch validation caches with batched reads: one `getNodes`
+ * per kind for existence probes and one `checkUniqueBatch` per
+ * (constraint, kind) for uniqueness pre-checks. The per-row checks in
+ * {@link finishNodeCreatePreparation} then hit memory instead of issuing
+ * one probe per row. Backends without the batch primitives skip priming
+ * and keep the per-row fallback.
+ */
+export async function primeBatchValidationCaches(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  drafts: readonly NodeCreateDraft[],
+  backend: GraphBackend | TransactionBackend,
+  seams: Readonly<{
+    seedNodeRow: (kind: string, id: string, row: CachedNodeRow) => void;
+    seedUniqueRow: (
+      kind: string,
+      constraintName: string,
+      key: string,
+      row: CachedUniqueRow,
+    ) => void;
+  }>,
+): Promise<void> {
+  if (backend.getNodes !== undefined) {
+    const idsByKind = new Map<string, Set<string>>();
+    for (const draft of drafts) {
+      const ids = idsByKind.get(draft.kind) ?? new Set<string>();
+      ids.add(draft.id);
+      idsByKind.set(draft.kind, ids);
+    }
+    for (const [kind, ids] of idsByKind) {
+      const orderedIds = [...ids];
+      const rows = await backend.getNodes(ctx.graphId, kind, orderedIds);
+      const rowsById = new Map(rows.map((row) => [row.id, row]));
+      for (const id of orderedIds) {
+        seams.seedNodeRow(kind, id, rowsById.get(id));
+      }
+    }
+  }
+
+  if (backend.checkUniqueBatch !== undefined) {
+    interface ProbeGroup {
+      nodeKind: string;
+      constraintName: string;
+      keys: Set<string>;
+    }
+    const groups = new Map<string, ProbeGroup>();
+    for (const draft of drafts) {
+      for (const constraint of draft.uniqueConstraints) {
+        if (!checkWherePredicate(constraint, draft.validatedProps)) continue;
+        const key = computeUniqueKey(
+          draft.validatedProps,
+          constraint.fields,
+          constraint.collation,
+        );
+        const kindsToCheck = getKindsForUniquenessCheck(
+          draft.kind,
+          constraint.scope,
+          ctx.registry,
+        );
+        for (const kindToCheck of kindsToCheck) {
+          const groupKey = kindToCheck + CACHE_KEY_SEPARATOR + constraint.name;
+          const group = groups.get(groupKey) ?? {
+            nodeKind: kindToCheck,
+            constraintName: constraint.name,
+            keys: new Set<string>(),
+          };
+          group.keys.add(key);
+          groups.set(groupKey, group);
+        }
+      }
+    }
+    for (const group of groups.values()) {
+      const orderedKeys = [...group.keys];
+      const rows = await backend.checkUniqueBatch({
+        graphId: ctx.graphId,
+        nodeKind: group.nodeKind,
+        constraintName: group.constraintName,
+        keys: orderedKeys,
+      });
+      const rowsByKey = new Map(rows.map((row) => [row.key, row]));
+      for (const key of orderedKeys) {
+        seams.seedUniqueRow(
+          group.nodeKind,
+          group.constraintName,
+          key,
+          rowsByKey.get(key),
+        );
+      }
+    }
+  }
+}
+
 async function prepareBatchCreates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
@@ -525,16 +715,30 @@ async function prepareBatchCreates<G extends GraphDef>(
     backend: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
+    seedNodeRow,
+    seedUniqueRow,
   } = createNodeBatchValidationBackend(ctx.graphId, ctx.registry, backend);
 
-  const preparedCreates: NodeCreatePrepared[] = [];
+  // Pass 1 (synchronous): validate every input and assign ids. This
+  // surfaces a later row's validation error before an earlier row's
+  // constraint error — both fail the whole batch, so ordering across
+  // error categories is not part of the contract.
+  const drafts = inputs.map((input) =>
+    draftNodeCreate(ctx, input, input.id ?? generateId()),
+  );
 
-  for (const input of inputs) {
-    const id = input.id ?? generateId();
-    const prepared = await validateAndPrepareNodeCreate(
+  await primeBatchValidationCaches(ctx, drafts, backend, {
+    seedNodeRow,
+    seedUniqueRow,
+  });
+
+  // Pass 2: per-row constraint checks against the primed caches, in input
+  // order, registering pendings so later rows see earlier ones.
+  const preparedCreates: NodeCreatePrepared[] = [];
+  for (const draft of drafts) {
+    const prepared = await finishNodeCreatePreparation(
       ctx,
-      input,
-      id,
+      draft,
       validationBackend,
     );
     preparedCreates.push(prepared);
@@ -727,9 +931,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 
     await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
 
-    for (const prepared of preparedCreates) {
-      await finalizeNodeCreate(ctx, prepared, target, lock);
-    }
+    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
   });
 }
 
@@ -761,9 +963,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       batchInsertParams,
     );
 
-    for (const prepared of preparedCreates) {
-      await finalizeNodeCreate(ctx, prepared, target, lock);
-    }
+    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
 
     return rows.map((row) => rowToNode(row));
   });
