@@ -11,7 +11,7 @@
  * backend bootstrap never runs ANALYZE on its own.
  */
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
@@ -19,6 +19,7 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
+import type { GraphBackend } from "../src/backend/types";
 import { defineNodeIndex } from "../src/indexes";
 import {
   exportGraph,
@@ -108,6 +109,37 @@ describe("importGraph statistics refresh", () => {
       expect(result.nodes.created).toBe(2);
       expect(hasStatisticsTable(target)).toBe(false);
     } finally {
+      await target.backend.close();
+    }
+  });
+
+  it("does not fail a committed import when the refresh itself fails", async () => {
+    const target = createLocalSqliteBackend();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {
+      // Swallow the expected warning — asserted via the spy below.
+    });
+    try {
+      const failing: GraphBackend = {
+        ...target.backend,
+        refreshStatistics: () => Promise.reject(new Error("stats refused")),
+      };
+      const store = createStore(buildGraph(), failing);
+      const data = await buildExportedData();
+
+      const result = await importGraph(
+        store,
+        data,
+        ImportOptionsSchema.parse({ onConflict: "skip" }),
+      );
+
+      // The rows committed before the refresh ran; a failed maintenance
+      // step degrades to a warning instead of a thrown failure that could
+      // push callers into retrying a completed import.
+      expect(result.nodes.created).toBe(2);
+      expect(result.success).toBe(true);
+      expect(warnSpy).toHaveBeenCalledOnce();
+    } finally {
+      warnSpy.mockRestore();
       await target.backend.close();
     }
   });

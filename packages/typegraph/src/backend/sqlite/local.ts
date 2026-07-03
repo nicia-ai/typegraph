@@ -223,7 +223,8 @@ export type LocalSqliteBackendOptions = Readonly<{
    * {@link DEFAULT_LOCAL_SQLITE_PRAGMAS} (WAL, `synchronous=NORMAL`, 5s busy
    * timeout). Individual values merge over the defaults; pass `false` to
    * skip pragma configuration entirely and keep the driver defaults
-   * (rollback journal, `synchronous=FULL`, no busy timeout).
+   * (rollback journal, `synchronous=FULL`, and better-sqlite3's own 5s busy
+   * timeout from its `timeout` constructor option).
    */
   pragmas?: LocalSqlitePragmaOptions | false;
 

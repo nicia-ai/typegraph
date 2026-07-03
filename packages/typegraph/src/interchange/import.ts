@@ -124,13 +124,32 @@ export async function importGraph<G extends GraphDef>(
   // (documented regressions: 0.5ms → 5ms traversals on Postgres, 0.9ms →
   // 23ms fulltext on SQLite), so a mutating import refreshes them once,
   // after the transaction commits.
+  //
+  // Best-effort: by this point the import is committed, so a failed
+  // statistics refresh must not convert the completed (non-atomic on some
+  // backends, non-retryable) import into a thrown failure — it degrades to
+  // a warning, and the caller can run `store.refreshStatistics()`.
   const mutationCount =
     result.nodes.created +
     result.nodes.updated +
     result.edges.created +
     result.edges.updated;
   if ((options.refreshStatistics ?? true) && mutationCount > 0) {
-    await store.refreshStatistics();
+    try {
+      await store.refreshStatistics();
+    } catch (error) {
+      if (
+        typeof console !== "undefined" &&
+        typeof console.warn === "function"
+      ) {
+        console.warn(
+          "[typegraph] importGraph committed its rows but the follow-up " +
+            "statistics refresh failed; run store.refreshStatistics() to " +
+            "give the planner fresh statistics.",
+          error,
+        );
+      }
+    }
   }
 
   return {
