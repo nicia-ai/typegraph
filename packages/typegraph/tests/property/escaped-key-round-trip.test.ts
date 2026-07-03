@@ -16,6 +16,13 @@
  * There is no library-level fix: the correct key is already gone once
  * `JSON.parse` returns, and a reviver does not bypass the fast path.
  *
+ * Upstream (both open/assigned as of Chrome milestone 151):
+ *   V8:   https://issues.chromium.org/issues/521080746
+ *         "escaped-key transition lookup uses raw source bytes with decoded
+ *          length" — keys of equal DECODED length collide in the map cache.
+ *   Node: https://github.com/nodejs/node/issues/63785
+ * Introduced in V8 12.9 (Node 23.0); clean on V8 12.4 (Node 22).
+ *
  * This test asserts the CORRECT behavior. On an affected Node it is expected
  * to fail, so it is skipped there — flipping to a hard failure the day the
  * engine is fixed, which is our signal to restore full escaped-key coverage.

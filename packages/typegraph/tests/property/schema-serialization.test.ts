@@ -86,10 +86,13 @@ const annotationsKeyArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,7}$/);
  * same-shaped object with a DIFFERENT escaped key at the same position gets
  * the earlier object's key string back. It is not a TypeGraph defect and has
  * no clean parse-level workaround (the correct key is already gone once
- * `JSON.parse` returns). This filter keeps the arbitrary broad
- * (all other Unicode, nesting, and value shapes) while excluding only the
- * region V8 cannot round-trip; `escaped-key-round-trip.test.ts` pins the bug
- * so we notice when a Node release fixes it and can drop this guard.
+ * `JSON.parse` returns). Upstream, open/assigned: V8
+ * https://issues.chromium.org/issues/521080746 and Node
+ * https://github.com/nodejs/node/issues/63785. This filter keeps the
+ * arbitrary broad (all other Unicode, nesting, and value shapes) while
+ * excluding only the region V8 cannot round-trip;
+ * `escaped-key-round-trip.test.ts` pins the bug so we notice when a Node
+ * release fixes it and can drop this guard.
  */
 // The characters JSON.stringify escapes in a string key: a double quote, a
 // backslash, or a C0 control character (U+0000–U+001F).
