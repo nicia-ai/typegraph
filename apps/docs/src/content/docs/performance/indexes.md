@@ -384,10 +384,14 @@ const profiler = new QueryProfiler({
 
 ## Limitations
 
-- `defineNodeIndex` / `defineEdgeIndex` generate B-tree expression indexes for **scalar** properties
-  (`string`, `number`, `boolean`, `Date`). For array containment queries, create
-  [GIN indexes](#gin-indexes-array-containment--postgresql-only) manually.
-- GIN indexes are PostgreSQL-only. SQLite has no equivalent for JSON containment acceleration.
+- The default `defineNodeIndex` / `defineEdgeIndex` method generates B-tree expression indexes for
+  **scalar** properties (`string`, `number`, `boolean`, `Date`). Array containment and substring
+  matching are served by [`method: "gin"`](#gin-indexes-array-containment--postgresql-only) and
+  [`method: "trigram"`](#trigram-indexes-substring-and-case-insensitive-matching--postgresql-only)
+  declarations.
+- GIN-family methods are PostgreSQL-only; `materializeIndexes()` reports them as `skipped` on
+  SQLite, which has no equivalent for JSON containment acceleration (substring search on SQLite is
+  served by FTS5 fulltext).
 - Embedding fields live in per-`(graphId, kind, field)` vector tables (`tg_vec_*`) and are indexed
   through `store.materializeIndexes()` (pgvector builds an HNSW / IVFFlat ANN index; sqlite-vec and
   libSQL report `skipped`/build their own). See [Semantic Search](/semantic-search).

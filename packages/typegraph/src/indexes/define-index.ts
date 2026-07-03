@@ -224,9 +224,24 @@ function resolveAdvancedIndexMethod(
       `Index method "${resolved}" requires exactly one field (a GIN indexes one expression), got ${details.fieldCount}`,
     );
   }
-  if (resolved === "gin" && details.fieldValueType === "string") {
+  // Enforce the field-type contract the methods advertise: gin serves the
+  // array containment predicates, trigram serves the string substring /
+  // case-insensitive predicates. Anything else (including unresolvable
+  // field types) would materialize an index no documented predicate can
+  // ever use, so it is rejected here rather than silently costing write
+  // amplification for nothing.
+  if (resolved === "gin" && details.fieldValueType !== "array") {
     throw new Error(
-      'Index method "gin" serves array/object containment; for substring or case-insensitive matching on a string field use method: "trigram"',
+      details.fieldValueType === "string" ?
+        'Index method "gin" serves array containment; for substring or case-insensitive matching on a string field use method: "trigram"'
+      : `Index method "gin" requires an array field (it serves the array containment predicates), got field type "${details.fieldValueType ?? "unresolved"}"`,
+    );
+  }
+  if (resolved === "trigram" && details.fieldValueType !== "string") {
+    throw new Error(
+      details.fieldValueType === "array" ?
+        'Index method "trigram" serves substring matching on string fields; for array containment use method: "gin"'
+      : `Index method "trigram" requires a string field (it serves substring and case-insensitive matches), got field type "${details.fieldValueType ?? "unresolved"}"`,
     );
   }
   if (details.coveringFieldCount > 0) {

@@ -25,6 +25,8 @@ const Document = defineNode("Doc", {
   schema: z.object({
     title: z.string(),
     tags: z.array(z.string()),
+    views: z.number(),
+    attributes: z.object({ source: z.string() }),
   }),
 });
 
@@ -52,6 +54,24 @@ describe("defineNodeIndex method validation", () => {
     expect(gin.name.endsWith("_gin")).toBe(true);
     expect(trigram.method).toBe("trigram");
     expect(trigram.name.endsWith("_trigram")).toBe(true);
+  });
+
+  it("enforces the field-type contract each method advertises", () => {
+    // gin serves array containment; trigram serves string substring
+    // matching. Any other field type would materialize an index no
+    // documented predicate can use.
+    expect(() =>
+      defineNodeIndex(Document, { fields: ["title"], method: "gin" }),
+    ).toThrow(/use method: "trigram"/);
+    expect(() =>
+      defineNodeIndex(Document, { fields: ["attributes"], method: "gin" }),
+    ).toThrow(/requires an array field/);
+    expect(() =>
+      defineNodeIndex(Document, { fields: ["views"], method: "trigram" }),
+    ).toThrow(/requires a string field/);
+    expect(() =>
+      defineNodeIndex(Document, { fields: ["tags"], method: "trigram" }),
+    ).toThrow(/use method: "gin"/);
   });
 
   it("rejects multi-field, covering, unique, and partial variants", () => {
