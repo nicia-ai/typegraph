@@ -1,4 +1,5 @@
 import { type GraphBackend } from "../../backend/types";
+import { type GraphDef } from "../../core/define-graph";
 import {
   assertValidRecordedInstant,
   type RecordedInstant,
@@ -17,6 +18,7 @@ import {
   type TemporalFilterOptions,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
+import { type KindRegistry } from "../../registry/kind-registry";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -24,6 +26,10 @@ export const DEFAULT_NEIGHBOR_DEPTH = 1;
 
 export type AlgorithmContext = Readonly<{
   graphId: string;
+  /** Graph definition — degree() enumerates declared edge endpoint kinds. */
+  graph: GraphDef;
+  /** Kind registry — expands declared endpoint kinds through subClassOf. */
+  registry: KindRegistry;
   backend: GraphBackend;
   dialect: DialectAdapter;
   schema: SqlSchema;
