@@ -167,12 +167,10 @@ type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<
   string;
 
 type SubgraphNodeProjectionField<N extends NodeType = NodeType> =
-  | NodeProjectionPropertyKey<N>
-  | "meta";
+  NodeProjectionPropertyKey<N> | "meta";
 
 type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> =
-  | EdgeProjectionPropertyKey<E>
-  | "meta";
+  EdgeProjectionPropertyKey<E> | "meta";
 
 type SubgraphNodeProjectionMap<
   G extends GraphDef,
@@ -633,8 +631,7 @@ function getSubgraphSchemaIntrospector<G extends GraphDef>(
 function buildProjectionPlan(
   kinds: readonly string[],
   projectionMap:
-    | Readonly<Record<string, readonly string[] | undefined>>
-    | undefined,
+    Readonly<Record<string, readonly string[] | undefined>> | undefined,
   resolveFieldType: FieldTypeResolver,
   entityPrefix: KindEntity,
 ): ProjectionPlan {

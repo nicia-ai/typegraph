@@ -191,7 +191,7 @@ export async function enumerateAllNodes(
   kind: string,
 ): Promise<readonly NodeRow[]> {
   const collected: NodeRow[] = [];
-  let after: string | undefined = undefined;
+  let after: string | undefined;
   for (;;) {
     const page: readonly NodeRow[] = await backend.findNodesByKind({
       graphId,
@@ -226,7 +226,7 @@ export async function enumerateAllEdges(
   kind: string,
 ): Promise<readonly EdgeRow[]> {
   const collected: EdgeRow[] = [];
-  let after: string | undefined = undefined;
+  let after: string | undefined;
   for (;;) {
     const page: readonly EdgeRow[] = await backend.findEdgesByKind({
       graphId,

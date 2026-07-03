@@ -38,14 +38,7 @@ export type IndexScope =
 // ============================================================
 
 export type IndexWhereOp =
-  | "eq"
-  | "neq"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "in"
-  | "notIn";
+  "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 export type IndexWhereExpression =
   | Readonly<{
@@ -152,8 +145,7 @@ export type EdgeIndexWhereBuilder<E extends AnyEdgeType> = Readonly<
 >;
 
 export type IndexWhereInput<Builder> =
-  | IndexWhereExpression
-  | ((where: Builder) => IndexWhereExpression);
+  IndexWhereExpression | ((where: Builder) => IndexWhereExpression);
 
 // ============================================================
 // Index Definitions
@@ -336,8 +328,7 @@ export type VectorIndexDeclaration = Readonly<{
  * materialization primitive on the backend).
  */
 export type RelationalIndexDeclaration =
-  | NodeIndexDeclaration
-  | EdgeIndexDeclaration;
+  NodeIndexDeclaration | EdgeIndexDeclaration;
 
 /**
  * A serializable index declaration that flows through `GraphDef.indexes`
@@ -349,8 +340,7 @@ export type RelationalIndexDeclaration =
  * SQL.
  */
 export type IndexDeclaration =
-  | RelationalIndexDeclaration
-  | VectorIndexDeclaration;
+  RelationalIndexDeclaration | VectorIndexDeclaration;
 
 // ============================================================
 // System Columns

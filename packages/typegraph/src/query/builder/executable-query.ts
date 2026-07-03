@@ -108,13 +108,9 @@ export class ExecutableQuery<
   #cachedOptimizedCompiled: CompiledSelectSql | typeof NOT_COMPUTED =
     NOT_COMPUTED;
   #cachedSelectiveFieldsForExecute:
-    | readonly SelectiveField[]
-    | typeof NOT_COMPUTED
-    | undefined = NOT_COMPUTED;
+    readonly SelectiveField[] | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
   #cachedSelectiveFieldsForPagination:
-    | readonly SelectiveField[]
-    | typeof NOT_COMPUTED
-    | undefined = NOT_COMPUTED;
+    readonly SelectiveField[] | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
 
   constructor(
     config: QueryBuilderConfig,

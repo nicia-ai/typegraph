@@ -77,13 +77,13 @@ describe("Cursor Encoding", () => {
     const data = {
       v: 1,
       d: "f" as const,
-      vals: [42, 3.141_59, -100, 0],
+      vals: [42, 3.14159, -100, 0],
       cols: ["p.a", "p.b", "p.c", "p.d"],
     };
 
     const encoded = encodeCursor(data);
     const decoded = decodeCursor(encoded);
-    expect(decoded.vals).toEqual([42, 3.141_59, -100, 0]);
+    expect(decoded.vals).toEqual([42, 3.14159, -100, 0]);
   });
 });
 

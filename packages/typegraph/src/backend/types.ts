@@ -743,10 +743,7 @@ export type RecordKindRemovalParams = Readonly<{
 export type TransactionOptions = Readonly<{
   /** Transaction isolation level (if supported) */
   isolationLevel?:
-    | "read_uncommitted"
-    | "read_committed"
-    | "repeatable_read"
-    | "serializable";
+    "read_uncommitted" | "read_committed" | "repeatable_read" | "serializable";
 }>;
 
 /**
@@ -1629,8 +1626,7 @@ export type InsertSchemaParams = Readonly<{
  * a *valid* expected state, not an out-of-band signal.
  */
 export type CommitSchemaVersionExpected =
-  | Readonly<{ kind: "initial" }>
-  | Readonly<{ kind: "active"; version: number }>;
+  Readonly<{ kind: "initial" }> | Readonly<{ kind: "active"; version: number }>;
 
 /**
  * Parameters for `commitSchemaVersion`.

@@ -210,12 +210,7 @@ const UNKNOWN_SCHEMA_METADATA: StoreSchemaMetadata = Object.freeze({
 });
 
 type CaughtUpVerb =
-  | "evolve"
-  | "materialize"
-  | "deprecate"
-  | "undeprecate"
-  | "remove"
-  | "reembed";
+  "evolve" | "materialize" | "deprecate" | "undeprecate" | "remove" | "reembed";
 
 /** Default page size for the {@link Store.reembedVectorField} re-embed loop. */
 const DEFAULT_REEMBED_BATCH_SIZE = 200;

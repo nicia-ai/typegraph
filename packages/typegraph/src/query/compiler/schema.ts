@@ -279,8 +279,7 @@ export type TypeGraphRecordedReadSource = Readonly<{
 }>;
 
 type RecordedReadSource =
-  | ExternalRecordedReadSource
-  | TypeGraphRecordedReadSource;
+  ExternalRecordedReadSource | TypeGraphRecordedReadSource;
 
 export type RecordedReadBinding = RecordedReadSource;
 

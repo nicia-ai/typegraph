@@ -34,8 +34,6 @@ const config: KnipConfig = {
     "apps/docs": {
       entry: ["src/**/*.{astro,ts,tsx}"],
       project: ["src/**/*.{astro,ts,tsx}"],
-      // Astro/Starlight plugins loaded via config
-      ignoreDependencies: ["@astrojs/starlight-tailwind", "tailwindcss"],
     },
     "packages/benchmarks": {
       // Neo4j head-to-head harness is a standalone package installed with

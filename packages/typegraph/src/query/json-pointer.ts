@@ -87,9 +87,7 @@ export type JsonPointerSegmentsFor<T, Current extends Depth = 5> =
     : never);
 
 export type JsonPointerInput<T> =
-  | JsonPointerFor<T>
-  | JsonPointerSegmentsFor<T>
-  | JsonPointer;
+  JsonPointerFor<T> | JsonPointerSegmentsFor<T> | JsonPointer;
 
 export type ResolveJsonPointer<T, Pointer extends string> =
   Pointer extends "" ? T

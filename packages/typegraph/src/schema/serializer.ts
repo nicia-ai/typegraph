@@ -573,11 +573,7 @@ function mapToRecord(
 function mapToSimpleRecord(
   map: ReadonlyMap<string, string>,
 ): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of map) {
-    result[key] = value;
-  }
-  return result;
+  return Object.fromEntries(map);
 }
 
 // ============================================================

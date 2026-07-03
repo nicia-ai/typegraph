@@ -50,7 +50,6 @@ describe("canonicalEqual", () => {
   });
 
   it("treats two undefined inputs as equal", () => {
-    // eslint-disable-next-line unicorn/no-useless-undefined -- testing undefined comparison
     expect(canonicalEqual(undefined, undefined)).toBe(true);
   });
 

@@ -253,8 +253,7 @@ type ProcessResult =
   | { status: "error"; error: string };
 
 type UniquenessGuardResult<T> =
-  | Readonly<{ ok: true; value: T }>
-  | Readonly<{ ok: false; error: string }>;
+  Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
 
 /**
  * Runs `fn` and reports a `UniquenessError` as a per-row result instead of

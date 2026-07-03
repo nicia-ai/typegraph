@@ -167,32 +167,32 @@
     }
   },
   "dependencies": {
-    "nanoid": "^5.1.11"
+    "nanoid": "^5.1.16"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.14",
-    "@electric-sql/pglite": "^0.5.1",
-    "@electric-sql/pglite-pgvector": "^0.0.2",
-    "@libsql/client": "^0.17.3",
+    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@electric-sql/pglite": "^0.5.4",
+    "@electric-sql/pglite-pgvector": "^0.0.5",
+    "@libsql/client": "^0.17.4",
     "@neondatabase/serverless": "^1.1.0",
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
     "@typegraph/eslint-config": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.12.0",
+    "@types/node": "^24.13.2",
     "@types/pg": "^8.20.0",
-    "@vitest/coverage-v8": "^4.1.8",
-    "better-sqlite3": "^12.10.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "better-sqlite3": "^12.11.1",
     "drizzle-orm": "^0.45.2",
-    "eslint": "^10.4.1",
+    "eslint": "^10.6.0",
     "fast-check": "^4.8.0",
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.9",
     "zod": "^4.4.3"
   }
 }

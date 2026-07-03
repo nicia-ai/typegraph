@@ -66,24 +66,13 @@ export type ValueType =
  * Comparison operators.
  */
 export type ComparisonOp =
-  | "eq"
-  | "neq"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "in"
-  | "notIn";
+  "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 /**
  * String operators.
  */
 export type StringOp =
-  | "contains"
-  | "startsWith"
-  | "endsWith"
-  | "like"
-  | "ilike";
+  "contains" | "startsWith" | "endsWith" | "like" | "ilike";
 
 /**
  * A comparison predicate.
@@ -468,12 +457,7 @@ export function mergeEdgeKinds(traversal: Traversal): readonly string[] {
  * Supported aggregate functions.
  */
 type AggregateFunction =
-  | "count"
-  | "countDistinct"
-  | "sum"
-  | "avg"
-  | "min"
-  | "max";
+  "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 /**
  * An aggregate expression.

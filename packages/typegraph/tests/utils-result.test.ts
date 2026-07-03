@@ -112,8 +112,7 @@ describe("result utilities", () => {
 
     it("acts as type guard for success", () => {
       const result = ok(42) as
-        | ReturnType<typeof ok<number>>
-        | ReturnType<typeof err<Error>>;
+        ReturnType<typeof ok<number>> | ReturnType<typeof err<Error>>;
       expect(isOk(result)).toBe(true);
       // TypeScript narrowing verified - access data after confirming success
       expect((result as { success: true; data: number }).data).toBe(42);
@@ -212,8 +211,7 @@ describe("result utilities", () => {
     it("acts as type guard for error", () => {
       const error = new Error("test");
       const result = err(error) as
-        | ReturnType<typeof ok<number>>
-        | ReturnType<typeof err<Error>>;
+        ReturnType<typeof ok<number>> | ReturnType<typeof err<Error>>;
       expect(isErr(result)).toBe(true);
       // TypeScript narrowing verified - access error after confirming failure
       expect((result as { success: false; error: Error }).error).toBe(error);

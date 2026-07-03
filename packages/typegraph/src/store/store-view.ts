@@ -395,13 +395,12 @@ function pinnedNodeCollection(
     keyof NodeCurrentReads<NodeType>
   > &
     Readonly<{
-      [Method in (typeof NODE_TEMPORAL_READ_NAMES)[number]]: StoreViewNodeCollection<NodeType>[Method];
+      [
+        Method in (typeof NODE_TEMPORAL_READ_NAMES)[number]
+      ]: StoreViewNodeCollection<NodeType>[Method];
     }> = {
     getById: (id) => live.getById(id, temporal),
     getByIds: (ids) => live.getByIds(ids, temporal),
-    // `live.find` is the NodeCollection read, not Array#find — the
-    // (filter, temporal) shape trips the array-method heuristics.
-    // eslint-disable-next-line unicorn/no-array-callback-reference, unicorn/no-array-method-this-argument
     find: (filter) => live.find(filter, temporal),
     count: () => live.count(temporal),
   };
@@ -420,17 +419,12 @@ function pinnedEdgeCollection(
   const temporal = withValidCoordinate(coordinate);
   const reads: StoreViewEdgeCollection<AnyEdgeType, NodeType, NodeType> &
     Readonly<{
-      [Method in (typeof EDGE_TEMPORAL_READ_NAMES)[number]]: StoreViewEdgeCollection<
-        AnyEdgeType,
-        NodeType,
-        NodeType
-      >[Method];
+      [
+        Method in (typeof EDGE_TEMPORAL_READ_NAMES)[number]
+      ]: StoreViewEdgeCollection<AnyEdgeType, NodeType, NodeType>[Method];
     }> = {
     getById: (id) => live.getById(id, temporal),
     getByIds: (ids) => live.getByIds(ids, temporal),
-    // `live.find` is the EdgeCollection read, not Array#find — the
-    // (filter, temporal) shape trips the array-method heuristics.
-    // eslint-disable-next-line unicorn/no-array-callback-reference, unicorn/no-array-method-this-argument
     find: (filter) => live.find(filter, temporal),
     count: (filter) => live.count(filter, temporal),
     findFrom: (from) => live.findFrom(from, temporal),
@@ -525,7 +519,9 @@ function recordedNodeCollection<G extends GraphDef>(
 ): RecordedStoreViewNodeCollection<NodeType> {
   const reads: RecordedStoreViewNodeCollection<NodeType> &
     Readonly<{
-      [Method in (typeof RECORDED_POINT_READ_NAMES)[number]]: RecordedStoreViewNodeCollection<NodeType>[Method];
+      [
+        Method in (typeof RECORDED_POINT_READ_NAMES)[number]
+      ]: RecordedStoreViewNodeCollection<NodeType>[Method];
     }> = {
     getById: (id) => store.recordedNodeGetById(kind, id, coordinate),
     getByIds: (ids) => store.recordedNodeGetByIds(kind, ids, coordinate),
@@ -545,7 +541,9 @@ function recordedEdgeCollection<G extends GraphDef>(
     NodeType
   > &
     Readonly<{
-      [Method in (typeof RECORDED_POINT_READ_NAMES)[number]]: RecordedStoreViewEdgeCollection<
+      [
+        Method in (typeof RECORDED_POINT_READ_NAMES)[number]
+      ]: RecordedStoreViewEdgeCollection<
         AnyEdgeType,
         NodeType,
         NodeType

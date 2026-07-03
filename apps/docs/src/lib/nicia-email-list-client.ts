@@ -75,22 +75,6 @@ class EmailListClient {
     this.token = options.token;
   }
 
-  async subscribe(slug: string, email: string): Promise<SubscribeResult> {
-    return this.post<SubscribeResult>(`/v1/lists/${enc(slug)}/subscribe`, {
-      email,
-    });
-  }
-
-  async check(slug: string, email: string): Promise<CheckResult> {
-    return this.post<CheckResult>(`/v1/lists/${enc(slug)}/check`, { email });
-  }
-
-  async unsubscribe(slug: string, email: string): Promise<UnsubscribeResult> {
-    return this.post<UnsubscribeResult>(`/v1/lists/${enc(slug)}/unsubscribe`, {
-      email,
-    });
-  }
-
   private async post<T>(path: string, body: { email: string }): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
@@ -108,6 +92,22 @@ class EmailListClient {
     }
 
     return json as T;
+  }
+
+  async subscribe(slug: string, email: string): Promise<SubscribeResult> {
+    return this.post<SubscribeResult>(`/v1/lists/${enc(slug)}/subscribe`, {
+      email,
+    });
+  }
+
+  async check(slug: string, email: string): Promise<CheckResult> {
+    return this.post<CheckResult>(`/v1/lists/${enc(slug)}/check`, { email });
+  }
+
+  async unsubscribe(slug: string, email: string): Promise<UnsubscribeResult> {
+    return this.post<UnsubscribeResult>(`/v1/lists/${enc(slug)}/unsubscribe`, {
+      email,
+    });
   }
 }
 

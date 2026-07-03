@@ -2206,8 +2206,7 @@ function validateOptionalFiniteNumber(
  * returned `T | undefined`.
  */
 type OptionalLiteralResult<T> =
-  | Readonly<{ ok: true; value: T | undefined }>
-  | Readonly<{ ok: false }>;
+  Readonly<{ ok: true; value: T | undefined }> | Readonly<{ ok: false }>;
 
 function validateOptionalLiteral<T extends string>(
   value: unknown,

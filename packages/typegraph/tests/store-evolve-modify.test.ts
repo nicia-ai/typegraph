@@ -44,8 +44,7 @@ const baseGraph = defineGraph({
 type AnyStore = Store<typeof baseGraph>;
 
 type ModifyScenarioResult =
-  | { ok: true; store: AnyStore }
-  | { ok: false; error: unknown };
+  { ok: true; store: AnyStore } | { ok: false; error: unknown };
 
 async function runModifyScenario(args: {
   initial: GraphExtension;

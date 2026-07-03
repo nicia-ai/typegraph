@@ -42,7 +42,6 @@ const propertyValueArb = fc.oneof(
   fc.string({ minLength: 0, maxLength: 50 }),
   fc.integer(),
   fc.boolean(),
-  // eslint-disable-next-line unicorn/no-useless-undefined -- testing undefined property values
   fc.constant(undefined),
 );
 
@@ -55,10 +54,7 @@ const propsArb = fc
     maxLength: 5,
   })
   .map((pairs) => {
-    const props: Record<string, unknown> = {};
-    for (const [key, value] of pairs) {
-      props[key] = value;
-    }
+    const props: Record<string, unknown> = Object.fromEntries(pairs);
     return props;
   });
 

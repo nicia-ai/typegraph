@@ -68,7 +68,6 @@ describe("embedding type", () => {
   it("should work with optional wrapper", () => {
     const schema = embedding(512).optional();
 
-    // eslint-disable-next-line unicorn/no-useless-undefined -- Testing optional accepts undefined
     expect(schema.safeParse(undefined).success).toBe(true);
     expect(schema.safeParse(Array.from({ length: 512 }).fill(0)).success).toBe(
       true,

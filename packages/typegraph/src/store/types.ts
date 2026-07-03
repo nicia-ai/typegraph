@@ -717,8 +717,7 @@ export type NodeCollection<
  * allowed node kinds defined in the edge registration.
  */
 export type NodeRef<N extends NodeType = NodeType> =
-  | Node<N>
-  | Readonly<{ kind: N["kind"]; id: string }>;
+  Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
 
 /**
  * Options for creating an edge.

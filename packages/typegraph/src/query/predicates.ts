@@ -108,7 +108,7 @@ function predicate(expr: PredicateExpression): Predicate {
  * const results = await prepared.execute({ name: "Alice" });
  * ```
  */
-// eslint-disable-next-line unicorn/prevent-abbreviations -- concise public API
+// eslint-disable-next-line unicorn/name-replacements -- concise public API
 export function param(name: string): ParameterRef {
   return { __type: "parameter", name };
 }

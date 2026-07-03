@@ -82,7 +82,6 @@ describe("defineEdge() with domain/range", () => {
     it("returns false for non-edge values", () => {
       // eslint-disable-next-line unicorn/no-null -- testing null handling
       expect(isEdgeTypeWithEndpoints(null)).toBe(false);
-      // eslint-disable-next-line unicorn/no-useless-undefined -- testing undefined property values
       expect(isEdgeTypeWithEndpoints(undefined)).toBe(false);
       expect(isEdgeTypeWithEndpoints({})).toBe(false);
       expect(isEdgeTypeWithEndpoints("worksAt")).toBe(false);

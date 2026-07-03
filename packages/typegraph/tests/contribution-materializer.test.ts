@@ -97,8 +97,8 @@ function createMockMaterializer(
   ) => Promise<ContributionMaterializationRow | undefined>,
 ) {
   const ensureMarkerTable = vi.fn((): Promise<void> => Promise.resolve());
-  const execDdl = vi.fn(
-    (_statement: string): Promise<void> => Promise.resolve(),
+  const execDdl = vi.fn((_statement: string): Promise<void> =>
+    Promise.resolve(),
   );
   const getMarker = vi.fn(
     getMarkerOverride ??
@@ -177,8 +177,8 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       tableExists = true;
       return Promise.resolve();
     });
-    const execDdl = vi.fn(
-      (_statement: string): Promise<void> => Promise.resolve(),
+    const execDdl = vi.fn((_statement: string): Promise<void> =>
+      Promise.resolve(),
     );
     // Faithful to the real backend: the marker SELECT throws until
     // `ensureMarkerTable` has created the table.
@@ -228,8 +228,8 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       tableExists = true;
       return Promise.resolve();
     });
-    const execDdl = vi.fn(
-      (_statement: string): Promise<void> => Promise.resolve(),
+    const execDdl = vi.fn((_statement: string): Promise<void> =>
+      Promise.resolve(),
     );
     const markers = new Map<string, ContributionMaterializationRow>();
     const getMarker = vi.fn(

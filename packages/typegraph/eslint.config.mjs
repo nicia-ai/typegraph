@@ -81,7 +81,7 @@ export default [
       "unicorn/no-null": "off",
       "unicorn/prefer-code-point": "off",
       "unicorn/prefer-structured-clone": "off",
-      "unicorn/prevent-abbreviations": "off",
+      "unicorn/name-replacements": "off",
       "vitest/no-conditional-expect": "off",
     },
   },

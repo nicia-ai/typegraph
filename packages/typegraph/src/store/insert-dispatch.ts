@@ -12,8 +12,7 @@ export type InsertDispatch<Params, Row> = Readonly<{
   oneNoReturn?: ((params: Params) => Promise<void>) | undefined;
   batch?: ((params: readonly Params[]) => Promise<void>) | undefined;
   batchReturning?:
-    | ((params: readonly Params[]) => Promise<readonly Row[]>)
-    | undefined;
+    ((params: readonly Params[]) => Promise<readonly Row[]>) | undefined;
 }>;
 
 type InsertBackend = GraphBackend | TransactionBackend;

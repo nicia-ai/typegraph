@@ -3,8 +3,7 @@
  * Use at service boundaries and for operations that can fail.
  */
 export type Result<T, E = Error> =
-  | Readonly<{ success: true; data: T }>
-  | Readonly<{ success: false; error: E }>;
+  Readonly<{ success: true; data: T }> | Readonly<{ success: false; error: E }>;
 
 /**
  * Creates a successful result.

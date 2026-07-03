@@ -60,8 +60,7 @@ type BackendFactoryResult = Readonly<{
  * May be async (e.g. for libsql which requires async DDL setup).
  */
 type BackendFactory = () =>
-  | BackendFactoryResult
-  | Promise<BackendFactoryResult>;
+  BackendFactoryResult | Promise<BackendFactoryResult>;
 
 /**
  * Options for the integration test suite.

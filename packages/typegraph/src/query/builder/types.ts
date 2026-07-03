@@ -224,10 +224,12 @@ export type UniqueAlias<A extends string, Aliases extends AliasMap> =
 /**
  * Creates typed field accessors for a node kind's properties.
  */
-export type PropsAccessor<N extends NodeType> = Readonly<{
-  // Remove optional modifier so optional fields still have accessor methods.
-  [K in keyof z.infer<N["schema"]>]-?: FieldAccessor<z.infer<N["schema"]>[K]>;
-}>;
+export type PropsAccessor<N extends NodeType> = Readonly<
+  {
+    // Remove optional modifier so optional fields still have accessor methods.
+    [K in keyof z.infer<N["schema"]>]-?: FieldAccessor<z.infer<N["schema"]>[K]>;
+  }
+>;
 
 /**
  * A field accessor with type-appropriate predicate methods.
@@ -371,10 +373,12 @@ export type NodeAccessor<N extends NodeType> =
 /**
  * Creates typed field accessors for an edge kind's properties.
  */
-type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
-  // Remove optional modifier so optional fields still have accessor methods.
-  [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
-}>;
+type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<
+  {
+    // Remove optional modifier so optional fields still have accessor methods.
+    [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
+  }
+>;
 
 /**
  * Edge accessor for predicate building.

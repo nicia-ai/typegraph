@@ -150,7 +150,7 @@ export function registerCrossBackendConsistencyTests(
         });
         await store.nodes.Product.create({
           name: "P2",
-          price: 10.500_01,
+          price: 10.50001,
           category: "A",
           rating: 4.6,
         });

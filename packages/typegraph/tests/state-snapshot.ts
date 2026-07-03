@@ -158,15 +158,13 @@ export async function dumpObservableState<G extends GraphDef>(
       WHERE graph_id = ${graphId} AND deleted_at IS NULL
     `),
   );
-  const uniques = uniqueRows.map(
-    (row): SnapshotUnique => ({
-      nodeKind: row.node_kind,
-      constraintName: row.constraint_name,
-      key: row.key,
-      nodeId: row.node_id,
-      concreteKind: row.concrete_kind,
-    }),
-  );
+  const uniques = uniqueRows.map((row): SnapshotUnique => ({
+    nodeKind: row.node_kind,
+    constraintName: row.constraint_name,
+    key: row.key,
+    nodeId: row.node_id,
+    concreteKind: row.concrete_kind,
+  }));
 
   const fulltextRows = await backend.execute<{
     node_kind: string;
@@ -180,14 +178,12 @@ export async function dumpObservableState<G extends GraphDef>(
       WHERE graph_id = ${graphId}
     `),
   );
-  const fulltext = fulltextRows.map(
-    (row): SnapshotFulltext => ({
-      nodeKind: row.node_kind,
-      nodeId: row.node_id,
-      language: row.language,
-      content: row.content,
-    }),
-  );
+  const fulltext = fulltextRows.map((row): SnapshotFulltext => ({
+    nodeKind: row.node_kind,
+    nodeId: row.node_id,
+    language: row.language,
+    content: row.content,
+  }));
 
   return {
     nodes: nodes.toSorted((left, right) => byNodeIdentity(left, right)),
