@@ -229,6 +229,11 @@ export const sqliteDialect: DialectAdapter = {
     return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
   },
 
+  subqueryMembership(column, subquery) {
+    // SQLite evaluates IN (subquery) with a transient index — optimal as-is.
+    return sql`${column} IN (${subquery})`;
+  },
+
   // ============================================================
   // Value Binding & Literals
   // ============================================================

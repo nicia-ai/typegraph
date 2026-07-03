@@ -322,6 +322,24 @@ export interface DialectAdapter {
    */
   currentTimestamp(): SQL;
 
+  /**
+   * Membership test of `column` against a same-statement subquery (a CTE
+   * scan in practice, e.g. the subgraph extractor's `included_ids`).
+   *
+   * SQLite: `column IN (subquery)` — evaluated as a hashed/indexed
+   * subquery, already optimal.
+   *
+   * PostgreSQL: `column = ANY(ARRAY(subquery))` — the subquery is
+   * collapsed to an array by an InitPlan once, and the scalar-array
+   * comparison is hash-probed (PG 14+) and index-condition eligible.
+   * The naive `IN (subquery)` form is pulled up into a join against the
+   * CTE, whose recursive-CTE row estimate (~10 rows for a single-row
+   * seed) drives the planner into a nested-loop join FILTER — measured
+   * at 10M discarded rows / 383ms on the depth-3 subgraph stress bench
+   * versus ~15ms for this form.
+   */
+  subqueryMembership(column: SQL, subquery: SQL): SQL;
+
   // ============================================================
   // Value Binding & Literals
   // ============================================================

@@ -750,7 +750,7 @@ async function fetchSubgraphNodes(
     ...buildProjectedPropertyColumns("n", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND n.id IN (SELECT id FROM included_ids)`;
+  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${ctx.dialect.subqueryMembership(sql.raw("n.id"), sql.raw("SELECT id FROM included_ids"))}`;
 
   return ctx.backend.execute<SubgraphNodeFetchRow>(
     asCompiledRowsSql(query),
@@ -789,7 +789,7 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND e.from_id IN (SELECT id FROM included_ids) AND e.to_id IN (SELECT id FROM included_ids)`;
+  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${ctx.dialect.subqueryMembership(sql.raw("e.from_id"), sql.raw("SELECT id FROM included_ids"))} AND ${ctx.dialect.subqueryMembership(sql.raw("e.to_id"), sql.raw("SELECT id FROM included_ids"))}`;
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(
     asCompiledRowsSql(query),

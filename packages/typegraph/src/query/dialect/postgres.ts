@@ -219,6 +219,15 @@ export const postgresDialect: DialectAdapter = {
     return sql`NOW()`;
   },
 
+  subqueryMembership(column, subquery) {
+    // ARRAY(subquery) collapses the CTE once via InitPlan; = ANY(array) is
+    // hash-probed (PG 14+) and index-condition eligible. The plain
+    // IN (subquery) form gets pulled up into a join whose recursive-CTE
+    // row estimate drives the planner into a nested-loop join FILTER —
+    // see the DialectAdapter docs for the measured pathology.
+    return sql`${column} = ANY(ARRAY(${subquery}))`;
+  },
+
   // ============================================================
   // Value Binding & Literals
   // ============================================================
