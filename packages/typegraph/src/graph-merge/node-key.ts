@@ -21,10 +21,7 @@
  * WHICH nodes share an identity, never the ordering among genuinely distinct ids.
  */
 
-
 import type { NodeId, NodeType } from "./typegraph-internal";
-
-
 
 /** The `(kind, id)` separator: a NUL byte (0x00), absent from schema kind names. */
 const SEPARATOR = String.fromCharCode(0);
@@ -94,4 +91,4 @@ export function compareMergeKeys(left: MergeKey, right: MergeKey): number {
   );
 }
 
-export {compareStrings} from "../utils/compare";
+export { compareStrings } from "../utils/compare";
