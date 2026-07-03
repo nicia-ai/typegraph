@@ -128,6 +128,88 @@ export async function syncEmbeddings(
 }
 
 /**
+ * Syncs embeddings for a batch of same-kind node creates through one
+ * `upsertEmbeddingBatch` per field (falling back to per-row
+ * `upsertEmbedding` when the backend lacks the batch primitive). Mirrors
+ * `syncEmbeddings` per row: present values upsert, `undefined` values
+ * delete any existing embedding for the field.
+ */
+export async function syncEmbeddingsBatchForKind(
+  args: Readonly<{
+    graphId: string;
+    nodeKind: string;
+    backend: GraphBackend | TransactionBackend;
+  }>,
+  schema: z.ZodType,
+  items: readonly Readonly<{
+    nodeId: string;
+    props: Record<string, unknown>;
+  }>[],
+): Promise<void> {
+  const { graphId, nodeKind, backend } = args;
+  if (!backend.upsertEmbedding || !backend.deleteEmbedding) {
+    return;
+  }
+
+  const embeddingFields = getEmbeddingFields(schema);
+  if (embeddingFields.length === 0) {
+    return;
+  }
+
+  for (const field of embeddingFields) {
+    const rows: { nodeId: string; embedding: readonly number[] }[] = [];
+    const deletionIds: string[] = [];
+    for (const item of items) {
+      const value = item.props[field.fieldPath];
+      if (isValidEmbeddingValue(value)) {
+        rows.push({ nodeId: item.nodeId, embedding: value });
+      } else if (value === undefined) {
+        deletionIds.push(item.nodeId);
+      }
+    }
+
+    if (rows.length > 0) {
+      if (backend.upsertEmbeddingBatch === undefined) {
+        for (const row of rows) {
+          await backend.upsertEmbedding({
+            graphId,
+            nodeKind,
+            nodeId: row.nodeId,
+            fieldPath: field.fieldPath,
+            embedding: row.embedding,
+            dimensions: field.dimensions,
+            metric: field.metric,
+            indexType: field.indexType,
+          });
+        }
+      } else {
+        await backend.upsertEmbeddingBatch({
+          graphId,
+          nodeKind,
+          fieldPath: field.fieldPath,
+          dimensions: field.dimensions,
+          metric: field.metric,
+          indexType: field.indexType,
+          rows,
+        });
+      }
+    }
+
+    for (const nodeId of deletionIds) {
+      await backend.deleteEmbedding({
+        graphId,
+        nodeKind,
+        nodeId,
+        fieldPath: field.fieldPath,
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
+      });
+    }
+  }
+}
+
+/**
  * Deletes a node's embeddings for the embedding fields its kind CURRENTLY
  * declares. A field dropped from the schema after the node was written is
  * intentionally NOT swept here — its entire per-field table is reclaimed

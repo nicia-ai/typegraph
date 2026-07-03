@@ -129,6 +129,80 @@ export function buildInsertUnique(
 }
 
 /**
+ * Builds a multi-row INSERT for uniqueness entries with the same conflict
+ * semantics as {@link buildInsertUnique}, expressed against `excluded`
+ * (the proposed row) instead of per-statement bound values. RETURNING
+ * exposes `(node_kind, constraint_name, key, node_id)` for every row —
+ * ON CONFLICT DO UPDATE returns updated rows too — so the caller can
+ * attribute each entry's final owner and raise a uniqueness error for the
+ * ones a different live node holds.
+ *
+ * Callers must not pass two entries with the same conflict target
+ * (`node_kind`, `constraint_name`, `key`): a multi-row upsert cannot
+ * affect one row twice.
+ */
+export function buildInsertUniqueBatch(
+  tables: Tables,
+  dialect: SqlDialect,
+  entries: readonly InsertUniqueParams[],
+): SQL {
+  const { uniques } = tables;
+
+  const columns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
+  );
+
+  // Mirror the single-row builders' dialect split for references to the
+  // EXISTING row inside DO UPDATE: Postgres qualifies with the table name,
+  // SQLite uses the bare quoted column.
+  const tableName = getTableName(uniques);
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    dialect === "postgres" ?
+      sql.raw(`"${tableName}"."${column.name}"`)
+    : sql.raw(`"${column.name}"`);
+  const excludedColumn = (column: Readonly<{ name: string }>) =>
+    sql.raw(`excluded."${column.name}"`);
+
+  const valueRows = sql.join(
+    entries.map(
+      (params) =>
+        sql`(${params.graphId}, ${params.nodeKind}, ${params.constraintName}, ${params.key}, ${params.nodeId}, ${params.concreteKind}, ${sql.raw("NULL")})`,
+    ),
+    sql`, `,
+  );
+
+  return sql`
+    INSERT INTO ${uniques} (${columns})
+    VALUES ${valueRows}
+    ON CONFLICT (${conflictColumns})
+    DO UPDATE SET
+      ${quotedColumn(uniques.nodeId)} = CASE
+        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.nodeId)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.nodeId)}
+        ELSE ${existingColumn(uniques.nodeId)}
+      END,
+      ${quotedColumn(uniques.concreteKind)} = CASE
+        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.concreteKind)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.concreteKind)}
+        ELSE ${existingColumn(uniques.concreteKind)}
+      END,
+      ${quotedColumn(uniques.deletedAt)} = CASE
+        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN NULL
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
+        ELSE ${existingColumn(uniques.deletedAt)}
+      END
+    RETURNING
+      ${quotedColumn(uniques.nodeKind)} as node_kind,
+      ${quotedColumn(uniques.constraintName)} as constraint_name,
+      ${quotedColumn(uniques.key)} as key,
+      ${quotedColumn(uniques.nodeId)} as node_id
+  `;
+}
+
+/**
  * Builds a soft DELETE query for a uniqueness entry.
  * Uses raw column name in SET clause.
  */

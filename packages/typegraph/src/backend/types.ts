@@ -354,6 +354,30 @@ export type UpsertEmbeddingParams = Readonly<{
 }>;
 
 /**
+ * One row of a batched embedding upsert.
+ */
+type UpsertEmbeddingBatchRow = Readonly<{
+  nodeId: string;
+  embedding: readonly number[];
+}>;
+
+/**
+ * Parameters for a batched embedding upsert. Homogeneous per vector slot:
+ * one graph, one node kind, one field, many nodes. Duplicate `nodeId`
+ * values within a batch are deduplicated last-write-wins by the backend
+ * (a multi-row upsert cannot affect one row twice).
+ */
+export type UpsertEmbeddingBatchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  fieldPath: string;
+  dimensions: number;
+  metric: VectorMetric;
+  indexType: VectorIndexType;
+  rows: readonly UpsertEmbeddingBatchRow[];
+}>;
+
+/**
  * Parameters for deleting an embedding.
  *
  * `dimensions` / `metric` / `indexType` mirror {@link UpsertEmbeddingParams}
@@ -857,6 +881,13 @@ export type GraphBackend = Readonly<{
 
   // === Unique Constraint Operations ===
   insertUnique: (params: InsertUniqueParams) => Promise<void>;
+  /**
+   * Batched variant of `insertUnique`: one multi-row statement per chunk
+   * with the same per-entry conflict semantics (throws `UniquenessError`
+   * for the first entry whose key a different live node holds). Optional —
+   * callers fall back to per-entry `insertUnique` when unset.
+   */
+  insertUniqueBatch?: (entries: readonly InsertUniqueParams[]) => Promise<void>;
   deleteUnique: (params: DeleteUniqueParams) => Promise<void>;
   checkUnique: (params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
   checkUniqueBatch?: (
@@ -905,6 +936,11 @@ export type GraphBackend = Readonly<{
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
   upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
+  /**
+   * Batched variant of `upsertEmbedding` for one vector slot. Optional —
+   * callers fall back to per-row `upsertEmbedding` when unset.
+   */
+  upsertEmbeddingBatch?: (params: UpsertEmbeddingBatchParams) => Promise<void>;
   deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
   vectorSearch?: (
     params: VectorSearchParams,
@@ -1294,7 +1330,11 @@ export type GraphEntityWriteBackend = NodeEntityWriteBackend &
 
 export type UniqueConstraintBackend = Pick<
   GraphBackend,
-  "insertUnique" | "deleteUnique" | "checkUnique" | "checkUniqueBatch"
+  | "insertUnique"
+  | "insertUniqueBatch"
+  | "deleteUnique"
+  | "checkUnique"
+  | "checkUniqueBatch"
 >;
 
 export type SchemaReadBackend = Pick<
@@ -1310,6 +1350,7 @@ export type SchemaCommitBackend = Pick<
 export type VectorOperationBackend = Pick<
   GraphBackend,
   | "upsertEmbedding"
+  | "upsertEmbeddingBatch"
   | "deleteEmbedding"
   | "vectorSearch"
   | "createVectorIndex"

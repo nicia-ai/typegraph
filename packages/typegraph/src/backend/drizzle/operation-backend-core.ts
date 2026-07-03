@@ -85,6 +85,7 @@ export type CommonOperationBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "insertUnique"
+  | "insertUniqueBatch"
   | "updateEdge"
   | "updateNode"
 > &
@@ -140,6 +141,7 @@ type OperationBackendBatchConfig = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  uniqueInsertBatchSize: number;
 }>;
 
 type OperationBackendRowMappers = Readonly<{
@@ -485,6 +487,68 @@ export function createCommonOperationBackend(
           newId: params.nodeId,
           fields: [],
         });
+      }
+    },
+
+    async insertUniqueBatch(
+      entries: readonly InsertUniqueParams[],
+    ): Promise<void> {
+      if (entries.length === 0) return;
+
+      // A multi-row upsert cannot affect one row twice, so collapse exact
+      // duplicates and reject two entries claiming the same conflict target
+      // for different nodes up front. Batch validation pre-rejects real
+      // conflicts, so this is a defensive invariant, not a semantic path.
+      const targetKey = (entry: InsertUniqueParams): string =>
+        `${entry.nodeKind}\u0000${entry.constraintName}\u0000${entry.key}`;
+      const byTarget = new Map<string, InsertUniqueParams>();
+      for (const entry of entries) {
+        const existing = byTarget.get(targetKey(entry));
+        if (existing === undefined) {
+          byTarget.set(targetKey(entry), entry);
+          continue;
+        }
+        if (existing.nodeId !== entry.nodeId) {
+          throw new UniquenessError({
+            constraintName: entry.constraintName,
+            kind: entry.nodeKind,
+            existingId: existing.nodeId,
+            newId: entry.nodeId,
+            fields: [],
+          });
+        }
+      }
+      const deduped = [...byTarget.values()];
+
+      for (const chunk of chunkArray(
+        deduped,
+        batchConfig.uniqueInsertBatchSize,
+      )) {
+        const query = operationStrategy.buildInsertUniqueBatch(chunk);
+        const rows = await execution.execAll<{
+          node_kind: string;
+          constraint_name: string;
+          key: string;
+          node_id: string;
+        }>(query);
+        const ownerByTarget = new Map(
+          rows.map((row) => [
+            `${row.node_kind}\u0000${row.constraint_name}\u0000${row.key}`,
+            row.node_id,
+          ]),
+        );
+        for (const entry of chunk) {
+          const owner = ownerByTarget.get(targetKey(entry));
+          if (owner !== undefined && owner !== entry.nodeId) {
+            throw new UniquenessError({
+              constraintName: entry.constraintName,
+              kind: entry.nodeKind,
+              existingId: owner,
+              newId: entry.nodeId,
+              fields: [],
+            });
+          }
+        }
       }
     },
 

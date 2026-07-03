@@ -28,6 +28,7 @@ import { quotedTableName } from "../../../backend/drizzle/operations/shared";
 import { type StrategyTableContribution } from "../../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
   type VectorMetric,
@@ -212,6 +213,31 @@ export const pgvectorStrategy: VectorStrategy = {
       sql`
         INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
         VALUES (${params.graphId}, ${params.nodeId}, ${value}, ${timestamp}, ${timestamp})
+        ON CONFLICT ("graph_id", "node_id")
+        DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
+      `,
+    ];
+  },
+
+  buildUpsertBatch(
+    slot,
+    params: UpsertEmbeddingBatchParams,
+    timestamp,
+  ): readonly SQL[] {
+    const table = quotedTableName(
+      this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    const valueRows = sql.join(
+      params.rows.map(
+        (row) =>
+          sql`(${params.graphId}, ${row.nodeId}, ${vectorLiteral(row.embedding, "embedding")}, ${timestamp}, ${timestamp})`,
+      ),
+      sql`, `,
+    );
+    return [
+      sql`
+        INSERT INTO ${table} ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+        VALUES ${valueRows}
         ON CONFLICT ("graph_id", "node_id")
         DO UPDATE SET "embedding" = EXCLUDED."embedding", "updated_at" = EXCLUDED."updated_at"
       `,

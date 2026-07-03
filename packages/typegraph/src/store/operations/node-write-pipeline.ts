@@ -27,14 +27,23 @@ import {
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
 import { RestrictedDeleteError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { deleteNodeEmbeddings, syncEmbeddings } from "../embedding-sync";
-import { deleteNodeFulltext, syncFulltext } from "../fulltext-sync";
+import {
+  deleteNodeEmbeddings,
+  syncEmbeddings,
+  syncEmbeddingsBatchForKind,
+} from "../embedding-sync";
+import {
+  deleteNodeFulltext,
+  syncFulltext,
+  syncFulltextBatchForKind,
+} from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   checkUniquenessConstraints,
   createUniquenessContext,
   deleteUniquenessEntries,
   insertUniquenessEntries,
+  insertUniquenessEntriesBatch,
   updateUniquenessEntries,
 } from "../uniqueness";
 
@@ -185,6 +194,58 @@ export async function applyNodeInsertSideEffects(
       args.props,
     ),
   ]);
+}
+
+/**
+ * Batched {@link applyNodeInsertSideEffects}: one uniqueness batch across
+ * every item, then one embedding batch per (kind, field) and one fulltext
+ * batch per kind — instead of the per-row statement fan the single-op path
+ * issues. Ordering matches the single-op path (uniqueness first, then the
+ * sync fans).
+ */
+export async function applyNodeInsertSideEffectsBatch(
+  ctx: NodeWriteContext,
+  items: readonly Readonly<{
+    kind: string;
+    id: string;
+    schema: z.ZodType;
+    props: Record<string, unknown>;
+    uniqueConstraints: readonly UniqueConstraint[];
+  }>[],
+  backend: Backend,
+): Promise<void> {
+  if (items.length === 0) return;
+
+  await insertUniquenessEntriesBatch(
+    uniquenessContext(ctx, backend),
+    items.map((item) => ({
+      kind: item.kind,
+      id: item.id,
+      props: item.props,
+      constraints: item.uniqueConstraints,
+    })),
+  );
+
+  interface KindGroup {
+    schema: z.ZodType;
+    rows: { nodeId: string; props: Record<string, unknown> }[];
+  }
+  const byKind = new Map<string, KindGroup>();
+  for (const item of items) {
+    const group = byKind.get(item.kind) ?? { schema: item.schema, rows: [] };
+    group.rows.push({ nodeId: item.id, props: item.props });
+    byKind.set(item.kind, group);
+  }
+
+  await Promise.all(
+    [...byKind.entries()].flatMap(([kind, group]) => {
+      const syncArguments = { graphId: ctx.graphId, nodeKind: kind, backend };
+      return [
+        syncEmbeddingsBatchForKind(syncArguments, group.schema, group.rows),
+        syncFulltextBatchForKind(syncArguments, group.schema, group.rows),
+      ];
+    }),
+  );
 }
 
 function parseRowProps(row: NodeRow): Record<string, unknown> {

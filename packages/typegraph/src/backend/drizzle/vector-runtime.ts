@@ -100,6 +100,15 @@ const VECTOR_SLOT_PLACEHOLDER_DIMENSIONS = 1;
  * just `(nodeKind, fieldPath)`) so the backend can idempotently ensure the
  * correctly-shaped per-field table before deleting.
  */
+/**
+ * Bound parameters per row in every strategy's embedding upsert SQL
+ * (graph_id, node_id, created_at, updated_at, embedding). Backends derive
+ * their batch chunk size from the connection's bound-parameter budget and
+ * this count. sqlite-vec's companion IN-list DELETE binds one parameter per
+ * row plus graph_id, which stays under the same budget.
+ */
+export const EMBEDDING_UPSERT_PARAM_COUNT = 5;
+
 export function vectorSlotFromParams(
   params: Omit<VectorSlot, "indexParams">,
 ): VectorSlot {
