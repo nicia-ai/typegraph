@@ -3,7 +3,11 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type PerfBackend, type PostgresDriver } from "./config";
+import {
+  type PerfBackend,
+  type PostgresDriver,
+  type SqliteStorage,
+} from "./config";
 import { type LatencyRecord } from "./measurements";
 
 /**
@@ -16,6 +20,8 @@ type HistoryEntry = Readonly<{
   gitRefName: string | undefined;
   backend: PerfBackend;
   postgresDriver?: PostgresDriver;
+  /** SQLite lanes only. Rows written before this field existed are "memory". */
+  sqliteStorage?: SqliteStorage;
   scale: number;
   userCount: number;
   latencies: Readonly<
@@ -62,6 +68,7 @@ function serializeLatencies(record: LatencyRecord): HistoryEntry["latencies"] {
 type WriteHistoryInput = Readonly<{
   backend: PerfBackend;
   postgresDriver?: PostgresDriver;
+  sqliteStorage?: SqliteStorage;
   scale: number;
   userCount: number;
   latencies: LatencyRecord;
@@ -76,6 +83,9 @@ export function writeHistoryEntry(input: WriteHistoryInput): string {
     ...(input.postgresDriver === undefined ?
       {}
     : { postgresDriver: input.postgresDriver }),
+    ...(input.sqliteStorage === undefined ?
+      {}
+    : { sqliteStorage: input.sqliteStorage }),
     scale: input.scale,
     userCount: input.userCount,
     latencies: serializeLatencies(input.latencies),

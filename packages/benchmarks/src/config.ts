@@ -113,11 +113,20 @@ export type PerfBackend = "sqlite" | "postgres";
 
 export type PostgresDriver = "pg" | "postgres-js";
 
+/**
+ * SQLite storage lane. `"memory"` measures pure engine/compile cost;
+ * `"file"` opens a temporary on-disk database so WAL, fsync, and page-cache
+ * behavior are part of the measurement — the lane that reflects real local
+ * deployments.
+ */
+export type SqliteStorage = "memory" | "file";
+
 export type PerfCliOptions = Readonly<{
   runChecks: boolean;
   backend: PerfBackend;
   postgresDriver: PostgresDriver;
   scale: number;
+  sqliteStorage: SqliteStorage;
 }>;
 
 export type Guardrails = Readonly<{

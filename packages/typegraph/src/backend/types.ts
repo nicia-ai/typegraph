@@ -1789,11 +1789,27 @@ export type CountEdgesByKindParams = Readonly<{
 // ============================================================
 
 /**
- * Default per-statement bound-parameter ceiling for SQLite. The compiled-in
- * `SQLITE_MAX_VARIABLE_NUMBER` has historically defaulted to 999. Single source
- * of truth for {@link SQLITE_CAPABILITIES} and the SQLite backend's batch math.
+ * Conservative per-statement bound-parameter floor for SQLite. The
+ * compiled-in `SQLITE_MAX_VARIABLE_NUMBER` defaulted to 999 before SQLite
+ * 3.32.0; drivers whose real ceiling cannot be probed (async/remote
+ * connections) keep this floor. Single source of truth for
+ * {@link SQLITE_CAPABILITIES} and the SQLite backend's batch math fallback.
  */
 export const SQLITE_MAX_BIND_PARAMETERS = 999;
+
+/**
+ * `SQLITE_MAX_VARIABLE_NUMBER` default since SQLite 3.32.0 (better-sqlite3
+ * also compiles it in explicitly). Used when a synchronous driver's probe
+ * confirms a modern build.
+ */
+export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32_766;
+
+/**
+ * Cloudflare D1's documented per-statement bound-parameter ceiling. Far
+ * below the classic SQLite floor, so D1 detection must cap the budget or
+ * batched writes fail at runtime.
+ */
+export const D1_MAX_BIND_PARAMETERS = 100;
 
 /**
  * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single

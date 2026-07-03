@@ -32,6 +32,20 @@ const { backend, db } = createLocalSqliteBackend({ path: "./app.db" });
 const store = createStore(graph, backend);
 ```
 
+The local backend owns its connection, so it applies performance pragmas at
+open: `journal_mode=WAL`, `synchronous=NORMAL`, and a 5s `busy_timeout`. On
+file databases this makes single-operation writes roughly 5× faster than the
+driver defaults (rollback journal, `synchronous=FULL`). Override individual
+values or opt out entirely:
+
+```typescript
+// Override one value, keep the other defaults
+createLocalSqliteBackend({ path: "./app.db", pragmas: { busyTimeoutMs: 10_000 } });
+
+// Keep better-sqlite3's driver defaults untouched
+createLocalSqliteBackend({ path: "./app.db", pragmas: false });
+```
+
 :::caution[Fulltext requires `createStoreWithSchema`]
 `createLocalSqliteBackend` creates the tables but does not durably
 materialize fulltext storage. If your graph has `searchable()` fields,
@@ -447,8 +461,16 @@ See [Semantic Search](/semantic-search) for query examples.
 
 ### Refreshing planner statistics after bulk loads
 
-Call `store.refreshStatistics()` after any large initial import or bulk
-backfill. PostgreSQL's query planner relies on table statistics to choose
+`importGraph()` refreshes planner statistics automatically after an import
+that created or updated rows, and `store.materializeIndexes()` does the
+same on SQLite after creating indexes (pass `refreshStatistics: false` to
+opt out). On PostgreSQL, `materializeIndexes()` builds with
+`CREATE INDEX CONCURRENTLY` and skips the automatic refresh — call
+`store.refreshStatistics()` after materializing. For other bulk paths — a
+`bulkCreate` loop, backend-level batch inserts — call
+`store.refreshStatistics()` yourself once the load completes.
+
+PostgreSQL's query planner relies on table statistics to choose
 between multi-column indexes on `typegraph_edges` (forward vs reverse vs
 cardinality), and when those statistics are stale the planner can pick a
 reverse-index scan with a filter — turning a 0.5ms forward traversal into a

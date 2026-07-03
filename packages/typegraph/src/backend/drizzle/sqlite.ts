@@ -176,27 +176,55 @@ export type SqliteBackendOptions = Readonly<{
 
 const NODE_INSERT_PARAM_COUNT = 9;
 const EDGE_INSERT_PARAM_COUNT = 12;
-const SQLITE_NODE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(SQLITE_MAX_BIND_PARAMETERS / NODE_INSERT_PARAM_COUNT),
-);
-const SQLITE_EDGE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(SQLITE_MAX_BIND_PARAMETERS / EDGE_INSERT_PARAM_COUNT),
-);
-const SQLITE_GET_NODES_ID_CHUNK_SIZE = Math.max(
-  1,
-  SQLITE_MAX_BIND_PARAMETERS - 2,
-);
-const SQLITE_GET_EDGES_ID_CHUNK_SIZE = Math.max(
-  1,
-  SQLITE_MAX_BIND_PARAMETERS - 1,
-);
+const GET_NODES_FIXED_PARAM_COUNT = 2;
+const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
-const SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
-  1,
-  SQLITE_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
-);
+
+/**
+ * Batch chunk sizes for the SQLite operation backend, derived from the
+ * connection's bound-parameter budget. Keys mirror the operation backend's
+ * `batchConfig`.
+ */
+export type SqliteBatchChunkSizes = Readonly<{
+  checkUniqueBatchChunkSize: number;
+  edgeInsertBatchSize: number;
+  getEdgesChunkSize: number;
+  getNodesChunkSize: number;
+  nodeInsertBatchSize: number;
+}>;
+
+/**
+ * Derives batch chunk sizes from a per-statement bound-parameter budget.
+ * The budget varies by driver — better-sqlite3 compiles in 32,766, D1 caps
+ * at ~100, undetectable async drivers keep the 999 floor — so chunk math is
+ * computed per backend instance rather than fixed at module scope.
+ */
+export function computeSqliteBatchChunkSizes(
+  maxBindParameters: number,
+): SqliteBatchChunkSizes {
+  return {
+    checkUniqueBatchChunkSize: Math.max(
+      1,
+      maxBindParameters - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+    ),
+    edgeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    getEdgesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_EDGES_FIXED_PARAM_COUNT,
+    ),
+    getNodesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_NODES_FIXED_PARAM_COUNT,
+    ),
+    nodeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+  };
+}
 
 type SerializedExecutionQueue = Readonly<{
   dispose: () => void;
@@ -361,6 +389,7 @@ function buildSqliteCapabilities(
     fulltextStrategy: FulltextStrategy;
     vectorStrategy: VectorStrategy | undefined;
     transactionMode: SqliteExecutionAdapter["profile"]["transactionMode"];
+    maxBindParameters: number;
   }>,
 ): BackendCapabilities {
   const base =
@@ -369,6 +398,7 @@ function buildSqliteCapabilities(
     : SQLITE_CAPABILITIES;
   return {
     ...base,
+    maxBindParameters: options.maxBindParameters,
     fulltext: buildFulltextCapabilities(options.fulltextStrategy),
     ...(options.vectorStrategy === undefined ?
       {}
@@ -469,13 +499,9 @@ function createSqliteOperationBackend(
   }
 
   const commonBackend = createCommonOperationBackend({
-    batchConfig: {
-      checkUniqueBatchChunkSize: SQLITE_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
-      edgeInsertBatchSize: SQLITE_EDGE_INSERT_BATCH_SIZE,
-      getEdgesChunkSize: SQLITE_GET_EDGES_ID_CHUNK_SIZE,
-      getNodesChunkSize: SQLITE_GET_NODES_ID_CHUNK_SIZE,
-      nodeInsertBatchSize: SQLITE_NODE_INSERT_BATCH_SIZE,
-    },
+    batchConfig: computeSqliteBatchChunkSizes(
+      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
+    ),
     execution: {
       execAll,
       execGet,
@@ -711,6 +737,7 @@ export function createSqliteBackend(
       fulltextStrategy,
       vectorStrategy,
       transactionMode,
+      maxBindParameters: executionAdapter.profile.maxBindParameters,
     }),
     ...options.capabilities,
   };

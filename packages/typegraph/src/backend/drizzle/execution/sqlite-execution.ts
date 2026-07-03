@@ -1,6 +1,11 @@
 import { type SQL, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
+import {
+  D1_MAX_BIND_PARAMETERS,
+  MODERN_SQLITE_MAX_BIND_PARAMETERS,
+  SQLITE_MAX_BIND_PARAMETERS,
+} from "../../types";
 import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
@@ -74,6 +79,13 @@ export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 export type SqliteExecutionProfile = Readonly<{
   isSync: boolean;
+  /**
+   * Detected per-statement bound-parameter ceiling for this connection:
+   * D1's documented cap, the probed `SQLITE_MAX_VARIABLE_NUMBER` on
+   * synchronous drivers, or the conservative 999 floor when the limit
+   * cannot be probed (async/remote drivers).
+   */
+  maxBindParameters: number;
   supportsCompiledExecution: boolean;
   transactionMode: SqliteTransactionMode;
 }>;
@@ -172,6 +184,72 @@ function detectTransactionMode(
   return "drizzle";
 }
 
+// SQLITE_MAX_VARIABLE_NUMBER's compiled-in default rose from 999 to 32,766
+// in SQLite 3.32.0. Builds that override the default list it in
+// `PRAGMA compile_options`; builds that keep it do not, so the version
+// decides the fallback.
+const MAX_VARIABLE_NUMBER_COMPILE_OPTION = /^MAX_VARIABLE_NUMBER=(\d+)$/;
+const FIRST_MODERN_BIND_LIMIT_MAJOR = 3;
+const FIRST_MODERN_BIND_LIMIT_MINOR = 32;
+
+function parseCompiledMaxVariableNumber(
+  rows: readonly unknown[],
+): number | undefined {
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const option = (row as Record<string, unknown>).compile_options;
+    if (typeof option !== "string") continue;
+    const match = MAX_VARIABLE_NUMBER_COMPILE_OPTION.exec(option);
+    if (match !== null) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function hasModernBindLimitByVersion(rows: readonly unknown[]): boolean {
+  const first = rows[0];
+  if (typeof first !== "object" || first === null) return false;
+  const version = (first as Record<string, unknown>).version;
+  if (typeof version !== "string") return false;
+  const [major = 0, minor = 0] = version
+    .split(".")
+    .map(Number);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
+  return (
+    major > FIRST_MODERN_BIND_LIMIT_MAJOR ||
+    (major === FIRST_MODERN_BIND_LIMIT_MAJOR &&
+      minor >= FIRST_MODERN_BIND_LIMIT_MINOR)
+  );
+}
+
+/**
+ * Resolves the connection's per-statement bound-parameter ceiling. Batch
+ * chunk math derives from this value, so too high breaks batched writes at
+ * runtime and too low wastes round trips (999 vs 32,766 is ~33× more
+ * chunks per bulk insert).
+ */
+function detectMaxBindParameters(
+  db: AnySqliteDatabase,
+  sqliteClient: SqliteClientWithPrepare | undefined,
+): number {
+  if (isD1DatabaseBySessionName(db)) return D1_MAX_BIND_PARAMETERS;
+  if (sqliteClient === undefined) return SQLITE_MAX_BIND_PARAMETERS;
+  try {
+    const compiled = parseCompiledMaxVariableNumber(
+      sqliteClient.prepare("PRAGMA compile_options").all(),
+    );
+    if (compiled !== undefined) return compiled;
+    const isModern = hasModernBindLimitByVersion(
+      sqliteClient.prepare("SELECT sqlite_version() AS version").all(),
+    );
+    return isModern ?
+        MODERN_SQLITE_MAX_BIND_PARAMETERS
+      : SQLITE_MAX_BIND_PARAMETERS;
+  } catch {
+    // A client that can't answer the probes keeps the conservative floor.
+    return SQLITE_MAX_BIND_PARAMETERS;
+  }
+}
+
 function resolveSqliteClient(
   db: AnySqliteDatabase,
 ): SqliteClientWithPrepare | undefined {
@@ -241,6 +319,7 @@ export function createSqliteExecutionAdapter(
 
   const profile: SqliteExecutionProfile = {
     isSync,
+    maxBindParameters: detectMaxBindParameters(db, sqliteClient),
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };

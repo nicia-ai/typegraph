@@ -17,13 +17,16 @@ async function main(argv: readonly string[]): Promise<void> {
   const scaleSuffix = options.scale === 1 ? "" : `, scale=${options.scale}`;
   const driverSuffix =
     options.backend === "postgres" ? `, driver=${options.postgresDriver}` : "";
+  const storageSuffix =
+    options.backend === "sqlite" ? `, storage=${options.sqliteStorage}` : "";
   console.log(
-    `TypeGraph perf sanity (${options.runChecks ? "guardrail mode" : "report mode"}, backend=${options.backend}${driverSuffix}${scaleSuffix}, users=${BENCHMARK_CONFIG.userCount})`,
+    `TypeGraph perf sanity (${options.runChecks ? "guardrail mode" : "report mode"}, backend=${options.backend}${driverSuffix}${storageSuffix}${scaleSuffix}, users=${BENCHMARK_CONFIG.userCount})`,
   );
 
   const resources = await createBackendResources(
     options.backend,
     options.postgresDriver,
+    options.sqliteStorage,
   );
   if (!resources.hasVectorPredicate) {
     console.log(
@@ -56,7 +59,7 @@ async function main(argv: readonly string[]): Promise<void> {
       backend: options.backend,
       ...(options.backend === "postgres" ?
         { postgresDriver: options.postgresDriver }
-      : {}),
+      : { sqliteStorage: options.sqliteStorage }),
       scale: options.scale,
       userCount: BENCHMARK_CONFIG.userCount,
       latencies,

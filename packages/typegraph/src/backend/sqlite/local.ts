@@ -107,6 +107,108 @@ function createDatabase(path: string): Database.Database {
 // ============================================================
 
 /**
+ * Journal modes accepted by {@link LocalSqlitePragmaOptions.journalMode}.
+ */
+export type LocalSqliteJournalMode =
+  "wal" | "delete" | "truncate" | "persist" | "memory" | "off";
+
+/**
+ * Synchronous levels accepted by {@link LocalSqlitePragmaOptions.synchronous}.
+ */
+export type LocalSqliteSynchronousMode = "off" | "normal" | "full" | "extra";
+
+/**
+ * Connection pragmas the local backend applies when it opens the database.
+ *
+ * Values merge over {@link DEFAULT_LOCAL_SQLITE_PRAGMAS}; pass
+ * `pragmas: false` on {@link LocalSqliteBackendOptions} to leave the
+ * better-sqlite3 driver defaults untouched.
+ */
+export type LocalSqlitePragmaOptions = Readonly<{
+  /** `PRAGMA journal_mode`. Default: `"wal"` (no-op on `":memory:"`). */
+  journalMode?: LocalSqliteJournalMode;
+  /** `PRAGMA synchronous`. Default: `"normal"`. */
+  synchronous?: LocalSqliteSynchronousMode;
+  /** `PRAGMA busy_timeout`, in milliseconds. Default: `5000`. */
+  busyTimeoutMs?: number;
+}>;
+
+/**
+ * Pragma defaults for connections the local backend owns: WAL journaling
+ * with `synchronous=NORMAL` (the standard durable-and-fast local-SQLite
+ * baseline — WAL survives crashes; at NORMAL a power loss can lose the
+ * final commits but never corrupts) and a 5s busy timeout so concurrent
+ * openers wait for the write lock instead of failing with SQLITE_BUSY.
+ */
+export const DEFAULT_LOCAL_SQLITE_PRAGMAS: Required<LocalSqlitePragmaOptions> =
+  {
+    journalMode: "wal",
+    synchronous: "normal",
+    busyTimeoutMs: 5000,
+  };
+
+const LOCAL_SQLITE_JOURNAL_MODES: readonly LocalSqliteJournalMode[] = [
+  "wal",
+  "delete",
+  "truncate",
+  "persist",
+  "memory",
+  "off",
+];
+
+const LOCAL_SQLITE_SYNCHRONOUS_MODES: readonly LocalSqliteSynchronousMode[] = [
+  "off",
+  "normal",
+  "full",
+  "extra",
+];
+
+function applyConnectionPragmas(
+  sqlite: Database.Database,
+  pragmas: LocalSqlitePragmaOptions | false | undefined,
+): void {
+  if (pragmas === false) return;
+  const resolved: Required<LocalSqlitePragmaOptions> = {
+    ...DEFAULT_LOCAL_SQLITE_PRAGMAS,
+    ...pragmas,
+  };
+
+  // Runtime guards mirror the compile-time unions: pragma values are spliced
+  // into pragma statements, so reject anything outside the allowlists rather
+  // than forwarding it to SQLite.
+  if (!LOCAL_SQLITE_JOURNAL_MODES.includes(resolved.journalMode)) {
+    throw new ConfigurationError(
+      `Invalid journalMode pragma: ${resolved.journalMode}. ` +
+        `Expected one of: ${LOCAL_SQLITE_JOURNAL_MODES.join(", ")}.`,
+      { journalMode: resolved.journalMode },
+    );
+  }
+  if (!LOCAL_SQLITE_SYNCHRONOUS_MODES.includes(resolved.synchronous)) {
+    throw new ConfigurationError(
+      `Invalid synchronous pragma: ${resolved.synchronous}. ` +
+        `Expected one of: ${LOCAL_SQLITE_SYNCHRONOUS_MODES.join(", ")}.`,
+      { synchronous: resolved.synchronous },
+    );
+  }
+  if (
+    !Number.isSafeInteger(resolved.busyTimeoutMs) ||
+    resolved.busyTimeoutMs < 0
+  ) {
+    throw new ConfigurationError(
+      `Invalid busyTimeoutMs pragma: ${String(resolved.busyTimeoutMs)}. ` +
+        "Expected a non-negative integer number of milliseconds.",
+      { busyTimeoutMs: resolved.busyTimeoutMs },
+    );
+  }
+
+  // ":memory:" databases always journal in memory; SQLite answers the WAL
+  // request with "memory" instead of erroring, so no special-casing needed.
+  sqlite.pragma(`journal_mode = ${resolved.journalMode}`);
+  sqlite.pragma(`synchronous = ${resolved.synchronous}`);
+  sqlite.pragma(`busy_timeout = ${resolved.busyTimeoutMs}`);
+}
+
+/**
  * Options for creating a local SQLite backend.
  */
 export type LocalSqliteBackendOptions = Readonly<{
@@ -115,6 +217,15 @@ export type LocalSqliteBackendOptions = Readonly<{
    * Defaults to ":memory:" for an in-memory database.
    */
   path?: string;
+
+  /**
+   * Connection pragmas applied at open. Defaults to
+   * {@link DEFAULT_LOCAL_SQLITE_PRAGMAS} (WAL, `synchronous=NORMAL`, 5s busy
+   * timeout). Individual values merge over the defaults; pass `false` to
+   * skip pragma configuration entirely and keep the driver defaults
+   * (rollback journal, `synchronous=FULL`, no busy timeout).
+   */
+  pragmas?: LocalSqlitePragmaOptions | false;
 
   /**
    * Custom table definitions.
@@ -181,6 +292,7 @@ export function createLocalSqliteBackend(
   const tables = options.tables ?? defaultTables;
 
   const sqlite = createDatabase(path);
+  applyConnectionPragmas(sqlite, options.pragmas);
 
   // Best-effort: load sqlite-vec so embedding fields are persisted to
   // per-`(kind, field)` `vec0` storage. Without it, nodes with

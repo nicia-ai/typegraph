@@ -140,6 +140,12 @@ export const ImportOptionsSchema = z.object({
   validateReferences: z.boolean().default(true),
   /** Number of items to process in each batch */
   batchSize: z.number().int().positive().default(100),
+  /**
+   * Refresh planner statistics (ANALYZE) after an import that created or
+   * updated rows. Bulk loads otherwise run against stale statistics until
+   * the engine catches up on its own. Default: true.
+   */
+  refreshStatistics: z.boolean().optional(),
 });
 
 export type ImportOptions = z.infer<typeof ImportOptionsSchema>;

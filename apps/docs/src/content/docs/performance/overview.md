@@ -209,8 +209,15 @@ within an implicit transaction, reducing N connections to 1 while guaranteeing s
 
 SQLite is single-writer. For best throughput:
 
-- Enable WAL mode: `sqlite.pragma("journal_mode = WAL")` — allows concurrent reads while writing
-- Batch writes in transactions rather than issuing many small commits
+- Use WAL with `synchronous=NORMAL`. `createLocalSqliteBackend` applies both
+  (plus a 5s `busy_timeout`) automatically; on a bring-your-own connection set
+  them yourself: `sqlite.pragma("journal_mode = WAL")`,
+  `sqlite.pragma("synchronous = NORMAL")`. On file databases this makes
+  single-operation writes roughly 5× faster than the driver defaults.
+- Batch writes in transactions rather than issuing many small commits. (One
+  nuance: pure bulk appends of fresh pages can run marginally faster under the
+  rollback journal than WAL, since WAL writes pages twice — the per-commit wins
+  dominate everywhere else.)
 - For read-heavy workloads, SQLite performs well without pooling since `better-sqlite3` is synchronous
 
 ### Transaction isolation
@@ -491,6 +498,26 @@ Run the same guardrailed suite against PostgreSQL:
 POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
   pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
 ```
+
+By default the SQLite suite runs against an in-memory database, which
+measures engine and compile cost but not WAL/fsync behavior. Add
+`--storage=file` (or use the `perf:file` / `perf:check:file` scripts) to run
+against a temporary on-disk database — the lane that reflects real local
+deployments.
+
+A separate write-throughput bench measures single-op creates,
+transaction-amortized creates, `bulkCreate`, search-indexed creates
+(fulltext + vector sync), and `importGraph`, normalized to milliseconds per
+operation:
+
+```bash
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:write        # sqlite, in-memory
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:write:file   # sqlite, on-disk
+POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:write:postgres
+```
+
+The write bench is report-only (no guardrails): write latency is dominated
+by fsync behavior on the file lane and needs per-machine calibration.
 
 The benchmark source code is located in `packages/benchmarks/src/`.
 

@@ -53,6 +53,16 @@ export type MaterializeIndexesOptions = Readonly<{
   kinds?: readonly string[];
   /** Stop on the first failure. Default: false (best-effort). */
   stopOnError?: boolean;
+  /**
+   * Refresh planner statistics (ANALYZE) after at least one index was
+   * created. A fresh index can be ignored by the planner until statistics
+   * exist. Default: true — but only applied on backends that build indexes
+   * non-concurrently (SQLite). Backends using CREATE INDEX CONCURRENTLY
+   * (Postgres) skip the automatic refresh — see
+   * refreshStatisticsAfterCreation — and should call
+   * `store.refreshStatistics()` after materializing.
+   */
+  refreshStatistics?: boolean;
 }>;
 
 /**
@@ -214,6 +224,12 @@ export async function materializeIndexes(
       results.push(entry);
       if (entry.status === "failed") break;
     }
+    await refreshStatisticsAfterCreation(
+      backend,
+      results,
+      options,
+      ddlOptions.concurrent,
+    );
     return { results };
   }
 
@@ -254,9 +270,56 @@ export async function materializeIndexes(
     }
     bucketIndex += 1;
   }
-  return {
-    results: candidates.map((declaration) => byDeclaration.get(declaration)!),
-  };
+  const results = candidates.map((declaration) =>
+    byDeclaration.get(declaration)!,
+  );
+  await refreshStatisticsAfterCreation(
+    backend,
+    results,
+    options,
+    ddlOptions.concurrent,
+  );
+  return { results };
+}
+
+/**
+ * Runs ANALYZE once when at least one index was freshly created (unless the
+ * caller opted out): the planner can keep seq-scanning past a brand-new
+ * index until statistics for it exist.
+ *
+ * Skipped on backends that build with CREATE INDEX CONCURRENTLY (Postgres):
+ * expression-index CIC builds get no safe-snapshot exemption, so two callers
+ * racing the SAME index name can deadlock each other — and the refresh's
+ * timing shift makes that latent race fire reliably. Until cross-caller
+ * builds are serialized by a claim protocol, Postgres callers refresh
+ * manually via `store.refreshStatistics()` after materializing.
+ *
+ * Best-effort: by this point the indexes exist and their status rows are
+ * recorded, so a failed statistics refresh must not convert that success
+ * into a failure — it degrades to a warning.
+ */
+async function refreshStatisticsAfterCreation(
+  backend: RawBackend,
+  results: readonly MaterializeIndexesEntry[],
+  options: MaterializeIndexesOptions,
+  usesConcurrentBuilds: boolean,
+): Promise<void> {
+  if (options.refreshStatistics === false) return;
+  if (usesConcurrentBuilds) return;
+  if (!results.some((entry) => entry.status === "created")) return;
+  try {
+    await backend.refreshStatistics();
+  } catch (error) {
+    if (typeof console === "undefined" || typeof console.warn !== "function") {
+      return;
+    }
+    console.warn(
+      "[typegraph] materializeIndexes created its indexes but the follow-up " +
+        "statistics refresh failed; run store.refreshStatistics() to give " +
+        "the planner fresh statistics.",
+      error,
+    );
+  }
 }
 
 function parallelBucketKey(declaration: IndexDeclaration): IndexEntity {

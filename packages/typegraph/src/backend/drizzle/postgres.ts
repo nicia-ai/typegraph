@@ -343,21 +343,28 @@ export function createPostgresBackend(
     uniques: getTableName(tables.uniques),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
-  // ANALYZE statement on every call. The recorded relations are ANALYZEd
+  // ANALYZE statements on every call. The recorded relations are ANALYZEd
   // separately under an existence guard (see refreshStatistics): a schema
   // created before recorded-time history landed (bring-your-own-pool, no DDL
   // re-run) has no recorded tables, and Postgres fails the whole ANALYZE if any
   // named relation is missing. Per-field vector tables are created lazily and
   // live outside this base set, so they are not ANALYZEd here.
-  const coreAnalyzeStatement = sql`ANALYZE ${sql.join(
-    [
-      tableNames.nodes,
-      tableNames.edges,
-      getTableName(tables.uniques),
-      tableNames.fulltext,
-    ].map((name) => quoteIdentifier(name)),
-    sql`, `,
-  )}`;
+  //
+  // ONE statement per table with SKIP_LOCKED, never `ANALYZE a, b, c`:
+  // ANALYZE takes a ShareUpdateExclusive lock, the same class CREATE INDEX
+  // CONCURRENTLY holds for its whole build — and a CIC in another session
+  // waits on every regular transaction's snapshot, ANALYZE's included. An
+  // ANALYZE that queues on a CIC's table lock while that CIC waits on the
+  // ANALYZE's snapshot is a two-node deadlock (observed when two
+  // materializeIndexes callers race). SKIP_LOCKED makes ANALYZE skip a
+  // locked table instead of queuing, so it can never join a wait cycle;
+  // a skipped table is covered by the next refresh or autovacuum.
+  const coreAnalyzeStatements = [
+    tableNames.nodes,
+    tableNames.edges,
+    getTableName(tables.uniques),
+    tableNames.fulltext,
+  ].map((name) => sql`ANALYZE (SKIP_LOCKED) ${quoteIdentifier(name)}`);
   const recordedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
@@ -717,12 +724,15 @@ export function createPostgresBackend(
       // unrelated tables in the same database. Without fresh stats
       // after a bulk load the planner can pick a reverse-index scan
       // with a filter (5ms forward traversal instead of 0.5ms) until
-      // autovacuum catches up.
-      await db.execute(coreAnalyzeStatement);
+      // autovacuum catches up. Sequential per-table statements — see
+      // coreAnalyzeStatements for why they are never combined.
+      for (const statement of coreAnalyzeStatements) {
+        await db.execute(statement);
+      }
       // The recorded relations may be absent on a schema created before
       // recorded-time history landed (bring-your-own-pool, no DDL re-run).
-      // Postgres fails the entire ANALYZE if any named relation is missing, so
-      // ANALYZE only the recorded tables that exist.
+      // Postgres fails an ANALYZE naming a missing relation, so ANALYZE
+      // only the recorded tables that exist.
       const tablePresence = await Promise.all(
         recordedAnalyzeTables.map(async (tableName) => ({
           tableName,
@@ -732,12 +742,9 @@ export function createPostgresBackend(
       const presentRecordedTables = tablePresence
         .filter((entry) => entry.exists)
         .map((entry) => entry.tableName);
-      if (presentRecordedTables.length > 0) {
+      for (const tableName of presentRecordedTables) {
         await db.execute(
-          sql`ANALYZE ${sql.join(
-            presentRecordedTables.map((name) => quoteIdentifier(name)),
-            sql`, `,
-          )}`,
+          sql`ANALYZE (SKIP_LOCKED) ${quoteIdentifier(tableName)}`,
         );
       }
     },

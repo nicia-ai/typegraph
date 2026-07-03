@@ -2,6 +2,7 @@ import {
   type PerfBackend,
   type PerfCliOptions,
   type PostgresDriver,
+  type SqliteStorage,
 } from "./config";
 
 function parseBackend(rawBackend: string): PerfBackend {
@@ -60,10 +61,34 @@ export function parseCliOptions(argv: readonly string[]): PerfCliOptions {
       parsePostgresDriver(driverArgument.slice("--postgres-driver=".length))
     );
 
+  const storageArgument = argv.find((argument) =>
+    argument.startsWith("--storage="),
+  );
+  const sqliteStorage: SqliteStorage =
+    storageArgument === undefined ? "memory" : (
+      parseSqliteStorage(storageArgument.slice("--storage=".length))
+    );
+  if (backend === "postgres" && storageArgument !== undefined) {
+    throw new Error(
+      "--storage only applies to the sqlite backend; PostgreSQL storage is wherever POSTGRES_URL points.",
+    );
+  }
+
   return {
     runChecks,
     backend,
     postgresDriver,
     scale,
+    sqliteStorage,
   };
+}
+
+function parseSqliteStorage(raw: string): SqliteStorage {
+  if (raw === "memory" || raw === "file") {
+    return raw;
+  }
+
+  throw new Error(
+    `Unsupported --storage value: "${raw}". Expected "memory" or "file".`,
+  );
 }

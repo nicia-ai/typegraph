@@ -60,12 +60,15 @@ describe("sqlite execution adapter", () => {
     let prepareCalls = 0;
 
     try {
+      // Spy AFTER construction: the adapter probes the connection's
+      // bound-parameter budget at creation, and those one-time statements
+      // are not part of the execute() reuse behavior under test.
+      const adapter = createSqliteExecutionAdapter(db);
       sqliteClient.prepare = (sqlText) => {
         prepareCalls += 1;
         return originalPrepare.call(sqliteClient, sqlText);
       };
 
-      const adapter = createSqliteExecutionAdapter(db);
       const query = sql`SELECT ${"Alice"} AS name`;
 
       await adapter.execute<{ name: string }>(query);
@@ -97,14 +100,14 @@ describe("sqlite execution adapter", () => {
     let prepareCalls = 0;
 
     try {
+      // Spy AFTER construction — see the reuse test above.
+      const adapter = createSqliteExecutionAdapter(db, {
+        statementCacheMax: 2,
+      });
       sqliteClient.prepare = (sqlText) => {
         prepareCalls += 1;
         return originalPrepare.call(sqliteClient, sqlText);
       };
-
-      const adapter = createSqliteExecutionAdapter(db, {
-        statementCacheMax: 2,
-      });
 
       // Use structurally different queries (different compiled SQL text)
       const queryA = sql`SELECT ${"x"} AS col_a`;

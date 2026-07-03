@@ -1,27 +1,25 @@
-import { createRequire } from "node:module";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import Database from "better-sqlite3";
-import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
 import { Pool } from "pg";
 import postgres, { type Sql } from "postgres";
-import { createStore, sqliteVecStrategy } from "@nicia-ai/typegraph";
+import { createStore } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/postgres";
-import {
-  createSqliteBackend,
-  createSqliteTables,
-  generateSqliteDDL,
-} from "@nicia-ai/typegraph/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
 import {
   getPostgresUrl,
   type PerfBackend,
   type PostgresDriver,
+  type SqliteStorage,
 } from "./config";
 import { perfGraph, perfIndexes, type PerfStore } from "./graph";
 
@@ -37,25 +35,6 @@ type BackendResources = Readonly<{
   /** True when `store.search.hybrid(...)` works. */
   hasHybridFacade: boolean;
 }>;
-
-/**
- * Attempt to load `sqlite-vec` into a better-sqlite3 connection. Returns
- * true on success. When sqlite-vec is missing (e.g. CI without the
- * optional dep) we quietly skip vector measurements rather than fail.
- */
-const sqliteVecRequire = createRequire(import.meta.url);
-
-function loadSqliteVec(sqlite: Database.Database): boolean {
-  try {
-    const sqliteVec = sqliteVecRequire("sqlite-vec") as {
-      load: (db: Database.Database) => void;
-    };
-    sqliteVec.load(sqlite);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), created
 // lazily on first write, so a clean reset drops whatever this graph
@@ -93,22 +72,21 @@ async function resetPostgresTablesViaSql(sql: Sql): Promise<void> {
 export async function createBackendResources(
   backend: PerfBackend,
   postgresDriver: PostgresDriver = "pg",
+  sqliteStorage: SqliteStorage = "memory",
 ): Promise<BackendResources> {
   if (backend === "sqlite") {
     const tables = createSqliteTables({}, { indexes: perfIndexes });
-    const sqlite = new Database(":memory:");
-    const hasVectorEmbeddings = loadSqliteVec(sqlite);
-
-    for (const statement of generateSqliteDDL(tables)) {
-      sqlite.exec(statement);
-    }
-    const db = drizzleSqlite(sqlite);
-    const sqliteBackend = createSqliteBackend(db, {
-      executionProfile: { isSync: true },
+    // Route through createLocalSqliteBackend so the suite measures the
+    // batteries-included default path — connection pragmas (WAL,
+    // synchronous=NORMAL), bind-budget detection, and best-effort
+    // sqlite-vec loading included — instead of a hand-assembled variant.
+    const tempDir =
+      sqliteStorage === "file" ?
+        mkdtempSync(join(tmpdir(), "typegraph-perf-"))
+      : undefined;
+    const { backend: sqliteBackend } = createLocalSqliteBackend({
       tables,
-      // Vector support is wired by passing the strategy (the old
-      // `hasVectorEmbeddings` boolean was replaced by `vector?: VectorStrategy`).
-      ...(hasVectorEmbeddings ? { vector: sqliteVecStrategy } : {}),
+      ...(tempDir === undefined ? {} : { path: join(tempDir, "perf.db") }),
     });
     // #135: the harness builds the schema via raw DDL and uses the sync
     // createStore, so it writes the durable fulltext-materialization
@@ -119,8 +97,10 @@ export async function createBackendResources(
         queryDefaults: { traversalExpansion: "none" },
       }),
       close: async () => {
-        sqliteBackend.close();
-        sqlite.close();
+        await sqliteBackend.close();
+        if (tempDir !== undefined) {
+          rmSync(tempDir, { recursive: true, force: true });
+        }
       },
       hasVectorPredicate: sqliteBackend.upsertEmbedding !== undefined,
       hasHybridFacade: sqliteBackend.vectorSearch !== undefined,

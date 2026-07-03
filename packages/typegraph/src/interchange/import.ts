@@ -120,6 +120,19 @@ export async function importGraph<G extends GraphDef>(
     );
   });
 
+  // A bulk load runs against stale planner statistics until ANALYZE runs
+  // (documented regressions: 0.5ms → 5ms traversals on Postgres, 0.9ms →
+  // 23ms fulltext on SQLite), so a mutating import refreshes them once,
+  // after the transaction commits.
+  const mutationCount =
+    result.nodes.created +
+    result.nodes.updated +
+    result.edges.created +
+    result.edges.updated;
+  if ((options.refreshStatistics ?? true) && mutationCount > 0) {
+    await store.refreshStatistics();
+  }
+
   return {
     ...result,
     success: errors.length === 0,
