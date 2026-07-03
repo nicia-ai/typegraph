@@ -79,10 +79,10 @@ describe("SQLite CRUD statement-cache reuse", () => {
       // touches (probes, inserts, uniqueness upserts, updates, deletes).
       await crudCycle("warmup");
 
-      (client as { prepare: unknown }).prepare = ((sqlText: string) => {
+      (client as { prepare: unknown }).prepare = (sqlText: string) => {
         prepareCalls += 1;
         return originalPrepare(sqlText);
-      });
+      };
 
       await crudCycle("second");
       await crudCycle("third");
