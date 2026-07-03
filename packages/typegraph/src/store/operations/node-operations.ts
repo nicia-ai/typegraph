@@ -237,7 +237,7 @@ function resolveConstraint<G extends GraphDef>(
 // in the batch can see earlier ones during validation.
 // ============================================================
 
-function createNodeBatchValidationBackend(
+export function createNodeBatchValidationBackend(
   graphId: string,
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
@@ -407,7 +407,7 @@ function createNodeBatchValidationBackend(
  * first and then prime the validation caches with batched reads before
  * running {@link finishNodeCreatePreparation} per row.
  */
-type NodeCreateDraft = Readonly<{
+export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
   nodeKind: NodeType;
@@ -619,8 +619,8 @@ async function performNodeUpdate<G extends GraphDef>(
  * one probe per row. Backends without the batch primitives skip priming
  * and keep the per-row fallback.
  */
-async function primeBatchValidationCaches<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
+export async function primeBatchValidationCaches(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
   drafts: readonly NodeCreateDraft[],
   backend: GraphBackend | TransactionBackend,
   seams: Readonly<{
