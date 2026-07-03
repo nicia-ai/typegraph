@@ -7,6 +7,7 @@ import {
   type SqlSchema,
 } from "../../query/compiler/schema";
 import { getDialect } from "../../query/dialect";
+import { type KindRegistry } from "../../registry/kind-registry";
 import { assertNoRecordedCoordinate } from "../recorded-coordinate-guard";
 import { type AlgorithmContext } from "./context";
 import { executeDegree } from "./degree";
@@ -136,6 +137,8 @@ export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
 
 export type CreateGraphAlgorithmsParams = Readonly<{
   graphId: string;
+  graph: GraphDef;
+  registry: KindRegistry;
   backend: GraphBackend;
   schema: SqlSchema | undefined;
   recordedReadBinding: RecordedReadBinding | undefined;
@@ -164,6 +167,8 @@ export function createGraphAlgorithms<G extends GraphDef>(
   const allowRecordedAsOf = params.allowRecordedAsOf === true;
   const ctx: AlgorithmContext = {
     graphId: params.graphId,
+    graph: params.graph,
+    registry: params.registry,
     backend: params.backend,
     dialect: getDialect(params.backend.dialect),
     schema: params.schema ?? createSqlSchema(params.backend.tableNames),

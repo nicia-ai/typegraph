@@ -543,6 +543,8 @@ export class Store<G extends GraphDef> {
     if (this.#algorithms === undefined) {
       this.#algorithms = createGraphAlgorithms<G>({
         graphId: this.graphId,
+        graph: this.#graph,
+        registry: this.#registry,
         backend: this.#backend,
         schema: this.#schema,
         recordedReadBinding: this.#recordedReadBinding,
@@ -1281,6 +1283,8 @@ export class Store<G extends GraphDef> {
   ): InternalGraphAlgorithms<G> {
     return createGraphAlgorithms<G>({
       graphId: this.graphId,
+      graph: this.#graph,
+      registry: this.#registry,
       backend: this.#recordedReads.backendForCoordinate(
         coordinate,
         "recorded-graph-algorithm",
