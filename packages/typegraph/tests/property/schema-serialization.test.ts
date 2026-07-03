@@ -77,11 +77,46 @@ const descriptionArb = fc.option(fc.string({ minLength: 1, maxLength: 100 }), {
  * embed (UI hints, audit policy, provenance pointers, etc.).
  */
 const annotationsKeyArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,7}$/);
+
+/**
+ * A JSON-escape sequence in an OBJECT KEY (a `"`, a `\`, or a control
+ * character — the characters `JSON.stringify` escapes) triggers an upstream
+ * V8 `JSON.parse` data-corruption bug on Node >= 23: parsing an object whose
+ * key needs escaping poisons an internal shape-keyed cache, so a LATER
+ * same-shaped object with a DIFFERENT escaped key at the same position gets
+ * the earlier object's key string back. It is not a TypeGraph defect and has
+ * no clean parse-level workaround (the correct key is already gone once
+ * `JSON.parse` returns). This filter keeps the arbitrary broad
+ * (all other Unicode, nesting, and value shapes) while excluding only the
+ * region V8 cannot round-trip; `escaped-key-round-trip.test.ts` pins the bug
+ * so we notice when a Node release fixes it and can drop this guard.
+ */
+// The characters JSON.stringify escapes in a string key: a double quote, a
+// backslash, or a C0 control character (U+0000–U+001F).
+// eslint-disable-next-line no-control-regex
+const KEY_ESCAPE_PATTERN = /["\\\u0000-\u001F]/;
+
+function hasEscapedObjectKey(value: unknown): boolean {
+  if (Array.isArray(value))
+    return value.some((item) => hasEscapedObjectKey(item));
+  if (value !== null && typeof value === "object") {
+    for (const [key, nested] of Object.entries(value)) {
+      if (KEY_ESCAPE_PATTERN.test(key)) return true;
+      if (hasEscapedObjectKey(nested)) return true;
+    }
+  }
+  return false;
+}
+
+const safeJsonValueArb = fc
+  .jsonValue()
+  .filter((value) => !hasEscapedObjectKey(value));
+
 // fc.jsonValue() produces values that are valid JSON at runtime, but its
 // TypeScript type is wider than our KindAnnotations type. Cast the arbitrary
 // so the rest of the test sees the public type.
 const annotationsArb = fc.option(
-  fc.dictionary(annotationsKeyArb, fc.jsonValue(), {
+  fc.dictionary(annotationsKeyArb, safeJsonValueArb, {
     minKeys: 0,
     maxKeys: 4,
   }),
