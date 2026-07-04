@@ -1,5 +1,6 @@
 import {
   createBackendOverlay,
+  type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
@@ -384,6 +385,32 @@ function createRecordedTransactionBackend(
       await target.hardDeleteEdge(params);
       session.touchEdge(params.graphId, params.id);
     },
+
+    ...(target.deleteEdgesBatch === undefined ?
+      {}
+    : {
+        async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
+          await lockGraph(params.graphId);
+          await target.deleteEdgesBatch!(params);
+          for (const id of params.ids) {
+            session.touchEdge(params.graphId, id);
+          }
+        },
+      }),
+
+    ...(target.hardDeleteEdgesBatch === undefined ?
+      {}
+    : {
+        async hardDeleteEdgesBatch(
+          params: DeleteEdgesBatchParams,
+        ): Promise<void> {
+          await lockGraph(params.graphId);
+          await target.hardDeleteEdgesBatch!(params);
+          for (const id of params.ids) {
+            session.touchEdge(params.graphId, id);
+          }
+        },
+      }),
   });
 }
 
@@ -548,6 +575,24 @@ export function createRecordedBackend(
     async hardDeleteEdge(params) {
       await capture((target) => target.hardDeleteEdge(params));
     },
+
+    ...(backend.deleteEdgesBatch === undefined ?
+      {}
+    : {
+        async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
+          await capture((target) => target.deleteEdgesBatch!(params));
+        },
+      }),
+
+    ...(backend.hardDeleteEdgesBatch === undefined ?
+      {}
+    : {
+        async hardDeleteEdgesBatch(
+          params: DeleteEdgesBatchParams,
+        ): Promise<void> {
+          await capture((target) => target.hardDeleteEdgesBatch!(params));
+        },
+      }),
 
     async transaction(fn, options) {
       assertRequestedRecordedIsolation(backend, options);

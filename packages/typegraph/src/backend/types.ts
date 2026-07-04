@@ -349,6 +349,12 @@ export type HardDeleteEdgeParams = Readonly<{
   id: string;
 }>;
 
+/** Parameters for a batched edge delete (soft or hard). */
+export type DeleteEdgesBatchParams = Readonly<{
+  graphId: string;
+  ids: readonly string[];
+}>;
+
 // ============================================================
 // Embedding Parameters
 // ============================================================
@@ -969,6 +975,15 @@ export type GraphBackend = Readonly<{
   updateEdge: (params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (params: DeleteEdgeParams) => Promise<void>;
   hardDeleteEdge: (params: HardDeleteEdgeParams) => Promise<void>;
+  /**
+   * Batched {@link deleteEdge}: one soft-delete statement per bind-budget
+   * chunk instead of one per edge. Optional — cascade deletes fall back to
+   * the per-edge form when unset. Same per-row semantics (idempotent on
+   * already-tombstoned rows).
+   */
+  deleteEdgesBatch?: (params: DeleteEdgesBatchParams) => Promise<void>;
+  /** Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. */
+  hardDeleteEdgesBatch?: (params: DeleteEdgesBatchParams) => Promise<void>;
   getEdge: (graphId: string, id: string) => Promise<EdgeRow | undefined>;
   getEdges?: (
     graphId: string,
@@ -1462,7 +1477,9 @@ export type EdgeEntityWriteBackend = Pick<
   | "insertEdgesBatchReturning"
   | "updateEdge"
   | "deleteEdge"
+  | "deleteEdgesBatch"
   | "hardDeleteEdge"
+  | "hardDeleteEdgesBatch"
 >;
 
 export type GraphEntityReadBackend = NodeEntityReadBackend &

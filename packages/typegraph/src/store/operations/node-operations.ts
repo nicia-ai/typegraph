@@ -408,6 +408,16 @@ export function createNodeBatchValidationBackend(
  * first and then prime the validation caches with batched reads before
  * running {@link finishNodeCreatePreparation} per row.
  */
+/**
+ * Internal create options threaded from operations that validated props
+ * BEFORE calling into the create path. Never exposed on the public store
+ * surface.
+ */
+type NodeCreateInternalOptions = Readonly<{
+  /** `input.props` is already the output of `validateNodeProps`. */
+  propsPreValidated?: boolean;
+}>;
+
 export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
@@ -422,15 +432,24 @@ function draftNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   id: string,
+  options?: NodeCreateInternalOptions,
 ): NodeCreateDraft {
   const kind = input.kind;
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
 
-  const validatedProps = validateNodeProps(nodeKind.schema, input.props, {
-    kind,
-    operation: "create",
-  });
+  // getOrCreate / findByConstraint variants validate props up front (the
+  // key computation needs the PARSED shape), then hand the validated
+  // object here — re-running the full Zod parse on it would double the
+  // validation cost of every create leg for no additional safety (hooks
+  // wrap the transaction and cannot transform inputs in between).
+  const validatedProps =
+    options?.propsPreValidated === true ?
+      input.props
+    : validateNodeProps(nodeKind.schema, input.props, {
+        kind,
+        operation: "create",
+      });
 
   return {
     kind,
@@ -493,10 +512,11 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   input: CreateNodeInput,
   id: string,
   backend: GraphBackend | TransactionBackend,
+  options?: NodeCreateInternalOptions,
 ): Promise<NodeCreatePrepared> {
   return finishNodeCreatePreparation(
     ctx,
-    draftNodeCreate(ctx, input, id),
+    draftNodeCreate(ctx, input, id, options),
     backend,
   );
 }
@@ -708,6 +728,7 @@ async function prepareBatchCreates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
   backend: GraphBackend | TransactionBackend,
+  options?: NodeCreateInternalOptions,
 ): Promise<{
   preparedCreates: NodeCreatePrepared[];
   batchInsertParams: InsertNodeParams[];
@@ -725,7 +746,7 @@ async function prepareBatchCreates<G extends GraphDef>(
   // constraint error — both fail the whole batch, so ordering across
   // error categories is not part of the contract.
   const drafts = inputs.map((input) =>
-    draftNodeCreate(ctx, input, input.id ?? generateId()),
+    draftNodeCreate(ctx, input, input.id ?? generateId(), options),
   );
 
   await primeBatchValidationCaches(ctx, drafts, backend, {
@@ -848,7 +869,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   backend: GraphBackend | TransactionBackend,
-  options?: Readonly<{ returnRow?: boolean }>,
+  options?: Readonly<{ returnRow?: boolean }> & NodeCreateInternalOptions,
 ): Promise<Node | undefined> {
   const kind = input.kind;
   const id = input.id ?? generateId();
@@ -865,6 +886,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         input,
         id,
         target,
+        options,
       );
 
       let row: BackendNodeRow | undefined;
@@ -889,9 +911,11 @@ export async function executeNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
   backend: GraphBackend | TransactionBackend,
+  options?: NodeCreateInternalOptions,
 ): Promise<Node> {
   const result = await executeNodeCreateInternal(ctx, input, backend, {
     returnRow: true,
+    ...options,
   });
   if (!result) {
     throw new DatabaseOperationError(
@@ -949,6 +973,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
   backend: GraphBackend | TransactionBackend,
+  options?: NodeCreateInternalOptions,
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
 
@@ -957,6 +982,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       ctx,
       inputs,
       target,
+      options,
     );
 
     const rows = await runInsertBatchReturning(
@@ -1128,6 +1154,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
       ctx,
       { kind, props: validatedProps },
       backend,
+      { propsPreValidated: true },
     );
     return { node, action: "created" };
   }
@@ -1166,6 +1193,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
         ctx,
         { kind, props: validatedProps },
         backend,
+        { propsPreValidated: true },
       );
       return { node, action: "created" };
     }
@@ -1183,6 +1211,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
         ctx,
         { kind, props: validatedProps },
         backend,
+        { propsPreValidated: true },
       );
       return { node, action: "created" };
     }
@@ -1872,6 +1901,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       ctx,
       createInputs,
       backend,
+      { propsPreValidated: true },
     );
     for (const [batchIndex, entry] of toCreate.entries()) {
       results[entry.index] = {
@@ -1897,6 +1927,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         ctx,
         { kind, props: validatedProps },
         backend,
+        { propsPreValidated: true },
       );
       results[index] = { node, action: "created" };
       continue;

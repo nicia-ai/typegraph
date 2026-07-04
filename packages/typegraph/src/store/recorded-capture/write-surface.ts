@@ -1,5 +1,6 @@
 import {
   type DeleteEdgeParams,
+  type DeleteEdgesBatchParams,
   type DeleteNodeParams,
   type GraphBackend,
   type HardDeleteEdgeParams,
@@ -44,6 +45,8 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "deleteEdgesBatch",
+  "hardDeleteEdgesBatch",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 // ============================================================
@@ -77,7 +80,8 @@ type GraphEntityWriteParam =
   | DeleteEdgeParams
   | HardDeleteEdgeParams
   | readonly InsertNodeParams[]
-  | readonly InsertEdgeParams[];
+  | readonly InsertEdgeParams[]
+  | DeleteEdgesBatchParams;
 
 /** Backend methods whose signature marks them a graph-entity write. */
 type DerivedGraphEntityWriteMethod = {

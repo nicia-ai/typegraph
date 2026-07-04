@@ -149,7 +149,20 @@ async function enforceNodeDeleteBehavior(
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
-      // without both endpoints.
+      // without both endpoints. One batched statement per bind-budget
+      // chunk instead of one statement per edge; the per-edge loop remains
+      // for backends without the batch members.
+      const batchDelete =
+        args.mode === "hard" ?
+          backend.hardDeleteEdgesBatch
+        : backend.deleteEdgesBatch;
+      if (batchDelete !== undefined) {
+        await batchDelete.call(backend, {
+          graphId: ctx.graphId,
+          ids: connectedEdges.map((edge) => edge.id),
+        });
+        break;
+      }
       for (const edge of connectedEdges) {
         await (args.mode === "hard" ?
           backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })

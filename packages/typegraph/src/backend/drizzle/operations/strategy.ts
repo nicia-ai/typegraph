@@ -9,6 +9,7 @@ import type {
   CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
+  DeleteEdgesBatchParams,
   DeleteFulltextBatchParams,
   DeleteFulltextParams,
   DeleteNodeParams,
@@ -43,11 +44,13 @@ import {
 import {
   buildCountEdgesFrom,
   buildDeleteEdge,
+  buildDeleteEdgesBatch,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
   buildGetEdge,
   buildGetEdges,
   buildHardDeleteEdge,
+  buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
   buildInsertEdge,
   buildInsertEdgeNoReturn,
@@ -155,7 +158,12 @@ export type CommonOperationStrategy = Readonly<{
   buildGetEdges: (graphId: string, ids: readonly string[]) => SQL;
   buildUpdateEdge: (params: UpdateEdgeParams, timestamp: string) => SQL;
   buildDeleteEdge: (params: DeleteEdgeParams, timestamp: string) => SQL;
+  buildDeleteEdgesBatch: (
+    params: DeleteEdgesBatchParams,
+    timestamp: string,
+  ) => SQL;
   buildHardDeleteEdge: (params: HardDeleteEdgeParams) => SQL;
+  buildHardDeleteEdgesBatch: (params: DeleteEdgesBatchParams) => SQL;
   buildHardDeleteEdgesByNode: (
     graphId: string,
     nodeKind: string,
@@ -244,7 +252,9 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetEdges,
   buildUpdateEdge,
   buildDeleteEdge,
+  buildDeleteEdgesBatch,
   buildHardDeleteEdge,
+  buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
   buildCountEdgesFrom,
   buildEdgeExistsBetween,
