@@ -1,6 +1,7 @@
 import { type SQL } from "drizzle-orm";
 import { type PgDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
 
+import { shouldForceCustomPlan } from "../../../query/sql-intent";
 import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
@@ -28,6 +29,15 @@ type PgQueryResult = Readonly<{
  */
 type PgQueryClient = Readonly<{
   query: (sqlText: string, params: readonly unknown[]) => Promise<PgQueryResult>;
+  /**
+   * Executes WITHOUT a named server-side prepared statement, so the
+   * server plans against the actual parameter values on every call.
+   * Used for statements marked `markForceCustomPlan` (see sql-intent).
+   */
+  queryUnnamed: (
+    sqlText: string,
+    params: readonly unknown[],
+  ) => Promise<PgQueryResult>;
 }>;
 
 /**
@@ -265,6 +275,13 @@ function wrapNodePgClient(
       });
       return { rows: normalizeRows(result.rows) };
     },
+    async queryUnnamed(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<PgQueryResult> {
+      const result = await client.query(sqlText, params);
+      return { rows: normalizeRows(result.rows) };
+    },
   };
 }
 
@@ -279,29 +296,37 @@ function wrapNodePgClient(
  * downstream stays identical.
  */
 function wrapNodePgClientUnnamed(client: NodePgClient): PgQueryClient {
+  async function queryUnnamed(
+    sqlText: string,
+    params: readonly unknown[],
+  ): Promise<PgQueryResult> {
+    const result = await client.query(sqlText, params);
+    return { rows: normalizeRows(result.rows) };
+  }
   return {
-    async query(
-      sqlText: string,
-      params: readonly unknown[],
-    ): Promise<PgQueryResult> {
-      const result = await client.query(sqlText, params);
-      return { rows: normalizeRows(result.rows) };
-    },
+    query: queryUnnamed,
+    queryUnnamed,
   };
 }
 
 function adaptPostgresJsClient(sql: PostgresJsClient): PgQueryClient {
+  async function query(
+    sqlText: string,
+    params: readonly unknown[],
+  ): Promise<PgQueryResult> {
+    // postgres-js handles its own statement preparation internally
+    // (controlled by the `prepare` connection option, default true),
+    // so we don't need to name statements here ourselves.
+    const rows = await sql.unsafe(sqlText, params);
+    return { rows };
+  }
   return {
-    async query(
-      sqlText: string,
-      params: readonly unknown[],
-    ): Promise<PgQueryResult> {
-      // postgres-js handles its own statement preparation internally
-      // (controlled by the `prepare` connection option, default true),
-      // so we don't need to name statements here ourselves.
-      const rows = await sql.unsafe(sqlText, params);
-      return { rows };
-    },
+    query,
+    // postgres-js exposes no per-call opt-out of its internal
+    // preparation through `.unsafe`, so custom-plan-preferring
+    // statements take the same path; the generic-plan hazard on this
+    // driver is governed by its `prepare` connection option.
+    queryUnnamed: query,
   };
 }
 
@@ -479,6 +504,13 @@ export function createPostgresExecutionAdapter(
       // the server-side prepared-statement path because the wrapped
       // client assigns each unique SQL a stable statement name.
       const compiled = compile(query);
+      if (shouldForceCustomPlan(query)) {
+        const result = await pgQueryClient.queryUnnamed(
+          compiled.sql,
+          compiled.params,
+        );
+        return result.rows as readonly TRow[];
+      }
       return executeCompiled<TRow>(compiled);
     },
     executeCompiled,
