@@ -185,6 +185,8 @@ const EDGE_INSERT_PARAM_COUNT = 12;
 const GET_NODES_FIXED_PARAM_COUNT = 2;
 const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
+const FULLTEXT_UPSERT_PARAM_COUNT = 6;
+const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
 const UNIQUE_INSERT_PARAM_COUNT = 6;
 
 /**
@@ -195,6 +197,10 @@ const UNIQUE_INSERT_PARAM_COUNT = 6;
 export type SqliteBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  /** Rows per fulltext batch upsert (6 binds per row on FTS5). */
+  fulltextUpsertBatchSize: number;
+  /** Node ids per fulltext batch delete (2 fixed binds + one per id). */
+  fulltextDeleteChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
@@ -214,6 +220,14 @@ export function computeSqliteBatchChunkSizes(
     checkUniqueBatchChunkSize: Math.max(
       1,
       maxBindParameters - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+    ),
+    fulltextUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / FULLTEXT_UPSERT_PARAM_COUNT),
+    ),
+    fulltextDeleteChunkSize: Math.max(
+      1,
+      maxBindParameters - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
     ),
     edgeInsertBatchSize: Math.max(
       1,
@@ -529,10 +543,11 @@ function createSqliteOperationBackend(
     });
   }
 
+  const batchConfig = computeSqliteBatchChunkSizes(
+    capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
+  );
   const commonBackend = createCommonOperationBackend({
-    batchConfig: computeSqliteBatchChunkSizes(
-      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-    ),
+    batchConfig,
     execution: {
       execAll,
       execGet,
@@ -815,12 +830,20 @@ function createSqliteOperationBackend(
     ): Promise<void> {
       if (params.rows.length === 0) return;
       const timestamp = nowIso();
-      const statements = operationStrategy.buildUpsertFulltextBatch(
-        params,
-        timestamp,
-      );
-      for (const stmt of statements) {
-        await execRun(stmt);
+      // The strategy emits ONE statement over every row it is given, so
+      // the bind budget is enforced here — same contract as node/edge
+      // batch inserts.
+      for (const rows of chunkArray(
+        params.rows,
+        batchConfig.fulltextUpsertBatchSize,
+      )) {
+        const statements = operationStrategy.buildUpsertFulltextBatch(
+          { ...params, rows },
+          timestamp,
+        );
+        for (const stmt of statements) {
+          await execRun(stmt);
+        }
       }
     },
 
@@ -828,9 +851,17 @@ function createSqliteOperationBackend(
       params: DeleteFulltextBatchParams,
     ): Promise<void> {
       if (params.nodeIds.length === 0) return;
-      const statements = operationStrategy.buildDeleteFulltextBatch(params);
-      for (const stmt of statements) {
-        await execRun(stmt);
+      for (const nodeIds of chunkArray(
+        params.nodeIds,
+        batchConfig.fulltextDeleteChunkSize,
+      )) {
+        const statements = operationStrategy.buildDeleteFulltextBatch({
+          ...params,
+          nodeIds,
+        });
+        for (const stmt of statements) {
+          await execRun(stmt);
+        }
       }
     },
 

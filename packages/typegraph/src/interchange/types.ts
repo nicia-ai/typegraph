@@ -138,8 +138,18 @@ export const ImportOptionsSchema = z.object({
   onUnknownProperty: UnknownPropertyStrategySchema.default("error"),
   /** Whether to validate that edge endpoints exist */
   validateReferences: z.boolean().default(true),
-  /** Number of items to process in each batch */
-  batchSize: z.number().int().positive().default(100),
+  /**
+   * Number of items to process in each batch. Each batch pays fixed
+   * per-round-trip costs (existence probe, unique check, one multi-row
+   * insert), so undersized batches dominate import time on client/server
+   * engines: measured on PostgreSQL, 20k nodes + 5k edges import in
+   * 1,515ms at 100 vs 781ms at 1,000. Above ~1,000 the multi-row insert
+   * itself dominates and larger batches stop paying; SQLite is
+   * insensitive to the value (in-process, no round trips). The backend
+   * further splits inserts by its bind-parameter budget, so a large
+   * batch never overruns driver limits.
+   */
+  batchSize: z.number().int().positive().default(1000),
   /**
    * Refresh planner statistics (ANALYZE) after an import that created or
    * updated rows. Bulk loads otherwise run against stale statistics until
@@ -148,7 +158,15 @@ export const ImportOptionsSchema = z.object({
   refreshStatistics: z.boolean().optional(),
 });
 
-export type ImportOptions = z.infer<typeof ImportOptionsSchema>;
+/**
+ * Caller-facing options: fields with schema defaults are optional.
+ * `importGraph` parses these once at its boundary; internal stages
+ * consume {@link ResolvedImportOptions} with every default applied.
+ */
+export type ImportOptions = z.input<typeof ImportOptionsSchema>;
+
+/** {@link ImportOptions} after schema parsing — all defaults resolved. */
+export type ResolvedImportOptions = z.infer<typeof ImportOptionsSchema>;
 
 // ============================================================
 // Graph Data Source

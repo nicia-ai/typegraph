@@ -139,7 +139,7 @@ const result = await importGraph(store, data, {
   onConflict: "update",
   onUnknownProperty: "strip",
   validateReferences: true,
-  batchSize: 100,
+  batchSize: 1000,
 });
 
 if (result.success) {
@@ -158,7 +158,7 @@ if (result.success) {
 | `onConflict` | `"skip" \| "update" \| "error"` | required | How to handle existing entities |
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
-| `batchSize` | `number` | `100` | Batch size for database operations |
+| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. |
 
 ### Conflict Strategies
 

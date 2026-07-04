@@ -39,9 +39,11 @@ import {
   type GraphData,
   type ImportError,
   type ImportOptions,
+  ImportOptionsSchema,
   type ImportResult,
   type InterchangeEdge,
   type InterchangeNode,
+  type ResolvedImportOptions,
   type UnknownPropertyStrategy,
 } from "./types";
 
@@ -73,8 +75,12 @@ import {
 export async function importGraph<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
-  options: ImportOptions,
+  rawOptions: ImportOptions,
 ): Promise<ImportResult> {
+  // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
+  // only exist after parsing, and every internal stage reads them
+  // directly.
+  const options = ImportOptionsSchema.parse(rawOptions);
   const result: ImportResult = {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
@@ -221,7 +227,7 @@ async function processNodes(
   registry: KindRegistry,
   nodes: readonly InterchangeNode[],
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
@@ -309,7 +315,7 @@ async function processNodeSlice(
   registry: KindRegistry,
   batch: readonly InterchangeNode[],
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
@@ -591,7 +597,7 @@ async function processNode(
   registry: KindRegistry,
   node: InterchangeNode,
   schemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   lock: GraphWriteLock,
 ): Promise<ProcessResult> {
   // Validate kind exists
@@ -719,7 +725,7 @@ async function processEdges(
   edges: readonly InterchangeEdge[],
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
@@ -793,7 +799,7 @@ async function processEdgeSlice(
   batch: readonly InterchangeEdge[],
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
@@ -1032,7 +1038,7 @@ async function processEdge(
   edge: InterchangeEdge,
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ImportOptions,
+  options: ResolvedImportOptions,
   importedNodeIds: Set<string>,
 ): Promise<ProcessResult> {
   // Validate edge kind exists
