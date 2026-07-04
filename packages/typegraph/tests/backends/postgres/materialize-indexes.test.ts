@@ -163,33 +163,50 @@ describe("Postgres store.materializeIndexes — CONCURRENTLY", () => {
     ).toBe(true);
   });
 
-  it("two concurrent callers race without producing failed results", async (ctx) => {
-    // Two fresh stores fire materializeIndexes simultaneously against
-    // an empty status table. The implementation reads status, runs
-    // CIC IF NOT EXISTS, then upserts status. Postgres serializes
-    // the CIC builds via SHARE UPDATE EXCLUSIVE; the second sees IF
-    // NOT EXISTS and no-ops. Status upserts use ON CONFLICT DO UPDATE.
-    // Net: neither caller's result contains `failed`.
+  it("two concurrent callers serialize through the build claim", async (ctx) => {
+    // Two fresh stores fire materializeIndexes simultaneously against an
+    // empty status table. The cross-caller claim serializes same-index
+    // CONCURRENTLY builds (two same-name expression-index CICs deadlock —
+    // no safe-snapshot exemption), so per index EXACTLY ONE caller
+    // creates and the other settles as alreadyMaterialized after
+    // re-claiming. Repeated to deny the old code its timing luck; the
+    // automatic post-create ANALYZE (re-enabled with the claim) runs in
+    // every iteration — the timing shift that originally surfaced the
+    // deadlock.
     const { pool } = requirePostgres(ctx);
-    const graph = buildGraph();
-    const backendA = createPostgresBackend(drizzle(pool));
-    const backendB = createPostgresBackend(drizzle(pool));
-    const [storeA] = await createStoreWithSchema(graph, backendA);
-    const [storeB] = await createStoreWithSchema(graph, backendB);
+    for (let iteration = 0; iteration < 3; iteration++) {
+      await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
+      const leaked = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'idx_tg_%'`,
+      );
+      for (const { indexname } of leaked.rows) {
+        await pool.query(`DROP INDEX IF EXISTS "${indexname}"`);
+      }
 
-    const [a, b] = await Promise.all([
-      storeA.materializeIndexes(),
-      storeB.materializeIndexes(),
-    ]);
+      const graph = buildGraph();
+      const backendA = createPostgresBackend(drizzle(pool));
+      const backendB = createPostgresBackend(drizzle(pool));
+      const [storeA] = await createStoreWithSchema(graph, backendA);
+      const [storeB] = await createStoreWithSchema(graph, backendB);
 
-    for (const entry of [...a.results, ...b.results]) {
-      expect(entry.status).not.toBe("failed");
+      const [a, b] = await Promise.all([
+        storeA.materializeIndexes(),
+        storeB.materializeIndexes(),
+      ]);
+
+      for (const [index, entryA] of a.results.entries()) {
+        const entryB = b.results[index]!;
+        const statuses = [entryA.status, entryB.status].toSorted();
+        expect(statuses, `iteration ${iteration}: ${entryA.indexName}`).toEqual(
+          ["alreadyMaterialized", "created"],
+        );
+      }
+
+      const created = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'idx_tg_%'`,
+      );
+      expect(created.rows.length).toBe(2);
     }
-
-    const created = await pool.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'idx_tg_%'`,
-    );
-    expect(created.rows.length).toBe(2);
   });
 
   it("does not hold AccessExclusiveLock on typegraph_nodes during materialization", async (ctx) => {
@@ -332,3 +349,216 @@ describe("Postgres store.materializeIndexes — GIN-family methods", () => {
 
 // Used to keep the import linter happy when the suite skips entirely.
 void generatePostgresDDL;
+
+describe("Postgres materialize build claim", () => {
+  it("waits for a live claim holder, then converges without rebuilding", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    // First materialize normally to learn the two index names and seed
+    // valid status rows, then wipe status to stage the contention.
+    const first = await store.materializeIndexes();
+    const indexNames = first.results.map((entry) => entry.indexName);
+    const claimedName = indexNames[0]!;
+
+    // Stage: another materializer "holds" a live claim on index 0 and has
+    // NOT yet recorded a result. Rows for both indexes are wiped so this
+    // caller must build both.
+    await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
+    for (const indexname of indexNames) {
+      await pool.query(`DROP INDEX IF EXISTS "${indexname}"`);
+    }
+    await pool.query(
+      `INSERT INTO typegraph_index_materializations
+         (index_name, graph_id, entity, kind, signature, schema_version,
+          last_attempted_at, building_since, claim_token)
+       VALUES ($1, 'pg_materialize_test', 'node', 'Person', 'foreign', 1,
+               now(), now(), 'other-holder')`,
+      [claimedName],
+    );
+
+    // The "holder" finishes 400ms in: it creates the physical index,
+    // records success with the REAL signature, and releases the claim —
+    // exactly what a winning materializer does.
+    const holderFinishes = (async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 400);
+      });
+      const holderBackend = createPostgresBackend(drizzle(pool));
+      const [holderStore] = await createStoreWithSchema(graph, holderBackend);
+      // Clear the fake claim so the holder-run can claim and build.
+      await pool.query(
+        `UPDATE typegraph_index_materializations
+         SET building_since = NULL, claim_token = NULL
+         WHERE index_name = $1`,
+        [claimedName],
+      );
+      await holderStore.materializeIndexes();
+    })();
+
+    const [result] = await Promise.all([
+      store.materializeIndexes(),
+      holderFinishes,
+    ]);
+
+    // This caller never failed and never double-built: the claimed index
+    // settles as alreadyMaterialized (built by the "holder") or created
+    // (if this caller won the post-release claim race) — either way both
+    // indexes exist exactly once and no entry failed.
+    for (const entry of result.results) {
+      expect(entry.status).not.toBe("failed");
+    }
+    const created = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'idx_tg_%'`,
+    );
+    expect(created.rows.length).toBe(2);
+  });
+
+  it("takes over a stale (lease-expired) claim immediately", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const first = await store.materializeIndexes();
+    const staleName = first.results[0]!.indexName;
+
+    await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
+    for (const entry of first.results) {
+      await pool.query(`DROP INDEX IF EXISTS "${entry.indexName}"`);
+    }
+    // A crashed materializer's claim: 16 minutes old, past the 15-minute
+    // lease.
+    await pool.query(
+      `INSERT INTO typegraph_index_materializations
+         (index_name, graph_id, entity, kind, signature, schema_version,
+          last_attempted_at, building_since, claim_token)
+       VALUES ($1, 'pg_materialize_test', 'node', 'Person', 'crashed', 1,
+               now() - interval '16 minutes', now() - interval '16 minutes',
+               'crashed-holder')`,
+      [staleName],
+    );
+
+    const startedAt = Date.now();
+    const result = await store.materializeIndexes();
+    const elapsed = Date.now() - startedAt;
+
+    for (const entry of result.results) {
+      expect(entry.status).toBe("created");
+    }
+    // Takeover is immediate — no lease-length wait.
+    expect(elapsed).toBeLessThan(30_000);
+    const claim = await pool.query<{ claim_token: string | null }>(
+      `SELECT claim_token FROM typegraph_index_materializations WHERE index_name = $1`,
+      [staleName],
+    );
+    expect(claim.rows[0]?.claim_token).toBeNull();
+  });
+
+  it("self-heals an INVALID leftover from an interrupted CONCURRENTLY build", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const first = await store.materializeIndexes();
+    const indexName = first.results[0]!.indexName;
+
+    await pool.query(`TRUNCATE typegraph_index_materializations CASCADE`);
+    for (const entry of first.results) {
+      await pool.query(`DROP INDEX IF EXISTS "${entry.indexName}"`);
+    }
+
+    // Manufacture the leftover honestly: seed duplicate rows, then let a
+    // UNIQUE CONCURRENTLY build with the declaration's name fail — it
+    // leaves an INVALID index with that name behind, the exact state a
+    // crashed materializer produces.
+    await store.nodes.Person.create({ email: "dup@example.com", name: "a" });
+    await store.nodes.Person.create({ email: "dup@example.com", name: "b" });
+    await expect(
+      pool.query(
+        `CREATE UNIQUE INDEX CONCURRENTLY "${indexName}" ON typegraph_nodes ((props ->> 'email'))`,
+      ),
+    ).rejects.toThrow();
+    const invalidBefore = await pool.query<{ indisvalid: boolean }>(
+      `SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(invalidBefore.rows[0]?.indisvalid).toBe(false);
+
+    // CREATE INDEX CONCURRENTLY IF NOT EXISTS would silently no-op on the
+    // invalid name; the claim-holding materializer must drop and rebuild.
+    const result = await store.materializeIndexes();
+    const healed = result.results.find(
+      (entry) => entry.indexName === indexName,
+    );
+    expect(healed?.status).toBe("created");
+
+    const validAfter = await pool.query<{ indisvalid: boolean }>(
+      `SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(validAfter.rows[0]?.indisvalid).toBe(true);
+  });
+
+  it("rebuilds a poisoned success: valid status row over an INVALID index", async (ctx) => {
+    // The older failure mode: a recorded SUCCESS whose physical index is
+    // invalid (a run interrupted after IF NOT EXISTS silently kept a
+    // leftover, or a pre-claim-protocol run recorded over one). The
+    // status row is NOT wiped here — alreadyMaterialized must not be
+    // trusted over an invalid index.
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const first = await store.materializeIndexes();
+    const indexName = first.results[0]!.indexName;
+
+    // Keep the success row; poison only the physical index.
+    await pool.query(`DROP INDEX IF EXISTS "${indexName}"`);
+    await store.nodes.Person.create({ email: "p@example.com", name: "a" });
+    await store.nodes.Person.create({ email: "p@example.com", name: "b" });
+    await expect(
+      pool.query(
+        `CREATE UNIQUE INDEX CONCURRENTLY "${indexName}" ON typegraph_nodes ((props ->> 'email'))`,
+      ),
+    ).rejects.toThrow();
+
+    const result = await store.materializeIndexes();
+    const healed = result.results.find(
+      (entry) => entry.indexName === indexName,
+    );
+    expect(healed?.status).toBe("created");
+    const validAfter = await pool.query<{ indisvalid: boolean }>(
+      `SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(validAfter.rows[0]?.indisvalid).toBe(true);
+  });
+
+  it("re-enables the automatic post-create ANALYZE on Postgres", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const statements: string[] = [];
+    const backend = createPostgresBackend(
+      drizzle(pool, {
+        logger: {
+          logQuery(query: string) {
+            statements.push(query);
+          },
+        },
+      }),
+    );
+    const graph = buildGraph();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    statements.length = 0;
+    const result = await store.materializeIndexes();
+    expect(result.results.some((entry) => entry.status === "created")).toBe(
+      true,
+    );
+    expect(
+      statements.some((statement) => statement.includes("ANALYZE")),
+      "post-create statistics refresh must run under the claim protocol",
+    ).toBe(true);
+  });
+});

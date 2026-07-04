@@ -740,6 +740,30 @@ export type FulltextSearchResult = Readonly<{
  * `materializedAt` is null until the first successful CREATE INDEX
  * completes; `lastAttemptedAt` is always set, even on failure.
  */
+/**
+ * Parameters for atomically claiming an index build (see
+ * `claimIndexMaterialization`). The declaration fields ride along so a
+ * fresh claim row is honest while the build is in flight.
+ */
+export type ClaimIndexMaterializationParams = Readonly<{
+  indexName: string;
+  graphId: string;
+  entity: IndexEntity;
+  kind: string;
+  signature: string;
+  schemaVersion: number;
+  /** Opaque claim identity; release is token-guarded. */
+  token: string;
+  /** A claim older than this is stale and may be taken over. */
+  leaseMs: number;
+}>;
+
+/** Parameters for releasing a build claim (token-guarded). */
+export type ReleaseIndexMaterializationClaimParams = Readonly<{
+  indexName: string;
+  token: string;
+}>;
+
 export type IndexMaterializationRow = Readonly<{
   indexName: string;
   graphId: string;
@@ -1165,6 +1189,21 @@ export type GraphBackend = Readonly<{
    */
   recordIndexMaterialization?: (
     params: RecordIndexMaterializationParams,
+  ) => Promise<void>;
+  /**
+   * Atomically claims the build of one index across every materializer
+   * (process- and pool-safe: the status row's own atomicity is the mutex).
+   * Returns true when this caller now holds the claim. Backends whose
+   * index builds cannot deadlock across callers (SQLite: engine-level
+   * write serialization, no CONCURRENTLY) omit it; `materializeIndexes`
+   * then builds without a claim, exactly as before.
+   */
+  claimIndexMaterialization?: (
+    params: ClaimIndexMaterializationParams,
+  ) => Promise<boolean>;
+  /** Releases a claim taken by `claimIndexMaterialization` (token-guarded). */
+  releaseIndexMaterializationClaim?: (
+    params: ReleaseIndexMaterializationClaimParams,
   ) => Promise<void>;
 
   // === Contribution Materialization (#135 — durable strategy-owned

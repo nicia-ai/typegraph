@@ -63,6 +63,7 @@ import { isMissingTableError } from "../../utils/sql-errors";
 import {
   type AdoptedTransaction,
   type BackendCapabilities,
+  type ClaimIndexMaterializationParams,
   type CommitSchemaVersionParams,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
@@ -83,6 +84,7 @@ import {
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
+  type ReleaseIndexMaterializationClaimParams,
   type SchemaVersionRow,
   type SetActiveVersionParams,
   type TransactionBackend,
@@ -577,6 +579,71 @@ export function createPostgresBackend(
       await db.execute(
         sql.raw(generatePgCreateTableSQL(tables.indexMaterializations)),
       );
+      // Deployments created before the build-claim columns existed get
+      // them additively; fresh installs already have them from the
+      // CREATE TABLE above.
+      const tableName = getTableName(tables.indexMaterializations);
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
+        ),
+      );
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
+        ),
+      );
+    },
+
+    async claimIndexMaterialization(
+      params: ClaimIndexMaterializationParams,
+    ): Promise<boolean> {
+      const t = tables.indexMaterializations;
+      // Atomic claim: insert a fresh claim row, or take over an existing
+      // row only when no live claim is on it (NULL or lease-expired
+      // building_since). The WHERE on the conflict update makes losing
+      // racers see zero returned rows — the row's own atomicity is the
+      // mutex, so this works identically through pools and across
+      // processes (unlike session advisory locks, which pin a
+      // connection).
+      const rows = await db.execute(sql`
+        INSERT INTO ${t} (
+          "index_name", "graph_id", "entity", "kind", "signature",
+          "schema_version", "last_attempted_at", "building_since",
+          "claim_token"
+        )
+        VALUES (
+          ${params.indexName}, ${params.graphId}, ${params.entity},
+          ${params.kind}, ${params.signature}, ${params.schemaVersion},
+          now(), now(), ${params.token}
+        )
+        ON CONFLICT ("index_name") DO UPDATE SET
+          "building_since" = now(),
+          "claim_token" = EXCLUDED."claim_token"
+        WHERE ${t}."building_since" IS NULL
+           OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
+        RETURNING "index_name"
+      `);
+      const result = rows;
+      const returned =
+        Array.isArray(result) ? result : (
+          ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
+        );
+      return returned.length > 0;
+    },
+
+    async releaseIndexMaterializationClaim(
+      params: ReleaseIndexMaterializationClaimParams,
+    ): Promise<void> {
+      const t = tables.indexMaterializations;
+      // Token-guarded: a lease-expired claim taken over by another
+      // materializer must not be released by the original holder.
+      await db.execute(sql`
+        UPDATE ${t}
+        SET "building_since" = NULL, "claim_token" = NULL
+        WHERE "index_name" = ${params.indexName}
+          AND "claim_token" = ${params.token}
+      `);
     },
 
     async getIndexMaterialization(
