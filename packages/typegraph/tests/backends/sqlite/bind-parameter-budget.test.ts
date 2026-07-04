@@ -103,6 +103,8 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(999)).toEqual({
       checkUniqueBatchChunkSize: 996,
       edgeInsertBatchSize: 83,
+      fulltextUpsertBatchSize: 166,
+      fulltextDeleteChunkSize: 997,
       getEdgesChunkSize: 998,
       getNodesChunkSize: 997,
       nodeInsertBatchSize: 111,
@@ -114,6 +116,8 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(MODERN_BETTER_SQLITE3_BUDGET)).toEqual({
       checkUniqueBatchChunkSize: 32_763,
       edgeInsertBatchSize: 2730,
+      fulltextUpsertBatchSize: 5461,
+      fulltextDeleteChunkSize: 32_764,
       getEdgesChunkSize: 32_765,
       getNodesChunkSize: 32_764,
       nodeInsertBatchSize: 3640,
@@ -121,10 +125,19 @@ describe("computeSqliteBatchChunkSizes", () => {
     });
   });
 
+  it("keeps fulltext batches within D1's ~100-bind cap", () => {
+    const sizes = computeSqliteBatchChunkSizes(100);
+    // 6 binds per fulltext row: 16 rows/statement fits, 17 would not.
+    expect(sizes.fulltextUpsertBatchSize).toBe(16);
+    expect(sizes.fulltextDeleteChunkSize).toBe(98);
+  });
+
   it("never returns a chunk size below one", () => {
     expect(computeSqliteBatchChunkSizes(1)).toEqual({
       checkUniqueBatchChunkSize: 1,
       edgeInsertBatchSize: 1,
+      fulltextUpsertBatchSize: 1,
+      fulltextDeleteChunkSize: 1,
       getEdgesChunkSize: 1,
       getNodesChunkSize: 1,
       nodeInsertBatchSize: 1,

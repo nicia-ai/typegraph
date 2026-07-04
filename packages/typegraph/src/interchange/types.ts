@@ -158,7 +158,15 @@ export const ImportOptionsSchema = z.object({
   refreshStatistics: z.boolean().optional(),
 });
 
-export type ImportOptions = z.infer<typeof ImportOptionsSchema>;
+/**
+ * Caller-facing options: fields with schema defaults are optional.
+ * `importGraph` parses these once at its boundary; internal stages
+ * consume {@link ResolvedImportOptions} with every default applied.
+ */
+export type ImportOptions = z.input<typeof ImportOptionsSchema>;
+
+/** {@link ImportOptions} after schema parsing — all defaults resolved. */
+export type ResolvedImportOptions = z.infer<typeof ImportOptionsSchema>;
 
 // ============================================================
 // Graph Data Source

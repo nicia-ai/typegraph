@@ -183,6 +183,53 @@ describe("importGraph batching", () => {
     );
   });
 
+  it("resolves schema defaults for direct calls that omit them", async () => {
+    // importGraph parses its options at the boundary; a caller passing
+    // only `onConflict` (the docs' minimal example) must get the
+    // batchSize default applied — previously options.batchSize was read
+    // raw and the import crashed on `undefined`.
+    await withCountedStore(async (store, counts) => {
+      const result = await importGraph(
+        store,
+        payload(Array.from({ length: 1500 }, (_, index) => personNode(index))),
+        { onConflict: "error" },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.nodes.created).toBe(1500);
+      // 1500 rows at the 1000-row default = exactly two slices.
+      expect(counts.insertNodesBatch).toBe(2);
+    });
+  });
+
+  it("chunks fulltext sync by the driver bind budget on large slices", async () => {
+    // The FTS5 batch upsert emits ONE statement over every row in the
+    // import slice (6 binds per row). better-sqlite3's budget is 32,766,
+    // so a 6,000-row searchable slice (36,000 binds) overflowed the
+    // statement before the backend wrappers chunked by bind budget.
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(buildGraph(), backend);
+      const noteCount = 6000;
+      const result = await importGraph(
+        store,
+        payload(
+          Array.from({ length: noteCount }, (_, index) => ({
+            kind: "Note",
+            id: `note-${index}`,
+            properties: { body: `searchable body ${index}` },
+          })),
+        ),
+        { onConflict: "error", batchSize: noteCount },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.nodes.created).toBe(noteCount);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("imports nodes through batched probes, inserts, and side effects", async () => {
     await withCountedStore(async (store, counts) => {
       const result = await importGraph(

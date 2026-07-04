@@ -256,6 +256,16 @@ const POSTGRES_GET_EDGES_ID_CHUNK_SIZE = Math.max(
   1,
   POSTGRES_MAX_BIND_PARAMETERS - 1,
 );
+const FULLTEXT_UPSERT_PARAM_COUNT = 6;
+const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
+const POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE = Math.max(
+  1,
+  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / FULLTEXT_UPSERT_PARAM_COUNT),
+);
+const POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE = Math.max(
+  1,
+  POSTGRES_MAX_BIND_PARAMETERS - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
+);
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
 const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
   1,
@@ -1445,12 +1455,20 @@ function createPostgresOperationBackend(
     ): Promise<void> {
       if (params.rows.length === 0) return;
       const timestamp = nowIso();
-      const statements = operationStrategy.buildUpsertFulltextBatch(
-        params,
-        timestamp,
-      );
-      for (const stmt of statements) {
-        await execRun(stmt);
+      // The strategy emits ONE statement over every row it is given, so
+      // the bind budget is enforced here — same contract as node/edge
+      // batch inserts.
+      for (const rows of chunkArray(
+        params.rows,
+        POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE,
+      )) {
+        const statements = operationStrategy.buildUpsertFulltextBatch(
+          { ...params, rows },
+          timestamp,
+        );
+        for (const stmt of statements) {
+          await execRun(stmt);
+        }
       }
     },
 
@@ -1458,9 +1476,17 @@ function createPostgresOperationBackend(
       params: DeleteFulltextBatchParams,
     ): Promise<void> {
       if (params.nodeIds.length === 0) return;
-      const statements = operationStrategy.buildDeleteFulltextBatch(params);
-      for (const stmt of statements) {
-        await execRun(stmt);
+      for (const nodeIds of chunkArray(
+        params.nodeIds,
+        POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE,
+      )) {
+        const statements = operationStrategy.buildDeleteFulltextBatch({
+          ...params,
+          nodeIds,
+        });
+        for (const stmt of statements) {
+          await execRun(stmt);
+        }
       }
     },
 
