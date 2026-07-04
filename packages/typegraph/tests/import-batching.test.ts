@@ -29,6 +29,7 @@ import {
   type GraphData,
   importGraph,
   type ImportOptions,
+  ImportOptionsSchema,
 } from "../src/interchange";
 
 const Person = defineNode("Person", {
@@ -176,6 +177,12 @@ async function withCountedStore<T>(
 const NODE_COUNT = 50;
 
 describe("importGraph batching", () => {
+  it("defaults batchSize to 1000 (round-trip cost dominates small batches)", () => {
+    expect(ImportOptionsSchema.parse({ onConflict: "error" }).batchSize).toBe(
+      1000,
+    );
+  });
+
   it("imports nodes through batched probes, inserts, and side effects", async () => {
     await withCountedStore(async (store, counts) => {
       const result = await importGraph(
