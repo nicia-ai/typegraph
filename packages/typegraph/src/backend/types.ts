@@ -452,16 +452,16 @@ export type VectorSearchParams = Readonly<{
   limit: number;
   minScore?: number;
   /**
-   * Subquery of eligible node ids (single column). When present, the
-   * search statement computes top-k over this candidate set — the store
-   * passes its compiled current-read query here so `where` predicates,
-   * subclass expansion, and valid-time currency all push down into the
-   * search SQL. Exact on engines whose search form takes the filter
-   * inside retrieval (pgvector, sqlite-vec, tsvector, FTS5); libSQL's
-   * DiskANN cannot pre-filter, so it post-filters an over-fetched ANN
-   * set and recall against the candidate set is bounded by that
-   * headroom. When absent, the backend restricts to live
-   * (non-tombstoned) nodes of the kind.
+   * Subquery of eligible node ids (single column, exposed as `node_id`).
+   * When present, the search statement computes top-k over this candidate
+   * set — the store passes its compiled current-read query here so
+   * `where` predicates push down into the search SQL. Exact on engines
+   * whose search form takes the filter inside retrieval (pgvector,
+   * sqlite-vec, tsvector, FTS5); libSQL's DiskANN cannot pre-filter, so
+   * it post-filters an over-fetched ANN set and recall against the
+   * candidate set is bounded by that headroom. When absent, the backend
+   * restricts to CURRENT nodes of the kind — non-tombstoned AND inside
+   * their validity window — matching a `current` read.
    */
   candidates?: SQL;
   /**
@@ -689,8 +689,9 @@ export type FulltextSearchParams = Readonly<{
    * inside retrieval (pgvector, sqlite-vec, tsvector, FTS5); libSQL's
    * DiskANN cannot pre-filter, so it post-filters an over-fetched ANN
    * set and recall against the candidate set is bounded by that
-   * headroom. When absent, the backend restricts to live
-   * (non-tombstoned) nodes of the kind.
+   * headroom. When absent, the backend restricts to CURRENT nodes of
+   * the kind — non-tombstoned AND inside their validity window —
+   * matching a `current` read.
    */
   candidates?: SQL;
   /**
@@ -1074,10 +1075,11 @@ export type GraphBackend = Readonly<{
   deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
   /**
    * KNN search over one `(nodeKind, fieldPath)` slot. Top-k is computed
-   * over LIVE nodes only: the search SQL constrains candidates to
-   * non-tombstoned node ids, so index drift (embedding rows whose node was
-   * deleted outside the store pipeline) can neither surface nor crowd live
-   * rows out of the top-k. Exact on pgvector >= 0.8 (HNSW via
+   * over CURRENT nodes only — non-tombstoned AND inside their validity
+   * window, matching a `current` read — so index drift (embedding rows
+   * whose node was deleted or expired outside the store pipeline) can
+   * neither surface nor crowd current rows out of the top-k. Custom
+   * backends implementing this member must honor the same contract. Exact on pgvector >= 0.8 (HNSW via
    * `hnsw.iterative_scan = strict_order`; IVFFlat via
    * `ivfflat.iterative_scan = relaxed_order` plus a re-sort of the
    * bounded set; probe-bounded below 0.8) and sqlite-vec;
@@ -1116,8 +1118,10 @@ export type GraphBackend = Readonly<{
   deleteFulltextBatch?: (params: DeleteFulltextBatchParams) => Promise<void>;
   /**
    * Ranked fulltext search over one node kind. Like `vectorSearch`, top-k
-   * is computed over LIVE nodes only (exact on both engines — plain WHERE,
-   * no top-k table function involved).
+   * is computed over CURRENT nodes only — non-tombstoned AND inside their
+   * validity window (exact on both engines — plain WHERE, no top-k table
+   * function involved). Custom backends implementing this member must
+   * honor the same contract.
    */
   fulltextSearch?: (
     params: FulltextSearchParams,
