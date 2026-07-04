@@ -114,8 +114,10 @@ export type FulltextSearchOptions<N extends NodeType = NodeType> =
       /** Query parser mode. Default: "websearch". */
       mode?: FulltextQueryMode;
       /**
-       * Language override for query parsing. Default: per-row language as
-       * stored at insert time.
+       * Language override for query parsing. Default: the kind's
+       * declared language (the same config rows were indexed with),
+       * which keeps the parsed tsquery a plan-time constant on
+       * PostgreSQL so the GIN index can serve the match.
        */
       language?: string;
       /** Minimum relevance score to include in results. */

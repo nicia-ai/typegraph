@@ -172,7 +172,11 @@ type MatchesOptions = Readonly<{
    */
   mode?: FulltextQueryMode;
   /**
-   * Language override. Default: per-row language as stored at insert time.
+   * Language override for query parsing. Default: the kind's declared
+   * language when every kind in the alias shares one (a plan-time
+   * constant, so PostgreSQL can serve the match from the GIN index);
+   * mixed-language subclass aliases fall back to the per-row language
+   * column.
    */
   language?: string;
   /** Minimum relevance score to include. */

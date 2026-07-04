@@ -669,7 +669,10 @@ export type FulltextSearchParams = Readonly<{
   /** How to parse `query`. Default: "websearch". */
   mode?: FulltextQueryMode;
   /**
-   * Language override. Default: per-row language (as stored at insert time).
+   * Language for query parsing. The store facade resolves the kind's
+   * declared language and passes it here, so the tsquery is a plan-time
+   * constant (GIN-servable); when absent the backend falls back to the
+   * per-row language column.
    * Postgres: passed as the regconfig to `to_tsquery` / `websearch_to_tsquery`.
    * SQLite: informational only (FTS5 tokenizer is fixed at table-create time).
    */
