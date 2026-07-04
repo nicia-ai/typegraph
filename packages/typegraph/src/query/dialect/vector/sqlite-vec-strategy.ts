@@ -259,6 +259,12 @@ export const sqliteVecStrategy: VectorStrategy = {
     ];
   },
 
+  // vec0's KNN is brute force in C — exact by construction (the
+  // "index" is a partitioned scan, not a graph) — and the non-indexed
+  // fallback below is a plain SQL scan. The compiler may therefore
+  // route the NON-approximate `.similarTo()` branch through this form.
+  searchIsExact: true,
+
   buildSearch(slot, params: VectorSearchParams, candidates?: SQL): SQL {
     const table = quotedTableName(
       this.tableName(slot.graphId, slot.nodeKind, slot.fieldPath),

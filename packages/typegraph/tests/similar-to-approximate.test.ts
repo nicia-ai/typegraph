@@ -99,6 +99,12 @@ type CreatedBackend = Readonly<{
   cleanup: BackendCleanup;
   /** Substring proving the engine-native ANN form was compiled. */
   annMarker: string;
+  /**
+   * True when the strategy declares `searchIsExact` (vec0's KNN is
+   * brute-force exact), so the NON-approximate path also routes through
+   * the engine form.
+   */
+  exactUsesEngineForm: boolean;
 }>;
 
 type BackendDescriptor = Readonly<{
@@ -114,6 +120,7 @@ const localSqliteDescriptor: BackendDescriptor = {
       backend,
       cleanup: () => backend.close(),
       annMarker: "MATCH",
+      exactUsesEngineForm: true,
     });
   },
 };
@@ -136,6 +143,7 @@ function libsqlDescriptor(): BackendDescriptor & { tempDir: string } {
           client.close();
         },
         annMarker: "vector_top_k",
+        exactUsesEngineForm: false,
       };
     },
   };
@@ -192,6 +200,19 @@ function documentQuery(
   return query.select((ctx) => ({ id: ctx.d.id }));
 }
 
+function cosineDistance(vector: readonly number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (const [index, value] of vector.entries()) {
+    const q = QUERY_EMBEDDING[index]!;
+    dot += value * q;
+    normA += value * value;
+    normB += q * q;
+  }
+  return 1 - dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
 async function ids(
   query: Readonly<{ execute: () => Promise<readonly unknown[]> }>,
 ): Promise<readonly string[]> {
@@ -200,13 +221,25 @@ async function ids(
 }
 
 async function runScenario(created: CreatedBackend): Promise<void> {
-  const { backend, cleanup, annMarker } = created;
+  const { backend, cleanup, annMarker, exactUsesEngineForm } = created;
   try {
     if (backend.capabilities.vector?.supported !== true) return;
     const store = await seedStore(backend);
 
     // --- Parity: plain, filtered, and on the unindexed slot. ---
+    // Anchor both paths to engine-independent JS truth: on strategies
+    // where the exact path routes through the engine form
+    // (searchIsExact), exact-vs-approximate parity alone would be
+    // tautological.
+    const jsTruth = CORPUS.map((document) => ({
+      id: document.id,
+      distance: cosineDistance(document.embedding),
+    }))
+      .toSorted((a, b) => a.distance - b.distance || (a.id < b.id ? -1 : 1))
+      .slice(0, 4)
+      .map((document) => document.id);
     const exact = await ids(documentQuery(store, "AnnDoc", {}));
+    expect(exact).toEqual(jsTruth);
     const approximate = await ids(
       documentQuery(store, "AnnDoc", { approximate: true }),
     );
@@ -294,7 +327,14 @@ async function runScenario(created: CreatedBackend): Promise<void> {
     expect(approximateSql).toContain(annMarker);
 
     const exactSql = documentQuery(store, "AnnDoc", {}).toSQL().sql;
-    expect(exactSql).not.toContain("tg_ann_src");
+    if (exactUsesEngineForm) {
+      // vec0's KNN is exact by construction, so the non-approximate
+      // path routes through the engine form too (searchIsExact).
+      expect(exactSql).toContain("tg_ann_src");
+      expect(exactSql).toContain(annMarker);
+    } else {
+      expect(exactSql).not.toContain("tg_ann_src");
+    }
 
     // The unindexed slot degrades to the strategy's exact scan even
     // with the opt-in: wrapper present, ANN form absent (pgvector's
@@ -372,6 +412,7 @@ describe("similarTo approximate opt-in", () => {
         // pgvector's ANN form is the same ORDER BY/LIMIT scan shape — the
         // approximate wrapper is the observable compile-level marker.
         annMarker: "tg_ann_src",
+        exactUsesEngineForm: false,
       };
     },
   };

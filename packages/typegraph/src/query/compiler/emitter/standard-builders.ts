@@ -848,11 +848,16 @@ export function buildStandardEmbeddingsCte(
     // under an overridden one would silently miss the override metric's
     // true nearest neighbors. A mismatched override falls back to the
     // exact scan below — correct for any metric, like `indexType: "none"`.
+    // Engines whose `buildSearch` is EXACT (vec0's brute-force C KNN)
+    // serve the non-approximate branch through it as well: identical
+    // results to the SQL distance scan at engine speed (489ms -> 113ms
+    // at 50k on the SQLite lane). The metric gate stays: the engine
+    // form is built for the slot's declared metric.
+    const engineFormEligible =
+      vectorPredicate.approximate === true ||
+      vectorStrategy.searchIsExact === true;
     const annSlot =
-      (
-        vectorPredicate.approximate === true &&
-        branchMetric === slotDescriptor?.metric
-      ) ?
+      engineFormEligible && branchMetric === slotDescriptor?.metric ?
         slotDescriptor
       : undefined;
     if (annSlot !== undefined) {

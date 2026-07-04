@@ -203,6 +203,18 @@ export interface VectorStrategy {
   ): SQL;
 
   /**
+   * True when {@link buildSearch} returns EXACT rankings — a brute-force
+   * engine form, not an approximate index (sqlite-vec's vec0 KNN scans
+   * every row in C). The query compiler then routes the NON-approximate
+   * `.similarTo()` branch through `buildSearch` too: same results as the
+   * SQL distance scan, at engine speed (measured 489ms -> 113ms at 50k
+   * on the SQLite lane). Leave false/absent when the engine form is or
+   * can be approximate (pgvector planner rewrites, libSQL DiskANN):
+   * exactness of the default path is a semantic guarantee.
+   */
+  searchIsExact?: boolean;
+
+  /**
    * The distance expression over the slot's embedding column, used by the
    * **query compiler** to splice vector relevance into its CTE. This is the
    * one genuinely engine-specific fragment (`vec_distance_cosine` vs
