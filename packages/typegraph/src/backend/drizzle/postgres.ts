@@ -74,6 +74,8 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
+  type HybridSearchParams,
+  type HybridSearchRow,
   type IndexMaterializationRow,
   type KindRemovalRow,
   POSTGRES_CAPABILITIES,
@@ -127,6 +129,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
@@ -974,7 +977,7 @@ function createPostgresOperationBackend(
    *   MATERIALIZED wrapper (see `buildSearch`) to restore exact ordering.
    */
   async function vectorSearchGucOverrides(
-    params: VectorSearchParams,
+    params: Pick<VectorSearchParams, "efSearch" | "indexType">,
   ): Promise<readonly SearchGucOverride[]> {
     const overrides: SearchGucOverride[] = [];
     if (params.efSearch !== undefined) {
@@ -1018,12 +1021,12 @@ function createPostgresOperationBackend(
    * onto one connection. With none we take the unchanged single-statement
    * fast path and open no transaction.
    */
-  async function runVectorSearch(
+  async function runVectorSearch<Row = VectorSearchRow>(
     overrides: readonly SearchGucOverride[],
     query: SQL,
-  ): Promise<readonly VectorSearchRow[]> {
+  ): Promise<readonly Row[]> {
     if (overrides.length === 0) {
-      return execAll<VectorSearchRow>(query);
+      return execAll<Row>(query);
     }
     if (db instanceof PgTransaction) {
       // Already inside the caller's transaction (low-level
@@ -1046,7 +1049,7 @@ function createPostgresOperationBackend(
           sql`SELECT set_config(${override.name}, ${override.value}, true)`,
         );
       }
-      const rows = await execAll<VectorSearchRow>(query);
+      const rows = await execAll<Row>(query);
       // Restore only on success: a failed SELECT aborts the caller's
       // transaction, so its rollback discards the overrides anyway and a
       // restore here would just fail against the aborted tx, masking the
@@ -1068,7 +1071,7 @@ function createPostgresOperationBackend(
           sql`SELECT set_config(${override.name}, ${override.value}, true)`,
         );
       }
-      return txAdapter.execute<VectorSearchRow>(query);
+      return txAdapter.execute<Row>(query);
     });
   }
 
@@ -1244,6 +1247,66 @@ function createPostgresOperationBackend(
             nodeId: row.node_id,
             score: row.score,
           }));
+        },
+        async hybridSearch(
+          params: HybridSearchParams,
+        ): Promise<readonly HybridSearchRow[]> {
+          assertVectorSearchLimit(params.limit);
+          assertPgvectorEfSearch(params.vector.efSearch);
+          const slot = vectorSlotFromParams({
+            graphId: params.graphId,
+            nodeKind: params.nodeKind,
+            fieldPath: params.vector.fieldPath,
+            dimensions: params.vector.dimensions,
+            metric: params.vector.metric,
+            indexType: params.vector.indexType,
+          });
+          await ensureVectorSlotStorage(slot);
+          const candidates =
+            params.candidates ??
+            operationStrategy.buildLiveNodeIds(
+              params.graphId,
+              params.nodeKind,
+            );
+          const vectorParams: VectorSearchParams = {
+            graphId: params.graphId,
+            nodeKind: params.nodeKind,
+            fieldPath: params.vector.fieldPath,
+            queryEmbedding: params.vector.queryEmbedding,
+            metric: params.vector.metric,
+            dimensions: params.vector.dimensions,
+            indexType: params.vector.indexType,
+            limit: params.vector.k,
+            ...(params.vector.minScore === undefined ?
+              {}
+            : { minScore: params.vector.minScore }),
+          };
+          const vectorSql = vectorStrategy.buildSearch(
+            slot,
+            vectorParams,
+            candidates,
+          );
+          const statement = operationStrategy.buildHybridSearch(
+            { ...params, candidates },
+            vectorSql,
+            params.vector.metric === "cosine",
+          );
+          const gucOverrides = await vectorSearchGucOverrides({
+            indexType: params.vector.indexType,
+            ...(params.vector.efSearch === undefined ?
+              {}
+            : { efSearch: params.vector.efSearch }),
+          });
+          let raw: readonly Record<string, unknown>[];
+          try {
+            raw = await runVectorSearch<Record<string, unknown>>(
+              gucOverrides,
+              statement,
+            );
+          } catch (error) {
+            throw mapVectorWriteError(error, vectorParams);
+          }
+          return raw.map((row) => mapHybridSearchRow(row, toNodeRow));
         },
       };
 

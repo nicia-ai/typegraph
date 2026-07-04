@@ -59,6 +59,8 @@ import {
   type FulltextSearchParams,
   type FulltextSearchResult,
   type GraphBackend,
+  type HybridSearchParams,
+  type HybridSearchRow,
   type IndexMaterializationRow,
   type KindRemovalRow,
   type RecordContributionMaterializationParams,
@@ -121,6 +123,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
+import { mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   coerceNumericScore,
@@ -684,6 +687,63 @@ function createSqliteOperationBackend(
             score: row.score,
           }));
         },
+        // Single-statement hybrid needs ROW_NUMBER(); a capability profile
+        // that disables window functions keeps the store's multi-statement
+        // fallback by simply not exposing the member.
+        ...(capabilities.windowFunctions ?
+          {
+            async hybridSearch(
+              params: HybridSearchParams,
+            ): Promise<readonly HybridSearchRow[]> {
+              assertVectorSearchLimit(params.limit);
+              const slot = vectorSlotFromParams({
+                graphId: params.graphId,
+                nodeKind: params.nodeKind,
+                fieldPath: params.vector.fieldPath,
+                dimensions: params.vector.dimensions,
+                metric: params.vector.metric,
+                indexType: params.vector.indexType,
+              });
+              await ensureVectorSlotStorage(slot);
+              const candidates =
+                params.candidates ??
+                operationStrategy.buildLiveNodeIds(
+                  params.graphId,
+                  params.nodeKind,
+                );
+              const vectorParams: VectorSearchParams = {
+                graphId: params.graphId,
+                nodeKind: params.nodeKind,
+                fieldPath: params.vector.fieldPath,
+                queryEmbedding: params.vector.queryEmbedding,
+                metric: params.vector.metric,
+                dimensions: params.vector.dimensions,
+                indexType: params.vector.indexType,
+                limit: params.vector.k,
+                ...(params.vector.minScore === undefined ?
+                  {}
+                : { minScore: params.vector.minScore }),
+              };
+              const vectorSql = vectorStrategy.buildSearch(
+                slot,
+                vectorParams,
+                candidates,
+              );
+              const statement = operationStrategy.buildHybridSearch(
+                { ...params, candidates },
+                vectorSql,
+                params.vector.metric === "cosine",
+              );
+              let raw: readonly Record<string, unknown>[];
+              try {
+                raw = await execAll<Record<string, unknown>>(statement);
+              } catch (error) {
+                throw mapVectorWriteError(error, vectorParams);
+              }
+              return raw.map((row) => mapHybridSearchRow(row, toNodeRow));
+            },
+          }
+        : {}),
       };
 
   const operationBackend: InternalOperationBackend = {

@@ -366,7 +366,15 @@ both paths.
 
 ### Hybrid Search (Store API)
 
-For tunable RRF parameters, use `store.search.hybrid()`:
+For tunable RRF parameters, use `store.search.hybrid()`. On the built-in
+backends this runs as a **single SQL statement** — both sources, RRF
+fusion, and node hydration composed together — so a hybrid query costs one
+round trip instead of three. The saving scales with per-statement cost:
+decisive on serverless HTTP drivers, Cloudflare D1 / Durable Objects, and
+remote databases; on a local low-latency connection the two paths are
+within a few milliseconds of each other. (Kind expansions via
+`includeSubClasses`, and custom backends without the composed statement,
+transparently use a multi-statement path with identical results.)
 
 ```typescript
 const results = await store.search.hybrid("Document", {

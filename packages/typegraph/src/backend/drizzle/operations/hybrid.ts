@@ -19,6 +19,8 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { type HybridSearchRow, type NodeRow } from "../../types";
+import { coerceNumericScore } from "../row-mappers";
 import { quotedColumn, type Tables } from "./shared";
 
 export type HybridStatementInput = Readonly<{
@@ -135,4 +137,41 @@ function qualified(
   member: "graphId" | "kind" | "id" | "deletedAt",
 ): SQL {
   return sql`tg_hybrid_node.${quotedColumn(nodes[member])}`;
+}
+
+function present(value: unknown): boolean {
+  return value !== null && value !== undefined;
+}
+
+/**
+ * Maps one raw statement row into a {@link HybridSearchRow}. Rank columns
+ * come from `ROW_NUMBER()` (bigint — node-postgres hands int8 back as a
+ * string) and scores from engine-native rank math (Postgres `numeric`
+ * can arrive as a string), so both coerce defensively.
+ */
+export function mapHybridSearchRow(
+  row: Record<string, unknown>,
+  toNodeRow: (raw: Record<string, unknown>) => NodeRow,
+): HybridSearchRow {
+  return {
+    node: toNodeRow(row),
+    fusedScore: coerceNumericScore(row.fused_score as number | string),
+    ...(present(row.vector_rank) ?
+      { vectorRank: Number(row.vector_rank) }
+    : {}),
+    ...(present(row.vector_score) ?
+      { vectorScore: coerceNumericScore(row.vector_score as number | string) }
+    : {}),
+    ...(present(row.fulltext_rank) ?
+      { fulltextRank: Number(row.fulltext_rank) }
+    : {}),
+    ...(present(row.fulltext_score) ?
+      {
+        fulltextScore: coerceNumericScore(
+          row.fulltext_score as number | string,
+        ),
+      }
+    : {}),
+    ...(present(row.snippet) ? { snippet: String(row.snippet) } : {}),
+  };
 }

@@ -722,6 +722,84 @@ export async function executeHybridSearch<N = Node>(
     }
   }
 
+  // Single-statement fast path: one kind, backend support. Both sources,
+  // fusion, liveness, and hydration compose into ONE statement (see
+  // `buildHybridSearchStatement`) — the multi-statement path below remains
+  // for kind expansions and backends without the member.
+  if (
+    backend.hybridSearch !== undefined &&
+    fulltextKinds.length === 1 &&
+    vectorKinds.length === 1 &&
+    fulltextKinds[0] === vectorKinds[0]!.kind
+  ) {
+    const kind = fulltextKinds[0];
+    const { slot } = vectorKinds[0]!;
+    const candidates = candidatesByKind.get(kind);
+    const rows = await backend.hybridSearch({
+      graphId,
+      nodeKind: kind,
+      vector: {
+        fieldPath: options.vector.fieldPath,
+        queryEmbedding: options.vector.queryEmbedding,
+        metric: vectorMetric,
+        dimensions: slot.dimensions,
+        indexType: slot.indexType,
+        k: vectorK,
+        ...(options.vector.minScore === undefined ?
+          {}
+        : { minScore: options.vector.minScore }),
+        ...(options.vector.efSearch === undefined ?
+          {}
+        : { efSearch: options.vector.efSearch }),
+      },
+      fulltext: {
+        query: options.fulltext.query,
+        k: fulltextK,
+        ...(options.fulltext.mode ? { mode: options.fulltext.mode } : {}),
+        ...(options.fulltext.language ?
+          { language: options.fulltext.language }
+        : {}),
+        ...(options.fulltext.minScore === undefined ?
+          {}
+        : { minScore: options.fulltext.minScore }),
+        ...(options.fulltext.includeSnippets === undefined ?
+          {}
+        : { includeSnippets: options.fulltext.includeSnippets }),
+      },
+      fusion: { k: fusionK, vectorWeight, fulltextWeight },
+      limit: options.limit,
+      ...(offset === 0 ? {} : { offset }),
+      ...(candidates === undefined ? {} : { candidates }),
+    });
+    return rows.map((row, index) => {
+      const typedNode = rowToNode(row.node) as N;
+      return {
+        node: typedNode,
+        score: row.fusedScore,
+        rank: index + 1,
+        ...(row.vectorRank !== undefined && row.vectorScore !== undefined ?
+          {
+            vector: {
+              node: typedNode,
+              score: row.vectorScore,
+              rank: row.vectorRank,
+            },
+          }
+        : {}),
+        ...(row.fulltextRank !== undefined && row.fulltextScore !== undefined ?
+          {
+            fulltext: {
+              node: typedNode,
+              score: row.fulltextScore,
+              rank: row.fulltextRank,
+              ...(row.snippet === undefined ? {} : { snippet: row.snippet }),
+            },
+          }
+        : {}),
+      };
+    });
+  }
+
   const vectorPromise = Promise.all(
     vectorKinds.map(
       async ({ kind, slot }): Promise<readonly RankedSourceRow[]> => {

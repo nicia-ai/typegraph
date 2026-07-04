@@ -20,6 +20,7 @@ import type {
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HybridSearchParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertSchemaParams,
@@ -55,6 +56,7 @@ import {
   buildUpdateEdge,
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
+import { buildHybridSearchStatement } from "./hybrid";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -107,6 +109,17 @@ export type CommonOperationStrategy = Readonly<{
    * fulltext search above, is computed over live rows in SQL.
    */
   buildLiveNodeIds: (graphId: string, nodeKind: string) => SQL;
+  /**
+   * Composes the single-statement hybrid search: the caller supplies the
+   * vector source SQL (strategy-owned); this member builds the fulltext
+   * source over the same candidate set and fuses both via
+   * {@link buildHybridSearchStatement}.
+   */
+  buildHybridSearch: (
+    params: HybridSearchParams,
+    vectorSql: SQL,
+    vectorScoreDescending: boolean,
+  ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodeNoReturn: (
     params: InsertNodeParams,
@@ -300,6 +313,51 @@ function createCommonOperationStrategy(
       ),
     buildLiveNodeIds: (graphId: string, nodeKind: string): SQL =>
       liveNodeIdsSubquery(tables.nodes, graphId, nodeKind),
+    buildHybridSearch: (
+      params: HybridSearchParams,
+      vectorSql: SQL,
+      vectorScoreDescending: boolean,
+    ): SQL => {
+      const candidates =
+        params.candidates ??
+        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind);
+      const fulltextSql = buildFulltextSearch(
+        fulltextTable,
+        {
+          graphId: params.graphId,
+          nodeKind: params.nodeKind,
+          query: params.fulltext.query,
+          limit: params.fulltext.k,
+          ...(params.fulltext.mode === undefined ?
+            {}
+          : { mode: params.fulltext.mode }),
+          ...(params.fulltext.language === undefined ?
+            {}
+          : { language: params.fulltext.language }),
+          ...(params.fulltext.minScore === undefined ?
+            {}
+          : { minScore: params.fulltext.minScore }),
+          ...(params.fulltext.includeSnippets === undefined ?
+            {}
+          : { includeSnippets: params.fulltext.includeSnippets }),
+        },
+        fulltextStrategy,
+        candidates,
+      );
+      return buildHybridSearchStatement({
+        vectorSql,
+        vectorScoreDescending,
+        fulltextSql,
+        nodes: tables.nodes,
+        graphId: params.graphId,
+        nodeKind: params.nodeKind,
+        fusionK: params.fusion.k,
+        vectorWeight: params.fusion.vectorWeight,
+        fulltextWeight: params.fusion.fulltextWeight,
+        limit: params.limit,
+        offset: params.offset ?? 0,
+      });
+    },
   };
 
   return {
