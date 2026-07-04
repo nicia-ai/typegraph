@@ -47,6 +47,18 @@ const Document = defineNode("AnnDoc", {
   }),
 });
 
+/**
+ * Cosine-declared kind with magnitude-skewed vectors: the cosine-nearest
+ * doc to the query is NOT the l2-nearest, so ANN retrieval under the
+ * declared metric followed by l2 re-scoring would return the wrong row —
+ * the exact regression surface for a metric override + approximate.
+ */
+const MagDocument = defineNode("MagDoc", {
+  schema: z.object({
+    embedding: embedding(EMBEDDING_DIMENSIONS),
+  }),
+});
+
 /** A second kind whose slot declares no ANN index. */
 const FlatDocument = defineNode("FlatDoc", {
   schema: z.object({
@@ -58,7 +70,11 @@ const FlatDocument = defineNode("FlatDoc", {
 function buildGraph() {
   return defineGraph({
     id: GRAPH_ID,
-    nodes: { AnnDoc: { type: Document }, FlatDoc: { type: FlatDocument } },
+    nodes: {
+      AnnDoc: { type: Document },
+      FlatDoc: { type: FlatDocument },
+      MagDoc: { type: MagDocument },
+    },
     edges: {},
   });
 }
@@ -141,6 +157,14 @@ async function seedStore(backend: GraphBackend) {
       { id: `flat-${seed.id}` },
     );
   }
+  // Magnitude-skewed corpus: query [1,0,0] — cosine ranks mag-far first
+  // (collinear, huge magnitude), l2 ranks mag-near first.
+  await store.nodes.MagDoc.create({ embedding: [10, 0, 0] }, { id: "mag-far" });
+  await store.nodes.MagDoc.create(
+    { embedding: [0.9, 0.1, 0] },
+    { id: "mag-near" },
+  );
+  await store.nodes.MagDoc.create({ embedding: [0, 1, 0] }, { id: "mag-off" });
   await store.materializeIndexes();
   return store;
 }
@@ -202,6 +226,45 @@ async function runScenario(created: CreatedBackend): Promise<void> {
       documentQuery(store, "FlatDoc", { approximate: true }),
     );
     expect(flatApproximate).toEqual(flatExact);
+
+    // --- Metric override + approximate: the ANN structure is built for
+    //     the DECLARED metric, so an overridden metric must fall back to
+    //     the exact scan. The corpus makes the failure observable: cosine
+    //     top-1 is mag-far, l2 top-1 is mag-near — ANN-retrieval under
+    //     cosine re-scored as l2 would return mag-far. ---
+    function magQuery(options: Readonly<{ approximate?: boolean }>) {
+      return store
+        .query()
+        .from("MagDoc", "d")
+        .whereNode("d", (document) =>
+          document.embedding.similarTo(QUERY_EMBEDDING, 1, {
+            metric: "l2",
+            ...(options.approximate === undefined ?
+              {}
+            : { approximate: options.approximate }),
+          }),
+        )
+        .select((ctx) => ({ id: ctx.d.id }));
+    }
+    const l2Exact = await ids(magQuery({}));
+    expect(l2Exact).toEqual(["mag-near"]);
+    const l2Approximate = await ids(magQuery({ approximate: true }));
+    expect(l2Approximate).toEqual(["mag-near"]);
+    // The mismatched override compiled to the exact scan, not the ANN form.
+    expect(magQuery({ approximate: true }).toSQL().sql).not.toContain(
+      "tg_ann_src",
+    );
+    // Sanity: cosine ranking really does disagree on this corpus.
+    const cosineTop = await ids(
+      store
+        .query()
+        .from("MagDoc", "d")
+        .whereNode("d", (document) =>
+          document.embedding.similarTo(QUERY_EMBEDDING, 1),
+        )
+        .select((ctx) => ({ id: ctx.d.id })),
+    );
+    expect(cosineTop).toEqual(["mag-far"]);
 
     // --- Fusion composition: the approximate vector CTE feeds the same
     //     RRF machinery; fused rankings must match the exact path. ---

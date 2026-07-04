@@ -839,7 +839,20 @@ export function buildStandardEmbeddingsCte(
     // re-derived from the strategy's score convention (cosine score =
     // `1 - distance`; l2 / inner_product score = raw distance) so the
     // shared ORDER BY / ROW_NUMBER machinery below is untouched.
-    if (vectorPredicate.approximate === true && slotDescriptor !== undefined) {
+    //
+    // The ANN path additionally requires the effective metric to MATCH the
+    // slot's declared metric: every engine materializes metric-specific
+    // ANN structures (vec0 bakes `distance_metric` into the virtual table,
+    // libSQL's DiskANN index and pgvector's operator class are built for
+    // one metric), so retrieving by the declared metric and re-scoring
+    // under an overridden one would silently miss the override metric's
+    // true nearest neighbors. A mismatched override falls back to the
+    // exact scan below — correct for any metric, like `indexType: "none"`.
+    if (
+      vectorPredicate.approximate === true &&
+      slotDescriptor !== undefined &&
+      branchMetric === slotDescriptor.metric
+    ) {
       const kindCandidates = sql`SELECT node_id FROM ${scopedNodes} WHERE ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} = ${kind}`;
       const annSql = vectorStrategy.buildSearch(
         {
