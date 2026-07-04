@@ -66,6 +66,7 @@ import {
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import {
+  annIndexScanTypes,
   asCompiledSelectSql,
   type CompiledSelectSql,
   markAnnIndexScan,
@@ -319,15 +320,30 @@ export function compileSetOperation(
   const dialect = options_.dialect ?? "sqlite";
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
-  return asCompiledSelectSql(
-    compileSetOp(
-      op,
-      graphId,
-      adapter,
-      (ast, gid) => compileQuery(ast, gid, propagateOptions(options_)),
-      options_.vectorStrategy,
-    ),
+  // Operand statements carry their own ANN brand, but the set-operation
+  // wrapper is a fresh SQL object and the backend only inspects the
+  // object it executes — so operand brands are merged onto the final
+  // statement here, or a union with an approximate operand would skip
+  // the pgvector GUC wrapper.
+  const annIndexTypes = new Set<string>();
+  const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
+    const compiled = compileQuery(ast, gid, propagateOptions(options_));
+    for (const indexType of annIndexScanTypes(compiled) ?? []) {
+      annIndexTypes.add(indexType);
+    }
+    return compiled;
+  };
+  const combined = compileSetOp(
+    op,
+    graphId,
+    adapter,
+    compileOperand,
+    options_.vectorStrategy,
   );
+  if (annIndexTypes.size > 0) {
+    markAnnIndexScan(combined, [...annIndexTypes]);
+  }
+  return asCompiledSelectSql(combined);
 }
 
 /**

@@ -177,6 +177,40 @@ describe("inline approximate queries apply pgvector GUCs", () => {
         gucCalls.length = 0;
         await similar(false);
         expect(gucCalls).toHaveLength(0);
+
+        // Set operations: the combined statement is a fresh SQL object,
+        // so operand ANN brands must be merged onto it — a union with
+        // an approximate operand still gets the GUC wrap.
+        function categoryQuery(category: string) {
+          return store
+            .query()
+            .from("Doc", "d")
+            .whereNode("d", (document) => document.category.eq(category))
+            .select((ctx2) => ({ id: ctx2.d.id }));
+        }
+        function annQuery() {
+          return store
+            .query()
+            .from("Doc", "d")
+            .whereNode("d", (document) =>
+              document.embedding.similarTo(queryVector, 4, {
+                metric: "cosine",
+                approximate: true,
+              }),
+            )
+            .select((ctx2) => ({ id: ctx2.d.id }));
+        }
+
+        gucCalls.length = 0;
+        await annQuery().union(categoryQuery("cat-1")).execute();
+        expect(
+          gucCalls.filter((call) => call.params[0] === "hnsw.iterative_scan"),
+        ).not.toHaveLength(0);
+
+        // And a set operation WITHOUT an approximate operand stays bare.
+        gucCalls.length = 0;
+        await categoryQuery("cat-0").union(categoryQuery("cat-1")).execute();
+        expect(gucCalls).toHaveLength(0);
       } finally {
         await spyPool.end();
       }
