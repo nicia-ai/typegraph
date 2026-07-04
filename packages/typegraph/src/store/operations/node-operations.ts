@@ -1058,6 +1058,10 @@ export async function executeNodeDelete<G extends GraphDef>(
     backend,
     async (target, lock) => {
       const registration = getNodeRegistration(ctx.graph, kind);
+      // This preflight is NOT removable round-trip fat: the soft-delete
+      // pipeline consumes the pre-image (uniqueness entries are keyed by
+      // props-derived constraint keys), and this in-transaction read is
+      // the concurrency-correct source for it.
       const preflight = await target.getNode(ctx.graphId, kind, id);
       if (!preflight || !isLiveNodeRow(preflight)) return;
 
@@ -1105,8 +1109,13 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     backend,
     async (target, lock) => {
       const registration = getNodeRegistration(ctx.graph, kind);
-      const preflight = await target.getNode(ctx.graphId, kind, id);
-      if (!preflight) return;
+      // No in-transaction preflight (unlike soft delete, whose pipeline
+      // consumes the pre-image for uniqueness-key cleanup): every hard
+      // cascade member is id-keyed and idempotent — the delete-behavior
+      // check re-reads edges itself, `hardDeleteNode` deletes by primary
+      // key, and embeddings clean up by id — so a node concurrently
+      // removed between the gate and the write lock makes each statement
+      // a 0-row no-op.
 
       // The cascade (edges, node, embeddings) is not individually atomic, so
       // it runs in one write transaction. Embeddings live in strategy-owned

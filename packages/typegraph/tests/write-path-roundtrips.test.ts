@@ -34,6 +34,8 @@ type CallCounts = Record<string, number>;
 const COUNTED_METHODS = [
   "deleteEdge",
   "deleteEdgesBatch",
+  "getEdge",
+  "getNode",
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
 ] as const;
@@ -190,6 +192,143 @@ describe("cascade edge deletion batches", () => {
       expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
     } finally {
       await backend.close();
+    }
+  });
+});
+
+// ============================================================
+// Delete preflight elimination
+// ============================================================
+
+describe("delete round trips", () => {
+  it("edge delete and hard delete read the row once (gate only)", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("delete_rt_edges"),
+        backend,
+      );
+      const hub = await store.nodes.Hub.create({ name: "hub" }, { id: "hub" });
+      const spoke = await store.nodes.Spoke.create(
+        { name: "spoke" },
+        { id: "spoke" },
+      );
+      const soft = await store.edges.links.create(hub, spoke, {});
+      const hard = await store.edges.links.create(hub, spoke, {});
+
+      counts.getEdge = 0;
+      await store.edges.links.delete(soft.id);
+      expect(counts.getEdge).toBe(1);
+      expect(counts.deleteEdge).toBe(1);
+
+      counts.getEdge = 0;
+      await store.edges.links.hardDelete(hard.id);
+      expect(counts.getEdge).toBe(1);
+      expect(counts.hardDeleteEdge).toBe(1);
+
+      expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
+
+      // Absent/tombstoned: the gate alone decides, still one read.
+      counts.getEdge = 0;
+      await store.edges.links.delete(soft.id);
+      expect(counts.getEdge).toBe(1);
+      expect(counts.deleteEdge).toBe(1);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
+  it("node hard delete reads once; soft delete keeps its consumed preflight", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("delete_rt_nodes"),
+        backend,
+      );
+      await store.nodes.Spoke.create({ name: "a" }, { id: "a" });
+      await store.nodes.Spoke.create({ name: "b" }, { id: "b" });
+
+      counts.getNode = 0;
+      await store.nodes.Spoke.hardDelete("a" as never);
+      expect(counts.getNode).toBe(1);
+      expect(await store.nodes.Spoke.getById("a" as never)).toBeUndefined();
+
+      // Soft delete's pipeline consumes the pre-image (uniqueness keys),
+      // so its in-transaction preflight is deliberate: gate + preflight.
+      counts.getNode = 0;
+      await store.nodes.Spoke.delete("b" as never);
+      expect(counts.getNode).toBe(2);
+      expect(await store.nodes.Spoke.getById("b" as never)).toBeUndefined();
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
+  it("a stale gate read degrades to a guarded no-op, recorded history intact", async () => {
+    // Simulates the race the removed preflight used to absorb: the gate
+    // sees a live row, but the row is tombstoned before the write
+    // transaction runs. The tombstone UPDATE's `deleted_at IS NULL`
+    // guard makes it a 0-row no-op, and the recorded-capture touch of
+    // the unchanged row must not corrupt history.
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      let staleEdgeRow: unknown;
+      let serveStaleGate = false;
+      const lying: GraphBackend = {
+        ...rawBackend,
+        getEdge: async (graphId: string, id: string) => {
+          const row = await rawBackend.getEdge(graphId, id);
+          if (serveStaleGate) return staleEdgeRow as never;
+          staleEdgeRow = row;
+          return row;
+        },
+      };
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("delete_rt_race"),
+        lying,
+        { history: true },
+      );
+      const hub = await store.nodes.Hub.create({ name: "hub" }, { id: "hub" });
+      const spoke = await store.nodes.Spoke.create({ name: "s" }, { id: "s" });
+      const edge = await store.edges.links.create(hub, spoke, {});
+      const beforeDelete = await store.recordedNow();
+      if (beforeDelete === undefined) throw new Error("recordedNow required");
+
+      // Prime the stale copy (live row), tombstone for real, then replay
+      // the delete against the stale gate.
+      await rawBackend.getEdge(store.graphId, edge.id);
+      await store.edges.links.delete(edge.id);
+      serveStaleGate = true;
+      await store.edges.links.delete(edge.id);
+      serveStaleGate = false;
+
+      expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
+      // Recorded history: visible before the delete, exactly gone after —
+      // the spurious touch closed nothing twice and resurrected nothing.
+      const view = store.asOfRecorded(beforeDelete);
+      const edgesBefore = await view
+        .query()
+        .from("Hub", "h")
+        .traverse("links", "e")
+        .to("Spoke", "s")
+        .select((ctx) => ({ id: ctx.s.id }))
+        .execute();
+      expect(edgesBefore).toHaveLength(1);
+      const nowRecorded = await store.recordedNow();
+      if (nowRecorded === undefined) throw new Error("recordedNow required");
+      const edgesAfter = await store
+        .asOfRecorded(nowRecorded)
+        .query()
+        .from("Hub", "h")
+        .traverse("links", "e")
+        .to("Spoke", "s")
+        .select((ctx) => ({ id: ctx.s.id }))
+        .execute();
+      expect(edgesAfter).toHaveLength(0);
+    } finally {
+      await rawBackend.close();
     }
   });
 });

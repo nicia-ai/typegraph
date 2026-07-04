@@ -672,12 +672,10 @@ export async function executeEdgeDelete<G extends GraphDef>(
   const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
 
   return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
-    const existing = await target.getEdge(ctx.graphId, id);
-    if (!existing || existing.deleted_at) {
-      // Already deleted - nothing to do
-      return;
-    }
-
+    // No in-transaction preflight: the tombstone UPDATE is guarded by
+    // `deleted_at IS NULL`, so a concurrent delete between the gate and
+    // the write lock is a 0-row no-op — the statement itself is the
+    // concurrency-correct check, and nothing here consumes the row.
     await target.deleteEdge({
       graphId: ctx.graphId,
       id,
@@ -703,12 +701,9 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
 
   return runHookedWriteOperation(ctx, opContext, backend, async (target) => {
-    const existing = await target.getEdge(ctx.graphId, id);
-    if (!existing) {
-      // Doesn't exist - nothing to do
-      return;
-    }
-
+    // No in-transaction preflight: DELETE by primary key is idempotent
+    // (0 rows when concurrently removed) and nothing here consumes the
+    // row.
     await target.hardDeleteEdge({
       graphId: ctx.graphId,
       id,
