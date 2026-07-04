@@ -738,6 +738,27 @@ drops from ~375ms to ~19ms and the filtered approximate search to
 lane tracks both forms (`vector:exact-filtered` before the index,
 `vector:exact-filtered-postindex` after).
 
+### Approximate search under selective filters
+
+`approximate: true` combined with a highly selective property filter is
+the shape where approximate means it. The index scan walks neighbors
+best-first and keeps going until enough filtered rows surface
+(TypeGraph applies pgvector's `hnsw.iterative_scan = strict_order`
+automatically on transaction-capable Postgres drivers with pgvector
+≥ 0.8 — the setting is transaction-scoped, so non-transactional
+backends such as `neon-http` keep the plain bounded scan), but the
+scan is still bounded by
+pgvector's `hnsw.max_scan_tuples` (default 20,000). If the nearest rows
+matching the filter live far from the query — a filter *correlated*
+with embedding geometry, like "category X" when category X's documents
+form their own distant cluster — the scan can exhaust its budget and
+return plausible-but-distant rows. For filters independent of the
+embedding space (the common case), filtered approximate recall stays
+near 1.0. When the filter is known to be geometry-correlated and
+selective, drop `approximate` (the exact path is index-assisted on the
+candidates side by a node index on the filter field) or raise
+`hnsw.max_scan_tuples`.
+
 ### Tuning recall per query with `efSearch`
 
 pgvector's HNSW index searches a dynamic candidate list whose size is

@@ -65,7 +65,12 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
-import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
+import {
+  annIndexScanTypes,
+  asCompiledSelectSql,
+  type CompiledSelectSql,
+  markAnnIndexScan,
+} from "../sql-intent";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLimitOffsetClause,
@@ -215,9 +220,18 @@ export function compileQuery(
   );
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
+  // Collects the ANN slot index types the emitter compiles engine-form
+  // branches for; a non-empty set brands the finished statement so the
+  // backend applies the pgvector iterative-scan GUCs around execution.
+  // (Sub-compiled correlated queries brand their own SQL objects, which
+  // are embedded by text — an ANN branch inside a subquery therefore
+  // does not surface the brand; the inline vector predicate compiles at
+  // the top level, so this is theoretical today.)
+  const annIndexTypes = new Set<string>();
   const ctx: PredicateCompilerContext = {
     dialect: adapter,
     schema,
+    annIndexTypes,
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
@@ -236,17 +250,24 @@ export function compileQuery(
     : { fulltextLanguages: options_.fulltextLanguages }),
   };
 
+  function finish(compiled: SQL): CompiledSelectSql {
+    if (annIndexTypes.size > 0) {
+      markAnnIndexScan(compiled, [...annIndexTypes]);
+    }
+    return asCompiledSelectSql(compiled);
+  }
+
   // Check for variable-length traversals
   if (hasVariableLengthTraversal(ast)) {
     const lowered = tryLowerSingleHopRecursiveTraversal(ast);
     if (lowered !== undefined) {
-      return asCompiledSelectSql(compileStandardQuery(lowered, graphId, ctx));
+      return finish(compileStandardQuery(lowered, graphId, ctx));
     }
-    return asCompiledSelectSql(compileVariableLengthQuery(ast, graphId, ctx));
+    return finish(compileVariableLengthQuery(ast, graphId, ctx));
   }
 
   // Standard query compilation
-  return asCompiledSelectSql(compileStandardQuery(ast, graphId, ctx));
+  return finish(compileStandardQuery(ast, graphId, ctx));
 }
 
 function tryLowerSingleHopRecursiveTraversal(
@@ -299,15 +320,30 @@ export function compileSetOperation(
   const dialect = options_.dialect ?? "sqlite";
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
-  return asCompiledSelectSql(
-    compileSetOp(
-      op,
-      graphId,
-      adapter,
-      (ast, gid) => compileQuery(ast, gid, propagateOptions(options_)),
-      options_.vectorStrategy,
-    ),
+  // Operand statements carry their own ANN brand, but the set-operation
+  // wrapper is a fresh SQL object and the backend only inspects the
+  // object it executes — so operand brands are merged onto the final
+  // statement here, or a union with an approximate operand would skip
+  // the pgvector GUC wrapper.
+  const annIndexTypes = new Set<string>();
+  const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
+    const compiled = compileQuery(ast, gid, propagateOptions(options_));
+    for (const indexType of annIndexScanTypes(compiled) ?? []) {
+      annIndexTypes.add(indexType);
+    }
+    return compiled;
+  };
+  const combined = compileSetOp(
+    op,
+    graphId,
+    adapter,
+    compileOperand,
+    options_.vectorStrategy,
   );
+  if (annIndexTypes.size > 0) {
+    markAnnIndexScan(combined, [...annIndexTypes]);
+  }
+  return asCompiledSelectSql(combined);
 }
 
 /**

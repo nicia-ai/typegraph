@@ -434,6 +434,12 @@ export type PredicateCompilerContext = Readonly<{
   vectorSlots?: VectorSlotMap;
   /** Per-kind declared fulltext language for constant-tsquery parsing. */
   fulltextLanguages?: ReadonlyMap<string, string>;
+  /**
+   * Mutable collector: the emitter records each ANN slot index type it
+   * compiles an engine-form branch for, and the compiler entry brands
+   * the finished statement with them (see markAnnIndexScan).
+   */
+  annIndexTypes?: Set<string>;
 }>;
 
 /**

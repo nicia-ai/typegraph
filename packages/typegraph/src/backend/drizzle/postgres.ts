@@ -58,6 +58,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
+import { annIndexScanTypes } from "../../query/sql-intent";
 import { chunk as chunkArray } from "../../utils/array";
 import {
   isInsufficientResourcesError,
@@ -1568,6 +1569,24 @@ function createPostgresOperationBackend(
     // === Query Execution ===
 
     async execute<T>(query: SQL): Promise<readonly T[]> {
+      // Statements the compiler branded as containing an ANN index scan
+      // (inline `approximate: true`) get the same pgvector GUC wrapping
+      // the search facade applies — most importantly
+      // `hnsw.iterative_scan = strict_order`, without which a filtered
+      // approximate query starves at the default ef_search frontier.
+      // On pgvector < 0.8 the override list is empty and this falls
+      // through to the plain fast path.
+      const annTypes = annIndexScanTypes(query);
+      if (annTypes !== undefined && vectorStrategy !== undefined) {
+        const overrides: SearchGucOverride[] = [];
+        for (const indexType of annTypes) {
+          if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
+          overrides.push(
+            ...(await vectorSearchGucOverrides({ indexType })),
+          );
+        }
+        return runVectorSearch<T>(overrides, query);
+      }
       return executionAdapter.execute<T>(query);
     },
 

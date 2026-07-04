@@ -861,7 +861,19 @@ export function buildStandardEmbeddingsCte(
         slotDescriptor
       : undefined;
     if (annSlot !== undefined) {
-      const kindCandidates = sql`SELECT node_id FROM ${scopedNodes} WHERE ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} = ${kind}`;
+      ctx.annIndexTypes?.add(annSlot.indexType);
+      // Membership candidates WITHOUT the scoped subquery's DISTINCT:
+      // strategies embed these as `node_id IN (...)`, where duplicates
+      // cannot change the result — and the DISTINCT is what kept
+      // PostgreSQL off the ordered ANN index scan entirely (verified:
+      // the identical statement flips from a full sort to an HNSW
+      // Index Scan when the DISTINCT is dropped; even
+      // `enable_seqscan = off` could not rescue the DISTINCT form).
+      // The JOIN consumers (exact branch, fulltext CTE) keep
+      // buildScopedNodeIdsSubquery's DISTINCT — a join DOES multiply
+      // rows on duplicates.
+      const candidateCte = `${ALIAS_CTE_PREFIX}${field.alias}`;
+      const kindCandidates = sql`SELECT ${qualifyColumn(candidateCte, `${field.alias}_id`)} FROM ${quoteIdentifier(candidateCte)} WHERE ${qualifyColumn(candidateCte, `${field.alias}_kind`)} = ${kind}`;
       const annSql = vectorStrategy.buildSearch(
         {
           graphId,

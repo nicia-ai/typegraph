@@ -233,26 +233,15 @@ describe("exact vector scan with an ANN index present", () => {
     const exactPlan = await planOf(similarQuery(store, queryVector, {}));
     expect(exactPlan).not.toContain("tg_vecidx");
 
-    // Guard that the pin is meaningful: the bare opclass-matching form
-    // on the same table IS served by the index under the same settings,
-    // so the exact plan's index absence is attributable to the
-    // `(distance + 0.0)` defense, not to a missing/unusable index.
-    // (The inline `approximate: true` form is deliberately not used as
-    // the guard: its candidates subquery currently keeps the planner
-    // off the index — a separate known finding.)
-    const strategyTable = backend.vectorStrategy?.tableName(
-      store.graphId,
-      "Doc",
-      "embedding",
+    // Guard that the pin is meaningful: the inline `approximate: true`
+    // form IS served by the index under the same settings (its
+    // candidates membership compiles without the DISTINCT that used to
+    // keep the planner off the ordered index scan), so the exact plan's
+    // index absence is attributable to the `(distance + 0.0)` defense,
+    // not to a missing/unusable index.
+    const annPlan = await planOf(
+      similarQuery(store, queryVector, { approximate: true }),
     );
-    expect(strategyTable).toBeDefined();
-    const bare = {
-      toSQL: () => ({
-        sql: `SELECT node_id FROM "${strategyTable}" ORDER BY embedding <=> $1::vector LIMIT ${TOP_K}`,
-        params: [JSON.stringify(queryVector)] as readonly unknown[],
-      }),
-    };
-    const barePlan = await planOf(bare);
-    expect(barePlan).toContain("tg_vecidx");
+    expect(annPlan).toContain("tg_vecidx");
   });
 });
