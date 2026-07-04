@@ -42,3 +42,27 @@ export function markForceCustomPlan(query: SQL): void {
 export function shouldForceCustomPlan(query: SQL): boolean {
   return forceCustomPlanQueries.has(query);
 }
+
+/**
+ * Statements whose plan includes an engine ANN index scan (the inline
+ * `.similarTo(..., { approximate: true })` branch). The PostgreSQL
+ * backend wraps their execution with the same pgvector GUC overrides
+ * the search facade applies (`hnsw.iterative_scan = strict_order` /
+ * `ivfflat.iterative_scan = relaxed_order` on pgvector >= 0.8), so a
+ * filtered approximate query keeps scanning past the default ef_search
+ * frontier instead of starving. Carries the slot index types so the
+ * backend knows which GUCs apply. Backends without GUC semantics
+ * ignore the brand.
+ */
+const annIndexScanQueries = new WeakMap<SQL, readonly string[]>();
+
+export function markAnnIndexScan(
+  query: SQL,
+  indexTypes: readonly string[],
+): void {
+  annIndexScanQueries.set(query, indexTypes);
+}
+
+export function annIndexScanTypes(query: SQL): readonly string[] | undefined {
+  return annIndexScanQueries.get(query);
+}

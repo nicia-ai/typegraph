@@ -65,7 +65,11 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
-import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
+import {
+  asCompiledSelectSql,
+  type CompiledSelectSql,
+  markAnnIndexScan,
+} from "../sql-intent";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLimitOffsetClause,
@@ -215,9 +219,18 @@ export function compileQuery(
   );
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
+  // Collects the ANN slot index types the emitter compiles engine-form
+  // branches for; a non-empty set brands the finished statement so the
+  // backend applies the pgvector iterative-scan GUCs around execution.
+  // (Sub-compiled correlated queries brand their own SQL objects, which
+  // are embedded by text — an ANN branch inside a subquery therefore
+  // does not surface the brand; the inline vector predicate compiles at
+  // the top level, so this is theoretical today.)
+  const annIndexTypes = new Set<string>();
   const ctx: PredicateCompilerContext = {
     dialect: adapter,
     schema,
+    annIndexTypes,
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
@@ -236,17 +249,24 @@ export function compileQuery(
     : { fulltextLanguages: options_.fulltextLanguages }),
   };
 
+  function finish(compiled: SQL): CompiledSelectSql {
+    if (annIndexTypes.size > 0) {
+      markAnnIndexScan(compiled, [...annIndexTypes]);
+    }
+    return asCompiledSelectSql(compiled);
+  }
+
   // Check for variable-length traversals
   if (hasVariableLengthTraversal(ast)) {
     const lowered = tryLowerSingleHopRecursiveTraversal(ast);
     if (lowered !== undefined) {
-      return asCompiledSelectSql(compileStandardQuery(lowered, graphId, ctx));
+      return finish(compileStandardQuery(lowered, graphId, ctx));
     }
-    return asCompiledSelectSql(compileVariableLengthQuery(ast, graphId, ctx));
+    return finish(compileVariableLengthQuery(ast, graphId, ctx));
   }
 
   // Standard query compilation
-  return asCompiledSelectSql(compileStandardQuery(ast, graphId, ctx));
+  return finish(compileStandardQuery(ast, graphId, ctx));
 }
 
 function tryLowerSingleHopRecursiveTraversal(

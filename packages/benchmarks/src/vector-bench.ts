@@ -117,6 +117,18 @@ const clusterCenters: number[][] = Array.from({ length: CLUSTER_COUNT }, () =>
   Array.from({ length: EMBEDDING_DIMENSIONS }, () => embeddingRng()),
 );
 
+/**
+ * Categories are drawn from an INDEPENDENT deterministic stream, not
+ * derived from the doc index: the cluster assignment cycles on the
+ * index too, so an index-derived category would correlate category
+ * with embedding cluster — making the filtered-ANN legs adversarial
+ * (the nearest same-category rows sit in a far cluster the HNSW
+ * frontier never reaches) rather than typical. The adversarial case is
+ * real ANN behavior, but the lane's filtered numbers should represent
+ * the common filter-independent-of-embedding workload.
+ */
+const categoryRng = createRng(1337);
+
 let embeddingCounter = 0;
 
 function buildEmbedding(): number[] {
@@ -153,7 +165,7 @@ async function seedCorpus(
         return {
           id: `vec-${index}`,
           props: {
-            category: `cat-${index % CATEGORY_COUNT}`,
+            category: `cat-${Math.floor(categoryRng() * CATEGORY_COUNT)}`,
             embedding: vector,
           },
         };
