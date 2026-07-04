@@ -467,6 +467,33 @@ const similar = await store
   .execute();
 ```
 
+### Approximate retrieval for `.similarTo()` (opt-in)
+
+By default `.similarTo()` ranks with an exact distance scan — correct at any
+scale, and index-served by the PostgreSQL planner where the plan shape
+allows. When a kind declares an ANN index (`embedding(n)` defaults to
+`hnsw`), you can opt the predicate into the engine's native approximate
+retrieval:
+
+```typescript
+const similar = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) =>
+    d.embedding
+      .similarTo(queryEmbedding, 10, { approximate: true })
+      .and(d.status.eq("published")),
+  )
+  .select((ctx) => ctx.d)
+  .execute();
+```
+
+This is a semantic change, never applied silently: results are subject to
+the index's recall. Composed predicates constrain the ANN candidate set —
+exactly on pgvector and sqlite-vec, bounded by over-fetch on libSQL
+DiskANN. A kind declared with `indexType: "none"` keeps the exact scan even
+with the opt-in.
+
 ### Scoped facade search: filters, pagination, subclasses
 
 `store.search.vector` (and `fulltext` / `hybrid`) accept a `where`
