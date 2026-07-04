@@ -848,20 +848,23 @@ export function buildStandardEmbeddingsCte(
     // under an overridden one would silently miss the override metric's
     // true nearest neighbors. A mismatched override falls back to the
     // exact scan below — correct for any metric, like `indexType: "none"`.
-    if (
-      vectorPredicate.approximate === true &&
-      slotDescriptor !== undefined &&
-      branchMetric === slotDescriptor.metric
-    ) {
+    const annSlot =
+      (
+        vectorPredicate.approximate === true &&
+        branchMetric === slotDescriptor?.metric
+      ) ?
+        slotDescriptor
+      : undefined;
+    if (annSlot !== undefined) {
       const kindCandidates = sql`SELECT node_id FROM ${scopedNodes} WHERE ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} = ${kind}`;
       const annSql = vectorStrategy.buildSearch(
         {
           graphId,
           nodeKind: kind,
           fieldPath,
-          dimensions: slotDescriptor.dimensions,
+          dimensions: annSlot.dimensions,
           metric: branchMetric,
-          indexType: slotDescriptor.indexType,
+          indexType: annSlot.indexType,
         },
         {
           graphId,
@@ -869,8 +872,8 @@ export function buildStandardEmbeddingsCte(
           fieldPath,
           queryEmbedding,
           metric: branchMetric,
-          dimensions: slotDescriptor.dimensions,
-          indexType: slotDescriptor.indexType,
+          dimensions: annSlot.dimensions,
+          indexType: annSlot.indexType,
           limit: vectorPredicate.limit,
           ...(minScore === undefined ? {} : { minScore }),
         },
