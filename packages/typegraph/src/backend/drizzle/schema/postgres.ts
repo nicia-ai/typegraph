@@ -359,6 +359,13 @@ export function createPostgresTables(
         withTimezone: true,
       }).notNull(),
       lastError: text("last_error"),
+      // Cross-caller build claim: while `building_since` is fresh (within
+      // the lease), exactly one materializer owns this index's CREATE
+      // INDEX CONCURRENTLY. Serializes same-index CIC across processes —
+      // two concurrent expression-index CICs deadlock each other (no
+      // safe-snapshot exemption). NULL when no build is in flight.
+      buildingSince: timestamp("building_since", { withTimezone: true }),
+      claimToken: text("claim_token"),
     },
     (t) => [primaryKey({ columns: [t.indexName] })],
   );

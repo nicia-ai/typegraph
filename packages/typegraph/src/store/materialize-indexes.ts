@@ -21,10 +21,17 @@
  *   only that something with that name exists. Drift detection here
  *   relies on TypeGraph's recorded signature, not on PG metadata.
  * - Failed `CONCURRENTLY` builds leave invalid indexes behind
- *   (`pg_index.indisvalid = false`). v1 surfaces this as a `failed`
- *   result; the operator must drop the invalid index manually before
- *   retry.
+ *   (`pg_index.indisvalid = false`). Relational rebuilds self-heal: the
+ *   claim-holding materializer drops an invalid leftover with the
+ *   declaration's name before rebuilding (see dropInvalidIndexLeftover).
+ *   Vector per-field index leftovers remain operator-repair.
+ * - Two materializers racing the SAME index name serialize through a
+ *   durable claim in the status table (see materializeWithClaim) —
+ *   concurrent same-name expression-index CIC builds deadlock on
+ *   Postgres (no safe-snapshot exemption).
  */
+
+import { sql } from "drizzle-orm";
 
 import { type RawBackend } from "../backend/branded";
 import {
@@ -43,10 +50,32 @@ import {
   type VectorIndexDeclaration,
 } from "../indexes/types";
 import { type SqlDialect } from "../query/dialect/types";
+import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { ensureFocusedStatusTable } from "./materialize-shared";
+
+/**
+ * Cross-caller build claim timing (Postgres).
+ *
+ * A claim older than the lease is stale (its holder crashed mid-build) and
+ * may be taken over; the lease is generous because CREATE INDEX
+ * CONCURRENTLY on a large relation legitimately runs for minutes, and a
+ * premature takeover would recreate exactly the same-index CIC race the
+ * claim exists to prevent. Losers retry the claim on an interval —
+ * re-claiming after the winner releases converges through the normal
+ * already-materialized check — and give up shortly after the lease bound.
+ */
+const CLAIM_LEASE_MS = 15 * 60_000;
+const CLAIM_RETRY_DELAY_MS = 200;
+const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 export type MaterializeIndexesOptions = Readonly<{
   /** Restrict to indexes whose `kind` is in this set. */
@@ -56,9 +85,10 @@ export type MaterializeIndexesOptions = Readonly<{
   /**
    * Refresh planner statistics (ANALYZE) after at least one index was
    * created. A fresh index can be ignored by the planner until statistics
-   * exist. Default: true — but only applied on backends that build indexes
-   * non-concurrently (SQLite). Backends using CREATE INDEX CONCURRENTLY
-   * (Postgres) skip the automatic refresh — see
+   * exist. Default: true. Applied on non-concurrent builders (SQLite) and
+   * on concurrent builders that serialize same-index builds via the
+   * cross-caller claim primitive (the bundled Postgres backend); a custom
+   * concurrent backend without the primitive skips the refresh — see
    * refreshStatisticsAfterCreation — and should call
    * `store.refreshStatistics()` after materializing.
    */
@@ -287,12 +317,13 @@ export async function materializeIndexes(
  * caller opted out): the planner can keep seq-scanning past a brand-new
  * index until statistics for it exist.
  *
- * Skipped on backends that build with CREATE INDEX CONCURRENTLY (Postgres):
- * expression-index CIC builds get no safe-snapshot exemption, so two callers
- * racing the SAME index name can deadlock each other — and the refresh's
- * timing shift makes that latent race fire reliably. Until cross-caller
- * builds are serialized by a claim protocol, Postgres callers refresh
- * manually via `store.refreshStatistics()` after materializing.
+ * On backends that build with CREATE INDEX CONCURRENTLY, the refresh runs
+ * only when the backend also exposes the cross-caller claim primitive
+ * (the bundled Postgres backend does): the claim serializes same-index
+ * CIC builds, which used to deadlock under the refresh's timing shift
+ * (expression-index CIC gets no safe-snapshot exemption). A custom
+ * concurrent backend without the primitive keeps the conservative skip
+ * and refreshes manually via `store.refreshStatistics()`.
  *
  * Best-effort: by this point the indexes exist and their status rows are
  * recorded, so a failed statistics refresh must not convert that success
@@ -305,7 +336,14 @@ async function refreshStatisticsAfterCreation(
   usesConcurrentBuilds: boolean,
 ): Promise<void> {
   if (options.refreshStatistics === false) return;
-  if (usesConcurrentBuilds) return;
+  // Concurrent (Postgres) builds were excluded while two callers racing
+  // the SAME expression-index CIC could deadlock — the refresh's timing
+  // shift made that latent race fire reliably. With the cross-caller
+  // claim protocol serializing same-index builds, backends that expose
+  // the claim primitive refresh automatically again; a custom concurrent
+  // backend without the primitive keeps the conservative skip.
+  if (usesConcurrentBuilds && backend.claimIndexMaterialization === undefined)
+    return;
   if (!results.some((entry) => entry.status === "created")) return;
   try {
     await backend.refreshStatistics();
@@ -512,26 +550,29 @@ async function materializeOne(
   const statusOverride =
     statusKey === declaration.name ? undefined : { statusName: statusKey };
 
-  const existing = existingByStatusKey.get(statusKey);
-  if (existing?.materializedAt !== undefined) {
-    if (existing.signature === signature) {
-      return entry(declaration, "alreadyMaterialized");
-    }
-    const error = new Error(
-      `${driftLabel} "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
-    );
-    await recordIndexMaterialization(
-      buildAttempt({
-        declaration,
-        graphId,
-        signature,
-        schemaVersion,
-        materializedAt: undefined,
-        error,
-        ...statusOverride,
-      }),
-    );
-    return entry(declaration, "failed", error);
+  const settled = await settleAgainstExisting(
+    existingByStatusKey.get(statusKey),
+    declaration,
+    backend,
+    graphId,
+    schemaVersion,
+    { statusKey, signature, driftLabel },
+  );
+  if (settled !== undefined) return settled;
+
+  // Backends whose concurrent builds can deadlock across callers expose a
+  // claim primitive; one caller builds, the rest wait and converge through
+  // the already-materialized check on re-claim.
+  if (
+    backend.claimIndexMaterialization !== undefined &&
+    backend.releaseIndexMaterializationClaim !== undefined
+  ) {
+    return materializeWithClaim(declaration, backend, graphId, schemaVersion, {
+      statusKey,
+      signature,
+      driftLabel,
+      run,
+    });
   }
 
   try {
@@ -565,6 +606,193 @@ async function materializeOne(
     );
     return entry(declaration, "failed", error);
   }
+}
+
+/**
+ * Applies the existing-status decision: `alreadyMaterialized` on a prior
+ * success with a matching signature, a recorded `failed` on signature
+ * drift, and `undefined` when a build is needed. Shared by the pre-claim
+ * check (against the bulk-preloaded rows) and the post-claim re-check
+ * (against a fresh read — the preload is stale after waiting on a claim).
+ */
+async function settleAgainstExisting(
+  existing: IndexMaterializationRow | undefined,
+  declaration: IndexDeclaration,
+  backend: GraphBackend,
+  graphId: string,
+  schemaVersion: number,
+  action: Readonly<{
+    statusKey: string;
+    signature: string;
+    driftLabel: string;
+  }>,
+): Promise<MaterializeIndexesEntry | undefined> {
+  if (existing?.materializedAt === undefined) return undefined;
+  const { statusKey, signature, driftLabel } = action;
+  if (existing.signature === signature) {
+    return entry(declaration, "alreadyMaterialized");
+  }
+  const error = new Error(
+    `${driftLabel} "${declaration.name}" already materialized with a different signature (recorded by graph "${existing.graphId}" at version ${existing.schemaVersion}). Drop the index manually and retry, or rename the new declaration.`,
+  );
+  await backend.recordIndexMaterialization!(
+    buildAttempt({
+      declaration,
+      graphId,
+      signature,
+      schemaVersion,
+      materializedAt: undefined,
+      error,
+      ...(statusKey === declaration.name ? {} : { statusName: statusKey }),
+    }),
+  );
+  return entry(declaration, "failed", error);
+}
+
+/**
+ * Builds one index under the cross-caller claim protocol.
+ *
+ * Claim → re-check → build → record → release. Losers retry the claim on
+ * an interval: once the winner records its result and releases, the next
+ * claim succeeds and the fresh status re-check settles them as
+ * `alreadyMaterialized` (or surfaces the winner's drift failure) without
+ * ever issuing a second same-index CONCURRENTLY build — the shape that
+ * deadlocks on Postgres (expression-index CIC gets no safe-snapshot
+ * exemption). A crashed holder's claim expires after the lease; the
+ * takeover drops the invalid leftover its interrupted build left behind
+ * (relational indexes — the declaration name IS the physical name) before
+ * rebuilding.
+ */
+async function materializeWithClaim(
+  declaration: IndexDeclaration,
+  backend: GraphBackend,
+  graphId: string,
+  schemaVersion: number,
+  action: Readonly<{
+    statusKey: string;
+    signature: string;
+    driftLabel: string;
+    run: () => Promise<void>;
+  }>,
+): Promise<MaterializeIndexesEntry> {
+  const { statusKey, signature, driftLabel, run } = action;
+  const statusOverride =
+    statusKey === declaration.name ? undefined : { statusName: statusKey };
+  const recordIndexMaterialization = backend.recordIndexMaterialization!;
+  const token = `${statusKey}:${nowIso()}:${Math.floor(performance.now() * 1000)}`;
+  const deadline = Date.now() + CLAIM_WAIT_TIMEOUT_MS;
+
+  for (;;) {
+    const claimed = await backend.claimIndexMaterialization!({
+      indexName: statusKey,
+      graphId,
+      entity: declaration.entity,
+      kind: declaration.kind,
+      signature,
+      schemaVersion,
+      token,
+      leaseMs: CLAIM_LEASE_MS,
+    });
+
+    if (!claimed) {
+      if (Date.now() >= deadline) {
+        return entry(
+          declaration,
+          "failed",
+          new Error(
+            `Timed out waiting for a concurrent materializer's claim on "${statusKey}" (waited ${String(CLAIM_WAIT_TIMEOUT_MS)}ms). If its holder crashed, retry after the lease expires.`,
+          ),
+        );
+      }
+      await delay(CLAIM_RETRY_DELAY_MS);
+      continue;
+    }
+
+    try {
+      // Fresh re-check: the bulk preload happened before (possibly) waiting
+      // on another caller's build.
+      const fresh = await backend.getIndexMaterialization!(statusKey);
+      const settled = await settleAgainstExisting(
+        fresh,
+        declaration,
+        backend,
+        graphId,
+        schemaVersion,
+        { statusKey, signature, driftLabel },
+      );
+      if (settled !== undefined) return settled;
+
+      if (declaration.entity !== "vector") {
+        await dropInvalidIndexLeftover(backend, declaration.name);
+      }
+
+      try {
+        await run();
+        const attemptedAt = nowIso();
+        await recordIndexMaterialization(
+          buildAttempt({
+            declaration,
+            graphId,
+            signature,
+            schemaVersion,
+            materializedAt: attemptedAt,
+            error: undefined,
+            attemptedAt,
+            ...statusOverride,
+          }),
+        );
+        return entry(declaration, "created");
+      } catch (error_) {
+        const error =
+          error_ instanceof Error ? error_ : new Error(String(error_));
+        await recordIndexMaterialization(
+          buildAttempt({
+            declaration,
+            graphId,
+            signature,
+            schemaVersion,
+            materializedAt: undefined,
+            error,
+            ...statusOverride,
+          }),
+        );
+        return entry(declaration, "failed", error);
+      }
+    } finally {
+      await backend.releaseIndexMaterializationClaim!({
+        indexName: statusKey,
+        token,
+      });
+    }
+  }
+}
+
+/**
+ * Self-heals an interrupted CONCURRENTLY build: a crashed CIC leaves an
+ * INVALID index behind, and a later `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS` would see the name and silently no-op — recording success over
+ * an index the planner will never use. Detect via pg_index and drop
+ * (also CONCURRENTLY — same no-transaction rule). Valid indexes are never
+ * touched.
+ */
+async function dropInvalidIndexLeftover(
+  backend: GraphBackend,
+  physicalIndexName: string,
+): Promise<void> {
+  if (backend.dialect !== "postgres") return;
+  if (backend.executeDdl === undefined) return;
+  const rows = await backend.execute<{ invalid: boolean }>(
+    asCompiledRowsSql(sql`
+      SELECT NOT i.indisvalid AS invalid
+      FROM pg_class c
+      JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.relname = ${physicalIndexName}
+    `),
+  );
+  const row = rows[0];
+  if (!row?.invalid) return;
+  const quoted = `"${physicalIndexName.replaceAll('"', '""')}"`;
+  await backend.executeDdl(`DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
 }
 
 function entry(
