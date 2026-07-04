@@ -770,14 +770,19 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
 
 /**
  * Builds the relevance CTE for a `field.similarTo(...)` predicate in the query
- * builder. NOTE: this path is exact-but-brute-force — it splices the strategy's
- * `distanceExpression` and full-scans each declaring kind's per-field table
- * (`ORDER BY distance LIMIT k`); it does NOT use a strategy's engine-native ANN
- * (vec0 `MATCH … k=`, libSQL `vector_top_k`, pgvector's HNSW scan), which is
- * only reachable through the `store.search.vector` / `store.search.hybrid`
- * facade. For ANN-accelerated retrieval at scale use the facade; use
- * `.where(similarTo())` when you need to compose vector similarity with
- * arbitrary predicates / traversals in one query and exact ranking is fine.
+ * builder.
+ *
+ * Default (exact): splices the strategy's `distanceExpression` and scans each
+ * declaring kind's per-field table (`ORDER BY distance LIMIT k`). On
+ * pgvector >= 0.8 the planner can serve this shape from an HNSW index for a
+ * single-kind alias; on the SQLite-family engines it is a full scan.
+ *
+ * Opt-in (`{ approximate: true }`): each declaring kind's branch compiles to
+ * the strategy's own search SQL — the engine-native ANN form (vec0
+ * `MATCH … k=`, libSQL `vector_top_k`, pgvector's index-eligible scan) —
+ * scoped to the alias's candidate nodes via the same `candidates` pushdown
+ * the search facade uses. Semantics become approximate (index recall); a
+ * slot declared `indexType: "none"` degrades to the exact scan.
  */
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
@@ -819,13 +824,68 @@ export function buildStandardEmbeddingsCte(
   // engines and the hybrid RRF / vector ORDER BY paths are untouched.
   const branches = declaringKinds.map((kind) => {
     const tableName = vectorStrategy.tableName(graphId, kind, fieldPath);
+    const slotDescriptor = vectorSlots?.get(vectorSlotKey(kind, fieldPath));
     // Use the predicate's explicit metric if given, else this kind's DECLARED
     // metric (the one its ANN index was built for). Resolving per kind keeps an
     // includeSubClasses union correct when subkinds declare different metrics.
-    const branchMetric =
-      metric ??
-      vectorSlots?.get(vectorSlotKey(kind, fieldPath))?.metric ??
-      "cosine";
+    const branchMetric = metric ?? slotDescriptor?.metric ?? "cosine";
+
+    // Approximate opt-in: retrieve this kind's candidates via the
+    // strategy's own search SQL — the engine's native ANN form — scoped to
+    // the alias's candidate nodes (predicates, currency, traversal
+    // reachability) via the same `candidates` pushdown the search facade
+    // uses. A slot declared `indexType: "none"` compiles to the strategy's
+    // exact scan, so the opt-in degrades to today's semantics. Distance is
+    // re-derived from the strategy's score convention (cosine score =
+    // `1 - distance`; l2 / inner_product score = raw distance) so the
+    // shared ORDER BY / ROW_NUMBER machinery below is untouched.
+    //
+    // The ANN path additionally requires the effective metric to MATCH the
+    // slot's declared metric: every engine materializes metric-specific
+    // ANN structures (vec0 bakes `distance_metric` into the virtual table,
+    // libSQL's DiskANN index and pgvector's operator class are built for
+    // one metric), so retrieving by the declared metric and re-scoring
+    // under an overridden one would silently miss the override metric's
+    // true nearest neighbors. A mismatched override falls back to the
+    // exact scan below — correct for any metric, like `indexType: "none"`.
+    const annSlot =
+      (
+        vectorPredicate.approximate === true &&
+        branchMetric === slotDescriptor?.metric
+      ) ?
+        slotDescriptor
+      : undefined;
+    if (annSlot !== undefined) {
+      const kindCandidates = sql`SELECT node_id FROM ${scopedNodes} WHERE ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} = ${kind}`;
+      const annSql = vectorStrategy.buildSearch(
+        {
+          graphId,
+          nodeKind: kind,
+          fieldPath,
+          dimensions: annSlot.dimensions,
+          metric: branchMetric,
+          indexType: annSlot.indexType,
+        },
+        {
+          graphId,
+          nodeKind: kind,
+          fieldPath,
+          queryEmbedding,
+          metric: branchMetric,
+          dimensions: annSlot.dimensions,
+          indexType: annSlot.indexType,
+          limit: vectorPredicate.limit,
+          ...(minScore === undefined ? {} : { minScore }),
+        },
+        kindCandidates,
+      );
+      const distanceFromScore =
+        branchMetric === "cosine" ? sql.raw("(1.0 - score)") : sql.raw("score");
+      return sql`
+        SELECT node_id, ${kind} AS node_kind, ${distanceFromScore} AS distance, score
+        FROM (${annSql}) AS tg_ann_src
+      `;
+    }
     const distanceExpr = vectorStrategy.distanceExpression(
       qualifyColumn(tableName, "embedding"),
       queryEmbedding,

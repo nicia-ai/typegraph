@@ -331,6 +331,17 @@ export type SimilarToOptions = Readonly<{
    * For inner_product: minimum inner product value.
    */
   minScore?: number;
+  /**
+   * Opt into approximate retrieval: each declaring kind's candidates come
+   * from the engine's native ANN structure (pgvector HNSW/IVFFlat scans,
+   * vec0 `MATCH … k=`, libSQL `vector_top_k`) instead of an exact
+   * distance scan. This is a SEMANTIC change — results are subject to the
+   * index's recall, and predicates composed alongside constrain the ANN
+   * candidate set (exact on pgvector/vec0; bounded by over-fetch on
+   * libSQL). A slot declared with `indexType: "none"` falls back to the
+   * exact scan. Default: exact.
+   */
+  approximate?: boolean;
 }>;
 
 /**
@@ -747,6 +758,9 @@ function vectorSimilarity(
     ...(options?.metric !== undefined && { metric: options.metric }),
     limit,
     ...(options?.minScore !== undefined && { minScore: options.minScore }),
+    ...(options?.approximate !== undefined && {
+      approximate: options.approximate,
+    }),
   };
   return predicate(expr);
 }

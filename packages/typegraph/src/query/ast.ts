@@ -265,6 +265,11 @@ export type VectorSimilarityPredicate = Readonly<{
   limit: number;
   /** Optional minimum similarity score (0-1 for cosine) */
   minScore?: number;
+  /**
+   * Retrieve each kind's candidates via the engine's native ANN structure
+   * instead of an exact distance scan (see `SimilarToOptions.approximate`).
+   */
+  approximate?: boolean;
 }>;
 
 // ============================================================
