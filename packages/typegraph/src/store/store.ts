@@ -1118,6 +1118,7 @@ export class Store<G extends GraphDef> {
         graphId: this.graphId,
         backend: this.#backend,
         registry: this.#registry,
+        createQuery: () => this.query(),
       });
     }
     return this.#search;

@@ -193,7 +193,9 @@ async function logSubgraphShape(
 type MeasurementContext = Readonly<{
   hasVectorPredicate: boolean;
   hasHybridFacade: boolean;
-  docs: readonly { id: string; embedding: readonly number[] }[] | undefined;
+  docs:
+    | readonly { id: string; embedding: readonly number[]; category: string }[]
+    | undefined;
 }>;
 
 export async function measureQueries(
@@ -704,6 +706,65 @@ export async function measureQueries(
       })
     : undefined;
 
+  // Filtered facade searches: the `where` predicate compiles into the
+  // search statement's candidate set. Selectivity is one category out of
+  // DOC_CATEGORIES, so the engine ranks within ~1/5 of the corpus.
+  const sampleCategory = context.docs?.[0]?.category;
+
+  const filteredVectorSearchMs =
+    (
+      context.hasHybridFacade &&
+      sampleEmbedding !== undefined &&
+      sampleCategory !== undefined
+    ) ?
+      await bench(
+        "vector search filtered (facade, where category)",
+        async () => {
+          const hits = await store.search.vector("Doc", {
+            fieldPath: "embedding",
+            queryEmbedding: sampleEmbedding,
+            limit: 20,
+            metric: "cosine",
+            where: (doc) => doc.category.eq(sampleCategory),
+          });
+          if (hits.length === 0) {
+            throw new Error(
+              "filtered vector search drift: expected non-empty result set",
+            );
+          }
+        },
+      )
+    : undefined;
+
+  const filteredHybridSearchMs =
+    (
+      context.hasHybridFacade &&
+      sampleEmbedding !== undefined &&
+      sampleCategory !== undefined
+    ) ?
+      await bench("hybrid search filtered (RRF, where category)", async () => {
+        const hits = await store.search.hybrid("Doc", {
+          limit: 10,
+          vector: {
+            fieldPath: "embedding",
+            queryEmbedding: sampleEmbedding,
+            metric: "cosine",
+            k: 30,
+          },
+          fulltext: {
+            query: "climate adaptation",
+            k: 30,
+          },
+          where: (doc) => doc.category.eq(sampleCategory),
+        });
+        if (hits.length === 0) {
+          throw new Error(
+            "filtered hybrid search drift: expected non-empty result set",
+          );
+        }
+      })
+    : undefined;
+
   if (!context.hasVectorPredicate) {
     console.log("vector search: skipped (backend does not persist embeddings)");
   }
@@ -806,6 +867,8 @@ export async function measureQueries(
     fulltextSearchMs,
     vectorSearchMs,
     hybridSearchMs,
+    filteredVectorSearchMs,
+    filteredHybridSearchMs,
     cachedExecuteMs,
     preparedExecuteMs,
     subgraphFullMs,

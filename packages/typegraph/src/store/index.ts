@@ -120,6 +120,7 @@ export type {
   HybridSearchHit,
   HybridSearchOptions,
   HybridVectorOptions,
+  SearchScopeOptions,
   VectorSearchHit,
   VectorSearchOptions,
 } from "./search";

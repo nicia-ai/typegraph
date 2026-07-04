@@ -330,6 +330,7 @@ export type {
   SchemaIntrospection,
   SchemaManagerOptions,
   SchemaValidationResult,
+  SearchScopeOptions,
   Store,
   UniqueIntrospection,
   VectorSearchHit,

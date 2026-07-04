@@ -185,6 +185,10 @@ export type QueryMetrics = Readonly<{
   vectorSearchMs: number | undefined;
   /** `undefined` when vector search is unavailable at this backend. */
   hybridSearchMs: number | undefined;
+  /** Facade vector search with a `where` filter pushed into the KNN SQL. */
+  filteredVectorSearchMs: number | undefined;
+  /** Facade hybrid search with a `where` filter pushed into both legs. */
+  filteredHybridSearchMs: number | undefined;
   cachedExecuteMs: number;
   preparedExecuteMs: number;
   subgraphFullMs: number;

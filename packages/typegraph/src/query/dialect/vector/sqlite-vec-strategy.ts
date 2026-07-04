@@ -278,9 +278,12 @@ export const sqliteVecStrategy: VectorStrategy = {
       // the recomputed `distance` expression is reused only for score/minScore
       // so the math matches the brute-force path and the shared helpers.
       const query = vecF32Literal(params.queryEmbedding, "queryEmbedding");
+      // `k` covers the requested page: vec0 has no OFFSET inside a MATCH
+      // query, so fetch `limit + offset` neighbors and page in a wrapper.
+      const knnK = params.limit + (params.offset ?? 0);
       const conditions: SQL[] = [
         sql`${table}."embedding" MATCH ${query}`,
-        sql`k = ${params.limit}`,
+        sql`k = ${knnK}`,
         sql`${table}."graph_id" = ${params.graphId}`,
       ];
       if (params.minScore !== undefined) {
@@ -294,11 +297,22 @@ export const sqliteVecStrategy: VectorStrategy = {
       if (candidates !== undefined) {
         conditions.push(sql`${table}."node_id" IN (${candidates})`);
       }
-      return sql`
+      const knnBody = sql`
         SELECT ${table}."node_id" AS node_id, ${score} AS score
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY distance ASC
+      `;
+      if (params.offset === undefined || params.offset === 0) {
+        return knnBody;
+      }
+      // MATERIALIZED fences the page wrapper: SQLite would otherwise
+      // flatten the subquery and push the outer LIMIT into the vec0 MATCH
+      // query, which rejects `k = ?` and LIMIT together.
+      return sql`
+        WITH knn_page AS MATERIALIZED (${knnBody})
+        SELECT node_id, score FROM knn_page
+        LIMIT ${params.limit} OFFSET ${params.offset}
       `;
     }
 
@@ -312,12 +326,16 @@ export const sqliteVecStrategy: VectorStrategy = {
         vectorMinScoreCondition(distance, params.metric, params.minScore),
       );
     }
+    const pageClause =
+      params.offset === undefined || params.offset === 0 ?
+        sql`LIMIT ${params.limit}`
+      : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
     return sql`
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
       ORDER BY ${distance} ASC
-      LIMIT ${params.limit}
+      ${pageClause}
     `;
   },
 

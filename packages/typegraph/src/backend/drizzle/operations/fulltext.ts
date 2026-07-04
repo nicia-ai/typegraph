@@ -70,6 +70,10 @@ export function buildFulltextSearch(
         )
       : sql`NULL`;
 
+  const pageClause =
+    params.offset === undefined || params.offset === 0 ?
+      sql`LIMIT ${params.limit}`
+    : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
   return sql`
     SELECT
       "node_id" AS node_id,
@@ -78,7 +82,7 @@ export function buildFulltextSearch(
     FROM ${table}
     WHERE ${sql.join(conditions, sql` AND `)}
     ORDER BY ${rankExpression} DESC, "node_id" ASC
-    LIMIT ${params.limit}
+    ${pageClause}
   `;
 }
 

@@ -7,6 +7,8 @@
  * rank-based, so it papers over score-scale differences between
  * pgvector/sqlite-vec (distance-derived) and tsvector/FTS5 (BM25-style).
  */
+import { type SQL, sql } from "drizzle-orm";
+
 import {
   type FulltextCapabilities,
   type FulltextQueryMode,
@@ -14,12 +16,14 @@ import {
   type VectorIndexType,
   type VectorMetric,
 } from "../backend/types";
+import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import {
   DEFAULT_RRF_K,
   DEFAULT_RRF_WEIGHT,
   type HybridFusionOptions,
 } from "../query/ast";
+import { type QueryBuilder } from "../query/builder/query-builder";
 import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
@@ -66,23 +70,51 @@ export type HybridSearchHit<N = Node> = Readonly<{
   fulltext?: FulltextSearchHit<N>;
 }>;
 
-export type FulltextSearchOptions = Readonly<{
-  /** The user-supplied query string. */
-  query: string;
-  /** Max results. Required. */
-  limit: number;
-  /** Query parser mode. Default: "websearch". */
-  mode?: FulltextQueryMode;
+/**
+ * Scope options shared by every facade search leg.
+ *
+ * `where` and `includeSubClasses` compile into the search statement's
+ * candidate set (a subquery produced by the store's own query compiler), so
+ * filtering happens INSIDE the engine's top-k — never by post-filtering a
+ * ranked list. `offset` is rank-relative pagination: the engine fetches
+ * `limit + offset` ranked candidates and discards the leading page.
+ */
+export type SearchScopeOptions = Readonly<{
   /**
-   * Language override for query parsing. Default: per-row language as
-   * stored at insert time.
+   * Predicate over the node's properties, compiled by the shared query
+   * compiler into the candidate subquery. Requires a query-capable store.
+   * The facade narrows the accessor to the kind's typed accessor.
    */
-  language?: string;
-  /** Minimum relevance score to include in results. */
-  minScore?: number;
-  /** Return a highlighted snippet alongside each hit. */
-  includeSnippets?: boolean;
+  where?: (accessor: never) => unknown;
+  /** Rows to skip after ranking (rank-relative pagination). */
+  offset?: number;
+  /**
+   * Expand the searched kind to include its `subClassOf` descendants.
+   * Vector legs search each declaring kind's storage and merge by score;
+   * kinds that don't declare the embedding field are skipped (mirroring
+   * the query builder). Requires a query-capable store.
+   */
+  includeSubClasses?: boolean;
 }>;
+
+export type FulltextSearchOptions = SearchScopeOptions &
+  Readonly<{
+    /** The user-supplied query string. */
+    query: string;
+    /** Max results. Required. */
+    limit: number;
+    /** Query parser mode. Default: "websearch". */
+    mode?: FulltextQueryMode;
+    /**
+     * Language override for query parsing. Default: per-row language as
+     * stored at insert time.
+     */
+    language?: string;
+    /** Minimum relevance score to include in results. */
+    minScore?: number;
+    /** Return a highlighted snippet alongside each hit. */
+    includeSnippets?: boolean;
+  }>;
 
 export type HybridVectorOptions = Readonly<{
   /** Field path of the embedding column on the node kind. */
@@ -110,34 +142,35 @@ export type HybridVectorOptions = Readonly<{
  * vector half of `HybridSearchOptions` but flattens it because the
  * standalone path doesn't fuse against fulltext.
  */
-export type VectorSearchOptions = Readonly<{
-  /** Field path of the embedding column on the node kind. */
-  fieldPath: string;
-  /** Query embedding to compare against. */
-  queryEmbedding: readonly number[];
-  /** Max results. Required. */
-  limit: number;
-  /** Distance metric. Default: "cosine". */
-  metric?: VectorMetric;
-  /** Minimum similarity to include (units depend on metric). */
-  minScore?: number;
-  /**
-   * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
-   * Sizes the dynamic candidate list the index scan maintains — higher
-   * trades latency for recall. The floor for the index to surface
-   * `limit` neighbors is `efSearch >= limit`; ~2–4× is the high-recall
-   * target on million-scale corpora. Lets a latency-sensitive
-   * interactive path and a recall-sensitive batch path share one
-   * connection pool, tuning per query rather than per session.
-   *
-   * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
-   * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
-   * backends without transactions (`drizzle-orm/neon-http`) ignore it
-   * with a one-time warning. Must be a positive integer; pgvector caps
-   * it at 1000.
-   */
-  efSearch?: number;
-}>;
+export type VectorSearchOptions = SearchScopeOptions &
+  Readonly<{
+    /** Field path of the embedding column on the node kind. */
+    fieldPath: string;
+    /** Query embedding to compare against. */
+    queryEmbedding: readonly number[];
+    /** Max results. Required. */
+    limit: number;
+    /** Distance metric. Default: "cosine". */
+    metric?: VectorMetric;
+    /** Minimum similarity to include (units depend on metric). */
+    minScore?: number;
+    /**
+     * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
+     * Sizes the dynamic candidate list the index scan maintains — higher
+     * trades latency for recall. The floor for the index to surface
+     * `limit` neighbors is `efSearch >= limit`; ~2–4× is the high-recall
+     * target on million-scale corpora. Lets a latency-sensitive
+     * interactive path and a recall-sensitive batch path share one
+     * connection pool, tuning per query rather than per session.
+     *
+     * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
+     * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
+     * backends without transactions (`drizzle-orm/neon-http`) ignore it
+     * with a one-time warning. Must be a positive integer; pgvector caps
+     * it at 1000.
+     */
+    efSearch?: number;
+  }>;
 
 export type HybridFulltextOptions = Readonly<{
   query: string;
@@ -149,19 +182,142 @@ export type HybridFulltextOptions = Readonly<{
   includeSnippets?: boolean;
 }>;
 
-export type HybridSearchOptions = Readonly<{
-  vector: HybridVectorOptions;
-  fulltext: HybridFulltextOptions;
-  fusion?: HybridFusionOptions;
-  /** Final number of fused results to return. Required. */
-  limit: number;
-}>;
+export type HybridSearchOptions = SearchScopeOptions &
+  Readonly<{
+    vector: HybridVectorOptions;
+    fulltext: HybridFulltextOptions;
+    fusion?: HybridFusionOptions;
+    /** Final number of fused results to return. Required. */
+    limit: number;
+  }>;
 
 type StoreSearchContext = Readonly<{
   graphId: string;
   backend: GraphBackend;
   registry: KindRegistry;
+  /**
+   * Builds a fresh query for candidate compilation (`store.query()`, the
+   * same seam collection `find({ where })` uses). Optional so a bare
+   * context still supports unscoped searches; `where` /
+   * `includeSubClasses` throw without it.
+   */
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
+
+/**
+ * Internal alias for the candidate query. The compiled query prefixes its
+ * output columns with the alias, so the id column is `"_sc_id"`.
+ */
+const SEARCH_CANDIDATE_ALIAS = "_sc";
+
+/**
+ * Compiles the candidate subquery for one kind: the ids of nodes a search
+ * statement may rank. Runs the store's own query compiler, so the
+ * predicate, valid-time currency, tombstone exclusion, and graph scoping
+ * are exactly the semantics of a `current` read — search can never return
+ * (or lose top-k slots to) rows a `find()` would not see.
+ */
+function buildKindCandidates(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  where: ((accessor: never) => unknown) | undefined,
+): SQL | undefined {
+  if (ctx.createQuery === undefined) {
+    if (where === undefined) return undefined;
+    throw new ConfigurationError(
+      "search with a where predicate requires a query-capable store",
+      { capability: "search", graphId: ctx.graphId },
+    );
+  }
+  let chain = ctx.createQuery().from(nodeKind, SEARCH_CANDIDATE_ALIAS);
+  if (where !== undefined) {
+    chain = chain.whereNode(SEARCH_CANDIDATE_ALIAS, where as never);
+  }
+  const compiled = chain
+    .select(
+      (aliases: Record<string, unknown>) => aliases[SEARCH_CANDIDATE_ALIAS],
+    )
+    .compile();
+  return sql`SELECT ${sql.raw(`"${SEARCH_CANDIDATE_ALIAS}_id"`)} FROM (${compiled}) AS tg_search_candidates`;
+}
+
+/**
+ * The kinds one search call spans: the kind itself, plus its `subClassOf`
+ * descendants when requested.
+ */
+function resolveSearchKinds(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  includeSubClasses: boolean | undefined,
+): readonly string[] {
+  if (includeSubClasses !== true) return [nodeKind];
+  if (ctx.createQuery === undefined) {
+    throw new ConfigurationError(
+      "search with includeSubClasses requires a query-capable store",
+      { capability: "search", graphId: ctx.graphId },
+    );
+  }
+  return ctx.registry.expandSubClasses(nodeKind);
+}
+
+function assertSearchOffset(offset: number | undefined, label: string): void {
+  if (offset === undefined) return;
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new RangeError(
+      `${label} must be a non-negative integer, got: ${offset}`,
+    );
+  }
+}
+
+/** A ranked row tagged with the kind whose search leg produced it. */
+type RankedSourceRow = Readonly<{
+  kind: string;
+  nodeId: string;
+  score: number;
+  snippet?: string;
+}>;
+
+/** Node ids are unique per kind, not globally — key hydration by both. */
+function searchNodeKey(kind: string, nodeId: string): string {
+  return `${kind}\u0000${nodeId}`;
+}
+
+/**
+ * Whether higher scores rank first for a metric. Cosine scores are
+ * similarities (`1 - distance`); l2 / inner_product scores are the raw
+ * distance expression, where lower is better (matching each strategy's
+ * `ORDER BY distance ASC`).
+ */
+function scoreDescending(metric: VectorMetric): boolean {
+  return metric === "cosine";
+}
+
+/**
+ * Hydrates ranked rows spanning multiple kinds. One batched fetch per
+ * kind, results keyed by {@link searchNodeKey}.
+ */
+async function fetchNodesForRows(
+  backend: GraphBackend,
+  graphId: string,
+  rows: readonly RankedSourceRow[],
+): Promise<Map<string, Node>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const ids = idsByKind.get(row.kind) ?? new Set<string>();
+    ids.add(row.nodeId);
+    idsByKind.set(row.kind, ids);
+  }
+  const map = new Map<string, Node>();
+  await Promise.all(
+    [...idsByKind].map(async ([kind, ids]) => {
+      const kindMap = await fetchNodesByIds(backend, graphId, kind, [...ids]);
+      for (const [id, node] of kindMap) {
+        map.set(searchNodeKey(kind, id), node);
+      }
+    }),
+  );
+  return map;
+}
 
 /**
  * Resolved storage identity of one embedding field on a concrete node
@@ -182,23 +338,30 @@ type ResolvedSearchSlot = Readonly<{
  * embedding field so the caller gets a clear boundary error instead of a
  * downstream missing-table failure.
  */
+function tryResolveSearchSlot(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  fieldPath: string,
+): ResolvedSearchSlot | undefined {
+  const nodeType = ctx.registry.getNodeType(nodeKind);
+  if (nodeType === undefined) return undefined;
+  const fields = getEmbeddingFields(nodeType.schema);
+  const field = fields.find((entry) => entry.fieldPath === fieldPath);
+  if (field === undefined) return undefined;
+  return {
+    dimensions: field.dimensions,
+    metric: field.metric,
+    indexType: field.indexType,
+  };
+}
+
 function resolveSearchSlot(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
 ): ResolvedSearchSlot {
-  const nodeType = ctx.registry.getNodeType(nodeKind);
-  if (nodeType !== undefined) {
-    const fields = getEmbeddingFields(nodeType.schema);
-    const field = fields.find((entry) => entry.fieldPath === fieldPath);
-    if (field !== undefined) {
-      return {
-        dimensions: field.dimensions,
-        metric: field.metric,
-        indexType: field.indexType,
-      };
-    }
-  }
+  const slot = tryResolveSearchSlot(ctx, nodeKind, fieldPath);
+  if (slot !== undefined) return slot;
   throw new ConfigurationError(
     `Node kind "${nodeKind}" has no embedding field "${fieldPath}". ` +
       `Declare it with embedding(dimensions) on the node schema.`,
@@ -223,35 +386,67 @@ export async function executeFulltextSearch<N = Node>(
       `fulltextSearch.limit must be a positive integer, got: ${options.limit}`,
     );
   }
+  assertSearchOffset(options.offset, "fulltextSearch.offset");
   validateFulltextCallOptions(backend, {
     mode: options.mode,
     includeSnippets: options.includeSnippets,
     language: options.language,
   });
 
-  const params: Parameters<NonNullable<GraphBackend["fulltextSearch"]>>[0] = {
-    graphId,
-    nodeKind,
-    query: options.query,
-    limit: options.limit,
-    ...(options.mode ? { mode: options.mode } : {}),
-    ...(options.language ? { language: options.language } : {}),
-    ...(options.minScore === undefined ? {} : { minScore: options.minScore }),
-    ...(options.includeSnippets === undefined ?
-      {}
-    : { includeSnippets: options.includeSnippets }),
-  };
+  const kinds = resolveSearchKinds(ctx, nodeKind, options.includeSubClasses);
+  const offset = options.offset ?? 0;
+  const singleKind = kinds.length === 1;
 
-  const rows = await backend.fulltextSearch(params);
-  if (rows.length === 0) return [];
+  const perKindRows = await Promise.all(
+    kinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
+      const candidates = buildKindCandidates(ctx, kind, options.where);
+      const rows = await backend.fulltextSearch!({
+        graphId,
+        nodeKind: kind,
+        query: options.query,
+        // A single kind pushes the page into SQL; multiple kinds fetch
+        // each kind's full page-covering prefix and re-slice after merge.
+        limit: singleKind ? options.limit : options.limit + offset,
+        ...(singleKind && offset > 0 ? { offset } : {}),
+        ...(candidates === undefined ? {} : { candidates }),
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.language ? { language: options.language } : {}),
+        ...(options.minScore === undefined ?
+          {}
+        : { minScore: options.minScore }),
+        ...(options.includeSnippets === undefined ?
+          {}
+        : { includeSnippets: options.includeSnippets }),
+      });
+      return rows.map((row) => ({
+        kind,
+        nodeId: row.nodeId,
+        score: row.score,
+        ...(row.snippet === undefined ? {} : { snippet: row.snippet }),
+      }));
+    }),
+  );
 
-  const ids = rows.map((row) => row.nodeId);
-  const nodeMap = await fetchNodesByIds(backend, graphId, nodeKind, ids);
+  const merged =
+    singleKind ?
+      perKindRows[0]!
+    : perKindRows
+        .flat()
+        .toSorted(
+          (a, b) =>
+            b.score - a.score ||
+            compareStrings(a.kind, b.kind) ||
+            compareStrings(a.nodeId, b.nodeId),
+        )
+        .slice(offset, offset + options.limit);
+  if (merged.length === 0) return [];
+
+  const nodeMap = await fetchNodesForRows(backend, graphId, merged);
 
   const hits: FulltextSearchHit<N>[] = [];
   let rank = 1;
-  for (const row of rows) {
-    const node = nodeMap.get(row.nodeId);
+  for (const row of merged) {
+    const node = nodeMap.get(searchNodeKey(row.kind, row.nodeId));
     if (!node) continue;
     hits.push({
       node: node as N,
@@ -282,48 +477,148 @@ export async function executeVectorSearch<N = Node>(
     );
   }
   assertEfSearch(options.efSearch, "vectorSearch.efSearch");
+  assertSearchOffset(options.offset, "vectorSearch.offset");
 
-  const slot = resolveSearchSlot(ctx, nodeKind, options.fieldPath);
-  assertVectorQueryCompatible(
-    backend,
-    slot,
-    { metric: options.metric, queryEmbedding: options.queryEmbedding },
+  const searchKinds = resolveVectorSearchKinds(
+    ctx,
+    nodeKind,
+    options.fieldPath,
+    options.includeSubClasses,
+    options.metric,
     "vectorSearch",
   );
-  assertMinScore(
-    options.minScore,
-    options.metric ?? slot.metric,
-    "vectorSearch.minScore",
-  );
-  const rows = await backend.vectorSearch({
-    graphId,
-    nodeKind,
-    fieldPath: options.fieldPath,
-    queryEmbedding: options.queryEmbedding,
-    // Default to the field's DECLARED metric (the metric its index was built
-    // for); only an explicit caller override changes it. Defaulting to cosine
-    // here would mis-rank l2 / inner_product fields and bypass their ANN index.
-    metric: options.metric ?? slot.metric,
-    dimensions: slot.dimensions,
-    indexType: slot.indexType,
-    limit: options.limit,
-    ...(options.minScore === undefined ? {} : { minScore: options.minScore }),
-    ...(options.efSearch === undefined ? {} : { efSearch: options.efSearch }),
-  });
-  if (rows.length === 0) return [];
+  for (const { slot } of searchKinds) {
+    assertVectorQueryCompatible(
+      backend,
+      slot,
+      { metric: options.metric, queryEmbedding: options.queryEmbedding },
+      "vectorSearch",
+    );
+    assertMinScore(
+      options.minScore,
+      options.metric ?? slot.metric,
+      "vectorSearch.minScore",
+    );
+  }
+  const offset = options.offset ?? 0;
+  const singleKind = searchKinds.length === 1;
+  const metric = options.metric ?? searchKinds[0]!.slot.metric;
 
-  const ids = rows.map((row) => row.nodeId);
-  const nodeMap = await fetchNodesByIds(backend, graphId, nodeKind, ids);
+  const perKindRows = await Promise.all(
+    searchKinds.map(
+      async ({ kind, slot }): Promise<readonly RankedSourceRow[]> => {
+        const candidates = buildKindCandidates(ctx, kind, options.where);
+        const rows = await backend.vectorSearch!({
+          graphId,
+          nodeKind: kind,
+          fieldPath: options.fieldPath,
+          queryEmbedding: options.queryEmbedding,
+          // Default to the field's DECLARED metric (the metric its index was
+          // built for); only an explicit caller override changes it.
+          // Defaulting to cosine here would mis-rank l2 / inner_product
+          // fields and bypass their ANN index.
+          metric,
+          dimensions: slot.dimensions,
+          indexType: slot.indexType,
+          // A single kind pushes the page into SQL; multiple kinds fetch
+          // each kind's full page-covering prefix and re-slice after merge.
+          limit: singleKind ? options.limit : options.limit + offset,
+          ...(singleKind && offset > 0 ? { offset } : {}),
+          ...(candidates === undefined ? {} : { candidates }),
+          ...(options.minScore === undefined ?
+            {}
+          : { minScore: options.minScore }),
+          ...(options.efSearch === undefined ?
+            {}
+          : { efSearch: options.efSearch }),
+        });
+        return rows.map((row) => ({
+          kind,
+          nodeId: row.nodeId,
+          score: row.score,
+        }));
+      },
+    ),
+  );
+
+  const merged =
+    singleKind ?
+      perKindRows[0]!
+    : mergeVectorRows(perKindRows, metric).slice(
+        offset,
+        offset + options.limit,
+      );
+  if (merged.length === 0) return [];
+
+  const nodeMap = await fetchNodesForRows(backend, graphId, merged);
 
   const hits: VectorSearchHit<N>[] = [];
   let rank = 1;
-  for (const row of rows) {
-    const node = nodeMap.get(row.nodeId);
+  for (const row of merged) {
+    const node = nodeMap.get(searchNodeKey(row.kind, row.nodeId));
     if (!node) continue;
     hits.push({ node: node as N, score: row.score, rank });
     rank += 1;
   }
   return hits;
+}
+
+/** One vector-search target: a kind and its resolved embedding slot. */
+type VectorSearchKind = Readonly<{ kind: string; slot: ResolvedSearchSlot }>;
+
+/**
+ * Resolves the kinds a vector search spans, keeping only kinds that
+ * declare the embedding field (mirroring the query builder, which skips
+ * non-declaring kinds instead of referencing a table that was never
+ * created). Enforces one comparable metric across the expansion: scores
+ * from different metrics cannot be merged into one ranking, so mixed
+ * declared metrics require an explicit `options.metric` override.
+ */
+function resolveVectorSearchKinds(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  fieldPath: string,
+  includeSubClasses: boolean | undefined,
+  metricOverride: VectorMetric | undefined,
+  label: string,
+): readonly VectorSearchKind[] {
+  const kinds = resolveSearchKinds(ctx, nodeKind, includeSubClasses);
+  const resolved: VectorSearchKind[] = [];
+  for (const kind of kinds) {
+    const slot = tryResolveSearchSlot(ctx, kind, fieldPath);
+    if (slot !== undefined) resolved.push({ kind, slot });
+  }
+  // No declaring kind: surface the standard configuration error for the
+  // requested kind.
+  if (resolved.length === 0) resolveSearchSlot(ctx, nodeKind, fieldPath);
+  if (metricOverride === undefined) {
+    const metrics = new Set(resolved.map(({ slot }) => slot.metric));
+    if (metrics.size > 1) {
+      throw new ConfigurationError(
+        `${label}: kinds expanded from "${nodeKind}" declare different ` +
+          `metrics for "${fieldPath}" (${[...metrics].join(", ")}). Pass an ` +
+          `explicit metric to search across them.`,
+        { capability: "vector", graphId: ctx.graphId },
+      );
+    }
+  }
+  return resolved;
+}
+
+/** Merges per-kind ranked rows into one globally ordered list. */
+function mergeVectorRows(
+  perKindRows: readonly (readonly RankedSourceRow[])[],
+  metric: VectorMetric,
+): readonly RankedSourceRow[] {
+  const descending = scoreDescending(metric);
+  return perKindRows
+    .flat()
+    .toSorted(
+      (a, b) =>
+        (descending ? b.score - a.score : a.score - b.score) ||
+        compareStrings(a.kind, b.kind) ||
+        compareStrings(a.nodeId, b.nodeId),
+    );
 }
 
 export async function executeHybridSearch<N = Node>(
@@ -361,63 +656,140 @@ export async function executeHybridSearch<N = Node>(
     language: options.fulltext.language,
   });
 
+  assertSearchOffset(options.offset, "hybridSearch.offset");
+
   const fusionK = options.fusion?.k ?? DEFAULT_RRF_K;
   const vectorWeight = options.fusion?.weights?.vector ?? DEFAULT_RRF_WEIGHT;
   const fulltextWeight =
     options.fusion?.weights?.fulltext ?? DEFAULT_RRF_WEIGHT;
+  const offset = options.offset ?? 0;
+  // Over-fetch covers the requested page: fused top-(limit+offset) needs
+  // deep-enough per-source prefixes.
   const overFetchMultiplier = 4;
-  const vectorK = options.vector.k ?? options.limit * overFetchMultiplier;
-  const fulltextK = options.fulltext.k ?? options.limit * overFetchMultiplier;
+  const pageLimit = options.limit + offset;
+  const vectorK = options.vector.k ?? pageLimit * overFetchMultiplier;
+  const fulltextK = options.fulltext.k ?? pageLimit * overFetchMultiplier;
 
-  const vectorSlot = resolveSearchSlot(ctx, nodeKind, options.vector.fieldPath);
-  assertVectorQueryCompatible(
-    backend,
-    vectorSlot,
-    {
-      metric: options.vector.metric,
-      queryEmbedding: options.vector.queryEmbedding,
-    },
+  // The fulltext half spans every expanded kind; the vector half only the
+  // kinds that declare the embedding field (mirroring the query builder's
+  // treatment of non-declaring kinds).
+  const fulltextKinds = resolveSearchKinds(
+    ctx,
+    nodeKind,
+    options.includeSubClasses,
+  );
+  const vectorKinds = resolveVectorSearchKinds(
+    ctx,
+    nodeKind,
+    options.vector.fieldPath,
+    options.includeSubClasses,
+    options.vector.metric,
     "hybridSearch.vector",
   );
-  assertMinScore(
-    options.vector.minScore,
-    options.vector.metric ?? vectorSlot.metric,
-    "hybridSearch.vector.minScore",
-  );
-  const vectorPromise = backend.vectorSearch({
-    graphId,
-    nodeKind,
-    fieldPath: options.vector.fieldPath,
-    queryEmbedding: options.vector.queryEmbedding,
-    // Default to the field's declared metric (see executeVectorSearch).
-    metric: options.vector.metric ?? vectorSlot.metric,
-    dimensions: vectorSlot.dimensions,
-    indexType: vectorSlot.indexType,
-    limit: vectorK,
-    ...(options.vector.minScore === undefined ?
-      {}
-    : { minScore: options.vector.minScore }),
-    ...(options.vector.efSearch === undefined ?
-      {}
-    : { efSearch: options.vector.efSearch }),
-  });
+  for (const { slot } of vectorKinds) {
+    assertVectorQueryCompatible(
+      backend,
+      slot,
+      {
+        metric: options.vector.metric,
+        queryEmbedding: options.vector.queryEmbedding,
+      },
+      "hybridSearch.vector",
+    );
+    assertMinScore(
+      options.vector.minScore,
+      options.vector.metric ?? slot.metric,
+      "hybridSearch.vector.minScore",
+    );
+  }
+  const vectorMetric = options.vector.metric ?? vectorKinds[0]!.slot.metric;
 
-  const fulltextPromise = backend.fulltextSearch({
-    graphId,
-    nodeKind,
-    query: options.fulltext.query,
-    limit: fulltextK,
-    ...(options.fulltext.mode ? { mode: options.fulltext.mode } : {}),
-    ...(options.fulltext.language ?
-      { language: options.fulltext.language }
-    : {}),
-    ...(options.fulltext.minScore === undefined ?
-      {}
-    : { minScore: options.fulltext.minScore }),
-    ...(options.fulltext.includeSnippets === undefined ?
-      {}
-    : { includeSnippets: options.fulltext.includeSnippets }),
-  });
+  // One candidate subquery per kind, shared by both halves.
+  const candidatesByKind = new Map<string, SQL | undefined>();
+  for (const kind of fulltextKinds) {
+    candidatesByKind.set(kind, buildKindCandidates(ctx, kind, options.where));
+  }
+  for (const { kind } of vectorKinds) {
+    if (!candidatesByKind.has(kind)) {
+      candidatesByKind.set(kind, buildKindCandidates(ctx, kind, options.where));
+    }
+  }
+
+  const vectorPromise = Promise.all(
+    vectorKinds.map(
+      async ({ kind, slot }): Promise<readonly RankedSourceRow[]> => {
+        const candidates = candidatesByKind.get(kind);
+        const rows = await backend.vectorSearch!({
+          graphId,
+          nodeKind: kind,
+          fieldPath: options.vector.fieldPath,
+          queryEmbedding: options.vector.queryEmbedding,
+          // Default to the field's declared metric (see executeVectorSearch).
+          metric: vectorMetric,
+          dimensions: slot.dimensions,
+          indexType: slot.indexType,
+          limit: vectorK,
+          ...(candidates === undefined ? {} : { candidates }),
+          ...(options.vector.minScore === undefined ?
+            {}
+          : { minScore: options.vector.minScore }),
+          ...(options.vector.efSearch === undefined ?
+            {}
+          : { efSearch: options.vector.efSearch }),
+        });
+        return rows.map((row) => ({
+          kind,
+          nodeId: row.nodeId,
+          score: row.score,
+        }));
+      },
+    ),
+  ).then((perKind) =>
+    perKind.length === 1 ?
+      perKind[0]!
+    : mergeVectorRows(perKind, vectorMetric).slice(0, vectorK),
+  );
+
+  const fulltextPromise = Promise.all(
+    fulltextKinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
+      const candidates = candidatesByKind.get(kind);
+      const rows = await backend.fulltextSearch!({
+        graphId,
+        nodeKind: kind,
+        query: options.fulltext.query,
+        limit: fulltextK,
+        ...(candidates === undefined ? {} : { candidates }),
+        ...(options.fulltext.mode ? { mode: options.fulltext.mode } : {}),
+        ...(options.fulltext.language ?
+          { language: options.fulltext.language }
+        : {}),
+        ...(options.fulltext.minScore === undefined ?
+          {}
+        : { minScore: options.fulltext.minScore }),
+        ...(options.fulltext.includeSnippets === undefined ?
+          {}
+        : { includeSnippets: options.fulltext.includeSnippets }),
+      });
+      return rows.map((row) => ({
+        kind,
+        nodeId: row.nodeId,
+        score: row.score,
+        ...(row.snippet === undefined ? {} : { snippet: row.snippet }),
+      }));
+    }),
+  ).then((perKind) =>
+    perKind.length === 1 ?
+      perKind[0]!
+    : perKind
+        .flat()
+        .toSorted(
+          (a, b) =>
+            b.score - a.score ||
+            compareStrings(a.kind, b.kind) ||
+            compareStrings(a.nodeId, b.nodeId),
+        )
+        .slice(0, fulltextK),
+  );
 
   const [vectorRows, fulltextRows] = await Promise.all([
     vectorPromise,
@@ -427,6 +799,7 @@ export async function executeHybridSearch<N = Node>(
   // RRF fusion. The classic formula is score = Σ_src 1 / (k + rank_src).
   // Per-source weights extend it to a weighted sum.
   interface FusedEntry {
+    kind: string;
     nodeId: string;
     fusedScore: number;
     vectorRank?: number;
@@ -440,20 +813,24 @@ export async function executeHybridSearch<N = Node>(
   for (const [index, row] of vectorRows.entries()) {
     const rank = index + 1;
     const contribution = vectorWeight / (fusionK + rank);
-    const entry = fused.get(row.nodeId) ?? {
+    const key = searchNodeKey(row.kind, row.nodeId);
+    const entry = fused.get(key) ?? {
+      kind: row.kind,
       nodeId: row.nodeId,
       fusedScore: 0,
     };
     entry.fusedScore += contribution;
     entry.vectorRank = rank;
     entry.vectorScore = row.score;
-    fused.set(row.nodeId, entry);
+    fused.set(key, entry);
   }
 
   for (const [index, row] of fulltextRows.entries()) {
     const rank = index + 1;
     const contribution = fulltextWeight / (fusionK + rank);
-    const entry = fused.get(row.nodeId) ?? {
+    const key = searchNodeKey(row.kind, row.nodeId);
+    const entry = fused.get(key) ?? {
+      kind: row.kind,
       nodeId: row.nodeId,
       fusedScore: 0,
     };
@@ -463,23 +840,32 @@ export async function executeHybridSearch<N = Node>(
     if (row.snippet !== undefined) {
       entry.fulltextSnippet = row.snippet;
     }
-    fused.set(row.nodeId, entry);
+    fused.set(key, entry);
   }
 
   const ranked = [...fused.values()]
     .toSorted(
       (a, b) =>
-        b.fusedScore - a.fusedScore || compareStrings(a.nodeId, b.nodeId),
+        b.fusedScore - a.fusedScore ||
+        compareStrings(a.kind, b.kind) ||
+        compareStrings(a.nodeId, b.nodeId),
     )
-    .slice(0, options.limit);
+    .slice(offset, offset + options.limit);
 
-  const ids = ranked.map((entry) => entry.nodeId);
-  const nodeMap = await fetchNodesByIds(backend, graphId, nodeKind, ids);
+  const nodeMap = await fetchNodesForRows(
+    backend,
+    graphId,
+    ranked.map((entry) => ({
+      kind: entry.kind,
+      nodeId: entry.nodeId,
+      score: entry.fusedScore,
+    })),
+  );
 
   const hits: HybridSearchHit<N>[] = [];
   let rank = 1;
   for (const entry of ranked) {
-    const node = nodeMap.get(entry.nodeId);
+    const node = nodeMap.get(searchNodeKey(entry.kind, entry.nodeId));
     if (!node) continue;
     const typedNode = node as N;
     const hit: HybridSearchHit<N> = {

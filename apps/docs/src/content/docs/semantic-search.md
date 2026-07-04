@@ -467,6 +467,42 @@ const similar = await store
   .execute();
 ```
 
+### Scoped facade search: filters, pagination, subclasses
+
+`store.search.vector` (and `fulltext` / `hybrid`) accept a `where`
+predicate, an `offset`, and `includeSubClasses` — all compiled into the
+search statement itself, so the engine ranks only eligible rows. A filter
+never costs you results: you get `limit` hits whenever `limit` matching
+nodes exist (on libSQL DiskANN, subject to the over-fetch bound above).
+
+```typescript
+// Top 10 most similar *published* documents, second page.
+const hits = await store.search.vector("Document", {
+  fieldPath: "embedding",
+  queryEmbedding,
+  limit: 10,
+  offset: 10,
+  where: (d) => d.status.eq("published"),
+});
+
+// Search a kind and all of its subClassOf descendants; per-kind results
+// merge into one globally ordered ranking. Kinds that don't declare the
+// embedding field are skipped.
+const acrossKinds = await store.search.vector("Content", {
+  fieldPath: "embedding",
+  queryEmbedding,
+  limit: 10,
+  includeSubClasses: true,
+});
+```
+
+The `where` predicate is compiled by the same query compiler as
+`store.query()` — property predicates behave identically, use the same
+declared indexes, and apply the same current-read semantics (tombstoned
+nodes and nodes outside their validity window never rank). With mixed
+declared metrics across expanded kinds, pass an explicit `metric` — scores
+from different metrics cannot merge into one ranking.
+
 ### Choosing a Distance Metric
 
 ```typescript

@@ -249,17 +249,22 @@ export const libsqlVectorStrategy: VectorStrategy = {
       if (candidates !== undefined) {
         conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
       }
+      // `pageK` covers the requested page (`limit + offset`); the
+      // candidate-filter over-fetch multiplies on top of it.
+      const pageK = params.limit + (params.offset ?? 0);
       const annK =
-        candidates === undefined ?
-          params.limit
-        : params.limit * CANDIDATE_FILTER_OVERFETCH;
+        candidates === undefined ? pageK : pageK * CANDIDATE_FILTER_OVERFETCH;
+      const pageClause =
+        params.offset === undefined || params.offset === 0 ?
+          sql`LIMIT ${params.limit}`
+        : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
       return sql`
         SELECT ${quoted}."node_id" AS node_id, ${score} AS score
         FROM vector_top_k(${indexName}, ${query}, ${annK})
         JOIN ${quoted} ON ${quoted}.rowid = id
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY ${distance} ASC
-        LIMIT ${params.limit}
+        ${pageClause}
       `;
     }
 
@@ -273,12 +278,16 @@ export const libsqlVectorStrategy: VectorStrategy = {
         vectorMinScoreCondition(distance, params.metric, params.minScore),
       );
     }
+    const pageClause =
+      params.offset === undefined || params.offset === 0 ?
+        sql`LIMIT ${params.limit}`
+      : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
     return sql`
       SELECT ${quoted}."node_id" AS node_id, ${score} AS score
       FROM ${quoted}
       WHERE ${sql.join(conditions, sql` AND `)}
       ORDER BY ${distance} ASC
-      LIMIT ${params.limit}
+      ${pageClause}
     `;
   },
 

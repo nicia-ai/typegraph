@@ -14,6 +14,9 @@ import { type GraphBackend } from "../backend/types";
 import { type GraphDef, type NodeKinds } from "../core/define-graph";
 import { type NodeRegistration, type NodeType } from "../core/types";
 import { KindNotFoundError } from "../errors";
+import { type QueryBuilder } from "../query/builder/query-builder";
+import { type NodeAccessor } from "../query/builder/types";
+import { type Predicate } from "../query/predicates";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   rebuildFulltextIndex,
@@ -50,10 +53,32 @@ type ResolveNode<G extends GraphDef, K extends string> =
     : Node
   : Node;
 
+/**
+ * The registered `NodeType` behind a kind literal — the accessor-level
+ * companion of {@link ResolveNode}, used to type `where` predicates.
+ * Falls back to the base `NodeType` for dynamic (string) kinds.
+ */
+type ResolveNodeType<G extends GraphDef, K extends string> =
+  K extends NodeKinds<G> ?
+    G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
+      N
+    : NodeType
+  : NodeType;
+
+/**
+ * The kind-typed search scope: same shape as {@link SearchScopeOptions}
+ * but with the `where` accessor narrowed to the searched kind, exactly
+ * like `store.nodes.<kind>.find({ where })`.
+ */
+type TypedSearchScope<G extends GraphDef, K extends string> = Readonly<{
+  where?: (accessor: NodeAccessor<ResolveNodeType<G, K>>) => Predicate;
+}>;
+
 type StoreSearchContext = Readonly<{
   graphId: string;
   backend: GraphBackend;
   registry: KindRegistry;
+  createQuery?: () => QueryBuilder<GraphDef>;
 }>;
 
 /**
@@ -109,15 +134,11 @@ export class StoreSearch<G extends GraphDef> {
    */
   async fulltext<K extends string>(
     nodeKind: K,
-    options: FulltextSearchOptions,
+    options: Omit<FulltextSearchOptions, "where"> & TypedSearchScope<G, K>,
   ): Promise<readonly FulltextSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeFulltextSearch<ResolveNode<G, K>>(
-      {
-        graphId: this.#context.graphId,
-        backend: this.#context.backend,
-        registry: this.#context.registry,
-      },
+      this.#context,
       nodeKind,
       options,
     );
@@ -136,15 +157,11 @@ export class StoreSearch<G extends GraphDef> {
    */
   async vector<K extends string>(
     nodeKind: K,
-    options: VectorSearchOptions,
+    options: Omit<VectorSearchOptions, "where"> & TypedSearchScope<G, K>,
   ): Promise<readonly VectorSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeVectorSearch<ResolveNode<G, K>>(
-      {
-        graphId: this.#context.graphId,
-        backend: this.#context.backend,
-        registry: this.#context.registry,
-      },
+      this.#context,
       nodeKind,
       options,
     );
@@ -161,15 +178,11 @@ export class StoreSearch<G extends GraphDef> {
    */
   async hybrid<K extends string>(
     nodeKind: K,
-    options: HybridSearchOptions,
+    options: Omit<HybridSearchOptions, "where"> & TypedSearchScope<G, K>,
   ): Promise<readonly HybridSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeHybridSearch<ResolveNode<G, K>>(
-      {
-        graphId: this.#context.graphId,
-        backend: this.#context.backend,
-        registry: this.#context.registry,
-      },
+      this.#context,
       nodeKind,
       options,
     );

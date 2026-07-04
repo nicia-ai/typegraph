@@ -293,7 +293,10 @@ function createCommonOperationStrategy(
         fulltextTable,
         params,
         fulltextStrategy,
-        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind),
+        // Store-compiled candidates (predicates + subclass + currency)
+        // take precedence; the live-node default covers direct backend use.
+        params.candidates ??
+          liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind),
       ),
     buildLiveNodeIds: (graphId: string, nodeKind: string): SQL =>
       liveNodeIdsSubquery(tables.nodes, graphId, nodeKind),

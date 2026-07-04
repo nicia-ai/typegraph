@@ -1223,7 +1223,13 @@ function createPostgresOperationBackend(
           const query = vectorStrategy.buildSearch(
             slot,
             params,
-            operationStrategy.buildLiveNodeIds(params.graphId, params.nodeKind),
+            // Store-compiled candidates (predicates + subclass + currency)
+            // take precedence; the live-node default covers direct backend use.
+            params.candidates ??
+              operationStrategy.buildLiveNodeIds(
+                params.graphId,
+                params.nodeKind,
+              ),
           );
           const gucOverrides = await vectorSearchGucOverrides(params);
           let rows: readonly { node_id: string; score: number }[];

@@ -437,7 +437,9 @@ type SeedResult = Readonly<{
    * `undefined` when vector support is not available so search
    * measurements can skip cleanly.
    */
-  docs: readonly { id: string; embedding: readonly number[] }[] | undefined;
+  docs:
+    | readonly { id: string; embedding: readonly number[]; category: string }[]
+    | undefined;
 }>;
 
 export async function seedStore(store: PerfStore): Promise<SeedResult> {
