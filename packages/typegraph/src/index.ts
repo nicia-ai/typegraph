@@ -144,6 +144,11 @@ export type {
   VectorCapabilities,
   VectorOperationBackend,
 } from "./backend/types";
+export {
+  type RowProps,
+  rowPropsToJsonText,
+  rowPropsToObject,
+} from "./backend/types";
 export type { FulltextStrategy } from "./query/dialect/fulltext-strategy";
 export {
   fts5Strategy,
