@@ -59,6 +59,9 @@ export type NodeCollectionConfig = Readonly<{
   backend: GraphBackend | TransactionBackend;
   defaultTemporalMode: TemporalMode;
   rowToNode: (row: NodeRow) => Node;
+  /** See NodeOperations.maybeRefreshStatisticsAfterBulk. */
+  maybeRefreshStatisticsAfterBulk?:
+    ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
@@ -384,9 +387,11 @@ export function createNodeCollection<
         const results = await backend.transaction(async (txBackend) =>
           executeNodeCreateBatch(batchInputs, txBackend),
         );
+        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
         return narrowNodes<N>(results);
       }
       const results = await executeNodeCreateBatch(batchInputs, backend);
+      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowNodes<N>(results);
     },
 

@@ -466,9 +466,26 @@ that created or updated rows, and `store.materializeIndexes()` does the
 same on SQLite after creating indexes (pass `refreshStatistics: false` to
 opt out). On PostgreSQL, `materializeIndexes()` builds with
 `CREATE INDEX CONCURRENTLY` and skips the automatic refresh — call
-`store.refreshStatistics()` after materializing. For other bulk paths — a
-`bulkCreate` loop, backend-level batch inserts — call
-`store.refreshStatistics()` yourself once the load completes.
+`store.refreshStatistics()` after materializing.
+
+`bulkCreate` on nodes and edges also refreshes automatically when a
+single autocommit call writes 1,000 rows or more. Tune or disable this
+with the `autoRefreshStatistics` store option:
+
+```typescript
+// Refresh after any autocommit bulkCreate of 5,000+ rows
+const store = createStore(graph, backend, { autoRefreshStatistics: 5000 });
+
+// Never refresh automatically after bulkCreate
+const store = createStore(graph, backend, { autoRefreshStatistics: false });
+```
+
+Bulk writes inside a `store.transaction(...)` block never auto-refresh —
+statistics collected mid-transaction cannot see the uncommitted rows —
+so refresh manually after the transaction commits. The same applies to
+loops of small `bulkCreate` batches that never individually reach the
+threshold, and to backend-level batch inserts — the loop example below
+covers that pattern.
 
 PostgreSQL's query planner relies on table statistics to choose
 between multi-column indexes on `typegraph_edges` (forward vs reverse vs

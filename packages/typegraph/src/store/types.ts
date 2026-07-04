@@ -305,9 +305,30 @@ export type StoreHooks = Readonly<{
 // Store Configuration
 // ============================================================
 
+/**
+ * Default row count at which an autocommit bulk write triggers an
+ * automatic planner-statistics refresh. Below this, the refresh cost is
+ * not worth paying per call and autovacuum/PRAGMA optimize cover it.
+ */
+export const AUTO_REFRESH_STATISTICS_ROW_THRESHOLD = 1000;
+
 type BaseStoreOptions = Readonly<{
   /** Observability hooks for monitoring */
   hooks?: StoreHooks;
+  /**
+   * Automatic planner-statistics refresh after large autocommit bulk
+   * writes (bulkCreate on nodes and edges). Stale statistics after a
+   * bulk load are a whole class of planner cliffs: the planner keeps
+   * pre-load row estimates until ANALYZE runs. When a single
+   * autocommit bulk write reaches the threshold
+   * ({@link AUTO_REFRESH_STATISTICS_ROW_THRESHOLD} rows by default),
+   * the store runs `refreshStatistics()` after the write commits.
+   * Pass a number to change the threshold, or `false` to disable.
+   * Bulk writes inside a caller-provided transaction never
+   * auto-refresh (statistics cannot see uncommitted rows); refresh
+   * manually after commit. `importGraph` handles its own refresh.
+   */
+  autoRefreshStatistics?: false | number;
   /** SQL schema configuration from createSqlSchema(...) for custom table names */
   schema?: SqlSchema;
   /** Query default behaviors. */

@@ -182,6 +182,7 @@ import {
   type SubgraphResult,
 } from "./subgraph";
 import {
+  AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
@@ -702,10 +703,33 @@ export class Store<G extends GraphDef> {
     return this.#buildNodeOperations(this.#createNodeOperationContext());
   }
 
+  /**
+   * Refreshes planner statistics after an autocommit bulk write that
+   * reached the configured row threshold. A refresh failure must never
+   * fail the (already committed) write — it degrades to a warning.
+   */
+  async #maybeRefreshStatisticsAfterBulk(rowCount: number): Promise<void> {
+    const configured = this.#options?.autoRefreshStatistics;
+    if (configured === false) return;
+    const threshold = configured ?? AUTO_REFRESH_STATISTICS_ROW_THRESHOLD;
+    if (rowCount < threshold) return;
+    try {
+      await this.refreshStatistics();
+    } catch (error) {
+      console.warn(
+        "typegraph: statistics refresh after bulk write failed; run " +
+          "store.refreshStatistics() to avoid stale planner statistics.",
+        error,
+      );
+    }
+  }
+
   #buildNodeOperations(ctx: NodeOperationContext<G>): NodeOperations {
     return {
       defaultTemporalMode: this.#graph.defaults.temporalMode,
       rowToNode: (row) => rowToNode(row),
+      maybeRefreshStatisticsAfterBulk: (rowCount) =>
+        this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
       executeCreateBatch: (inputs, backend) =>
         executeNodeCreateBatch(ctx, inputs, backend),
@@ -789,6 +813,8 @@ export class Store<G extends GraphDef> {
     return {
       defaultTemporalMode: this.#graph.defaults.temporalMode,
       rowToEdge: (row) => rowToEdge(row),
+      maybeRefreshStatisticsAfterBulk: (rowCount) =>
+        this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
       executeCreateBatch: (inputs, backend) =>
         executeEdgeCreateBatch(ctx, inputs, backend),
@@ -1604,13 +1630,18 @@ export class Store<G extends GraphDef> {
     sql?: AdoptedTransaction,
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
   ): TransactionContext<G> {
+    // No statistics auto-refresh inside a caller-provided transaction:
+    // ANALYZE from another connection cannot see the uncommitted rows,
+    // so it would only reset the counter without fixing the estimates.
     const txNodeOperations: NodeOperations = {
       ...this.#buildNodeOperations(this.#createNodeOperationContext(runHooks)),
       createQuery: () => this.#createQueryForBackend(txBackend),
+      maybeRefreshStatisticsAfterBulk: undefined,
     };
     const txEdgeOperations: EdgeOperations = {
       ...this.#buildEdgeOperations(this.#createEdgeOperationContext(runHooks)),
       createQuery: () => this.#createQueryForBackend(txBackend),
+      maybeRefreshStatisticsAfterBulk: undefined,
     };
 
     const runNodeOperationHooks = <T>(

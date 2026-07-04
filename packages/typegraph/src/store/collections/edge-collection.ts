@@ -58,6 +58,9 @@ export type EdgeCollectionConfig = Readonly<{
   backend: GraphBackend | TransactionBackend;
   defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
+  /** See EdgeOperations.maybeRefreshStatisticsAfterBulk. */
+  maybeRefreshStatisticsAfterBulk?:
+    ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
@@ -496,9 +499,11 @@ export function createEdgeCollection<
         const results = await backend.transaction(async (txBackend) =>
           executeEdgeCreateBatch(batchInputs, txBackend),
         );
+        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
         return narrowEdges<E>(results);
       }
       const results = await executeEdgeCreateBatch(batchInputs, backend);
+      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowEdges<E>(results);
     },
 

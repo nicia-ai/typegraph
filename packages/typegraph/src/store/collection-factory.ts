@@ -33,6 +33,13 @@ import {
 export type NodeOperations = Readonly<{
   defaultTemporalMode: TemporalMode;
   rowToNode: (row: NodeRow) => Node;
+  /**
+   * Store-provided hook run after an autocommit bulk write completes;
+   * refreshes planner statistics when the row count crosses the
+   * configured threshold. Absent on transaction-scoped collections.
+   */
+  maybeRefreshStatisticsAfterBulk?:
+    ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateNodeInput,
     backend: GraphBackend | TransactionBackend,
@@ -105,6 +112,13 @@ export type NodeOperations = Readonly<{
 export type EdgeOperations = Readonly<{
   defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
+  /**
+   * Store-provided hook run after an autocommit bulk write completes;
+   * refreshes planner statistics when the row count crosses the
+   * configured threshold. Absent on transaction-scoped collections.
+   */
+  maybeRefreshStatisticsAfterBulk?:
+    ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateEdgeInput,
     backend: GraphBackend | TransactionBackend,
