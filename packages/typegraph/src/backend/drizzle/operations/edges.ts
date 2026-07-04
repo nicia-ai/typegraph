@@ -4,6 +4,7 @@ import { sqlValueList } from "../../../query/compiler/predicate-utils";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
+  DeleteEdgesBatchParams,
   EdgeExistsBetweenParams,
   FindEdgesConnectedToParams,
   HardDeleteEdgeParams,
@@ -199,6 +200,45 @@ export function buildDeleteEdge(
     WHERE ${edges.graphId} = ${params.graphId}
       AND ${edges.id} = ${params.id}
       AND ${edges.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds one soft-delete UPDATE covering a batch of edge ids. Matches
+ * {@link buildDeleteEdge} semantics per row (idempotent via the
+ * `deleted_at IS NULL` guard); the caller chunks ids to the bind budget.
+ */
+export function buildDeleteEdgesBatch(
+  tables: Tables,
+  params: DeleteEdgesBatchParams,
+  timestamp: string,
+): SQL {
+  const { edges } = tables;
+
+  return sql`
+    UPDATE ${edges}
+    SET ${quotedColumn(edges.deletedAt)} = ${timestamp}
+    WHERE ${edges.graphId} = ${params.graphId}
+      AND ${edges.id} IN (${sqlValueList(params.ids)})
+      AND ${edges.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds one hard DELETE covering a batch of edge ids. Matches
+ * {@link buildHardDeleteEdge} semantics per row; the caller chunks ids to
+ * the bind budget.
+ */
+export function buildHardDeleteEdgesBatch(
+  tables: Tables,
+  params: DeleteEdgesBatchParams,
+): SQL {
+  const { edges } = tables;
+
+  return sql`
+    DELETE FROM ${edges}
+    WHERE ${edges.graphId} = ${params.graphId}
+      AND ${edges.id} IN (${sqlValueList(params.ids)})
   `;
 }
 

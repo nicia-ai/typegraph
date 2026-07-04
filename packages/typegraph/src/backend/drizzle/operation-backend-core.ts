@@ -17,6 +17,7 @@ import type {
   CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
+  DeleteEdgesBatchParams,
   DeleteNodeParams,
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
@@ -61,6 +62,7 @@ export type CommonOperationBackend = Pick<
   | "countEdgesFrom"
   | "countNodesByKind"
   | "deleteEdge"
+  | "deleteEdgesBatch"
   | "deleteNode"
   | "deleteUnique"
   | "edgeExistsBetween"
@@ -75,6 +77,7 @@ export type CommonOperationBackend = Pick<
   | "getNodes"
   | "getSchemaVersion"
   | "hardDeleteEdge"
+  | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
   | "insertEdge"
   | "insertEdgeNoReturn"
@@ -425,6 +428,29 @@ export function createCommonOperationBackend(
     async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
       const query = operationStrategy.buildHardDeleteEdge(params);
       await execution.execRun(query);
+    },
+
+    async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
+      if (params.ids.length === 0) return;
+      const timestamp = nowIso();
+      for (const chunk of chunkArray(params.ids, batchConfig.getEdgesChunkSize)) {
+        const query = operationStrategy.buildDeleteEdgesBatch(
+          { graphId: params.graphId, ids: chunk },
+          timestamp,
+        );
+        await execution.execRun(query);
+      }
+    },
+
+    async hardDeleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
+      if (params.ids.length === 0) return;
+      for (const chunk of chunkArray(params.ids, batchConfig.getEdgesChunkSize)) {
+        const query = operationStrategy.buildHardDeleteEdgesBatch({
+          graphId: params.graphId,
+          ids: chunk,
+        });
+        await execution.execRun(query);
+      }
     },
 
     async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
