@@ -135,6 +135,22 @@ describe("recorded graph-write advisory lock churn", () => {
     await store.nodes.Person.create({ name: "solo-2" }, { id: "solo-2" });
     await store.nodes.Person.create({ name: "solo-3" }, { id: "solo-3" });
     expect(graphWriteLockCount(statements)).toBe(2);
+
+    // --- Concurrent same-transaction writers coalesce: the memo is
+    //     single-flight (in-flight promise, not resolved-set), so a
+    //     Promise.all over captured writes still pays ONE acquisition. ---
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await Promise.all(
+        Array.from({ length: 8 }, (_, index) =>
+          tx.nodes.Person.create(
+            { name: `par${index}` },
+            { id: `parallel-${index}` },
+          ),
+        ),
+      );
+    });
+    expect(graphWriteLockCount(statements)).toBe(1);
   });
 
   it("still serializes: the lock statement is present before row writes", async (ctx) => {

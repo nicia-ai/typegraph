@@ -21,6 +21,7 @@ import {
 } from "./insert-dispatch";
 import {
   allocateRecordedCommit,
+  createRecordedGraphLockMemo,
   lockRecordedGraphWrite,
   registerRecordedGraphLockMemo,
 } from "./recorded-capture/clock";
@@ -219,13 +220,12 @@ function createRecordedTransactionBackend(
 
   // One advisory-lock round trip per graph per transaction: the memo is
   // shared with the returned overlay (see registerRecordedGraphLockMemo),
-  // so external lock paths handed this backend dedupe against the same set.
-  const lockedGraphs = new Set<string>();
+  // so external lock paths handed this backend dedupe against the same
+  // single-flight promises — including concurrent same-transaction writers.
+  const graphLocks = createRecordedGraphLockMemo();
 
   async function lockGraph(graphId: string): Promise<void> {
-    if (lockedGraphs.has(graphId)) return;
-    await lockRecordedGraphWrite(target, graphId);
-    lockedGraphs.add(graphId);
+    await lockRecordedGraphWrite(target, graphId, graphLocks);
   }
 
   async function lockGraphs(
@@ -235,14 +235,12 @@ function createRecordedTransactionBackend(
     // multi-graph locks in the same order, and locale-sensitive collation
     // varies with the host's ICU configuration — two processes sorting the
     // same ids differently would take the same lock pair in opposite
-    // orders and deadlock. Already-held graphs are skipped without
-    // re-sorting the remainder out of order.
-    const pending = [...new Set(params.map((parameter) => parameter.graphId))]
-      .toSorted()
-      .filter((graphId) => !lockedGraphs.has(graphId));
-    for (const graphId of pending) {
-      await lockRecordedGraphWrite(target, graphId);
-      lockedGraphs.add(graphId);
+    // orders and deadlock.
+    const graphIds = [
+      ...new Set(params.map((parameter) => parameter.graphId)),
+    ].toSorted();
+    for (const graphId of graphIds) {
+      await lockRecordedGraphWrite(target, graphId, graphLocks);
     }
   }
 
@@ -428,7 +426,7 @@ function createRecordedTransactionBackend(
         },
       }),
   });
-  registerRecordedGraphLockMemo(overlay, lockedGraphs);
+  registerRecordedGraphLockMemo(overlay, graphLocks);
   return overlay;
 }
 

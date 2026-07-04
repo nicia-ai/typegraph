@@ -110,26 +110,60 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * state (also not savepoint-scoped); manual savepoints inside a recorded
  * transaction are outside the capture contract.
  */
-const recordedGraphLockMemos = new WeakMap<object, Set<string>>();
+/**
+ * Single-flight per graph: the memo stores the IN-FLIGHT acquisition
+ * promise, not just completed acquisitions, so concurrent same-transaction
+ * writers (`Promise.all` over captured writes) coalesce onto one advisory
+ * round trip instead of racing past an empty resolved-set. A rejected
+ * acquisition evicts its entry so a retry is not poisoned (in practice a
+ * failed statement has aborted the Postgres transaction anyway).
+ */
+export type RecordedGraphLockMemo = Map<string, Promise<void>>;
+
+export function createRecordedGraphLockMemo(): RecordedGraphLockMemo {
+  return new Map();
+}
+
+const recordedGraphLockMemos = new WeakMap<object, RecordedGraphLockMemo>();
 
 export function registerRecordedGraphLockMemo(
   backend: object,
-  memo: Set<string>,
+  memo: RecordedGraphLockMemo,
 ): void {
   recordedGraphLockMemos.set(backend, memo);
+}
+
+async function acquireRecordedGraphWriteLock(
+  target: Pick<TransactionBackend, "execute">,
+  graphId: string,
+): Promise<void> {
+  await target.execute(
+    asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
+  );
 }
 
 export async function lockRecordedGraphWrite(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   graphId: string,
+  memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
   if (target.dialect !== "postgres") return graphWriteLockEvidence();
-  const memo = recordedGraphLockMemos.get(target);
-  if (memo?.has(graphId)) return graphWriteLockEvidence();
-  await target.execute(
-    asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
-  );
-  memo?.add(graphId);
+  const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
+  if (effectiveMemo === undefined) {
+    await acquireRecordedGraphWriteLock(target, graphId);
+    return graphWriteLockEvidence();
+  }
+  let pending = effectiveMemo.get(graphId);
+  if (pending === undefined) {
+    pending = acquireRecordedGraphWriteLock(target, graphId).catch(
+      (error: unknown) => {
+        effectiveMemo.delete(graphId);
+        throw error;
+      },
+    );
+    effectiveMemo.set(graphId, pending);
+  }
+  await pending;
   return graphWriteLockEvidence();
 }
 
