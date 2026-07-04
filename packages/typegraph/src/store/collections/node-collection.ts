@@ -499,10 +499,12 @@ export function createNodeCollection<
         await backend.transaction(async (txBackend) => {
           await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
         });
+        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
         return;
       }
 
       await executeNodeCreateNoReturnBatch(batchInputs, backend);
+      await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
     async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {

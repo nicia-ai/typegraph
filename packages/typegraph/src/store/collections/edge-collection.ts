@@ -602,10 +602,12 @@ export function createEdgeCollection<
         await backend.transaction(async (txBackend) => {
           await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
         });
+        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
         return;
       }
 
       await executeEdgeCreateNoReturnBatch(batchInputs, backend);
+      await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
     async bulkDelete(ids: readonly string[]): Promise<void> {

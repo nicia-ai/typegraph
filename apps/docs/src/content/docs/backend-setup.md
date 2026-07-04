@@ -468,8 +468,8 @@ opt out). On PostgreSQL, `materializeIndexes()` builds with
 `CREATE INDEX CONCURRENTLY` and skips the automatic refresh — call
 `store.refreshStatistics()` after materializing.
 
-`bulkCreate` on nodes and edges also refreshes automatically when a
-single autocommit call writes 1,000 rows or more. Tune or disable this
+`bulkCreate` and `bulkInsert` on nodes and edges also refresh
+automatically when a single autocommit call writes 1,000 rows or more. Tune or disable this
 with the `autoRefreshStatistics` store option:
 
 ```typescript

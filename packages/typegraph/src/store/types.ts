@@ -317,7 +317,7 @@ type BaseStoreOptions = Readonly<{
   hooks?: StoreHooks;
   /**
    * Automatic planner-statistics refresh after large autocommit bulk
-   * writes (bulkCreate on nodes and edges). Stale statistics after a
+   * writes (bulkCreate and bulkInsert on nodes and edges). Stale statistics after a
    * bulk load are a whole class of planner cliffs: the planner keeps
    * pre-load row estimates until ANALYZE runs. When a single
    * autocommit bulk write reaches the threshold

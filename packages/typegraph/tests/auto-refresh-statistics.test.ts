@@ -122,6 +122,40 @@ describe("auto-refresh statistics after bulk writes", () => {
     }
   });
 
+  it("refreshes after autocommit bulkInsert on nodes and edges", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, refreshCount } = withRefreshSpy(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildGraph("stats_insert"),
+        backend,
+      );
+
+      await store.nodes.Item.create({ name: "hub" }, { id: "hub" });
+      await store.nodes.Item.bulkInsert(
+        Array.from({ length: THRESHOLD }, (_, index) => ({
+          props: { name: `spoke-${index}` },
+          id: `spoke-${index}`,
+        })),
+      );
+      expect(refreshCount()).toBe(1);
+
+      await store.edges.relates.bulkInsert(
+        Array.from({ length: THRESHOLD }, (_, index) => ({
+          from: { kind: "Item", id: "hub" },
+          to: { kind: "Item", id: `spoke-${index}` },
+          props: {},
+        })),
+      );
+      expect(refreshCount()).toBe(2);
+
+      await store.nodes.Item.bulkInsert(nodeItems(THRESHOLD - 1));
+      expect(refreshCount()).toBe(2);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
   it("does not refresh inside a caller-provided transaction", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
@@ -133,6 +167,11 @@ describe("auto-refresh statistics after bulk writes", () => {
 
       await store.transaction(async (tx) => {
         await tx.nodes.Item.bulkCreate(nodeItems(THRESHOLD));
+        await tx.nodes.Item.bulkInsert(
+          nodeItems(THRESHOLD).map((item, index) => ({
+            props: { name: `insert-${index}` },
+          })),
+        );
       });
       expect(refreshCount()).toBe(0);
     } finally {

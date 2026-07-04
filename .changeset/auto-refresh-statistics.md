@@ -2,7 +2,8 @@
 "@nicia-ai/typegraph": patch
 ---
 
-Autocommit `bulkCreate` calls (nodes and edges) now refresh planner
+Autocommit `bulkCreate` and `bulkInsert` calls (nodes and edges) now
+refresh planner
 statistics automatically when a single call writes 1,000 rows or more,
 closing the stale-statistics window after bulk loads where the planner
 keeps pre-load row estimates until ANALYZE runs (observed 25-200x
