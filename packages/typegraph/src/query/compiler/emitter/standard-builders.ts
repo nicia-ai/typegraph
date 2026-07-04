@@ -891,6 +891,17 @@ export function buildStandardEmbeddingsCte(
       queryEmbedding,
       branchMetric,
     );
+    // EXACT MEANS EXACT: this branch is the non-approximate path, but on
+    // pgvector any `ORDER BY embedding <=> q LIMIT k` whose expression
+    // matches the ANN opclass is silently served by the HNSW/IVFFlat
+    // index — approximate results with plan-dependent recall (measured
+    // recall 0.980 unfiltered, 0.000 under a selective filter at 50k,
+    // where the index frontier starves). `+ 0.0` makes the ordered
+    // expression unmatchable to the opclass, forcing the true flat scan;
+    // numerically identity, and inert on engines whose ANN forms are
+    // opt-in anyway (vec0 MATCH, libSQL vector_top_k). The sanctioned
+    // index path is `approximate: true` above.
+    const exactDistanceExpr = sql`(${distanceExpr} + 0.0)`;
     const scoreExpr = vectorScoreExpression(distanceExpr, branchMetric);
 
     const conditions: SQL[] = [
@@ -908,7 +919,7 @@ export function buildStandardEmbeddingsCte(
       SELECT
         ${qualifyColumn(tableName, "node_id")} AS node_id,
         ${kind} AS node_kind,
-        ${distanceExpr} AS distance,
+        ${exactDistanceExpr} AS distance,
         ${scoreExpr} AS score
       FROM ${quoteIdentifier(tableName)}
       INNER JOIN ${scopedNodes}
