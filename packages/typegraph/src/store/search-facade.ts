@@ -15,8 +15,6 @@ import { type GraphDef, type NodeKinds } from "../core/define-graph";
 import { type NodeRegistration, type NodeType } from "../core/types";
 import { KindNotFoundError } from "../errors";
 import { type QueryBuilder } from "../query/builder/query-builder";
-import { type NodeAccessor } from "../query/builder/types";
-import { type Predicate } from "../query/predicates";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   rebuildFulltextIndex,
@@ -64,15 +62,6 @@ type ResolveNodeType<G extends GraphDef, K extends string> =
       N
     : NodeType
   : NodeType;
-
-/**
- * The kind-typed search scope: same shape as {@link SearchScopeOptions}
- * but with the `where` accessor narrowed to the searched kind, exactly
- * like `store.nodes.<kind>.find({ where })`.
- */
-type TypedSearchScope<G extends GraphDef, K extends string> = Readonly<{
-  where?: (accessor: NodeAccessor<ResolveNodeType<G, K>>) => Predicate;
-}>;
 
 type StoreSearchContext = Readonly<{
   graphId: string;
@@ -134,13 +123,15 @@ export class StoreSearch<G extends GraphDef> {
    */
   async fulltext<K extends string>(
     nodeKind: K,
-    options: Omit<FulltextSearchOptions, "where"> & TypedSearchScope<G, K>,
+    options: FulltextSearchOptions<ResolveNodeType<G, K>>,
   ): Promise<readonly FulltextSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeFulltextSearch<ResolveNode<G, K>>(
       this.#context,
       nodeKind,
-      options,
+      // Contravariance: the narrowed accessor callback is intentionally
+      // wider than the base instantiation the core helpers take.
+      options as unknown as FulltextSearchOptions,
     );
   }
 
@@ -157,13 +148,15 @@ export class StoreSearch<G extends GraphDef> {
    */
   async vector<K extends string>(
     nodeKind: K,
-    options: Omit<VectorSearchOptions, "where"> & TypedSearchScope<G, K>,
+    options: VectorSearchOptions<ResolveNodeType<G, K>>,
   ): Promise<readonly VectorSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeVectorSearch<ResolveNode<G, K>>(
       this.#context,
       nodeKind,
-      options,
+      // Contravariance: the narrowed accessor callback is intentionally
+      // wider than the base instantiation the core helpers take.
+      options as unknown as VectorSearchOptions,
     );
   }
 
@@ -178,13 +171,15 @@ export class StoreSearch<G extends GraphDef> {
    */
   async hybrid<K extends string>(
     nodeKind: K,
-    options: Omit<HybridSearchOptions, "where"> & TypedSearchScope<G, K>,
+    options: HybridSearchOptions<ResolveNodeType<G, K>>,
   ): Promise<readonly HybridSearchHit<ResolveNode<G, K>>[]> {
     this.#assertKindRegistered(nodeKind);
     return executeHybridSearch<ResolveNode<G, K>>(
       this.#context,
       nodeKind,
-      options,
+      // Contravariance: the narrowed accessor callback is intentionally
+      // wider than the base instantiation the core helpers take.
+      options as unknown as HybridSearchOptions,
     );
   }
 

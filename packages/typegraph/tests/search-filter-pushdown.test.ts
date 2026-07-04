@@ -37,6 +37,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
+import { type VectorSearchOptions } from "../src/store/search";
 
 const GRAPH_ID = "search_pushdown";
 const FIELD_PATH = "embedding";
@@ -461,5 +462,53 @@ describe("facade search filter pushdown", () => {
       return;
     }
     await runScenario(postgresDescriptor);
+  });
+
+  it("rejects mixed declared metrics across a subclass expansion", async () => {
+    // No per-call metric can bridge mixed declared metrics: each kind's
+    // storage is validated against its declared metric, so the expansion
+    // is unsupported outright.
+    const L2Note = defineNode("L2Note", {
+      schema: z.object({
+        title: searchable({ language: "english" }),
+        category: z.string(),
+        embedding: embedding(EMBEDDING_DIMENSIONS, { metric: "l2" }),
+      }),
+    });
+    const graph = defineGraph({
+      id: "search_pushdown_mixed",
+      nodes: { Article: { type: Article }, L2Note: { type: L2Note } },
+      edges: {},
+      ontology: [subClassOf(L2Note, Article)],
+    });
+    const { backend, cleanup } = await localSqliteDescriptor.create();
+    try {
+      if (backend.capabilities.vector?.supported !== true) return;
+      const [store] = await createStoreWithSchema(graph, backend);
+      await expect(
+        store.search.vector("Article", {
+          fieldPath: FIELD_PATH,
+          queryEmbedding: QUERY_EMBEDDING,
+          limit: 3,
+          includeSubClasses: true,
+        }),
+      ).rejects.toThrow(
+        /declare different metrics.*search the kinds separately/s,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("keeps standalone option values typed (where usable off the facade)", () => {
+    // Compile-time pin for the exported generic option types: a standalone
+    // options value can carry a where predicate against the base accessor.
+    const standalone: VectorSearchOptions = {
+      fieldPath: FIELD_PATH,
+      queryEmbedding: QUERY_EMBEDDING,
+      limit: 3,
+      where: (node) => node.kind.eq("Article"),
+    };
+    expect(standalone.limit).toBe(3);
   });
 });

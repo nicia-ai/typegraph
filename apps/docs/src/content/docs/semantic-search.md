@@ -499,9 +499,12 @@ const acrossKinds = await store.search.vector("Content", {
 The `where` predicate is compiled by the same query compiler as
 `store.query()` — property predicates behave identically, use the same
 declared indexes, and apply the same current-read semantics (tombstoned
-nodes and nodes outside their validity window never rank). With mixed
-declared metrics across expanded kinds, pass an explicit `metric` — scores
-from different metrics cannot merge into one ranking.
+nodes and nodes outside their validity window never rank). Kinds expanded
+via `includeSubClasses` must share one declared metric: scores from
+different metrics cannot merge into one ranking (and a per-call `metric`
+cannot bridge the gap — each kind's storage is validated against its
+declared metric), so mixed-metric expansions throw; search those kinds
+separately.
 
 ### Choosing a Distance Metric
 

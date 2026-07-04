@@ -431,7 +431,7 @@ for (const hit of hits) {
 | `language` | `string` | per-row (as indexed) | Override the stemming/tokenization language for this query. Postgres only — SQLite FTS5's tokenizer is fixed at table-create time and a per-query override throws. |
 | `minScore` | `number` | *(none)* | Drop hits whose backend-native score is below this threshold. Score units depend on the strategy. |
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
-| `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist. Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
+| `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
 | `includeSubClasses` | `boolean` | `false` | Also search `subClassOf` descendant kinds and merge their scores into one ranking. |
 

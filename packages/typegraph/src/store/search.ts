@@ -17,6 +17,7 @@ import {
   type VectorMetric,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import { type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
   DEFAULT_RRF_K,
@@ -24,9 +25,11 @@ import {
   type HybridFusionOptions,
 } from "../query/ast";
 import { type QueryBuilder } from "../query/builder/query-builder";
+import { type NodeAccessor } from "../query/builder/types";
 import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
+import { type Predicate } from "../query/predicates";
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareStrings } from "../utils/compare";
 import { getEmbeddingFields } from "./embedding-sync";
@@ -79,13 +82,16 @@ export type HybridSearchHit<N = Node> = Readonly<{
  * ranked list. `offset` is rank-relative pagination: the engine fetches
  * `limit + offset` ranked candidates and discards the leading page.
  */
-export type SearchScopeOptions = Readonly<{
+export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
   /**
    * Predicate over the node's properties, compiled by the shared query
    * compiler into the candidate subquery. Requires a query-capable store.
-   * The facade narrows the accessor to the kind's typed accessor.
+   * The facade instantiates `N` to the searched kind's node type, so the
+   * accessor is fully typed at the call site; the base instantiation
+   * exposes the system accessors (`id`, `kind`) for standalone option
+   * values.
    */
-  where?: (accessor: never) => unknown;
+  where?: (accessor: NodeAccessor<N>) => Predicate;
   /** Rows to skip after ranking (rank-relative pagination). */
   offset?: number;
   /**
@@ -97,24 +103,25 @@ export type SearchScopeOptions = Readonly<{
   includeSubClasses?: boolean;
 }>;
 
-export type FulltextSearchOptions = SearchScopeOptions &
-  Readonly<{
-    /** The user-supplied query string. */
-    query: string;
-    /** Max results. Required. */
-    limit: number;
-    /** Query parser mode. Default: "websearch". */
-    mode?: FulltextQueryMode;
-    /**
-     * Language override for query parsing. Default: per-row language as
-     * stored at insert time.
-     */
-    language?: string;
-    /** Minimum relevance score to include in results. */
-    minScore?: number;
-    /** Return a highlighted snippet alongside each hit. */
-    includeSnippets?: boolean;
-  }>;
+export type FulltextSearchOptions<N extends NodeType = NodeType> =
+  SearchScopeOptions<N> &
+    Readonly<{
+      /** The user-supplied query string. */
+      query: string;
+      /** Max results. Required. */
+      limit: number;
+      /** Query parser mode. Default: "websearch". */
+      mode?: FulltextQueryMode;
+      /**
+       * Language override for query parsing. Default: per-row language as
+       * stored at insert time.
+       */
+      language?: string;
+      /** Minimum relevance score to include in results. */
+      minScore?: number;
+      /** Return a highlighted snippet alongside each hit. */
+      includeSnippets?: boolean;
+    }>;
 
 export type HybridVectorOptions = Readonly<{
   /** Field path of the embedding column on the node kind. */
@@ -142,35 +149,36 @@ export type HybridVectorOptions = Readonly<{
  * vector half of `HybridSearchOptions` but flattens it because the
  * standalone path doesn't fuse against fulltext.
  */
-export type VectorSearchOptions = SearchScopeOptions &
-  Readonly<{
-    /** Field path of the embedding column on the node kind. */
-    fieldPath: string;
-    /** Query embedding to compare against. */
-    queryEmbedding: readonly number[];
-    /** Max results. Required. */
-    limit: number;
-    /** Distance metric. Default: "cosine". */
-    metric?: VectorMetric;
-    /** Minimum similarity to include (units depend on metric). */
-    minScore?: number;
-    /**
-     * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
-     * Sizes the dynamic candidate list the index scan maintains — higher
-     * trades latency for recall. The floor for the index to surface
-     * `limit` neighbors is `efSearch >= limit`; ~2–4× is the high-recall
-     * target on million-scale corpora. Lets a latency-sensitive
-     * interactive path and a recall-sensitive batch path share one
-     * connection pool, tuning per query rather than per session.
-     *
-     * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
-     * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
-     * backends without transactions (`drizzle-orm/neon-http`) ignore it
-     * with a one-time warning. Must be a positive integer; pgvector caps
-     * it at 1000.
-     */
-    efSearch?: number;
-  }>;
+export type VectorSearchOptions<N extends NodeType = NodeType> =
+  SearchScopeOptions<N> &
+    Readonly<{
+      /** Field path of the embedding column on the node kind. */
+      fieldPath: string;
+      /** Query embedding to compare against. */
+      queryEmbedding: readonly number[];
+      /** Max results. Required. */
+      limit: number;
+      /** Distance metric. Default: "cosine". */
+      metric?: VectorMetric;
+      /** Minimum similarity to include (units depend on metric). */
+      minScore?: number;
+      /**
+       * HNSW search frontier for this query (pgvector `hnsw.ef_search`).
+       * Sizes the dynamic candidate list the index scan maintains — higher
+       * trades latency for recall. The floor for the index to surface
+       * `limit` neighbors is `efSearch >= limit`; ~2–4× is the high-recall
+       * target on million-scale corpora. Lets a latency-sensitive
+       * interactive path and a recall-sensitive batch path share one
+       * connection pool, tuning per query rather than per session.
+       *
+       * Postgres HNSW only: applied transaction-locally via `SET LOCAL`.
+       * sqlite-vec has no equivalent frontier knob and ignores it; Postgres
+       * backends without transactions (`drizzle-orm/neon-http`) ignore it
+       * with a one-time warning. Must be a positive integer; pgvector caps
+       * it at 1000.
+       */
+      efSearch?: number;
+    }>;
 
 export type HybridFulltextOptions = Readonly<{
   query: string;
@@ -182,14 +190,15 @@ export type HybridFulltextOptions = Readonly<{
   includeSnippets?: boolean;
 }>;
 
-export type HybridSearchOptions = SearchScopeOptions &
-  Readonly<{
-    vector: HybridVectorOptions;
-    fulltext: HybridFulltextOptions;
-    fusion?: HybridFusionOptions;
-    /** Final number of fused results to return. Required. */
-    limit: number;
-  }>;
+export type HybridSearchOptions<N extends NodeType = NodeType> =
+  SearchScopeOptions<N> &
+    Readonly<{
+      vector: HybridVectorOptions;
+      fulltext: HybridFulltextOptions;
+      fusion?: HybridFusionOptions;
+      /** Final number of fused results to return. Required. */
+      limit: number;
+    }>;
 
 type StoreSearchContext = Readonly<{
   graphId: string;
@@ -220,7 +229,7 @@ const SEARCH_CANDIDATE_ALIAS = "_sc";
 function buildKindCandidates(
   ctx: StoreSearchContext,
   nodeKind: string,
-  where: ((accessor: never) => unknown) | undefined,
+  where: ((accessor: NodeAccessor<NodeType>) => Predicate) | undefined,
 ): SQL | undefined {
   if (ctx.createQuery === undefined) {
     if (where === undefined) return undefined;
@@ -231,7 +240,7 @@ function buildKindCandidates(
   }
   let chain = ctx.createQuery().from(nodeKind, SEARCH_CANDIDATE_ALIAS);
   if (where !== undefined) {
-    chain = chain.whereNode(SEARCH_CANDIDATE_ALIAS, where as never);
+    chain = chain.whereNode(SEARCH_CANDIDATE_ALIAS, where);
   }
   const compiled = chain
     .select(
@@ -484,7 +493,6 @@ export async function executeVectorSearch<N = Node>(
     nodeKind,
     options.fieldPath,
     options.includeSubClasses,
-    options.metric,
     "vectorSearch",
   );
   for (const { slot } of searchKinds) {
@@ -570,16 +578,17 @@ type VectorSearchKind = Readonly<{ kind: string; slot: ResolvedSearchSlot }>;
  * Resolves the kinds a vector search spans, keeping only kinds that
  * declare the embedding field (mirroring the query builder, which skips
  * non-declaring kinds instead of referencing a table that was never
- * created). Enforces one comparable metric across the expansion: scores
- * from different metrics cannot be merged into one ranking, so mixed
- * declared metrics require an explicit `options.metric` override.
+ * created). Enforces one shared declared metric across the expansion:
+ * scores from different metrics cannot be merged into one ranking, and a
+ * per-call metric override cannot bridge the gap either (each kind's
+ * storage is built for — and validated against — its declared metric), so
+ * mixed declared metrics are unsupported for cross-kind ranking.
  */
 function resolveVectorSearchKinds(
   ctx: StoreSearchContext,
   nodeKind: string,
   fieldPath: string,
   includeSubClasses: boolean | undefined,
-  metricOverride: VectorMetric | undefined,
   label: string,
 ): readonly VectorSearchKind[] {
   const kinds = resolveSearchKinds(ctx, nodeKind, includeSubClasses);
@@ -591,16 +600,15 @@ function resolveVectorSearchKinds(
   // No declaring kind: surface the standard configuration error for the
   // requested kind.
   if (resolved.length === 0) resolveSearchSlot(ctx, nodeKind, fieldPath);
-  if (metricOverride === undefined) {
-    const metrics = new Set(resolved.map(({ slot }) => slot.metric));
-    if (metrics.size > 1) {
-      throw new ConfigurationError(
-        `${label}: kinds expanded from "${nodeKind}" declare different ` +
-          `metrics for "${fieldPath}" (${[...metrics].join(", ")}). Pass an ` +
-          `explicit metric to search across them.`,
-        { capability: "vector", graphId: ctx.graphId },
-      );
-    }
+  const metrics = new Set(resolved.map(({ slot }) => slot.metric));
+  if (metrics.size > 1) {
+    throw new ConfigurationError(
+      `${label}: kinds expanded from "${nodeKind}" declare different ` +
+        `metrics for "${fieldPath}" (${[...metrics].join(", ")}). ` +
+        `Cross-kind vector ranking requires one shared declared metric — ` +
+        `search the kinds separately.`,
+      { capability: "vector", graphId: ctx.graphId },
+    );
   }
   return resolved;
 }
@@ -683,7 +691,6 @@ export async function executeHybridSearch<N = Node>(
     nodeKind,
     options.vector.fieldPath,
     options.includeSubClasses,
-    options.vector.metric,
     "hybridSearch.vector",
   );
   for (const { slot } of vectorKinds) {

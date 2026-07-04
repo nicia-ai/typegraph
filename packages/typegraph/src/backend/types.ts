@@ -447,11 +447,15 @@ export type VectorSearchParams = Readonly<{
   minScore?: number;
   /**
    * Subquery of eligible node ids (single column). When present, the
-   * search statement computes top-k over exactly this candidate set —
-   * the store passes its compiled current-read query here so `where`
-   * predicates, subclass expansion, and valid-time currency all push
-   * down into the search SQL. When absent, the backend restricts to
-   * live (non-tombstoned) nodes of the kind.
+   * search statement computes top-k over this candidate set — the store
+   * passes its compiled current-read query here so `where` predicates,
+   * subclass expansion, and valid-time currency all push down into the
+   * search SQL. Exact on engines whose search form takes the filter
+   * inside retrieval (pgvector, sqlite-vec, tsvector, FTS5); libSQL's
+   * DiskANN cannot pre-filter, so it post-filters an over-fetched ANN
+   * set and recall against the candidate set is bounded by that
+   * headroom. When absent, the backend restricts to live
+   * (non-tombstoned) nodes of the kind.
    */
   candidates?: SQL;
   /**
@@ -615,11 +619,15 @@ export type FulltextSearchParams = Readonly<{
   includeSnippets?: boolean;
   /**
    * Subquery of eligible node ids (single column). When present, the
-   * search statement computes top-k over exactly this candidate set —
-   * the store passes its compiled current-read query here so `where`
-   * predicates, subclass expansion, and valid-time currency all push
-   * down into the search SQL. When absent, the backend restricts to
-   * live (non-tombstoned) nodes of the kind.
+   * search statement computes top-k over this candidate set — the store
+   * passes its compiled current-read query here so `where` predicates,
+   * subclass expansion, and valid-time currency all push down into the
+   * search SQL. Exact on engines whose search form takes the filter
+   * inside retrieval (pgvector, sqlite-vec, tsvector, FTS5); libSQL's
+   * DiskANN cannot pre-filter, so it post-filters an over-fetched ANN
+   * set and recall against the candidate set is bounded by that
+   * headroom. When absent, the backend restricts to live
+   * (non-tombstoned) nodes of the kind.
    */
   candidates?: SQL;
   /**
