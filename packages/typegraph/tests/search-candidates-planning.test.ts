@@ -12,7 +12,7 @@
  * - The store compiles builder-query candidates ONLY when a `where`
  *   predicate exists; unfiltered searches use the flat backend form.
  */
-import { type SQL,sql } from "drizzle-orm";
+import { type SQL, sql } from "drizzle-orm";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
