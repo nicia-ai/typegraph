@@ -71,6 +71,20 @@ const CLAIM_LEASE_MS = 15 * 60_000;
 const CLAIM_RETRY_DELAY_MS = 200;
 const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
 
+/**
+ * Whether the backend implements the FULL cross-caller build-claim
+ * protocol. One predicate for both decisions that depend on it — build
+ * serialization and the post-create statistics refresh — so a backend
+ * implementing only half the surface can never refresh without
+ * serializing (the combination that reopens the same-index CIC deadlock).
+ */
+function hasIndexBuildClaimProtocol(backend: GraphBackend): boolean {
+  return (
+    backend.claimIndexMaterialization !== undefined &&
+    backend.releaseIndexMaterializationClaim !== undefined
+  );
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -342,8 +356,7 @@ async function refreshStatisticsAfterCreation(
   // claim protocol serializing same-index builds, backends that expose
   // the claim primitive refresh automatically again; a custom concurrent
   // backend without the primitive keeps the conservative skip.
-  if (usesConcurrentBuilds && backend.claimIndexMaterialization === undefined)
-    return;
+  if (usesConcurrentBuilds && !hasIndexBuildClaimProtocol(backend)) return;
   if (!results.some((entry) => entry.status === "created")) return;
   try {
     await backend.refreshStatistics();
@@ -563,10 +576,7 @@ async function materializeOne(
   // Backends whose concurrent builds can deadlock across callers expose a
   // claim primitive; one caller builds, the rest wait and converge through
   // the already-materialized check on re-claim.
-  if (
-    backend.claimIndexMaterialization !== undefined &&
-    backend.releaseIndexMaterializationClaim !== undefined
-  ) {
+  if (hasIndexBuildClaimProtocol(backend)) {
     return materializeWithClaim(declaration, backend, graphId, schemaVersion, {
       statusKey,
       signature,
@@ -630,6 +640,18 @@ async function settleAgainstExisting(
   if (existing?.materializedAt === undefined) return undefined;
   const { statusKey, signature, driftLabel } = action;
   if (existing.signature === signature) {
+    // A recorded success is only trustworthy while the physical index is
+    // valid: a run interrupted after `CREATE ... IF NOT EXISTS` silently
+    // kept an invalid leftover (or a pre-claim-protocol run recorded
+    // success over one), leaving a poisoned status row. Fall through to
+    // the build path — under the claim it drops the leftover and rebuilds.
+    if (
+      declaration.entity !== "vector" &&
+      hasIndexBuildClaimProtocol(backend) &&
+      (await hasInvalidIndexLeftover(backend, declaration.name))
+    ) {
+      return undefined;
+    }
     return entry(declaration, "alreadyMaterialized");
   }
   const error = new Error(
@@ -775,12 +797,16 @@ async function materializeWithClaim(
  * (also CONCURRENTLY — same no-transaction rule). Valid indexes are never
  * touched.
  */
-async function dropInvalidIndexLeftover(
+/**
+ * Whether an index with this name exists but is INVALID (an interrupted
+ * CONCURRENTLY build's leftover). False for absent or valid indexes and
+ * on non-Postgres dialects.
+ */
+async function hasInvalidIndexLeftover(
   backend: GraphBackend,
   physicalIndexName: string,
-): Promise<void> {
-  if (backend.dialect !== "postgres") return;
-  if (backend.executeDdl === undefined) return;
+): Promise<boolean> {
+  if (backend.dialect !== "postgres") return false;
   const rows = await backend.execute<{ invalid: boolean }>(
     asCompiledRowsSql(sql`
       SELECT NOT i.indisvalid AS invalid
@@ -789,8 +815,15 @@ async function dropInvalidIndexLeftover(
       WHERE c.relname = ${physicalIndexName}
     `),
   );
-  const row = rows[0];
-  if (!row?.invalid) return;
+  return rows[0]?.invalid === true;
+}
+
+async function dropInvalidIndexLeftover(
+  backend: GraphBackend,
+  physicalIndexName: string,
+): Promise<void> {
+  if (backend.executeDdl === undefined) return;
+  if (!(await hasInvalidIndexLeftover(backend, physicalIndexName))) return;
   const quoted = `"${physicalIndexName.replaceAll('"', '""')}"`;
   await backend.executeDdl(`DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
 }

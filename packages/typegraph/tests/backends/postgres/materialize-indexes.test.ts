@@ -501,6 +501,41 @@ describe("Postgres materialize build claim", () => {
     expect(validAfter.rows[0]?.indisvalid).toBe(true);
   });
 
+  it("rebuilds a poisoned success: valid status row over an INVALID index", async (ctx) => {
+    // The older failure mode: a recorded SUCCESS whose physical index is
+    // invalid (a run interrupted after IF NOT EXISTS silently kept a
+    // leftover, or a pre-claim-protocol run recorded over one). The
+    // status row is NOT wiped here — alreadyMaterialized must not be
+    // trusted over an invalid index.
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const first = await store.materializeIndexes();
+    const indexName = first.results[0]!.indexName;
+
+    // Keep the success row; poison only the physical index.
+    await pool.query(`DROP INDEX IF EXISTS "${indexName}"`);
+    await store.nodes.Person.create({ email: "p@example.com", name: "a" });
+    await store.nodes.Person.create({ email: "p@example.com", name: "b" });
+    await expect(
+      pool.query(
+        `CREATE UNIQUE INDEX CONCURRENTLY "${indexName}" ON typegraph_nodes ((props ->> 'email'))`,
+      ),
+    ).rejects.toThrow();
+
+    const result = await store.materializeIndexes();
+    const healed = result.results.find(
+      (entry) => entry.indexName === indexName,
+    );
+    expect(healed?.status).toBe("created");
+    const validAfter = await pool.query<{ indisvalid: boolean }>(
+      `SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(validAfter.rows[0]?.indisvalid).toBe(true);
+  });
+
   it("re-enables the automatic post-create ANALYZE on Postgres", async (ctx) => {
     const { pool } = requirePostgres(ctx);
     const statements: string[] = [];
