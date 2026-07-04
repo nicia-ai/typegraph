@@ -22,7 +22,7 @@ import {
 import {
   allocateRecordedCommit,
   lockRecordedGraphWrite,
-  lockRecordedGraphWrites,
+  registerRecordedGraphLockMemo,
 } from "./recorded-capture/clock";
 import {
   entityKey,
@@ -217,20 +217,36 @@ function createRecordedTransactionBackend(
   const nodeDispatch = nodeInsertDispatch(target);
   const edgeDispatch = edgeInsertDispatch(target);
 
+  // One advisory-lock round trip per graph per transaction: the memo is
+  // shared with the returned overlay (see registerRecordedGraphLockMemo),
+  // so external lock paths handed this backend dedupe against the same set.
+  const lockedGraphs = new Set<string>();
+
   async function lockGraph(graphId: string): Promise<void> {
+    if (lockedGraphs.has(graphId)) return;
     await lockRecordedGraphWrite(target, graphId);
+    lockedGraphs.add(graphId);
   }
 
   async function lockGraphs(
     params: readonly Readonly<{ graphId: string }>[],
   ): Promise<void> {
-    await lockRecordedGraphWrites(
-      target,
-      params.map((parameter) => parameter.graphId),
-    );
+    // Codepoint sort, NOT localeCompare: every process must acquire
+    // multi-graph locks in the same order, and locale-sensitive collation
+    // varies with the host's ICU configuration — two processes sorting the
+    // same ids differently would take the same lock pair in opposite
+    // orders and deadlock. Already-held graphs are skipped without
+    // re-sorting the remainder out of order.
+    const pending = [...new Set(params.map((parameter) => parameter.graphId))]
+      .toSorted()
+      .filter((graphId) => !lockedGraphs.has(graphId));
+    for (const graphId of pending) {
+      await lockRecordedGraphWrite(target, graphId);
+      lockedGraphs.add(graphId);
+    }
   }
 
-  return createBackendOverlay(target, {
+  const overlay = createBackendOverlay(target, {
     ...rawWriteGuards(target, "tx.backend"),
 
     async insertNode(params) {
@@ -412,6 +428,8 @@ function createRecordedTransactionBackend(
         },
       }),
   });
+  registerRecordedGraphLockMemo(overlay, lockedGraphs);
+  return overlay;
 }
 
 export function createRecordedTransactionScope(

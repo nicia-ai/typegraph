@@ -92,30 +92,45 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
   return graphWriteLockEvidence();
 }
 
+/**
+ * Per-transaction memo of graphs whose advisory lock is already held.
+ *
+ * `pg_advisory_xact_lock` is reentrant and held until the top-level
+ * transaction ends, so re-acquiring it on every captured write inside one
+ * transaction is pure round-trip churn — a multi-write transaction paid one
+ * lock round trip per write. The capture layer registers its per-transaction
+ * backend here; every lock path that receives that backend (the capture
+ * delegate's own writes, `runInWriteTransaction`, provenance) then skips the
+ * SQL once the graph's lock is held.
+ *
+ * Keyed weakly by the backend object: the delegate is created per
+ * transaction, so memo lifetime equals lock lifetime. NOT savepoint-aware —
+ * a manual `SAVEPOINT` rolled back across the first acquisition releases the
+ * lock but not the memo entry. That matches the capture session's touch
+ * state (also not savepoint-scoped); manual savepoints inside a recorded
+ * transaction are outside the capture contract.
+ */
+const recordedGraphLockMemos = new WeakMap<object, Set<string>>();
+
+export function registerRecordedGraphLockMemo(
+  backend: object,
+  memo: Set<string>,
+): void {
+  recordedGraphLockMemos.set(backend, memo);
+}
+
 export async function lockRecordedGraphWrite(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   graphId: string,
 ): Promise<GraphWriteLock> {
   if (target.dialect !== "postgres") return graphWriteLockEvidence();
+  const memo = recordedGraphLockMemos.get(target);
+  if (memo?.has(graphId)) return graphWriteLockEvidence();
   await target.execute(
     asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
   );
+  memo?.add(graphId);
   return graphWriteLockEvidence();
-}
-
-export async function lockRecordedGraphWrites(
-  target: Pick<TransactionBackend, "dialect" | "execute">,
-  graphIds: Iterable<string>,
-): Promise<void> {
-  if (target.dialect !== "postgres") return;
-  // Codepoint sort, NOT localeCompare: every process must acquire multi-graph
-  // locks in the same order, and locale-sensitive collation varies with the
-  // host's ICU configuration — two processes sorting the same ids differently
-  // would take the same lock pair in opposite orders and deadlock.
-  const uniqueGraphIds = [...new Set(graphIds)].toSorted();
-  for (const graphId of uniqueGraphIds) {
-    await lockRecordedGraphWrite(target, graphId);
-  }
 }
 
 function failInvalidClockTimestamp(value: unknown): never {
