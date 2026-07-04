@@ -123,7 +123,10 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { mapHybridSearchRow } from "./operations/hybrid";
+import {
+  hybridCandidatesRef,
+  mapHybridSearchRow,
+} from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   coerceNumericScore,
@@ -729,10 +732,13 @@ function createSqliteOperationBackend(
                   {}
                 : { minScore: params.vector.minScore }),
               };
+              // The vector leg references the statement's shared
+              // tg_hybrid_cand CTE; the actual candidates SQL is emitted
+              // once by buildHybridSearch.
               const vectorSql = vectorStrategy.buildSearch(
                 slot,
                 vectorParams,
-                candidates,
+                hybridCandidatesRef(),
               );
               const statement = operationStrategy.buildHybridSearch(
                 { ...params, candidates },

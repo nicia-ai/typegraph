@@ -60,7 +60,7 @@ import {
   buildUpdateEdge,
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
-import { buildHybridSearchStatement } from "./hybrid";
+import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -331,7 +331,12 @@ function createCommonOperationStrategy(
     ): SQL => {
       const candidates =
         params.candidates ??
-        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind, nowIso());
+        liveNodeIdsSubquery(
+          tables.nodes,
+          params.graphId,
+          params.nodeKind,
+          nowIso(),
+        );
       const fulltextSql = buildFulltextSearch(
         fulltextTable,
         {
@@ -353,9 +358,12 @@ function createCommonOperationStrategy(
           : { includeSnippets: params.fulltext.includeSnippets }),
         },
         fulltextStrategy,
-        candidates,
+        // Reference, not copy: the statement evaluates the shared
+        // tg_hybrid_cand CTE once for both legs.
+        hybridCandidatesRef(),
       );
       return buildHybridSearchStatement({
+        candidatesSql: candidates,
         vectorSql,
         vectorScoreDescending,
         fulltextSql,

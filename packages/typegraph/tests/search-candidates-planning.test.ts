@@ -12,7 +12,7 @@
  * - The store compiles builder-query candidates ONLY when a `where`
  *   predicate exists; unfiltered searches use the flat backend form.
  */
-import { type SQL } from "drizzle-orm";
+import { type SQL,sql } from "drizzle-orm";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -23,7 +23,10 @@ import {
   defineNode,
   searchable,
 } from "../src";
-import { buildHybridSearchStatement } from "../src/backend/drizzle/operations/hybrid";
+import {
+  buildHybridSearchStatement,
+  hybridCandidatesRef,
+} from "../src/backend/drizzle/operations/hybrid";
 import { liveNodeIdsSubquery } from "../src/backend/drizzle/operations/shared";
 import { tables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -37,6 +40,12 @@ function sqlToText(query: SQL): string {
 describe("search candidates planning shapes", () => {
   it("materializes the hybrid fused CTE", () => {
     const statement = buildHybridSearchStatement({
+      candidatesSql: liveNodeIdsSubquery(
+        tables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
       vectorSql: liveNodeIdsSubquery(
         tables.nodes,
         "g",
@@ -60,6 +69,43 @@ describe("search candidates planning shapes", () => {
       offset: 0,
     });
     expect(sqlToText(statement)).toContain("tg_hybrid_fused AS MATERIALIZED");
+  });
+
+  it("emits the candidates set once as a shared CTE both legs reference", () => {
+    const candidates = liveNodeIdsSubquery(
+      tables.nodes,
+      "g",
+      "Doc",
+      "2026-01-01T00:00:00.000Z",
+    );
+    // Source legs built the production way: against the CTE reference,
+    // never against their own copy of the candidates subquery.
+    const vectorSql = sql`SELECT node_id, 0.5 AS score FROM vec WHERE node_id IN (${hybridCandidatesRef()})`;
+    const fulltextSql = sql`SELECT node_id, 0.5 AS score, NULL AS snippet FROM fts WHERE node_id IN (${hybridCandidatesRef()})`;
+    const statement = buildHybridSearchStatement({
+      candidatesSql: candidates,
+      vectorSql,
+      vectorScoreDescending: true,
+      fulltextSql,
+      nodes: tables.nodes,
+      graphId: "g",
+      nodeKind: "Doc",
+      fusionK: 60,
+      vectorWeight: 1,
+      fulltextWeight: 1,
+      limit: 10,
+      offset: 0,
+    });
+    const text = sqlToText(statement);
+    expect(text.split("tg_hybrid_cand AS (")).toHaveLength(2);
+    // The candidates subquery body appears exactly once (inside the
+    // shared CTE) — previously each leg embedded and re-executed its
+    // own copy. `AS node_id FROM` is unique to the candidates shape;
+    // the hydration column aliases don't match it.
+    expect(text.split("AS node_id FROM")).toHaveLength(2);
+    expect(
+      text.split("SELECT node_id FROM tg_hybrid_cand").length,
+    ).toBeGreaterThanOrEqual(3);
   });
 
   it("default candidates bind the currency instant as a parameter", () => {

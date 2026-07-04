@@ -27,6 +27,15 @@ import { coerceNumericScore } from "../row-mappers";
 import { quotedColumn, type Tables } from "./shared";
 
 export type HybridStatementInput = Readonly<{
+  /**
+   * The candidates set (liveness/currency filter, or the store-compiled
+   * predicate query): `(node_id)` rows. Emitted ONCE as the
+   * `tg_hybrid_cand` CTE; both source legs must reference it via
+   * {@link hybridCandidatesRef} instead of embedding their own copy —
+   * previously each leg re-executed the candidates subquery (with two
+   * separate `nowIso()` stamps for the currency window, no less).
+   */
+  candidatesSql: SQL;
   /** Vector source SQL: `(node_id, score)` ordered best-first, bounded. */
   vectorSql: SQL;
   /**
@@ -51,6 +60,18 @@ export type HybridStatementInput = Readonly<{
  * node row (aliased to the mapper's expected column names). `node_id`
  * (fusion side) and `id` (node side) intentionally coexist.
  */
+/**
+ * The reference the vector/fulltext source legs embed in place of the
+ * candidates subquery (their strategies emit `node_id IN (<this>)`).
+ * Valid only inside {@link buildHybridSearchStatement}, which defines
+ * the `tg_hybrid_cand` CTE first in its WITH list — CTEs are visible to
+ * later members on both dialects, and a CTE referenced from both legs
+ * is evaluated once.
+ */
+export function hybridCandidatesRef(): SQL {
+  return sql`SELECT node_id FROM tg_hybrid_cand`;
+}
+
 export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
   const { nodes } = input;
   const vectorOrder =
@@ -83,7 +104,10 @@ export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
   // otherwise evaluate `weight / (k + rank)` in integer arithmetic and
   // collapse every contribution to zero.
   return sql`
-    WITH tg_hybrid_vec AS (
+    WITH tg_hybrid_cand AS (
+      SELECT node_id FROM (${input.candidatesSql}) AS tg_hybrid_cand_src
+    ),
+    tg_hybrid_vec AS (
       SELECT node_id, score,
              ROW_NUMBER() OVER (ORDER BY ${vectorOrder}) AS ord
       FROM (${input.vectorSql}) AS tg_hybrid_vec_src
