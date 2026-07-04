@@ -165,3 +165,104 @@ export function getSearchableMetadata(
 
   return undefined;
 }
+
+// ============================================================
+// Schema-level searchable-field resolution
+// ============================================================
+
+/** One searchable field discovered on a node schema. */
+export type SearchableFieldInfo = Readonly<{
+  fieldPath: string;
+  metadata: SearchableMetadata;
+}>;
+
+/**
+ * Cache keyed by the Zod schema *instance*. Schemas are immutable at
+ * runtime and the same `nodeKind.schema` reference is reused across
+ * every CRUD call, so this collapses the per-use introspection cost to
+ * one walk per schema for the lifetime of the process.
+ */
+const searchableFieldsCache = new WeakMap<
+  z.ZodType,
+  readonly SearchableFieldInfo[]
+>();
+
+/**
+ * Extracts searchable field information from a Zod schema.
+ *
+ * Handles top-level searchable() strings as well as wrapped variants
+ * (optional / nullable / default / readonly / pipe).
+ */
+export function getSearchableFields(
+  schema: z.ZodType,
+): readonly SearchableFieldInfo[] {
+  const cached = searchableFieldsCache.get(schema);
+  if (cached) return cached;
+
+  const fields = computeSearchableFields(schema);
+  searchableFieldsCache.set(schema, fields);
+  return fields;
+}
+
+function computeSearchableFields(
+  schema: z.ZodType,
+): readonly SearchableFieldInfo[] {
+  if (schema.type !== "object") return [];
+
+  const def = schema.def as { shape?: Record<string, z.ZodType> };
+  const shape = def.shape;
+  if (!shape) return [];
+
+  const fields: SearchableFieldInfo[] = [];
+  for (const [fieldPath, fieldSchema] of Object.entries(shape)) {
+    const metadata = getSearchableMetadata(fieldSchema);
+    if (metadata !== undefined) {
+      fields.push({ fieldPath, metadata });
+    }
+  }
+  warnIfConflictingLanguages(fields);
+  return fields;
+}
+
+/**
+ * Warns (once per schema, via the WeakMap memo above) when a schema's
+ * searchable fields declare different `language` values. The first
+ * field's language wins on the stored row; true per-field multilingual
+ * indexing is not supported today.
+ */
+function warnIfConflictingLanguages(
+  fields: readonly SearchableFieldInfo[],
+): void {
+  if (fields.length < 2) return;
+  const languages = new Set(fields.map((field) => field.metadata.language));
+  if (languages.size < 2) return;
+  if (typeof console === "undefined" || typeof console.warn !== "function") {
+    return;
+  }
+  const fieldSummary = fields
+    .map((field) => `${field.fieldPath}=${field.metadata.language}`)
+    .join(", ");
+  const winning = fields[0]?.metadata.language ?? DEFAULT_SEARCHABLE_LANGUAGE;
+  console.warn(
+    `[typegraph] searchable() fields declare conflicting languages ` +
+      `(${fieldSummary}). The first field's language ("${winning}") is ` +
+      `used for the combined fulltext row.`,
+  );
+}
+
+/**
+ * The one language a kind's fulltext rows are written with — the first
+ * searchable field's declared language (the winning-language rule the
+ * write path applies). `undefined` when the schema has no searchable
+ * fields.
+ *
+ * Search paths use this to parse queries with a CONSTANT regconfig: the
+ * per-row `websearch_to_tsquery("language", ...)` form makes the tsquery
+ * non-constant, so PostgreSQL's GIN index on `tsv` can never serve the
+ * match and every search scans the kind's rows.
+ */
+export function resolveDeclaredFulltextLanguage(
+  schema: z.ZodType,
+): string | undefined {
+  return getSearchableFields(schema)[0]?.metadata.language;
+}

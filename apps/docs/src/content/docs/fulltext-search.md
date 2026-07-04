@@ -436,7 +436,7 @@ for (const hit of hits) {
 | `query` | `string` | — *(required)* | User-supplied query string. Parsed according to `mode`. |
 | `limit` | `number` | — *(required)* | Max rows to return. Must be a positive integer. |
 | `mode` | `"websearch" \| "phrase" \| "plain" \| "raw"` | `"websearch"` | Parser for `query`. See [Query Modes](#query-modes). |
-| `language` | `string` | per-row (as indexed) | Override the stemming/tokenization language for this query. Postgres only — SQLite FTS5's tokenizer is fixed at table-create time and a per-query override throws. |
+| `language` | `string` | the kind's declared language | Override the stemming/tokenization language for this query. By default the query is parsed with the language the kind's `searchable()` fields declare — a plan-time constant, which is what lets PostgreSQL serve the match from the `tsv` GIN index (a per-row language reference makes the tsquery non-constant and forces a scan). Postgres only — SQLite FTS5's tokenizer is fixed at table-create time and a per-query override throws. |
 | `minScore` | `number` | *(none)* | Drop hits whose backend-native score is below this threshold. Score units depend on the strategy. |
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
 | `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |

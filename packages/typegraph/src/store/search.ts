@@ -17,6 +17,7 @@ import {
   type VectorMetric,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import { resolveDeclaredFulltextLanguage } from "../core/searchable";
 import { type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
@@ -113,8 +114,10 @@ export type FulltextSearchOptions<N extends NodeType = NodeType> =
       /** Query parser mode. Default: "websearch". */
       mode?: FulltextQueryMode;
       /**
-       * Language override for query parsing. Default: per-row language as
-       * stored at insert time.
+       * Language override for query parsing. Default: the kind's
+       * declared language (the same config rows were indexed with),
+       * which keeps the parsed tsquery a plan-time constant on
+       * PostgreSQL so the GIN index can serve the match.
        */
       language?: string;
       /** Minimum relevance score to include in results. */
@@ -284,6 +287,25 @@ function assertSearchOffset(offset: number | undefined, label: string): void {
   }
 }
 
+/**
+ * The language a fulltext query should be parsed with for one kind: the
+ * caller's explicit override, else the kind's DECLARED language (the one
+ * its rows were written with). Passing the declared language keeps the
+ * tsquery CONSTANT, so PostgreSQL's GIN index on `tsv` can serve the
+ * match — the per-row `websearch_to_tsquery("language", ...)` fallback
+ * (used only when the kind declares no searchable fields) forces a scan.
+ */
+function effectiveFulltextLanguage(
+  ctx: StoreSearchContext,
+  nodeKind: string,
+  override: string | undefined,
+): string | undefined {
+  if (override !== undefined) return override;
+  const nodeType = ctx.registry.getNodeType(nodeKind);
+  if (nodeType === undefined) return undefined;
+  return resolveDeclaredFulltextLanguage(nodeType.schema);
+}
+
 /** A ranked row tagged with the kind whose search leg produced it. */
 type RankedSourceRow = Readonly<{
   kind: string;
@@ -415,6 +437,7 @@ export async function executeFulltextSearch<N = Node>(
   const perKindRows = await Promise.all(
     kinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
       const candidates = buildKindCandidates(ctx, kind, options.where);
+      const language = effectiveFulltextLanguage(ctx, kind, options.language);
       const rows = await backend.fulltextSearch!({
         graphId,
         nodeKind: kind,
@@ -425,7 +448,7 @@ export async function executeFulltextSearch<N = Node>(
         ...(singleKind && offset > 0 ? { offset } : {}),
         ...(candidates === undefined ? {} : { candidates }),
         ...(options.mode ? { mode: options.mode } : {}),
-        ...(options.language ? { language: options.language } : {}),
+        ...(language === undefined ? {} : { language }),
         ...(options.minScore === undefined ?
           {}
         : { minScore: options.minScore }),
@@ -741,6 +764,11 @@ export async function executeHybridSearch<N = Node>(
     const kind = fulltextKinds[0];
     const { slot } = vectorKinds[0]!;
     const candidates = candidatesByKind.get(kind);
+    const hybridFulltextLanguage = effectiveFulltextLanguage(
+      ctx,
+      kind,
+      options.fulltext.language,
+    );
     const rows = await backend.hybridSearch({
       graphId,
       nodeKind: kind,
@@ -762,9 +790,9 @@ export async function executeHybridSearch<N = Node>(
         query: options.fulltext.query,
         k: fulltextK,
         ...(options.fulltext.mode ? { mode: options.fulltext.mode } : {}),
-        ...(options.fulltext.language ?
-          { language: options.fulltext.language }
-        : {}),
+        ...(hybridFulltextLanguage === undefined ?
+          {}
+        : { language: hybridFulltextLanguage }),
         ...(options.fulltext.minScore === undefined ?
           {}
         : { minScore: options.fulltext.minScore }),
@@ -844,6 +872,11 @@ export async function executeHybridSearch<N = Node>(
   const fulltextPromise = Promise.all(
     fulltextKinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
       const candidates = candidatesByKind.get(kind);
+      const language = effectiveFulltextLanguage(
+        ctx,
+        kind,
+        options.fulltext.language,
+      );
       const rows = await backend.fulltextSearch!({
         graphId,
         nodeKind: kind,
@@ -851,9 +884,7 @@ export async function executeHybridSearch<N = Node>(
         limit: fulltextK,
         ...(candidates === undefined ? {} : { candidates }),
         ...(options.fulltext.mode ? { mode: options.fulltext.mode } : {}),
-        ...(options.fulltext.language ?
-          { language: options.fulltext.language }
-        : {}),
+        ...(language === undefined ? {} : { language }),
         ...(options.fulltext.minScore === undefined ?
           {}
         : { minScore: options.fulltext.minScore }),

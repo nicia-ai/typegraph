@@ -1002,17 +1002,27 @@ export function buildStandardFulltextCte(
       `Fulltext match predicates are not supported for dialect "${dialect.name}"`,
     );
   }
+  // Parse the query with a CONSTANT language whenever possible: the
+  // caller's explicit override, else the one declared language shared by
+  // every kind in the alias (rows are written with their kind's declared
+  // language, so this matches the stored tsv). A constant keeps the
+  // tsquery plan-time-stable, so PostgreSQL's GIN index on `tsv` can
+  // serve the match — the per-row `websearch_to_tsquery("language", ...)`
+  // fallback (mixed-language aliases only) forces a scan of the kinds'
+  // rows.
+  const effectiveLanguage =
+    language ?? sharedDeclaredLanguage(ctx.fulltextLanguages, nodeKinds);
   const matchCondition = fulltextStrategy.matchCondition(
     tableName,
     query,
     mode,
-    language,
+    effectiveLanguage,
   );
   const rankExpression = fulltextStrategy.rankExpression(
     tableName,
     query,
     mode,
-    language,
+    effectiveLanguage,
   );
 
   const conditions: SQL[] = [
@@ -1054,6 +1064,25 @@ export function buildStandardFulltextCte(
       ) AS fts_inner
     )
   `;
+}
+
+/**
+ * The single declared language shared by every kind in the alias that
+ * declares searchable fields, or `undefined` when they disagree (or none
+ * declares any — such kinds contribute no fulltext rows either way).
+ */
+function sharedDeclaredLanguage(
+  fulltextLanguages: ReadonlyMap<string, string> | undefined,
+  nodeKinds: readonly string[],
+): string | undefined {
+  if (fulltextLanguages === undefined) return undefined;
+  const languages = new Set<string>();
+  for (const kind of nodeKinds) {
+    const language = fulltextLanguages.get(kind);
+    if (language !== undefined) languages.add(language);
+  }
+  if (languages.size !== 1) return undefined;
+  return [...languages][0];
 }
 
 export function buildStandardHybridCandidateCte(): SQL {

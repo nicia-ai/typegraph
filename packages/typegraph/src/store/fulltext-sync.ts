@@ -14,14 +14,11 @@ import { type z } from "zod";
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import {
   DEFAULT_SEARCHABLE_LANGUAGE,
-  getSearchableMetadata,
-  type SearchableMetadata,
+  getSearchableFields,
+  type SearchableFieldInfo,
 } from "../core/searchable";
 
-type SearchableFieldInfo = Readonly<{
-  fieldPath: string;
-  metadata: SearchableMetadata;
-}>;
+export { getSearchableFields } from "../core/searchable";
 
 export type FulltextSyncContext = Readonly<{
   graphId: string;
@@ -29,83 +26,6 @@ export type FulltextSyncContext = Readonly<{
   nodeId: string;
   backend: GraphBackend | TransactionBackend;
 }>;
-
-/**
- * Cache keyed by the Zod schema *instance*. Schemas are immutable at
- * runtime and the same `nodeKind.schema` reference is reused across
- * every CRUD call, so this collapses the per-write introspection cost
- * to one walk per schema for the lifetime of the process.
- */
-const searchableFieldsCache = new WeakMap<
-  z.ZodType,
-  readonly SearchableFieldInfo[]
->();
-
-/**
- * Extracts searchable field information from a Zod schema.
- *
- * Handles top-level searchable() strings as well as wrapped variants
- * (optional / nullable / default / readonly / pipe).
- */
-export function getSearchableFields(
-  schema: z.ZodType,
-): readonly SearchableFieldInfo[] {
-  const cached = searchableFieldsCache.get(schema);
-  if (cached) return cached;
-
-  const fields = computeSearchableFields(schema);
-  searchableFieldsCache.set(schema, fields);
-  return fields;
-}
-
-function computeSearchableFields(
-  schema: z.ZodType,
-): readonly SearchableFieldInfo[] {
-  if (schema.type !== "object") return [];
-
-  const def = schema.def as { shape?: Record<string, z.ZodType> };
-  const shape = def.shape;
-  if (!shape) return [];
-
-  const fields: SearchableFieldInfo[] = [];
-  for (const [fieldPath, fieldSchema] of Object.entries(shape)) {
-    const metadata = getSearchableMetadata(fieldSchema);
-    if (metadata !== undefined) {
-      fields.push({ fieldPath, metadata });
-    }
-  }
-  warnIfConflictingLanguages(fields);
-  return fields;
-}
-
-/**
- * Emits a one-time warning per schema when searchable fields declare
- * different `language` values. The first field's language wins on the
- * stored row; true per-field multilingual indexing is not supported
- * today. This fires from `computeSearchableFields`, which is memoized
- * via a WeakMap keyed by schema instance — so the warning is emitted
- * at most once per schema for the lifetime of the process.
- */
-function warnIfConflictingLanguages(
-  fields: readonly SearchableFieldInfo[],
-): void {
-  if (fields.length < 2) return;
-  const languages = new Set(fields.map((field) => field.metadata.language));
-  if (languages.size < 2) return;
-  if (typeof console === "undefined" || typeof console.warn !== "function") {
-    return;
-  }
-  const fieldSummary = fields
-    .map((field) => `${field.fieldPath}=${field.metadata.language}`)
-    .join(", ");
-  const winning = fields[0]?.metadata.language ?? DEFAULT_SEARCHABLE_LANGUAGE;
-  console.warn(
-    `[typegraph] searchable() fields declare conflicting languages ` +
-      `(${fieldSummary}). The first field's language ("${winning}") is ` +
-      `recorded on the fulltext row; true multilingual indexing requires ` +
-      `a dedicated node kind per language.`,
-  );
-}
 
 const FIELD_SEPARATOR = "\n";
 

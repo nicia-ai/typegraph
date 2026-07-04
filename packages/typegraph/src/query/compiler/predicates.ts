@@ -432,6 +432,8 @@ export type PredicateCompilerContext = Readonly<{
    * table scan in the UNION ALL.
    */
   vectorSlots?: VectorSlotMap;
+  /** Per-kind declared fulltext language for constant-tsquery parsing. */
+  fulltextLanguages?: ReadonlyMap<string, string>;
 }>;
 
 /**
