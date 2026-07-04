@@ -489,6 +489,63 @@ export type VectorSearchResult = Readonly<{
 }>;
 
 /**
+ * Parameters for a single-statement hybrid (vector + fulltext, RRF-fused)
+ * search. The store facade resolves every default before calling — the
+ * per-source candidate depths (`k`), the fusion constants, and the shared
+ * `candidates` subquery — so the backend composes SQL without policy.
+ */
+export type HybridSearchParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  vector: Readonly<{
+    fieldPath: string;
+    queryEmbedding: readonly number[];
+    metric: VectorMetric;
+    dimensions: number;
+    indexType: VectorIndexType;
+    /** Candidate depth of the vector source (rows entering fusion). */
+    k: number;
+    minScore?: number;
+    efSearch?: number;
+  }>;
+  fulltext: Readonly<{
+    query: string;
+    mode?: FulltextQueryMode;
+    language?: string;
+    /** Candidate depth of the fulltext source (rows entering fusion). */
+    k: number;
+    minScore?: number;
+    includeSnippets?: boolean;
+  }>;
+  fusion: Readonly<{
+    /** RRF rank constant (`1 / (k + rank)`). */
+    k: number;
+    vectorWeight: number;
+    fulltextWeight: number;
+  }>;
+  /** Fused rows to return after `offset`. */
+  limit: number;
+  /** Fused rows to skip (rank-relative pagination). */
+  offset?: number;
+  /** See {@link VectorSearchParams.candidates}; applies to both sources. */
+  candidates?: SQL;
+}>;
+
+/**
+ * One fused hybrid hit, hydrated in the same statement: the node row
+ * rides along so the caller needs no follow-up id fetch.
+ */
+export type HybridSearchRow = Readonly<{
+  node: NodeRow;
+  fusedScore: number;
+  vectorRank?: number;
+  vectorScore?: number;
+  fulltextRank?: number;
+  fulltextScore?: number;
+  snippet?: string;
+}>;
+
+/**
  * Parameters for creating a vector index.
  */
 export type CreateVectorIndexParams = Readonly<{
@@ -1017,6 +1074,17 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly VectorSearchResult[]>;
   createVectorIndex?: (params: CreateVectorIndexParams) => Promise<void>;
   dropVectorIndex?: (params: DropVectorIndexParams) => Promise<void>;
+  /**
+   * Single-statement hybrid search: both sources, RRF fusion, liveness
+   * join, and node hydration composed into ONE statement — replacing the
+   * facade's two search round trips plus id-hydration fetch. Optional;
+   * the store falls back to the multi-statement path when unset (custom
+   * backends, engines without window functions). Same liveness contract
+   * as `vectorSearch` / `fulltextSearch`.
+   */
+  hybridSearch?: (
+    params: HybridSearchParams,
+  ) => Promise<readonly HybridSearchRow[]>;
 
   // === Fulltext Operations (optional - depends on fulltext capabilities) ===
   upsertFulltext?: (params: UpsertFulltextParams) => Promise<void>;
