@@ -696,6 +696,11 @@ function createSqliteOperationBackend(
               params: HybridSearchParams,
             ): Promise<readonly HybridSearchRow[]> {
               assertVectorSearchLimit(params.limit);
+              // Source depths get the same boundary validation the
+              // fallback path applies (vectorSearch validates its limit;
+              // the fulltext depth is validated inside
+              // buildFulltextSearch).
+              assertVectorSearchLimit(params.vector.k);
               const slot = vectorSlotFromParams({
                 graphId: params.graphId,
                 nodeKind: params.nodeKind,

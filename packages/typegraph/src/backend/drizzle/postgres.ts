@@ -1248,66 +1248,77 @@ function createPostgresOperationBackend(
             score: row.score,
           }));
         },
-        async hybridSearch(
-          params: HybridSearchParams,
-        ): Promise<readonly HybridSearchRow[]> {
-          assertVectorSearchLimit(params.limit);
-          assertPgvectorEfSearch(params.vector.efSearch);
-          const slot = vectorSlotFromParams({
-            graphId: params.graphId,
-            nodeKind: params.nodeKind,
-            fieldPath: params.vector.fieldPath,
-            dimensions: params.vector.dimensions,
-            metric: params.vector.metric,
-            indexType: params.vector.indexType,
-          });
-          await ensureVectorSlotStorage(slot);
-          const candidates =
-            params.candidates ??
-            operationStrategy.buildLiveNodeIds(
-              params.graphId,
-              params.nodeKind,
-            );
-          const vectorParams: VectorSearchParams = {
-            graphId: params.graphId,
-            nodeKind: params.nodeKind,
-            fieldPath: params.vector.fieldPath,
-            queryEmbedding: params.vector.queryEmbedding,
-            metric: params.vector.metric,
-            dimensions: params.vector.dimensions,
-            indexType: params.vector.indexType,
-            limit: params.vector.k,
-            ...(params.vector.minScore === undefined ?
-              {}
-            : { minScore: params.vector.minScore }),
-          };
-          const vectorSql = vectorStrategy.buildSearch(
-            slot,
-            vectorParams,
-            candidates,
-          );
-          const statement = operationStrategy.buildHybridSearch(
-            { ...params, candidates },
-            vectorSql,
-            params.vector.metric === "cosine",
-          );
-          const gucOverrides = await vectorSearchGucOverrides({
-            indexType: params.vector.indexType,
-            ...(params.vector.efSearch === undefined ?
-              {}
-            : { efSearch: params.vector.efSearch }),
-          });
-          let raw: readonly Record<string, unknown>[];
-          try {
-            raw = await runVectorSearch<Record<string, unknown>>(
-              gucOverrides,
-              statement,
-            );
-          } catch (error) {
-            throw mapVectorWriteError(error, vectorParams);
+        // Single-statement hybrid needs ROW_NUMBER(); a capability
+        // profile that disables window functions keeps the store's
+        // multi-statement fallback by simply not exposing the member.
+        ...(capabilities.windowFunctions ?
+          {
+            async hybridSearch(
+              params: HybridSearchParams,
+            ): Promise<readonly HybridSearchRow[]> {
+              assertVectorSearchLimit(params.limit);
+              // Source depths get the same boundary validation the fallback
+              // path applies (vectorSearch validates its limit; the fulltext
+              // depth is validated inside buildFulltextSearch).
+              assertVectorSearchLimit(params.vector.k);
+              assertPgvectorEfSearch(params.vector.efSearch);
+              const slot = vectorSlotFromParams({
+                graphId: params.graphId,
+                nodeKind: params.nodeKind,
+                fieldPath: params.vector.fieldPath,
+                dimensions: params.vector.dimensions,
+                metric: params.vector.metric,
+                indexType: params.vector.indexType,
+              });
+              await ensureVectorSlotStorage(slot);
+              const candidates =
+                params.candidates ??
+                operationStrategy.buildLiveNodeIds(
+                  params.graphId,
+                  params.nodeKind,
+                );
+              const vectorParams: VectorSearchParams = {
+                graphId: params.graphId,
+                nodeKind: params.nodeKind,
+                fieldPath: params.vector.fieldPath,
+                queryEmbedding: params.vector.queryEmbedding,
+                metric: params.vector.metric,
+                dimensions: params.vector.dimensions,
+                indexType: params.vector.indexType,
+                limit: params.vector.k,
+                ...(params.vector.minScore === undefined ?
+                  {}
+                : { minScore: params.vector.minScore }),
+              };
+              const vectorSql = vectorStrategy.buildSearch(
+                slot,
+                vectorParams,
+                candidates,
+              );
+              const statement = operationStrategy.buildHybridSearch(
+                { ...params, candidates },
+                vectorSql,
+                params.vector.metric === "cosine",
+              );
+              const gucOverrides = await vectorSearchGucOverrides({
+                indexType: params.vector.indexType,
+                ...(params.vector.efSearch === undefined ?
+                  {}
+                : { efSearch: params.vector.efSearch }),
+              });
+              let raw: readonly Record<string, unknown>[];
+              try {
+                raw = await runVectorSearch<Record<string, unknown>>(
+                  gucOverrides,
+                  statement,
+                );
+              } catch (error) {
+                throw mapVectorWriteError(error, vectorParams);
+              }
+              return raw.map((row) => mapHybridSearchRow(row, toNodeRow));
+            },
           }
-          return raw.map((row) => mapHybridSearchRow(row, toNodeRow));
-        },
+        : {}),
       };
 
   const operationBackend: InternalOperationBackend = {

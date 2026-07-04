@@ -357,6 +357,26 @@ describe("single-statement hybrid search", () => {
           hits: fallback.map((hit) => projectHit(hit)),
         });
       }
+
+      // Invalid source depths reject identically on both paths — the fast
+      // path must not skip the boundary validation the fallback applies.
+      const invalidDepth = {
+        vector: {
+          fieldPath: FIELD_PATH,
+          queryEmbedding: QUERY_EMBEDDING,
+          k: 0,
+        },
+        fulltext: { query: FULLTEXT_QUERY },
+        limit: 3,
+      } as const;
+      await expect(
+        store.search.hybrid("Document", invalidDepth),
+        "native path must reject k: 0",
+      ).rejects.toThrow(/positive integer/);
+      await expect(
+        fallbackStore.search.hybrid("Document", invalidDepth),
+        "fallback path must reject k: 0",
+      ).rejects.toThrow(/positive integer/);
     } finally {
       await cleanup();
     }
@@ -374,5 +394,37 @@ describe("single-statement hybrid search", () => {
       return;
     }
     await runScenario(postgresDescriptor);
+  });
+
+  it("[postgres-pgvector] hides hybridSearch when window functions are disabled", async (ctx) => {
+    if (postgresPool === undefined) {
+      skipTest(ctx);
+      return;
+    }
+    // A capability profile without window functions cannot run the
+    // ROW_NUMBER() fusion statement; the member must be absent so the
+    // store's multi-statement fallback engages.
+    const { cleanup } = await postgresDescriptor.create();
+    try {
+      const noWindowBackend = createPostgresBackend(
+        drizzleNodePostgres(postgresPool),
+        { capabilities: { windowFunctions: false } },
+      );
+      expect(noWindowBackend.hybridSearch).toBeUndefined();
+
+      const store = await seedStore(noWindowBackend);
+      const vectorSpy = vi.spyOn(
+        noWindowBackend as {
+          vectorSearch: NonNullable<GraphBackend["vectorSearch"]>;
+        },
+        "vectorSearch",
+      );
+      const hits = await runHybrid(store, { limit: 4 });
+      expect(hits.length).toBeGreaterThan(0);
+      expect(vectorSpy).toHaveBeenCalled();
+      vectorSpy.mockRestore();
+    } finally {
+      await cleanup();
+    }
   });
 });
