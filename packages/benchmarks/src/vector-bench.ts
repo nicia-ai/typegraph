@@ -286,18 +286,35 @@ async function main(argv: readonly string[]): Promise<void> {
 
     const materializeStart = nowMs();
     const materialized = await store.materializeIndexes();
-    const vectorStatuses = materialized.results
-      .filter((entry) => entry.entity === "vector")
-      .map((entry) => `${entry.indexName}:${entry.status}`);
+    const vectorEntries = materialized.results.filter(
+      (entry) => entry.entity === "vector",
+    );
     recordDuration(
       latencies,
       "vector:materialize",
       nowMs() - materializeStart,
-      `ANN index build [${vectorStatuses.join(", ")}]`,
+      `ANN index build [${vectorEntries
+        .map((entry) => `${entry.indexName}:${entry.status}`)
+        .join(", ")}]`,
     );
-    if (vectorStatuses.length === 0) {
+    if (vectorEntries.length === 0) {
       throw new Error(
         "vector bench drift: materializeIndexes reported no vector index",
+      );
+    }
+    // materializeIndexes is best-effort: a failed ANN build is a status,
+    // not a throw. Measuring "ANN" against a missing index is exactly
+    // the bad signal this lane exists to prevent (first run of this
+    // bench did precisely that — see the serial-retry fix), so any
+    // failed vector entry aborts the run.
+    const failedBuilds = vectorEntries.filter(
+      (entry) => entry.status === "failed",
+    );
+    if (failedBuilds.length > 0) {
+      throw new Error(
+        `vector bench: ANN index build failed for ${failedBuilds
+          .map((entry) => entry.indexName)
+          .join(", ")} — refusing to measure a flat scan as ANN`,
       );
     }
 
