@@ -43,7 +43,7 @@ import {
   type FieldTypeInfo,
   type SchemaIntrospector,
 } from "../query/schema-introspector";
-import { asCompiledRowsSql } from "../query/sql-intent";
+import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
 import { buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
@@ -564,9 +564,44 @@ export async function executeSubgraph<
   });
   const includedIdsCte = buildIncludedIdsCte(ctx);
 
+  // The node and edge fetches both need the traversal closure. Embedding
+  // the recursive CTE in each statement runs the BFS twice; on Postgres
+  // the closure ids are fetched ONCE and passed to both fetches as a
+  // single text[] parameter, filtered via a hashed semi-join
+  // (EXISTS over unnest — measured faster than `= ANY` on the same
+  // closure). SQLite keeps the embedded form: its in-process traversal
+  // is cheap, an id list would bind one parameter per id (bind-budget
+  // pressure), and per-count SQL texts would churn the prepared-statement
+  // cache.
+  let membership: SubgraphMembership;
+  if (ctx.dialect.name === "postgres") {
+    const includedIds = await fetchIncludedIds(
+      ctx,
+      reachableCte,
+      includedIdsCte,
+    );
+    const idsArray = textArrayParam(includedIds);
+    membership = {
+      prefix: sql``,
+      idFilter: (column) =>
+        sql`EXISTS (SELECT 1 FROM unnest(${idsArray}) AS tg_included(id) WHERE tg_included.id = ${column})`,
+      parameterDependentPlan: true,
+    };
+  } else {
+    membership = {
+      prefix: sql`${reachableCte}${includedIdsCte} `,
+      idFilter: (column) =>
+        ctx.dialect.subqueryMembership(
+          column,
+          sql.raw("SELECT id FROM included_ids"),
+        ),
+      parameterDependentPlan: false,
+    };
+  }
+
   const [nodeRows, edgeRows] = await Promise.all([
-    fetchSubgraphNodes(ctx, reachableCte, includedIdsCte, nodeProjectionPlan),
-    fetchSubgraphEdges(ctx, reachableCte, includedIdsCte, edgeProjectionPlan),
+    fetchSubgraphNodes(ctx, membership, nodeProjectionPlan),
+    fetchSubgraphEdges(ctx, membership, edgeProjectionPlan),
   ]);
 
   const nodesMap = new Map<string, Node>();
@@ -722,10 +757,55 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SQL {
   return sql`, included_ids AS (SELECT DISTINCT id FROM reachable${whereClause})`;
 }
 
-async function fetchSubgraphNodes(
+/**
+ * How the node/edge fetches restrict rows to the traversal closure:
+ * either a statement prefix re-declaring the recursive CTE with an
+ * `included_ids` membership subquery (SQLite), or an empty prefix with a
+ * pre-fetched id-array filter (Postgres).
+ */
+type SubgraphMembership = Readonly<{
+  prefix: SQL;
+  idFilter: (column: SQL) => SQL;
+  /**
+   * True in id-array mode: the fetch plans depend on the array
+   * cardinality, so the statements must never fall onto a prepared
+   * generic plan (see markForceCustomPlan).
+   */
+  parameterDependentPlan: boolean;
+}>;
+
+/**
+ * Binds a string list as ONE text parameter in Postgres array-literal
+ * form, cast to text[]. A single parameter keeps the statement text
+ * constant across id counts, and the fetch statements semi-join against
+ * `unnest` of the array. (Drizzle would otherwise serialize a JS array
+ * param as JSON text.)
+ */
+function textArrayParam(values: readonly string[]): SQL {
+  const elements = values.map(
+    (value) =>
+      `"${value.replaceAll("\\", "\\\\").replaceAll('"', String.raw`\"`)}"`,
+  );
+  return sql`${`{${elements.join(",")}}`}::text[]`;
+}
+
+/** Runs the traversal once and returns the closure's node ids. */
+async function fetchIncludedIds(
   ctx: SubgraphContext,
   reachableCte: SQL,
   includedIdsCte: SQL,
+): Promise<readonly string[]> {
+  const rows = await ctx.backend.execute<{ id: string }>(
+    asCompiledRowsSql(
+      sql`${reachableCte}${includedIdsCte} SELECT id FROM included_ids`,
+    ),
+  );
+  return rows.map((row) => row.id);
+}
+
+async function fetchSubgraphNodes(
+  ctx: SubgraphContext,
+  membership: SubgraphMembership,
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphNodeFetchRow[]> {
   const nodeTemporalFilter = compileTemporalFilter({
@@ -750,7 +830,8 @@ async function fetchSubgraphNodes(
     ...buildProjectedPropertyColumns("n", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${ctx.dialect.subqueryMembership(sql.raw("n.id"), sql.raw("SELECT id FROM included_ids"))}`;
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${membership.idFilter(sql.raw("n.id"))}`;
+  if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphNodeFetchRow>(
     asCompiledRowsSql(query),
@@ -759,8 +840,7 @@ async function fetchSubgraphNodes(
 
 async function fetchSubgraphEdges(
   ctx: SubgraphContext,
-  reachableCte: SQL,
-  includedIdsCte: SQL,
+  membership: SubgraphMembership,
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphEdgeFetchRow[]> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
@@ -789,7 +869,8 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${reachableCte}${includedIdsCte} SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${ctx.dialect.subqueryMembership(sql.raw("e.from_id"), sql.raw("SELECT id FROM included_ids"))} AND ${ctx.dialect.subqueryMembership(sql.raw("e.to_id"), sql.raw("SELECT id FROM included_ids"))}`;
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.idFilter(sql.raw("e.from_id"))} AND ${membership.idFilter(sql.raw("e.to_id"))}`;
+  if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(
     asCompiledRowsSql(query),
