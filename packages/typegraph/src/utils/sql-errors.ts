@@ -139,6 +139,25 @@ function isPostgresUndefinedRelationMessage(link: unknown): boolean {
   return POSTGRES_UNDEFINED_RELATION_PATTERN.test(message);
 }
 
+/**
+ * Whether any link in the cause chain is a PostgreSQL "insufficient
+ * resources" failure (SQLSTATE class 53: disk_full, out_of_memory,
+ * configuration_limit_exceeded, ...). Parallel index builds surface
+ * shared-memory exhaustion this way (53100 from dsm_impl_posix on hosts
+ * with a small /dev/shm); callers retry such work with parallelism
+ * disabled. Identified by the locale-independent 5-character SQLSTATE
+ * prefix only — never by message text.
+ */
+export function isInsufficientResourcesError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code === "string" && code.length === 5 && code.startsWith("53"))
+      return true;
+  }
+  return false;
+}
+
 export function isMissingTableError(error: unknown): boolean {
   // SQLSTATE 42P01 is locale-independent and structural, so it is honored on
   // *every* link — including a plain driver-error object reached only by walking

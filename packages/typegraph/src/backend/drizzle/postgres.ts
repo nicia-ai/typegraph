@@ -59,7 +59,10 @@ import {
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
 import { chunk as chunkArray } from "../../utils/array";
-import { isMissingTableError } from "../../utils/sql-errors";
+import {
+  isInsufficientResourcesError,
+  isMissingTableError,
+} from "../../utils/sql-errors";
 import {
   type AdoptedTransaction,
   type BackendCapabilities,
@@ -1416,7 +1419,40 @@ function createPostgresOperationBackend(
         concurrent: params.concurrent === true,
       });
       if (indexStatement !== undefined) {
-        await execRun(indexStatement);
+        try {
+          await execRun(indexStatement);
+        } catch (error) {
+          if (!isInsufficientResourcesError(error)) throw error;
+          // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
+          // shared memory, and resource-constrained hosts reject the
+          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
+          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
+          // from dsm_impl_posix). Retry serially: drop the INVALID
+          // leftover the failed CONCURRENTLY build leaves behind (its
+          // IF NOT EXISTS would otherwise mask the retry), pin the
+          // strategy table to parallel_workers = 0 (maintenance builds
+          // take min(storage parameter, max_parallel_maintenance_workers)),
+          // rebuild in local memory, and restore the setting.
+          const dropStatement = vectorStrategy.buildDropIndex?.(slot);
+          if (dropStatement !== undefined) {
+            await execRun(dropStatement);
+          }
+          const table = quoteIdentifier(
+            vectorStrategy.tableName(
+              slot.graphId,
+              slot.nodeKind,
+              slot.fieldPath,
+            ),
+          );
+          await execRun(
+            sql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
+          );
+          try {
+            await execRun(indexStatement);
+          } finally {
+            await execRun(sql`ALTER TABLE ${table} RESET (parallel_workers)`);
+          }
+        }
       }
     },
 

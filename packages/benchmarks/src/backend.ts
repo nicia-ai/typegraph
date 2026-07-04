@@ -6,7 +6,7 @@ import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
 import { Pool } from "pg";
 import postgres, { type Sql } from "postgres";
-import { createStore } from "@nicia-ai/typegraph";
+import { createStore, type GraphBackend } from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -25,6 +25,13 @@ import { perfGraph, perfIndexes, type PerfStore } from "./graph";
 
 type BackendResources = Readonly<{
   store: PerfStore;
+  /**
+   * The raw backend, for benches that need their own store construction
+   * (e.g. the vector bench commits a schema version so
+   * `materializeIndexes()` works — the sync `createStore` harness path
+   * deliberately skips that boot step).
+   */
+  backend: GraphBackend;
   close: () => Promise<void>;
   /**
    * True when the backend can evaluate `similarTo()` predicates:
@@ -55,6 +62,7 @@ const POSTGRES_RESET_DDL = `
   DROP TABLE IF EXISTS typegraph_nodes CASCADE;
   DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
   DROP TABLE IF EXISTS typegraph_node_fulltext CASCADE;
+  DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
 `;
 
 async function resetPostgresTablesViaPool(pool: Pool): Promise<void> {
@@ -96,6 +104,7 @@ export async function createBackendResources(
       store: createStore(perfGraph, sqliteBackend, {
         queryDefaults: { traversalExpansion: "none" },
       }),
+      backend: sqliteBackend,
       close: async () => {
         await sqliteBackend.close();
         if (tempDir !== undefined) {
@@ -133,6 +142,7 @@ export async function createBackendResources(
       store: createStore(perfGraph, postgresBackend, {
         queryDefaults: { traversalExpansion: "none" },
       }),
+      backend: postgresBackend,
       close: async () => {
         await postgresBackend.close();
         await pool.end();
@@ -174,6 +184,7 @@ export async function createBackendResources(
     store: createStore(perfGraph, postgresBackend, {
       queryDefaults: { traversalExpansion: "none" },
     }),
+    backend: postgresBackend,
     close: async () => {
       await postgresBackend.close();
       await sql.end();
