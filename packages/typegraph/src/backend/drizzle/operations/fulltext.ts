@@ -52,10 +52,15 @@ export function buildFulltextSearch(
   if (params.minScore !== undefined) {
     conditions.push(sql`${rankExpression} >= ${params.minScore}`);
   }
-  // Liveness pushdown: rank only rows whose node is live, so top-k can never
-  // be crowded out by index drift (side-table rows for tombstoned nodes).
-  // Plain WHERE on both engines — exact, no over-fetch (neither tsvector nor
-  // FTS5 MATCH is a top-k table function; LIMIT applies after filtering).
+  // Liveness pushdown: rank only rows whose node is current, so top-k can
+  // never be crowded out by index drift (side-table rows for tombstoned or
+  // expired nodes). Plain `IN (subquery)` on both engines: SQLite
+  // materializes it once, and with fresh planner statistics Postgres
+  // hashes it for ~0.5ms over the unfiltered scan. Like every candidate
+  // membership shape (hash join, ANY(ARRAY), LATERAL all measured worse
+  // or no better), it cliffs when statistics are stale — the answer is
+  // `store.refreshStatistics()` after bulk loads (the documented setup),
+  // not a cleverer SQL form.
   if (candidates !== undefined) {
     conditions.push(sql`"node_id" IN (${candidates})`);
   }

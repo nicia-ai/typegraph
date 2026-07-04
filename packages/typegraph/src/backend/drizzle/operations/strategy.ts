@@ -32,6 +32,7 @@ import type {
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
 } from "../../types";
+import { nowIso } from "../row-mappers";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
@@ -319,10 +320,10 @@ function createCommonOperationStrategy(
         // Store-compiled candidates (predicates + subclass + currency)
         // take precedence; the live-node default covers direct backend use.
         params.candidates ??
-          liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind),
+          liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind, nowIso()),
       ),
     buildLiveNodeIds: (graphId: string, nodeKind: string): SQL =>
-      liveNodeIdsSubquery(tables.nodes, graphId, nodeKind),
+      liveNodeIdsSubquery(tables.nodes, graphId, nodeKind, nowIso()),
     buildHybridSearch: (
       params: HybridSearchParams,
       vectorSql: SQL,
@@ -330,7 +331,7 @@ function createCommonOperationStrategy(
     ): SQL => {
       const candidates =
         params.candidates ??
-        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind);
+        liveNodeIdsSubquery(tables.nodes, params.graphId, params.nodeKind, nowIso());
       const fulltextSql = buildFulltextSearch(
         fulltextTable,
         {

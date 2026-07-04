@@ -225,29 +225,35 @@ const SEARCH_CANDIDATE_ALIAS = "_sc";
  * predicate, valid-time currency, tombstone exclusion, and graph scoping
  * are exactly the semantics of a `current` read — search can never return
  * (or lose top-k slots to) rows a `find()` would not see.
+ *
+ * Compiled ONLY when a `where` predicate exists: the unfiltered case
+ * returns `undefined` so the backend supplies its flat, parameter-bound
+ * current-read candidates (same semantics, far cheaper — the compiled
+ * query's per-row SQL now() currency checks measurably dominated
+ * unfiltered facade searches on SQLite and planned poorly on Postgres).
  */
 function buildKindCandidates(
   ctx: StoreSearchContext,
   nodeKind: string,
   where: ((accessor: NodeAccessor<NodeType>) => Predicate) | undefined,
 ): SQL | undefined {
+  if (where === undefined) return undefined;
   if (ctx.createQuery === undefined) {
-    if (where === undefined) return undefined;
     throw new ConfigurationError(
       "search with a where predicate requires a query-capable store",
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  let chain = ctx.createQuery().from(nodeKind, SEARCH_CANDIDATE_ALIAS);
-  if (where !== undefined) {
-    chain = chain.whereNode(SEARCH_CANDIDATE_ALIAS, where);
-  }
+  const chain = ctx
+    .createQuery()
+    .from(nodeKind, SEARCH_CANDIDATE_ALIAS)
+    .whereNode(SEARCH_CANDIDATE_ALIAS, where);
   const compiled = chain
     .select(
       (aliases: Record<string, unknown>) => aliases[SEARCH_CANDIDATE_ALIAS],
     )
     .compile();
-  return sql`SELECT ${sql.raw(`"${SEARCH_CANDIDATE_ALIAS}_id"`)} FROM (${compiled}) AS tg_search_candidates`;
+  return sql`SELECT ${sql.raw(`"${SEARCH_CANDIDATE_ALIAS}_id"`)} AS node_id FROM (${compiled}) AS tg_search_candidates`;
 }
 
 /**

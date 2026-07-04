@@ -27,18 +27,26 @@ export function quotedTableName(tableName: string): SQL {
 }
 
 /**
- * Subquery yielding the ids of LIVE nodes of one kind — the candidate set a
- * facade search statement is allowed to return. Passed into the fulltext and
- * vector search builders so top-k is computed over live rows in SQL, instead
- * of ranking side-table rows first and dropping tombstones after (which
- * silently shrinks results below `limit` under index drift).
+ * Subquery yielding the ids of CURRENT nodes of one kind — the candidate
+ * set a facade search statement is allowed to return. Passed into the
+ * fulltext and vector search builders so top-k is computed over current
+ * rows in SQL, instead of ranking side-table rows first and dropping
+ * tombstoned/expired nodes after (which silently shrinks results below
+ * `limit` under index drift).
+ *
+ * Currency matches a `current` read: non-tombstoned AND inside the
+ * validity window. The instant is BOUND as a parameter (the backend's
+ * clock, same source as its write timestamps) rather than compiled as a
+ * per-row SQL now() call — on SQLite a per-row strftime() across two
+ * search legs dominated unfiltered facade searches.
  */
 export function liveNodeIdsSubquery(
   nodes: Tables["nodes"],
   graphId: string,
   nodeKind: string,
+  nowIso: string,
 ): SQL {
-  return sql`SELECT ${nodes.id} FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${nodes.deletedAt} IS NULL`;
+  return sql`SELECT ${nodes.id} AS node_id FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${nodes.deletedAt} IS NULL AND (${nodes.validFrom} IS NULL OR ${nodes.validFrom} <= ${nowIso}) AND (${nodes.validTo} IS NULL OR ${nodes.validTo} > ${nowIso})`;
 }
 
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {

@@ -15,7 +15,10 @@
  *
  * The two-branch `UNION ALL` + `GROUP BY` fusion shape is deliberate: it
  * needs no FULL OUTER JOIN (absent from older SQLite builds) and keeps the
- * statement identical across dialects.
+ * statement identical across dialects. The fused CTE is MATERIALIZED — a
+ * fence, not a hint: Postgres inlines single-use CTEs, and the inlined
+ * fusion subtree re-executed once per candidate node row under a
+ * nested-loop join (2000x in the regression that motivated this).
  */
 import { type SQL, sql } from "drizzle-orm";
 
@@ -98,7 +101,7 @@ export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
       SELECT node_id, NULL, NULL, ord, score, snippet
       FROM tg_hybrid_fts
     ),
-    tg_hybrid_fused AS (
+    tg_hybrid_fused AS MATERIALIZED (
       SELECT node_id,
         SUM(
           COALESCE((${input.vectorWeight} * 1.0) / (${input.fusionK} + vector_rank), 0)

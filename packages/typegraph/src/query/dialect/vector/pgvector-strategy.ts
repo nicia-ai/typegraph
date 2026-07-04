@@ -282,6 +282,13 @@ export const pgvectorStrategy: VectorStrategy = {
     // `hnsw.iterative_scan` (pgvector >= 0.8, applied by the backend);
     // bounded by `ef_search` on older pgvector — still strictly better than
     // ranking tombstones into top-k and dropping them post-hoc.
+    //
+    // Plain `IN (subquery)`: with fresh statistics the planner hashes it
+    // (brute-force scans) or drives per-row probes of the nodes pkey
+    // under the ordered HNSW scan — the plan-verified shape the liveness
+    // pushdown was built on. Stale statistics degrade any membership
+    // form; the answer is `store.refreshStatistics()` after bulk loads,
+    // not a cleverer SQL shape.
     if (candidates !== undefined) {
       conditions.push(sql`${table}."node_id" IN (${candidates})`);
     }
