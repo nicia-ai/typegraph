@@ -285,13 +285,31 @@ export const pgvectorStrategy: VectorStrategy = {
     if (candidates !== undefined) {
       conditions.push(sql`${table}."node_id" IN (${candidates})`);
     }
-    return sql`
+    const body = sql`
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
       ORDER BY ${distance} ASC
       LIMIT ${params.limit}
     `;
+    // IVFFlat's iterative scan only offers `relaxed_order` (no
+    // strict_order mode), so under the backend-applied
+    // `ivfflat.iterative_scan` the index may emit the candidate set
+    // slightly out of distance order. Re-sort the bounded set inside a
+    // MATERIALIZED wrapper — the fence stops the planner from collapsing
+    // the sort back into the index scan's claimed ordering. Score is
+    // monotone in distance, so ordering by score per the metric's
+    // direction restores exact ranking.
+    if (slot.indexType === "ivfflat") {
+      const direction =
+        params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
+      return sql`
+        WITH tg_vec_relaxed AS MATERIALIZED (${body})
+        SELECT node_id, score FROM tg_vec_relaxed
+        ORDER BY score ${direction}, node_id ASC
+      `;
+    }
+    return body;
   },
 
   distanceExpression(embeddingColumn, queryEmbedding, metric) {

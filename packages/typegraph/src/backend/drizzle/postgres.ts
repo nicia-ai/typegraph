@@ -934,9 +934,9 @@ function createPostgresOperationBackend(
   // GUCs register only once the extension library has loaded into the
   // session, so a fresh pooled connection reports NULL even on 0.8+.
   // `pg_extension.extversion` is connection-independent truth.
-  let hnswIterativeScanProbe: Promise<boolean> | undefined;
-  function hnswIterativeScanSupported(): Promise<boolean> {
-    hnswIterativeScanProbe ??= (async () => {
+  let pgvectorIterativeScanProbe: Promise<boolean> | undefined;
+  function pgvectorIterativeScanSupported(): Promise<boolean> {
+    pgvectorIterativeScanProbe ??= (async () => {
       try {
         const [row] = await execAll<{ v: string | null }>(
           sql`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`,
@@ -950,7 +950,7 @@ function createPostgresOperationBackend(
         return false;
       }
     })();
-    return hnswIterativeScanProbe;
+    return pgvectorIterativeScanProbe;
   }
 
   /**
@@ -968,6 +968,10 @@ function createPostgresOperationBackend(
    *   preserves the distance ordering the plan relies on (`relaxed_order`
    *   may emit slightly out of order beneath our LIMIT). On older pgvector
    *   the search stays `ef_search`-bounded — documented caveat.
+   * - `ivfflat.iterative_scan = relaxed_order` on IVFFlat slots (same
+   *   pgvector floor): IVFFlat has no strict_order mode, so the strategy's
+   *   IVFFlat search SQL re-sorts the relaxed candidate set inside a
+   *   MATERIALIZED wrapper (see `buildSearch`) to restore exact ordering.
    */
   async function vectorSearchGucOverrides(
     params: VectorSearchParams,
@@ -986,9 +990,19 @@ function createPostgresOperationBackend(
     if (
       params.indexType === "hnsw" &&
       capabilities.transactions &&
-      (await hnswIterativeScanSupported())
+      (await pgvectorIterativeScanSupported())
     ) {
       overrides.push({ name: "hnsw.iterative_scan", value: "strict_order" });
+    }
+    if (
+      params.indexType === "ivfflat" &&
+      capabilities.transactions &&
+      (await pgvectorIterativeScanSupported())
+    ) {
+      overrides.push({
+        name: "ivfflat.iterative_scan",
+        value: "relaxed_order",
+      });
     }
     return overrides;
   }

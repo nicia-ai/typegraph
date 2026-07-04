@@ -947,8 +947,10 @@ export type GraphBackend = Readonly<{
    * over LIVE nodes only: the search SQL constrains candidates to
    * non-tombstoned node ids, so index drift (embedding rows whose node was
    * deleted outside the store pipeline) can neither surface nor crowd live
-   * rows out of the top-k. Exact on pgvector (>= 0.8 via
-   * `hnsw.iterative_scan`; `ef_search`-bounded below) and sqlite-vec;
+   * rows out of the top-k. Exact on pgvector >= 0.8 (HNSW via
+   * `hnsw.iterative_scan = strict_order`; IVFFlat via
+   * `ivfflat.iterative_scan = relaxed_order` plus a re-sort of the
+   * bounded set; probe-bounded below 0.8) and sqlite-vec;
    * libSQL's DiskANN over-fetches 4x and post-filters (recall bounded by
    * that headroom).
    */

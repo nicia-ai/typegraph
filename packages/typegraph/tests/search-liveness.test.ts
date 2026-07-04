@@ -338,4 +338,60 @@ describe("facade search liveness under index drift", () => {
       await cleanup();
     }
   });
+
+  it("[postgres-pgvector] IVFFlat: filtered top-k stays full and ordered under drift", async (ctx) => {
+    if (postgresPool === undefined) {
+      skipTest(ctx);
+      return;
+    }
+    // IVFFlat has no strict_order iterative scan — its liveness pushdown
+    // pairs `ivfflat.iterative_scan = relaxed_order` with a MATERIALIZED
+    // re-sort in the strategy SQL. This drift regression proves the pair:
+    // full `limit` live hits AND exact ranking on a materialized IVFFlat
+    // slot.
+    const IvfDocument = defineNode("IvfDocument", {
+      schema: z.object({
+        title: searchable({ language: "english" }),
+        embedding: embedding(EMBEDDING_DIMENSIONS, { indexType: "ivfflat" }),
+      }),
+    });
+    const graph = defineGraph({
+      id: "search_liveness_ivfflat",
+      nodes: { IvfDocument: { type: IvfDocument } },
+      edges: {},
+    });
+    const { backend, cleanup } = await postgresDescriptor.create();
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      for (const seed of [...LIVE_CORPUS, ...DRIFT_CORPUS]) {
+        await store.nodes.IvfDocument.create(
+          { title: seed.title, embedding: seed.embedding },
+          { id: seed.id },
+        );
+      }
+      for (const seed of DRIFT_CORPUS) {
+        await backend.deleteNode({
+          graphId: "search_liveness_ivfflat",
+          kind: "IvfDocument",
+          id: seed.id,
+        });
+      }
+      await store.materializeIndexes();
+
+      const hits = await store.search.vector("IvfDocument", {
+        fieldPath: FIELD_PATH,
+        queryEmbedding: QUERY_EMBEDDING,
+        limit: LIMIT,
+      });
+      // Full page of live hits, in exact similarity order (live-1 is the
+      // nearest live vector, live-3 the farthest).
+      expect(hits.map((hit) => hit.node.id)).toEqual([
+        "live-1",
+        "live-2",
+        "live-3",
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
 });

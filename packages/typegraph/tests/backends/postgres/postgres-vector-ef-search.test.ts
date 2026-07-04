@@ -321,6 +321,29 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
     ).toBe(true);
 
     statements.length = 0;
+    await backend.vectorSearch!({ ...params, indexType: "ivfflat" });
+    const ivfflatSetCalls = statements.filter((statement) =>
+      statement.query.includes("set_config"),
+    );
+    expect(
+      ivfflatSetCalls.some(
+        (statement) =>
+          statement.params[0] === "ivfflat.iterative_scan" &&
+          statement.params[1] === "relaxed_order",
+      ),
+      "IVFFlat search must apply ivfflat.iterative_scan = relaxed_order",
+    ).toBe(true);
+    // The IVFFlat SQL re-sorts the relaxed candidate set in a
+    // MATERIALIZED wrapper so relaxed_order cannot leak misordered rows.
+    const ivfflatSelect = statements.find((statement) =>
+      statement.query.includes("tg_vec_relaxed"),
+    );
+    expect(
+      ivfflatSelect?.query,
+      "IVFFlat search must re-sort via the MATERIALIZED wrapper",
+    ).toContain("AS MATERIALIZED");
+
+    statements.length = 0;
     await backend.vectorSearch!({ ...params, indexType: "none" });
     expect(
       statements.filter((statement) => statement.query.includes("set_config")),
