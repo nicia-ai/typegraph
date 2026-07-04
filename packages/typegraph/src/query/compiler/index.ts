@@ -157,6 +157,8 @@ export type CompileQueryOptions = Readonly<{
    * declare the field. Callers build it from the graph's node schemas.
    */
   vectorSlots?: VectorSlotMap | undefined;
+  /** Per-kind declared fulltext language (see buildFulltextLanguages). */
+  fulltextLanguages?: ReadonlyMap<string, string> | undefined;
   /**
    * Recorded read relation to use when the AST carries `recordedAsOf`.
    * Supplying a recorded timestamp without this binding is rejected so the
@@ -229,6 +231,9 @@ export function compileQuery(
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
+    ...(options_.fulltextLanguages === undefined ?
+      {}
+    : { fulltextLanguages: options_.fulltextLanguages }),
   };
 
   // Check for variable-length traversals
@@ -393,6 +398,9 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
+    ...(options_.fulltextLanguages === undefined ?
+      {}
+    : { fulltextLanguages: options_.fulltextLanguages }),
     ...(options_.recordedReadBinding === undefined ?
       {}
     : { recordedReadBinding: options_.recordedReadBinding }),
