@@ -744,7 +744,10 @@ lane tracks both forms (`vector:exact-filtered` before the index,
 the shape where approximate means it. The index scan walks neighbors
 best-first and keeps going until enough filtered rows surface
 (TypeGraph applies pgvector's `hnsw.iterative_scan = strict_order`
-automatically on pgvector ≥ 0.8), but the scan is still bounded by
+automatically on transaction-capable Postgres drivers with pgvector
+≥ 0.8 — the setting is transaction-scoped, so non-transactional
+backends such as `neon-http` keep the plain bounded scan), but the
+scan is still bounded by
 pgvector's `hnsw.max_scan_tuples` (default 20,000). If the nearest rows
 matching the filter live far from the query — a filter *correlated*
 with embedding geometry, like "category X" when category X's documents
