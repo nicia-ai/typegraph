@@ -703,6 +703,41 @@ Vector indexes (HNSW, IVFFlat) trade accuracy for speed:
 
 TypeGraph creates HNSW indexes by default for optimal balance.
 
+### Filtered vector search needs a node index on the filter field
+
+Combining `similarTo` with a property predicate is the shape that
+degrades first at scale — and the vector index is not the reason. The
+candidates side (`d.category.eq(...)`) is a JSON property predicate
+over the nodes table, and rows that carry an embedding field have LARGE
+props: on PostgreSQL the predicate scan detoasts every row, so at 50k
+documents (384-dim embeddings) the filter alone costs ~375ms regardless
+of how the vector side is executed. SQLite pays the same class of cost
+parsing large JSON props per row.
+
+Declare a node index on the filter field and materialize it — the
+candidates predicate becomes an index lookup:
+
+```typescript
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+
+const categoryIndex = defineNodeIndex(Document, { fields: ["category"] });
+
+const graph = defineGraph({
+  id: "docs",
+  nodes: { Document: { type: Document } },
+  edges: {},
+  indexes: [categoryIndex],
+});
+
+await store.materializeIndexes();
+```
+
+Measured at 50k documents on PostgreSQL: the filtered exact search
+drops from ~375ms to ~7.5ms, and the filtered approximate search drops
+equivalently — a 50× difference from one declared index. The
+`bench:vector` lane tracks both forms (`vector:exact-filtered` before
+the index, `vector:exact-filtered-postindex` after).
+
 ### Tuning recall per query with `efSearch`
 
 pgvector's HNSW index searches a dynamic candidate list whose size is

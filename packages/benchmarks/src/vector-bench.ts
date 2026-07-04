@@ -6,14 +6,28 @@
  * against measured recall/latency trade-offs instead of tiny-corpus
  * parity.
  *
- * Measures, per backend lane:
- * - seed (bulkCreate with embedding sync) and materializeIndexes
- *   (pgvector HNSW build on Postgres) as one-shot durations
- * - exact top-10 (flat scan), approximate top-10, and both again under
- *   a ~10% category filter, as per-query medians
- * - recall@10 of the approximate legs against the exact legs (mean
- *   over query vectors), recorded in history as `vector:*-recall`
- *   pseudo-latency rows (median = recall) so trends are greppable.
+ * The lane runs in two phases around `materializeIndexes()`:
+ *
+ * PRE-INDEX (flat scans — the ground truth):
+ * - `vector:exact` / `vector:exact-filtered` — true exact top-10; the
+ *   filtered leg also captures the un-indexed candidates cost (the
+ *   category predicate detoasts every row's props, which carry the
+ *   embedding — measured ~375ms at 50k on Postgres).
+ *
+ * POST-INDEX (ANN index + the declared category node index):
+ * - `vector:ann` / `vector:ann-filtered` — approximate legs, recall@10
+ *   against the pre-index exact results.
+ * - `vector:exact-postindex` — the NON-approximate query re-measured
+ *   with the ANN index present, with recall against pre-index truth.
+ *   On pgvector any `ORDER BY embedding <=> q LIMIT k` can be served
+ *   by the HNSW index, so this leg detects the default path silently
+ *   turning approximate (recall < 1.000 means it did).
+ * - `vector:exact-filtered-postindex` — the filtered leg with the
+ *   category node index materialized (the candidates predicate becomes
+ *   an index lookup; measured 375ms -> 7.5ms at 50k on Postgres).
+ *
+ * Recall lands in history as `vector:*-recall` pseudo-latency rows
+ * (median = recall) so trends are greppable.
  *
  * Runtime budget: ~1-2 min on SQLite, ~3-6 min on Postgres (HNSW build
  * dominates). Scale with --scale=0.1 for a quick smoke pass.
@@ -23,11 +37,18 @@
  *   pnpm --filter @nicia-ai/typegraph-benchmarks bench:vector:file
  *   POSTGRES_URL=... pnpm --filter @nicia-ai/typegraph-benchmarks bench:vector:postgres
  */
-import { createStoreWithSchema } from "@nicia-ai/typegraph";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  embedding,
+} from "@nicia-ai/typegraph";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+import { z } from "zod";
 
 import { createBackendResources } from "./backend";
 import { parseCliOptions } from "./cli";
-import { EMBEDDING_DIMENSIONS, perfGraph, type PerfStore } from "./graph";
+import { EMBEDDING_DIMENSIONS } from "./graph";
 import { writeHistoryEntry } from "./history";
 import { type LatencyRecord } from "./measurements";
 import { formatMs, median, nowMs, percentile } from "./utils";
@@ -40,8 +61,32 @@ const WARMUP_QUERIES = 3;
 const SAMPLE_ROUNDS = 3;
 const CATEGORY_COUNT = 10;
 const FILTER_CATEGORY = "cat-3";
-
 const QUERY_PERTURBATION = 0.01;
+
+/**
+ * Dedicated graph: the lane owns its kind so it can declare the
+ * category node index the filtered legs depend on without touching the
+ * main perf suite's shapes or baselines.
+ */
+const VecDoc = defineNode("VecDoc", {
+  schema: z.object({
+    category: z.string(),
+    embedding: embedding(EMBEDDING_DIMENSIONS),
+  }),
+});
+
+const categoryIndex = defineNodeIndex(VecDoc, { fields: ["category"] });
+
+const vectorBenchGraph = defineGraph({
+  id: "vector_bench",
+  nodes: { VecDoc: { type: VecDoc } },
+  edges: {},
+  indexes: [categoryIndex],
+});
+
+type VectorBenchStore = Awaited<
+  ReturnType<typeof createStoreWithSchema<typeof vectorBenchGraph>>
+>[0];
 
 /** Deterministic RNG (xorshift32) so embeddings are stable across runs. */
 function createRng(seed: number): () => number {
@@ -90,7 +135,7 @@ function perturb(base: readonly number[], rng: () => number): number[] {
 }
 
 async function seedCorpus(
-  store: PerfStore,
+  store: VectorBenchStore,
   docCount: number,
 ): Promise<readonly number[][]> {
   const queryBases: number[][] = [];
@@ -107,15 +152,13 @@ async function seedCorpus(
         return {
           id: `vec-${index}`,
           props: {
-            title: `vector doc ${index}`,
-            body: `vector bench body ${index}`,
             category: `cat-${index % CATEGORY_COUNT}`,
             embedding: vector,
           },
         };
       },
     );
-    await store.nodes.Doc.bulkCreate(rows);
+    await store.nodes.VecDoc.bulkCreate(rows);
   }
   return queryBases;
 }
@@ -126,13 +169,13 @@ type QueryLegOptions = Readonly<{
 }>;
 
 async function runQuery(
-  store: PerfStore,
+  store: VectorBenchStore,
   queryEmbedding: readonly number[],
   options: QueryLegOptions,
 ): Promise<readonly string[]> {
   const rows = await store
     .query()
-    .from("Doc", "d")
+    .from("VecDoc", "d")
     .whereNode("d", (doc) => {
       const similar = doc.embedding.similarTo([...queryEmbedding], TOP_K, {
         metric: "cosine",
@@ -156,7 +199,7 @@ type LegResult = Readonly<{
 }>;
 
 async function measureLeg(
-  store: PerfStore,
+  store: VectorBenchStore,
   queries: readonly (readonly number[])[],
   options: QueryLegOptions,
 ): Promise<LegResult> {
@@ -208,7 +251,7 @@ function recordLeg(
     samples: result.latencies,
   });
   console.log(
-    `${label.padEnd(24)} ${formatMs(result.medianMs).padStart(8)}  p95 ${formatMs(result.p95Ms).padStart(8)}  (${result.latencies.length} queries)`,
+    `${label.padEnd(34)} ${formatMs(result.medianMs).padStart(8)}  p95 ${formatMs(result.p95Ms).padStart(8)}  (${result.latencies.length} queries)`,
   );
 }
 
@@ -224,7 +267,7 @@ function recordDuration(
     samples: [durationMs],
   });
   console.log(
-    `${label.padEnd(24)} ${formatMs(durationMs).padStart(8)}  ${detail}`,
+    `${label.padEnd(34)} ${formatMs(durationMs).padStart(8)}  ${detail}`,
   );
 }
 
@@ -236,7 +279,7 @@ function recordRecall(
   // Pseudo-latency row: median carries the recall value so history
   // trend tooling picks it up without a second sink.
   latencies.set(label, { median: recall, p95: recall, samples: [recall] });
-  console.log(`${label.padEnd(24)} ${recall.toFixed(3).padStart(8)}`);
+  console.log(`${label.padEnd(34)} ${recall.toFixed(3).padStart(8)}`);
 }
 
 async function main(argv: readonly string[]): Promise<void> {
@@ -262,11 +305,14 @@ async function main(argv: readonly string[]): Promise<void> {
       );
       return;
     }
-    // A schema-committed store (unlike the sync harness store) so
-    // `materializeIndexes()` can run; same backend, same tables.
-    const [store] = await createStoreWithSchema(perfGraph, resources.backend, {
-      queryDefaults: { traversalExpansion: "none" },
-    });
+    // A schema-committed store over the lane's own graph (so
+    // `materializeIndexes()` works and the declared category node index
+    // belongs to this lane alone); same backend, same tables.
+    const [store] = await createStoreWithSchema(
+      vectorBenchGraph,
+      resources.backend,
+      { queryDefaults: { traversalExpansion: "none" } },
+    );
     const latencies: LatencyRecord = new Map();
 
     const seedStart = nowMs();
@@ -284,49 +330,58 @@ async function main(argv: readonly string[]): Promise<void> {
       );
     }
 
-    const materializeStart = nowMs();
-    const materialized = await store.materializeIndexes();
-    const vectorEntries = materialized.results.filter(
-      (entry) => entry.entity === "vector",
-    );
-    recordDuration(
-      latencies,
-      "vector:materialize",
-      nowMs() - materializeStart,
-      `ANN index build [${vectorEntries
-        .map((entry) => `${entry.indexName}:${entry.status}`)
-        .join(", ")}]`,
-    );
-    if (vectorEntries.length === 0) {
-      throw new Error(
-        "vector bench drift: materializeIndexes reported no vector index",
-      );
-    }
-    // materializeIndexes is best-effort: a failed ANN build is a status,
-    // not a throw. Measuring "ANN" against a missing index is exactly
-    // the bad signal this lane exists to prevent (first run of this
-    // bench did precisely that — see the serial-retry fix), so any
-    // failed vector entry aborts the run.
-    const failedBuilds = vectorEntries.filter(
-      (entry) => entry.status === "failed",
-    );
-    if (failedBuilds.length > 0) {
-      throw new Error(
-        `vector bench: ANN index build failed for ${failedBuilds
-          .map((entry) => entry.indexName)
-          .join(", ")} — refusing to measure a flat scan as ANN`,
-      );
-    }
-
     const queryRng = createRng(7);
     const queries = queryBases.map((base) => perturb(base, queryRng));
 
+    // --- PRE-INDEX: flat scans are the ground truth. ---
     const exact = await measureLeg(store, queries, {
       approximate: false,
       filtered: false,
     });
     recordLeg(latencies, "vector:exact", exact);
 
+    const exactFiltered = await measureLeg(store, queries, {
+      approximate: false,
+      filtered: true,
+    });
+    recordLeg(latencies, "vector:exact-filtered", exactFiltered);
+
+    // --- Materialize: the ANN index AND the category node index. ---
+    const materializeStart = nowMs();
+    const materialized = await store.materializeIndexes();
+    const statuses = materialized.results.map(
+      (entry) => `${entry.indexName}:${entry.status}`,
+    );
+    recordDuration(
+      latencies,
+      "vector:materialize",
+      nowMs() - materializeStart,
+      `[${statuses.join(", ")}]`,
+    );
+    const vectorEntries = materialized.results.filter(
+      (entry) => entry.entity === "vector",
+    );
+    if (vectorEntries.length === 0) {
+      throw new Error(
+        "vector bench drift: materializeIndexes reported no vector index",
+      );
+    }
+    // materializeIndexes is best-effort: a failed build is a status, not
+    // a throw. Measuring "ANN" against a missing index is exactly the
+    // bad signal this lane exists to prevent, so any failed entry
+    // (vector or the category node index) aborts the run.
+    const failedBuilds = materialized.results.filter(
+      (entry) => entry.status === "failed",
+    );
+    if (failedBuilds.length > 0) {
+      throw new Error(
+        `vector bench: index build failed for ${failedBuilds
+          .map((entry) => entry.indexName)
+          .join(", ")} — refusing to measure without it`,
+      );
+    }
+
+    // --- POST-INDEX legs, recall against pre-index truth. ---
     const ann = await measureLeg(store, queries, {
       approximate: true,
       filtered: false,
@@ -338,12 +393,6 @@ async function main(argv: readonly string[]): Promise<void> {
       meanRecall(exact.resultsByQuery, ann.resultsByQuery),
     );
 
-    const exactFiltered = await measureLeg(store, queries, {
-      approximate: false,
-      filtered: true,
-    });
-    recordLeg(latencies, "vector:exact-filtered", exactFiltered);
-
     const annFiltered = await measureLeg(store, queries, {
       approximate: true,
       filtered: true,
@@ -353,6 +402,42 @@ async function main(argv: readonly string[]): Promise<void> {
       latencies,
       "vector:ann-filtered-recall",
       meanRecall(exactFiltered.resultsByQuery, annFiltered.resultsByQuery),
+    );
+
+    // The NON-approximate query with the ANN index present: on pgvector
+    // any `ORDER BY embedding <=> q LIMIT k` can be served by HNSW, so
+    // recall < 1.000 here means the default path silently turned
+    // approximate.
+    const exactPostIndex = await measureLeg(store, queries, {
+      approximate: false,
+      filtered: false,
+    });
+    recordLeg(latencies, "vector:exact-postindex", exactPostIndex);
+    recordRecall(
+      latencies,
+      "vector:exact-postindex-recall",
+      meanRecall(exact.resultsByQuery, exactPostIndex.resultsByQuery),
+    );
+
+    // The filtered leg with the category node index in place: the
+    // candidates predicate becomes an index lookup instead of a
+    // detoast-everything scan.
+    const exactFilteredPostIndex = await measureLeg(store, queries, {
+      approximate: false,
+      filtered: true,
+    });
+    recordLeg(
+      latencies,
+      "vector:exact-filtered-postindex",
+      exactFilteredPostIndex,
+    );
+    recordRecall(
+      latencies,
+      "vector:exact-filtered-postindex-recall",
+      meanRecall(
+        exactFiltered.resultsByQuery,
+        exactFilteredPostIndex.resultsByQuery,
+      ),
     );
 
     const historyPath = writeHistoryEntry({
