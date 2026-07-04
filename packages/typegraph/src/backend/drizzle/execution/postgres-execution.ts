@@ -70,6 +70,7 @@ type PostgresJsClient = ((...args: readonly unknown[]) => unknown) &
     unsafe: (
       sqlText: string,
       params?: readonly unknown[],
+      queryOptions?: Readonly<{ prepare?: boolean }>,
     ) => PromiseLike<readonly unknown[]>;
   }>;
 
@@ -322,11 +323,18 @@ function adaptPostgresJsClient(sql: PostgresJsClient): PgQueryClient {
   }
   return {
     query,
-    // postgres-js exposes no per-call opt-out of its internal
-    // preparation through `.unsafe`, so custom-plan-preferring
-    // statements take the same path; the generic-plan hazard on this
-    // driver is governed by its `prepare` connection option.
-    queryUnnamed: query,
+    async queryUnnamed(
+      sqlText: string,
+      params: readonly unknown[],
+    ): Promise<PgQueryResult> {
+      // Per-call opt-out of postgres-js's internal preparation
+      // (verified: `unsafe(text, params, { prepare: false })` leaves
+      // pg_prepared_statements empty), so custom-plan-preferring
+      // statements are re-planned against their actual parameters on
+      // every call — same contract as the node-postgres unnamed path.
+      const rows = await sql.unsafe(sqlText, params, { prepare: false });
+      return { rows };
+    },
   };
 }
 
