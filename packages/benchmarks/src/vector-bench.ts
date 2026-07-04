@@ -24,7 +24,8 @@
  *   turning approximate (recall < 1.000 means it did).
  * - `vector:exact-filtered-postindex` — the filtered leg with the
  *   category node index materialized (the candidates predicate becomes
- *   an index lookup; measured 375ms -> 7.5ms at 50k on Postgres).
+ *   an index lookup; measured 375ms -> ~19ms at 50k on Postgres with
+ *   the exact-means-exact defense keeping the leg genuinely exact).
  *
  * Recall lands in history as `vector:*-recall` pseudo-latency rows
  * (median = recall) so trends are greppable.

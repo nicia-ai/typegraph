@@ -733,10 +733,10 @@ await store.materializeIndexes();
 ```
 
 Measured at 50k documents on PostgreSQL: the filtered exact search
-drops from ~375ms to ~7.5ms, and the filtered approximate search drops
-equivalently — a 50× difference from one declared index. The
-`bench:vector` lane tracks both forms (`vector:exact-filtered` before
-the index, `vector:exact-filtered-postindex` after).
+drops from ~375ms to ~19ms and the filtered approximate search to
+~20ms — a ~20× difference from one declared index. The `bench:vector`
+lane tracks both forms (`vector:exact-filtered` before the index,
+`vector:exact-filtered-postindex` after).
 
 ### Tuning recall per query with `efSearch`
 
