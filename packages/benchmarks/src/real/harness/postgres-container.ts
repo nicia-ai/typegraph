@@ -1,16 +1,23 @@
 /**
- * Imperative throwaway PostgreSQL container: `docker run` + tmpfs +
- * harness-allocated free port, torn down on `close()`. Used for the
- * TypeGraph/PostgreSQL engine so its server pairing with Neo4j launches the
- * same way — neither depends on an ambient daemon or compose file
- * (docs/design/benchmark-program-plan.md).
+ * Imperative throwaway PostgreSQL container: `docker run` + harness-allocated
+ * free port, torn down on `close()`. Used for the TypeGraph/PostgreSQL engine
+ * so its server pairing with Neo4j launches the same way — neither depends
+ * on an ambient daemon or compose file (docs/design/benchmark-program-plan.md).
+ *
+ * PGDATA lives on the container's own writable layer (disk-backed), not a
+ * tmpfs. A tmpfs is RAM-backed by the Docker VM, and real LDBC SF1 data plus
+ * indexes (multiple GB) overflows a laptop-sized Docker VM (observed: "no
+ * space left on device" mid-load against a 4g tmpfs on an 8GB VM) — the same
+ * lesson the sibling braiddb project's own SNB benchmark driver documents
+ * (`storage = dataDir ? PGDATA-on-disk : tmpfs`). `fsync=off` still labels
+ * this as a fast, non-durable mode; only the RAM-vs-disk backing changed.
  */
 import { freePort, spawnCapture } from "./process";
 import { POSTGRES_IMAGE } from "./doctor";
 
 export type PostgresContainer = Readonly<{
   connectionString: string;
-  /** e.g. "tmpfs, fsync=off" — for the results doc's durability labels. */
+  /** e.g. "disk, fsync=off" — for the results doc's durability labels. */
   durabilityLabel: string;
   close(): Promise<void>;
 }>;
@@ -30,8 +37,6 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
     container,
     "-p",
     `127.0.0.1:${port}:5432`,
-    "--tmpfs",
-    "/var/lib/postgresql:rw,size=4g",
     "-e",
     `POSTGRES_USER=${POSTGRES_USER}`,
     "-e",
@@ -61,7 +66,7 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
   return {
     connectionString,
     durabilityLabel:
-      "tmpfs, fsync=off (fast mode — not a durability guarantee)",
+      "disk (container writable layer), fsync=off (fast mode — not a durability guarantee)",
     close,
   };
 }

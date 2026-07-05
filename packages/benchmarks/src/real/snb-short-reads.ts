@@ -10,6 +10,7 @@
 import path from "node:path";
 
 import { parseSnbCliOptions } from "./cli";
+import { type SnbIdPools } from "./dataset/ldbc-csv";
 import { resolveDatasetRoot } from "./dataset/resolve";
 import { createLadybugEngine } from "./engines/ladybug";
 import { createNeo4jEngine } from "./engines/neo4j";
@@ -120,6 +121,99 @@ async function collectEngineVersions(
   return versions;
 }
 
+type RunEngineOptions = Readonly<{
+  datasetRoot: string;
+  options: ReturnType<typeof parseSnbCliOptions>;
+  requestCount: number;
+  getOrBuildRequestPlan: (pools: SnbIdPools) => SnbRequestPlan;
+}>;
+
+/** Loads and measures one engine end to end; always closes its handle. */
+async function runEngine(
+  engineName: SnbEngineName,
+  {
+    datasetRoot,
+    options,
+    requestCount,
+    getOrBuildRequestPlan,
+  }: RunEngineOptions,
+): Promise<EngineRun> {
+  const factory = ENGINE_FACTORIES[engineName];
+  const handle = await factory({
+    datasetRoot,
+    log: (message) => console.log(`[${engineName}] ${message}`),
+  });
+
+  try {
+    const loadStarted = nowMs();
+    const pools = await handle.load();
+    const loadMs = nowMs() - loadStarted;
+    console.log(
+      `${engineName} loaded in ${formatMs(loadMs)} ` +
+        `(${pools.persons.length} persons, ${pools.posts.length} posts, ${pools.comments.length} comments)`,
+    );
+
+    const requestPlan = getOrBuildRequestPlan(pools);
+
+    const queries: Record<IsQueryId, EngineQueryMeasurement> = {
+      IS1: await measureQuery(
+        requestPlan.IS1,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS1,
+      ),
+      IS2: await measureQuery(
+        requestPlan.IS2,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS2,
+      ),
+      IS3: await measureQuery(
+        requestPlan.IS3,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS3,
+      ),
+      IS4: await measureQuery(
+        requestPlan.IS4,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS4,
+      ),
+      IS5: await measureQuery(
+        requestPlan.IS5,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS5,
+      ),
+      IS6: await measureQuery(
+        requestPlan.IS6,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS6,
+      ),
+      IS7: await measureQuery(
+        requestPlan.IS7,
+        options.warmupRequests,
+        requestCount,
+        handle.queries.IS7,
+      ),
+    };
+
+    for (const queryId of IS_QUERY_IDS) {
+      const stats = computeLatencyStats(queries[queryId].samplesMs);
+      console.log(
+        `  ${queryId}: p50=${formatMs(stats.medianMs)} p95=${formatMs(stats.p95Ms)} ` +
+          `p99=${formatMs(stats.p99Ms)}${stats.noisy ? " (NOISY, CV>25%)" : ""}`,
+      );
+    }
+
+    return { name: engineName, fairness: handle.fairness, loadMs, queries };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function main(argv: readonly string[]): Promise<void> {
   const options = parseSnbCliOptions(argv);
   const datasetRoot = await resolveDatasetRoot(
@@ -164,98 +258,34 @@ async function main(argv: readonly string[]): Promise<void> {
   const requestCount = options.warmupRequests + options.requestsPerQuery;
   let requestPlan: SnbRequestPlan | undefined;
   const runs: EngineRun[] = [];
+  // A doctor-runnable engine can still fail mid-run (resource exhaustion, a
+  // transient container issue — this is exactly how a Postgres container's
+  // undersized storage was discovered). One engine's crash must not lose
+  // every other engine's already-collected results or kill the whole
+  // process — recorded here as an explicit failed row, never a silent loss.
+  const failures: { engine: SnbEngineName; error: string }[] = [];
 
   for (const engineName of engineNames) {
     console.log(`\n=== ${engineName} ===`);
-    const factory = ENGINE_FACTORIES[engineName];
-    const handle = await factory({
-      datasetRoot,
-      log: (message) => console.log(`[${engineName}] ${message}`),
-    });
-
     try {
-      const loadStarted = nowMs();
-      const pools = await handle.load();
-      const loadMs = nowMs() - loadStarted;
-      console.log(
-        `${engineName} loaded in ${formatMs(loadMs)} ` +
-          `(${pools.persons.length} persons, ${pools.posts.length} posts, ${pools.comments.length} comments)`,
-      );
-
-      requestPlan ??= buildRequestPlan({
-        pools,
+      const run = await runEngine(engineName, {
+        datasetRoot,
+        options,
         requestCount,
-        seed: options.seed,
+        getOrBuildRequestPlan: (pools) => {
+          requestPlan ??= buildRequestPlan({
+            pools,
+            requestCount,
+            seed: options.seed,
+          });
+          return requestPlan;
+        },
       });
-
-      const is1 = await measureQuery(
-        requestPlan.IS1,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS1,
-      );
-      const is2 = await measureQuery(
-        requestPlan.IS2,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS2,
-      );
-      const is3 = await measureQuery(
-        requestPlan.IS3,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS3,
-      );
-      const is4 = await measureQuery(
-        requestPlan.IS4,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS4,
-      );
-      const is5 = await measureQuery(
-        requestPlan.IS5,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS5,
-      );
-      const is6 = await measureQuery(
-        requestPlan.IS6,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS6,
-      );
-      const is7 = await measureQuery(
-        requestPlan.IS7,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS7,
-      );
-
-      const queries: Record<IsQueryId, EngineQueryMeasurement> = {
-        IS1: is1,
-        IS2: is2,
-        IS3: is3,
-        IS4: is4,
-        IS5: is5,
-        IS6: is6,
-        IS7: is7,
-      };
-      for (const queryId of IS_QUERY_IDS) {
-        const stats = computeLatencyStats(queries[queryId].samplesMs);
-        console.log(
-          `  ${queryId}: p50=${formatMs(stats.medianMs)} p95=${formatMs(stats.p95Ms)} ` +
-            `p99=${formatMs(stats.p99Ms)}${stats.noisy ? " (NOISY, CV>25%)" : ""}`,
-        );
-      }
-
-      runs.push({
-        name: engineName,
-        fairness: handle.fairness,
-        loadMs,
-        queries,
-      });
-    } finally {
-      await handle.close();
+      runs.push(run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`  [FAILED] ${engineName}: ${message}`);
+      failures.push({ engine: engineName, error: message });
     }
   }
 
@@ -330,6 +360,13 @@ async function main(argv: readonly string[]): Promise<void> {
     }
   }
 
+  if (failures.length > 0) {
+    console.log("\n=== Engine failures ===");
+    for (const failure of failures) {
+      console.log(`  [FAILED] ${failure.engine}: ${failure.error}`);
+    }
+  }
+
   const resultsPath = path.join(options.outputDir, "results.json");
   await writeJsonFile(resultsPath, {
     profile: options.profile,
@@ -340,6 +377,7 @@ async function main(argv: readonly string[]): Promise<void> {
       fairness: run.fairness,
       loadMs: run.loadMs,
     })),
+    failures,
     queries: resultsByQuery,
   });
 
@@ -358,10 +396,22 @@ async function main(argv: readonly string[]): Promise<void> {
 
   console.log(`\nWrote results to ${options.outputDir}`);
 
-  if (options.runChecks && mismatches.length > 0) {
-    console.error("\nRow-count mismatches between engines:");
-    for (const mismatch of mismatches) {
-      console.error(`  ${mismatch}`);
+  // A doctor-runnable engine that then failed mid-run is a real regression
+  // signal (unlike "not runnable", which is expected in a no-Docker CI
+  // environment and must stay green) — --check treats it the same as a
+  // genuine row-count mismatch.
+  if (options.runChecks && (mismatches.length > 0 || failures.length > 0)) {
+    if (mismatches.length > 0) {
+      console.error("\nRow-count mismatches between engines:");
+      for (const mismatch of mismatches) {
+        console.error(`  ${mismatch}`);
+      }
+    }
+    if (failures.length > 0) {
+      console.error("\nEngine failures:");
+      for (const failure of failures) {
+        console.error(`  ${failure.engine}: ${failure.error}`);
+      }
     }
     process.exitCode = 1;
   }

@@ -2,10 +2,13 @@
  * Neo4j engine driver — the competitor for the "server pairing" (vs
  * TypeGraph/PostgreSQL) in the LDBC SNB Interactive short-read benchmark
  * (docs/design/benchmark-program-plan.md, Lane 1). Launches its own
- * throwaway container imperatively (`docker run` + tmpfs + a
- * harness-allocated free port) — never an ambient daemon or compose file —
- * the same way `../harness/postgres-container.ts` does for the TypeGraph/
- * PostgreSQL side of that pairing.
+ * throwaway container imperatively (`docker run` + a named volume for
+ * `/data` + a harness-allocated free port) — never an ambient daemon or
+ * compose file — the same way `../harness/postgres-container.ts` does for
+ * the TypeGraph/PostgreSQL side of that pairing. `/data` is disk-backed
+ * (not tmpfs): real LDBC SF1 data plus constraint indexes overflows a
+ * laptop-sized Docker VM's RAM (observed on an 8GB VM), the same lesson
+ * the sibling braiddb project's own Neo4j driver documents.
  *
  * Unlike TypeGraph (which needs an artificial ontological `Message`
  * supertype so the polymorphic replyOf chain can be walked with one
@@ -81,10 +84,22 @@ const IS2_MESSAGE_LIMIT = 10;
 
 // ---- Container lifecycle ----
 
+/**
+ * `/data` lives on a named docker volume (disk-backed), not a tmpfs. A
+ * tmpfs is RAM-backed by the Docker VM, and real LDBC SF1 data plus
+ * constraint indexes overflows a laptop-sized Docker VM — the same
+ * "no space left on device" failure mode observed against the
+ * TypeGraph/PostgreSQL container's tmpfs on an 8GB VM, and the exact
+ * reason the sibling braiddb project's own Neo4j driver switches off
+ * tmpfs for anything but its tiny synthetic profile. `/logs` and `/tmp`
+ * stay tmpfs — their contents never scale with dataset size.
+ */
 async function runNeo4jContainer(
   containerName: string,
+  dataVolume: string,
   port: number,
 ): Promise<void> {
+  await spawnCapture("docker", ["volume", "create", dataVolume]);
   await spawnCapture("docker", [
     "run",
     "-d",
@@ -92,8 +107,8 @@ async function runNeo4jContainer(
     containerName,
     "-p",
     `127.0.0.1:${port}:${NEO4J_BOLT_PORT}`,
-    "--tmpfs",
-    "/data:rw,size=6g",
+    "-v",
+    `${dataVolume}:/data`,
     "--tmpfs",
     "/logs:rw,size=256m",
     "--tmpfs",
@@ -501,6 +516,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
   options,
 ): Promise<SnbEngineHandle> => {
   const containerName = `typegraph-bench-snb-neo4j-${process.pid}-${Date.now()}`;
+  const dataVolume = `${containerName}-data`;
   let driver: Driver | undefined;
   let session: Session | undefined;
 
@@ -519,23 +535,27 @@ export const createNeo4jEngine: SnbEngineFactory = async (
     await spawnCapture("docker", ["rm", "-f", containerName]).catch(
       () => undefined,
     );
+    await spawnCapture("docker", ["volume", "rm", "-f", dataVolume]).catch(
+      () => undefined,
+    );
   }
 
   return {
     name: "neo4j",
     fairness:
-      `${NEO4J_IMAGE}, imperative docker container (tmpfs /data + /logs + /tmp, ` +
-      "harness-allocated port, NEO4J_AUTH=none); unique constraints on " +
-      "Person/Message/Forum(id) plus a Message(creationDate) index, awaited " +
-      "ONLINE before relationship wiring; batched `UNWIND ... CALL { } IN " +
-      "TRANSACTIONS OF 5000 ROWS` bulk load for both smoke and SF1 (no " +
-      "offline neo4j-admin import); official LDBC SNB Interactive v1 Cypher " +
-      "for IS1-IS7, using native multi-label (:Message:Post/:Message:Comment) " +
-      "polymorphism instead of TypeGraph's ontological supertype workaround.",
+      `${NEO4J_IMAGE}, imperative docker container (named volume for /data, ` +
+      "tmpfs for /logs + /tmp, harness-allocated port, NEO4J_AUTH=none); " +
+      "unique constraints on Person/Message/Forum(id) plus a " +
+      "Message(creationDate) index, awaited ONLINE before relationship " +
+      "wiring; batched `UNWIND ... CALL { } IN TRANSACTIONS OF 5000 ROWS` " +
+      "bulk load for both smoke and SF1 (no offline neo4j-admin import); " +
+      "official LDBC SNB Interactive v1 Cypher for IS1-IS7, using native " +
+      "multi-label (:Message:Post/:Message:Comment) polymorphism instead of " +
+      "TypeGraph's ontological supertype workaround.",
     async load() {
       try {
         const port = await freePort();
-        await runNeo4jContainer(containerName, port);
+        await runNeo4jContainer(containerName, dataVolume, port);
         driver = neo4j.driver(`bolt://127.0.0.1:${port}`);
         await waitForNeo4jBolt(containerName, driver);
         session = driver.session({ database: NEO4J_DATABASE });
