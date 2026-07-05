@@ -49,6 +49,8 @@
     "bench:snb:smoke:check": "tsx src/real/snb-short-reads.ts --profile=smoke --check",
     "prebench:snb:sf1": "pnpm --filter @nicia-ai/typegraph build",
     "bench:snb:sf1": "tsx src/real/snb-short-reads.ts --profile=sf1",
+    "bench:snb:sf1:ec2": "tsx src/real/ec2/run-sf1-ec2.ts launch",
+    "bench:snb:sf1:ec2:collect": "tsx src/real/ec2/run-sf1-ec2.ts collect",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

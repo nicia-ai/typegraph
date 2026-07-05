@@ -11,7 +11,10 @@ import { isSnbDatagenDirectory } from "./ldbc-csv";
 
 export type SnbProfile = "smoke" | "sf1";
 
-const SF1_CACHE_DIR = path.join(
+// Exported (with SF1_ARCHIVE/SF1_DOWNLOAD_URL below) so the EC2 bootstrap
+// script (src/real/ec2/) fetches the identical archive to the identical path
+// instead of re-deriving these from scratch.
+export const SF1_CACHE_DIR = path.join(
   homedir(),
   ".cache",
   "typegraph",
@@ -20,8 +23,9 @@ const SF1_CACHE_DIR = path.join(
   "sf1",
 );
 
-const SF1_ARCHIVE = "social_network-sf1-CsvBasic-LongDateFormatter.tar.zst";
-const SF1_DOWNLOAD_URL = `https://datasets.ldbcouncil.org/snb-interactive-v1/${SF1_ARCHIVE}`;
+export const SF1_ARCHIVE =
+  "social_network-sf1-CsvBasic-LongDateFormatter.tar.zst";
+export const SF1_DOWNLOAD_URL = `https://datasets.ldbcouncil.org/snb-interactive-v1/${SF1_ARCHIVE}`;
 
 function smokeFixtureRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
