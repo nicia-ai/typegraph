@@ -54,6 +54,8 @@ export {
   // Type utilities
   type AllEdgeTypes,
   type AllNodeTypes,
+  asEdgeId,
+  asNodeId,
   // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
   asRecordedInstant,
   // External reference type for hybrid overlay patterns

@@ -58,6 +58,8 @@ export {
 // Core types
 export {
   type AnyEdgeType,
+  asEdgeId,
+  asNodeId,
   type Cardinality,
   type Collation,
   type DeleteBehavior,
