@@ -32,6 +32,7 @@ import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { BackendDisposedError, ConfigurationError } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
+import { quoteIdentifier } from "../../query/compiler/utils";
 import {
   buildFulltextCapabilities,
   fts5Strategy,
@@ -191,6 +192,20 @@ const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
 const FULLTEXT_UPSERT_PARAM_COUNT = 6;
 const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
 const UNIQUE_INSERT_PARAM_COUNT = 6;
+
+/**
+ * `PRAGMA analysis_limit` value `refreshStatistics()` sets before running
+ * `ANALYZE`. Unlike Postgres (whose `ANALYZE` always examines a bounded
+ * sample sized off `default_statistics_target`), SQLite's `ANALYZE`
+ * defaults to a full table/index scan — O(table size) per call. A caller
+ * streaming a bulk load through repeated `bulkInsert()` calls (the only
+ * practical pattern for a multi-million-row load) re-triggers
+ * `refreshStatistics()` on every batch once that batch's row count crosses
+ * `AUTO_REFRESH_STATISTICS_ROW_THRESHOLD`; without this bound, per-call
+ * cost grows with total table size, integrating to O(n²) total load time.
+ * 1000 is SQLite's own documented suggestion for large databases.
+ */
+export const SQLITE_ANALYZE_ROW_LIMIT = 1000;
 
 /**
  * Batch chunk sizes for the SQLite operation backend, derived from the
@@ -944,6 +959,22 @@ export function createSqliteBackend(
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
+  // refreshStatistics() scopes ANALYZE to these — matching the Postgres
+  // backend, which never touches unrelated tables sharing the database.
+  // The recorded relations are ANALYZEd separately under a missing-table
+  // guard: a schema created before recorded-time history landed
+  // (bring-your-own-connection, no DDL re-run) has no recorded_* tables.
+  const coreAnalyzeTables = [
+    tableNames.nodes,
+    tableNames.edges,
+    tableNames.uniques,
+    tableNames.fulltext,
+  ];
+  const recordedAnalyzeTables = [
+    tableNames.recordedNodes,
+    tableNames.recordedEdges,
+    tableNames.recordedClock,
+  ] as const;
   const operationStrategy = createSqliteOperationStrategy(
     tables,
     fulltextStrategy,
@@ -1391,7 +1422,31 @@ export function createSqliteBackend(
       // virtual-table queries and multi-column index selection, can be
       // an order of magnitude slower. Running it explicitly makes the
       // planner data-driven.
-      await db.run(sql`ANALYZE`);
+      //
+      // Scoped to TypeGraph-managed tables only (matching the Postgres
+      // backend) — a bare `ANALYZE` touches every table in the database
+      // file, including unrelated ones sharing it. Bounded by
+      // `analysis_limit` (see its doc comment) so cost stays roughly
+      // constant per call regardless of table size — the value is a
+      // fixed internal constant, not user input, so inlining it via
+      // `sql.raw` is safe; SQLite's `PRAGMA` does not accept bound
+      // parameters for its value.
+      await db.run(
+        sql`PRAGMA analysis_limit = ${sql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
+      );
+      for (const tableName of coreAnalyzeTables) {
+        await db.run(sql`ANALYZE ${quoteIdentifier(tableName)}`);
+      }
+      // The recorded relations may be absent on a schema created before
+      // recorded-time history landed (bring-your-own-connection, no DDL
+      // re-run); ANALYZE on a missing table errors, so skip those.
+      for (const tableName of recordedAnalyzeTables) {
+        try {
+          await db.run(sql`ANALYZE ${quoteIdentifier(tableName)}`);
+        } catch (error) {
+          if (!isMissingTableError(error)) throw error;
+        }
+      }
     },
 
     async commitSchemaVersion(
