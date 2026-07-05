@@ -10,11 +10,23 @@
  * appears (run-sf1-ec2.ts) — cloud-init user-data runs once at first boot
  * and isn't a good fit for a command whose stdout we need to parse.
  */
+import path from "node:path";
+
 import {
   SF1_ARCHIVE,
-  SF1_CACHE_DIR,
+  SF1_CACHE_RELATIVE_SEGMENTS,
   SF1_DOWNLOAD_URL,
 } from "../dataset/resolve";
+
+/**
+ * This script runs as root on a remote Ubuntu box (bootstrap sets
+ * `HOME=/root`), never on the machine that renders it — so the cache path
+ * must be built from "/root", not this (local) process's `os.homedir()`.
+ */
+const REMOTE_SF1_CACHE_DIR = path.posix.join(
+  "/root",
+  ...SF1_CACHE_RELATIVE_SEGMENTS,
+);
 
 export type BootstrapOptions = Readonly<{
   repoUrl: string;
@@ -31,8 +43,8 @@ export function renderBootstrapScript(options: BootstrapOptions): string {
   const datasetStep =
     options.profile === "sf1" ?
       `
-mkdir -p "${SF1_CACHE_DIR}"
-cd "${SF1_CACHE_DIR}"
+mkdir -p "${REMOTE_SF1_CACHE_DIR}"
+cd "${REMOTE_SF1_CACHE_DIR}"
 curl -fsSL -O "${SF1_DOWNLOAD_URL}"
 zstd -d --stdout "${SF1_ARCHIVE}" | tar -xf -
 rm -f "${SF1_ARCHIVE}"

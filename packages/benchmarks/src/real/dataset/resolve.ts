@@ -12,15 +12,23 @@ import { isSnbDatagenDirectory } from "./ldbc-csv";
 export type SnbProfile = "smoke" | "sf1";
 
 // Exported (with SF1_ARCHIVE/SF1_DOWNLOAD_URL below) so the EC2 bootstrap
-// script (src/real/ec2/) fetches the identical archive to the identical path
-// instead of re-deriving these from scratch.
-export const SF1_CACHE_DIR = path.join(
-  homedir(),
+// script (src/real/ec2/) fetches the identical archive to the identical
+// *relative* path instead of re-deriving these from scratch. Segments are
+// exported separately from the joined SF1_CACHE_DIR below because the
+// bootstrap script runs as root on a *different* machine — `homedir()`
+// there must resolve to "/root", not whatever this (local) process's home
+// directory happens to be.
+export const SF1_CACHE_RELATIVE_SEGMENTS = [
   ".cache",
   "typegraph",
   "fixtures",
   "ldbc-snb",
   "sf1",
+] as const;
+
+export const SF1_CACHE_DIR = path.join(
+  homedir(),
+  ...SF1_CACHE_RELATIVE_SEGMENTS,
 );
 
 export const SF1_ARCHIVE =
