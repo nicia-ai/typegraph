@@ -1323,6 +1323,52 @@ const personId = await store.transaction(async (tx) => {
 // personId is available here
 ```
 
+#### Transaction receipts
+
+Pass `{ receipt: true }` when a caller needs a write summary without wrapping the
+transaction context itself:
+
+```typescript
+const outcome = await store.transaction(
+  async (tx) => {
+    const alice = await tx.nodes.Person.create({ name: "Alice" });
+    const bob = await tx.nodes.Person.create({ name: "Bob" });
+    await tx.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "2026",
+    });
+    return alice.id;
+  },
+  { receipt: true },
+);
+
+outcome.result; // Alice's id
+outcome.receipt.writes; // { nodes: { Person: 2 }, edges: { knows: 1 }, total: 3 }
+outcome.receipt.recorded; // RecordedInstant | undefined
+```
+
+Receipt counts are completed write intents at the collection surface, not rows
+affected:
+
+- Every successful completion of a write method on `tx.nodes.*` / `tx.edges.*`
+  counts. The authoritative method list is `NodeWrites` / `EdgeWrites`.
+- Bulk methods count by input length; an empty bulk call (`bulkCreate([])`)
+  counts 0.
+- Single-row methods count 1 on resolve — including `delete` of an absent id and
+  `getOrCreate*` that found an existing row. Consumers that need "did anything
+  actually change" semantics apply their own per-operation policy.
+- A method that rejects counts 0.
+- Rows-affected fidelity is intentionally out of scope for this first version; a
+  future extension could ask backends to return row counts.
+
+When the store was created with `{ history: true }` and the transaction flushed
+captured writes, `receipt.recorded` is the recorded commit instant allocated for
+this store's graph by this transaction. It is `undefined` when history capture is
+off, the transaction is read-only, or no captured writes were flushed. Writes
+that bypass the transaction collection surface — direct backend writes, raw SQL,
+and import helpers — are not counted. Adopted transactions
+(`withTransaction` / `withRecordedTransaction`) do not produce receipts in this
+version because their commit belongs to the caller.
+
 #### Rollback and error propagation
 
 If the callback throws, the transaction is rolled back and the error re-throws to the

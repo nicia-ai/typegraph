@@ -450,6 +450,8 @@ export type {
   StoreProjection,
   StoreRef,
   TransactionContext,
+  TransactionOutcome,
+  TransactionReceipt,
   TypedEdgeCollection,
   UpdateEdgeInput,
   UpdateNodeInput,

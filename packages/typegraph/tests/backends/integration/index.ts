@@ -21,4 +21,5 @@ export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerTemporalIntegrationTests } from "./temporal";
 export type { IntegrationTestContext } from "./test-context";
+export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTraversalIntegrationTests } from "./traversals";

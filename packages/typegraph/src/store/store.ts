@@ -160,6 +160,8 @@ import {
   lockRecordedGraphWrite,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
+  type RecordedFlushInstants,
+  withRecordedFlushObserver,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
 import { assertNoRecordedCoordinate } from "./recorded-coordinate-guard";
@@ -182,6 +184,11 @@ import {
   type SubgraphResult,
 } from "./subgraph";
 import {
+  createTransactionReceiptRecorder,
+  type TransactionReceiptRecorder,
+  wrapTransactionCollections,
+} from "./transaction-receipt";
+import {
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
@@ -198,6 +205,7 @@ import {
   type StoreOptions,
   type StoreRef,
   type TransactionContext,
+  type TransactionOutcome,
 } from "./types";
 
 type StoreSchemaMetadata = Readonly<{
@@ -332,6 +340,41 @@ type PendingOperationOutcome = Readonly<{
   ctx: OperationHookContext;
   durationMs: number;
 }>;
+
+type ReceiptTransactionOptions = TransactionOptions &
+  Readonly<{ receipt: true }>;
+
+type StoreTransactionOptions = TransactionOptions | ReceiptTransactionOptions;
+
+function requestsReceipt(
+  options: StoreTransactionOptions | undefined,
+): options is ReceiptTransactionOptions {
+  return (
+    (options as Readonly<{ receipt?: true }> | undefined)?.receipt === true
+  );
+}
+
+function stripReceiptOption(
+  options: StoreTransactionOptions | undefined,
+): TransactionOptions | undefined {
+  if (options?.isolationLevel === undefined) return undefined;
+  return { isolationLevel: options.isolationLevel };
+}
+
+function transactionOutcome<T>(
+  result: T,
+  recorder: TransactionReceiptRecorder,
+  recordedByGraph: RecordedFlushInstants | undefined,
+  graphId: string,
+): TransactionOutcome<T> {
+  const recorded = recordedByGraph?.get(graphId);
+  return {
+    result,
+    receipt: recorder.snapshot(
+      recorded === undefined ? undefined : asRecordedInstant(recorded),
+    ),
+  };
+}
 
 export class Store<G extends GraphDef> {
   readonly #graph: G;
@@ -1387,7 +1430,27 @@ export class Store<G extends GraphDef> {
    *   fallback ignores it entirely. Stores created with `{ history: true }`
    *   require read-committed semantics for PostgreSQL recorded-clock capture and
    *   reject stronger snapshot isolation levels.
+   *
+   * Pass `{ receipt: true }` to return a {@link TransactionOutcome}. The
+   * receipt counts completed write intents on the transaction-scoped collection
+   * surface. It does not count writes that bypass those collections, such as
+   * direct backend writes, raw SQL, or import helpers. Adopted transactions
+   * (`withTransaction` / `withRecordedTransaction`) do not produce receipts in
+   * this version because their commit belongs to the caller. On
+   * non-transactional backends, the receipt is still returned, but it describes
+   * operations that individually committed rather than one atomic commit.
    */
+  transaction<T>(
+    this: HistoryStore<G>,
+    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+    options: ReceiptTransactionOptions,
+  ): Promise<TransactionOutcome<T>>;
+
+  transaction<T>(
+    fn: (tx: TransactionContext<G>) => Promise<T>,
+    options: ReceiptTransactionOptions,
+  ): Promise<TransactionOutcome<T>>;
+
   transaction<T>(
     this: HistoryStore<G>,
     fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
@@ -1403,19 +1466,37 @@ export class Store<G extends GraphDef> {
     fn:
       | ((tx: TransactionContext<G>) => Promise<T>)
       | ((tx: HistoryTransactionContext<G>) => Promise<T>),
-    options?: TransactionOptions,
-  ): Promise<T> {
+    options?: StoreTransactionOptions,
+  ): Promise<T | TransactionOutcome<T>> {
     const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const receiptRequested = requestsReceipt(options);
+    const receiptRecorder =
+      receiptRequested ? createTransactionReceiptRecorder() : undefined;
+    const backendOptions = stripReceiptOption(options);
     // Without a real transaction the tx-scoped collections would be
     // bound to the same backend as this.nodes/this.edges and exposing
     // the cached versions avoids rebuilding the proxies on every call.
     // An isolation-level request in `options` is equally meaningless here.
     if (!this.#backend.capabilities.transactions) {
-      return invoke({
-        nodes: this.nodes,
-        edges: this.edges,
+      let nodes = this.nodes;
+      let edges = this.edges;
+      if (receiptRecorder !== undefined) {
+        ({ nodes, edges } = wrapTransactionCollections(
+          nodes,
+          edges,
+          receiptRecorder,
+        ));
+      }
+      const result = await invoke({
+        nodes,
+        edges,
         backend: this.#backend,
-        getNodeCollection: (kind) => this.getNodeCollection(kind),
+        getNodeCollection: (kind) => {
+          if (!Object.hasOwn(this.#graph.nodes, kind)) return;
+          return nodes[
+            kind as keyof G["nodes"] & string
+          ] as unknown as DynamicNodeCollection;
+        },
         // No transaction, no deferral: operations apply as they happen, so
         // their hooks fire immediately.
         runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
@@ -1424,6 +1505,13 @@ export class Store<G extends GraphDef> {
             hookedFunction,
           ),
       });
+      if (receiptRecorder === undefined) return result;
+      return transactionOutcome(
+        result,
+        receiptRecorder,
+        undefined,
+        this.graphId,
+      );
     }
 
     // #134/#135: no gate here. The backend's transaction() wraps the
@@ -1445,16 +1533,38 @@ export class Store<G extends GraphDef> {
     // "durable" even for tx-scoped collection operations.
     const pending: PendingOperationOutcome[] = [];
     const runHooks = this.#createBufferedHookRunner(pending);
+    let recordedByGraph: RecordedFlushInstants | undefined;
+    const transactionOptions =
+      receiptRecorder !== undefined && this.#captureEnabled ?
+        withRecordedFlushObserver(backendOptions, (instants) => {
+          recordedByGraph = instants;
+        })
+      : backendOptions;
     try {
       const result = await this.#backend.transaction(
         async (txBackend, sql) =>
-          invoke(this.#buildTransactionContext(txBackend, sql, runHooks)),
-        options,
+          invoke(
+            this.#buildTransactionContext(
+              txBackend,
+              sql,
+              runHooks,
+              receiptRecorder,
+            ),
+          ),
+        transactionOptions,
       );
       for (const outcome of pending) {
         this.#hooks.onOperationEnd?.(outcome.ctx, {
           durationMs: outcome.durationMs,
         });
+      }
+      if (receiptRecorder !== undefined) {
+        return transactionOutcome(
+          result,
+          receiptRecorder,
+          recordedByGraph,
+          this.graphId,
+        );
       }
       return result;
     } catch (error) {
@@ -1629,6 +1739,7 @@ export class Store<G extends GraphDef> {
     txBackend: TransactionBackend,
     sql?: AdoptedTransaction,
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    receiptRecorder?: TransactionReceiptRecorder,
   ): TransactionContext<G> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
@@ -1652,7 +1763,7 @@ export class Store<G extends GraphDef> {
     ): Promise<T> =>
       runHooks(this.#createOperationContext(operation, "node", kind, id), fn);
 
-    const nodes = createNodeCollectionsProxy(
+    let nodes = createNodeCollectionsProxy(
       this.#graph,
       this.graphId,
       this.#registry,
@@ -1660,13 +1771,21 @@ export class Store<G extends GraphDef> {
       txNodeOperations,
     );
 
-    const edges = createEdgeCollectionsProxy(
+    let edges = createEdgeCollectionsProxy(
       this.#graph,
       this.graphId,
       this.#registry,
       txBackend,
       txEdgeOperations,
     );
+
+    if (receiptRecorder !== undefined) {
+      ({ nodes, edges } = wrapTransactionCollections(
+        nodes,
+        edges,
+        receiptRecorder,
+      ));
+    }
 
     const getNodeCollection = (
       kind: string,

@@ -42,6 +42,7 @@ import {
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
+  registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
 } from "./integration";
 
@@ -122,6 +123,7 @@ export function createIntegrationTestSuite(
     registerProvenanceIntegrationTests(context);
     registerOrderingIntegrationTests(context);
     registerTemporalIntegrationTests(context);
+    registerTransactionReceiptIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);

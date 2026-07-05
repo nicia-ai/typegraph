@@ -81,12 +81,48 @@ type RecordedCaptureSession = Readonly<{
     target: TransactionBackend,
     schema: SqlSchema,
     ownsWriteLock: boolean,
-  ) => Promise<void>;
+  ) => Promise<RecordedFlushInstants>;
 }>;
+
+export type RecordedFlushInstants = ReadonlyMap<string, string>;
+
+type RecordedFlushObserver = (instants: RecordedFlushInstants) => void;
+
+const RECORDED_FLUSH_OBSERVER = Symbol("typegraph.recordedFlushObserver");
+
+type RecordedFlushObserverOptions = TransactionOptions &
+  Readonly<{
+    [RECORDED_FLUSH_OBSERVER]?: RecordedFlushObserver;
+  }>;
+
+function readRecordedFlushObserver(
+  options: TransactionOptions | undefined,
+): RecordedFlushObserver | undefined {
+  return (options as RecordedFlushObserverOptions | undefined)?.[
+    RECORDED_FLUSH_OBSERVER
+  ];
+}
+
+function stripRecordedFlushObserver(
+  options: TransactionOptions | undefined,
+): TransactionOptions | undefined {
+  if (options?.isolationLevel === undefined) return undefined;
+  return { isolationLevel: options.isolationLevel };
+}
+
+export function withRecordedFlushObserver(
+  options: TransactionOptions | undefined,
+  observer: RecordedFlushObserver,
+): TransactionOptions {
+  return {
+    ...stripRecordedFlushObserver(options),
+    [RECORDED_FLUSH_OBSERVER]: observer,
+  } as RecordedFlushObserverOptions;
+}
 
 type RecordedTransactionScope = Readonly<{
   backend: TransactionBackend;
-  flush: () => Promise<void>;
+  flush: () => Promise<RecordedFlushInstants>;
 }>;
 
 declare const NODE_IDENTITY_KEY_BRAND: unique symbol;
@@ -171,7 +207,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       target: TransactionBackend,
       schema: SqlSchema,
       ownsWriteLock: boolean,
-    ): Promise<void> {
+    ): Promise<RecordedFlushInstants> {
       if (sealed) {
         throw new ConfigurationError(
           "Recorded-time capture session was already flushed.",
@@ -187,7 +223,8 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       // flush() writes recorded rows directly (never via touch), so sealing here
       // does not block its own work.
       sealed = true;
-      if (touched.size === 0) return;
+      if (touched.size === 0) return new Map();
+      const recordedByGraph = new Map<string, string>();
       const byGraph = groupBy(touched.values(), (entity) => entity.graphId);
       for (const [graphId, entities] of byGraph) {
         const recordedCommit = await allocateRecordedCommit(
@@ -196,6 +233,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           graphId,
           ownsWriteLock,
         );
+        recordedByGraph.set(graphId, recordedCommit);
         const nodes = entities.filter(
           (entity): entity is TouchedNode => entity.entity === "node",
         );
@@ -206,6 +244,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         await flushEdges(target, schema, graphId, edges, recordedCommit);
       }
       touched.clear();
+      return recordedByGraph;
     },
   };
 }
@@ -451,11 +490,11 @@ export function createRecordedTransactionScope(
   const resolvedSchema = schema ?? requireRecordedSchema(target);
   return {
     backend: createRecordedTransactionBackend(target, session, resolvedSchema),
-    async flush(): Promise<void> {
+    async flush(): Promise<RecordedFlushInstants> {
       // By flush time the live write has committed within this transaction, so a
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.
-      await withRecordedRelationsPrecondition(
+      return withRecordedRelationsPrecondition(
         session.flush(target, resolvedSchema, ownsWriteLock),
         { dialect: target.dialect, surface: "capture-flush" },
       );
@@ -611,15 +650,18 @@ export function createRecordedBackend(
       }),
 
     async transaction(fn, options) {
-      assertRequestedRecordedIsolation(backend, options);
+      const observer = readRecordedFlushObserver(options);
+      const backendOptions = stripRecordedFlushObserver(options);
+      assertRequestedRecordedIsolation(backend, backendOptions);
       return backend.transaction(async (target) => {
         await assertRecordedCaptureTransactionIsolation(target);
         // Bundled BEGIN IMMEDIATE transaction — the write lock is already held.
         const scope = createRecordedTransactionScope(target, schema, true);
         const result = await fn(scope.backend, createHistoryUnsafeSqlRef());
-        await scope.flush();
+        const instants = await scope.flush();
+        observer?.(instants);
         return result;
-      }, options);
+      }, backendOptions);
     },
 
     ...(backend.adoptTransaction === undefined ?

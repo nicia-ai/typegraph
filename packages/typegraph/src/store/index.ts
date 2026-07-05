@@ -43,6 +43,8 @@ export {
   type StoreViewNodeCollection,
   type StoreViewNodeCollections,
   type TransactionContext,
+  type TransactionOutcome,
+  type TransactionReceipt,
   type TypedEdgeCollection,
   type TypedRecordedStoreViewEdgeCollection,
   type TypedStoreViewEdgeCollection,
