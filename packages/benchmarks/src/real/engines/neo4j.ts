@@ -174,10 +174,21 @@ async function waitForNeo4jBolt(
 }
 
 /**
- * Unique constraints on Person/Message/Forum(id) plus a Message(creationDate)
- * index, awaited ONLINE before any relationship is wired — so every
- * MATCH-by-id below is index-backed, matching the pk btrees the SQL-backed
- * engines get (same-index fairness, docs/design/benchmark-program-plan.md).
+ * Unique constraints on Person/Message/Post/Comment/Forum(id) plus a
+ * Message(creationDate) index, awaited ONLINE before any relationship is
+ * wired — so every MATCH-by-id below is index-backed, matching the pk
+ * btrees the SQL-backed engines get (same-index fairness,
+ * docs/design/benchmark-program-plan.md).
+ *
+ * Post and Comment BOTH need their own constraint even though every Post/
+ * Comment node also carries `:Message`: Neo4j's schema indexes are scoped
+ * to one label each, never inherited across the other labels a multi-label
+ * node happens to carry. Discovered the hard way — the load's
+ * `containerOf`/`replyOf` edge-wiring steps MATCH by id filtered on the
+ * concrete `:Post`/`:Comment` label (not `:Message`), and without a
+ * label-specific index those MATCHes silently fall back to a full label
+ * scan per row: a 5,000-row batch against SF1's ~1M Post nodes turned one
+ * `containerOf` batch into billions of comparisons and multi-hour hangs.
  */
 async function ensureSchema(session: Session): Promise<void> {
   await session.run(
@@ -185,6 +196,12 @@ async function ensureSchema(session: Session): Promise<void> {
   );
   await session.run(
     "CREATE CONSTRAINT snb_message_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
+  );
+  await session.run(
+    "CREATE CONSTRAINT snb_post_id IF NOT EXISTS FOR (post:Post) REQUIRE post.id IS UNIQUE",
+  );
+  await session.run(
+    "CREATE CONSTRAINT snb_comment_id IF NOT EXISTS FOR (c:Comment) REQUIRE c.id IS UNIQUE",
   );
   await session.run(
     "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
@@ -545,7 +562,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
     fairness:
       `${NEO4J_IMAGE}, imperative docker container (named volume for /data, ` +
       "tmpfs for /logs + /tmp, harness-allocated port, NEO4J_AUTH=none); " +
-      "unique constraints on Person/Message/Forum(id) plus a " +
+      "unique constraints on Person/Message/Post/Comment/Forum(id) plus a " +
       "Message(creationDate) index, awaited ONLINE before relationship " +
       "wiring; batched `UNWIND ... CALL { } IN TRANSACTIONS OF 5000 ROWS` " +
       "bulk load for both smoke and SF1 (no offline neo4j-admin import); " +
