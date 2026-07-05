@@ -48,7 +48,10 @@ function sf1DownloadInstructions(): string {
     "(CsvBasic serializer, LongDateFormatter epoch-millis dates, ~230 MB compressed):\n\n" +
     `  mkdir -p ${SF1_CACHE_DIR} && cd ${SF1_CACHE_DIR}\n` +
     `  curl -L -O ${SF1_DOWNLOAD_URL}\n` +
-    `  zstd -d --stdout ${SF1_ARCHIVE} | tar -xf -\n\n` +
+    // The archive extracts into its own social_network-...-LongDateFormatter/
+    // subdirectory, not flat — --strip-components=1 lands dynamic/, static/,
+    // etc. directly here, matching what isSnbDatagenDirectory expects.
+    `  zstd -d --stdout ${SF1_ARCHIVE} | tar -xf - --strip-components=1\n\n` +
     "Or pass --data-dir <extracted-dir> to point at an existing extract."
   );
 }

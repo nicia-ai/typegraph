@@ -46,7 +46,7 @@ export function renderBootstrapScript(options: BootstrapOptions): string {
 mkdir -p "${REMOTE_SF1_CACHE_DIR}"
 cd "${REMOTE_SF1_CACHE_DIR}"
 curl -fsSL -O "${SF1_DOWNLOAD_URL}"
-zstd -d --stdout "${SF1_ARCHIVE}" | tar -xf -
+zstd -d --stdout "${SF1_ARCHIVE}" | tar -xf - --strip-components=1
 rm -f "${SF1_ARCHIVE}"
 cd "${REPO_DIR}"
 `.trim()
