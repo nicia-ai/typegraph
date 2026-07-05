@@ -17,6 +17,7 @@ const LLMS_SMALL_PAGES = new Set([
   "graph-merge",
   "provenance",
   "integration",
+  "materializing-event-logs",
   "multiple-graphs",
   "queries/overview",
   "queries/filter",
@@ -83,6 +84,7 @@ const sidebar = [
       { label: "Common Patterns", slug: "recipes" },
       { label: "Data Sync", slug: "data-sync" },
       { label: "Integration Patterns", slug: "integration" },
+      { label: "Materializing Event Logs", slug: "materializing-event-logs" },
     ],
   },
   {

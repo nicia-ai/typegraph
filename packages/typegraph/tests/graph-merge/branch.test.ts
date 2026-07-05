@@ -17,6 +17,7 @@ import {
 } from "../../src/graph-merge/state-diff";
 import { asBranchId } from "../../src/graph-merge/types";
 import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
+import { exportGraph, importGraph } from "../../src/interchange";
 import { backendMatrix } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -36,6 +37,40 @@ const graph = defineGraph({
 });
 
 type G = typeof graph;
+
+const WorkItem = defineNode("WorkItem", {
+  schema: z.object({
+    title: z.string(),
+    status: z.string(),
+  }),
+});
+
+const Label = defineNode("Label", {
+  schema: z.object({
+    name: z.string(),
+  }),
+});
+
+const blocks = defineEdge("blocks", {
+  schema: z.object({
+    reason: z.string(),
+  }),
+  from: [WorkItem],
+  to: [WorkItem],
+});
+
+const materializationGraph = defineGraph({
+  id: "branch-materialization-copy-test",
+  nodes: {
+    WorkItem: { type: WorkItem },
+    Label: { type: Label },
+  },
+  edges: {
+    blocks: { type: blocks, from: [WorkItem], to: [WorkItem] },
+  },
+});
+
+type MaterializationGraph = typeof materializationGraph;
 
 /** Live `{ id, name }` snapshot of every Person node in a store, sorted by id. */
 async function snapshotPeople(
@@ -241,5 +276,88 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect((await created.store.nodes.Person.getById(aliceId))?.name).toBe(
       "Alice",
     );
+  });
+
+  it("bulk-copies a history source subset into a non-history branch with update conflicts", async () => {
+    const [sourceStore] = await createStoreWithSchema(
+      materializationGraph,
+      await makeBackend(),
+      { history: true },
+    );
+    const [baseStore] = await createStoreWithSchema(
+      materializationGraph,
+      await makeBackend(),
+    );
+
+    await baseStore.nodes.WorkItem.upsertById("work-1", {
+      title: "Old title",
+      status: "stale",
+    });
+
+    const sourceWork = await sourceStore.nodes.WorkItem.upsertById("work-1", {
+      title: "Fresh title",
+      status: "open",
+    });
+    const dependency = await sourceStore.nodes.WorkItem.upsertById("work-2", {
+      title: "Dependency",
+      status: "blocked",
+    });
+    const omittedLabel = await sourceStore.nodes.Label.upsertById("label-1", {
+      name: "not exported",
+    });
+    const copiedEdge = await sourceStore.edges.blocks.create(
+      sourceWork,
+      dependency,
+      { reason: "waiting on import" },
+    );
+    expect(await sourceStore.recordedNow()).toBeDefined();
+
+    const exported = await exportGraph(sourceStore, {
+      nodeKinds: ["WorkItem"],
+      edgeKinds: ["blocks"],
+      includeMeta: true,
+    });
+    expect(exported.nodes).toHaveLength(2);
+    expect(exported.nodes.every((node) => node.kind === "WorkItem")).toBe(true);
+    expect(exported.edges).toHaveLength(1);
+    expect(exported.edges[0]?.kind).toBe("blocks");
+
+    const branchResult = await branch<MaterializationGraph>(
+      baseStore,
+      () => makeBackend(),
+      { id: asBranchId("materialized-copy") },
+    );
+    expect(isOk(branchResult)).toBe(true);
+    const copiedBranch = unwrap(branchResult);
+
+    const result = await importGraph(copiedBranch.store, exported, {
+      onConflict: "update",
+      validateReferences: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.nodes.updated).toBe(1);
+    expect(result.nodes.created).toBe(1);
+    expect(result.edges.created).toBe(1);
+
+    const copiedWork = await copiedBranch.store.nodes.WorkItem.getById(
+      sourceWork.id,
+    );
+    const copiedDependency = await copiedBranch.store.nodes.WorkItem.getById(
+      dependency.id,
+    );
+    const omitted = await copiedBranch.store.nodes.Label.getById(
+      omittedLabel.id,
+    );
+    const copiedRelationship = await copiedBranch.store.edges.blocks.getById(
+      copiedEdge.id,
+    );
+
+    expect(copiedWork?.title).toBe("Fresh title");
+    expect(copiedWork?.status).toBe("open");
+    expect(copiedDependency?.title).toBe("Dependency");
+    expect(omitted).toBeUndefined();
+    expect(copiedRelationship?.fromId).toBe(sourceWork.id);
+    expect(copiedRelationship?.toId).toBe(dependency.id);
+    expect(copiedRelationship?.reason).toBe("waiting on import");
   });
 });
