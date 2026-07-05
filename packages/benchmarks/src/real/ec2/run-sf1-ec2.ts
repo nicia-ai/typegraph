@@ -363,62 +363,67 @@ async function collect(argv: readonly string[]): Promise<void> {
   }
 
   console.log(`Command finished with status: ${invocation.status}`);
-  const exitCodeText = extractSection(invocation.stdout, EXIT_CODE_MARKER);
-  const resultsText = extractSection(invocation.stdout, RESULTS_MARKER);
-  const summaryText = extractSection(invocation.stdout, SUMMARY_MARKER);
-  const historyText = extractSection(invocation.stdout, HISTORY_MARKER);
 
-  if (resultsText === undefined) {
-    console.error(
-      "Could not find delimited results section in command output.",
-    );
-    console.error("--- stdout ---");
-    console.error(invocation.stdout);
-    console.error("--- stderr ---");
-    console.error(invocation.stderr);
-    throw new Error(
-      `SSM command ${commandId} produced no parseable results (status: ${invocation.status}).`,
-    );
-  }
+  try {
+    const exitCodeText = extractSection(invocation.stdout, EXIT_CODE_MARKER);
+    const resultsText = extractSection(invocation.stdout, RESULTS_MARKER);
+    const summaryText = extractSection(invocation.stdout, SUMMARY_MARKER);
+    const historyText = extractSection(invocation.stdout, HISTORY_MARKER);
 
-  const localDir = path.join(
-    benchmarksRoot(),
-    "bench-results",
-    "current",
-    `snb-${benchProfile}-ec2-${runId}`,
-  );
-  await mkdir(localDir, { recursive: true });
+    if (resultsText === undefined) {
+      console.error(
+        "Could not find delimited results section in command output.",
+      );
+      console.error("--- stdout ---");
+      console.error(invocation.stdout);
+      console.error("--- stderr ---");
+      console.error(invocation.stderr);
+      throw new Error(
+        `SSM command ${commandId} produced no parseable results (status: ${invocation.status}).`,
+      );
+    }
 
-  if (resultsText.length > 0) {
-    await writeJsonFile(
-      path.join(localDir, "results.json"),
-      JSON.parse(resultsText),
+    const localDir = path.join(
+      benchmarksRoot(),
+      "bench-results",
+      "current",
+      `snb-${benchProfile}-ec2-${runId}`,
     );
-  }
-  if (summaryText !== undefined && summaryText.length > 0) {
-    await writeJsonFile(
-      path.join(localDir, "summary.json"),
-      JSON.parse(summaryText),
-    );
-  }
-  if (historyText !== undefined && historyText.length > 0) {
-    await appendFile(resolveHistoryPath(), `${historyText}\n`, "utf-8");
-    console.log(
-      `Appended ${historyText.split("\n").length} line(s) to ${resolveHistoryPath()}`,
-    );
-  }
+    await mkdir(localDir, { recursive: true });
 
-  console.log(`Results written to ${localDir}`);
-  console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
+    if (resultsText.length > 0) {
+      await writeJsonFile(
+        path.join(localDir, "results.json"),
+        JSON.parse(resultsText),
+      );
+    }
+    if (summaryText !== undefined && summaryText.length > 0) {
+      await writeJsonFile(
+        path.join(localDir, "summary.json"),
+        JSON.parse(summaryText),
+      );
+    }
+    if (historyText !== undefined && historyText.length > 0) {
+      await appendFile(resolveHistoryPath(), `${historyText}\n`, "utf-8");
+      console.log(
+        `Appended ${historyText.split("\n").length} line(s) to ${resolveHistoryPath()}`,
+      );
+    }
 
-  if (!keep) {
-    console.log(`Terminating instance ${instanceId}...`);
-    await terminateInstance(awsOptions, instanceId);
-  } else {
-    console.log(`--keep set: instance ${instanceId} left running.`);
-    console.log(
-      `Terminate manually: aws ec2 terminate-instances --region ${region} --instance-ids ${instanceId}`,
-    );
+    console.log(`Results written to ${localDir}`);
+    console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
+  } finally {
+    // Always reached: a parse failure or non-Success status above must not
+    // leave a billable instance orphaned.
+    if (!keep) {
+      console.log(`Terminating instance ${instanceId}...`);
+      await terminateInstance(awsOptions, instanceId);
+    } else {
+      console.log(`--keep set: instance ${instanceId} left running.`);
+      console.log(
+        `Terminate manually: aws ec2 terminate-instances --region ${region} --instance-ids ${instanceId}`,
+      );
+    }
   }
 }
 

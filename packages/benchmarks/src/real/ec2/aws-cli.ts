@@ -193,7 +193,14 @@ export async function sendShellCommand(
     "--timeout-seconds",
     String(sendOptions.timeoutSeconds),
     "--parameters",
-    JSON.stringify({ commands: [script] }),
+    // AWS-RunShellScript's own `executionTimeout` document parameter
+    // defaults to 3600s (1h) and is separate from send-command's top-level
+    // --timeout-seconds (a delivery timeout, not an execution timeout) —
+    // both must be set for a genuinely multi-hour command.
+    JSON.stringify({
+      commands: [script],
+      executionTimeout: [String(sendOptions.timeoutSeconds)],
+    }),
   ]);
   return result.Command.CommandId;
 }
