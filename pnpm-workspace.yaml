@@ -3,6 +3,7 @@ packages:
   - apps/*
 
 onlyBuiltDependencies:
+  - "@ladybugdb/core"
   - better-sqlite3
   - esbuild
   - workerd

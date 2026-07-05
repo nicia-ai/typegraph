@@ -1,0 +1,3 @@
+# Dated real-workload benchmark run bundles (docs/design/benchmark-program-plan.md).
+# The one-line-per-run reports/history.jsonl append log stays in git.
+bench-results/

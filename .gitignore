@@ -58,7 +58,7 @@ yarn-error.log
 
 # Stryker mutation testing
 .stryker-cache/
-reports/
+packages/typegraph/reports/
 .gstack/
 
 # Local design scratch files

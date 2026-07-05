@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +7,7 @@ import {
   type PostgresDriver,
   type SqliteStorage,
 } from "./config";
+import { resolveGitRefName, resolveGitSha } from "./git";
 import { type LatencyRecord } from "./measurements";
 
 /**
@@ -29,29 +29,25 @@ type HistoryEntry = Readonly<{
   >;
 }>;
 
-function resolveGitSha(): string {
-  try {
-    return execSync("git rev-parse HEAD", { encoding: "utf-8" }).trim();
-  } catch {
-    return "unknown";
-  }
-}
-
-function resolveGitRefName(): string | undefined {
-  try {
-    const ref = execSync("git rev-parse --abbrev-ref HEAD", {
-      encoding: "utf-8",
-    }).trim();
-    return ref === "HEAD" ? undefined : ref;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveHistoryPath(): string {
+/**
+ * Absolute path to the shared `packages/benchmarks/reports/history.jsonl`
+ * append log. Every lane (the original synthetic perf suite, and the
+ * real-workload lanes under `src/real/`) appends to this one file.
+ */
+export function resolveHistoryPath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   // src/ -> ../reports/history.jsonl
   return join(here, "..", "reports", "history.jsonl");
+}
+
+/** Appends one JSONL line to `history.jsonl`, creating the directory if needed. */
+export function appendHistoryLine(
+  entry: Readonly<Record<string, unknown>>,
+): string {
+  const path = resolveHistoryPath();
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, `${JSON.stringify(entry)}\n`, "utf-8");
+  return path;
 }
 
 function serializeLatencies(record: LatencyRecord): HistoryEntry["latencies"] {
@@ -90,8 +86,5 @@ export function writeHistoryEntry(input: WriteHistoryInput): string {
     userCount: input.userCount,
     latencies: serializeLatencies(input.latencies),
   };
-  const path = resolveHistoryPath();
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`, "utf-8");
-  return path;
+  return appendHistoryLine(entry);
 }
