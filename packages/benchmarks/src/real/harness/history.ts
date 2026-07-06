@@ -9,7 +9,7 @@ import { type LatencyStats } from "./stats";
  * requirement 5). Query labels are namespaced `snb:IS1`..`snb:IS7` so a
  * `grep`/`jq` over the file can separate lanes.
  */
-export type LaneHistoryEntry = Readonly<{
+type LaneHistoryEntry = Readonly<{
   timestamp: string;
   gitSha: string;
   gitRefName: string | undefined;

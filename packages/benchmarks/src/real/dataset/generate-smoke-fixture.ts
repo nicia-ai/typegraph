@@ -5,8 +5,8 @@
  * (../dataset/ldbc-csv.ts) parses, so the smoke profile exercises the SAME
  * code path as a real SF1 extract — just a few dozen rows instead of 5.3M.
  *
- * Re-run with `tsx src/real/dataset/generate-smoke-fixture.ts` after
- * changing the shape below; the output is committed (small, deterministic).
+ * Re-run with `pnpm bench:snb:generate-smoke-fixture` after changing the
+ * shape below; the output is committed (small, deterministic).
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";

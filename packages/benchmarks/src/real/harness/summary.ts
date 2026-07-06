@@ -15,7 +15,7 @@ export type EngineVersion = Readonly<{
   detail?: string;
 }>;
 
-export type HardwareInfo = Readonly<{
+type HardwareInfo = Readonly<{
   platform: string;
   arch: string;
   cpuModel: string;
@@ -24,7 +24,7 @@ export type HardwareInfo = Readonly<{
   nodeVersion: string;
 }>;
 
-export function collectHardwareInfo(): HardwareInfo {
+function collectHardwareInfo(): HardwareInfo {
   const cpus = os.cpus();
   return {
     platform: os.platform(),

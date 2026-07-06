@@ -26,10 +26,7 @@ export const SF1_CACHE_RELATIVE_SEGMENTS = [
   "sf1",
 ] as const;
 
-export const SF1_CACHE_DIR = path.join(
-  homedir(),
-  ...SF1_CACHE_RELATIVE_SEGMENTS,
-);
+const SF1_CACHE_DIR = path.join(homedir(), ...SF1_CACHE_RELATIVE_SEGMENTS);
 
 export const SF1_ARCHIVE =
   "social_network-sf1-CsvBasic-LongDateFormatter.tar.zst";

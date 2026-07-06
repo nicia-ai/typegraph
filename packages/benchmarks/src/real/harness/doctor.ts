@@ -46,7 +46,7 @@ export const NEO4J_IMAGE =
 
 type CheckStatus = "ok" | "failed" | "skipped";
 
-export type DoctorCheck = Readonly<{
+type DoctorCheck = Readonly<{
   category: string;
   name: string;
   status: CheckStatus;

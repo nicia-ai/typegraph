@@ -1,4 +1,4 @@
-import { type SnbIdPools, type SnbRowSink } from "../dataset/ldbc-csv";
+import { type SnbIdPools } from "../dataset/ldbc-csv";
 import { type SnbEngineName } from "../harness/doctor";
 
 export type IsQueryId = "IS1" | "IS2" | "IS3" | "IS4" | "IS5" | "IS6" | "IS7";
@@ -55,7 +55,7 @@ export type SnbEngineHandle = Readonly<{
   close(): Promise<void>;
 }>;
 
-export type SnbEngineOptions = Readonly<{
+type SnbEngineOptions = Readonly<{
   /** Directory containing `dynamic/` (extracted datagen output or the smoke fixture). */
   datasetRoot: string;
   log: (message: string) => void;
@@ -64,6 +64,3 @@ export type SnbEngineOptions = Readonly<{
 export type SnbEngineFactory = (
   options: SnbEngineOptions,
 ) => Promise<SnbEngineHandle>;
-
-/** Re-exported so engine modules have one import source for the row sink shape. */
-export type { SnbRowSink };

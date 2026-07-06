@@ -24,7 +24,7 @@ import {
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
 
-export const Person = defineNode("Person", {
+const Person = defineNode("Person", {
   schema: z.object({
     firstName: z.string(),
     lastName: z.string(),
@@ -39,7 +39,7 @@ export const Person = defineNode("Person", {
   }),
 });
 
-export const Forum = defineNode("Forum", {
+const Forum = defineNode("Forum", {
   schema: z.object({
     title: z.string(),
     creationDate: z.string(),
@@ -48,14 +48,14 @@ export const Forum = defineNode("Forum", {
   }),
 });
 
-export const Post = defineNode("Post", {
+const Post = defineNode("Post", {
   schema: z.object({
     content: z.string(),
     creationDate: z.string(),
   }),
 });
 
-export const Comment = defineNode("Comment", {
+const Comment = defineNode("Comment", {
   schema: z.object({
     content: z.string(),
     creationDate: z.string(),
@@ -63,21 +63,21 @@ export const Comment = defineNode("Comment", {
 });
 
 /** Ontological supertype only — see module doc. Never instantiated. */
-export const Message = defineNode("Message", {
+const Message = defineNode("Message", {
   schema: z.object({}),
 });
 
-export const knows = defineEdge("knows", {
+const knows = defineEdge("knows", {
   schema: z.object({
     since: z.string(),
   }),
 });
 
-export const hasCreator = defineEdge("hasCreator");
+const hasCreator = defineEdge("hasCreator");
 
-export const containerOf = defineEdge("containerOf");
+const containerOf = defineEdge("containerOf");
 
-export const replyOf = defineEdge("replyOf");
+const replyOf = defineEdge("replyOf");
 
 /**
  * Composite covering index matching the competitors' `message(creator_id,
@@ -122,5 +122,5 @@ export const snbGraph = defineGraph({
   ontology: [subClassOf(Post, Message), subClassOf(Comment, Message)],
 });
 
-export type SnbGraph = typeof snbGraph;
+type SnbGraph = typeof snbGraph;
 export type SnbStore = ReturnType<typeof createStore<SnbGraph>>;
