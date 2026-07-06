@@ -84,17 +84,30 @@ async function rowsOf(
 }
 
 /**
+ * `|` rather than the default `,`: LDBC post/comment/forum-title content is
+ * natural-language text, which contains commas constantly but a literal
+ * pipe almost never — so staging on `|` avoids quoting nearly every large
+ * text field. This isn't just cosmetic: a properly double-quote-escaped
+ * comma-containing field was observed to break Ladybug's CSV parser when it
+ * landed near an internal ~1MB read-buffer boundary in a large file (a
+ * small isolated repro of the exact same line parsed fine — only the real,
+ * multi-megabyte file reproduced it), so minimizing how often quoting is
+ * needed at all is the practical mitigation, not just a style choice.
+ */
+const CSV_DELIMITER = "|";
+
+/**
  * RFC4180-style CSV field escaping: quote-wrap and double any embedded
  * quote whenever the field contains the delimiter, a quote, or a newline.
  * Ladybug's CSV reader treats a bare empty string as NULL by default, which
  * matches every optional LDBC field this loader ever emits.
  */
 function csvField(value: string): string {
-  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  return /[|"\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 function csvRow(fields: readonly string[]): string {
-  return `${fields.map(csvField).join(",")}\n`;
+  return `${fields.map(csvField).join(CSV_DELIMITER)}\n`;
 }
 
 /** Streams rows to a staging CSV file for a later `COPY ... FROM` load. */
@@ -131,7 +144,8 @@ async function copyNodeTable(
   filePath: string,
 ): Promise<void> {
   await conn.query(
-    `COPY ${table} FROM '${filePath}' (header=true, parallel=false);`,
+    `COPY ${table} FROM '${filePath}' ` +
+      `(header=true, parallel=false, delim='${CSV_DELIMITER}');`,
   );
 }
 
@@ -149,7 +163,8 @@ async function copyRelTable(
 ): Promise<void> {
   await conn.query(
     `COPY ${table} FROM '${filePath}' ` +
-      `(header=true, parallel=false, from='${pair.from}', to='${pair.to}');`,
+      `(header=true, parallel=false, delim='${CSV_DELIMITER}', ` +
+      `from='${pair.from}', to='${pair.to}');`,
   );
 }
 
