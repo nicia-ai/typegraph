@@ -52,7 +52,11 @@ const DEFAULT_INSTANCE_TYPE = "c7i.4xlarge";
 const DEFAULT_VOLUME_SIZE_GIB = 150;
 const DEFAULT_REPO_URL = "https://github.com/nicia-ai/typegraph.git";
 const DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 1800; // 30 min
-const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 21600; // 6 h
+// 6h was the original guess and proved too tight in practice: a real SF1
+// run's sqlite (74.5min) + postgres (78.4min) + neo4j (4.5min) load phases
+// alone already used ~2.6h, leaving too little margin once query
+// benchmarking, container startup, and ladybugdb's own load are added.
+const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 36000; // 10 h
 const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 const HEARTBEAT_EVERY_N_POLLS = 5;
 

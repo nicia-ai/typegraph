@@ -68,7 +68,8 @@ point this at your fork), `--ref` (default: your local `git rev-parse
 HEAD` — **must already be pushed** to `--repo-url`, since the instance does
 a fresh clone), `--profile` (`smoke` or `sf1`, default `sf1`),
 `--bootstrap-timeout-seconds` (default 1800), `--benchmark-timeout-seconds`
-(default 21600).
+(default 36000 — a real SF1 run's sqlite+postgres+neo4j load phases alone
+took ~2.6h, so a 6h default proved too tight in practice).
 
 `collect` (required): `--region`, `--instance-id`, `--command-id`.
 
@@ -112,7 +113,7 @@ If `collect` is never run, the instance keeps billing. The bootstrap script
 schedules a `shutdown` dead-man's switch as soon as it starts, so a
 forgotten run self-terminates instead of running forever. Its duration is
 derived from `--bootstrap-timeout-seconds` + `--benchmark-timeout-seconds`
-plus a one-hour buffer (defaults: 30min + 6h + 1h = 7.5h) — deliberately
+plus a one-hour buffer (defaults: 30min + 10h + 1h = 11.5h) — deliberately
 longer than the benchmark's own SSM `executionTimeout`, so this "nobody
 ever collected" safety net can never race a benchmark that's still
 legitimately running (an earlier version hardcoded a flat 6h, which was
