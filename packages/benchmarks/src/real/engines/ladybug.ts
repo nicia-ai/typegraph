@@ -15,31 +15,37 @@
  * reads that touch a polymorphic edge are split by kind (fromKind/toKind for
  * loading, MessageRef.kind for querying) rather than expressed once.
  *
- * Bulk load uses `conn.prepare()` once per entity/edge kind, then
- * `conn.execute(prepared, { rows: batch })` per batch — a parameterized
- * `UNWIND` over a list-of-structs param, not literal-interpolated Cypher
- * text. This sidesteps hand-escaping arbitrary LDBC post/comment content
- * (quotes, backslashes, colons) into a Cypher literal, and reuses one
- * compiled plan across every batch of a given kind instead of recompiling
- * per batch.
+ * Bulk load stages each entity/edge kind as its own CSV file, then issues a
+ * `COPY <table> FROM '<path>'` per file, instead of batched `UNWIND ...
+ * CREATE`. LadybugDB (Kuzu-family) stores relationships in a columnar CSR
+ * (Compressed Sparse Row) adjacency structure — excellent for bulk/analytic
+ * reads, but incremental `MATCH ... CREATE` edge writes rebuild that
+ * structure per call, scaling roughly *cubically* with edge count (measured:
+ * 2x edges -> ~8.4x time on a synthetic repro). `COPY FROM` builds the CSR
+ * structure once from the whole file, which is what Kuzu/Ladybug's own docs
+ * recommend for bulk loading. A relationship table with multiple FROM/TO
+ * pairs (e.g. `HasCreator(FROM Post TO Person, FROM Comment TO Person)`)
+ * needs one `COPY` per pair, disambiguated with `(from='Post', to='Person')`
+ * — verified against the installed engine version, since Kuzu's own docs
+ * disagreed with themselves on the option name (`header` vs `headers`).
+ * `parallel=false` is set on every copy so a literal newline inside LDBC
+ * post/comment content can't break the (default) parallel CSV reader.
  *
- * IS1-IS7 point queries are likewise `conn.prepare()`d once (at engine
+ * IS1-IS7 point queries are still `conn.prepare()`d once (at engine
  * construction, right after DDL) and `conn.execute()`d per request — the
  * same fairness point as TypeGraph's `.prepare()`/`.execute()` split
  * documented in `./typegraph-queries.ts`'s module doc: Neo4j caches a Cypher
  * plan by statement text server-side, so an engine driver that recompiled a
  * query per request would be paying a tax the competitors don't.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
 
 import { Connection, Database } from "@ladybugdb/core";
-import type {
-  LbugValue,
-  PreparedStatement,
-  QueryResult,
-} from "@ladybugdb/core";
+import type { PreparedStatement, QueryResult } from "@ladybugdb/core";
 
 import {
   streamSnbCsvDataset,
@@ -56,8 +62,6 @@ import {
   type SnbQueries,
 } from "./types";
 
-const BATCH_SIZE = 2_000;
-
 /**
  * LadybugDB's variable-length relationship pattern rejects an upper bound
  * above 30 (`Binder exception: Upper bound of rel e exceeds maximum: 30`),
@@ -70,11 +74,6 @@ const BATCH_SIZE = 2_000;
  */
 const ROOT_WALK_MAX_HOPS = 30;
 
-type KnowsInsertRow = Readonly<{ fromId: string; toId: string; since: string }>;
-type HasCreatorInsertRow = Readonly<{ fromId: string; toId: string }>;
-type ContainerOfInsertRow = Readonly<{ fromId: string; toId: string }>;
-type ReplyOfInsertRow = Readonly<{ fromId: string; toId: string }>;
-
 /** Read every row out of a (possibly multi-statement) query result. */
 async function rowsOf(
   result: QueryResult | QueryResult[],
@@ -84,45 +83,74 @@ async function rowsOf(
   return (await queryResult.getAll()) as Record<string, unknown>[];
 }
 
-/** Execute a prepared `UNWIND $rows AS row ...` statement over one batch. */
-async function executeBatch<Row>(
-  conn: Connection,
-  prepared: PreparedStatement,
-  rows: readonly Row[],
-): Promise<void> {
-  await conn.execute(prepared, { rows } as unknown as Record<
-    string,
-    LbugValue
-  >);
+/**
+ * RFC4180-style CSV field escaping: quote-wrap and double any embedded
+ * quote whenever the field contains the delimiter, a quote, or a newline.
+ * Ladybug's CSV reader treats a bare empty string as NULL by default, which
+ * matches every optional LDBC field this loader ever emits.
+ */
+function csvField(value: string): string {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-/**
- * Buffers items and flushes in fixed-size chunks — mirrors `createBatcher`
- * in `./typegraph-load.ts` (kept local here since that helper isn't
- * exported, and its `flush` there is coupled to `SnbStore.bulkInsert`).
- */
-function createBatcher<T>(
-  size: number,
-  flush: (batch: readonly T[]) => Promise<void>,
-): Readonly<{ push: (item: T) => Promise<void>; finish: () => Promise<void> }> {
-  let buffer: T[] = [];
+function csvRow(fields: readonly string[]): string {
+  return `${fields.map(csvField).join(",")}\n`;
+}
+
+/** Streams rows to a staging CSV file for a later `COPY ... FROM` load. */
+function createCsvStager<T>(
+  filePath: string,
+  header: readonly string[],
+  toFields: (row: T) => readonly string[],
+): Readonly<{
+  write: (row: T) => Promise<void>;
+  finish: () => Promise<void>;
+}> {
+  const stream = createWriteStream(filePath, { encoding: "utf-8" });
+  stream.write(csvRow(header));
+
   return {
-    async push(item: T): Promise<void> {
-      buffer.push(item);
-      if (buffer.length >= size) {
-        const toFlush = buffer;
-        buffer = [];
-        await flush(toFlush);
+    async write(row: T): Promise<void> {
+      if (!stream.write(csvRow(toFields(row)))) {
+        await once(stream, "drain");
       }
     },
     async finish(): Promise<void> {
-      if (buffer.length > 0) {
-        const toFlush = buffer;
-        buffer = [];
-        await flush(toFlush);
-      }
+      stream.end();
+      await once(stream, "finish");
     },
   };
+}
+
+type RelCopyOptions = Readonly<{ from: string; to: string }>;
+
+/** `COPY <table> FROM '<path>' (...)` for a node table staged by createCsvStager. */
+async function copyNodeTable(
+  conn: Connection,
+  table: string,
+  filePath: string,
+): Promise<void> {
+  await conn.query(
+    `COPY ${table} FROM '${filePath}' (header=true, parallel=false);`,
+  );
+}
+
+/**
+ * `COPY <table> FROM '<path>' (..., from=..., to=...)` for a relationship
+ * table — the `from`/`to` pair disambiguates which of a multi-pair rel
+ * table's declared endpoints this file's rows belong to (e.g. `HasCreator`
+ * has both `FROM Post TO Person` and `FROM Comment TO Person`).
+ */
+async function copyRelTable(
+  conn: Connection,
+  table: string,
+  filePath: string,
+  pair: RelCopyOptions,
+): Promise<void> {
+  await conn.query(
+    `COPY ${table} FROM '${filePath}' ` +
+      `(header=true, parallel=false, from='${pair.from}', to='${pair.to}');`,
+  );
 }
 
 async function createSchema(conn: Connection): Promise<void> {
@@ -152,160 +180,236 @@ async function createSchema(conn: Connection): Promise<void> {
   );
 }
 
-type LoadStatements = Readonly<{
-  insertPerson: PreparedStatement;
-  insertForum: PreparedStatement;
-  insertPost: PreparedStatement;
-  insertComment: PreparedStatement;
-  insertKnows: PreparedStatement;
-  insertHasCreatorFromPost: PreparedStatement;
-  insertHasCreatorFromComment: PreparedStatement;
-  insertContainerOf: PreparedStatement;
-  insertReplyOfToPost: PreparedStatement;
-  insertReplyOfToComment: PreparedStatement;
+type LoadStagers = Readonly<{
+  person: ReturnType<typeof createCsvStager<SnbPersonRow>>;
+  forum: ReturnType<typeof createCsvStager<SnbForumRow>>;
+  post: ReturnType<typeof createCsvStager<SnbPostRow>>;
+  comment: ReturnType<typeof createCsvStager<SnbCommentRow>>;
+  knows: ReturnType<typeof createCsvStager<KnowsInsertRow>>;
+  hasCreatorFromPost: ReturnType<typeof createCsvStager<EdgeInsertRow>>;
+  hasCreatorFromComment: ReturnType<typeof createCsvStager<EdgeInsertRow>>;
+  containerOf: ReturnType<typeof createCsvStager<EdgeInsertRow>>;
+  replyOfToPost: ReturnType<typeof createCsvStager<EdgeInsertRow>>;
+  replyOfToComment: ReturnType<typeof createCsvStager<EdgeInsertRow>>;
 }>;
 
-async function prepareLoadStatements(
-  conn: Connection,
-): Promise<LoadStatements> {
+type KnowsInsertRow = Readonly<{ fromId: string; toId: string; since: string }>;
+type EdgeInsertRow = Readonly<{ fromId: string; toId: string }>;
+
+function createLoadStagers(stageDir: string): LoadStagers {
+  const path = (name: string) => join(stageDir, `${name}.csv`);
   return {
-    insertPerson: await conn.prepare(
-      "UNWIND $rows AS row CREATE (:Person {id: row.id, firstName: row.firstName, " +
-        "lastName: row.lastName, gender: row.gender, birthday: row.birthday, " +
-        "creationDate: row.creationDate, locationIp: row.locationIp, " +
-        "browserUsed: row.browserUsed, cityId: row.cityId});",
+    person: createCsvStager<SnbPersonRow>(
+      path("person"),
+      [
+        "id",
+        "firstName",
+        "lastName",
+        "gender",
+        "birthday",
+        "creationDate",
+        "locationIp",
+        "browserUsed",
+        "cityId",
+      ],
+      (row) => [
+        row.id,
+        row.firstName,
+        row.lastName,
+        row.gender,
+        row.birthday,
+        row.creationDate,
+        row.locationIp,
+        row.browserUsed,
+        row.cityId,
+      ],
     ),
-    insertForum: await conn.prepare(
-      "UNWIND $rows AS row CREATE (:Forum {id: row.id, title: row.title, " +
-        "creationDate: row.creationDate, moderatorId: row.moderatorId});",
+    forum: createCsvStager<SnbForumRow>(
+      path("forum"),
+      ["id", "title", "creationDate", "moderatorId"],
+      (row) => [row.id, row.title, row.creationDate, row.moderatorId],
     ),
-    insertPost: await conn.prepare(
-      "UNWIND $rows AS row CREATE (:Post {id: row.id, content: row.content, creationDate: row.creationDate});",
+    post: createCsvStager<SnbPostRow>(
+      path("post"),
+      ["id", "content", "creationDate"],
+      (row) => [row.id, row.content, row.creationDate],
     ),
-    insertComment: await conn.prepare(
-      "UNWIND $rows AS row CREATE (:Comment {id: row.id, content: row.content, creationDate: row.creationDate});",
+    comment: createCsvStager<SnbCommentRow>(
+      path("comment"),
+      ["id", "content", "creationDate"],
+      (row) => [row.id, row.content, row.creationDate],
     ),
-    insertKnows: await conn.prepare(
-      "UNWIND $rows AS row MATCH (a:Person {id: row.fromId}), (b:Person {id: row.toId}) " +
-        "CREATE (a)-[:Knows {since: row.since}]->(b);",
+    knows: createCsvStager<KnowsInsertRow>(
+      path("knows"),
+      ["fromId", "toId", "since"],
+      (row) => [row.fromId, row.toId, row.since],
     ),
-    insertHasCreatorFromPost: await conn.prepare(
-      "UNWIND $rows AS row MATCH (m:Post {id: row.fromId}), (p:Person {id: row.toId}) " +
-        "CREATE (m)-[:HasCreator]->(p);",
+    hasCreatorFromPost: createCsvStager<EdgeInsertRow>(
+      path("has-creator-from-post"),
+      ["fromId", "toId"],
+      (row) => [row.fromId, row.toId],
     ),
-    insertHasCreatorFromComment: await conn.prepare(
-      "UNWIND $rows AS row MATCH (m:Comment {id: row.fromId}), (p:Person {id: row.toId}) " +
-        "CREATE (m)-[:HasCreator]->(p);",
+    hasCreatorFromComment: createCsvStager<EdgeInsertRow>(
+      path("has-creator-from-comment"),
+      ["fromId", "toId"],
+      (row) => [row.fromId, row.toId],
     ),
-    insertContainerOf: await conn.prepare(
-      "UNWIND $rows AS row MATCH (f:Forum {id: row.fromId}), (p:Post {id: row.toId}) " +
-        "CREATE (f)-[:ContainerOf]->(p);",
+    containerOf: createCsvStager<EdgeInsertRow>(
+      path("container-of"),
+      ["fromId", "toId"],
+      (row) => [row.fromId, row.toId],
     ),
-    insertReplyOfToPost: await conn.prepare(
-      "UNWIND $rows AS row MATCH (c:Comment {id: row.fromId}), (m:Post {id: row.toId}) " +
-        "CREATE (c)-[:ReplyOf]->(m);",
+    replyOfToPost: createCsvStager<EdgeInsertRow>(
+      path("reply-of-to-post"),
+      ["fromId", "toId"],
+      (row) => [row.fromId, row.toId],
     ),
-    insertReplyOfToComment: await conn.prepare(
-      "UNWIND $rows AS row MATCH (c:Comment {id: row.fromId}), (m:Comment {id: row.toId}) " +
-        "CREATE (c)-[:ReplyOf]->(m);",
+    replyOfToComment: createCsvStager<EdgeInsertRow>(
+      path("reply-of-to-comment"),
+      ["fromId", "toId"],
+      (row) => [row.fromId, row.toId],
     ),
   };
 }
 
 async function loadSnbDataset(
   conn: Connection,
-  statements: LoadStatements,
+  stageDir: string,
   datasetRoot: string,
   log: (message: string) => void,
 ): Promise<SnbIdPools> {
-  const persons = createBatcher<SnbPersonRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertPerson, batch),
-  );
-  const forums = createBatcher<SnbForumRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertForum, batch),
-  );
-  const posts = createBatcher<SnbPostRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertPost, batch),
-  );
-  const comments = createBatcher<SnbCommentRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertComment, batch),
-  );
-  const knows = createBatcher<KnowsInsertRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertKnows, batch),
-  );
-  const hasCreatorFromPost = createBatcher<HasCreatorInsertRow>(
-    BATCH_SIZE,
-    (batch) => executeBatch(conn, statements.insertHasCreatorFromPost, batch),
-  );
-  const hasCreatorFromComment = createBatcher<HasCreatorInsertRow>(
-    BATCH_SIZE,
-    (batch) =>
-      executeBatch(conn, statements.insertHasCreatorFromComment, batch),
-  );
-  const containerOf = createBatcher<ContainerOfInsertRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertContainerOf, batch),
-  );
-  const replyOfToPost = createBatcher<ReplyOfInsertRow>(BATCH_SIZE, (batch) =>
-    executeBatch(conn, statements.insertReplyOfToPost, batch),
-  );
-  const replyOfToComment = createBatcher<ReplyOfInsertRow>(
-    BATCH_SIZE,
-    (batch) => executeBatch(conn, statements.insertReplyOfToComment, batch),
-  );
+  const stagers = createLoadStagers(stageDir);
 
-  // Flushing every batcher at each stage boundary (not just at the very
-  // end) guarantees a stage's nodes are durably written before the next
-  // stage's edges can reference them — see the flush-discipline note on
-  // `SnbRowSink.stageComplete` in `../dataset/ldbc-csv.ts`.
-  async function flushAll(): Promise<void> {
-    await persons.finish();
-    await forums.finish();
-    await posts.finish();
-    await comments.finish();
-    await knows.finish();
-    await hasCreatorFromPost.finish();
-    await hasCreatorFromComment.finish();
-    await containerOf.finish();
-    await replyOfToPost.finish();
-    await replyOfToComment.finish();
+  // `stageComplete` fires exactly 5 times, in this fixed order (see
+  // `streamSnbCsvDataset` in `../dataset/ldbc-csv.ts`): persons, knows,
+  // forums, posts, comments. Each handler below finishes that stage's CSV
+  // file(s), then COPYs them — nodes before the edges referencing them,
+  // matching the dependency ordering `COPY` requires (endpoint tables must
+  // already be populated).
+  const stageHandlers: readonly (() => Promise<void>)[] = [
+    async () => {
+      await stagers.person.finish();
+      await copyNodeTable(conn, "Person", join(stageDir, "person.csv"));
+    },
+    async () => {
+      await stagers.knows.finish();
+      await copyRelTable(conn, "Knows", join(stageDir, "knows.csv"), {
+        from: "Person",
+        to: "Person",
+      });
+    },
+    async () => {
+      await stagers.forum.finish();
+      await copyNodeTable(conn, "Forum", join(stageDir, "forum.csv"));
+    },
+    async () => {
+      await stagers.post.finish();
+      await copyNodeTable(conn, "Post", join(stageDir, "post.csv"));
+      await stagers.hasCreatorFromPost.finish();
+      await copyRelTable(
+        conn,
+        "HasCreator",
+        join(stageDir, "has-creator-from-post.csv"),
+        { from: "Post", to: "Person" },
+      );
+      await stagers.containerOf.finish();
+      await copyRelTable(
+        conn,
+        "ContainerOf",
+        join(stageDir, "container-of.csv"),
+        { from: "Forum", to: "Post" },
+      );
+    },
+    async () => {
+      await stagers.comment.finish();
+      await copyNodeTable(conn, "Comment", join(stageDir, "comment.csv"));
+      await stagers.hasCreatorFromComment.finish();
+      await copyRelTable(
+        conn,
+        "HasCreator",
+        join(stageDir, "has-creator-from-comment.csv"),
+        { from: "Comment", to: "Person" },
+      );
+      await stagers.replyOfToPost.finish();
+      await copyRelTable(
+        conn,
+        "ReplyOf",
+        join(stageDir, "reply-of-to-post.csv"),
+        { from: "Comment", to: "Post" },
+      );
+      await stagers.replyOfToComment.finish();
+      await copyRelTable(
+        conn,
+        "ReplyOf",
+        join(stageDir, "reply-of-to-comment.csv"),
+        { from: "Comment", to: "Comment" },
+      );
+    },
+  ];
+  let stageIndex = 0;
+  async function stageComplete(): Promise<void> {
+    const handler = stageHandlers[stageIndex];
+    stageIndex += 1;
+    if (handler === undefined) {
+      throw new Error(
+        `LadybugDB loader received more stageComplete() calls (${stageIndex}) than expected (${stageHandlers.length}).`,
+      );
+    }
+    await handler();
   }
 
   const result = await streamSnbCsvDataset(
     datasetRoot,
     {
-      person: (row) => persons.push(row),
-      forum: (row) => forums.push(row),
-      post: (row) => posts.push(row),
-      comment: (row) => comments.push(row),
+      person: (row) => stagers.person.write(row),
+      forum: (row) => stagers.forum.write(row),
+      post: (row) => stagers.post.write(row),
+      comment: (row) => stagers.comment.write(row),
       edge: (row) => {
         switch (row.kind) {
           case "knows":
-            return knows.push({
+            return stagers.knows.write({
               fromId: row.fromId,
               toId: row.toId,
               since: row.createdAt,
             });
           case "hasCreator":
             return row.fromKind === "Post" ?
-                hasCreatorFromPost.push({ fromId: row.fromId, toId: row.toId })
-              : hasCreatorFromComment.push({
+                stagers.hasCreatorFromPost.write({
+                  fromId: row.fromId,
+                  toId: row.toId,
+                })
+              : stagers.hasCreatorFromComment.write({
                   fromId: row.fromId,
                   toId: row.toId,
                 });
           case "containerOf":
-            return containerOf.push({ fromId: row.fromId, toId: row.toId });
+            return stagers.containerOf.write({
+              fromId: row.fromId,
+              toId: row.toId,
+            });
           case "replyOf":
             return row.toKind === "Post" ?
-                replyOfToPost.push({ fromId: row.fromId, toId: row.toId })
-              : replyOfToComment.push({ fromId: row.fromId, toId: row.toId });
+                stagers.replyOfToPost.write({
+                  fromId: row.fromId,
+                  toId: row.toId,
+                })
+              : stagers.replyOfToComment.write({
+                  fromId: row.fromId,
+                  toId: row.toId,
+                });
         }
       },
-      stageComplete: flushAll,
+      stageComplete,
     },
     log,
   );
 
-  await flushAll();
+  if (stageIndex !== stageHandlers.length) {
+    throw new Error(
+      `LadybugDB loader expected ${stageHandlers.length} stageComplete() calls, got ${stageIndex}.`,
+    );
+  }
 
   return result.pools;
 }
@@ -535,6 +639,7 @@ export const createLadybugEngine: SnbEngineFactory = async (
   options,
 ): Promise<SnbEngineHandle> => {
   const tempDir = await mkdtemp(join(tmpdir(), "typegraph-bench-snb-ladybug-"));
+  const stageDir = join(tempDir, "stage");
   const database = new Database(join(tempDir, "graph.lbug"));
   const conn = new Connection(database);
 
@@ -543,22 +648,23 @@ export const createLadybugEngine: SnbEngineFactory = async (
   // native database handle the caller never gets an `SnbEngineHandle` to
   // close().
   try {
+    await mkdir(stageDir, { recursive: true });
     await createSchema(conn);
     const queries = await createQueries(conn);
-    const loadStatements = await prepareLoadStatements(conn);
 
     return {
       name: "ladybugdb",
       fairness:
-        "in-process @ladybugdb/core (Kuzu-family embedded engine), no Docker; bulk load via " +
-        "prepared UNWIND-CREATE statements (one compiled plan per entity/edge kind, reused across " +
-        `${BATCH_SIZE}-row batches); IS1-IS7 point queries run through conn.prepare()+execute() ` +
-        "(cached query plan reused per request), matching TypeGraph's .prepare()/.execute() split " +
-        "and Neo4j's server-side statement cache.",
+        "in-process @ladybugdb/core (Kuzu-family embedded engine), no Docker; bulk load stages " +
+        "each entity/edge kind to a CSV file and issues one COPY FROM per file (Ladybug's CSR " +
+        "adjacency structure scales badly with incremental MATCH+CREATE edge writes — COPY FROM " +
+        "builds it once from the whole file); IS1-IS7 point queries run through " +
+        "conn.prepare()+execute() (cached query plan reused per request), matching TypeGraph's " +
+        ".prepare()/.execute() split and Neo4j's server-side statement cache.",
       async load() {
         return await loadSnbDataset(
           conn,
-          loadStatements,
+          stageDir,
           options.datasetRoot,
           options.log,
         );
