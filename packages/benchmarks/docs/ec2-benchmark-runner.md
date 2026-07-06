@@ -109,11 +109,17 @@ each run launches its own instance tagged `Project=TypeGraphBenchmark`.
 ## Cost safety net
 
 If `collect` is never run, the instance keeps billing. The bootstrap script
-schedules `shutdown -h +360` (a 6-hour dead-man's switch) as soon as it
-starts, so a forgotten run self-terminates instead of running forever.
-`collect`'s explicit termination makes this moot on the happy path — but if
-you walk away mid-run, don't assume the box is gone until either `collect`
-finishes or 6 hours have passed.
+schedules a `shutdown` dead-man's switch as soon as it starts, so a
+forgotten run self-terminates instead of running forever. Its duration is
+derived from `--bootstrap-timeout-seconds` + `--benchmark-timeout-seconds`
+plus a one-hour buffer (defaults: 30min + 6h + 1h = 7.5h) — deliberately
+longer than the benchmark's own SSM `executionTimeout`, so this "nobody
+ever collected" safety net can never race a benchmark that's still
+legitimately running (an earlier version hardcoded a flat 6h, which was
+long enough to kill a real SF1 run in its last minutes). `collect`'s
+explicit termination makes the dead-man's switch moot on the happy path —
+but if you walk away mid-run, don't assume the box is gone until either
+`collect` finishes or that window has passed.
 
 ## Deliberate scope cuts (v1)
 

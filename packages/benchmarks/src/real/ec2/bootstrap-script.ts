@@ -32,6 +32,13 @@ export type BootstrapOptions = Readonly<{
   repoUrl: string;
   ref: string;
   profile: "smoke" | "sf1";
+  /**
+   * Minutes until the dead-man's-switch `shutdown` fires. Must be
+   * comfortably longer than the benchmark's own SSM executionTimeout —
+   * otherwise this "in case nobody ever collects" safety net becomes the
+   * thing that kills a benchmark that's still legitimately running.
+   */
+  deadManSwitchMinutes: number;
 }>;
 
 export const BOOTSTRAP_LOG_PATH = "/var/log/typegraph-bootstrap.log";
@@ -61,7 +68,7 @@ export DEBIAN_FRONTEND=noninteractive
 trap 'echo "bootstrap failed at $(date -u --iso-8601=seconds)" > ${BOOTSTRAP_FAILED_SENTINEL}; tail -n 200 ${BOOTSTRAP_LOG_PATH} >> ${BOOTSTRAP_FAILED_SENTINEL} || true' ERR
 
 # Dead-man's switch: self-terminate if the benchmark is never collected.
-shutdown -h +360 || true
+shutdown -h +${options.deadManSwitchMinutes} || true
 
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg git zstd

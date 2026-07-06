@@ -216,11 +216,18 @@ async function launch(argv: readonly string[]): Promise<void> {
   const amiId = await resolveUbuntu2404Ami(awsOptions);
   console.log(`AMI: ${amiId}`);
 
+  // Comfortably longer than both SSM executionTimeouts below, so this
+  // "nobody ever collected" safety net can never race a benchmark that's
+  // still legitimately running (see docs/ec2-benchmark-runner.md).
+  const deadManSwitchMinutes =
+    Math.ceil((bootstrapTimeoutSeconds + benchmarkTimeoutSeconds) / 60) + 60;
+
   console.log(`Ref to clone: ${ref} (from ${repoUrl})`);
   const userData = renderBootstrapScript({
     repoUrl,
     ref,
     profile: benchProfile,
+    deadManSwitchMinutes,
   });
 
   console.log(`Launching ${instanceType} (${runId})...`);
