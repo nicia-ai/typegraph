@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { resolveGitSha } from "../../git";
 import { resolveHistoryPath } from "../../history";
-import { writeJsonFile } from "../harness/process";
+import { stringifyError, writeJsonFile } from "../harness/process";
 import {
   type AwsCliOptions,
   describeInstanceState,
@@ -107,6 +107,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Retries `check()` until it returns true or `timeoutMs` elapses. A thrown
+ * error from `check()` is treated as "not ready yet" rather than a fatal
+ * failure — `describeInstanceState` right after `run-instances` reliably
+ * hits AWS's own eventual-consistency window (`InvalidInstanceID.NotFound`
+ * for an instance id the API itself just returned), and propagating that
+ * immediately killed the whole launch instead of retrying a few seconds
+ * later like everything else in this poll loop already does. The last error
+ * is surfaced in the timeout message so a genuine, persistent failure (bad
+ * credentials, wrong region) is still diagnosable instead of silently
+ * retrying to a generic timeout.
+ */
 async function waitUntil(
   description: string,
   intervalMs: number,
@@ -114,10 +126,20 @@ async function waitUntil(
   check: () => Promise<boolean>,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
   for (;;) {
-    if (await check()) return;
+    try {
+      if (await check()) return;
+      lastError = undefined;
+    } catch (error) {
+      lastError = error;
+    }
     if (Date.now() >= deadline) {
-      throw new Error(`Timed out waiting for: ${description}`);
+      const suffix =
+        lastError === undefined ? "" : (
+          ` (last error: ${stringifyError(lastError)})`
+        );
+      throw new Error(`Timed out waiting for: ${description}${suffix}`);
     }
     await sleep(intervalMs);
   }
