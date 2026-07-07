@@ -255,7 +255,10 @@ const topContributors = await store
 
 ## Ordering Aggregated Results
 
-Order by aggregate values:
+Aggregate queries have their own `orderBy(key, direction?)`, called after
+`.aggregate({...})`. `key` is any output name from the fields object — a
+grouped field or an aggregate alias — so `limit()` finally means "top N",
+not "an arbitrary N":
 
 ```typescript
 const topDepartments = await store
@@ -267,7 +270,7 @@ const topDepartments = await store
     headcount: count("e"),
     totalSalary: sum("e", "salary"),
   })
-  .orderBy((ctx) => ctx.totalSalary, "desc")
+  .orderBy("totalSalary", "desc")
   .limit(10)
   .execute();
 ```
@@ -306,7 +309,7 @@ const activeReviewers = await store
     developer: field("d", "name"),
     reviewCount: count("pr"),
   })
-  .orderBy((ctx) => ctx.reviewCount, "desc")
+  .orderBy("reviewCount", "desc")
   .execute();
 
 // 3. Repository health

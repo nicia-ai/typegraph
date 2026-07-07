@@ -98,7 +98,9 @@ const employees = await store
 
 ### Ordering Aggregated Results
 
-Order by aggregate values:
+Aggregate queries have their own `orderBy(key, direction?)`, called after
+`.aggregate({...})`. `key` is any output name from the fields object — a
+grouped field or an aggregate alias:
 
 ```typescript
 import { count, field } from "@nicia-ai/typegraph";
@@ -111,7 +113,7 @@ const topDepartments = await store
     department: field("e", "department"),
     headcount: count("e"),
   })
-  .orderBy((ctx) => ctx.headcount, "desc")
+  .orderBy("headcount", "desc")
   .execute();
 ```
 

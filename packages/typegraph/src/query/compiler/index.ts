@@ -703,12 +703,21 @@ function compileCountAggregateFastPath(
   //   - The traversal is optional (LEFT JOIN outer). For INNER JOIN we can't
   //     push down without potentially dropping rows the original query would
   //     have kept.
-  //   - No ORDER BY. ORDER BY over the full result requires the full result.
-  //     (The fast path already restricts ORDER BY to the start alias, but we
-  //     still need every row to sort correctly.)
+  //   - No ORDER BY of either kind. ORDER BY over the full result requires
+  //     the full result. `ast.orderBy` is FieldRef-based row ordering (the
+  //     fast path already restricts it to the start alias, but we still
+  //     need every row to sort correctly); `ast.aggregateOrderBy` is
+  //     output-alias-based ordering added via `ExecutableAggregateQuery
+  //     .orderBy()` — sorting by an aggregate value (e.g. `employeeCount`)
+  //     needs every start row counted first, so pushing LIMIT into the
+  //     start CTE before aggregation would pick an arbitrary subset of
+  //     rows to count rather than the true top-N.
   //   - LIMIT is defined. OFFSET is carried with it.
   const startCteLimit =
-    traversal.optional && ast.orderBy === undefined && ast.limit !== undefined ?
+    traversal.optional &&
+    ast.orderBy === undefined &&
+    ast.aggregateOrderBy === undefined &&
+    ast.limit !== undefined ?
       { limit: ast.limit, offset: ast.offset }
     : undefined;
 
