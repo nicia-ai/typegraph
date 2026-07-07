@@ -167,9 +167,8 @@ export async function main() {
     if (error instanceof RestrictedDeleteError) {
       console.log("Deletion BLOCKED!");
       console.log(`  Reason: ${error.message}`);
-      const details = error.details as { edgeCount: number; edgeKinds: string[] };
-      console.log(`  Connected edges: ${details.edgeCount}`);
-      console.log(`  Edge kinds: [${details.edgeKinds.join(", ")}]`);
+      console.log(`  Connected edges: ${error.details.edgeCount}`);
+      console.log(`  Edge kinds: [${error.details.edgeKinds.join(", ")}]`);
     } else {
       throw error;
     }
