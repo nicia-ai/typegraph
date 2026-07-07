@@ -85,6 +85,15 @@ const graph = defineGraph({
 // Demonstrate Validation
 // ============================================================
 
+// ValidationError carries structured issues (path + message), so the
+// custom messages defined in the schemas above can be shown readably
+function printValidationIssues(error: ValidationError) {
+  console.log("   Validation failed:");
+  for (const issue of error.details.issues) {
+    console.log(`     - ${issue.path || "(root)"}: ${issue.message}`);
+  }
+}
+
 export async function main() {
   const backend = createExampleBackend();
   const store = createStore(graph, backend);
@@ -111,7 +120,9 @@ export async function main() {
     });
   } catch (error) {
     if (error instanceof ValidationError) {
-      console.log("   Validation failed:", error.message);
+      printValidationIssues(error);
+    } else {
+      throw error;
     }
   }
 
@@ -124,7 +135,9 @@ export async function main() {
     });
   } catch (error) {
     if (error instanceof ValidationError) {
-      console.log("   Validation failed:", error.message);
+      printValidationIssues(error);
+    } else {
+      throw error;
     }
   }
 
@@ -139,7 +152,9 @@ export async function main() {
     });
   } catch (error) {
     if (error instanceof ValidationError) {
-      console.log("   Validation failed:", error.message);
+      printValidationIssues(error);
+    } else {
+      throw error;
     }
   }
 
@@ -172,7 +187,9 @@ export async function main() {
     );
   } catch (error) {
     if (error instanceof ValidationError) {
-      console.log("   Validation failed:", error.message);
+      printValidationIssues(error);
+    } else {
+      throw error;
     }
   }
 

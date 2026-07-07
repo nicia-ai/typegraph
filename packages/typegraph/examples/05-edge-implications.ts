@@ -189,6 +189,7 @@ export async function main() {
   const aliceKnows = await store
     .query()
     .from("Person", "alice")
+    .whereNode("alice", ({ name }) => name.eq("Alice"))
     .traverse("knows", "e", { expand: "implying" })
     .to("Person", "other")
     .select((ctx) => ({
@@ -202,12 +203,13 @@ export async function main() {
   }
 
   // Query without expansion
-  console.log("\nQuery: Who does Alice explicitly 'knows'? (no expansion)");
+  console.log("\nQuery: Who does Alice explicitly 'knows'? (default expansion)");
 
   const aliceExplicitlyKnows = await store
     .query()
     .from("Person", "alice")
-    .traverse("knows", "e") // No implying-edge expansion
+    .whereNode("alice", ({ name }) => name.eq("Alice"))
+    .traverse("knows", "e") // Default expansion — implying edges are not included
     .to("Person", "other")
     .select((ctx) => ({
       person: ctx.other.name,
@@ -228,6 +230,7 @@ export async function main() {
   const aliceFriends = await store
     .query()
     .from("Person", "alice")
+    .whereNode("alice", ({ name }) => name.eq("Alice"))
     .traverse("friends", "e", { expand: "implying" })
     .to("Person", "friend")
     .select((ctx) => ({

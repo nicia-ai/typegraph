@@ -451,7 +451,7 @@ export async function main(): Promise<void> {
     const fulltextRank = hit.fulltext ? `f#${hit.fulltext.rank}` : "f—";
     renderHit(
       index + 1,
-      hit.node as ProductHit,
+      hit.node,
       hit.score,
       `(${vectorRank}, ${fulltextRank})`,
     );

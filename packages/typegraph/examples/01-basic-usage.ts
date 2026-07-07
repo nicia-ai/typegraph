@@ -131,6 +131,22 @@ export async function main() {
     aliceByConstraint.action,
     aliceByConstraint.node.id,
   );
+  console.log("Alice's age after update:", aliceByConstraint.node.age);
+
+  // The person_email constraint uses caseInsensitive collation, so a
+  // differently-cased email still matches the existing Alice
+  const aliceUppercase = await store.nodes.Person.getOrCreateByConstraint(
+    "person_email",
+    {
+      name: "Alice",
+      email: "ALICE@EXAMPLE.COM",
+    },
+  );
+  console.log(
+    "getOrCreateByConstraint with ALICE@EXAMPLE.COM:",
+    aliceUppercase.action,
+    aliceUppercase.node.name,
+  );
 
   // Create edges by passing nodes directly
   await store.edges.worksAt.create(aliceByConstraint.node, acme, {
@@ -170,7 +186,9 @@ export async function main() {
 
   console.log("\nQuery results (who works where):");
   for (const row of results) {
-    console.log(`  ${row.personName} works at ${row.companyName} as ${row.role}`);
+    console.log(
+      `  ${row.personName} works at ${row.companyName} as ${row.role} since ${row.startDate}`,
+    );
   }
 
   // Clean up

@@ -141,9 +141,9 @@ export async function main() {
     doc1Chunks.push(chunk);
     await store.edges.containsChunk.create(doc1, chunk, {});
     if (prevChunkNode) {
-      // Create both directions - inverseOf declares them equivalent but doesn't auto-create
+      // Store only nextChunk — the inverseOf ontology lets .traverse("prevChunk")
+      // follow stored nextChunk edges automatically.
       await store.edges.nextChunk.create(prevChunkNode, chunk, {});
-      await store.edges.prevChunk.create(chunk, prevChunkNode, {});
     }
     prevChunkNode = chunk;
   }
@@ -173,7 +173,6 @@ export async function main() {
     await store.edges.containsChunk.create(doc2, chunk, {});
     if (prevChunkNode) {
       await store.edges.nextChunk.create(prevChunkNode, chunk, {});
-      await store.edges.prevChunk.create(chunk, prevChunkNode, {});
     }
     prevChunkNode = chunk;
   }
@@ -413,5 +412,8 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
 }

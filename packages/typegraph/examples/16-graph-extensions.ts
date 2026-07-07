@@ -75,7 +75,7 @@ const baseGraph = defineGraph({
 });
 
 async function main() {
-  const { backend, db } = createLocalSqliteBackend();
+  const { backend } = createLocalSqliteBackend();
 
   const [store] = await createStoreWithSchema(baseGraph, backend);
   console.log("\n[1] Booted with compile-time kind: Document");
@@ -352,7 +352,7 @@ async function main() {
     restored.registry.hasNodeType("Paper"),
   );
   console.log(
-    "    registry.hasNodeType('Author') (removed in step 7):",
+    "    registry.hasNodeType('Author') (removed in step 8):",
     restored.registry.hasNodeType("Author"),
   );
   console.log(
@@ -365,10 +365,6 @@ async function main() {
   console.log(`    Found ${allPapers.length} Paper nodes after restart`);
 
   await backend.close();
-  // Keep `db` referenced so the linter doesn't strip it — it's the
-  // shared connection backing both the original and restored stores
-  // for the parity demonstration.
-  void db;
 }
 
 async function activeVersion(

@@ -116,9 +116,7 @@ export async function main() {
     // Run TypeGraph migrations
     console.log("Running TypeGraph migrations...");
     const migrationSQL = generatePostgresMigrationSQL();
-    for (const statement of migrationSQL.split(";").filter((s) => s.trim())) {
-      await pool.query(statement);
-    }
+    await pool.query(migrationSQL);
     console.log("Migrations complete!\n");
 
     // Create Drizzle instance and backend
@@ -259,19 +257,23 @@ export async function main() {
     console.log("=== Cleanup ===\n");
 
     // Delete in correct order (edges first due to constraints)
-    const allPeople = await store
-      .query()
-      .from("Person", "p")
-      .select((ctx) => ({ id: ctx.p.id }))
-      .execute();
+    const allWorksAt = await store.edges.worksAt.find();
+    for (const edge of allWorksAt) {
+      await store.edges.worksAt.delete(edge.id);
+    }
+    console.log(`Deleted ${allWorksAt.length} worksAt edges`);
 
+    const allPeople = await store.nodes.Person.find();
     for (const person of allPeople) {
-      await store.nodes.Person.delete(person.id as typeof alice.id);
+      await store.nodes.Person.delete(person.id);
     }
     console.log(`Deleted ${allPeople.length} people`);
 
-    await store.nodes.Organization.delete(org.id);
-    console.log("Deleted organization\n");
+    const allOrganizations = await store.nodes.Organization.find();
+    for (const organization of allOrganizations) {
+      await store.nodes.Organization.delete(organization.id);
+    }
+    console.log(`Deleted ${allOrganizations.length} organizations\n`);
 
     console.log("=== PostgreSQL example complete ===");
   } catch (error) {

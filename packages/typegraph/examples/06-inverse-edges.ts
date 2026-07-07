@@ -14,7 +14,6 @@ import {
   defineEdge,
   defineNode,
   inverseOf,
-  type NodeId,
 } from "@nicia-ai/typegraph";
 import { createExampleBackend } from "./_helpers";
 
@@ -151,7 +150,8 @@ export async function main() {
   console.log("Created employees: Sarah (CEO), Mike (VP), Alice (Senior), Bob (Junior)");
   console.log("Created team: Platform Team\n");
 
-  // Create management relationships (only need to create one direction!)
+  // Create management relationships (only need to create one direction —
+  // the reportsTo traversals below derive the other from the ontology!)
   console.log("Creating management chain...");
 
   await store.edges.manages.create(ceo, vpEng, { since: "2020-01-01" });
@@ -199,6 +199,7 @@ export async function main() {
   const aliceManages = await store
     .query()
     .from("Employee", "manager")
+    .whereNode("manager", ({ name }) => name.eq("Alice Senior"))
     .traverse("manages", "e")
     .to("Employee", "report")
     .select((ctx) => ({
@@ -208,18 +209,18 @@ export async function main() {
     .execute();
 
   for (const row of aliceManages) {
-    if (row.manager === "Alice Senior") {
-      console.log(`  ${row.manager} manages ${row.report}`);
-    }
+    console.log(`  ${row.manager} manages ${row.report}`);
   }
 
   // Reverse: Who does Bob report to?
-  // Since we only created "manages" edges, we query in reverse direction
-  console.log("\nQuery: Who does Bob report to? (using 'manages' with direction: 'in')");
+  // No reportsTo edge was ever created — the inverseOf(manages, reportsTo)
+  // ontology lets the traversal follow stored manages edges inversely
+  console.log("\nQuery: Who does Bob report to? (traversing 'reportsTo')");
   const bobReportsTo = await store
     .query()
     .from("Employee", "report")
-    .traverse("manages", "e", { direction: "in" })
+    .whereNode("report", ({ name }) => name.eq("Bob Junior"))
+    .traverse("reportsTo", "e")
     .to("Employee", "manager")
     .select((ctx) => ({
       report: ctx.report.name,
@@ -228,37 +229,35 @@ export async function main() {
     .execute();
 
   for (const row of bobReportsTo) {
-    if (row.report === "Bob Junior") {
-      console.log(`  ${row.report} reports to ${row.manager}`);
-    }
+    console.log(`  ${row.report} reports to ${row.manager}`);
   }
 
-  // Full management chain upward from Bob
-  console.log("\nBob's management chain (manual traversal):");
-  let currentId: NodeId<typeof Employee> | undefined = juniorDev.id;
+  // Full management chain upward from Bob — one bound reportsTo query per level
+  console.log("\nBob's management chain (reportsTo traversal per level):");
+  type ChainEntry = Readonly<{ id: string; name: string; title: string }>;
+  let current: ChainEntry | undefined = juniorDev;
   let level = 0;
 
-  while (currentId) {
-    const current = await store.nodes.Employee.getById(currentId);
-    if (!current) break;
-
+  while (current !== undefined) {
+    const employee = current;
     const indent = "  ".repeat(level);
-    console.log(`${indent}${current.name} (${current.title})`);
+    console.log(`${indent}${employee.name} (${employee.title})`);
 
-    // Find manager
-    const managerEdges = await store
+    // Find this employee's manager via the derived reportsTo edge
+    const managers: readonly ChainEntry[] = await store
       .query()
       .from("Employee", "emp")
-      .traverse("manages", "e", { direction: "in" })
+      .whereNode("emp", ({ id }) => id.eq(employee.id))
+      .traverse("reportsTo", "e")
       .to("Employee", "mgr")
       .select((ctx) => ({
-        empId: ctx.emp.id,
-        mgrId: ctx.mgr.id,
+        id: ctx.mgr.id,
+        name: ctx.mgr.name,
+        title: ctx.mgr.title,
       }))
       .execute();
 
-    const myManager = managerEdges.find((r) => r.empId === currentId);
-    currentId = myManager?.mgrId;
+    current = managers[0];
     level++;
   }
 
