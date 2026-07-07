@@ -24,9 +24,6 @@
  * Run with:
  *   npx tsx examples/25-transactions.ts
  */
-import { sql } from "drizzle-orm";
-import { z } from "zod";
-
 import {
   createStore,
   defineEdge,
@@ -34,6 +31,9 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { sql } from "drizzle-orm";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -113,9 +113,10 @@ export async function main() {
       return created;
     });
 
-    const onHandAfterCommit = (
-      await store.nodes.InventoryItem.getById(widget.id)
-    )?.onHand;
+    const widgetAfterCommit = await store.nodes.InventoryItem.getById(
+      widget.id,
+    );
+    const onHandAfterCommit = widgetAfterCommit?.onHand;
     const edgesAfterCommit = await store.edges.fulfills.findFrom(widget);
     console.log(`  committed: order ${order.id} (quantity=${order.quantity})`);
     console.log(
@@ -154,9 +155,10 @@ export async function main() {
     }
 
     const orders = await store.nodes.Order.find();
-    const onHandAfterRollback = (
-      await store.nodes.InventoryItem.getById(widget.id)
-    )?.onHand;
+    const widgetAfterRollback = await store.nodes.InventoryItem.getById(
+      widget.id,
+    );
+    const onHandAfterRollback = widgetAfterRollback?.onHand;
     const edgesAfterRollback = await store.edges.fulfills.findFrom(widget);
     console.log(
       `  rolled back: order count still ${orders.length} (the doomed order is gone)`,
@@ -193,9 +195,8 @@ export async function main() {
     }
 
     const strandedOrders = await store.nodes.Order.find();
-    const unfulfilled =
-      strandedOrders.length -
-      (await store.edges.fulfills.findFrom(widget)).length;
+    const fulfilledEdges = await store.edges.fulfills.findFrom(widget);
+    const unfulfilled = strandedOrders.length - fulfilledEdges.length;
     console.log(
       `  stranded: order count is now ${strandedOrders.length} — ${unfulfilled} order has NO fulfills edge`,
     );
@@ -273,7 +274,7 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

@@ -8,14 +8,14 @@
  * - Using upsert/get-or-create collection APIs
  * - Simple queries
  */
-import { z } from "zod";
-
 import {
   createStore,
-  defineGraph,
   defineEdge,
+  defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -26,7 +26,7 @@ import { createExampleBackend } from "./_helpers";
 const Person = defineNode("Person", {
   schema: z.object({
     name: z.string(),
-    email: z.string().email(),
+    email: z.email(),
     age: z.number().int().positive().optional(),
   }),
 });
@@ -95,108 +95,109 @@ export async function main() {
   const backend = createExampleBackend();
   const store = createStore(graph, backend);
 
-  // Create some nodes using the collection API
-  const alice = await store.nodes.Person.create({
-    name: "Alice",
-    email: "alice@example.com",
-    age: 30,
-  });
-  console.log("Created Alice:", alice.id);
-
-  const bob = await store.nodes.Person.create({
-    name: "Bob",
-    email: "bob@example.com",
-  });
-  console.log("Created Bob:", bob.id);
-
-  const acme = await store.nodes.Company.upsertById("company:acme", {
-    name: "Acme Corp",
-    industry: "Technology",
-    founded: 2010,
-  });
-  console.log("Upserted Acme Corp by ID:", acme.id);
-
-  // Get or create by a uniqueness constraint (person_email)
-  const aliceByConstraint = await store.nodes.Person.getOrCreateByConstraint(
-    "person_email",
-    {
+  try {
+    // Create some nodes using the collection API
+    const alice = await store.nodes.Person.create({
       name: "Alice",
       email: "alice@example.com",
-      age: 31,
-    },
-    { ifExists: "update" },
-  );
-  console.log(
-    "getOrCreateByConstraint for Alice:",
-    aliceByConstraint.action,
-    aliceByConstraint.node.id,
-  );
-  console.log("Alice's age after update:", aliceByConstraint.node.age);
+      age: 30,
+    });
+    console.log("Created Alice:", alice.id);
 
-  // The person_email constraint uses caseInsensitive collation, so a
-  // differently-cased email still matches the existing Alice
-  const aliceUppercase = await store.nodes.Person.getOrCreateByConstraint(
-    "person_email",
-    {
-      name: "Alice",
-      email: "ALICE@EXAMPLE.COM",
-    },
-  );
-  console.log(
-    "getOrCreateByConstraint with ALICE@EXAMPLE.COM:",
-    aliceUppercase.action,
-    aliceUppercase.node.name,
-  );
+    const bob = await store.nodes.Person.create({
+      name: "Bob",
+      email: "bob@example.com",
+    });
+    console.log("Created Bob:", bob.id);
 
-  // Create edges by passing nodes directly
-  await store.edges.worksAt.create(aliceByConstraint.node, acme, {
-    role: "Engineer",
-    startDate: "2023-01-15",
-  });
-  console.log("Created edge: Alice worksAt Acme");
+    const acme = await store.nodes.Company.upsertById("company:acme", {
+      name: "Acme Corp",
+      industry: "Technology",
+      founded: 2010,
+    });
+    console.log("Upserted Acme Corp by ID:", acme.id);
 
-  const knowsResult = await store.edges.knows.getOrCreateByEndpoints(
-    aliceByConstraint.node,
-    bob,
-    { since: "2022-06-01" },
-    { ifExists: "return" },
-  );
-  console.log("getOrCreateByEndpoints (knows):", knowsResult.action, knowsResult.edge.id);
-
-  // Retrieve nodes by ID
-  const retrievedAlice = await store.nodes.Person.getById(aliceByConstraint.node.id);
-  console.log(
-    "\nRetrieved Alice:",
-    retrievedAlice && { name: retrievedAlice.name, email: retrievedAlice.email },
-  );
-
-  // Query using the fluent API - including edge properties
-  const results = await store
-    .query()
-    .from("Person", "p")
-    .traverse("worksAt", "e")
-    .to("Company", "c")
-    .select((ctx) => ({
-      personName: ctx.p.name,
-      companyName: ctx.c.name,
-      role: ctx.e.role,           // Access edge property
-      startDate: ctx.e.startDate, // Access optional edge property
-    }))
-    .execute();
-
-  console.log("\nQuery results (who works where):");
-  for (const row of results) {
-    console.log(
-      `  ${row.personName} works at ${row.companyName} as ${row.role} since ${row.startDate}`,
+    // Get or create by a uniqueness constraint (person_email)
+    const aliceByConstraint = await store.nodes.Person.getOrCreateByConstraint(
+      "person_email",
+      {
+        name: "Alice",
+        email: "alice@example.com",
+        age: 31,
+      },
+      { ifExists: "update" },
     );
-  }
+    console.log(
+      "getOrCreateByConstraint for Alice:",
+      aliceByConstraint.action,
+      aliceByConstraint.node.id,
+    );
+    console.log("Alice's age after update:", aliceByConstraint.node.age);
 
-  // Clean up
-  await backend.close();
+    // The person_email constraint uses caseInsensitive collation, so a
+    // differently-cased email still matches the existing Alice
+    const aliceUppercase = await store.nodes.Person.getOrCreateByConstraint(
+      "person_email",
+      {
+        name: "Alice",
+        email: "ALICE@EXAMPLE.COM",
+      },
+    );
+    console.log(
+      "getOrCreateByConstraint with ALICE@EXAMPLE.COM:",
+      aliceUppercase.action,
+      aliceUppercase.node.name,
+    );
+
+    // Create edges by passing nodes directly
+    await store.edges.worksAt.create(aliceByConstraint.node, acme, {
+      role: "Engineer",
+      startDate: "2023-01-15",
+    });
+    console.log("Created edge: Alice worksAt Acme");
+
+    const knowsResult = await store.edges.knows.getOrCreateByEndpoints(
+      aliceByConstraint.node,
+      bob,
+      { since: "2022-06-01" },
+      { ifExists: "return" },
+    );
+    console.log("getOrCreateByEndpoints (knows):", knowsResult.action, knowsResult.edge.id);
+
+    // Retrieve nodes by ID
+    const retrievedAlice = await store.nodes.Person.getById(aliceByConstraint.node.id);
+    console.log(
+      "\nRetrieved Alice:",
+      retrievedAlice && { name: retrievedAlice.name, email: retrievedAlice.email },
+    );
+
+    // Query using the fluent API - including edge properties
+    const results = await store
+      .query()
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .to("Company", "c")
+      .select((ctx) => ({
+        personName: ctx.p.name,
+        companyName: ctx.c.name,
+        role: ctx.e.role,           // Access edge property
+        startDate: ctx.e.startDate, // Access optional edge property
+      }))
+      .execute();
+
+    console.log("\nQuery results (who works where):");
+    for (const row of results) {
+      console.log(
+        `  ${row.personName} works at ${row.companyName} as ${row.role} since ${row.startDate}`,
+      );
+    }
+  } finally {
+    await backend.close();
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

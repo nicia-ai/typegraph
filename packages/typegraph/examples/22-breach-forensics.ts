@@ -18,8 +18,6 @@
  * the breach instant, and what did they reach?" Run with:
  *   npx tsx examples/22-breach-forensics.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineEdge,
@@ -28,6 +26,8 @@ import {
   type RecordedStoreView,
   type Store,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
 
 // ============================================================
@@ -94,7 +94,7 @@ async function exposedResources(
     .whereNode("r", (r) => r.id.in(resourceIds))
     .select((ctx) => ({ name: ctx.r.name, sensitivity: ctx.r.sensitivity }))
     .execute();
-  return [...resources].sort((a, b) => a.name.localeCompare(b.name));
+  return [...resources].toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 const EXPOSED_LEVELS = new Set(["high", "critical"]);
@@ -139,7 +139,7 @@ async function runForensics(store: Store<typeof graph>): Promise<void> {
     { name: "ci-secrets", sensitivity: "medium" },
     eff,
   );
-  const prodDb = await store.nodes.Resource.create(
+  const productionDb = await store.nodes.Resource.create(
     { name: "prod-db", sensitivity: "high" },
     eff,
   );
@@ -150,7 +150,7 @@ async function runForensics(store: Store<typeof graph>): Promise<void> {
 
   await store.edges.assumes.create(account, deployer, {}, eff);
   await store.edges.grants.create(deployer, ciSecrets, {}, eff);
-  await store.edges.grants.create(admin, prodDb, {}, eff);
+  await store.edges.grants.create(admin, productionDb, {}, eff);
   await store.edges.grants.create(admin, pii, {}, eff);
   // The dangerous grant: a contractor's deploy role may escalate to admin —
   // but only during the March maintenance window.
@@ -162,7 +162,7 @@ async function runForensics(store: Store<typeof graph>): Promise<void> {
   );
 
   const nodeName = new Map<string, string>(
-    [account, deployer, admin, ciSecrets, prodDb, pii].map(
+    [account, deployer, admin, ciSecrets, productionDb, pii].map(
       (node) => [node.id, node.name] as [string, string],
     ),
   );
@@ -266,7 +266,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

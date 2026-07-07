@@ -30,8 +30,6 @@
  * Run with:
  *   npx tsx examples/26-store-views.ts
  */
-import { z } from "zod";
-
 import {
   ConfigurationError,
   createStoreWithSchema,
@@ -39,6 +37,8 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -163,7 +163,8 @@ export async function main(): Promise<void> {
 
     await store.nodes.Document.delete(onboarding.id); // soft delete
 
-    const liveTitles = (await store.nodes.Document.find())
+    const liveDocuments = await store.nodes.Document.find();
+    const liveTitles = liveDocuments
       .map((document) => document.title)
       .toSorted((a, b) => a.localeCompare(b));
     console.log(`\n  App (live store, current mode): ${liveTitles.join(", ")}`);
@@ -176,7 +177,8 @@ export async function main(): Promise<void> {
     );
 
     const moderation = store.view({ mode: "includeTombstones" });
-    const everything = (await moderation.nodes.Document.find())
+    const moderationDocuments = await moderation.nodes.Document.find();
+    const everything = moderationDocuments
       .map((document) => document.title)
       .toSorted((a, b) => a.localeCompare(b));
     const ghost = await moderation.nodes.Document.getById(onboarding.id);
@@ -298,7 +300,8 @@ export async function main(): Promise<void> {
       { validTo: new Date().toISOString() }, // ended just now
     );
 
-    const reportTitles = (await report.nodes.Document.find())
+    const reportDocuments = await report.nodes.Document.find();
+    const reportTitles = reportDocuments
       .map((document) => document.title)
       .toSorted((a, b) => a.localeCompare(b));
     console.log(`\n  ${"".padEnd(24)}snapshot view        live store`);
@@ -366,7 +369,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

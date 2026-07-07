@@ -27,11 +27,11 @@ npx tsx examples/<example-name>.ts
 
 | Example | Description |
 |---------|-------------|
-| [03-subclass-hierarchy.ts](./03-subclass-hierarchy.ts) | Type inheritance with `subClassOf` |
+| [03-subclass-hierarchy.ts](./03-subclass-hierarchy.ts) | Type hierarchies with `subClassOf`: shared base schemas, polymorphic edge endpoints, `includeSubClasses` query expansion (and what it excludes), and registry introspection |
 | [04-disjoint-constraints.ts](./04-disjoint-constraints.ts) | Mutual exclusion with `disjointWith` |
 | [05-edge-implications.ts](./05-edge-implications.ts) | Edge hierarchies with `implies` |
 | [06-inverse-edges.ts](./06-inverse-edges.ts) | Bidirectional relationships with `inverseOf` |
-| [08-custom-ontology.ts](./08-custom-ontology.ts) | Advanced ontology features and meta-edges |
+| [08-custom-ontology.ts](./08-custom-ontology.ts) | The core meta-edges working together (`broader`, `equivalentTo`, `disjointWith`, `partOf`, `inverseOf`, `implies`) plus custom `metaEdge()` relations — persisted, introspectable, and serialized, with custom semantics interpreted by your application |
 
 ### Data Management
 
@@ -43,14 +43,17 @@ npx tsx examples/<example-name>.ts
 | [17-bulk-find-by-index.ts](./17-bulk-find-by-index.ts) | Batched candidate lookup by declared index for import reconciliation and dedup, with null-safe matching and `limitPerInput` |
 | [18-fhir-graph-merge.ts](./18-fhir-graph-merge.ts) | Branch and merge overlapping FHIR-style records into a canonical patient care graph with conflict and provenance reporting |
 | [19-incremental-merge.ts](./19-incremental-merge.ts) | Incrementally ingest a new source into a live graph with `mergeIncremental()` — recall an already-committed entity by its unique key (no duplicate), flag the conflict, and persist queryable provenance |
+| [24-bulk-writes.ts](./24-bulk-writes.ts) | High-throughput sync with `bulkCreate`, `bulkInsert`, `bulkUpsertById`, and `bulkDelete` — created-vs-updated tracking, atomic failure semantics, and a per-row-loop timing comparison |
+| [25-transactions.ts](./25-transactions.ts) | Atomic multi-write operations with `store.transaction()`: commit-or-rollback guarantees, rollback proof, and joining a caller-owned transaction via `withTransaction()` |
 
-### Time Travel & Bitemporal
+### Time Travel, Views & Bitemporal
 
 | Example | Description |
 |---------|-------------|
 | [20-bitemporal-time-travel.ts](./20-bitemporal-time-travel.ts) | Valid time (`store.asOf`) + recorded time (`store.asOfRecorded`, `history: true`): corrections, effective dating, and the bitemporal 2×2 — what TypeGraph captured as true at a recorded instant |
 | [21-agent-decision-replay.ts](./21-agent-decision-replay.ts) | Reconstruct the exact knowledge graph an AI agent saw at decision time and replay the *same* `query()` / `degree()` over it — point-in-time-correct reasoning for audit, eval, and debugging |
-| [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: pin an access graph to the breach instant and run `reachable()` to recover the true blast radius — including the over-permissive edge that was deleted afterward |
+| [22-breach-forensics.ts](./22-breach-forensics.ts) | Bitemporal + graph: valid-time-windowed grants (`validFrom`/`validTo`), composed pins (`store.asOf(breachAt).asOfRecorded(alertAnchor)`), `reachable()` for the true blast radius, and a pinned `shortestPath()` that names the attack path incident response later deleted |
+| [26-store-views.ts](./26-store-views.ts) | Read lenses over one graph: view modes (current / includeTombstones / includeEnded), asOf-pinned edge reads, consistent snapshots, and the read-only refusal contract |
 
 ### Provenance & Retraction
 
@@ -58,11 +61,11 @@ npx tsx examples/<example-name>.ts
 |---------|-------------|
 | [23-provenance-retraction.ts](./23-provenance-retraction.ts) | Retract bad scanner/vendor sources, keep facts with alternate support, close unsupported terminal facts, and replay the before/after belief state with recorded time |
 
-Docs walkthroughs:
+Docs walkthroughs for the temporal examples (20–23):
 [Bitemporal Time Travel](https://typegraph.dev/examples/bitemporal-time-travel)
 · [Agent Decision Replay](https://typegraph.dev/examples/agent-decision-replay)
-· [Provenance Retraction](https://typegraph.dev/examples/provenance-retraction)
 · [Breach Forensics](https://typegraph.dev/examples/breach-forensics)
+· [Provenance Retraction](https://typegraph.dev/examples/provenance-retraction)
 
 ### Backend Configuration
 
@@ -81,7 +84,7 @@ the only diff from example 10 is the import line and connection setup.
 | Example | Description |
 |---------|-------------|
 | [11-semantic-search.ts](./11-semantic-search.ts) | Vector embeddings and similarity search |
-| [12-knowledge-graph-rag.ts](./12-knowledge-graph-rag.ts) | Knowledge graph patterns for RAG applications |
+| [12-knowledge-graph-rag.ts](./12-knowledge-graph-rag.ts) | What graph structure adds to RAG beyond vector similarity: entity linking, multi-hop traversal, context window expansion via chunk chains, and hybrid vector + graph retrieval |
 | [14-research-copilot.ts](./14-research-copilot.ts) | End-to-end showcase: semantic search + ontology-expanded topics + all five Tier 1 graph algorithms over a citation graph |
 | [15-fulltext-hybrid-search.ts](./15-fulltext-hybrid-search.ts) | BM25 fulltext + hybrid (vector + fulltext) retrieval with RRF, query modes, and index rebuild |
 
@@ -150,14 +153,18 @@ Each example follows a consistent pattern:
 4. Understand data lifecycle with **07-delete-behaviors**
 5. Learn efficient data access with **09-pagination-streaming**
 6. Learn aggregate queries with **13-aggregates**
-7. Reconcile imports and find dedup candidates with **17-bulk-find-by-index**
-8. Merge independently edited graph branches with **18-fhir-graph-merge**, then
+7. Make multi-write invariants atomic with **25-transactions**
+8. Move high-volume ingestion to **24-bulk-writes**, and reconcile imports
+   and find dedup candidates with **17-bulk-find-by-index**
+9. Merge independently edited graph branches with **18-fhir-graph-merge**, then
    ingest into a live graph in waves with **19-incremental-merge**
-9. For production, see **10-postgresql** for backend configuration
-10. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
-11. For end-to-end application demos, see **14-research-copilot**
-12. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
+10. For production, see **10-postgresql** for backend configuration
+11. For AI/ML applications, see **11-semantic-search** and **12-knowledge-graph-rag**
+12. For end-to-end application demos, see **14-research-copilot**
+13. For read lenses over one graph — view modes, pinned reads, consistent
+    snapshots — see **26-store-views**
+14. For time travel and bitemporal history, start with **20-bitemporal-time-travel**,
     then see **21-agent-decision-replay** (reconstruct what an agent saw) and
     **22-breach-forensics** (bitemporal reachability)
-13. For source lineage and belief transitions, run
+15. For source lineage and belief transitions, run
     **23-provenance-retraction**

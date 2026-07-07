@@ -64,16 +64,16 @@ function tokenize(text: string): string[] {
 
 /** Deterministic FNV-1a hash, so a given word always maps to the same dimension. */
 function hashWord(word: string): number {
-  let hash = 2166136261;
+  let hash = 2_166_136_261;
   for (let index = 0; index < word.length; index += 1) {
-    hash ^= word.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+    hash ^= word.codePointAt(index) ?? 0;
+    hash = Math.imul(hash, 16_777_619);
   }
   return hash >>> 0;
 }
 
 export function mockTextEmbedding(text: string, dimensions: number): number[] {
-  const vector = new Array<number>(dimensions).fill(0);
+  const vector = Array.from({ length: dimensions }, () => 0);
   for (const token of tokenize(text)) {
     const dimension = hashWord(token) % dimensions;
     vector[dimension] = (vector[dimension] ?? 0) + 1;
@@ -98,9 +98,9 @@ export function cosineSimilarity(
   let dotProduct = 0;
   let magnitudeA = 0;
   let magnitudeB = 0;
-  for (let index = 0; index < a.length; index += 1) {
-    dotProduct += (a[index] ?? 0) * (b[index] ?? 0);
-    magnitudeA += (a[index] ?? 0) ** 2;
+  for (const [index, element] of a.entries()) {
+    dotProduct += element * (b[index] ?? 0);
+    magnitudeA += element ** 2;
     magnitudeB += (b[index] ?? 0) ** 2;
   }
   return dotProduct / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));

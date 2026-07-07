@@ -9,30 +9,30 @@
  * Run with:
  *   npx tsx examples/18-fhir-graph-merge.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
-  searchable,
   type GraphBackend,
   type Node,
+  searchable,
   type Store,
 } from "@nicia-ai/typegraph";
 import {
   asBranchId,
   branch,
-  isOk,
-  merge,
-  unwrap,
   type GraphBranch,
+  isOk,
   type MakeBackend,
+  merge,
   type MergeOptions,
   type MergeReport,
   type SimilarityStrategy,
+  unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -168,7 +168,7 @@ const mergeOptions: MergeOptions<CareGraph> = {
 async function createBranch(
   base: CareStore,
   makeBackend: MakeBackend,
-  id: typeof EHR_BRANCH | typeof CLAIMS_BRANCH,
+  id: typeof EHR_BRANCH  ,
 ): Promise<GraphBranch<CareGraph>> {
   return unwrap(await branch(base, makeBackend, { id }));
 }
@@ -386,7 +386,7 @@ async function careContextFor(
     .map(
       (edge) => displays.get(edge.fromId) ?? `${edge.fromKind} ${edge.fromId}`,
     )
-    .sort((left, right) => compareStrings(left, right));
+    .toSorted((left, right) => compareStrings(left, right));
 }
 
 /**
@@ -402,7 +402,7 @@ async function printResolutions(
     patientNamesById.set(patient.id, patient.name);
   }
   console.log(`  entity resolutions (${report.resolutions.length}):`);
-  const resolutions = [...report.resolutions].sort((left, right) =>
+  const resolutions = [...report.resolutions].toSorted((left, right) =>
     compareStrings(left.canonicalId, right.canonicalId),
   );
   for (const resolution of resolutions) {
@@ -453,10 +453,10 @@ async function main(): Promise<void> {
   // Every backend this example opens — directly or through `branch()`'s factory —
   // is tracked here and closed in the finally below.
   const openedBackends: GraphBackend[] = [];
-  async function makeBackend(): Promise<GraphBackend> {
+  function makeBackend(): Promise<GraphBackend> {
     const backend = createExampleBackend();
     openedBackends.push(backend);
-    return backend;
+    return Promise.resolve(backend);
   }
 
   try {
@@ -470,15 +470,12 @@ async function main(): Promise<void> {
 
     console.log("=== FHIR Graph Merge ===\n");
     console.log("Before merge:");
-    console.log("  base patients:", (await base.nodes.Patient.find()).length);
-    console.log(
-      "  EHR branch patients:",
-      (await ehr.store.nodes.Patient.find()).length,
-    );
-    console.log(
-      "  claims branch patients:",
-      (await claims.store.nodes.Patient.find()).length,
-    );
+    const basePatients = await base.nodes.Patient.find();
+    const ehrPatients = await ehr.store.nodes.Patient.find();
+    const claimsPatients = await claims.store.nodes.Patient.find();
+    console.log("  base patients:", basePatients.length);
+    console.log("  EHR branch patients:", ehrPatients.length);
+    console.log("  claims branch patients:", claimsPatients.length);
 
     const result = await merge(base, [ehr, claims], mergeOptions);
     if (!isOk(result)) {
@@ -497,7 +494,8 @@ async function main(): Promise<void> {
     // MRN (exact identity), Mohammed/Mohamed by fulltext name similarity. The care
     // context below is read by following `forPatient` edges INTO each survivor, so
     // it proves both branches' edges were repointed onto the canonical patient.
-    const patients = (await base.nodes.Patient.find()).sort((left, right) =>
+    const mergedPatients = await base.nodes.Patient.find();
+    const patients = mergedPatients.toSorted((left, right) =>
       compareStrings(left.name, right.name),
     );
     const displays = await resourceDisplays(base);
@@ -514,7 +512,7 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

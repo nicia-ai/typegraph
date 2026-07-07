@@ -12,14 +12,12 @@
  * Run with:
  *   npx tsx examples/19-incremental-merge.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  searchable,
   type GraphBackend,
+  searchable,
   type Store,
 } from "@nicia-ai/typegraph";
 import {
@@ -27,11 +25,12 @@ import {
   branch,
   isOk,
   mergeIncremental,
+  type MergeIncrementalArgs,
   openProvenanceStore,
   readProvenance,
   unwrap,
-  type MergeIncrementalArgs,
 } from "@nicia-ai/typegraph/graph-merge";
+import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";
 
@@ -83,17 +82,17 @@ async function listCompanies(store: KbStore): Promise<readonly string[]> {
   const companies = await store.nodes.Company.find();
   return companies
     .map((company) => `${company.name} (${company.domain})`)
-    .sort((left, right) => compareStrings(left, right));
+    .toSorted((left, right) => compareStrings(left, right));
 }
 
 async function main(): Promise<void> {
   // Every backend this example opens — directly or through `branch()`'s factory —
   // is tracked here and closed in the finally below.
   const openedBackends: GraphBackend[] = [];
-  async function makeBackend(): Promise<GraphBackend> {
+  function makeBackend(): Promise<GraphBackend> {
     const backend = createExampleBackend();
     openedBackends.push(backend);
-    return backend;
+    return Promise.resolve(backend);
   }
 
   try {
@@ -174,7 +173,7 @@ async function main(): Promise<void> {
     }
     const report = result.data;
 
-    console.log("Target after: ", await listCompanies(target));
+    console.log("Target after:", await listCompanies(target));
     console.log(
       `\nNo duplicate was created: the provider's "ACME Corporation" merged onto`,
     );
@@ -246,7 +245,7 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

@@ -10,8 +10,6 @@
  * Run with:
  *   npx tsx examples/12-knowledge-graph-rag.ts
  */
-import { z } from "zod";
-
 import {
   createStore,
   defineEdge,
@@ -20,6 +18,8 @@ import {
   embedding,
   inverseOf,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend, mockTextEmbedding } from "./_helpers";
 
 // ============================================================
@@ -53,7 +53,7 @@ const Entity = defineNode("Entity", {
 
 const containsChunk = defineEdge("containsChunk");
 const nextChunk = defineEdge("nextChunk");
-const prevChunk = defineEdge("prevChunk");
+const previousChunk = defineEdge("prevChunk");
 const mentions = defineEdge("mentions");
 const relatesTo = defineEdge("relatesTo", {
   schema: z.object({ relationship: z.string() }),
@@ -79,11 +79,11 @@ const graph = defineGraph({
   edges: {
     containsChunk: { type: containsChunk, from: [Document], to: [Chunk] },
     nextChunk: { type: nextChunk, from: [Chunk], to: [Chunk] },
-    prevChunk: { type: prevChunk, from: [Chunk], to: [Chunk] },
+    prevChunk: { type: previousChunk, from: [Chunk], to: [Chunk] },
     mentions: { type: mentions, from: [Chunk], to: [Entity] },
     relatesTo: { type: relatesTo, from: [Entity], to: [Entity] },
   },
-  ontology: [inverseOf(nextChunk, prevChunk)],
+  ontology: [inverseOf(nextChunk, previousChunk)],
 });
 
 // ============================================================
@@ -104,7 +104,7 @@ export async function main() {
     console.log("--- Seeding Data ---\n");
 
     // Document 1: About OpenAI
-    const doc1 = await store.nodes.Document.create({
+    const document1 = await store.nodes.Document.create({
       title: "OpenAI History",
       source: "wikipedia.org/openai",
     });
@@ -115,28 +115,28 @@ export async function main() {
       "OpenAI released GPT-4 in March 2023.",
     ];
 
-    let prevChunkNode:
+    let previousChunkNode:
       Awaited<ReturnType<typeof store.nodes.Chunk.create>> | undefined;
-    const doc1Chunks = [];
+    const document1Chunks = [];
 
-    for (const [i, text] of chunks1.entries()) {
+    for (const [index, text] of chunks1.entries()) {
       const chunk = await store.nodes.Chunk.create({
         text,
         embedding: mockTextEmbedding(text, EMBEDDING_DIMENSIONS),
-        position: i,
+        position: index,
       });
-      doc1Chunks.push(chunk);
-      await store.edges.containsChunk.create(doc1, chunk, {});
-      if (prevChunkNode) {
+      document1Chunks.push(chunk);
+      await store.edges.containsChunk.create(document1, chunk, {});
+      if (previousChunkNode) {
         // Store only nextChunk — the inverseOf ontology lets .traverse("prevChunk")
         // follow stored nextChunk edges automatically.
-        await store.edges.nextChunk.create(prevChunkNode, chunk, {});
+        await store.edges.nextChunk.create(previousChunkNode, chunk, {});
       }
-      prevChunkNode = chunk;
+      previousChunkNode = chunk;
     }
 
     // Document 2: About Tesla
-    const doc2 = await store.nodes.Document.create({
+    const document2 = await store.nodes.Document.create({
       title: "Tesla Overview",
       source: "wikipedia.org/tesla",
     });
@@ -147,21 +147,21 @@ export async function main() {
       "Tesla produces electric vehicles and energy storage systems.",
     ];
 
-    prevChunkNode = undefined;
-    const doc2Chunks = [];
+    previousChunkNode = undefined;
+    const document2Chunks = [];
 
-    for (const [i, text] of chunks2.entries()) {
+    for (const [index, text] of chunks2.entries()) {
       const chunk = await store.nodes.Chunk.create({
         text,
         embedding: mockTextEmbedding(text, EMBEDDING_DIMENSIONS),
-        position: i,
+        position: index,
       });
-      doc2Chunks.push(chunk);
-      await store.edges.containsChunk.create(doc2, chunk, {});
-      if (prevChunkNode) {
-        await store.edges.nextChunk.create(prevChunkNode, chunk, {});
+      document2Chunks.push(chunk);
+      await store.edges.containsChunk.create(document2, chunk, {});
+      if (previousChunkNode) {
+        await store.edges.nextChunk.create(previousChunkNode, chunk, {});
       }
-      prevChunkNode = chunk;
+      previousChunkNode = chunk;
     }
 
     // Use getOrCreateByConstraint so re-running ingestion on overlapping
@@ -190,17 +190,17 @@ export async function main() {
     const gpt4 = await ensureEntity("GPT-4", "concept");
 
     // Link chunks to entities (mentions)
-    await store.edges.mentions.create(doc1Chunks[0]!, samAltman, {});
-    await store.edges.mentions.create(doc1Chunks[0]!, openai, {});
-    await store.edges.mentions.create(doc1Chunks[1]!, samAltman, {});
-    await store.edges.mentions.create(doc1Chunks[1]!, openai, {});
-    await store.edges.mentions.create(doc1Chunks[2]!, openai, {});
-    await store.edges.mentions.create(doc1Chunks[2]!, gpt4, {});
+    await store.edges.mentions.create(document1Chunks[0]!, samAltman, {});
+    await store.edges.mentions.create(document1Chunks[0]!, openai, {});
+    await store.edges.mentions.create(document1Chunks[1]!, samAltman, {});
+    await store.edges.mentions.create(document1Chunks[1]!, openai, {});
+    await store.edges.mentions.create(document1Chunks[2]!, openai, {});
+    await store.edges.mentions.create(document1Chunks[2]!, gpt4, {});
 
-    await store.edges.mentions.create(doc2Chunks[0]!, tesla, {});
-    await store.edges.mentions.create(doc2Chunks[1]!, elonMusk, {});
-    await store.edges.mentions.create(doc2Chunks[1]!, tesla, {});
-    await store.edges.mentions.create(doc2Chunks[2]!, tesla, {});
+    await store.edges.mentions.create(document2Chunks[0]!, tesla, {});
+    await store.edges.mentions.create(document2Chunks[1]!, elonMusk, {});
+    await store.edges.mentions.create(document2Chunks[1]!, tesla, {});
+    await store.edges.mentions.create(document2Chunks[2]!, tesla, {});
 
     // Entity relationships
     await store.edges.relatesTo.create(samAltman, openai, {
@@ -225,7 +225,7 @@ export async function main() {
     const samAltmanChunks = await store
       .query()
       .from("Entity", "e")
-      .whereNode("e", (e) => e.name.eq("Sam Altman"))
+      .whereNode("e", (entity) => entity.name.eq("Sam Altman"))
       .traverse("mentions", "m", { direction: "in" })
       .to("Chunk", "c")
       .select((ctx) => ctx.c.text)
@@ -245,7 +245,7 @@ export async function main() {
     const relatedToPersons = await store
       .query()
       .from("Entity", "e")
-      .whereNode("e", (e) => e.type.eq("person"))
+      .whereNode("e", (entity) => entity.type.eq("person"))
       .traverse("relatesTo", "r")
       .to("Entity", "target")
       .select((ctx) => ({
@@ -254,8 +254,8 @@ export async function main() {
       }))
       .execute();
 
-    for (const rel of relatedToPersons) {
-      console.log(`  ${rel.person} --> ${rel.target}`);
+    for (const relation of relatedToPersons) {
+      console.log(`  ${relation.person} --> ${relation.target}`);
     }
 
     // ----------------------------------------------------------
@@ -265,7 +265,7 @@ export async function main() {
     console.log("\n--- Pattern 3: Context Window Expansion ---");
     console.log("Get chunk with surrounding context\n");
 
-    const middleChunk = doc1Chunks[1]!;
+    const middleChunk = document1Chunks[1]!;
 
     // Get previous chunk
     const before = await store
@@ -333,7 +333,7 @@ export async function main() {
       {
         text: string;
         source: string;
-        entities: Array<{ name: string; type: string }>;
+        entities: { name: string; type: string }[];
       }
     >();
     for (const row of hybridResults) {
@@ -353,7 +353,7 @@ export async function main() {
     for (const [, chunk] of byChunk) {
       console.log(`  • [${chunk.source}] "${chunk.text.slice(0, 40)}..."`);
       console.log(
-        `    Entities: [${chunk.entities.map((e) => e.name).join(", ")}]`,
+        `    Entities: [${chunk.entities.map((entity) => entity.name).join(", ")}]`,
       );
     }
 
@@ -378,7 +378,7 @@ export async function main() {
     const entityRelations = await store
       .query()
       .from("Entity", "e")
-      .whereNode("e", (e) => e.name.eq("Sam Altman"))
+      .whereNode("e", (entity) => entity.name.eq("Sam Altman"))
       .traverse("relatesTo", "r")
       .to("Entity", "target")
       .select((ctx) => ({
@@ -394,8 +394,8 @@ export async function main() {
     }
 
     console.log("## Entity Relationships\n");
-    for (const rel of entityRelations) {
-      console.log(`- ${rel.from} → ${rel.to}`);
+    for (const relation of entityRelations) {
+      console.log(`- ${relation.from} → ${relation.to}`);
     }
 
     // ----------------------------------------------------------
@@ -440,7 +440,7 @@ export async function main() {
     // Only nextChunk edges are stored; every prevChunk hop below is resolved
     // through the inverseOf ontology. Repeating the single-hop traversal walks
     // the whole chain back to the first chunk.
-    const lastChunk = doc1Chunks[2]!;
+    const lastChunk = document1Chunks[2]!;
     console.log(`  start: "${lastChunk.text}"`);
 
     let cursorId = lastChunk.id;
@@ -466,7 +466,7 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

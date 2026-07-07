@@ -14,14 +14,10 @@
  *   POSTGRES_URL=postgresql://user:pass@localhost:5432/typegraph_example \
  *   npx tsx examples/10-postgresql.ts
  */
-import { z } from "zod";
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-
 import {
   createStore,
-  defineGraph,
   defineEdge,
+  defineGraph,
   defineNode,
   subClassOf,
 } from "@nicia-ai/typegraph";
@@ -29,6 +25,9 @@ import {
   createPostgresBackend,
   generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/postgres";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import { z } from "zod";
 
 // ============================================================
 // Schema Definition
@@ -43,7 +42,7 @@ const Entity = defineNode("Entity", {
 const Person = defineNode("Person", {
   schema: z.object({
     name: z.string(),
-    email: z.string().email(),
+    email: z.email(),
     metadata: z
       .object({
         preferences: z.record(z.string(), z.unknown()).optional(),
@@ -104,9 +103,13 @@ export async function main() {
   const pool = new Pool({
     connectionString,
     max: 10,
-    idleTimeoutMillis: 30000,
+    idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5000,
   });
+
+  // Create Drizzle instance and backend (lazy — no connection is made yet)
+  const db = drizzle(pool);
+  const backend = createPostgresBackend(db);
 
   try {
     // Test connection
@@ -118,10 +121,6 @@ export async function main() {
     const migrationSQL = generatePostgresMigrationSQL();
     await pool.query(migrationSQL);
     console.log("Migrations complete!\n");
-
-    // Create Drizzle instance and backend
-    const db = drizzle(pool);
-    const backend = createPostgresBackend(db);
 
     // Create store
     const store = createStore(graph, backend);
@@ -288,14 +287,15 @@ export async function main() {
       throw error;
     }
   } finally {
-    // Close connection pool
+    // Close the backend, then the connection pool it wraps
+    await backend.close();
     await pool.end();
     console.log("\nConnection pool closed.");
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

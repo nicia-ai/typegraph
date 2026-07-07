@@ -13,8 +13,6 @@
  * Run with:
  *   npx tsx examples/03-subclass-hierarchy.ts
  */
-import { z } from "zod";
-
 import {
   createStore,
   defineEdge,
@@ -22,6 +20,8 @@ import {
   defineNode,
   subClassOf,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -171,7 +171,7 @@ export async function main(): Promise<void> {
     const theOffice = await store.nodes.TVShow.create({
       title: "The Office",
       releaseYear: 2005,
-      rating: 9.0,
+      rating: 9,
       seasons: 9,
       episodeCount: 201,
     });
@@ -230,8 +230,8 @@ export async function main(): Promise<void> {
     }
 
     console.log("\nExpanding 'Documentary' includes:");
-    const docExpanded = registry.expandSubClasses("Documentary");
-    for (const kind of docExpanded) {
+    const documentExpanded = registry.expandSubClasses("Documentary");
+    for (const kind of documentExpanded) {
       console.log(`  - ${kind}`);
     }
 
@@ -254,7 +254,7 @@ export async function main(): Promise<void> {
       .execute();
 
     for (const row of allWatched) {
-      console.log(`  ${row.person} watched "${row.title}" (${row.kind})`);
+      console.log(`  ${row.person} watched "${String(row.title)}" (${row.kind})`);
     }
     console.log(
       "  ^ All four items, including both TVShows — Media expands to\n" +
@@ -278,7 +278,7 @@ export async function main(): Promise<void> {
       .execute();
 
     for (const row of moviesWatched) {
-      console.log(`  ${row.person} watched "${row.title}" (${row.kind})`);
+      console.log(`  ${row.person} watched "${String(row.title)}" (${row.kind})`);
     }
     console.log(
       '  ^ "Breaking Bad" and "The Office" are excluded: TVShow is a\n' +
@@ -345,7 +345,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

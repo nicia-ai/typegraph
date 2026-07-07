@@ -23,8 +23,6 @@
  * Run with:
  *   npx tsx examples/23-provenance-retraction.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineEdge,
@@ -38,6 +36,7 @@ import {
   type RetractionCapability,
   type RetractionReport,
 } from "@nicia-ai/typegraph/provenance";
+import { z } from "zod";
 
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
 
@@ -127,7 +126,7 @@ type ExampleProvenance = RetractionCapability<
   "Justification"
 >;
 
-function formatFactRefs(
+function formatFactReferences(
   facts: readonly ProvenanceFactRef<typeof graph, FactKind>[],
 ): string {
   if (facts.length === 0) return "(none)";
@@ -149,9 +148,9 @@ function formatReport(report: ExampleReport): string {
         .toSorted((left, right) => left.localeCompare(right))
         .join("; ");
   return [
-    `    died:        ${formatFactRefs(report.died)}`,
+    `    died:        ${formatFactReferences(report.died)}`,
     `    survived:    ${survived}`,
-    `    unaffected:  ${formatFactRefs(report.unaffected)}`,
+    `    unaffected:  ${formatFactReferences(report.unaffected)}`,
   ].join("\n");
 }
 
@@ -165,7 +164,7 @@ async function printHolding(
   label: string,
   provenance: ExampleProvenance,
 ): Promise<void> {
-  console.log(`${label}: ${formatFactRefs(await provenance.holding())}`);
+  console.log(`${label}: ${formatFactReferences(await provenance.holding())}`);
 }
 
 export async function main(): Promise<void> {
@@ -354,7 +353,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

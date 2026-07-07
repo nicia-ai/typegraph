@@ -12,8 +12,6 @@
  * - Aggregations across graph traversals
  * - Ordering and limiting aggregate results (top-N by aggregate)
  */
-import { z } from "zod";
-
 import {
   avg,
   count,
@@ -29,6 +27,8 @@ import {
   min,
   sum,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -117,233 +117,239 @@ export async function main() {
   const backend = createExampleBackend();
   const store = createStore(graph, backend);
 
-  await seedData(store);
+  try {
+    await seedData(store);
 
-  console.log("=== Aggregate Query Examples ===\n");
+    console.log("=== Aggregate Query Examples ===\n");
 
-  // ============================================================
-  // 1. Basic COUNT — books per genre
-  // ============================================================
+    // ============================================================
+    // 1. Basic COUNT — books per genre
+    // ============================================================
 
-  console.log("--- Books per genre (COUNT) ---\n");
+    console.log("--- Books per genre (COUNT) ---\n");
 
-  const booksPerGenre = await store
-    .query()
-    .from("Book", "b")
-    .groupBy("b", "genre")
-    .aggregate({
-      genre: field("b", "genre"),
-      bookCount: count("b"),
-    })
-    .execute();
+    const booksPerGenre = await store
+      .query()
+      .from("Book", "b")
+      .groupBy("b", "genre")
+      .aggregate({
+        genre: field("b", "genre"),
+        bookCount: count("b"),
+      })
+      .execute();
 
-  for (const row of booksPerGenre) {
-    console.log(`  ${row.genre}: ${row.bookCount} books`);
+    for (const row of booksPerGenre) {
+      console.log(`  ${String(row.genre)}: ${row.bookCount} books`);
+    }
+
+    // ============================================================
+    // 2. Multiple aggregates — price statistics per genre
+    // ============================================================
+
+    console.log("\n--- Price statistics per genre (SUM, AVG, MIN, MAX) ---\n");
+
+    const priceStats = await store
+      .query()
+      .from("Book", "b")
+      .groupBy("b", "genre")
+      .aggregate({
+        genre: field("b", "genre"),
+        totalValue: sum("b", "price"),
+        avgPrice: avg("b", "price"),
+        cheapest: min("b", "price"),
+        mostExpensive: max("b", "price"),
+      })
+      .execute();
+
+    for (const row of priceStats) {
+      console.log(`  ${String(row.genre)}:`);
+      console.log(`    Total: $${row.totalValue.toFixed(2)}`);
+      console.log(`    Avg:   $${row.avgPrice.toFixed(2)}`);
+      console.log(`    Range: $${row.cheapest.toFixed(2)} – $${row.mostExpensive.toFixed(2)}`);
+    }
+
+    // ============================================================
+    // 3. countDistinct — unique authors per genre
+    // ============================================================
+
+    console.log("\n--- Unique authors per genre (COUNT DISTINCT) ---\n");
+
+    // countDistinct counts unique node IDs within each group,
+    // useful when joins might produce duplicates
+    const authorsPerGenre = await store
+      .query()
+      .from("Author", "a")
+      .traverse("wrote", "e")
+      .to("Book", "b")
+      .groupBy("b", "genre")
+      .aggregate({
+        genre: field("b", "genre"),
+        totalBooks: count("b"),
+        uniqueAuthors: countDistinct("a"),
+      })
+      .execute();
+
+    for (const row of authorsPerGenre) {
+      const authorLabel = row.uniqueAuthors === 1 ? "author" : "authors";
+      console.log(`  ${String(row.genre)}: ${row.totalBooks} books by ${row.uniqueAuthors} ${authorLabel}`);
+    }
+
+    // ============================================================
+    // 4. Multiple groupBy fields — genre × availability
+    // ============================================================
+
+    console.log("\n--- Books by genre and availability (multiple GROUP BY) ---\n");
+
+    const breakdown = await store
+      .query()
+      .from("Book", "b")
+      .groupBy("b", "genre")
+      .groupBy("b", "inStock")
+      .aggregate({
+        genre: field("b", "genre"),
+        inStock: field("b", "inStock"),
+        bookCount: count("b"),
+      })
+      .execute();
+
+    for (const row of breakdown) {
+      const status = row.inStock ? "in stock" : "out of stock";
+      console.log(`  ${String(row.genre)} (${status}): ${row.bookCount}`);
+    }
+
+    // ============================================================
+    // 5. groupByNode — books per author via traversal
+    // ============================================================
+
+    console.log("\n--- Books per author (groupByNode + traversal) ---\n");
+
+    const booksPerAuthor = await store
+      .query()
+      .from("Author", "a")
+      .traverse("wrote", "e")
+      .to("Book", "b")
+      .groupByNode("a")
+      .aggregate({
+        author: field("a", "name"),
+        bookCount: count("b"),
+        avgRating: avg("b", "rating"),
+      })
+      .execute();
+
+    for (const row of booksPerAuthor) {
+      console.log(`  ${String(row.author)}: ${row.bookCount} books (avg rating: ${row.avgRating.toFixed(1)})`);
+    }
+
+    // ============================================================
+    // 6. HAVING — genres with 3+ books
+    // ============================================================
+
+    console.log("\n--- Genres with 3+ books (HAVING) ---\n");
+
+    const popularGenres = await store
+      .query()
+      .from("Book", "b")
+      .groupBy("b", "genre")
+      .having(havingGte(count("b"), 3))
+      .aggregate({
+        genre: field("b", "genre"),
+        bookCount: count("b"),
+      })
+      .execute();
+
+    for (const row of popularGenres) {
+      console.log(`  ${String(row.genre)}: ${row.bookCount} books`);
+    }
+
+    if (popularGenres.length === 0) {
+      console.log("  (no genres matched)");
+    }
+
+    // ============================================================
+    // 7. WHERE + HAVING — in-stock genres worth over $20
+    // ============================================================
+
+    console.log("\n--- In-stock books: genres with total value > $20 (WHERE + HAVING) ---\n");
+
+    const valuableInStock = await store
+      .query()
+      .from("Book", "b")
+      .whereNode("b", (b) => b.inStock.eq(true))
+      .groupBy("b", "genre")
+      .having(havingGt(sum("b", "price"), 20))
+      .aggregate({
+        genre: field("b", "genre"),
+        bookCount: count("b"),
+        totalValue: sum("b", "price"),
+      })
+      .execute();
+
+    for (const row of valuableInStock) {
+      console.log(`  ${String(row.genre)}: ${row.bookCount} books, $${row.totalValue.toFixed(2)} total`);
+    }
+
+    // ============================================================
+    // 8. Traversal aggregates — revenue per publisher
+    // ============================================================
+
+    console.log("\n--- Revenue per publisher (traversal + aggregates) ---\n");
+
+    const publisherRevenue = await store
+      .query()
+      .from("Book", "b")
+      .traverse("publishedBy", "e")
+      .to("Publisher", "p")
+      .groupByNode("p")
+      .aggregate({
+        publisher: field("p", "name"),
+        bookCount: count("b"),
+        totalRevenue: sum("b", "price"),
+        avgPrice: avg("b", "price"),
+        topRating: max("b", "rating"),
+      })
+      .execute();
+
+    for (const row of publisherRevenue) {
+      console.log(`  ${String(row.publisher)}:`);
+      console.log(`    ${row.bookCount} books, $${row.totalRevenue.toFixed(2)} total, avg $${row.avgPrice.toFixed(2)}`);
+      console.log(`    Highest rating: ${row.topRating}`);
+    }
+
+    // ============================================================
+    // 9. Ordering and limiting aggregate results
+    // ============================================================
+
+    console.log("\n--- Top 2 authors by book count (orderBy + limit) ---\n");
+
+    // orderBy accepts grouped fields and aggregate aliases; chained calls
+    // sort by the first key, then the next as a tiebreak
+    const topAuthors = await store
+      .query()
+      .from("Author", "a")
+      .traverse("wrote", "e")
+      .to("Book", "b")
+      .groupByNode("a")
+      .aggregate({
+        author: field("a", "name"),
+        bookCount: count("b"),
+      })
+      .orderBy("bookCount", "desc")
+      .orderBy("author")
+      .limit(2)
+      .execute();
+
+    for (const row of topAuthors) {
+      console.log(`  ${String(row.author)}: ${row.bookCount} books`);
+    }
+
+    console.log("\n=== Aggregate query example complete ===");
+  } finally {
+    await backend.close();
   }
-
-  // ============================================================
-  // 2. Multiple aggregates — price statistics per genre
-  // ============================================================
-
-  console.log("\n--- Price statistics per genre (SUM, AVG, MIN, MAX) ---\n");
-
-  const priceStats = await store
-    .query()
-    .from("Book", "b")
-    .groupBy("b", "genre")
-    .aggregate({
-      genre: field("b", "genre"),
-      totalValue: sum("b", "price"),
-      avgPrice: avg("b", "price"),
-      cheapest: min("b", "price"),
-      mostExpensive: max("b", "price"),
-    })
-    .execute();
-
-  for (const row of priceStats) {
-    console.log(`  ${row.genre}:`);
-    console.log(`    Total: $${row.totalValue.toFixed(2)}`);
-    console.log(`    Avg:   $${row.avgPrice.toFixed(2)}`);
-    console.log(`    Range: $${row.cheapest.toFixed(2)} – $${row.mostExpensive.toFixed(2)}`);
-  }
-
-  // ============================================================
-  // 3. countDistinct — unique authors per genre
-  // ============================================================
-
-  console.log("\n--- Unique authors per genre (COUNT DISTINCT) ---\n");
-
-  // countDistinct counts unique node IDs within each group,
-  // useful when joins might produce duplicates
-  const authorsPerGenre = await store
-    .query()
-    .from("Author", "a")
-    .traverse("wrote", "e")
-    .to("Book", "b")
-    .groupBy("b", "genre")
-    .aggregate({
-      genre: field("b", "genre"),
-      totalBooks: count("b"),
-      uniqueAuthors: countDistinct("a"),
-    })
-    .execute();
-
-  for (const row of authorsPerGenre) {
-    console.log(`  ${row.genre}: ${row.totalBooks} books by ${row.uniqueAuthors} authors`);
-  }
-
-  // ============================================================
-  // 4. Multiple groupBy fields — genre × availability
-  // ============================================================
-
-  console.log("\n--- Books by genre and availability (multiple GROUP BY) ---\n");
-
-  const breakdown = await store
-    .query()
-    .from("Book", "b")
-    .groupBy("b", "genre")
-    .groupBy("b", "inStock")
-    .aggregate({
-      genre: field("b", "genre"),
-      inStock: field("b", "inStock"),
-      bookCount: count("b"),
-    })
-    .execute();
-
-  for (const row of breakdown) {
-    const status = row.inStock ? "in stock" : "out of stock";
-    console.log(`  ${row.genre} (${status}): ${row.bookCount}`);
-  }
-
-  // ============================================================
-  // 5. groupByNode — books per author via traversal
-  // ============================================================
-
-  console.log("\n--- Books per author (groupByNode + traversal) ---\n");
-
-  const booksPerAuthor = await store
-    .query()
-    .from("Author", "a")
-    .traverse("wrote", "e")
-    .to("Book", "b")
-    .groupByNode("a")
-    .aggregate({
-      author: field("a", "name"),
-      bookCount: count("b"),
-      avgRating: avg("b", "rating"),
-    })
-    .execute();
-
-  for (const row of booksPerAuthor) {
-    console.log(`  ${row.author}: ${row.bookCount} books (avg rating: ${row.avgRating.toFixed(1)})`);
-  }
-
-  // ============================================================
-  // 6. HAVING — genres with 3+ books
-  // ============================================================
-
-  console.log("\n--- Genres with 3+ books (HAVING) ---\n");
-
-  const popularGenres = await store
-    .query()
-    .from("Book", "b")
-    .groupBy("b", "genre")
-    .having(havingGte(count("b"), 3))
-    .aggregate({
-      genre: field("b", "genre"),
-      bookCount: count("b"),
-    })
-    .execute();
-
-  for (const row of popularGenres) {
-    console.log(`  ${row.genre}: ${row.bookCount} books`);
-  }
-
-  if (popularGenres.length === 0) {
-    console.log("  (no genres matched)");
-  }
-
-  // ============================================================
-  // 7. WHERE + HAVING — in-stock genres worth over $20
-  // ============================================================
-
-  console.log("\n--- In-stock books: genres with total value > $20 (WHERE + HAVING) ---\n");
-
-  const valuableInStock = await store
-    .query()
-    .from("Book", "b")
-    .whereNode("b", (b) => b.inStock.eq(true))
-    .groupBy("b", "genre")
-    .having(havingGt(sum("b", "price"), 20))
-    .aggregate({
-      genre: field("b", "genre"),
-      bookCount: count("b"),
-      totalValue: sum("b", "price"),
-    })
-    .execute();
-
-  for (const row of valuableInStock) {
-    console.log(`  ${row.genre}: ${row.bookCount} books, $${row.totalValue.toFixed(2)} total`);
-  }
-
-  // ============================================================
-  // 8. Traversal aggregates — revenue per publisher
-  // ============================================================
-
-  console.log("\n--- Revenue per publisher (traversal + aggregates) ---\n");
-
-  const publisherRevenue = await store
-    .query()
-    .from("Book", "b")
-    .traverse("publishedBy", "e")
-    .to("Publisher", "p")
-    .groupByNode("p")
-    .aggregate({
-      publisher: field("p", "name"),
-      bookCount: count("b"),
-      totalRevenue: sum("b", "price"),
-      avgPrice: avg("b", "price"),
-      topRating: max("b", "rating"),
-    })
-    .execute();
-
-  for (const row of publisherRevenue) {
-    console.log(`  ${row.publisher}:`);
-    console.log(`    ${row.bookCount} books, $${row.totalRevenue.toFixed(2)} total, avg $${row.avgPrice.toFixed(2)}`);
-    console.log(`    Highest rating: ${row.topRating}`);
-  }
-
-  // ============================================================
-  // 9. Limit on aggregate results
-  // ============================================================
-
-  console.log("\n--- Top 2 authors by book count (orderBy + limit) ---\n");
-
-  const topAuthors = await store
-    .query()
-    .from("Author", "a")
-    .traverse("wrote", "e")
-    .to("Book", "b")
-    .groupByNode("a")
-    .aggregate({
-      author: field("a", "name"),
-      bookCount: count("b"),
-    })
-    .orderBy("bookCount", "desc")
-    .limit(2)
-    .execute();
-
-  for (const row of topAuthors) {
-    console.log(`  ${row.author}: ${row.bookCount} books`);
-  }
-
-  console.log("\n=== Aggregate query example complete ===");
-
-  await backend.close();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

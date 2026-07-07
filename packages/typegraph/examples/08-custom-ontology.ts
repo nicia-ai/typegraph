@@ -18,8 +18,6 @@
  * Run with:
  *   npx tsx examples/08-custom-ontology.ts
  */
-import { z } from "zod";
-
 import {
   broader,
   createStore,
@@ -30,8 +28,8 @@ import {
   equivalentTo,
   implies,
   inverseOf,
-  metaEdge,
   type MetaEdge,
+  metaEdge,
   narrower,
   type NodeType,
   type OntologyRelation,
@@ -39,6 +37,8 @@ import {
   relatedTo,
   subClassOf,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -446,7 +446,7 @@ export async function main() {
       .select((ctx) => ({ title: ctx.pub.title, kind: ctx.pub.kind }))
       .execute();
     for (const row of publications) {
-      console.log(`  [${row.kind}] "${row.title}"`);
+      console.log(`  [${row.kind}] "${String(row.title)}"`);
     }
 
     // Bound topic filter: only papers tagged with the Deep Learning field.
@@ -462,7 +462,7 @@ export async function main() {
       .select((ctx) => ({ title: ctx.p.title, topic: ctx.t.name }))
       .execute();
     for (const row of dlPapers) {
-      console.log(`  "${row.title}" is about ${row.topic}`);
+      console.log(`  "${row.title}" is about ${String(row.topic)}`);
     }
 
     // SKOS closure feeding a query: publications about AI or any narrower
@@ -477,7 +477,7 @@ export async function main() {
       .select((ctx) => ({ title: ctx.pub.title, field: ctx.t.name }))
       .execute();
     for (const row of aiPublications) {
-      console.log(`  "${row.title}" (via ${row.field})`);
+      console.log(`  "${String(row.title)}" (via ${String(row.field)})`);
     }
 
     // Implication expansion: the published paper has NO explicit cites edge,
@@ -501,7 +501,7 @@ export async function main() {
       .select((ctx) => ({ title: ctx.cited.title }))
       .execute();
     for (const row of impliedCites) {
-      console.log(`  With expand "implying": cites "${row.title}" (via buildsOn)`);
+      console.log(`  With expand "implying": cites "${String(row.title)}" (via buildsOn)`);
     }
 
     // Inverse + implication combined: nothing ever wrote a citedBy edge,
@@ -516,7 +516,7 @@ export async function main() {
       .select((ctx) => ({ title: ctx.citing.title }))
       .execute();
     for (const row of citingPublications) {
-      console.log(`  Cited by "${row.title}"`);
+      console.log(`  Cited by "${String(row.title)}"`);
     }
 
     // --- Custom meta-edges in practice ------------------------------
@@ -646,7 +646,7 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

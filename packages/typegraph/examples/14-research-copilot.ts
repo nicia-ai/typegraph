@@ -25,8 +25,6 @@
  * Run with:
  *   npx tsx examples/14-research-copilot.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineEdge,
@@ -35,6 +33,8 @@ import {
   embedding,
   searchable,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -104,13 +104,13 @@ const graph = defineGraph({
 
 function mockEmbedding(text: string): number[] {
   const dim = 128;
-  const vector = new Array<number>(dim).fill(0);
+  const vector = Array.from({ length: dim }, () => 0);
   const tokens = text.toLowerCase().split(/\W+/).filter(Boolean);
   for (const token of tokens) {
     let hash = 0;
-    for (const char of token) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-    for (let i = 0; i < dim; i++) {
-      vector[i]! += Math.sin(hash * (i + 1)) * 0.25 + Math.cos(hash + i) * 0.25;
+    for (const char of token) hash = Math.imul(hash, 31) + (char.codePointAt(0) ?? 0);
+    for (let index = 0; index < dim; index++) {
+      vector[index]! += Math.sin(hash * (index + 1)) * 0.25 + Math.cos(hash + index) * 0.25;
     }
   }
   const magnitude = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0)) || 1;
@@ -119,7 +119,7 @@ function mockEmbedding(text: string): number[] {
 
 function cosine(a: readonly number[], b: readonly number[]): number {
   let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
+  for (let index = 0; index < a.length; index++) dot += a[index]! * b[index]!;
   return dot; // both vectors are unit-length
 }
 
@@ -511,7 +511,7 @@ export async function main(): Promise<void> {
   // so this runs native vector search (store.search.vector); pgvector / libSQL
   // run the identical call. If no vector engine is present we rank in JS so the
   // example still completes.
-  let ranked: ReadonlyArray<{ paper: PaperNode; similarity: number }>;
+  let ranked: readonly { paper: PaperNode; similarity: number }[];
   if (backend.capabilities.vector?.supported) {
     const hits = await store.search.vector("Paper", {
       fieldPath: "embedding",
@@ -529,7 +529,7 @@ export async function main(): Promise<void> {
         paper,
         similarity: cosine(queryEmbedding, paper.embedding),
       }))
-      .sort((a, b) => b.similarity - a.similarity);
+      .toSorted((a, b) => b.similarity - a.similarity);
   }
 
   console.log("\nTop semantic hits (vector similarity only):");
@@ -799,7 +799,7 @@ export async function main(): Promise<void> {
 
   const topCollaborators = [...collaboratorCounts.entries()]
     .filter(([id]) => !clipAuthorIds.has(id))
-    .sort((a, b) => b[1] - a[1])
+    .toSorted((a, b) => b[1] - a[1])
     .slice(0, 8);
 
   console.log(" Nearby collaborators beyond the original CLIP paper:");
@@ -822,7 +822,7 @@ export async function main(): Promise<void> {
 
   const topPicks = hybridScored
     .slice(0, 5)
-    .sort((a, b) => a.paper.year - b.paper.year);
+    .toSorted((a, b) => a.paper.year - b.paper.year);
 
   // Batch the metadata lookups: one `.in([...])` query per relation for all
   // five picks — the same pattern as the expanded-topic query in [1] —
@@ -889,7 +889,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

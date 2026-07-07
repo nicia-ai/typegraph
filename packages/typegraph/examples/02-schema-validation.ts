@@ -6,15 +6,15 @@
  * - Provide type safety at compile time
  * - Handle validation errors gracefully
  */
-import { z } from "zod";
-
 import {
   createStore,
-  defineGraph,
   defineEdge,
+  defineGraph,
   defineNode,
   ValidationError,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -29,7 +29,7 @@ const User = defineNode("User", {
       .min(3, "Username must be at least 3 characters")
       .max(20, "Username must be at most 20 characters")
       .regex(/^[a-z0-9_]+$/, "Username can only contain lowercase letters, numbers, and underscores"),
-    email: z.string().email("Invalid email format"),
+    email: z.email("Invalid email format"),
     age: z
       .number()
       .int("Age must be an integer")
@@ -61,7 +61,7 @@ const purchased = defineEdge("purchased", {
   schema: z.object({
     quantity: z.number().int().positive("Quantity must be a positive integer"),
     priceAtPurchase: z.number().positive(),
-    purchasedAt: z.string().datetime("Must be ISO datetime"),
+    purchasedAt: z.iso.datetime("Must be ISO datetime"),
   }),
 });
 
@@ -98,132 +98,134 @@ export async function main() {
   const backend = createExampleBackend();
   const store = createStore(graph, backend);
 
-  console.log("=== Schema Validation Examples ===\n");
-
-  // 1. Valid node creation
-  console.log("1. Creating valid user...");
-  const user = await store.nodes.User.create({
-    username: "alice_dev",
-    email: "alice@example.com",
-    age: 28,
-    role: "admin",
-    tags: ["developer", "team-lead"],
-  });
-  console.log("   Created user:", user.username);
-
-  // 2. Invalid username - too short
-  console.log("\n2. Trying invalid username (too short)...");
   try {
-    await store.nodes.User.create({
-      username: "ab", // Too short!
-      email: "ab@example.com",
+    console.log("=== Schema Validation Examples ===\n");
+
+    // 1. Valid node creation
+    console.log("1. Creating valid user...");
+    const user = await store.nodes.User.create({
+      username: "alice_dev",
+      email: "alice@example.com",
+      age: 28,
+      role: "admin",
+      tags: ["developer", "team-lead"],
     });
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      printValidationIssues(error);
-    } else {
-      throw error;
-    }
-  }
+    console.log("   Created user:", user.username);
 
-  // 3. Invalid email format
-  console.log("\n3. Trying invalid email...");
-  try {
-    await store.nodes.User.create({
-      username: "bob_test",
-      email: "not-an-email", // Invalid!
+    // 2. Invalid username - too short
+    console.log("\n2. Trying invalid username (too short)...");
+    try {
+      await store.nodes.User.create({
+        username: "ab", // Too short!
+        email: "ab@example.com",
+      });
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        printValidationIssues(error);
+      } else {
+        throw error;
+      }
+    }
+
+    // 3. Invalid email format
+    console.log("\n3. Trying invalid email...");
+    try {
+      await store.nodes.User.create({
+        username: "bob_test",
+        email: "not-an-email", // Invalid!
+      });
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        printValidationIssues(error);
+      } else {
+        throw error;
+      }
+    }
+
+    // 4. Invalid SKU format
+    console.log("\n4. Trying invalid product SKU...");
+    try {
+      await store.nodes.Product.create({
+        sku: "invalid-sku", // Doesn't match pattern!
+        name: "Widget",
+        price: 9.99,
+        categories: ["widgets"],
+      });
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        printValidationIssues(error);
+      } else {
+        throw error;
+      }
+    }
+
+    // 5. Valid product
+    console.log("\n5. Creating valid product...");
+    const product = await store.nodes.Product.create({
+      sku: "WDG-12345",
+      name: "Super Widget",
+      price: 29.99,
+      currency: "USD",
+      categories: ["widgets", "tools"],
     });
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      printValidationIssues(error);
-    } else {
-      throw error;
+    console.log("   Created product:", product.name);
+
+    // 6. Invalid edge - negative quantity
+    // Note: Edges can be created using either:
+    // - Node objects directly: store.edges.purchased.create(user, product, {...})
+    // - NodeRef objects: store.edges.purchased.create({ kind: "User", id: user.id }, ...)
+    // Both forms are equivalent. NodeRef is useful when you only have the ID.
+    console.log("\n6. Trying invalid purchase (negative quantity)...");
+    try {
+      await store.edges.purchased.create(
+        { kind: "User", id: user.id },
+        { kind: "Product", id: product.id },
+        {
+          quantity: -5, // Invalid!
+          priceAtPurchase: 29.99,
+          purchasedAt: new Date().toISOString(),
+        },
+      );
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        printValidationIssues(error);
+      } else {
+        throw error;
+      }
     }
-  }
 
-  // 4. Invalid SKU format
-  console.log("\n4. Trying invalid product SKU...");
-  try {
-    await store.nodes.Product.create({
-      sku: "invalid-sku", // Doesn't match pattern!
-      name: "Widget",
-      price: 9.99,
-      categories: ["widgets"],
-    });
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      printValidationIssues(error);
-    } else {
-      throw error;
-    }
-  }
-
-  // 5. Valid product
-  console.log("\n5. Creating valid product...");
-  const product = await store.nodes.Product.create({
-    sku: "WDG-12345",
-    name: "Super Widget",
-    price: 29.99,
-    currency: "USD",
-    categories: ["widgets", "tools"],
-  });
-  console.log("   Created product:", product.name);
-
-  // 6. Invalid edge - negative quantity
-  // Note: Edges can be created using either:
-  // - Node objects directly: store.edges.purchased.create(user, product, {...})
-  // - NodeRef objects: store.edges.purchased.create({ kind: "User", id: user.id }, ...)
-  // Both forms are equivalent. NodeRef is useful when you only have the ID.
-  console.log("\n6. Trying invalid purchase (negative quantity)...");
-  try {
-    await store.edges.purchased.create(
+    // 7. Valid edge
+    console.log("\n7. Creating valid purchase...");
+    const purchase = await store.edges.purchased.create(
       { kind: "User", id: user.id },
       { kind: "Product", id: product.id },
       {
-        quantity: -5, // Invalid!
+        quantity: 2,
         priceAtPurchase: 29.99,
         purchasedAt: new Date().toISOString(),
       },
     );
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      printValidationIssues(error);
-    } else {
-      throw error;
-    }
+    console.log("   Created purchase, quantity:", purchase.quantity);
+
+    // 8. Demonstrate default values
+    console.log("\n8. Creating user with defaults...");
+    const guestUser = await store.nodes.User.create({
+      username: "guest_user",
+      email: "guest@example.com",
+      // role defaults to "user"
+      // tags defaults to []
+    });
+    console.log("   User role (defaulted):", guestUser.role);
+    console.log("   User tags (defaulted):", guestUser.tags);
+
+    console.log("\n=== All validation examples complete ===");
+  } finally {
+    await backend.close();
   }
-
-  // 7. Valid edge
-  console.log("\n7. Creating valid purchase...");
-  const purchase = await store.edges.purchased.create(
-    { kind: "User", id: user.id },
-    { kind: "Product", id: product.id },
-    {
-      quantity: 2,
-      priceAtPurchase: 29.99,
-      purchasedAt: new Date().toISOString(),
-    },
-  );
-  console.log("   Created purchase, quantity:", purchase.quantity);
-
-  // 8. Demonstrate default values
-  console.log("\n8. Creating user with defaults...");
-  const guestUser = await store.nodes.User.create({
-    username: "guest_user",
-    email: "guest@example.com",
-    // role defaults to "user"
-    // tags defaults to []
-  });
-  console.log("   User role (defaulted):", guestUser.role);
-  console.log("   User tags (defaulted):", guestUser.tags);
-
-  console.log("\n=== All validation examples complete ===");
-
-  await backend.close();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

@@ -30,9 +30,9 @@
  * Run with:
  *   npx tsx examples/24-bulk-writes.ts
  */
+import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
-import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -311,7 +311,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

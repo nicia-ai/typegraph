@@ -17,8 +17,6 @@
  * Run with:
  *   npx tsx examples/11-semantic-search.ts
  */
-import { z } from "zod";
-
 import {
   createStore,
   defineGraph,
@@ -27,6 +25,8 @@ import {
   getEmbeddingDimensions,
   isEmbeddingSchema,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import {
   cosineSimilarity,
   createExampleBackend,
@@ -101,11 +101,11 @@ export async function main() {
   // rejects wrong lengths and non-numeric elements at write time, and
   // isEmbeddingSchema/getEmbeddingDimensions introspect it (this is how
   // TypeGraph discovers which fields are vector-indexable).
-  const docEmbeddingSchema = embedding(1536);
+  const documentEmbeddingSchema = embedding(1536);
   console.log(
-    `  Is embedding schema: ${isEmbeddingSchema(docEmbeddingSchema)}`,
+    `  Is embedding schema: ${isEmbeddingSchema(documentEmbeddingSchema)}`,
   );
-  console.log(`  Dimensions: ${getEmbeddingDimensions(docEmbeddingSchema)}`);
+  console.log(`  Dimensions: ${getEmbeddingDimensions(documentEmbeddingSchema)}`);
 
   // ============================================================
   // Part 2: Storing Documents with Embeddings
@@ -156,17 +156,17 @@ export async function main() {
 
     // Kept solely for the no-vector-engine fallback in Part 3, which ranks
     // in JS from these created nodes instead of querying the backend.
-    const createdDocs = [];
-    for (const doc of documents) {
+    const createdDocuments = [];
+    for (const document of documents) {
       // Generate embedding from title + content
-      const textForEmbedding = `${doc.title} ${doc.content}`;
+      const textForEmbedding = `${document.title} ${document.content}`;
       const created = await store.nodes.Document.create({
-        ...doc,
+        ...document,
         embedding: mockTextEmbedding(textForEmbedding, 1536),
       });
 
-      createdDocs.push(created);
-      console.log(`  Created: "${doc.title}" (${doc.category})`);
+      createdDocuments.push(created);
+      console.log(`  Created: "${document.title}" (${document.category})`);
     }
 
     // ============================================================
@@ -245,12 +245,12 @@ export async function main() {
     } else {
       // No vector engine loaded — rank in JS so the example still runs.
       console.log("No vector engine loaded; ranking in JS (cosine):\n");
-      const similarities = createdDocs
-        .map((doc) => ({
-          title: doc.title,
-          similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+      const similarities = createdDocuments
+        .map((document) => ({
+          title: document.title,
+          similarity: cosineSimilarity(queryEmbedding, document.embedding),
         }))
-        .sort((a, b) => b.similarity - a.similarity);
+        .toSorted((a, b) => b.similarity - a.similarity);
       for (const result of similarities) {
         console.log(
           `  ${stars(result.similarity).padEnd(5)} ${result.similarity.toFixed(4)} - "${result.title}"`,
@@ -283,7 +283,7 @@ export async function main() {
     console.log("Creating images with CLIP embeddings...\n");
 
     for (const img of images) {
-      const clipEmbedding = mockTextEmbedding(img.description ?? img.url, 512);
+      const clipEmbedding = mockTextEmbedding(img.description, 512);
       await store.nodes.Image.create({
         ...img,
         clipEmbedding,
@@ -387,7 +387,7 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

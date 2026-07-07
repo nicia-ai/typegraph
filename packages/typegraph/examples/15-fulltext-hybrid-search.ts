@@ -26,8 +26,6 @@
  * Run with:
  *   npx tsx examples/15-fulltext-hybrid-search.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineGraph,
@@ -35,6 +33,8 @@ import {
   embedding,
   searchable,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend, mockTextEmbedding } from "./_helpers";
 
 /**
@@ -179,10 +179,10 @@ function renderHit(
   score: number,
   extras?: string,
 ): void {
-  const scoreStr = score.toFixed(4);
-  const extrasStr = extras === undefined ? "" : ` ${extras}`;
+  const scoreString = score.toFixed(4);
+  const extrasString = extras === undefined ? "" : ` ${extras}`;
   console.log(
-    `  ${String(rank).padStart(2)}. [${node.sku}] ${node.name.padEnd(24)} score=${scoreStr}${extrasStr}`,
+    `  ${String(rank).padStart(2)}. [${node.sku}] ${node.name.padEnd(24)} score=${scoreString}${extrasString}`,
   );
 }
 
@@ -284,7 +284,7 @@ export async function main(): Promise<void> {
       limit: 5,
       mode: "websearch",
     });
-    console.log(`Query: "\\"ski goggles\\" -compression"`);
+    console.log(String.raw`Query: "\"ski goggles\" -compression"`);
     for (const [index, hit] of websearchHits.entries()) {
       renderHit(index + 1, hit.node, hit.score);
     }
@@ -544,7 +544,7 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });
