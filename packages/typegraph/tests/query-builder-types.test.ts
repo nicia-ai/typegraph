@@ -450,7 +450,15 @@ describe("Query Builder Type Safety", () => {
       expect(query).toBeDefined();
     });
 
-    it("brands a projected edge id as EdgeId<E>, not a plain string", () => {
+    it("leaves a projected edge id as plain string, unlike node id", () => {
+      // Unlike node ids, an edge alias's id must NOT be branded EdgeId<E>.
+      // `traverse(edgeKind, alias)` defaults to `expand: "inverse"`, which
+      // UNIONs in rows for the registered *inverse* edge kind alongside the
+      // requested one — the row backing `alias` can genuinely be a
+      // different edge kind than the alias's static type says. Branding
+      // `id` here would let a wrong-kind id compile straight into
+      // `getById`, which silently returns undefined for a kind mismatch
+      // instead of erroring. See SelectableEdge's docblock.
       const query = createQueryBuilder<typeof graph>(graph.id, registry)
         .from("Person", "p")
         .traverse("worksAt", "e")
@@ -462,9 +470,9 @@ describe("Query Builder Type Safety", () => {
         Store<typeof graph>["edges"]["worksAt"]["getById"]
       >[0];
 
-      expectTypeOf<ProjectedId>().toEqualTypeOf<EdgeId<typeof worksAt>>();
-      expectTypeOf<ProjectedId>().toEqualTypeOf<GetByIdParam>();
-      expectTypeOf<ProjectedId>().not.toEqualTypeOf<string>();
+      expectTypeOf<ProjectedId>().toEqualTypeOf<string>();
+      expectTypeOf<ProjectedId>().not.toEqualTypeOf<GetByIdParam>();
+      expectTypeOf<ProjectedId>().not.toEqualTypeOf<EdgeId<typeof worksAt>>();
 
       expect(query).toBeDefined();
     });

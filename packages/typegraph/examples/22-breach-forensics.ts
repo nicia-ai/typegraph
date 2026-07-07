@@ -22,11 +22,11 @@
 import { z } from "zod";
 
 import {
+  asNodeId,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
-  type NodeId,
   type RecordedStoreView,
 } from "@nicia-ai/typegraph";
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
@@ -135,11 +135,12 @@ export async function main(): Promise<void> {
     // deliberately kind-erased (`id: string`) — unlike a `.select()`
     // projection, there's no single statically-known kind to brand against.
     // The `kind` filter is a runtime check TypeScript can't turn into a
-    // `NodeId<Resource>` narrowing, so a single targeted cast is still
-    // required here.
+    // `NodeId<Resource>` narrowing, so re-branding the id at this boundary
+    // is still required — `asNodeId` does that with a checked cast instead
+    // of an unsafe one.
     const resourceIds = reached
       .filter((node) => node.kind === "Resource")
-      .map((node) => node.id as NodeId<typeof Resource>);
+      .map((node) => asNodeId<typeof Resource>(node.id));
     const resources = await view.nodes.Resource.getByIds(resourceIds);
     return resources.filter((r): r is NonNullable<typeof r> => r !== undefined);
   }

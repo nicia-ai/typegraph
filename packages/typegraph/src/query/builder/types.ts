@@ -15,7 +15,6 @@ import { type EmbeddingValue } from "../../core/embedding";
 import { type RecordedInstant } from "../../core/temporal";
 import {
   type AnyEdgeType,
-  type EdgeId,
   type EdgeRegistration,
   type EdgeType,
   type NodeId,
@@ -463,18 +462,24 @@ export type SelectableEdgeMeta = Readonly<{
  *
  * Dynamic-mode counterpart: see `SelectableNode`.
  *
- * `id` carries the same `EdgeId<E>` brand as `Edge<E>` (see `store/types.ts`)
- * so a projected id can be passed straight back into `getById`/`getByIds`
- * without a cast. `fromId`/`toId` stay plain `string` for now: branding them
- * as `NodeId<From>`/`NodeId<To>` (matching `Edge<E, From, To>`) needs the
- * endpoint kinds from the graph's `EdgeRegistration` threaded through
- * `EdgeAlias`/`SelectContext`, which isn't wired up yet — tracked separately
- * in #235, since no reported case has needed it yet (unlike `id`, see #229).
+ * `id`/`kind`/`fromId`/`toId` stay plain `string`, unlike `SelectableNode`'s
+ * `id: NodeId<N>`. `traverse(edgeKind, alias)` defaults to
+ * `expand: "inverse"` (see `GraphAlgorithms`/`QueryBuilder.traverse`'s
+ * `defaultTraversalExpansion`), which UNIONs in rows for the *registered
+ * inverse* edge kind alongside the requested one — `EdgeAlias<E>`'s `E`
+ * stays pinned to the single requested kind regardless, so under the
+ * default expansion mode the row backing `alias` can genuinely be a
+ * different edge kind than `E` says. Branding `id` as `EdgeId<E>` there
+ * would compile but be actively wrong: `store.edges.<E>.getById()` filters
+ * on `row.kind !== kind` and silently returns `undefined` for a
+ * mismatched-kind id — worse than the unsafe cast it would have replaced.
+ * Safe to brand once `EdgeAlias` tracks whether expansion could have
+ * produced a different kind (`expand: "none"` vs not); see #235's note.
  */
 export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
   IsDynamicEdgeType<E> extends true ? DynamicSelectableEdge
   : Readonly<{
-      id: EdgeId<E>;
+      id: string;
       kind: E["kind"];
       fromId: string;
       toId: string;
