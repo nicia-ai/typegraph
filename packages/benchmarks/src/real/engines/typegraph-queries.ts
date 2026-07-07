@@ -303,18 +303,19 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
   }
 
   async function IS7(message: MessageRef) {
-    const parentAuthorRows = await (
-      message.kind === "Post" ?
-        authorOfPost
-      : authorOfComment).execute({ id: message.id });
+    // The parent-author lookup and the replies fetch both depend only on
+    // `message.id`, not on each other, so they run concurrently rather than
+    // paying two round trips serially (only the knows-check below has a
+    // real dependency, on both of these results).
+    const [parentAuthorRows, replies] = await Promise.all([
+      (message.kind === "Post" ? authorOfPost : authorOfComment).execute({
+        id: message.id,
+      }),
+      (message.kind === "Post" ? repliesOfPost : repliesOfComment).execute({
+        id: message.id,
+      }),
+    ]);
     const parentAuthorId = parentAuthorRows[0]?.id;
-
-    const replies = await (
-      message.kind === "Post" ?
-        repliesOfPost
-      : repliesOfComment).execute({
-      id: message.id,
-    });
     const authorIds = [...new Set(replies.map((row) => row.authorId))];
 
     if (parentAuthorId !== undefined && authorIds.length > 0) {
