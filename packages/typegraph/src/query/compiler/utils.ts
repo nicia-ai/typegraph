@@ -123,7 +123,7 @@ export function markSelectiveFieldAsRequired(
   addRequiredColumn(requiredColumnsByAlias, field.alias, "props");
 }
 
-export function getTopLevelPropsFieldName(field: FieldRef): string | undefined {
+function getTopLevelPropsFieldName(field: FieldRef): string | undefined {
   if (field.path.length === 0 || field.path[0] !== "props") {
     return undefined;
   }
