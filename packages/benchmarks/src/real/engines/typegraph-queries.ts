@@ -240,21 +240,27 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
 
   // Real LDBC IS2: friend frontier, then a merged top-10 by creationDate
   // across the (polymorphic) Post/Comment kinds authored by those friends,
-  // then the root post + root author of each of those 10 messages. This is
-  // the un-batched per-message root walk (readability over the batched
-  // multi-seed CTE the SQL reference driver uses — see module doc).
+  // then the root post + root author of each of those 10 messages. Each
+  // message's root walk is independent of the others, so they run
+  // concurrently (Promise.all) instead of one-at-a-time — this overlaps
+  // round-trip latency across up to 10 messages rather than paying it
+  // serially, which matters most for network-bound backends like Postgres.
+  // Still the un-batched per-message root walk (readability over the
+  // batched multi-seed CTE the SQL reference driver uses — see module doc).
   async function IS2(personId: string) {
     const friends = await friendsOf.execute({ id: personId });
     const friendIds = friends.map((row) => row.personId);
     const recent = await recentMessagesByFriends(friendIds);
 
-    for (const message of recent) {
-      const rootId =
-        message.kind === "Post" ?
-          message.id
-        : await resolveRootPostId(message.id);
-      await authorOfPost.execute({ id: rootId });
-    }
+    await Promise.all(
+      recent.map(async (message) => {
+        const rootId =
+          message.kind === "Post" ?
+            message.id
+          : await resolveRootPostId(message.id);
+        await authorOfPost.execute({ id: rootId });
+      }),
+    );
 
     return { rowCount: recent.length };
   }

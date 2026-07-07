@@ -76,6 +76,52 @@ consistent with its cost scaling with each sampled person's actual friend
 count and message volume rather than being a fixed-cost point read like
 IS1/IS4/IS5.
 
+**IS2 numbers above predate a follow-up optimization** (see below) and will
+be superseded on the next full EC2 run.
+
+### IS2 follow-up: parallelize the per-message root walk
+
+IS2's root-post walk (`resolveRootPostId` + `authorOfPost`) ran once per
+message, sequentially, in a plain `for` loop — up to 10 independent
+round-trips paid one after another. Each message's walk has no dependency
+on any other message's, so it now runs concurrently via `Promise.all`
+(`src/real/engines/typegraph-queries.ts`) instead. No query shape changed;
+only the orchestration around already-existing prepared queries did.
+
+Before trusting this, we first considered whether the real fix was
+elsewhere — an apparent SQLite planner issue (`.in(friendIds)` picking a
+table scan over an index) turned out to be an artifact of a test missing
+`store.refreshStatistics()`, not a real bug; once statistics were fresh,
+the planner already chose correctly. That ruled out a planner-level
+generalizable win and left concurrency as the change worth making.
+
+Verified in two stages against the real, cached SF1 dataset:
+
+1. **Row-count parity**: unaffected, both at smoke scale and a full SF1 run
+   (100% comparable across all 7 queries in both cases).
+2. **Same-machine controlled A/B** (a laptop under normal contention — not
+   the dedicated EC2 box used for the table above, so *not* directly
+   comparable to those absolute numbers): sequential vs. parallel IS2 on
+   `typegraph-sqlite`, same dataset, same run of the harness either side of
+   the change —
+
+   | | p50 | p95 | p99 |
+   | --- | --- | --- | --- |
+   | Sequential (before) | 602.8 ms | 1939.3 ms | 2328.8 ms |
+   | Parallel (after) | 336.0 ms | 1100.3 ms | 1418.6 ms |
+
+   A first attempt to judge this by comparing the parallel run against the
+   EC2-measured table above looked like a 4x *regression* — that comparison
+   was invalid (different machine entirely; this laptop's sequential IS2 is
+   itself ~7x slower than EC2's). The only valid same-machine comparison
+   shows parallelization winning by ~1.8x, not regressing.
+
+`typegraph-postgres` showed a similar directional improvement against the
+EC2-measured baseline (203.229 / 605.720 / 876.873 ms → 131.5 / 426.9 /
+615.6 ms, same laptop), consistent with overlapping round-trip latency
+across a connection pool, though no same-machine sequential baseline was
+taken for Postgres to isolate the effect as cleanly as SQLite's.
+
 ## Fixes made to reach a working SF1 run
 
 Three independent scaling bugs blocked a working SF1 run; all three showed
@@ -161,6 +207,13 @@ posts, 80 comments; 15 samples / 3 warmups per query).
       slower than Neo4j/LadybugDB at SF1 scale (both of which use an
       engine-native bulk path TypeGraph's `bulkInsert` doesn't have an
       equivalent of yet).
+- [x] ~~Parallelize IS2's sequential per-message root walk.~~ Done — see
+      [IS2 follow-up](#is2-follow-up-parallelize-the-per-message-root-walk)
+      above. Verified functionally (row-count parity, smoke + full SF1) and
+      directionally (same-machine A/B); not yet re-measured on EC2.
+- [ ] Re-run the full SF1 EC2 benchmark to capture clean, comparable IS2
+      numbers reflecting the parallelization above, and update the query
+      latency table.
 - [ ] Run SF1 multiple times and report a distribution, not a single
       sample, before making any comparative claim publicly.
 - [ ] SF10 remains a stretch goal per the plan, gated on SF1 numbers being
