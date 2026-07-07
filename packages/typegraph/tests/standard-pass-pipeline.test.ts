@@ -174,14 +174,14 @@ describe("column pruning pass", () => {
     expect(state.requiredColumnsByAlias).toBeUndefined();
   });
 
-  it("enables column pruning when selectiveFields are present", () => {
+  it("does not carry raw props for selective prop fields", () => {
     const ast = makeMinimalAst({
       selectiveFields: [makeSelectiveField("p", "name", false, "string")],
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
     expect(state.requiredColumnsByAlias).toBeDefined();
-    expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(true);
+    expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(false);
     expect(state.requiredColumnsByAlias?.get("p")?.has("id")).toBe(true);
   });
 
@@ -232,7 +232,7 @@ describe("column pruning pass", () => {
     expect(state.requiredColumnsByAlias).toBeDefined();
   });
 
-  it("includes predicate fields in required columns", () => {
+  it("does not carry predicate-only props for selective queries", () => {
     const ast = makeMinimalAst({
       selectiveFields: [makeSelectiveField("p", "name", false, "string")],
       predicates: [
@@ -241,7 +241,7 @@ describe("column pruning pass", () => {
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(true);
+    expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(false);
   });
 
   it("includes orderBy fields in required columns", () => {
@@ -254,6 +254,18 @@ describe("column pruning pass", () => {
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
     expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(true);
+  });
+
+  it("does not carry raw props when orderBy is covered by selectiveFields", () => {
+    const ast = makeMinimalAst({
+      selectiveFields: [makeSelectiveField("p", "age", false, "number")],
+      orderBy: [
+        { field: makeFieldRef("p", ["props", "age"]), direction: "asc" },
+      ],
+    });
+    const ctx = makePipelineContext();
+    const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
+    expect(state.requiredColumnsByAlias?.get("p")?.has("props")).toBe(false);
   });
 });
 
