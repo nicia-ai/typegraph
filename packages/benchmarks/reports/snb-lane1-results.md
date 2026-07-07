@@ -10,9 +10,9 @@ final verdict — this is one run on one machine, not the multiple runs /
 statistical-confidence bar a published comparison would need. The
 smoke-scale table is kept below for harness-wiring reference.
 
-Reaching a working SF1 run required finding and fixing three real
-scaling bugs (two in TypeGraph itself, one in this benchmark's own
-LadybugDB driver) — see
+Reaching a working SF1 run required finding and fixing three real scaling
+bugs (one in TypeGraph itself, two in this benchmark's own Neo4j/LadybugDB
+drivers), plus a follow-up TypeGraph load-time fix found afterward — see
 [Fixes made to reach a working SF1 run](#fixes-made-to-reach-a-working-sf1-run).
 
 ## SF1 environment
@@ -33,7 +33,7 @@ LadybugDB driver) — see
 | Runner | `pnpm bench:snb:sf1:ec2` (docs/ec2-benchmark-runner.md) — dedicated ephemeral instance, no other workload sharing the box |
 
 Full machine-readable detail:
-`bench-results/current/snb-sf1-ec2-ec2-20260706T215112Z/{summary,results}.json`
+`bench-results/current/snb-sf1-ec2-ec2-20260707T051024Z/{summary,results}.json`
 (gitignored — regenerate with `pnpm bench:snb:sf1:ec2` then the printed
 `collect` command).
 
@@ -41,18 +41,22 @@ Full machine-readable detail:
 
 | Engine | Load time |
 | --- | --- |
-| ladybugdb | 45.3 s |
-| neo4j | 266.9 s (4.4 min) |
-| typegraph-sqlite | 4,454.4 s (74.2 min) |
-| typegraph-postgres | 4,853.6 s (80.9 min) |
+| ladybugdb | 53.8 s |
+| neo4j | 306.2 s (5.1 min) |
+| typegraph-postgres | 693.8 s (11.6 min) |
+| typegraph-sqlite | 2,408.2 s (40.1 min) |
 
-TypeGraph's SQLite/Postgres backends are markedly slower to *load* at this
+TypeGraph's SQLite/Postgres backends are still slower to *load* at this
 scale than Neo4j or LadybugDB — both of the latter use engine-native bulk
 paths (Neo4j's batched `UNWIND ... IN TRANSACTIONS OF 5000 ROWS`, Ladybug's
 `COPY FROM`), while TypeGraph's backends go through the general-purpose
-`bulkInsert` API. This is a real, load-bearing difference worth its own
-investigation, not something to paper over — filed as a follow-up, not
-fixed in this PR (see Next steps).
+`bulkInsert` API — but both improved substantially since the first SF1 run
+(sqlite 74.2 min → 40.1 min, ~1.85x; postgres 80.9 min → 11.6 min, ~7x),
+after fixing a real N+1 endpoint-lookup pattern in edge creation (see
+[Fixes made](#fixes-made-to-reach-a-working-sf1-run)). Postgres's much
+larger relative gain makes sense: eliminating a redundant round trip
+matters far more over a network connection than for SQLite's in-process
+calls. Further load-time work remains a follow-up (see Next steps).
 
 ## SF1 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
 
@@ -134,6 +138,39 @@ character almost never, switching the staging delimiter from `,` to `|`
 any real content field at all. Verified against the actual cached SF1
 dataset end-to-end before trusting it on EC2.
 
+### 4. TypeGraph's edge creation had an N+1 endpoint-existence check
+
+TypeGraph core, merged, found after the SF1 run above already worked.
+
+Investigating the load-time gap noted above (not a blocker like 1-3,
+found afterward while chasing load performance): `bulkCreate`/`bulkInsert`
+for edges validated each edge's from/to endpoint existence with a
+per-edge lookup instead of batching it, unlike node creation's existing
+batched-prefetch pattern. Fixed in `@nicia-ai/typegraph` (PR #227,
+merged to `main` before this branch): `primeEdgeBatchValidationCache`
+now collects every distinct `(kind, id)` pair across a batch's endpoints
+and issues one `getNodes()` call per kind before the per-row validation
+loop, mirroring node creation's `primeBatchValidationCaches`. Combined
+with raising this benchmark's loader batch size (2,000 → 20,000 rows per
+`bulkInsert` call), this is what dropped SQLite's load time by ~1.85x and
+Postgres's by ~7x (see [SF1 load time](#sf1-load-time-9892-persons-90492-forums-1003605-posts-2052169-comments)
+above).
+
+## Query-latency experiment: concurrent per-message root walks (tried, reverted)
+
+IS2 and IS7 each make 2+ independent, single-seed lookups per request
+(IS2's per-message root-post walk; IS7's parent-author and replies
+fetches). Both were rewritten to run their independent lookups
+concurrently via `Promise.all` instead of sequentially, on the theory
+that overlapping round-trip latency should help, especially Postgres.
+Measured on this dedicated EC2 box, the effect was a wash for SQLite (as
+expected — it serializes concurrent `execute()` calls internally, so
+there's nothing to overlap) and a mild *regression* for Postgres (IS2:
+~15-17% slower), most likely because this benchmark's Postgres runs in a
+local Docker container over `localhost` TCP — there's little real
+round-trip latency to hide, so promise/connection-pool scheduling only
+adds overhead. Reverted; not merged.
+
 ## Smoke-scale results (harness-wiring reference only)
 
 Kept for reference — this is what proved the harness and all four query
@@ -157,10 +194,17 @@ posts, 80 comments; 15 samples / 3 warmups per query).
       above.~~ Fixed and merged (PR #226).
 - [x] ~~Re-run `bench:snb:sf1` once resolved; replace this doc's
       smoke-scale table with real SF1 numbers.~~ Done — see above.
-- [ ] Investigate why TypeGraph's SQLite/Postgres backends load ~65-100x
-      slower than Neo4j/LadybugDB at SF1 scale (both of which use an
-      engine-native bulk path TypeGraph's `bulkInsert` doesn't have an
-      equivalent of yet).
+- [x] ~~Investigate why TypeGraph's SQLite/Postgres backends load
+      ~65-100x slower than Neo4j/LadybugDB at SF1 scale.~~ Found and
+      fixed a real N+1 endpoint-lookup pattern in edge creation (PR
+      #227) plus tuned this benchmark's loader batch size — cut sqlite
+      load ~1.85x and postgres ~7x. Neo4j/LadybugDB's engine-native bulk
+      paths remain faster still; TypeGraph's `bulkInsert` has no
+      equivalent of `COPY FROM` or `UNWIND ... IN TRANSACTIONS`, which
+      is a larger, separate investigation if pursued further.
+- [x] ~~Re-run the full SF1 EC2 benchmark to capture clean, comparable
+      numbers.~~ Done — see above (also used to test and correctly
+      reject the concurrent-root-walk experiment).
 - [ ] Run SF1 multiple times and report a distribution, not a single
       sample, before making any comparative claim publicly.
 - [ ] SF10 remains a stretch goal per the plan, gated on SF1 numbers being
