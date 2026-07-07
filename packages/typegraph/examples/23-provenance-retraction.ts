@@ -13,6 +13,13 @@
  * edges, with `history: true` preserving what the graph believed before and
  * after the retraction.
  *
+ * Scenes:
+ *   [1] Derive facts from sources through justifications
+ *   [2] Retract one source — facts survive via alternate support
+ *   [3] Retract the other source — facts lose all support and die
+ *   [4] Un-retract — belief currency returns
+ *   [5] Recorded time keeps the audit trail, even across the un-retract
+ *
  * Run with:
  *   npx tsx examples/23-provenance-retraction.ts
  */
@@ -41,6 +48,11 @@ import { createExampleBackend, requireRecordedNow } from "./_helpers";
 const ScannerSource = defineNode("ScannerSource", {
   schema: z.object({
     title: z.string(),
+    // `retracted` is a hard contract of the retraction capability:
+    // createRetractionCapability requires every source kind's schema to
+    // declare a boolean field with this name (default "retracted",
+    // overridable via `source.retractedField`) and flips it inside
+    // retract()/unRetract(). It is not unused — do not remove it.
     retracted: z.boolean().default(false),
   }),
 });
@@ -48,6 +60,7 @@ const ScannerSource = defineNode("ScannerSource", {
 const VendorSource = defineNode("VendorSource", {
   schema: z.object({
     title: z.string(),
+    // Required by the retraction capability — see ScannerSource above.
     retracted: z.boolean().default(false),
   }),
 });
@@ -98,101 +111,20 @@ const retractionConfig = {
   derives: { kind: "derives" },
 } as const;
 
-type ExampleStore = Awaited<ReturnType<typeof createExampleStore>>;
-type ScannerSourceRef = Node<typeof ScannerSource>;
-type VendorSourceRef = Node<typeof VendorSource>;
-type VulnerabilityRef = Node<typeof Vulnerability>;
-type DeployDecisionRef = Node<typeof DeployDecision>;
-type JustificationRef = Node<typeof Justification>;
-type SourceRef = ScannerSourceRef | VendorSourceRef;
-type PremiseRef = SourceRef | VulnerabilityRef;
-type FactRef = VulnerabilityRef | DeployDecisionRef;
 type SourceKind = "ScannerSource" | "VendorSource";
 type FactKind = "Vulnerability" | "DeployDecision";
-type JustificationKind = "Justification";
+type Premise =
+  | Node<typeof ScannerSource>
+  | Node<typeof VendorSource>
+  | Node<typeof Vulnerability>;
+type Fact = Node<typeof Vulnerability> | Node<typeof DeployDecision>;
 
-async function createExampleStore() {
-  const [store] = await createStoreWithSchema(graph, createExampleBackend(), {
-    history: true,
-  });
-  return store;
-}
-
-async function createScannerSource(
-  store: ExampleStore,
-  id: string,
-  title: string,
-): Promise<ScannerSourceRef> {
-  return store.nodes.ScannerSource.create({ title, retracted: false }, { id });
-}
-
-async function createVendorSource(
-  store: ExampleStore,
-  id: string,
-  title: string,
-): Promise<VendorSourceRef> {
-  return store.nodes.VendorSource.create({ title, retracted: false }, { id });
-}
-
-async function createVulnerability(
-  store: ExampleStore,
-  id: string,
-  cve: string,
-  packageName: string,
-): Promise<VulnerabilityRef> {
-  return store.nodes.Vulnerability.create({ cve, packageName }, { id });
-}
-
-async function createDeployDecision(
-  store: ExampleStore,
-  id: string,
-  action: string,
-): Promise<DeployDecisionRef> {
-  return store.nodes.DeployDecision.create({ action }, { id });
-}
-
-async function createJustification(
-  store: ExampleStore,
-  id: string,
-  text: string,
-  premises: readonly PremiseRef[],
-  fact: FactRef,
-): Promise<JustificationRef> {
-  const justification = await store.nodes.Justification.create(
-    { text },
-    { id },
-  );
-  for (const [index, premise] of premises.entries()) {
-    await store.edges.premiseOf.create(
-      premise,
-      justification,
-      {},
-      {
-        id: `${id}-premise-${index + 1}`,
-      },
-    );
-  }
-  await store.edges.derives.create(
-    justification,
-    fact,
-    {},
-    {
-      id: `${id}-derives-${fact.id}`,
-    },
-  );
-  return justification;
-}
-
-type ExampleReport = RetractionReport<
-  typeof graph,
-  FactKind,
-  JustificationKind
->;
-type ExampleRetractionCapability = RetractionCapability<
+type ExampleReport = RetractionReport<typeof graph, FactKind, "Justification">;
+type ExampleProvenance = RetractionCapability<
   typeof graph,
   SourceKind,
   FactKind,
-  JustificationKind
+  "Justification"
 >;
 
 function formatFactRefs(
@@ -205,135 +137,220 @@ function formatFactRefs(
     .join(", ");
 }
 
-function formatSurvivedVia(entries: ExampleReport["survivedVia"]): string {
-  if (entries.length === 0) return "(none)";
-  return entries
-    .map((entry) => {
-      const via = entry.via.map((justification) => justification.id);
-      return `${entry.fact.id} via ${via.join(" + ")}`;
-    })
-    .toSorted((left, right) => left.localeCompare(right))
-    .join("; ");
-}
-
-function formatDecisionAction(decision: DeployDecisionRef | undefined): string {
-  return decision === undefined ? "not current" : decision.action;
-}
-
 function formatReport(report: ExampleReport): string {
-  const died = formatFactRefs(report.died);
-  const survived = formatSurvivedVia(report.survivedVia);
-  const unaffected = formatFactRefs(report.unaffected);
+  const survived =
+    report.survivedVia.length === 0 ?
+      "(none)"
+    : report.survivedVia
+        .map((entry) => {
+          const via = entry.via.map((justification) => justification.id);
+          return `${entry.fact.id} via ${via.join(" + ")}`;
+        })
+        .toSorted((left, right) => left.localeCompare(right))
+        .join("; ");
   return [
-    `    died:        ${died}`,
+    `    died:        ${formatFactRefs(report.died)}`,
     `    survived:    ${survived}`,
-    `    unaffected:  ${unaffected}`,
+    `    unaffected:  ${formatFactRefs(report.unaffected)}`,
   ].join("\n");
+}
+
+function formatDecisionAction(
+  decision: Node<typeof DeployDecision> | undefined,
+): string {
+  return decision === undefined ? "not current" : decision.action;
 }
 
 async function printHolding(
   label: string,
-  provenance: ExampleRetractionCapability,
+  provenance: ExampleProvenance,
 ): Promise<void> {
   console.log(`${label}: ${formatFactRefs(await provenance.holding())}`);
 }
 
 export async function main(): Promise<void> {
-  const store = await createExampleStore();
+  const backend = createExampleBackend();
+  try {
+    const [store] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
 
-  console.log("=".repeat(72));
-  console.log(" Provenance retraction over derived facts");
-  console.log("=".repeat(72));
+    console.log("━".repeat(70));
+    console.log(" Provenance retraction over derived facts");
+    console.log("━".repeat(70));
 
-  const scanner = await createScannerSource(
-    store,
-    "scanner-source",
-    "Unverified scanner finding",
-  );
-  const vendor = await createVendorSource(
-    store,
-    "vendor-source",
-    "Vendor security advisory",
-  );
+    // ----------------------------------------------------------
+    // [1] Derive facts from sources through justifications
+    // ----------------------------------------------------------
 
-  const vulnerable = await createVulnerability(
-    store,
-    "vulnerability-libvector",
-    "CVE-2026-1234",
-    "libvector",
-  );
-  const blockDeploy = await createDeployDecision(
-    store,
-    "decision-block-deploy",
-    "Block the production deploy",
-  );
+    console.log("\n" + "━".repeat(70));
+    console.log(" [1] Derive facts from sources through justifications");
+    console.log("━".repeat(70));
 
-  await createJustification(
-    store,
-    "justification-scanner-finding",
-    "The scanner reported CVE-2026-1234 in libvector",
-    [scanner],
-    vulnerable,
-  );
-  await createJustification(
-    store,
-    "justification-vendor-advisory",
-    "The vendor advisory confirms CVE-2026-1234 in libvector",
-    [vendor],
-    vulnerable,
-  );
-  await createJustification(
-    store,
-    "justification-block-deploy",
-    "The deploy should stop whenever libvector is believed vulnerable",
-    [vulnerable],
-    blockDeploy,
-  );
+    async function createSource(
+      kind: SourceKind,
+      id: string,
+      title: string,
+    ): Promise<Node<typeof ScannerSource> | Node<typeof VendorSource>> {
+      return store.nodes[kind].create({ title, retracted: false }, { id });
+    }
 
-  const provenance = createRetractionCapability(store, retractionConfig);
+    async function createJustification(
+      id: string,
+      text: string,
+      premises: readonly Premise[],
+      fact: Fact,
+    ): Promise<void> {
+      const justification = await store.nodes.Justification.create(
+        { text },
+        { id },
+      );
+      for (const [index, premise] of premises.entries()) {
+        await store.edges.premiseOf.create(premise, justification, {}, {
+          id: `${id}-premise-${index + 1}`,
+        });
+      }
+      await store.edges.derives.create(justification, fact, {}, {
+        id: `${id}-derives-${fact.id}`,
+      });
+    }
 
-  console.log("\nInitial derived beliefs:");
-  await printHolding("  holding()", provenance);
+    const scanner = await createSource(
+      "ScannerSource",
+      "scanner-source",
+      "Unverified scanner finding",
+    );
+    const vendor = await createSource(
+      "VendorSource",
+      "vendor-source",
+      "Vendor security advisory",
+    );
 
-  console.log("\nRetract the unverified scanner source.");
-  const scannerReport = await provenance.retract(scanner);
-  console.log(formatReport(scannerReport));
-  await printHolding("  holding()", provenance);
-  console.log(
-    "  The vulnerability and deploy-block facts survive through the vendor advisory.",
-  );
+    const vulnerable = await store.nodes.Vulnerability.create(
+      { cve: "CVE-2026-1234", packageName: "libvector" },
+      { id: "vulnerability-libvector" },
+    );
+    const blockDeploy = await store.nodes.DeployDecision.create(
+      { action: "Block the production deploy" },
+      { id: "decision-block-deploy" },
+    );
 
-  const beforeVendorRetraction = await requireRecordedNow(store);
+    await createJustification(
+      "justification-scanner-finding",
+      "The scanner reported CVE-2026-1234 in libvector",
+      [scanner],
+      vulnerable,
+    );
+    await createJustification(
+      "justification-vendor-advisory",
+      "The vendor advisory confirms CVE-2026-1234 in libvector",
+      [vendor],
+      vulnerable,
+    );
+    await createJustification(
+      "justification-block-deploy",
+      "The deploy should stop whenever libvector is believed vulnerable",
+      [vulnerable],
+      blockDeploy,
+    );
 
-  console.log("\nRetract the vendor advisory too.");
-  const vendorReport = await provenance.retract(vendor);
-  console.log(formatReport(vendorReport));
-  await printHolding("  holding()", provenance);
+    const provenance = createRetractionCapability(store, retractionConfig);
 
-  const afterVendorRetraction = await requireRecordedNow(store);
-  const before = await store
-    .asOfRecorded(beforeVendorRetraction)
-    .nodes.DeployDecision.getById(blockDeploy.id);
-  const after = await store
-    .asOfRecorded(afterVendorRetraction)
-    .nodes.DeployDecision.getById(blockDeploy.id);
+    console.log("\nInitial derived beliefs:");
+    await printHolding("  holding()", provenance);
 
-  console.log("\nRecorded-time replay of the deploy-block fact:");
-  console.log(`  before vendor retraction: ${formatDecisionAction(before)}`);
-  console.log(`  after vendor retraction:  ${formatDecisionAction(after)}`);
+    // ----------------------------------------------------------
+    // [2] Retract one source — facts survive via alternate support
+    // ----------------------------------------------------------
 
-  console.log("\nUn-retract the scanner source.");
-  const restoreReport = await provenance.unRetract(scanner);
-  console.log(formatReport(restoreReport));
-  await printHolding("  holding()", provenance);
+    console.log("\n" + "━".repeat(70));
+    console.log(" [2] Retract the scanner — alternate support survives");
+    console.log("━".repeat(70));
 
-  console.log("\n" + "=".repeat(72));
-  console.log(
-    " Retraction changes belief currency; recorded time keeps the audit trail.",
-  );
-  console.log("=".repeat(72) + "\n");
+    console.log("\nRetract the unverified scanner source.");
+    const scannerReport = await provenance.retract(scanner);
+    console.log(formatReport(scannerReport));
+    await printHolding("  holding()", provenance);
+    console.log(
+      "  The vulnerability and deploy-block facts survive through the vendor advisory.",
+    );
 
-  await store.close();
+    // Pin the recorded clock while the facts are still believed.
+    const beforeVendorRetraction = await requireRecordedNow(store);
+
+    // ----------------------------------------------------------
+    // [3] Retract the other source — facts lose all support
+    // ----------------------------------------------------------
+
+    console.log("\n" + "━".repeat(70));
+    console.log(" [3] Retract the vendor advisory too — the facts die");
+    console.log("━".repeat(70));
+
+    console.log("\nRetract the vendor advisory.");
+    const vendorReport = await provenance.retract(vendor);
+    console.log(formatReport(vendorReport));
+    await printHolding("  holding()", provenance);
+
+    // Pin the recorded clock inside the interval where the facts are dead.
+    const afterVendorRetraction = await requireRecordedNow(store);
+
+    // ----------------------------------------------------------
+    // [4] Un-retract — belief currency returns
+    // ----------------------------------------------------------
+
+    console.log("\n" + "━".repeat(70));
+    console.log(" [4] Un-retract the scanner — belief currency returns");
+    console.log("━".repeat(70));
+
+    console.log("\nUn-retract the scanner source.");
+    const restoreReport = await provenance.unRetract(scanner);
+    console.log(formatReport(restoreReport));
+    await printHolding("  holding()", provenance);
+
+    // ----------------------------------------------------------
+    // [5] Recorded time keeps the audit trail
+    // ----------------------------------------------------------
+
+    console.log("\n" + "━".repeat(70));
+    console.log(" [5] Recorded time keeps the audit trail");
+    console.log("━".repeat(70));
+
+    const liveDecision = await store.nodes.DeployDecision.getById(
+      blockDeploy.id,
+    );
+    const decisionBeforeVendorRetraction = await store
+      .asOfRecorded(beforeVendorRetraction)
+      .nodes.DeployDecision.getById(blockDeploy.id);
+    const decisionAfterVendorRetraction = await store
+      .asOfRecorded(afterVendorRetraction)
+      .nodes.DeployDecision.getById(blockDeploy.id);
+
+    console.log("\nThe deploy-block fact, read at three moments:");
+    console.log(
+      `  live (after the un-retract):      ${formatDecisionAction(liveDecision)}`,
+    );
+    console.log(
+      `  pinned before vendor retraction:  ${formatDecisionAction(decisionBeforeVendorRetraction)}`,
+    );
+    console.log(
+      `  pinned after vendor retraction:   ${formatDecisionAction(decisionAfterVendorRetraction)}`,
+    );
+    console.log(
+      "\n  The un-retract restored the fact's currency, but the recorded pin",
+    );
+    console.log(
+      "  taken while it was dead still reads as not current — the dead",
+    );
+    console.log("  interval stays replayable; history is never rewritten.");
+
+    console.log("\n" + "━".repeat(70));
+    console.log(
+      " Retraction changes belief currency; recorded time keeps the audit trail.",
+    );
+    console.log("━".repeat(70) + "\n");
+  } finally {
+    await backend.close();
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

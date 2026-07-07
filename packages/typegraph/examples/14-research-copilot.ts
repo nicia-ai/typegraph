@@ -4,17 +4,23 @@
  * A showcase that combines everything TypeGraph does:
  *
  *   • Typed schema with Zod        → compile-time guarantees
- *   • Ontology (topic hierarchy)   → query expansion
+ *   • Concept-hierarchy expansion  → higher-recall topic matching
  *   • Vector embeddings            → semantic retrieval
  *   • Recursive CTE traversals     → subgraph extraction
  *   • Graph algorithms             → shortestPath / reachable /
  *                                      canReach / neighbors / degree
  *
  * The scenario: a researcher asks natural-language questions over a corpus
- * of landmark ML papers. The copilot combines semantic search, ontology-
- * expanded topic matching, citation-authority ranking (degree), explainable
- * recommendations (shortestPath), and co-author discovery (neighbors) — all
- * over a single SQLite database with zero external services.
+ * of landmark ML papers. The copilot combines semantic search, concept-
+ * hierarchy-expanded topic matching, citation-authority ranking (degree),
+ * explainable recommendations (shortestPath), and co-author discovery
+ * (neighbors + a multi-hop traversal query) — all over a single SQLite
+ * database with zero external services.
+ *
+ * Note: the concept hierarchy here is instance-level data — Topic nodes
+ * connected by a custom `broader_than` edge, expanded with a recursive
+ * traversal. It is distinct from TypeGraph's type-level ontology module
+ * (subClassOf / broader relationships between kinds — see examples 03–08).
  *
  * Run with:
  *   npx tsx examples/14-research-copilot.ts
@@ -40,9 +46,10 @@ const Paper = defineNode("Paper", {
     // `searchable()` on title + abstract puts both into the BM25 index so
     // rare-token queries (author surnames, dataset names, method acronyms)
     // hit exact matches where embeddings are weakest. The semantic-
-    // retrieval scene below ranks by JS cosine for self-containment; a
-    // production deployment pairs this schema with `store.search.hybrid`
-    // for fused vector+fulltext retrieval.
+    // retrieval scene below runs native `store.search.vector` when a
+    // vector engine is loaded (sqlite-vec here) and falls back to a JS
+    // cosine ranking otherwise; a production deployment pairs this schema
+    // with `store.search.hybrid` for fused vector+fulltext retrieval.
     title: searchable({ language: "english" }),
     year: z.number().int(),
     abstract: searchable({ language: "english" }),
@@ -398,11 +405,18 @@ export async function main(): Promise<void> {
   console.log("━".repeat(68));
   console.log(" Research Copilot — RAG + citation graph + graph algorithms");
   console.log("━".repeat(68));
+  const vectorEngineLabel =
+    backend.capabilities.vector?.supported ?
+      "native vector search (sqlite-vec)"
+    : "JS cosine fallback (no vector engine loaded)";
+  console.log(` Vector engine: ${vectorEngineLabel}`);
   console.log("\n Tour:");
-  console.log("  [1] Vector similarity + ontology expansion via reachable()");
+  console.log(
+    "  [1] Vector similarity + concept-hierarchy expansion via reachable()",
+  );
   console.log("  [2] Citation-aware re-ranking via degree()");
   console.log("  [3] Explainable lineage via shortestPath() + canReach()");
-  console.log("  [4] Collaborator expansion via neighbors()");
+  console.log("  [4] Collaborator discovery via one multi-hop traversal");
   console.log("  [5] Final reading list that combines the signals above");
 
   // ----------------------------------------------------------
@@ -476,7 +490,7 @@ export async function main(): Promise<void> {
   );
 
   // ----------------------------------------------------------
-  // [1] Semantic retrieval with ontology-expanded topics
+  // [1] Semantic retrieval with concept-hierarchy-expanded topics
   // ----------------------------------------------------------
 
   const query =
@@ -560,10 +574,10 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // Ontology-expanded topic retrieval (sub-step of [1])
+  // Concept-hierarchy-expanded topic retrieval (sub-step of [1])
   // ----------------------------------------------------------
 
-  console.log("\n─── Ontology-expanded topic match ───");
+  console.log("\n─── Concept-hierarchy-expanded topic match ───");
   console.log(
     ' Query: "Contrastive" → recursively expand via broader_than → all',
   );
@@ -630,6 +644,9 @@ export async function main(): Promise<void> {
     ...matchByPaper.keys(),
   ]);
 
+  // Per-candidate degree() keeps the algorithm explicit here; for bulk
+  // citation counts over many nodes, one aggregate groupBy query does it
+  // in a single statement (see example 13).
   const hybridScored = await Promise.all(
     [...candidateIds].map(async (paperId) => {
       const paper = paperById.get(paperId)!;
@@ -723,11 +740,11 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------
-  // [4] Co-author discovery via 2-hop neighborhood
+  // [4] Co-author discovery via one multi-hop traversal
   // ----------------------------------------------------------
 
   console.log("\n" + "━".repeat(68));
-  console.log(" [4] Collaborator discovery (neighbors, 2 hops)");
+  console.log(" [4] Collaborator discovery (2 hops from the seed's authors)");
   console.log("━".repeat(68));
   console.log(
     '\n "If I write a paper citing CLIP, who are my natural co-authors?"\n',
@@ -735,7 +752,8 @@ export async function main(): Promise<void> {
 
   const clip = paperByKey.get("clip")!;
 
-  // 1-hop out: CLIP → authors
+  // 1-hop out: CLIP → authors. `neighbors()` is the natural fit for a
+  // single node's adjacency.
   const clipAuthors = await store.algorithms.neighbors(clip.id, {
     edges: ["authored_by"],
     depth: 1,
@@ -747,48 +765,36 @@ export async function main(): Promise<void> {
     ` Seed paper authors: ${clipAuthors.map((author) => authorById.get(author.id) ?? author.id).join(", ")}\n`,
   );
 
-  // For each CLIP author: 1-hop in along authored_by = all their papers,
-  // then 1-hop out = all collaborators. Issue each level in parallel so the
-  // full fan-out finishes in O(depth) round-trips instead of O(authors × papers).
-  //
-  // Parallel arrays indexed by the same `i` as clipAuthors:
-  //   clipAuthors[i]                    → one CLIP author
-  //   perAuthorPapers[i]                → that author's papers
-  //   perAuthorCollaborators[i][j]      → co-authors on paper j of author i
-  const perAuthorPapers = await Promise.all(
-    clipAuthors.map((author) =>
-      store.algorithms.neighbors(author.id, {
-        edges: ["authored_by"],
-        direction: "in",
-        depth: 1,
-      }),
-    ),
-  );
-  const perAuthorCollaborators = await Promise.all(
-    perAuthorPapers.map((papers) =>
-      Promise.all(
-        papers.map((paper) =>
-          store.algorithms.neighbors(paper.id, {
-            edges: ["authored_by"],
-            depth: 1,
-          }),
-        ),
-      ),
-    ),
-  );
+  // From those authors, the whole collaborator fan-out is one traversal
+  // query instead of a 1+N+N×M `neighbors()` cascade: CLIP → its authors →
+  // (direction "in") their other papers → those papers' authors. The
+  // recursive-CTE compiler turns the four-alias chain into a single SQL
+  // statement; JS only tallies the rows.
+  const collaborationRows = await store
+    .query()
+    .from("Paper", "seed")
+    .whereNode("seed", (paper) => paper.id.eq(clip.id))
+    .traverse("authored_by", "wrote")
+    .to("Author", "clipAuthor")
+    .traverse("authored_by", "alsoWrote", { direction: "in" })
+    .to("Paper", "sharedPaper")
+    .traverse("authored_by", "coWrote")
+    .to("Author", "collaborator")
+    .select((ctx) => ({
+      clipAuthorId: ctx.clipAuthor.id,
+      collaboratorId: ctx.collaborator.id,
+    }))
+    .execute();
 
-  // Tally how often each person co-authored with any CLIP author.
+  // Tally how often each person co-authored with any CLIP author
+  // (one row per CLIP author × shared paper × collaborator).
   const collaboratorCounts = new Map<string, number>();
-  for (const [authorIndex, clipAuthor] of clipAuthors.entries()) {
-    for (const collaborators of perAuthorCollaborators[authorIndex]!) {
-      for (const collab of collaborators) {
-        if (collab.id === clipAuthor.id) continue;
-        collaboratorCounts.set(
-          collab.id,
-          (collaboratorCounts.get(collab.id) ?? 0) + 1,
-        );
-      }
-    }
+  for (const row of collaborationRows) {
+    if (row.collaboratorId === row.clipAuthorId) continue;
+    collaboratorCounts.set(
+      row.collaboratorId,
+      (collaboratorCounts.get(row.collaboratorId) ?? 0) + 1,
+    );
   }
 
   const topCollaborators = [...collaboratorCounts.entries()]
@@ -818,34 +824,47 @@ export async function main(): Promise<void> {
     .slice(0, 5)
     .sort((a, b) => a.paper.year - b.paper.year);
 
-  const picksWithMeta = await Promise.all(
-    topPicks.map(async (pick) => {
-      const [paperAuthors, paperTopics] = await Promise.all([
-        store
-          .query()
-          .from("Paper", "p")
-          .whereNode("p", (p) => p.id.eq(pick.paper.id))
-          .traverse("authored_by", "e")
-          .to("Author", "a")
-          .select((ctx) => ctx.a.name)
-          .execute(),
-        store
-          .query()
-          .from("Paper", "p")
-          .whereNode("p", (p) => p.id.eq(pick.paper.id))
-          .traverse("covers_topic", "e")
-          .to("Topic", "t")
-          .select((ctx) => ctx.t.name)
-          .execute(),
-      ]);
-      const matchedTopics = [
-        ...(matchByPaper.get(pick.paper.id) ?? new Set<string>()),
-      ];
-      return { pick, paperAuthors, paperTopics, matchedTopics };
-    }),
-  );
+  // Batch the metadata lookups: one `.in([...])` query per relation for all
+  // five picks — the same pattern as the expanded-topic query in [1] —
+  // instead of two queries per pick.
+  const pickIds = topPicks.map((pick) => pick.paper.id);
+  const [authorRows, topicRows] = await Promise.all([
+    store
+      .query()
+      .from("Paper", "p")
+      .whereNode("p", (p) => p.id.in(pickIds))
+      .traverse("authored_by", "e")
+      .to("Author", "a")
+      .select((ctx) => ({ paperId: ctx.p.id, name: ctx.a.name }))
+      .execute(),
+    store
+      .query()
+      .from("Paper", "p")
+      .whereNode("p", (p) => p.id.in(pickIds))
+      .traverse("covers_topic", "e")
+      .to("Topic", "t")
+      .select((ctx) => ({ paperId: ctx.p.id, topic: ctx.t.name }))
+      .execute(),
+  ]);
+  const authorsByPaper = new Map<string, string[]>();
+  for (const row of authorRows) {
+    const names = authorsByPaper.get(row.paperId) ?? [];
+    names.push(row.name);
+    authorsByPaper.set(row.paperId, names);
+  }
+  const topicsByPaper = new Map<string, string[]>();
+  for (const row of topicRows) {
+    const names = topicsByPaper.get(row.paperId) ?? [];
+    names.push(row.topic);
+    topicsByPaper.set(row.paperId, names);
+  }
 
-  for (const { pick, paperAuthors, paperTopics, matchedTopics } of picksWithMeta) {
+  for (const pick of topPicks) {
+    const paperAuthors = authorsByPaper.get(pick.paper.id) ?? [];
+    const paperTopics = topicsByPaper.get(pick.paper.id) ?? [];
+    const matchedTopics = [
+      ...(matchByPaper.get(pick.paper.id) ?? new Set<string>()),
+    ];
     const citationLabel = pick.citationCount === 1 ? "citation" : "citations";
     const why: string[] = [`semantic ${pick.similarity.toFixed(3)}`];
     if (matchedTopics.length > 0) why.push(`topic match: ${matchedTopics.join(", ")}`);
@@ -859,7 +878,10 @@ export async function main(): Promise<void> {
   }
 
   console.log("\n" + "━".repeat(68));
-  console.log(" Everything above ran against a single in-memory SQLite file.");
+  console.log(
+    " Everything above ran against a single in-memory SQLite database",
+  );
+  console.log(` using ${vectorEngineLabel}.`);
   console.log(" Swap to Postgres by changing one import.");
   console.log("━".repeat(68) + "\n");
 
