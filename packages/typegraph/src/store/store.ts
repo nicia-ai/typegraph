@@ -349,16 +349,28 @@ type StoreTransactionOptions = TransactionOptions | ReceiptTransactionOptions;
 function requestsReceipt(
   options: StoreTransactionOptions | undefined,
 ): options is ReceiptTransactionOptions {
-  return (
-    (options as Readonly<{ receipt?: true }> | undefined)?.receipt === true
+  const receipt = (options as Readonly<{ receipt?: unknown }> | undefined)
+    ?.receipt;
+  if (receipt === undefined || typeof receipt === "boolean") {
+    return receipt === true;
+  }
+  // Untyped callers can pass any truthy value; silently returning the bare
+  // result there would mirror the corruption the receipt exists to prevent.
+  throw new ConfigurationError(
+    "Transaction option `receipt` must be `true` when requesting a receipt.",
+    { receipt },
   );
 }
 
 function stripReceiptOption(
   options: StoreTransactionOptions | undefined,
 ): TransactionOptions | undefined {
-  if (options?.isolationLevel === undefined) return undefined;
-  return { isolationLevel: options.isolationLevel };
+  if (options === undefined) return undefined;
+  // Omit only the store-level flag; every other (current or future)
+  // TransactionOptions field passes through to the backend untouched.
+  const { receipt: _receipt, ...backendOptions } =
+    options as ReceiptTransactionOptions;
+  return backendOptions;
 }
 
 function transactionOutcome<T>(
@@ -1438,7 +1450,16 @@ export class Store<G extends GraphDef> {
    * (`withTransaction` / `withRecordedTransaction`) do not produce receipts in
    * this version because their commit belongs to the caller. On
    * non-transactional backends, the receipt is still returned, but it describes
-   * operations that individually committed rather than one atomic commit.
+   * operations that individually committed rather than one atomic commit. If
+   * the callback rejects on such a backend, no receipt is returned even though
+   * earlier operations committed individually.
+   *
+   * Receipt detection is a runtime check on `options.receipt`. Forwarding
+   * receipt options through a variable typed as plain `TransactionOptions`
+   * (`ReceiptTransactionOptions` is assignable to it) statically selects the
+   * `Promise<T>` overload while the call still returns a
+   * {@link TransactionOutcome} at runtime — keep receipt options literally
+   * typed, or thread the `{ receipt: true }` type through wrapper signatures.
    */
   transaction<T>(
     this: HistoryStore<G>,

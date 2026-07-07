@@ -106,8 +106,12 @@ function readRecordedFlushObserver(
 function stripRecordedFlushObserver(
   options: TransactionOptions | undefined,
 ): TransactionOptions | undefined {
-  if (options?.isolationLevel === undefined) return undefined;
-  return { isolationLevel: options.isolationLevel };
+  if (options === undefined) return undefined;
+  // Omit only the observer symbol; every other (current or future)
+  // TransactionOptions field passes through to the wrapped backend untouched.
+  const { [RECORDED_FLUSH_OBSERVER]: _observer, ...backendOptions } =
+    options as RecordedFlushObserverOptions;
+  return backendOptions;
 }
 
 export function withRecordedFlushObserver(

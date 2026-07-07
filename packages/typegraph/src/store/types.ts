@@ -423,8 +423,15 @@ export type TransactionOutcome<T> = Readonly<{
  *    id and `getOrCreate*` that found an existing row. Consumers that need
  *    "did anything actually change" semantics apply their own per-operation
  *    policy.
- * 4. A method that rejects counts 0.
- * 5. Rows-affected fidelity is intentionally out of scope for this first
+ * 4. A method that rejects counts 0 — even when the backend applied part of a
+ *    bulk input before failing. On SQLite a failed statement does not abort
+ *    the surrounding transaction, so a caller that catches the rejection and
+ *    commits can persist rows the receipt never counted. Do not read the
+ *    receipt as rows-affected in that scenario.
+ * 5. A node `delete` under `cascade` / `disconnect` removes connected edges
+ *    through the backend, not the edge-collection surface; those removals do
+ *    not appear in `edges`.
+ * 6. Rows-affected fidelity is intentionally out of scope for this first
  *    version; a future extension could ask backends to return row counts.
  */
 export type TransactionReceipt = Readonly<{

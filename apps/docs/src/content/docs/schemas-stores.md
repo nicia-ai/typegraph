@@ -1356,7 +1356,14 @@ affected:
 - Single-row methods count 1 on resolve — including `delete` of an absent id and
   `getOrCreate*` that found an existing row. Consumers that need "did anything
   actually change" semantics apply their own per-operation policy.
-- A method that rejects counts 0.
+- A method that rejects counts 0 — even when the backend applied part of a bulk
+  input before failing. On SQLite a failed statement does not abort the
+  surrounding transaction, so a caller that catches the rejection and commits
+  can persist rows the receipt never counted. Do not read the receipt as
+  rows-affected in that scenario.
+- A node `delete` under `cascade` / `disconnect` removes connected edges through
+  the backend, not the edge-collection surface; those removals do not appear in
+  `edges`.
 - Rows-affected fidelity is intentionally out of scope for this first version; a
   future extension could ask backends to return row counts.
 
@@ -1367,7 +1374,13 @@ off, the transaction is read-only, or no captured writes were flushed. Writes
 that bypass the transaction collection surface — direct backend writes, raw SQL,
 and import helpers — are not counted. Adopted transactions
 (`withTransaction` / `withRecordedTransaction`) do not produce receipts in this
-version because their commit belongs to the caller.
+version because their commit belongs to the caller. On non-transactional
+backends a receipt describes operations that individually committed; if the
+callback rejects there, no receipt is returned even though earlier operations
+committed. Receipt detection is a runtime check on `options.receipt`, so
+forwarding receipt options through a variable typed as plain
+`TransactionOptions` returns a `TransactionOutcome` at runtime that the static
+`Promise<T>` type will not reflect — keep receipt options literally typed.
 
 #### Rollback and error propagation
 

@@ -39,40 +39,58 @@ export type TransactionReceiptRecorder = Readonly<{
 
 type WrappedMethod = (...args: unknown[]) => Promise<unknown>;
 
-const NODE_BULK_FIRST_ARG_METHODS = new Set<NodeWriteMethodName>([
-  "bulkCreate",
-  "bulkUpsertById",
-  "bulkInsert",
-  "bulkDelete",
-]);
-
-const EDGE_BULK_FIRST_ARG_METHODS = new Set<EdgeWriteMethodName>([
-  "bulkCreate",
-  "bulkUpsertById",
-  "bulkInsert",
-  "bulkDelete",
-  "bulkGetOrCreateByEndpoints",
-]);
+type WriteIntentCounter = (args: readonly unknown[]) => number;
 
 function inputLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
-function nodeWriteIntentCount(
-  method: NodeWriteMethodName,
-  args: readonly unknown[],
-): number {
-  if (NODE_BULK_FIRST_ARG_METHODS.has(method)) return inputLength(args[0]);
-  if (method === "bulkGetOrCreateByConstraint") return inputLength(args[1]);
+function countSingleWrite(): number {
   return 1;
 }
 
-function edgeWriteIntentCount(
-  method: EdgeWriteMethodName,
-  args: readonly unknown[],
-): number {
-  if (EDGE_BULK_FIRST_ARG_METHODS.has(method)) return inputLength(args[0]);
-  return 1;
+function countBulkInputAt(index: number): WriteIntentCounter {
+  return (args) => inputLength(args[index]);
+}
+
+// `satisfies Record<...MethodName, ...>` forces a per-method decision: a new
+// write method fails to compile here until its intent count is chosen, so a
+// future bulk method cannot silently fall back to counting 1 per call.
+const NODE_WRITE_INTENT_COUNTERS = {
+  create: countSingleWrite,
+  createFromRecord: countSingleWrite,
+  update: countSingleWrite,
+  delete: countSingleWrite,
+  hardDelete: countSingleWrite,
+  upsertById: countSingleWrite,
+  upsertByIdFromRecord: countSingleWrite,
+  bulkCreate: countBulkInputAt(0),
+  bulkUpsertById: countBulkInputAt(0),
+  bulkInsert: countBulkInputAt(0),
+  bulkDelete: countBulkInputAt(0),
+  getOrCreateByConstraint: countSingleWrite,
+  bulkGetOrCreateByConstraint: countBulkInputAt(1),
+} as const satisfies Record<NodeWriteMethodName, WriteIntentCounter>;
+
+const EDGE_WRITE_INTENT_COUNTERS = {
+  create: countSingleWrite,
+  update: countSingleWrite,
+  delete: countSingleWrite,
+  hardDelete: countSingleWrite,
+  bulkCreate: countBulkInputAt(0),
+  bulkUpsertById: countBulkInputAt(0),
+  bulkInsert: countBulkInputAt(0),
+  bulkDelete: countBulkInputAt(0),
+  getOrCreateByEndpoints: countSingleWrite,
+  bulkGetOrCreateByEndpoints: countBulkInputAt(0),
+} as const satisfies Record<EdgeWriteMethodName, WriteIntentCounter>;
+
+// Null-prototype buckets: kind names are arbitrary identifiers, so
+// `constructor`, `toString`, or `__proto__` are valid kinds. On a plain `{}`
+// they would read inherited Object.prototype members (corrupting the count)
+// or trigger the `__proto__` setter (dropping it).
+function createCountBucket(): Record<string, number> {
+  return Object.create(null) as Record<string, number>;
 }
 
 function increment(
@@ -85,8 +103,8 @@ function increment(
 }
 
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
-  const nodes: Record<string, number> = {};
-  const edges: Record<string, number> = {};
+  const nodes = createCountBucket();
+  const edges = createCountBucket();
   let total = 0;
 
   return {
@@ -101,10 +119,12 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
     },
 
     snapshot(recorded): TransactionReceipt {
+      // Object.assign onto a fresh null-prototype bucket (rather than spread)
+      // keeps prototype-colliding kind names readable on the returned receipt.
       return Object.freeze({
         writes: Object.freeze({
-          nodes: Object.freeze({ ...nodes }),
-          edges: Object.freeze({ ...edges }),
+          nodes: Object.freeze(Object.assign(createCountBucket(), nodes)),
+          edges: Object.freeze(Object.assign(createCountBucket(), edges)),
           total,
         }),
         ...(recorded === undefined ? {} : { recorded }),
@@ -143,8 +163,13 @@ function wrapNodeCollection<T extends object>(
 
       const method = property as NodeWriteMethodName;
       const wrapped: WrappedMethod = async (...args) => {
+        // Pin the intent count at call time: a caller may mutate a bulk input
+        // array while the write is in flight, and the backend has already
+        // snapshotted the items. Recording still waits for resolution so a
+        // rejected write counts 0.
+        const count = NODE_WRITE_INTENT_COUNTERS[method](args);
         const result = await Reflect.apply(value, target, args);
-        recorder.recordNode(kind, nodeWriteIntentCount(method, args));
+        recorder.recordNode(kind, count);
         return result;
       };
       cache.set(property, wrapped);
@@ -175,8 +200,9 @@ function wrapEdgeCollection<T extends object>(
 
       const method = property as EdgeWriteMethodName;
       const wrapped: WrappedMethod = async (...args) => {
+        const count = EDGE_WRITE_INTENT_COUNTERS[method](args);
         const result = await Reflect.apply(value, target, args);
-        recorder.recordEdge(kind, edgeWriteIntentCount(method, args));
+        recorder.recordEdge(kind, count);
         return result;
       };
       cache.set(property, wrapped);

@@ -1,9 +1,14 @@
 import { type SQL, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   asCompiledRowsSql,
   createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type EdgeId,
   type GraphBackend,
   type NodeId,
   type RecordedInstant,
@@ -25,6 +30,53 @@ function missingPersonId(
   id: string,
 ): NodeId<typeof integrationTestGraph.nodes.Person.type> {
   return id as NodeId<typeof integrationTestGraph.nodes.Person.type>;
+}
+
+/**
+ * Local graph for the full write-surface count test: a uniqueness constraint
+ * (for the `getOrCreateByConstraint` variants) and `onDelete: "cascade"` (to
+ * pin that cascade-removed edges do not appear in the receipt).
+ */
+const ReceiptEntity = defineNode("ReceiptEntity", {
+  schema: z.object({ name: z.string(), slot: z.string() }),
+});
+
+const receiptLinks = defineEdge("receiptLinks", {
+  schema: z.object({ label: z.string() }),
+});
+
+const receiptSurfaceGraph = defineGraph({
+  id: "receipt_surface",
+  nodes: {
+    ReceiptEntity: {
+      type: ReceiptEntity,
+      onDelete: "cascade",
+      unique: [
+        {
+          name: "entity_slot",
+          fields: ["slot"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {
+    receiptLinks: {
+      type: receiptLinks,
+      from: [ReceiptEntity],
+      to: [ReceiptEntity],
+      cardinality: "many",
+    },
+  },
+});
+
+function entityId(id: string): NodeId<typeof ReceiptEntity> {
+  return id as NodeId<typeof ReceiptEntity>;
+}
+
+function linkId(id: string): EdgeId<typeof receiptLinks> {
+  return id as EdgeId<typeof receiptLinks>;
 }
 
 function requireRecordedInstant(
@@ -158,6 +210,158 @@ export function registerTransactionReceiptIntegrationTests(
       expect(outcome.result.action).toBe("found");
       expect(outcome.receipt.writes.nodes).toEqual({});
       expect(outcome.receipt.writes.edges).toEqual({ knows: 1 });
+      expect(outcome.receipt.writes.total).toBe(1);
+    });
+
+    it("counts every write method on the collection surface", async () => {
+      const [store] = await createStoreWithSchema(
+        receiptSurfaceGraph,
+        context.getStore().backend,
+      );
+
+      const outcome = await store.transaction(
+        async (tx) => {
+          const nodes = tx.nodes.ReceiptEntity;
+          const nodeA = await nodes.create({ name: "a", slot: "a" });
+          const nodeB = await nodes.createFromRecord({ name: "b", slot: "b" });
+          await nodes.update(nodeA.id, { name: "a2" });
+          await nodes.upsertById("u1", { name: "u1", slot: "u1" });
+          const nodeU2 = await nodes.upsertByIdFromRecord("u2", {
+            name: "u2",
+            slot: "u2",
+          });
+          const [nodeC, nodeD] = await nodes.bulkCreate([
+            { props: { name: "c", slot: "c" } },
+            { props: { name: "d", slot: "d" } },
+          ]);
+          if (nodeC === undefined || nodeD === undefined) {
+            throw new Error("bulkCreate did not return the created nodes");
+          }
+          await nodes.bulkUpsertById([
+            { id: "u1", props: { name: "u1b", slot: "u1" } },
+            { id: "u3", props: { name: "u3", slot: "u3" } },
+          ]);
+          await nodes.bulkInsert([
+            { props: { name: "n5", slot: "n5" }, id: "n5" },
+            { props: { name: "n6", slot: "n6" }, id: "n6" },
+          ]);
+          await nodes.getOrCreateByConstraint("entity_slot", {
+            name: "g",
+            slot: "g",
+          });
+          // The one method whose bulk input is the SECOND argument.
+          await nodes.bulkGetOrCreateByConstraint("entity_slot", [
+            { props: { name: "h", slot: "h" } },
+            { props: { name: "a-again", slot: "a" } },
+          ]);
+          await nodes.delete(nodeU2.id);
+          await nodes.hardDelete(entityId("u3"));
+          await nodes.bulkDelete([entityId("n5"), entityId("n6")]);
+
+          const edges = tx.edges.receiptLinks;
+          const edge1 = await edges.create(nodeA, nodeB, { label: "e1" });
+          await edges.update(edge1.id, { label: "e1b" });
+          await edges.getOrCreateByEndpoints(nodeA, nodeC, { label: "e2" });
+          const [edge3, edge4] = await edges.bulkCreate([
+            { from: nodeA, to: nodeD, props: { label: "e3" } },
+            { from: nodeB, to: nodeC, props: { label: "e4" } },
+          ]);
+          if (edge3 === undefined || edge4 === undefined) {
+            throw new Error("bulkCreate did not return the created edges");
+          }
+          await edges.bulkUpsertById([
+            {
+              id: linkId("be1"),
+              from: nodeA,
+              to: nodeB,
+              props: { label: "be1" },
+            },
+            {
+              id: linkId("be2"),
+              from: nodeC,
+              to: nodeD,
+              props: { label: "be2" },
+            },
+          ]);
+          await edges.bulkInsert([
+            { from: nodeD, to: nodeA, props: { label: "e5" } },
+            { from: nodeD, to: nodeB, props: { label: "e6" } },
+          ]);
+          await edges.bulkGetOrCreateByEndpoints([
+            { from: nodeB, to: nodeD, props: { label: "e7" } },
+            { from: nodeC, to: nodeA, props: { label: "e8" } },
+          ]);
+          await edges.delete(edge1.id);
+          await edges.hardDelete(edge3.id);
+          await edges.bulkDelete([edge4.id, linkId("be1")]);
+        },
+        { receipt: true },
+      );
+
+      // Node intents: create 1 + createFromRecord 1 + update 1 + upsertById 1
+      // + upsertByIdFromRecord 1 + bulkCreate 2 + bulkUpsertById 2
+      // + bulkInsert 2 + getOrCreateByConstraint 1
+      // + bulkGetOrCreateByConstraint 2 + delete 1 + hardDelete 1
+      // + bulkDelete 2 = 18.
+      expect(outcome.receipt.writes.nodes).toEqual({ ReceiptEntity: 18 });
+      // Edge intents: create 1 + update 1 + getOrCreateByEndpoints 1
+      // + bulkCreate 2 + bulkUpsertById 2 + bulkInsert 2
+      // + bulkGetOrCreateByEndpoints 2 + delete 1 + hardDelete 1
+      // + bulkDelete 2 = 15.
+      expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 15 });
+      expect(outcome.receipt.writes.total).toBe(33);
+    });
+
+    it("does not count cascade-removed edges", async () => {
+      const [store] = await createStoreWithSchema(
+        receiptSurfaceGraph,
+        context.getStore().backend,
+      );
+      const source = await store.transaction(async (tx) => {
+        const source = await tx.nodes.ReceiptEntity.create({
+          name: "src",
+          slot: "cascade-src",
+        });
+        const target = await tx.nodes.ReceiptEntity.create({
+          name: "dst",
+          slot: "cascade-dst",
+        });
+        await tx.edges.receiptLinks.create(source, target, {
+          label: "doomed",
+        });
+        return source;
+      });
+
+      const outcome = await store.transaction(
+        async (tx) => tx.nodes.ReceiptEntity.delete(source.id),
+        { receipt: true },
+      );
+
+      // The cascade removes the connected edge through the backend, not the
+      // edge-collection surface — the receipt reports the node intent only.
+      expect(outcome.receipt.writes.nodes).toEqual({ ReceiptEntity: 1 });
+      expect(outcome.receipt.writes.edges).toEqual({});
+      expect(outcome.receipt.writes.total).toBe(1);
+      await expect(store.edges.receiptLinks.findFrom(source)).resolves.toEqual(
+        [],
+      );
+    });
+
+    it("counts writes made through tx.getNodeCollection", async () => {
+      const store = context.getStore();
+
+      const outcome = await store.transaction(
+        async (tx) => {
+          const people = tx.getNodeCollection("Person");
+          if (people === undefined) {
+            throw new Error("Person collection missing from transaction");
+          }
+          await people.createFromRecord({ name: "Dynamic" });
+        },
+        { receipt: true },
+      );
+
+      expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
       expect(outcome.receipt.writes.total).toBe(1);
     });
 
