@@ -714,10 +714,12 @@ function compileCountAggregateFastPath(
   //     rows to count rather than the true top-N.
   //   - LIMIT is defined. OFFSET is carried with it.
   const startCteLimit =
-    traversal.optional &&
-    ast.orderBy === undefined &&
-    ast.aggregateOrderBy === undefined &&
-    ast.limit !== undefined ?
+    (
+      traversal.optional &&
+      ast.orderBy === undefined &&
+      ast.aggregateOrderBy === undefined &&
+      ast.limit !== undefined
+    ) ?
       { limit: ast.limit, offset: ast.offset }
     : undefined;
 
