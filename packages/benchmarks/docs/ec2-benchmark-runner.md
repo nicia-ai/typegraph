@@ -66,10 +66,13 @@ instance-metadata credential chain or a role already assumed in the shell),
 150), `--repo-url` (default `https://github.com/nicia-ai/typegraph.git` —
 point this at your fork), `--ref` (default: your local `git rev-parse
 HEAD` — **must already be pushed** to `--repo-url`, since the instance does
-a fresh clone), `--profile` (`smoke` or `sf1`, default `sf1`),
+a fresh clone), `--profile` (`smoke`, `sf1`, or `sf10`; default `sf1`),
 `--bootstrap-timeout-seconds` (default 1800), `--benchmark-timeout-seconds`
-(default 36000 — a real SF1 run's sqlite+postgres+neo4j load phases alone
-took ~2.6h, so a 6h default proved too tight in practice).
+(defaults per profile: smoke 3600, sf1 36000 — a real SF1 run's
+sqlite+postgres+neo4j load phases alone took ~2.6h pre-fix, so a 6h default
+proved too tight in practice — sf10 129600 / 36h, deliberately generous
+since SF10 is ~10x SF1's row counts with no direct measurement yet of how
+each engine's load time actually scales).
 
 `collect` (required): `--region`, `--instance-id`, `--command-id`.
 

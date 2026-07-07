@@ -1,9 +1,10 @@
 /**
- * Renders the cloud-init user-data bash script for the SNB-SF1 EC2 runner.
+ * Renders the cloud-init user-data bash script for the SNB EC2 runner.
  * Installs Docker, Node, and pnpm; clones the repo at a given ref; builds
- * `@nicia-ai/typegraph`; and (for the `sf1` profile) downloads the official
- * LDBC dataset to the exact path `resolveDatasetRoot("sf1")` already expects
- * (dataset/resolve.ts), so the benchmark run needs no `--data-dir` override.
+ * `@nicia-ai/typegraph`; and (for any real scale-factor profile) downloads
+ * the official LDBC dataset to the exact path `resolveDatasetRoot(profile)`
+ * already expects (dataset/resolve.ts), so the benchmark run needs no
+ * `--data-dir` override.
  *
  * This only prepares the environment. The benchmark itself is kicked off by
  * a separate SSM Run Command sent after this script's completion sentinel
@@ -13,9 +14,9 @@
 import path from "node:path";
 
 import {
-  SF1_ARCHIVE,
-  SF1_CACHE_RELATIVE_SEGMENTS,
-  SF1_DOWNLOAD_URL,
+  type SnbProfile,
+  SNB_DATASET_SPECS,
+  snbDownloadUrl,
 } from "../dataset/resolve";
 
 /**
@@ -23,15 +24,17 @@ import {
  * `HOME=/root`), never on the machine that renders it — so the cache path
  * must be built from "/root", not this (local) process's `os.homedir()`.
  */
-const REMOTE_SF1_CACHE_DIR = path.posix.join(
-  "/root",
-  ...SF1_CACHE_RELATIVE_SEGMENTS,
-);
+function remoteCacheDir(profile: Exclude<SnbProfile, "smoke">): string {
+  return path.posix.join(
+    "/root",
+    ...SNB_DATASET_SPECS[profile].cacheRelativeSegments,
+  );
+}
 
 export type BootstrapOptions = Readonly<{
   repoUrl: string;
   ref: string;
-  profile: "smoke" | "sf1";
+  profile: SnbProfile;
   /**
    * Minutes until the dead-man's-switch `shutdown` fires. Must be
    * comfortably longer than the benchmark's own SSM executionTimeout —
@@ -48,16 +51,20 @@ export const REPO_DIR = "/opt/typegraph";
 
 export function renderBootstrapScript(options: BootstrapOptions): string {
   const datasetStep =
-    options.profile === "sf1" ?
-      `
-mkdir -p "${REMOTE_SF1_CACHE_DIR}"
-cd "${REMOTE_SF1_CACHE_DIR}"
-curl -fsSL -O "${SF1_DOWNLOAD_URL}"
-zstd -d --stdout "${SF1_ARCHIVE}" | tar -xf - --strip-components=1
-rm -f "${SF1_ARCHIVE}"
+    options.profile === "smoke" ?
+      "# smoke profile uses the committed fixture; no dataset download needed."
+    : (() => {
+        const cacheDir = remoteCacheDir(options.profile);
+        const { archive } = SNB_DATASET_SPECS[options.profile];
+        return `
+mkdir -p "${cacheDir}"
+cd "${cacheDir}"
+curl -fsSL -O "${snbDownloadUrl(options.profile)}"
+zstd -d --stdout "${archive}" | tar -xf - --strip-components=1
+rm -f "${archive}"
 cd "${REPO_DIR}"
-`.trim()
-    : "# smoke profile uses the committed fixture; no dataset download needed.";
+`.trim();
+      })();
 
   return `#!/bin/bash
 set -euxo pipefail

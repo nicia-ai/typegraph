@@ -56,7 +56,16 @@ const DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 1800; // 30 min
 // run's sqlite (74.5min) + postgres (78.4min) + neo4j (4.5min) load phases
 // alone already used ~2.6h, leaving too little margin once query
 // benchmarking, container startup, and ladybugdb's own load are added.
-const DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 36000; // 10 h
+// SF10 is ~10x SF1's row counts with no direct measurement yet of how each
+// engine's load time actually scales, so its default is deliberately much
+// larger rather than a naive 10x extrapolation.
+const DEFAULT_BENCHMARK_TIMEOUT_SECONDS_BY_PROFILE: Readonly<
+  Record<string, number>
+> = {
+  smoke: 3600, // 1 h
+  sf1: 36000, // 10 h
+  sf10: 129600, // 36 h
+};
 const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 const HEARTBEAT_EVERY_N_POLLS = 5;
 
@@ -196,9 +205,13 @@ async function launch(argv: readonly string[]): Promise<void> {
   const repoUrl = parseArgValue(argv, "repo-url") ?? DEFAULT_REPO_URL;
   const ref = parseArgValue(argv, "ref") ?? resolveGitSha();
   const benchProfile = parseArgValue(argv, "profile") ?? "sf1";
-  if (benchProfile !== "smoke" && benchProfile !== "sf1") {
+  if (
+    benchProfile !== "smoke" &&
+    benchProfile !== "sf1" &&
+    benchProfile !== "sf10"
+  ) {
     throw new Error(
-      `Unsupported --profile "${benchProfile}". Expected "smoke" or "sf1".`,
+      `Unsupported --profile "${benchProfile}". Expected "smoke", "sf1", or "sf10".`,
     );
   }
   const bootstrapTimeoutSeconds = Number(
@@ -207,7 +220,7 @@ async function launch(argv: readonly string[]): Promise<void> {
   );
   const benchmarkTimeoutSeconds = Number(
     parseArgValue(argv, "benchmark-timeout-seconds") ??
-      DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
+      DEFAULT_BENCHMARK_TIMEOUT_SECONDS_BY_PROFILE[benchProfile],
   );
 
   const runId = `ec2-${new Date()

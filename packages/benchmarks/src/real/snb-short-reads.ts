@@ -3,7 +3,7 @@
  * real-workload benchmark program (docs/design/benchmark-program-plan.md).
  *
  * Usage:
- *   tsx src/real/snb-short-reads.ts [--profile=smoke|sf1] [--engines=a,b,c]
+ *   tsx src/real/snb-short-reads.ts [--profile=smoke|sf1|sf10] [--engines=a,b,c]
  *     [--data-dir=<extracted-datagen-dir>] [--requests-per-query=N]
  *     [--warmup-requests=N] [--seed=N] [--output=<dir>]
  */

@@ -27,6 +27,7 @@ const PROFILE_DEFAULTS: Readonly<
   // (docs/design/benchmark-program-plan.md); smoke stays near the floor for CI speed.
   smoke: { warmup: 3, samples: 15 },
   sf1: { warmup: 5, samples: 20 },
+  sf10: { warmup: 5, samples: 20 },
 };
 
 function parseArgValue(
@@ -41,8 +42,9 @@ function parseArgValue(
 function parseProfile(raw: string | undefined): SnbProfile {
   if (raw === undefined || raw === "smoke") return "smoke";
   if (raw === "sf1") return "sf1";
+  if (raw === "sf10") return "sf10";
   throw new Error(
-    `Unsupported --profile value: "${raw}". Expected "smoke" or "sf1".`,
+    `Unsupported --profile value: "${raw}". Expected "smoke", "sf1", or "sf10".`,
   );
 }
 
