@@ -966,11 +966,17 @@ export class StoreNotInitializedError extends TypeGraphError {
 
   // `graphId`/`reason` are positional and required: both are
   // load-bearing for the message and for programmatic handling via
-  // `details.reason`. Caller `details` merge on top.
+  // `details.reason`. Caller `details` merge underneath — spread first
+  // so `graphId`/`reason` win and can't be clobbered by an
+  // accidentally-colliding extra key.
   constructor(
     graphId: string,
     reason: StoreNotInitializedReason,
-    options?: { cause?: unknown; details?: Record<string, unknown> },
+    options?: {
+      cause?: unknown;
+      details?: Readonly<Record<string, unknown>> &
+        Readonly<{ graphId?: never; reason?: never }>;
+    },
   ) {
     super(
       `fulltext storage for graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
@@ -978,7 +984,7 @@ export class StoreNotInitializedError extends TypeGraphError {
         `outside request handlers and adopted transactions, before using createStore().`,
       "STORE_NOT_INITIALIZED",
       {
-        details: { graphId, reason, ...options?.details },
+        details: { ...options?.details, graphId, reason },
         category: "user",
         suggestion:
           "Call createStoreWithSchema(graph, backend) once at application " +

@@ -899,6 +899,25 @@ describe("StoreNotInitializedError", () => {
       "missing" | "stale" | "failed"
     >();
   });
+
+  it("keeps the constructor's graphId/reason authoritative over colliding extra details", () => {
+    const spoofedDetails = {
+      graphId: "spoofed",
+      reason: "spoofed",
+      logicalName: "vector:summary",
+    };
+    const error = new StoreNotInitializedError(
+      "lib",
+      "stale",
+      // @ts-expect-error graphId/reason are reserved and cannot be overridden via extra details
+      { details: spoofedDetails },
+    );
+    expect(error.details).toEqual({
+      graphId: "lib",
+      reason: "stale",
+      logicalName: "vector:summary",
+    });
+  });
 });
 
 describe("EagerMaterializationError", () => {
