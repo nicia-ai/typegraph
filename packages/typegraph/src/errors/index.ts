@@ -232,6 +232,14 @@ export class ValidationError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for NodeNotFoundError.
+ */
+export type NodeNotFoundErrorDetails = Readonly<{
+  kind: string;
+  id: string;
+}>;
+
+/**
  * Thrown when a node is not found.
  *
  * @example
@@ -246,6 +254,8 @@ export class ValidationError extends TypeGraphError {
  * ```
  */
 export class NodeNotFoundError extends TypeGraphError {
+  declare readonly details: NodeNotFoundErrorDetails;
+
   constructor(kind: string, id: string, options?: { cause?: unknown }) {
     super(`Node not found: ${kind}/${id}`, "NODE_NOT_FOUND", {
       details: { kind, id },
@@ -258,9 +268,19 @@ export class NodeNotFoundError extends TypeGraphError {
 }
 
 /**
+ * Details for EdgeNotFoundError.
+ */
+export type EdgeNotFoundErrorDetails = Readonly<{
+  kind: string;
+  id: string;
+}>;
+
+/**
  * Thrown when an edge is not found.
  */
 export class EdgeNotFoundError extends TypeGraphError {
+  declare readonly details: EdgeNotFoundErrorDetails;
+
   constructor(kind: string, id: string, options?: { cause?: unknown }) {
     super(`Edge not found: ${kind}/${id}`, "EDGE_NOT_FOUND", {
       details: { kind, id },
@@ -273,6 +293,15 @@ export class EdgeNotFoundError extends TypeGraphError {
 }
 
 /**
+ * Details for KindNotFoundError.
+ */
+export type KindNotFoundErrorDetails = Readonly<{
+  kindName: string;
+  entity: KindEntity;
+  graphId?: string;
+}>;
+
+/**
  * Thrown when an operation references a kind that isn't registered on
  * the graph — `getNodeCollectionOrThrow` against an unknown kind, a
  * `materializeIndexes({ kinds })` filter naming a missing kind, an
@@ -282,6 +311,7 @@ export class EdgeNotFoundError extends TypeGraphError {
  * process.
  */
 export class KindNotFoundError extends TypeGraphError {
+  declare readonly details: KindNotFoundErrorDetails;
   readonly kindName: string;
   readonly entity: KindEntity;
 
@@ -321,9 +351,19 @@ export class KindNotFoundError extends TypeGraphError {
 }
 
 /**
+ * Details for NodeConstraintNotFoundError.
+ */
+export type NodeConstraintNotFoundErrorDetails = Readonly<{
+  constraintName: string;
+  kind: string;
+}>;
+
+/**
  * Thrown when a uniqueness constraint name is not found on a node kind.
  */
 export class NodeConstraintNotFoundError extends TypeGraphError {
+  declare readonly details: NodeConstraintNotFoundErrorDetails;
+
   constructor(
     constraintName: string,
     kind: string,
@@ -344,9 +384,19 @@ export class NodeConstraintNotFoundError extends TypeGraphError {
 }
 
 /**
+ * Details for NodeIndexNotFoundError.
+ */
+export type NodeIndexNotFoundErrorDetails = Readonly<{
+  indexName: string;
+  kind: string;
+}>;
+
+/**
  * Thrown when a declared node index name is not found on a node kind.
  */
 export class NodeIndexNotFoundError extends TypeGraphError {
+  declare readonly details: NodeIndexNotFoundErrorDetails;
+
   constructor(indexName: string, kind: string, options?: { cause?: unknown }) {
     super(
       `Index not found: "${indexName}" on node kind "${kind}"`,
@@ -367,16 +417,23 @@ export class NodeIndexNotFoundError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for EndpointNotFoundError.
+ */
+export type EndpointNotFoundErrorDetails = Readonly<{
+  edgeKind: string;
+  endpoint: "from" | "to";
+  nodeKind: string;
+  nodeId: string;
+}>;
+
+/**
  * Thrown when edge endpoint node does not exist or is deleted.
  */
 export class EndpointNotFoundError extends TypeGraphError {
+  declare readonly details: EndpointNotFoundErrorDetails;
+
   constructor(
-    details: Readonly<{
-      edgeKind: string;
-      endpoint: "from" | "to";
-      nodeKind: string;
-      nodeId: string;
-    }>,
+    details: EndpointNotFoundErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(
@@ -394,18 +451,22 @@ export class EndpointNotFoundError extends TypeGraphError {
 }
 
 /**
+ * Details for EndpointError.
+ */
+export type EndpointErrorDetails = Readonly<{
+  edgeKind: string;
+  endpoint: "from" | "to";
+  actualKind: string;
+  expectedKinds: readonly string[];
+}>;
+
+/**
  * Thrown when edge endpoint has wrong node type.
  */
 export class EndpointError extends TypeGraphError {
-  constructor(
-    details: Readonly<{
-      edgeKind: string;
-      endpoint: "from" | "to";
-      actualKind: string;
-      expectedKinds: readonly string[];
-    }>,
-    options?: { cause?: unknown },
-  ) {
+  declare readonly details: EndpointErrorDetails;
+
+  constructor(details: EndpointErrorDetails, options?: { cause?: unknown }) {
     const expected = details.expectedKinds.join(" | ");
     super(
       `Invalid ${details.endpoint} endpoint for edge "${details.edgeKind}": got "${details.actualKind}", expected ${expected}`,
@@ -422,19 +483,23 @@ export class EndpointError extends TypeGraphError {
 }
 
 /**
+ * Details for UniquenessError.
+ */
+export type UniquenessErrorDetails = Readonly<{
+  constraintName: string;
+  kind: string;
+  existingId: string;
+  newId: string;
+  fields: readonly string[];
+}>;
+
+/**
  * Thrown when uniqueness constraint is violated.
  */
 export class UniquenessError extends TypeGraphError {
-  constructor(
-    details: Readonly<{
-      constraintName: string;
-      kind: string;
-      existingId: string;
-      newId: string;
-      fields: readonly string[];
-    }>,
-    options?: { cause?: unknown },
-  ) {
+  declare readonly details: UniquenessErrorDetails;
+
+  constructor(details: UniquenessErrorDetails, options?: { cause?: unknown }) {
     const fieldList = details.fields.join(", ");
     super(
       `Uniqueness violation on "${details.kind}": constraint "${details.constraintName}" (fields: ${fieldList}) conflicts with existing node ${details.existingId}`,
@@ -451,19 +516,23 @@ export class UniquenessError extends TypeGraphError {
 }
 
 /**
+ * Details for CardinalityError.
+ */
+export type CardinalityErrorDetails = Readonly<{
+  edgeKind: string;
+  fromKind: string;
+  fromId: string;
+  cardinality: string;
+  existingCount: number;
+}>;
+
+/**
  * Thrown when cardinality constraint is violated.
  */
 export class CardinalityError extends TypeGraphError {
-  constructor(
-    details: Readonly<{
-      edgeKind: string;
-      fromKind: string;
-      fromId: string;
-      cardinality: string;
-      existingCount: number;
-    }>,
-    options?: { cause?: unknown },
-  ) {
+  declare readonly details: CardinalityErrorDetails;
+
+  constructor(details: CardinalityErrorDetails, options?: { cause?: unknown }) {
     super(
       `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
       "CARDINALITY_ERROR",
@@ -482,20 +551,24 @@ export class CardinalityError extends TypeGraphError {
 }
 
 /**
+ * Details for DisjointError.
+ */
+export type DisjointErrorDetails = Readonly<{
+  nodeId: string;
+  attemptedKind: string;
+  conflictingKind: string;
+}>;
+
+/**
  * Thrown when disjointness constraint is violated.
  *
  * Disjoint types cannot share the same ID - a node cannot be both
  * a Person and an Organization if they are declared disjoint.
  */
 export class DisjointError extends TypeGraphError {
-  constructor(
-    details: Readonly<{
-      nodeId: string;
-      attemptedKind: string;
-      conflictingKind: string;
-    }>,
-    options?: { cause?: unknown },
-  ) {
+  declare readonly details: DisjointErrorDetails;
+
+  constructor(details: DisjointErrorDetails, options?: { cause?: unknown }) {
     super(
       `Disjoint constraint violation: cannot create ${details.attemptedKind} with ID "${details.nodeId}" - conflicts with existing ${details.conflictingKind}`,
       "DISJOINT_ERROR",
@@ -511,16 +584,23 @@ export class DisjointError extends TypeGraphError {
 }
 
 /**
+ * Details for RestrictedDeleteError.
+ */
+export type RestrictedDeleteErrorDetails = Readonly<{
+  nodeKind: string;
+  nodeId: string;
+  edgeCount: number;
+  edgeKinds: readonly string[];
+}>;
+
+/**
  * Thrown when deletion is blocked due to existing edges (restrict behavior).
  */
 export class RestrictedDeleteError extends TypeGraphError {
+  declare readonly details: RestrictedDeleteErrorDetails;
+
   constructor(
-    details: Readonly<{
-      nodeKind: string;
-      nodeId: string;
-      edgeCount: number;
-      edgeKinds: readonly string[];
-    }>,
+    details: RestrictedDeleteErrorDetails,
     options?: { cause?: unknown },
   ) {
     const edgeList = details.edgeKinds.join(", ");
@@ -543,19 +623,26 @@ export class RestrictedDeleteError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for VersionConflictError.
+ */
+export type VersionConflictErrorDetails = Readonly<{
+  kind: string;
+  id: string;
+  expectedVersion: number;
+  actualVersion: number;
+}>;
+
+/**
  * Thrown when optimistic locking detects a concurrent modification.
  *
  * This occurs when two operations try to update the same entity simultaneously.
  * The operation with the stale version fails.
  */
 export class VersionConflictError extends TypeGraphError {
+  declare readonly details: VersionConflictErrorDetails;
+
   constructor(
-    details: Readonly<{
-      kind: string;
-      id: string;
-      expectedVersion: number;
-      actualVersion: number;
-    }>,
+    details: VersionConflictErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(
@@ -577,15 +664,22 @@ export class VersionConflictError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for SchemaMismatchError.
+ */
+export type SchemaMismatchErrorDetails = Readonly<{
+  graphId: string;
+  expectedHash: string;
+  actualHash: string;
+}>;
+
+/**
  * Thrown when the schema in code doesn't match the schema in the database.
  */
 export class SchemaMismatchError extends TypeGraphError {
+  declare readonly details: SchemaMismatchErrorDetails;
+
   constructor(
-    details: Readonly<{
-      graphId: string;
-      expectedHash: string;
-      actualHash: string;
-    }>,
+    details: SchemaMismatchErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(
@@ -603,17 +697,24 @@ export class SchemaMismatchError extends TypeGraphError {
 }
 
 /**
+ * Details for MigrationError.
+ */
+export type MigrationErrorDetails = Readonly<{
+  graphId: string;
+  fromVersion: number;
+  toVersion: number;
+  reason?: string;
+}>;
+
+/**
  * Thrown when schema migration fails.
  */
 export class MigrationError extends TypeGraphError {
+  declare readonly details: MigrationErrorDetails;
+
   constructor(
     message: string,
-    details: Readonly<{
-      graphId: string;
-      fromVersion: number;
-      toVersion: number;
-      reason?: string;
-    }>,
+    details: MigrationErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(message, "MIGRATION_ERROR", {
@@ -625,6 +726,14 @@ export class MigrationError extends TypeGraphError {
     this.name = "MigrationError";
   }
 }
+
+/**
+ * Details for EagerMaterializationError.
+ */
+export type EagerMaterializationErrorDetails = Readonly<{
+  graphId: string;
+  failedIndexNames: readonly string[];
+}>;
 
 /**
  * Thrown by `Store.evolve(extension, { eager })` when the schema
@@ -657,6 +766,8 @@ export class MigrationError extends TypeGraphError {
  * ```
  */
 export class EagerMaterializationError extends TypeGraphError {
+  declare readonly details: EagerMaterializationErrorDetails;
+
   /**
    * The full materialization result, including successful and failed
    * entries. Same shape as `Store.materializeIndexes()` returns.
@@ -698,6 +809,16 @@ function collectFailedIndexNames(
 }
 
 /**
+ * Details for StaleVersionError. `actual` is `0` when no active version
+ * exists yet (initial-commit race where another writer initialized first).
+ */
+export type StaleVersionErrorDetails = Readonly<{
+  graphId: string;
+  expected: number;
+  actual: number;
+}>;
+
+/**
  * Thrown by `commitSchemaVersion` and `setActiveVersion` when the
  * caller's view of the active schema version is out of date — another
  * writer has already advanced it.
@@ -705,23 +826,12 @@ function collectFailedIndexNames(
  * Recovery: re-read the active version with `getActiveSchema(graphId)`,
  * recompute against the new baseline, and retry. This is a routine
  * concurrency signal, not a bug.
- *
- * `actual` is `0` when no active version exists yet (initial-commit race
- * where another writer initialized first).
  */
 export class StaleVersionError extends TypeGraphError {
-  declare readonly details: Readonly<{
-    graphId: string;
-    expected: number;
-    actual: number;
-  }>;
+  declare readonly details: StaleVersionErrorDetails;
 
   constructor(
-    details: Readonly<{
-      graphId: string;
-      expected: number;
-      actual: number;
-    }>,
+    details: StaleVersionErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(
@@ -739,6 +849,16 @@ export class StaleVersionError extends TypeGraphError {
 }
 
 /**
+ * Details for SchemaContentConflictError.
+ */
+export type SchemaContentConflictErrorDetails = Readonly<{
+  graphId: string;
+  version: number;
+  existingHash: string;
+  incomingHash: string;
+}>;
+
+/**
  * Thrown by `commitSchemaVersion` when a row already exists at the
  * target version with a *different* schema hash — i.e. two writers
  * committed materially different schemas at the same version number.
@@ -749,20 +869,10 @@ export class StaleVersionError extends TypeGraphError {
  * deployments writing schemas that hash differently.
  */
 export class SchemaContentConflictError extends TypeGraphError {
-  declare readonly details: Readonly<{
-    graphId: string;
-    version: number;
-    existingHash: string;
-    incomingHash: string;
-  }>;
+  declare readonly details: SchemaContentConflictErrorDetails;
 
   constructor(
-    details: Readonly<{
-      graphId: string;
-      version: number;
-      existingHash: string;
-      incomingHash: string;
-    }>,
+    details: SchemaContentConflictErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(
@@ -830,6 +940,17 @@ const STORE_NOT_INITIALIZED_REASON_PHRASE: Readonly<
 };
 
 /**
+ * Details for StoreNotInitializedError. `graphId`/`reason` are always
+ * present; callers may merge additional context (e.g. `logicalName`) via
+ * `options.details`.
+ */
+export type StoreNotInitializedErrorDetails = Readonly<{
+  graphId: string;
+  reason: StoreNotInitializedReason;
+}> &
+  Readonly<Record<string, unknown>>;
+
+/**
  * Thrown when a fulltext-dependent operation runs against a connection
  * whose strategy-owned storage has not been durably materialized.
  *
@@ -841,13 +962,21 @@ const STORE_NOT_INITIALIZED_REASON_PHRASE: Readonly<
  * loudly here instead of lazily emitting DDL on the hot path.
  */
 export class StoreNotInitializedError extends TypeGraphError {
+  declare readonly details: StoreNotInitializedErrorDetails;
+
   // `graphId`/`reason` are positional and required: both are
   // load-bearing for the message and for programmatic handling via
-  // `details.reason`. Caller `details` merge on top.
+  // `details.reason`. Caller `details` merge underneath — spread first
+  // so `graphId`/`reason` win and can't be clobbered by an
+  // accidentally-colliding extra key.
   constructor(
     graphId: string,
     reason: StoreNotInitializedReason,
-    options?: { cause?: unknown; details?: Record<string, unknown> },
+    options?: {
+      cause?: unknown;
+      details?: Readonly<Record<string, unknown>> &
+        Readonly<{ graphId?: never; reason?: never }>;
+    },
   ) {
     super(
       `fulltext storage for graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
@@ -855,7 +984,7 @@ export class StoreNotInitializedError extends TypeGraphError {
         `outside request handlers and adopted transactions, before using createStore().`,
       "STORE_NOT_INITIALIZED",
       {
-        details: { graphId, reason, ...options?.details },
+        details: { ...options?.details, graphId, reason },
         category: "user",
         suggestion:
           "Call createStoreWithSchema(graph, backend) once at application " +
@@ -873,15 +1002,25 @@ export class StoreNotInitializedError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for DatabaseOperationError.
+ */
+export type DatabaseOperationErrorDetails = Readonly<{
+  operation: string;
+  entity: string;
+}>;
+
+/**
  * Thrown when a database operation fails unexpectedly.
  *
  * This indicates a system-level failure in the database backend,
  * not a user-recoverable error.
  */
 export class DatabaseOperationError extends TypeGraphError {
+  declare readonly details: DatabaseOperationErrorDetails;
+
   constructor(
     message: string,
-    details: Readonly<{ operation: string; entity: string }>,
+    details: DatabaseOperationErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(message, "DATABASE_OPERATION_ERROR", {
@@ -899,6 +1038,16 @@ export class DatabaseOperationError extends TypeGraphError {
 // ============================================================
 
 /**
+ * Details for EmbeddingDimensionChangedError.
+ */
+export type EmbeddingDimensionChangedErrorDetails = Readonly<{
+  kind: string;
+  fieldPath: string;
+  declaredDimensions?: number;
+  storedDimensions?: number;
+}>;
+
+/**
  * Thrown when an embedding field's declared dimension no longer matches the
  * dimension of its materialized per-field storage — i.e. a field's
  * `embedding(N)` was changed to `embedding(M)`. The stored vectors are invalid
@@ -908,14 +1057,11 @@ export class DatabaseOperationError extends TypeGraphError {
  * the new dimension and re-embed existing rows.
  */
 export class EmbeddingDimensionChangedError extends TypeGraphError {
+  declare readonly details: EmbeddingDimensionChangedErrorDetails;
+
   constructor(
     message: string,
-    details: Readonly<{
-      kind: string;
-      fieldPath: string;
-      declaredDimensions?: number;
-      storedDimensions?: number;
-    }>,
+    details: EmbeddingDimensionChangedErrorDetails,
     options?: { cause?: unknown },
   ) {
     super(message, "EMBEDDING_DIMENSION_CHANGED", {

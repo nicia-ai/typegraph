@@ -135,7 +135,7 @@ try {
   if (error instanceof DisjointError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { existingType: "Person", attemptedType: "Organization" }
+    // { nodeId: "entity-1", attemptedKind: "Organization", conflictingKind: "Person" }
     console.log(error.suggestion);
     // "Use a different ID for the new node, or delete the existing node first..."
   }
@@ -172,7 +172,8 @@ try {
 } catch (error) {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
-    console.log(error.details); // { edge: "worksAt", cardinality: "one" }
+    console.log(error.details);
+    // { edgeKind: "worksAt", fromKind: "Person", fromId: "<alice-id>", cardinality: "one", existingCount: 1 }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
@@ -192,7 +193,8 @@ try {
 } catch (error) {
   if (error instanceof UniquenessError) {
     console.log(error.category); // "constraint"
-    console.log(error.details); // { field: "email", value: "alice@example.com" }
+    console.log(error.details);
+    // { constraintName: "unique_email", kind: "Person", existingId: "<alice-id>", newId: "<bob-id>", fields: ["email"] }
     console.log(error.suggestion);
     // "Use a different value for the unique field, or update the existing record..."
   }
@@ -211,7 +213,7 @@ try {
 } catch (error) {
   if (error instanceof NodeNotFoundError) {
     console.log(error.category); // "user"
-    console.log(error.details); // { id: "nonexistent-id", type: "Person" }
+    console.log(error.details); // { kind: "Person", id: "nonexistent-id" }
     console.log(error.suggestion);
     // "Verify the node ID is correct and the node hasn't been deleted..."
   }
@@ -228,7 +230,7 @@ try {
 } catch (error) {
   if (error instanceof EdgeNotFoundError) {
     console.log(error.category); // "user"
-    console.log(error.details); // { id: "nonexistent-edge" }
+    console.log(error.details); // { kind: "worksAt", id: "nonexistent-edge" }
     console.log(error.suggestion);
     // "Verify the edge ID is correct and the edge hasn't been deleted..."
   }
@@ -245,7 +247,7 @@ try {
 } catch (error) {
   if (error instanceof KindNotFoundError) {
     console.log(error.category); // "user"
-    console.log(error.details); // { kind: "NonExistentType" }
+    console.log(error.details); // { kindName: "NonExistentType", entity: "node" }
     console.log(error.suggestion);
     // "Check the graph definition to see which node and edge types are available..."
   }
@@ -266,7 +268,8 @@ try {
 } catch (error) {
   if (error instanceof EndpointNotFoundError) {
     console.log(error.category); // "user"
-    console.log(error.details); // { kind: "Person", id: "nonexistent" }
+    console.log(error.details);
+    // { edgeKind: "worksAt", endpoint: "from", nodeKind: "Person", nodeId: "nonexistent" }
     console.log(error.suggestion);
     // "Create the referenced node first, or verify the node ID is correct..."
   }
@@ -286,7 +289,8 @@ try {
 } catch (error) {
   if (error instanceof RestrictedDeleteError) {
     console.log(error.category); // "constraint"
-    console.log(error.details); // { nodeId: "...", edgeCount: 3 }
+    console.log(error.details);
+    // { nodeKind: "Person", nodeId: "<alice-id>", edgeCount: 3, edgeKinds: ["worksAt", "authored"] }
     console.log(error.suggestion);
     // "Delete all edges connected to this node first, or change the delete behavior..."
   }
@@ -324,7 +328,8 @@ try {
 } catch (error) {
   if (error instanceof SchemaMismatchError) {
     console.log(error.category); // "system"
-    console.log(error.details); // { expected: "...", actual: "..." }
+    console.log(error.details);
+    // { graphId: "my-graph", expectedHash: "<hash>", actualHash: "<hash>" }
     console.log(error.suggestion);
     // "Run migrations to update the database schema..."
   }
@@ -341,8 +346,8 @@ try {
 } catch (error) {
   if (error instanceof MigrationError) {
     console.log(error.category); // "system"
-    console.log(error.details.breakingChanges);
-    // ["Removed required field 'email' from Person"]
+    console.log(error.details);
+    // { graphId: "my-graph", fromVersion: 3, toVersion: 4, reason: "Removed required field 'email' from Person" }
     console.log(error.suggestion);
     // "Review the breaking changes and perform manual migration if needed..."
   }
@@ -528,7 +533,7 @@ try {
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
-| `UNIQUENESS_ERROR` | `UniquenessError` | constraint | Uniqueness constraint violated |
+| `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |
 | `EDGE_NOT_FOUND` | `EdgeNotFoundError` | user | Referenced edge doesn't exist |
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |

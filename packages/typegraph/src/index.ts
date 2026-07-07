@@ -248,11 +248,31 @@ export {
 // ============================================================
 
 export type {
+  CardinalityErrorDetails,
+  DatabaseOperationErrorDetails,
+  DisjointErrorDetails,
+  EagerMaterializationErrorDetails,
+  EdgeNotFoundErrorDetails,
+  EmbeddingDimensionChangedErrorDetails,
+  EndpointErrorDetails,
+  EndpointNotFoundErrorDetails,
   ErrorCategory,
+  KindNotFoundErrorDetails,
+  MigrationErrorDetails,
+  NodeConstraintNotFoundErrorDetails,
+  NodeIndexNotFoundErrorDetails,
+  NodeNotFoundErrorDetails,
+  RestrictedDeleteErrorDetails,
+  SchemaContentConflictErrorDetails,
+  SchemaMismatchErrorDetails,
+  StaleVersionErrorDetails,
+  StoreNotInitializedErrorDetails,
   StoreNotInitializedReason,
   TypeGraphErrorOptions,
+  UniquenessErrorDetails,
   ValidationErrorDetails,
   ValidationIssue,
+  VersionConflictErrorDetails,
 } from "./errors";
 export {
   // Error classes
