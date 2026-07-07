@@ -19,7 +19,15 @@ type HasCreatorEdgeRow = Extract<SnbEdgeRow, { kind: "hasCreator" }>;
 type ContainerOfEdgeRow = Extract<SnbEdgeRow, { kind: "containerOf" }>;
 type ReplyOfEdgeRow = Extract<SnbEdgeRow, { kind: "replyOf" }>;
 
-const BATCH_SIZE = 2_000;
+// Each bulkInsert() call gets its own transaction (runInWriteTransaction),
+// while bind-parameter-limit chunking happens *inside* that call
+// (computeSqliteBatchChunkSizes) regardless of this outer size — so a
+// bigger outer batch trades more transactions for fewer, without changing
+// per-statement bind-parameter safety. Profiled on a synthetic 500k-row
+// repro: 2,000 (the old value) was consistently the slowest; anything
+// >=10,000 was 25-30% faster, with the exact optimum noisy run-to-run.
+// 20,000 is a well-supported middle ground, not a precisely tuned peak.
+const BATCH_SIZE = 20_000;
 
 function createBatcher<T>(
   size: number,
