@@ -1090,15 +1090,20 @@ describe("Bulk Operations (SQLite)", () => {
       expect(count).toBe(0);
     });
 
-    it("reuses endpoint existence checks for bulkInsert edge batches", async () => {
+    it("batch-prefetches endpoint existence checks for bulkInsert edge batches", async () => {
       const baseBackend = createSqliteBackend(createTestDatabase());
       let getNodeCalls = 0;
+      let getNodesCalls = 0;
 
       const backendWithNodeCounter: GraphBackend = {
         ...baseBackend,
         async getNode(graphId, kind, id) {
           getNodeCalls += 1;
           return baseBackend.getNode(graphId, kind, id);
+        },
+        async getNodes(graphId, kind, ids) {
+          getNodesCalls += 1;
+          return baseBackend.getNodes!(graphId, kind, ids);
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx, sql) => {
@@ -1107,6 +1112,14 @@ describe("Bulk Operations (SQLite)", () => {
               async getNode(graphId: string, kind: string, id: string) {
                 getNodeCalls += 1;
                 return tx.getNode(graphId, kind, id);
+              },
+              async getNodes(
+                graphId: string,
+                kind: string,
+                ids: readonly string[],
+              ) {
+                getNodesCalls += 1;
+                return tx.getNodes!(graphId, kind, ids);
               },
             };
             return fn(wrappedTx, sql);
@@ -1119,6 +1132,7 @@ describe("Bulk Operations (SQLite)", () => {
       const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
 
       getNodeCalls = 0;
+      getNodesCalls = 0;
       await localStore.edges.worksAt.bulkInsert([
         {
           id: "edge-cache-1",
@@ -1140,8 +1154,12 @@ describe("Bulk Operations (SQLite)", () => {
         },
       ]);
 
-      // Two endpoint checks total: one for from-node, one for to-node.
-      expect(getNodeCalls).toBe(2);
+      // The batch is prefetched with one getNodes() call per distinct
+      // endpoint kind (Person for `from`, Company for `to`) instead of a
+      // getNode() probe per edge — zero individual endpoint lookups even
+      // though the batch references two distinct nodes across three edges.
+      expect(getNodeCalls).toBe(0);
+      expect(getNodesCalls).toBe(2);
     });
   });
 

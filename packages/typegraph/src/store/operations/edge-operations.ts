@@ -179,6 +179,12 @@ function createEdgeBatchValidationBackend(
     insertParams: InsertEdgeParams,
     cardinality: Cardinality,
   ) => void;
+  seedEndpointRow: (
+    graphId: string,
+    kind: string,
+    id: string,
+    row: Awaited<ReturnType<GraphBackend["getNode"]>>,
+  ) => void;
 }> {
   const endpointCache = new Map<
     string,
@@ -202,6 +208,23 @@ function createEdgeBatchValidationBackend(
     const node = await backend.getNode(graphId, kind, id);
     endpointCache.set(cacheKey, node);
     return node;
+  }
+
+  // Lets batch preparation prime the endpoint cache from one getNodes
+  // round trip per (kind) instead of a per-edge getNode probe for each
+  // from/to endpoint — mirrors seedNodeRow in createNodeBatchValidationBackend.
+  // Seeding an absent result (`undefined`) is meaningful — it marks the key
+  // as known-missing so the per-edge check skips the backend read. An
+  // earlier lookup or seed always wins; seeding never overwrites.
+  function seedEndpointRow(
+    graphId: string,
+    kind: string,
+    id: string,
+    row: Awaited<ReturnType<GraphBackend["getNode"]>>,
+  ): void {
+    const cacheKey = buildEdgeEndpointCacheKey(graphId, kind, id);
+    if (endpointCache.has(cacheKey)) return;
+    endpointCache.set(cacheKey, row);
   }
 
   async function countEdgesFromCached(
@@ -290,6 +313,7 @@ function createEdgeBatchValidationBackend(
   return {
     backend: validationBackend,
     registerPendingEdgeForCardinality,
+    seedEndpointRow,
   };
 }
 
@@ -455,6 +479,93 @@ export async function executeEdgeCreateNoReturn<G extends GraphDef>(
 }
 
 /**
+ * Batch-primes an edge batch's endpoint validation cache with one
+ * `getNodes` round trip per distinct (kind) referenced across every
+ * from/to endpoint in the batch, instead of a `getNode` probe per edge.
+ * Mirrors `primeBatchValidationCaches`'s node-existence priming.
+ */
+async function primeEdgeBatchValidationCache<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: GraphBackend | TransactionBackend,
+  seedEndpointRow: (
+    graphId: string,
+    kind: string,
+    id: string,
+    row: Awaited<ReturnType<GraphBackend["getNode"]>>,
+  ) => void,
+): Promise<void> {
+  if (backend.getNodes === undefined) return;
+
+  const idsByKind = new Map<string, Set<string>>();
+  const addEndpoint = (kind: string, id: string): void => {
+    const ids = idsByKind.get(kind) ?? new Set<string>();
+    ids.add(id);
+    idsByKind.set(kind, ids);
+  };
+  for (const input of inputs) {
+    addEndpoint(input.fromKind, input.fromId);
+    addEndpoint(input.toKind, input.toId);
+  }
+
+  for (const [kind, ids] of idsByKind) {
+    const orderedIds = [...ids];
+    const rows = await backend.getNodes(ctx.graphId, kind, orderedIds);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    for (const id of orderedIds) {
+      seedEndpointRow(ctx.graphId, kind, id, rowsById.get(id));
+    }
+  }
+}
+
+/**
+ * Shared batch preparation for edge creates: primes the endpoint
+ * validation cache with one `getNodes` call per referenced kind, then
+ * validates every input against the primed cache in order (so later
+ * inputs see earlier ones' pending cardinality/uniqueness registrations).
+ * Shared between the non-returning and RETURNING batch paths so both get
+ * the same batched-prefetch treatment.
+ */
+async function prepareEdgeBatchCreates<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<{
+  preparedCreates: EdgeCreatePrepared[];
+  batchInsertParams: InsertEdgeParams[];
+}> {
+  const {
+    backend: validationBackend,
+    registerPendingEdgeForCardinality,
+    seedEndpointRow,
+  } = createEdgeBatchValidationBackend(backend);
+
+  await primeEdgeBatchValidationCache(ctx, inputs, backend, seedEndpointRow);
+
+  const preparedCreates: EdgeCreatePrepared[] = [];
+  for (const input of inputs) {
+    const id = input.id ?? generateId();
+    const prepared = await validateAndPrepareEdgeCreate(
+      ctx,
+      input,
+      id,
+      validationBackend,
+    );
+    preparedCreates.push(prepared);
+    registerPendingEdgeForCardinality(
+      prepared.insertParams,
+      prepared.cardinality,
+    );
+  }
+
+  const batchInsertParams = preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
+
+  return { preparedCreates, batchInsertParams };
+}
+
+/**
  * Executes batched edge creates without returning inserted edge payloads.
  *
  * Note: `withOperationHooks` is intentionally skipped for batch throughput.
@@ -470,27 +581,10 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   }
 
   await runInWriteTransaction(ctx, backend, async (target) => {
-    const { backend: validationBackend, registerPendingEdgeForCardinality } =
-      createEdgeBatchValidationBackend(target);
-    const preparedCreates: EdgeCreatePrepared[] = [];
-
-    for (const input of inputs) {
-      const id = input.id ?? generateId();
-      const prepared = await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        id,
-        validationBackend,
-      );
-      preparedCreates.push(prepared);
-      registerPendingEdgeForCardinality(
-        prepared.insertParams,
-        prepared.cardinality,
-      );
-    }
-
-    const batchInsertParams = preparedCreates.map(
-      (prepared) => prepared.insertParams,
+    const { batchInsertParams } = await prepareEdgeBatchCreates(
+      ctx,
+      inputs,
+      target,
     );
     await runInsertBatch(edgeInsertDispatch(target), batchInsertParams);
   });
@@ -515,27 +609,10 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
   }
 
   return runInWriteTransaction(ctx, backend, async (target) => {
-    const { backend: validationBackend, registerPendingEdgeForCardinality } =
-      createEdgeBatchValidationBackend(target);
-    const preparedCreates: EdgeCreatePrepared[] = [];
-
-    for (const input of inputs) {
-      const id = input.id ?? generateId();
-      const prepared = await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        id,
-        validationBackend,
-      );
-      preparedCreates.push(prepared);
-      registerPendingEdgeForCardinality(
-        prepared.insertParams,
-        prepared.cardinality,
-      );
-    }
-
-    const batchInsertParams = preparedCreates.map(
-      (prepared) => prepared.insertParams,
+    const { batchInsertParams } = await prepareEdgeBatchCreates(
+      ctx,
+      inputs,
+      target,
     );
 
     const rows = await runInsertBatchReturning(
