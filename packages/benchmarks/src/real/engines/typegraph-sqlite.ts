@@ -31,8 +31,14 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
     // createStoreWithSchema (not the sync createStore) is the documented
     // production boot path: it runs DDL/bootstrap and durably materializes
     // runtime contributions, which materializeIndexes() below requires.
+    // Auto-refresh-after-bulk would otherwise re-run refreshStatistics()
+    // on every large bulkInsert() call during the load below (each of our
+    // batches already exceeds the default row threshold on its own) — pure
+    // redundant work, since load() already calls refreshStatistics() itself
+    // exactly once after the whole dataset is in.
     const [store] = await createStoreWithSchema(snbGraph, backend, {
       queryDefaults: { traversalExpansion: "none" },
+      autoRefreshStatistics: false,
     });
 
     return {
