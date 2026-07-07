@@ -76,20 +76,16 @@ export const typegraphTables = createSqliteTables({}, {
 
 **Key options:**
 
-- `fields`: JSON property paths used for filtering/ordering (B-tree expression keys). Optional — an
-  index can instead be keyed entirely by `coveringFields`/`keySystemColumns` — but the declaration
-  must supply at least one of `fields`, `coveringFields`, or `keySystemColumns`.
+- `fields`: JSON property paths used for filtering/ordering (B-tree expression keys). Optional if
+  `coveringFields` or `keySystemColumns` supply the key instead — an index must declare at least
+  one of the three.
 - `coveringFields`: additional properties frequently selected with the same filters. These become
   additional index keys to enable index-only reads when combined with smart select.
-- `keySystemColumns`: system columns (e.g. `"id"`) to include in the index key, alongside
-  `fields`/`coveringFields`. A covering index can only serve a query's join index-only if the
-  index's key matches the join's actual predicate — a query that joins on a system column directly
-  (e.g. a compiled `n.id = e.from_id` for a reverse traversal) needs a matching key column that
-  `fields`/`coveringFields` can't provide, since those only ever accept schema properties. Rejects
-  edge-only system columns on a node index and any column `scope` already prefixes the key with;
-  not supported together with `method: "gin"`/`"trigram"`. Rejects `"id"` combined with `unique:
-  true` — every node's `id` is already unique per row, so a unique index keyed on `id` plus other
-  columns can never enforce a meaningful constraint across those other columns.
+- `keySystemColumns`: system columns (e.g. `"id"`) to include in the key, after the `scope` prefix
+  and before `fields`. See [Keying on system columns](#keying-on-system-columns-keysystemcolumns).
+  Rejects `"id"` combined with `unique: true` — every node's `id` is already unique per row, so a
+  unique index keyed on `id` plus other columns can never enforce a meaningful constraint across
+  those other columns.
 - `unique`: create a unique index.
 - `scope`: prefixes index keys with TypeGraph system columns (default is `"graphAndKind"`).
 - `where`: partial index predicate (portable DSL, compiled per dialect).
@@ -134,6 +130,31 @@ Index `scope` controls which TypeGraph system columns are prefixed ahead of your
 - `"graphAndKind"` (default): prefixes with `(graph_id, kind)` to match most TypeGraph queries.
 - `"graph"`: prefixes with `graph_id` only (rare; useful for cross-kind queries within a graph).
 - `"none"`: no system prefix (rare; usually only correct for global queries).
+
+### Keying on system columns (`keySystemColumns`)
+
+`fields` and `coveringFields` only ever reference your schema's own properties, and `scope` only
+ever prefixes `graph_id`/`kind` — neither can put a system column like `id` into the index **key**.
+
+Some query shapes need that. A reverse traversal — `.traverse("hasCreator", { direction: "in"
+}).to("Post", "post")` — compiles a join on the target node's own `id` (`n.id = e.from_id`). If you
+also filter, sort, or select a prop on that same node (say `creationDate`), a covering index needs
+`id` in its key to match that join — `graph_id`/`kind` and `creationDate` alone aren't enough,
+because the index can't be chosen for an `id`-equality join it doesn't cover.
+
+```ts
+const postRecent = defineNodeIndex(Post, {
+  keySystemColumns: ["id"],
+  coveringFields: ["creationDate"],
+});
+// -> CREATE INDEX ... ON typegraph_nodes (graph_id, kind, id, (props #>> ARRAY['creationDate']))
+```
+
+**Validation:**
+
+- Node indexes only. Rejects edge-only system columns (`fromKind` / `fromId` / `toKind` / `toId`).
+- Rejects a column already implied by `scope` (e.g. `graph_id` when `scope: "graphAndKind"`).
+- Not supported with `method: "gin" | "trigram"` (same restriction as `coveringFields`).
 
 ## Edge Indexes
 
@@ -196,6 +217,33 @@ CREATE INDEX idx_person_email_name ON typegraph_nodes
   (graph_id, kind, json_extract(props, '$.email'), json_extract(props, '$.name'))
   WHERE deleted_at IS NULL;
 ```
+
+:::caution[PostgreSQL: JSONB expression indexes don't get a true Index Only Scan]
+A covering index like the one above lets PostgreSQL avoid a full **table scan**, but not
+necessarily a **heap fetch** per matching row. PostgreSQL's `Index Only Scan` optimization — skip
+the heap entirely when the index already has everything the query needs — does not extend to
+JSONB extraction expressions (`props #>> ARRAY[...]`), only to real stored columns. Even a
+correctly-shaped `coveringFields` index shows as a plain `Index Scan` in `EXPLAIN`, not
+`Index Only Scan`, and PostgreSQL still visits the heap row for every match.
+
+This matters most for high-fan-in ranked reads — e.g. "each of N friends' most recent post, top 10
+overall" — where a query visits many candidate rows and discards most of them after sorting. If
+`EXPLAIN (ANALYZE, BUFFERS)` shows most of a query's cost coming from a repeated `Index Scan` with
+high `Buffers: shared hit` relative to the rows actually returned, this is likely why — confirmed
+against a real workload at real scale, not a theoretical concern.
+
+TypeGraph doesn't currently offer a built-in way to materialize a hot prop as a real column (this
+is an active area of investigation). Until then, if this is a genuine hot-path bottleneck on
+PostgreSQL, the workaround is maintaining your own
+[stored generated column](https://www.postgresql.org/docs/current/ddl-generated-columns.html)
+alongside `props` with a plain index over it — a real column does get `Index Only Scan`, confirmed
+via `EXPLAIN (ANALYZE, BUFFERS)` showing `Heap Fetches: 0` (run `VACUUM ANALYZE`, not just
+`ANALYZE`, after backfilling — the visibility map needs to be current before PostgreSQL will prove
+it immediately).
+
+We haven't specifically verified whether SQLite's JSON-extraction covering indexes have the same
+limitation for this query shape.
+:::
 
 ## Batched Index Lookup (`bulkFindByIndex`)
 

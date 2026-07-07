@@ -138,6 +138,19 @@ await store.nodes.Person.bulkInsert(people);
 await store.nodes.Person.bulkUpsertById(itemsWithIds);
 ```
 
+### Batch sizing for large multi-call imports
+
+For a dataset too large for a single `bulkInsert`/`bulkCreate` call (e.g., streaming rows from a
+file in a loop), the *size* of each call matters, not just the total row count. Each call is its
+own transaction, and — per the default
+[`autoRefreshStatistics`](/backend-setup#refreshing-planner-statistics-after-bulk-loads) — can
+trigger a planner-statistics refresh on its own. In a large-scale bulk-load benchmark, batches of
+~2,000 rows per call were consistently ~25-30% slower per row than batches of ~20,000+: fewer,
+larger calls amortize both the per-call transaction commit and the statistics refresh across more
+rows. Prefer batch sizes in the tens of thousands when looping over many calls for a large import,
+and consider `autoRefreshStatistics: false` plus one `store.refreshStatistics()` call after the
+loop if per-call refreshes still dominate.
+
 ### Batch reads
 
 `getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
@@ -271,8 +284,11 @@ const results = await store
 ```
 
 This optimization pairs well with [covering indexes](/performance/indexes#covering-indexes): if
-your index contains both the filter keys and the selected keys, the database can satisfy the query
-with an index-only scan.
+your index contains both the filter keys and the selected keys, the database can serve the query
+straight from the index instead of scanning the whole table — though on PostgreSQL specifically,
+this stops short of a true `Index Only Scan` for JSONB-extracted fields; see the
+[covering indexes](/performance/indexes#covering-indexes) section for the concrete limitation and
+a workaround.
 
 **When optimization applies:**
 
@@ -489,6 +505,17 @@ Backend-specific overrides:
 | PostgreSQL | prepared execute latency | <= 700ms |
 
 </details>
+
+### Real-world workload validation
+
+Beyond the synthetic guardrail suite above, TypeGraph is also exercised against the
+[LDBC Social Network Benchmark (SNB) Interactive](https://github.com/ldbc/ldbc_snb_interactive_v1)
+workload — a standard, independently-defined graph benchmark, not a TypeGraph-specific one — at
+SF1 scale (~10k persons, ~1M posts, ~2M comments). This surfaced and fixed two real scaling bugs in
+the library: an unbounded `ANALYZE` cost on bulk SQLite loads, and an N+1 endpoint-existence check
+in batched edge creation. It also directly produced the `keySystemColumns` guidance and the
+PostgreSQL index-only-scan caveat in [Indexes](/performance/indexes#covering-indexes). The
+benchmark source lives in `packages/benchmarks/src/real/` in the repository.
 
 ### Running benchmarks locally
 
