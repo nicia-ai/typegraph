@@ -60,14 +60,19 @@ pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke
 # engines that ran (the CI-safe form: 0 or 1 runnable engines still exits 0)
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke:check
 
-# Real LDBC SF1 (~10.6k persons, ~180k knows, ~1.1M posts, ~2.2M comments)
-# CAUTION: as of this writing, TypeGraph/SQLite's bulk load shows apparent
-# O(n^2) scaling on this schema (batches slow down as the graph grows —
-# see the PR description for the isolated reproduction), so an SF1 load
-# does not complete in a practical amount of time. Filed as a library
-# finding, not fixed here (this is a benchmarks-only PR). Use the smoke
-# profile until that's resolved.
+# Real LDBC SF1 (~9.9k persons, ~361k knows (directed), ~1M posts, ~2.05M
+# comments). Takes 1-2 hours on typical hardware (TypeGraph/SQLite and
+# TypeGraph/Postgres each load in ~75-80 minutes; Neo4j ~5 minutes;
+# LadybugDB under a minute — see reports/snb-lane1-results.md for a real
+# run's numbers and why the load times differ this much across engines).
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:sf1
+
+# Or run it on a dedicated ephemeral EC2 instance instead of local
+# hardware (docs/ec2-benchmark-runner.md) — useful when local hardware is
+# contended, or for a stable, reproducible hardware profile.
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:sf1:ec2 -- \
+  --region=us-west-2 --subnet-id=<id> --security-group-id=<id> \
+  --iam-instance-profile=<name>
 ```
 
 `bench:snb:sf1` looks for an extracted datagen directory at
@@ -77,11 +82,15 @@ commands if it's missing:
 ```bash
 mkdir -p ~/.cache/typegraph/fixtures/ldbc-snb/sf1 && cd ~/.cache/typegraph/fixtures/ldbc-snb/sf1
 curl -L -O https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst
-zstd -d --stdout social_network-sf1-CsvBasic-LongDateFormatter.tar.zst | tar -xf -
+zstd -d --stdout social_network-sf1-CsvBasic-LongDateFormatter.tar.zst | tar -xf - --strip-components=1
 ```
 
-Or point at an existing extract with `--data-dir <path>`. Real datasets are
-never committed — only the tiny smoke fixture under `fixtures/` is.
+The archive extracts into its own `social_network-...-LongDateFormatter/`
+subdirectory, not flat — `--strip-components=1` is required, not
+cosmetic; without it, `dynamic/person_0_0.csv` won't be where
+`resolveDatasetRoot` looks for it. Or point at an existing extract with
+`--data-dir <path>`. Real datasets are never committed — only the tiny
+smoke fixture under `fixtures/` is.
 
 Useful flags (all scripts): `--engines=typegraph-sqlite,neo4j` (default:
 all four), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,

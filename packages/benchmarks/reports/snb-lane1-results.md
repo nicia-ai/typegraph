@@ -1,35 +1,145 @@
-# Lane 1 (LDBC SNB Interactive short reads) — first results
+# Lane 1 (LDBC SNB Interactive short reads) — results
 
-**Status: smoke-scale only. Not a publishable comparison.** Per the
-program plan, SF1 is the minimum scale for any claim about relative engine
-performance — the numbers below are from the tiny 30-person/40-post/
-80-comment committed smoke fixture, run only to prove the harness and all
-four query implementations are wired correctly end-to-end. Treat every
-number in this file as "the code runs and agrees across engines," not as
-"engine X is faster than engine Y." See [Finding: SF1 load does not
-complete in practical time](#finding-sf1-bulk-load-does-not-complete-in-a-practical-time)
-below for why there are no SF1 numbers yet.
+**Status: real SF1-scale numbers, single run — not a publishable comparison
+yet.** Per the program plan, SF1 is the minimum scale for any claim about
+relative engine performance, and this file now has it: a full run (~9.9k
+persons, ~1M posts, ~2.05M comments, official CsvBasic datagen export)
+completed cleanly across all four engines with 100% row-count parity on
+every query. Treat the numbers below as a first real data point, not a
+final verdict — this is one run on one machine, not the multiple runs /
+statistical-confidence bar a published comparison would need. The
+smoke-scale table is kept below for harness-wiring reference.
 
-## Environment (non-publishable iteration hardware)
+Reaching a working SF1 run required finding and fixing three real
+scaling bugs (two in TypeGraph itself, one in this benchmark's own
+LadybugDB driver) — see
+[Fixes made to reach a working SF1 run](#fixes-made-to-reach-a-working-sf1-run).
+
+## SF1 environment
 
 | | |
 | --- | --- |
-| Date | 2026-07-05 |
-| Machine | Apple M4 Pro, 14 cores, 48 GiB RAM, macOS (darwin/arm64) |
+| Date | 2026-07-07 |
+| Machine | AWS EC2 `c7i.4xlarge`, Ubuntu 24.04 LTS |
+| CPU / RAM | Intel(R) Xeon(R) Platinum 8488C, 16 vCPU, 30.8 GiB |
 | Node.js | v24.18.0 |
 | `@nicia-ai/typegraph` | 0.34.0 |
 | `better-sqlite3` | 12.11.1 |
 | `pg` | 8.22.0 |
 | `neo4j-driver` | 6.2.0 (server image `neo4j:2026.05.0`) |
 | `@ladybugdb/core` | 0.18.0 |
-| Command | `tsx src/real/snb-short-reads.ts --profile=smoke --check` |
-| Samples / warmups | 15 / 3 per query (smoke profile defaults) |
+| Command | `tsx src/real/snb-short-reads.ts --profile=sf1 --check` |
+| Samples / warmups | 20 / 5 per query (sf1 profile defaults) |
+| Runner | `pnpm bench:snb:sf1:ec2` (docs/ec2-benchmark-runner.md) — dedicated ephemeral instance, no other workload sharing the box |
 
-Full machine-readable detail: `bench-results/current/snb-smoke/summary.json`,
-`results.json`, `competitor-doctor.json` (gitignored — regenerate with
-`pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke:check`).
+Full machine-readable detail:
+`bench-results/current/snb-sf1-ec2-ec2-20260706T215112Z/{summary,results}.json`
+(gitignored — regenerate with `pnpm bench:snb:sf1:ec2` then the printed
+`collect` command).
 
-## Load time (smoke fixture: 30 persons, 5 forums, 40 posts, 80 comments)
+## SF1 load time (9,892 persons, 90,492 forums, 1,003,605 posts, 2,052,169 comments)
+
+| Engine | Load time |
+| --- | --- |
+| ladybugdb | 45.3 s |
+| neo4j | 266.9 s (4.4 min) |
+| typegraph-sqlite | 4,454.4 s (74.2 min) |
+| typegraph-postgres | 4,853.6 s (80.9 min) |
+
+TypeGraph's SQLite/Postgres backends are markedly slower to *load* at this
+scale than Neo4j or LadybugDB — both of the latter use engine-native bulk
+paths (Neo4j's batched `UNWIND ... IN TRANSACTIONS OF 5000 ROWS`, Ladybug's
+`COPY FROM`), while TypeGraph's backends go through the general-purpose
+`bulkInsert` API. This is a real, load-bearing difference worth its own
+investigation, not something to paper over — filed as a follow-up, not
+fixed in this PR (see Next steps).
+
+## SF1 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
+
+| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
+| --- | --- | --- | --- | --- |
+| IS1 (person profile) | 0.038 / 0.066 / 0.074 | 0.089 / 0.116 / 0.179 | 0.921 / 1.192 / 4.931 | 0.344 / 0.434 / 0.442 |
+| IS2 (friends' recent messages) | 81.575 / 264.280 / 381.127 | 203.229 / 605.720 / 876.873 | 25.035 / 102.378 / 172.022 | 62.142 / 82.944 / 90.185 |
+| IS3 (friends with dates) | 0.225 / 0.987 / 0.996 | 0.569 / 2.114 / 2.311 | 1.101 / 2.127 / 3.985 | 2.289 / 3.429 / 3.703 |
+| IS4 (message content) | 0.020 / 0.027 / 0.035 | 0.088 / 0.124 / 0.139 | 0.768 / 2.502 / 2.813 | 0.272 / 0.300 / 0.306 |
+| IS5 (message creator) | 0.035 / 0.036 / 0.037 | 0.124 / 0.135 / 0.137 | 0.691 / 0.862 / 3.289 | 0.954 / 0.999 / 1.025 |
+| IS6 (root forum + moderator) | 0.095 / 0.125 / 0.160 | 0.721 / 0.792 / 1.185 | 0.721 / 0.965 / 4.556 | 3.027 / 3.333 / 3.347 |
+| IS7 (replies + knows check) | 0.090 / 1.202 / 1.324 | 0.265 / 3.890 / 7.061 | 1.222 / 27.811 / 47.521 | 2.906 / 4.955 / 5.077 |
+
+Several queries are flagged noisy (CV > 25%, see `results.json`'s `noisy`
+field) — expected for a single-run measurement of sub-millisecond-to-
+low-double-digit-millisecond operations on a shared cloud instance. IS2's
+much higher latency across every engine reflects real work (merging and
+re-ranking up to 10 messages across a friend frontier, then a root-post
+walk per message), not overhead — the same query is also the noisiest,
+consistent with its cost scaling with each sampled person's actual friend
+count and message volume rather than being a fixed-cost point read like
+IS1/IS4/IS5.
+
+## Fixes made to reach a working SF1 run
+
+Three independent scaling bugs blocked a working SF1 run; all three showed
+the same shape (fine at smoke scale, catastrophic at SF1 scale) and were
+root-caused with the same discipline — a controlled, isolated repro at
+increasing scale, not guessing from the full run's symptoms.
+
+### 1. SQLite `refreshStatistics()` O(n²) `ANALYZE` (TypeGraph core, merged)
+
+`bulkCreate`/`bulkInsert`'s auto-refresh-statistics trigger ran a bare,
+unscoped `ANALYZE` on SQLite — re-scanning every table in the database
+file, unbounded, on every large batch. A 2M-row bulk load never finished
+after 4.5+ hours. Fixed in `@nicia-ai/typegraph` (PR #226, merged to
+`main` before this branch): scope `ANALYZE` to TypeGraph's own tables and
+bound it with `PRAGMA analysis_limit`, matching Postgres's already-bounded
+sampling behavior. This is a library fix, not a benchmarks-only change —
+out of this PR's diff, referenced here because it's the reason a real SF1
+run was possible at all.
+
+### 2. Neo4j: `Post`/`Comment` had no per-label id index (this PR)
+
+Neo4j's schema indexes are scoped to one label at a time and never
+inherited across the other labels a multi-label node carries.
+`ensureSchema()` only created uniqueness constraints on `Person`/
+`Message`/`Forum`(id) — so the load's `containerOf`/`replyOf` edge-wiring
+steps, which `MATCH` by id filtered on the concrete `:Post`/`:Comment`
+label (not `:Message`), silently fell back to a full label scan per row.
+At SF1 scale (~1M Post nodes), one 5,000-row batch turned into billions of
+comparisons. Fixed by adding `snb_post_id`/`snb_comment_id` constraints;
+verified via `EXPLAIN` that the query plan changed from `NodeByLabelScan`
+to `NodeUniqueIndexSeek(Locking)` before trusting it at scale
+(`src/real/engines/neo4j.ts`).
+
+### 3. LadybugDB: incremental edge writes vs. its CSR storage (this PR)
+
+LadybugDB (Kuzu-family) stores relationships in a columnar CSR
+(Compressed Sparse Row) adjacency structure — cheap to build once in bulk,
+expensive to update incrementally. The original loader batched edge writes
+via `UNWIND ... MATCH ... CREATE` (mirroring every other engine driver's
+own pattern), which a controlled repro showed scaling roughly *cubically*:
+46s at 50k edges, 388s at 100k edges (~8.4x time for 2x data). Rewrote the
+loader to stage each entity/edge kind to a CSV file and issue one
+`COPY <table> FROM` per file (`src/real/engines/ladybug.ts`) — Ladybug's
+own recommended bulk-load path. That alone dropped the same 100k-edge case
+to 57ms (~6,800x), confirmed scaling linearly through 800k edges.
+
+A second, subtler bug surfaced only at real SF1 scale: a properly
+RFC4180-quoted forum title containing a comma broke Ladybug's CSV parser
+specifically in a large (90k-row) file — the exact same line parsed fine
+in a 2-line isolated test. The failing line's byte offset (~1.08MB) sits
+suspiciously close to a 1MB buffer boundary, pointing at a parser bug when
+a quoted field straddles an internal read-buffer boundary. Since LDBC's
+natural-language content contains commas constantly but a literal pipe
+character almost never, switching the staging delimiter from `,` to `|`
+(one of Ladybug's supported delimiters) sidesteps needing to quote nearly
+any real content field at all. Verified against the actual cached SF1
+dataset end-to-end before trusting it on EC2.
+
+## Smoke-scale results (harness-wiring reference only)
+
+Kept for reference — this is what proved the harness and all four query
+implementations wired correctly end-to-end before SF1 was attempted. Not
+meaningful for performance comparison (load time here is dominated by
+fixed setup costs like container startup, not row count).
 
 | Engine | Load time |
 | --- | --- |
@@ -38,86 +148,20 @@ Full machine-readable detail: `bench-results/current/snb-smoke/summary.json`,
 | typegraph-postgres | 185.0 ms (includes imperative container startup) |
 | neo4j | 5993.2 ms (includes imperative container startup + constraint/index `awaitIndexes`) |
 
-At this scale, load time is dominated by fixed setup costs (container
-startup, schema bootstrap), not row count — not meaningful for comparison.
-
-## Query latency (p50 / p95, milliseconds) — row-count parity: **7/7 queries comparable=yes**
-
-Every engine returned an identical result-set size for every one of the 15
-sampled requests, for all seven queries — the row-count parity gate never
-failed. This is the headline result of this run: **the TypeGraph query
-builder implementation, the Cypher implementations for Neo4j and
-LadybugDB, and the harness's shared request sampling are all semantically
-consistent with each other.**
-
-| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
-| --- | --- | --- | --- | --- |
-| IS1 (person profile) | 0.018 / 0.034 | 0.291 / 0.375 | 2.279 / 7.224 | 0.162 / 0.197 |
-| IS2 (friends' recent messages) | 3.342 / 4.701 | 4.938 / 9.972 | 19.789 / 72.974 | 5.232 / 8.968 |
-| IS3 (friends with dates) | 0.190 / 0.193 | 0.288 / 0.315 | 1.921 / 4.935 | 0.487 / 0.601 |
-| IS4 (message content) | 0.008 / 0.012 | 0.246 / 0.310 | 1.443 / 3.389 | 0.128 / 0.209 |
-| IS5 (message creator) | 0.177 / 0.181 | 0.270 / 0.381 | 1.569 / 21.946 | 0.247 / 0.370 |
-| IS6 (root forum + moderator) | 0.314 / 0.328 | 0.897 / 1.227 | 1.583 / 4.525 | 1.060 / 1.282 |
-| IS7 (replies + knows check) | 0.756 / 0.906 | 1.080 / 2.249 | 3.804 / 48.804 | 1.225 / 2.253 |
-
-Most of these are sub-millisecond and several are flagged noisy
-(coefficient of variation > 25% — see `results.json`'s `noisy` field per
-query/engine); at smoke scale, absolute timing is dominated by
-process/JIT/connection noise, not engine or query-plan characteristics.
-Neo4j's p95s in particular reflect per-request Bolt round-trips over a
-multi-statement query (IS2/IS7), not a query-plan cost — expected to look
-very different at SF1 where the fixed per-request overhead amortizes over
-real work.
-
-## Finding: SF1 bulk load does not complete in a practical time
-
-Attempted a real LDBC SF1 run (~9.9k persons, ~1M posts, ~2.05M comments,
-via the official CsvBasic datagen export) against all four engines. The
-`typegraph-sqlite` load got through persons (9,892), knows edges (361,246
-directed), forums (90,492), and posts (1,003,605 + their `hasCreator`/
-`containerOf` edges) in 46 minutes, then ran for **over 4.5 hours** on the
-comments stage (2,052,170 rows) without finishing — killed after
-confirming the process was still actively writing (not deadlocked; the
-SQLite file was still growing) but at a rate that would have taken many
-more hours.
-
-Isolated with three controlled reproductions (60k-row synthetic loads,
-`store.nodes.<Kind>.bulkInsert()`/`store.edges.<kind>.bulkInsert()`, not
-hand SQL):
-
-1. A single node kind with no edges shows **flat per-batch time** across
-   60k rows (fixed 2,000-row batches stay in the 25–75ms range throughout).
-2. The SNB schema (Person/Forum/Post/Comment + knows/hasCreator/
-   containerOf/replyOf, including the `Message` ontological supertype)
-   shows **per-batch time growing roughly linearly with cumulative rows
-   already loaded** — a fixed 2,000-row batch costs ~116ms at row 0 and
-   ~569ms at row 58,000 (~5x), which integrates to O(n²) total bulk-load
-   time instead of the expected O(n).
-3. Removing the `Message` ontology (`subClassOf`) entirely — keeping only
-   the polymorphic `hasCreator`/`replyOf` edge declarations — reproduces
-   essentially the same growth (~197ms → ~544ms over the same range),
-   ruling out the ontology/`includeSubClasses` machinery as the primary
-   cause.
-4. The slowdown appears even on edges whose target table never grows
-   (`hasCreator`'s target is a single fixed Person row throughout), which
-   points at something scaling with total graph size (or a specific
-   auxiliary table) rather than with the size of the specific table an
-   edge references. `typegraph_node_uniques` (the one bookkeeping table
-   with a `concrete_kind` column) was checked directly and confirmed
-   empty/uninvolved for this schema (no unique constraints declared), so
-   it is not the mechanism — the actual cause is unidentified.
-
-This is filed as a finding for the TypeGraph maintainers, not fixed here
-(this is a benchmarks-only PR; see
-`docs/design/benchmark-program-plan.md`'s explicit no-library-changes
-scope). It blocks Lane 1's SF1 run — the headline scale the plan calls
-for — until resolved. Recommend profiling `bulkInsert` (nodes and edges)
-against a multi-node-kind graph with cross-kind edges at increasing
-cumulative row counts to localize the source of the per-batch growth.
+Row-count parity: 7/7 queries comparable=yes (30 persons, 5 forums, 40
+posts, 80 comments; 15 samples / 3 warmups per query).
 
 ## Next steps
 
-- [ ] TypeGraph maintainers investigate the bulk-load scaling finding above.
-- [ ] Re-run `bench:snb:sf1` once resolved; replace this doc's smoke-scale
-      table with real SF1 numbers before making any comparative claim.
-- [ ] SF10 remains a stretch goal per the plan, gated on SF1 being green.
+- [x] ~~TypeGraph maintainers investigate the bulk-load scaling finding
+      above.~~ Fixed and merged (PR #226).
+- [x] ~~Re-run `bench:snb:sf1` once resolved; replace this doc's
+      smoke-scale table with real SF1 numbers.~~ Done — see above.
+- [ ] Investigate why TypeGraph's SQLite/Postgres backends load ~65-100x
+      slower than Neo4j/LadybugDB at SF1 scale (both of which use an
+      engine-native bulk path TypeGraph's `bulkInsert` doesn't have an
+      equivalent of yet).
+- [ ] Run SF1 multiple times and report a distribution, not a single
+      sample, before making any comparative claim publicly.
+- [ ] SF10 remains a stretch goal per the plan, gated on SF1 numbers being
+      trusted (multi-run, not single-sample).
