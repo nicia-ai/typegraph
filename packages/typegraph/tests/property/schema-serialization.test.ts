@@ -952,6 +952,63 @@ describe("Schema Serialization Properties", () => {
       expect(canonical).not.toContain('"origin"');
     });
 
+    // `keySystemColumns` follows the same canonicalize-by-absence rule as
+    // `method`/`origin`: indexes that don't use it must hash/serialize
+    // identically to before the field existed.
+    it("indexes without keySystemColumns omit the field from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+
+      const graph = defineGraph({
+        id: "key_system_columns_omit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [personEmail],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      for (const index of serialized.indexes ?? []) {
+        expect("keySystemColumns" in index).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"keySystemColumns"');
+    });
+
+    it("indexes using keySystemColumns emit and round-trip it in canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_emit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const serializedIndex = serialized.indexes?.[0];
+      expect(serializedIndex?.entity).toBe("node");
+      expect(
+        serializedIndex?.entity === "node" ?
+          serializedIndex.keySystemColumns
+        : undefined,
+      ).toEqual(["id"]);
+
+      const json = JSON.stringify(serialized, sortedReplacer);
+      const parsed = serializedSchemaZod.parse(JSON.parse(json));
+      const reSerialized = JSON.stringify(parsed, sortedReplacer);
+      expect(reSerialized).toBe(json);
+    });
+
     // Conversely, `origin: "runtime"` is emitted explicitly so the
     // restart loader can route it through the runtime compiler.
     it('graph-extension indexes emit `origin: "runtime"` in canonical serialization', () => {

@@ -225,6 +225,10 @@ function serializeNodeIndexDeclaration(
     where: declaration.where,
     // `method: "btree"` is canonicalized by absence, like `origin` below.
     ...(declaration.method === undefined ? {} : { method: declaration.method }),
+    // `keySystemColumns: []` is canonicalized by absence, same rule.
+    ...(declaration.keySystemColumns === undefined ?
+      {}
+    : { keySystemColumns: declaration.keySystemColumns }),
     // `origin: "compile-time"` is the default and is omitted from the
     // canonical form (absence == compile-time). Only `runtime` is
     // emitted explicitly so the restart loader can route the declaration

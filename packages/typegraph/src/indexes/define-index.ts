@@ -26,6 +26,7 @@ import {
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
 import { fnv1aBase36 } from "../utils/hash";
+import { getNodeScopeColumns } from "./compiler";
 import {
   type EdgeIndexConfig,
   type EdgeIndexDeclaration,
@@ -45,6 +46,18 @@ import {
   type SystemColumnName,
 } from "./types";
 
+const NODE_KEY_SYSTEM_COLUMNS: ReadonlySet<SystemColumnName> = new Set([
+  "graph_id",
+  "kind",
+  "id",
+  "deleted_at",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "version",
+]);
+
 // ============================================================
 // Public API
 // ============================================================
@@ -55,6 +68,10 @@ export function defineNodeIndex<N extends NodeType>(
 ): NodeIndexDeclaration {
   const scope = config.scope ?? "graphAndKind";
   const unique = config.unique ?? false;
+  const keySystemColumns = normalizeKeySystemColumnsOrThrow(
+    config.keySystemColumns ?? [],
+    scope,
+  );
 
   const schemaIntrospector = createSchemaIntrospector(
     new Map([[node.kind, { schema: node.schema }]]),
@@ -63,12 +80,12 @@ export function defineNodeIndex<N extends NodeType>(
   const { pointers: fields, valueTypes: fieldValueTypes } =
     normalizeNodeIndexFieldsOrThrow(
       node,
-      config.fields,
+      config.fields ?? [],
       schemaIntrospector,
       "fields",
       // GIN containment indexes exist precisely for array/object fields,
       // which the btree guard otherwise rejects.
-      { allowEmpty: false, allowJsonFields: config.method === "gin" },
+      { allowEmpty: true, allowJsonFields: config.method === "gin" },
     );
 
   const { pointers: coveringFields, valueTypes: coveringFieldValueTypes } =
@@ -81,6 +98,16 @@ export function defineNodeIndex<N extends NodeType>(
     );
   assertNoOverlap(fields, coveringFields, "fields", "coveringFields");
 
+  if (
+    fields.length === 0 &&
+    coveringFields.length === 0 &&
+    keySystemColumns.length === 0
+  ) {
+    throw new Error(
+      "Index must declare at least one of fields, coveringFields, or keySystemColumns",
+    );
+  }
+
   const where = normalizeWhereInput(config.where, () =>
     createNodeWhereBuilder(node, schemaIntrospector),
   );
@@ -89,6 +116,7 @@ export function defineNodeIndex<N extends NodeType>(
     fieldCount: fields.length,
     fieldValueType: fieldValueTypes[0],
     coveringFieldCount: coveringFields.length,
+    keySystemColumnCount: keySystemColumns.length,
     unique,
     hasWhere: where !== undefined,
   });
@@ -101,6 +129,7 @@ export function defineNodeIndex<N extends NodeType>(
     direction: "none",
     fields,
     coveringFields,
+    keySystemColumns,
   });
   const name =
     config.name ??
@@ -108,8 +137,8 @@ export function defineNodeIndex<N extends NodeType>(
 
   // `origin` is intentionally omitted: `"compile-time"` is the default
   // and is canonicalized by absence so the serialized form stays
-  // byte-identical for legacy graphs. `method` follows the same rule
-  // (absence == "btree").
+  // byte-identical for legacy graphs. `method` and `keySystemColumns`
+  // follow the same rule (absence == "btree" / no system key columns).
   return {
     entity: "node",
     kind: node.kind,
@@ -122,7 +151,41 @@ export function defineNodeIndex<N extends NodeType>(
     scope,
     where,
     ...(method === undefined ? {} : { method }),
+    ...(keySystemColumns.length === 0 ? {} : { keySystemColumns }),
   };
+}
+
+/**
+ * Validates `keySystemColumns`: must be node system columns (not
+ * edge-only `from_kind`/`from_id`/`to_kind`/`to_id`), must not repeat
+ * each other, and must not repeat a column `scope` already prefixes the
+ * key with.
+ */
+function normalizeKeySystemColumnsOrThrow(
+  columns: readonly SystemColumnName[],
+  scope: IndexScope,
+): readonly SystemColumnName[] {
+  if (columns.length === 0) return [];
+
+  for (const column of columns) {
+    if (!NODE_KEY_SYSTEM_COLUMNS.has(column)) {
+      throw new Error(
+        `Node index keySystemColumns does not support "${column}" (edge-only system column)`,
+      );
+    }
+  }
+  assertUnique(columns, "keySystemColumns");
+
+  const scopeColumns = new Set(getNodeScopeColumns(scope));
+  for (const column of columns) {
+    if (scopeColumns.has(column)) {
+      throw new Error(
+        `Node index keySystemColumns must not repeat a column already implied by scope "${scope}": "${column}"`,
+      );
+    }
+  }
+
+  return columns;
 }
 
 export function defineEdgeIndex<E extends AnyEdgeType>(
@@ -165,6 +228,7 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
     fieldCount: fields.length,
     fieldValueType: fieldValueTypes[0],
     coveringFieldCount: coveringFields.length,
+    keySystemColumnCount: 0,
     unique,
     hasWhere: where !== undefined,
   });
@@ -213,6 +277,7 @@ function resolveAdvancedIndexMethod(
     fieldCount: number;
     fieldValueType: ValueType | undefined;
     coveringFieldCount: number;
+    keySystemColumnCount: number;
     unique: boolean;
     hasWhere: boolean;
   }>,
@@ -247,6 +312,11 @@ function resolveAdvancedIndexMethod(
   if (details.coveringFieldCount > 0) {
     throw new Error(
       `Index method "${resolved}" does not support coveringFields (GIN indexes cannot serve index-only scans over extra columns)`,
+    );
+  }
+  if (details.keySystemColumnCount > 0) {
+    throw new Error(
+      `Index method "${resolved}" does not support keySystemColumns (GIN indexes cannot serve index-only scans over extra columns)`,
     );
   }
   if (details.unique) {
@@ -790,9 +860,16 @@ type DefaultNameParts = Readonly<{
   direction: EdgeIndexDirection;
   fields: readonly string[];
   coveringFields: readonly string[];
+  /**
+   * Node-only, defaults to `[]` for edges. Folded into the hash/name only
+   * when non-empty so indexes that don't use it keep byte-identical
+   * default names to before this field existed.
+   */
+  keySystemColumns?: readonly string[];
 }>;
 
 function generateDefaultIndexName(parts: DefaultNameParts): string {
+  const keySystemColumns = parts.keySystemColumns ?? [];
   const hash = fnv1aBase36(
     JSON.stringify({
       kind: parts.kind,
@@ -802,6 +879,7 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
       direction: parts.direction,
       fields: parts.fields,
       covering: parts.coveringFields,
+      ...(keySystemColumns.length > 0 ? { keySystemColumns } : {}),
     }),
   );
 
@@ -813,6 +891,9 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
     sanitizeIdentifierComponent(parts.fields.join("_")),
     parts.coveringFields.length > 0 ?
       `cov_${sanitizeIdentifierComponent(parts.coveringFields.join("_"))}`
+    : undefined,
+    keySystemColumns.length > 0 ?
+      `sys_${sanitizeIdentifierComponent(keySystemColumns.join("_"))}`
     : undefined,
     parts.direction === "none" ? undefined : parts.direction,
     parts.unique ? "uniq" : undefined,

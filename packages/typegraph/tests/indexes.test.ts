@@ -198,6 +198,61 @@ describe("indexes", () => {
     expect(pg).toContain(`ARRAY['startDate']`);
   });
 
+  it("supports keySystemColumns for index-only join coverage", () => {
+    const idCoveringName = defineNodeIndex(Person, {
+      keySystemColumns: ["id"],
+      coveringFields: ["name"],
+    });
+
+    const pg = generateIndexDDL(idCoveringName, "postgres");
+    expect(pg).toContain('"graph_id"');
+    expect(pg).toContain('"kind"');
+    expect(pg).toContain('"id"');
+    expect(pg).toContain(`ARRAY['name']`);
+
+    const sqlite = generateIndexDDL(idCoveringName, "sqlite");
+    expect(sqlite).toContain('"id"');
+    expect(sqlite).toContain(`$."name"`);
+
+    // Canonicalized by absence, like `method`: an index that never uses
+    // keySystemColumns must not carry the key at all.
+    const plainEmailIndex = defineNodeIndex(Person, { fields: ["email"] });
+    expect(Object.hasOwn(plainEmailIndex, "keySystemColumns")).toBe(false);
+  });
+
+  it("rejects edge-only system columns in a node index's keySystemColumns", () => {
+    expect(() => {
+      defineNodeIndex(Person, {
+        keySystemColumns: ["from_id"],
+        coveringFields: ["name"],
+      });
+    }).toThrow(/edge-only system column/);
+  });
+
+  it("rejects keySystemColumns that duplicate a column scope already implies", () => {
+    expect(() => {
+      defineNodeIndex(Person, {
+        // Default scope is "graphAndKind", which already prefixes graph_id/kind.
+        keySystemColumns: ["graph_id"],
+        coveringFields: ["name"],
+      });
+    }).toThrow(/must not repeat a column already implied by scope/);
+  });
+
+  it("rejects keySystemColumns combined with gin/trigram methods", () => {
+    const Tagged = defineNode("Tagged", {
+      schema: z.object({ tags: z.array(z.string()) }),
+    });
+
+    expect(() => {
+      defineNodeIndex(Tagged, {
+        fields: ["tags"],
+        keySystemColumns: ["id"],
+        method: "gin",
+      });
+    }).toThrow(/does not support keySystemColumns/);
+  });
+
   it("throws when covering fields overlap with index fields", () => {
     expect(() => {
       defineNodeIndex(Person, {
@@ -207,13 +262,10 @@ describe("indexes", () => {
     }).toThrow(/must not overlap/);
   });
 
-  it("throws when fields array is empty", () => {
+  it("throws when fields, coveringFields, and keySystemColumns are all empty", () => {
     expect(() => {
-      defineNodeIndex(Person, {
-        // @ts-expect-error Empty fields should be a type error
-        fields: [],
-      });
-    }).toThrow(/must not be empty/);
+      defineNodeIndex(Person, { fields: [] });
+    }).toThrow(/must declare at least one of/);
   });
 
   it("throws for unknown fields in index definition", () => {

@@ -46,6 +46,10 @@ export function compileNodeIndexKeys(
     keys.push(systemColumn(column));
   }
 
+  for (const column of index.keySystemColumns ?? []) {
+    keys.push(systemColumn(column));
+  }
+
   const allPointers = [...index.fields, ...index.coveringFields];
   const allValueTypes = [
     ...index.fieldValueTypes,
@@ -158,7 +162,7 @@ function compileIndexKeyValue(
   }
 }
 
-function getNodeScopeColumns(
+export function getNodeScopeColumns(
   scope: NodeIndexDeclaration["scope"],
 ): readonly SystemColumnName[] {
   switch (scope) {

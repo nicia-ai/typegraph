@@ -1609,6 +1609,17 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
 
   const index = resolveNodeIndex(ctx.graph, kind, indexName);
 
+  if (index.fields.length === 0) {
+    throw new ConfigurationError(
+      `bulkFindByIndex requires an index with at least one prop-based field on index "${indexName}" (node kind "${kind}")`,
+      { indexName, kind },
+      {
+        suggestion:
+          "bulkFindByIndex probes by prop values from each item; an index declared with only keySystemColumns/coveringFields (no fields) has nothing to probe by.",
+      },
+    );
+  }
+
   // Date-typed lookup keys can't satisfy the cross-backend parity guarantee:
   // SQLite compares stored ISO text byte-wise while Postgres compares
   // timestamptz instants, so equal instants in different ISO forms diverge.

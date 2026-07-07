@@ -191,11 +191,27 @@ export type IndexFieldInput<T> =
   | JsonPointer;
 
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
-  fields: readonly [
-    IndexFieldInput<z.infer<N["schema"]>>,
-    ...IndexFieldInput<z.infer<N["schema"]>>[],
-  ];
+  /**
+   * Prop-based key fields. May be empty (or omitted) only if
+   * `keySystemColumns` supplies at least one key column instead — an
+   * index needs at least one of `fields`, `coveringFields`, or
+   * `keySystemColumns` to be non-empty.
+   */
+  fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
   coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
+  /**
+   * System columns (e.g. `"id"`) to include in the index key, positioned
+   * after the `scope` prefix and before `fields`/`coveringFields`.
+   *
+   * Needed when an index must serve a join predicate on a system column
+   * TypeGraph's compiled queries filter on directly — e.g. `n.id =
+   * e.from_id` — so the index can be used for an index-only scan instead
+   * of falling back to a heap fetch per candidate row. Must not repeat a
+   * column already implied by `scope`, and must only reference node
+   * system columns (`"from_kind"` / `"from_id"` / `"to_kind"` / `"to_id"`
+   * are edge-only and are rejected).
+   */
+  keySystemColumns?: readonly SystemColumnName[] | undefined;
   unique?: boolean | undefined;
   name?: string | undefined;
   scope?: IndexScope | undefined;
@@ -289,6 +305,13 @@ export type NodeIndexDeclaration = IndexDeclarationBase &
   Readonly<{
     entity: "node";
     kind: string;
+    /**
+     * System columns included in the index key (see
+     * {@link NodeIndexConfig.keySystemColumns}). Absent means none —
+     * canonicalized by absence like `origin`/`method` so declarations
+     * that don't use this stay byte-identical to before it existed.
+     */
+    keySystemColumns?: readonly SystemColumnName[];
   }>;
 
 export type EdgeIndexDeclaration = IndexDeclarationBase &
