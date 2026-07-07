@@ -611,6 +611,46 @@ describe("Query Execution (SQLite)", () => {
         "Charlie (charlie)",
       ]);
     });
+
+    it("round-trips a projected node id into getById/getByIds with no cast", async () => {
+      const ids = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .select((context) => context.p.id)
+        .execute();
+
+      const [aliceId] = ids;
+      expect(aliceId).toBeDefined();
+
+      // No cast: SelectableNode.id is branded NodeId<Person>, matching what
+      // getById/getByIds require.
+      const [alice, [aliceAgain]] = await Promise.all([
+        store.nodes.Person.getById(aliceId!),
+        store.nodes.Person.getByIds([aliceId!]),
+      ]);
+      expect(alice?.name).toBe("Alice");
+      expect(aliceAgain?.name).toBe("Alice");
+    });
+
+    it("round-trips a projected edge id into getById with no cast", async () => {
+      const edgeIds = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .traverse("worksAt", "e")
+        .to("Company", "c")
+        .select((context) => context.e.id)
+        .execute();
+
+      const [worksAtId] = edgeIds;
+      expect(worksAtId).toBeDefined();
+
+      // No cast: SelectableEdge.id is branded EdgeId<worksAt>, matching what
+      // getById requires.
+      const edge = await store.edges.worksAt.getById(worksAtId!);
+      expect(edge?.role).toBe("Engineer");
+    });
   });
 
   describe("Query Compilation", () => {

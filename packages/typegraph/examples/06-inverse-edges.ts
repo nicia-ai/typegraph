@@ -14,6 +14,7 @@ import {
   defineEdge,
   defineNode,
   inverseOf,
+  type NodeId,
 } from "@nicia-ai/typegraph";
 import { createExampleBackend } from "./_helpers";
 
@@ -234,11 +235,11 @@ export async function main() {
 
   // Full management chain upward from Bob
   console.log("\nBob's management chain (manual traversal):");
-  let currentId: string | undefined = juniorDev.id;
+  let currentId: NodeId<typeof Employee> | undefined = juniorDev.id;
   let level = 0;
 
   while (currentId) {
-    const current = await store.nodes.Employee.getById(currentId as typeof juniorDev.id);
+    const current = await store.nodes.Employee.getById(currentId);
     if (!current) break;
 
     const indent = "  ".repeat(level);

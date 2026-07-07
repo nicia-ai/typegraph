@@ -11,7 +11,7 @@
  * - Aliases must be unique
  * - whereNode aliases must reference existing aliases
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -20,6 +20,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type EdgeId,
+  type NodeId,
   type Store,
   type TypedEdgeCollection,
 } from "../src";
@@ -425,6 +427,44 @@ describe("Query Builder Type Safety", () => {
           person: context.p,
           // ctx.c would be a type error here since "c" alias doesn't exist
         }));
+
+      expect(query).toBeDefined();
+    });
+
+    it("brands a projected node id as NodeId<N>, not a plain string", () => {
+      const query = createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .select((context) => context.p.id);
+
+      type ProjectedId = Awaited<ReturnType<(typeof query)["execute"]>>[number];
+      type GetByIdParam = Parameters<
+        Store<typeof graph>["nodes"]["Person"]["getById"]
+      >[0];
+
+      // The id flowing out of .select() must line up exactly with what
+      // getById/getByIds require, with no cast at the call site.
+      expectTypeOf<ProjectedId>().toEqualTypeOf<NodeId<typeof Person>>();
+      expectTypeOf<ProjectedId>().toEqualTypeOf<GetByIdParam>();
+      expectTypeOf<ProjectedId>().not.toEqualTypeOf<string>();
+
+      expect(query).toBeDefined();
+    });
+
+    it("brands a projected edge id as EdgeId<E>, not a plain string", () => {
+      const query = createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .to("Company", "c")
+        .select((context) => context.e.id);
+
+      type ProjectedId = Awaited<ReturnType<(typeof query)["execute"]>>[number];
+      type GetByIdParam = Parameters<
+        Store<typeof graph>["edges"]["worksAt"]["getById"]
+      >[0];
+
+      expectTypeOf<ProjectedId>().toEqualTypeOf<EdgeId<typeof worksAt>>();
+      expectTypeOf<ProjectedId>().toEqualTypeOf<GetByIdParam>();
+      expectTypeOf<ProjectedId>().not.toEqualTypeOf<string>();
 
       expect(query).toBeDefined();
     });

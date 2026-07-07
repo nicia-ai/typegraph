@@ -15,8 +15,10 @@ import { type EmbeddingValue } from "../../core/embedding";
 import { type RecordedInstant } from "../../core/temporal";
 import {
   type AnyEdgeType,
+  type EdgeId,
   type EdgeRegistration,
   type EdgeType,
+  type NodeId,
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
@@ -427,11 +429,15 @@ export type SelectableNodeMeta = Readonly<{
  * For aliases declared via `fromDynamic` / `toDynamic` this resolves to
  * `DynamicSelectableNode` — same wire shape, schema properties typed
  * `unknown` for narrowing at the call site.
+ *
+ * `id` carries the same `NodeId<N>` brand as `Node<N>` (see `store/types.ts`)
+ * so a projected id can be passed straight back into `getById`/`getByIds`
+ * without a cast.
  */
 export type SelectableNode<N extends NodeType> =
   IsDynamicNodeType<N> extends true ? DynamicSelectableNode
   : Readonly<{
-      id: string;
+      id: NodeId<N>;
       kind: N["kind"];
       meta: SelectableNodeMeta;
     }> &
@@ -456,11 +462,19 @@ export type SelectableEdgeMeta = Readonly<{
  * - System metadata is under `edge.meta.*`
  *
  * Dynamic-mode counterpart: see `SelectableNode`.
+ *
+ * `id` carries the same `EdgeId<E>` brand as `Edge<E>` (see `store/types.ts`)
+ * so a projected id can be passed straight back into `getById`/`getByIds`
+ * without a cast. `fromId`/`toId` stay plain `string` for now: branding them
+ * as `NodeId<From>`/`NodeId<To>` (matching `Edge<E, From, To>`) needs the
+ * endpoint kinds from the graph's `EdgeRegistration` threaded through
+ * `EdgeAlias`/`SelectContext`, which isn't wired up yet — tracked separately
+ * in #235, since no reported case has needed it yet (unlike `id`, see #229).
  */
 export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
   IsDynamicEdgeType<E> extends true ? DynamicSelectableEdge
   : Readonly<{
-      id: string;
+      id: EdgeId<E>;
       kind: E["kind"];
       fromId: string;
       toId: string;

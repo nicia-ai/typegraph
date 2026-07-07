@@ -96,7 +96,7 @@ async function recommendSource(
 
   const top = scored[0];
   if (top === undefined) return undefined;
-  const paper = await view.nodes.Paper.getById(top.id as never);
+  const paper = await view.nodes.Paper.getById(top.id);
   return {
     id: top.id,
     title: paper?.title ?? top.id,
