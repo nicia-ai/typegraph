@@ -146,12 +146,20 @@ function appendAggregateSortLimitAndProjectNodes(
       : { ...aggregateNode, having: ast.having };
   }
 
-  if (ast.orderBy !== undefined && ast.orderBy.length > 0) {
+  const hasFieldOrderBy = ast.orderBy !== undefined && ast.orderBy.length > 0;
+  const hasAggregateOrderBy =
+    ast.aggregateOrderBy !== undefined && ast.aggregateOrderBy.length > 0;
+  if (hasFieldOrderBy || hasAggregateOrderBy) {
+    // The sort node's presence (not its `orderBy` payload) is what the
+    // emitter's plan-shape invariant reads — see `hasSort` in
+    // emitter/plan-inspector.ts. `orderBy` here can be `[]` when only
+    // `ast.aggregateOrderBy` is set; that's fine today since nothing reads
+    // this field's contents, only whether the node exists.
     node = {
       id: nextPlanNodeId(),
       input: node,
       op: "sort",
-      orderBy: ast.orderBy,
+      orderBy: ast.orderBy ?? [],
     };
   }
 

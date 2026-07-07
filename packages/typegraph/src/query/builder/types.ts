@@ -22,6 +22,7 @@ import {
 } from "../../core/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
+  type AggregateOrderSpec,
   type GroupBySpec,
   type HybridFusionOptions,
   type NodePredicate,
@@ -585,6 +586,8 @@ export type QueryBuilderState = Readonly<{
   predicates: readonly NodePredicate[];
   projection: readonly ProjectedField[];
   orderBy: readonly OrderSpec[];
+  /** ORDER BY entries added via `ExecutableAggregateQuery.orderBy()`. */
+  aggregateOrderBy: readonly AggregateOrderSpec[];
   limit: number | undefined;
   offset: number | undefined;
   temporalMode: TemporalMode;

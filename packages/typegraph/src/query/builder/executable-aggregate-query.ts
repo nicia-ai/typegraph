@@ -2,7 +2,13 @@
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
 import { type GraphDef } from "../../core/define-graph";
-import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
+import {
+  type AggregateExpr,
+  type AggregateOrderSpec,
+  type FieldRef,
+  type QueryAst,
+  type SortDirection,
+} from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
@@ -51,6 +57,47 @@ export class ExecutableAggregateQuery<
    */
   toAst(): QueryAst {
     return buildQueryAst(this.#config, this.#state);
+  }
+
+  /**
+   * Orders results by a grouped field or aggregate alias.
+   *
+   * `key` is one of the output names passed to `.aggregate({...})` — either
+   * a grouped field (e.g. `genre`) or an aggregate alias (e.g. `bookCount`).
+   * Both are ordered the same way: by referencing the SELECT-list output
+   * column, since every `.aggregate()` field is projected with an alias.
+   *
+   * Chain multiple calls to sort by more than one key, in call order:
+   * `.orderBy("genre").orderBy("bookCount", "desc")` sorts by genre first,
+   * then by book count within each genre.
+   *
+   * @example
+   * ```typescript
+   * // Top 2 authors by book count
+   * store.query()
+   *   .from("Author", "a")
+   *   .traverse("wrote", "e")
+   *   .to("Book", "b")
+   *   .groupByNode("a")
+   *   .aggregate({ author: field("a", "name"), bookCount: count("b") })
+   *   .orderBy("bookCount", "desc")
+   *   .limit(2)
+   *   .execute();
+   * ```
+   */
+  orderBy<K extends keyof R & string>(
+    key: K,
+    direction: SortDirection = "asc",
+  ): ExecutableAggregateQuery<G, Aliases, R> {
+    const orderSpec: AggregateOrderSpec = { outputName: key, direction };
+    return new ExecutableAggregateQuery(
+      this.#config,
+      {
+        ...this.#state,
+        aggregateOrderBy: [...this.#state.aggregateOrderBy, orderSpec],
+      },
+      this.#fields,
+    );
   }
 
   /**

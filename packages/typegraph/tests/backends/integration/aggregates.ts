@@ -142,6 +142,174 @@ export function registerAggregateIntegrationTests(
     });
   });
 
+  describe("Aggregate ORDER BY", () => {
+    beforeEach(async () => {
+      const store = context.getStore();
+      await seedAggregateProducts(store);
+    });
+
+    it("orders by a grouped field ascending", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .aggregate({
+          category: field("p", "category"),
+          productCount: count("p"),
+        })
+        .orderBy("category", "asc")
+        .execute();
+
+      expect(results.map((result) => result.category)).toEqual([
+        "Electronics",
+        "Furniture",
+      ]);
+    });
+
+    it("orders by a grouped field descending", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .aggregate({
+          category: field("p", "category"),
+          productCount: count("p"),
+        })
+        .orderBy("category", "desc")
+        .execute();
+
+      expect(results.map((result) => result.category)).toEqual([
+        "Furniture",
+        "Electronics",
+      ]);
+    });
+
+    it("orders by an aggregate alias, enabling correct top-N via limit", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .aggregate({
+          category: field("p", "category"),
+          productCount: count("p"),
+        })
+        .orderBy("productCount", "desc")
+        .limit(1)
+        .execute();
+
+      // Electronics has 3 products, Furniture has 2 — without ORDER BY this
+      // would be an arbitrary one of the two groups.
+      expect(results).toHaveLength(1);
+      expect(results[0]?.category).toBe("Electronics");
+      expect(results[0]?.productCount).toBe(3);
+    });
+
+    it("orders by an aggregate alias ascending", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .aggregate({
+          category: field("p", "category"),
+          productCount: count("p"),
+        })
+        .orderBy("productCount", "asc")
+        .execute();
+
+      expect(results.map((result) => result.category)).toEqual([
+        "Furniture",
+        "Electronics",
+      ]);
+    });
+
+    it("supports multi-key ordering across a grouped field then an aggregate alias", async () => {
+      const store = context.getStore();
+      const results = await store
+        .query()
+        .from("Product", "p")
+        .groupBy("p", "category")
+        .groupBy("p", "inStock")
+        .aggregate({
+          category: field("p", "category"),
+          inStock: field("p", "inStock"),
+          productCount: count("p"),
+        })
+        .orderBy("category", "asc")
+        .orderBy("inStock", "asc")
+        .execute();
+
+      expect(
+        results.map(
+          (result) => `${String(result.category)}:${String(result.inStock)}`,
+        ),
+      ).toEqual(["Electronics:false", "Electronics:true", "Furniture:true"]);
+    });
+
+    it("orders correct top-N results through the traversal + groupByNode count fast path", async () => {
+      // This shape (single traversal, groupByNode on the start alias, a
+      // count() aggregate) hits the compiler's count-aggregate fast path,
+      // which builds its own ORDER BY/LIMIT independently of the general
+      // query path — cover it explicitly so ordering isn't silently
+      // dropped for the most common "top N by count" traversal shape.
+      const store = context.getStore();
+
+      const acme = await store.nodes.Company.create({
+        name: "Acme Corp",
+        industry: "Tech",
+      });
+      const globex = await store.nodes.Company.create({
+        name: "Globex",
+        industry: "Finance",
+      });
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const charlie = await store.nodes.Person.create({ name: "Charlie" });
+      const dave = await store.nodes.Person.create({ name: "Dave" });
+
+      await store.edges.worksAt.create(alice, acme, {
+        role: "Engineer",
+        salary: 100_000,
+      });
+      await store.edges.worksAt.create(bob, acme, {
+        role: "Manager",
+        salary: 120_000,
+      });
+      await store.edges.worksAt.create(charlie, acme, {
+        role: "Designer",
+        salary: 90_000,
+      });
+      await store.edges.worksAt.create(dave, globex, {
+        role: "Developer",
+        salary: 90_000,
+      });
+
+      const results = await store
+        .query()
+        .from("Company", "c")
+        .traverse("worksAt", "e", { direction: "in" })
+        .to("Person", "p")
+        .groupByNode("c")
+        .aggregate({
+          companyName: field("c", "name"),
+          employeeCount: count("p"),
+        })
+        .orderBy("employeeCount", "desc")
+        .limit(2)
+        .execute();
+
+      expect(results).toHaveLength(2);
+      expect(results[0]?.companyName).toBe("Acme Corp");
+      expect(results[0]?.employeeCount).toBe(3);
+      expect(results[1]?.companyName).toBe("Globex");
+      expect(results[1]?.employeeCount).toBe(1);
+    });
+  });
+
   describe("count/countDistinct with field argument", () => {
     beforeEach(async () => {
       const store = context.getStore();

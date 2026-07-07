@@ -171,6 +171,130 @@ describe("ExecutableAggregateQuery.offset", () => {
 });
 
 // ============================================================
+// ExecutableAggregateQuery orderBy
+// ============================================================
+
+describe("ExecutableAggregateQuery.orderBy", () => {
+  it("adds an aggregateOrderBy entry referencing the grouped field's output name", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      })
+      .orderBy("category", "asc");
+
+    const ast = query.toAst();
+
+    expect(ast.aggregateOrderBy).toEqual([
+      { outputName: "category", direction: "asc" },
+    ]);
+  });
+
+  it("adds an aggregateOrderBy entry referencing an aggregate alias", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      })
+      .orderBy("count", "desc");
+
+    const ast = query.toAst();
+
+    expect(ast.aggregateOrderBy).toEqual([
+      { outputName: "count", direction: "desc" },
+    ]);
+  });
+
+  it("defaults direction to asc", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      })
+      .orderBy("count");
+
+    expect(query.toAst().aggregateOrderBy).toEqual([
+      { outputName: "count", direction: "asc" },
+    ]);
+  });
+
+  it("accumulates multiple orderBy calls in call order", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      })
+      .orderBy("category", "asc")
+      .orderBy("count", "desc");
+
+    expect(query.toAst().aggregateOrderBy).toEqual([
+      { outputName: "category", direction: "asc" },
+      { outputName: "count", direction: "desc" },
+    ]);
+  });
+
+  it("does not mutate the original query", () => {
+    const original = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        count: count("p"),
+      });
+
+    const ordered = original.orderBy("count", "desc");
+
+    expect(ordered).not.toBe(original);
+    expect(original.toAst().aggregateOrderBy).toBeUndefined();
+    expect(ordered.toAst().aggregateOrderBy).toEqual([
+      { outputName: "count", direction: "desc" },
+    ]);
+  });
+
+  it("compiles to SQL with ORDER BY referencing the quoted output alias", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        productCount: count("p"),
+      })
+      .orderBy("productCount", "desc");
+
+    const sqlString = toSqlString(query.compile());
+
+    expect(sqlString).toContain("ORDER BY");
+    expect(sqlString).toContain('"productCount"');
+    expect(sqlString).toContain("DESC");
+  });
+
+  it("combines with limit to express top-N by aggregate", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Product", "p")
+      .groupBy("p", "category")
+      .aggregate({
+        category: field("p", "category"),
+        productCount: count("p"),
+      })
+      .orderBy("productCount", "desc")
+      .limit(2);
+
+    const sqlString = toSqlString(query.compile());
+
+    expect(sqlString).toContain("ORDER BY");
+    expect(sqlString).toContain("LIMIT");
+  });
+});
+
+// ============================================================
 // ExecutableAggregateQuery compile
 // ============================================================
 

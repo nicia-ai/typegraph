@@ -636,13 +636,20 @@ export function buildStandardOrderBy(
   input: BuildStandardOrderByInput,
 ): SQL | undefined {
   const { ast, collapsedTraversalCteAlias, dialect } = input;
-  if (!ast.orderBy || ast.orderBy.length === 0) {
+  const fieldOrderBy = ast.orderBy ?? [];
+  const aggregateOrderBy = ast.aggregateOrderBy ?? [];
+  if (fieldOrderBy.length === 0 && aggregateOrderBy.length === 0) {
     return undefined;
   }
 
-  const aliasToCte = buildAliasToCteMap(ast);
+  // Only built when there's a FieldRef-based order spec to resolve against
+  // a CTE — the aggregate-alias loop below references the SELECT-list
+  // output alias directly and never needs it, which matters because the
+  // common case for `.aggregate().orderBy(...)` has `fieldOrderBy` empty.
+  const aliasToCte =
+    fieldOrderBy.length > 0 ? buildAliasToCteMap(ast) : undefined;
   const parts: SQL[] = [];
-  for (const orderSpec of ast.orderBy) {
+  for (const orderSpec of fieldOrderBy) {
     const valueType = orderSpec.field.valueType;
     if (valueType === "array" || valueType === "object") {
       throw new UnsupportedPredicateError(
@@ -651,7 +658,7 @@ export function buildStandardOrderBy(
     }
     const cteAlias =
       collapsedTraversalCteAlias ??
-      aliasToCte.get(orderSpec.field.alias) ??
+      aliasToCte?.get(orderSpec.field.alias) ??
       `cte_${orderSpec.field.alias}`;
     const field = compileFieldValue(
       orderSpec.field,
@@ -667,6 +674,31 @@ export function buildStandardOrderBy(
       sql`(${field} IS NULL) ${nullsDirection}`,
       sql`${field} ${direction}`,
     );
+  }
+
+  // Aggregate ordering references the projected SELECT-list output alias
+  // directly rather than recompiling a FieldRef/AggregateExpr — every
+  // `.aggregate()` field (grouped or aggregated) is always projected with
+  // an alias, and both SQLite and PostgreSQL allow ORDER BY to reference
+  // it, so this needs no per-CTE or per-dialect resolution.
+  //
+  // Nulls ordering can't reuse the `(field IS NULL) direction, field
+  // direction` trick above: unlike a source-table field reference, an
+  // output alias is only resolved by either dialect when the ORDER BY term
+  // is the bare identifier itself — wrapping it in `(alias IS NULL)`
+  // makes both SQLite and PostgreSQL look for a real column named
+  // `alias` and fail. The standard `NULLS FIRST`/`NULLS LAST` suffix
+  // (supported by both dialects) sidesteps that: it attaches to the bare
+  // identifier rather than embedding it in a larger expression.
+  for (const orderSpec of aggregateOrderBy) {
+    const column = quoteIdentifier(orderSpec.outputName);
+    const direction = sql.raw(orderSpec.direction.toUpperCase());
+    const nulls =
+      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nullsKeyword = sql.raw(
+      nulls === "first" ? "NULLS FIRST" : "NULLS LAST",
+    );
+    parts.push(sql`${column} ${direction} ${nullsKeyword}`);
   }
 
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;

@@ -786,6 +786,11 @@ function compileCountAggregateFastPath(
       AND ${sql.raw(countCteAlias)}.${sql.raw(previousAliasKindColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
   `;
 
+  // Also picks up `ast.aggregateOrderBy` (ORDER BY output-alias entries
+  // added via `ExecutableAggregateQuery.orderBy()`) with no extra handling
+  // here: the fast path's projection above always re-aliases every
+  // projected column to its final output name, so an alias reference
+  // resolves the same way it would on the general query path.
   const orderBy = buildStandardOrderBy({ ast, dialect });
   // When the LIMIT/OFFSET was pushed into the start CTE, the outer SELECT
   // must not re-apply it — the start CTE already produced exactly the

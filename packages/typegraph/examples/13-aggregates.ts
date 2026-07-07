@@ -10,7 +10,7 @@
  * - HAVING clauses to filter groups
  * - Combining WHERE filters with HAVING
  * - Aggregations across graph traversals
- * - Limiting aggregate results
+ * - Ordering and limiting aggregate results (top-N by aggregate)
  */
 import { z } from "zod";
 
@@ -317,7 +317,7 @@ export async function main() {
   // 9. Limit on aggregate results
   // ============================================================
 
-  console.log("\n--- Top 2 authors by book count (limit) ---\n");
+  console.log("\n--- Top 2 authors by book count (orderBy + limit) ---\n");
 
   const topAuthors = await store
     .query()
@@ -329,6 +329,7 @@ export async function main() {
       author: field("a", "name"),
       bookCount: count("b"),
     })
+    .orderBy("bookCount", "desc")
     .limit(2)
     .execute();
 

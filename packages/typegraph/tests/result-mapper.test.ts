@@ -26,6 +26,7 @@ describe("transformPathColumns", () => {
     predicates: [],
     projection: [],
     orderBy: [],
+    aggregateOrderBy: [],
     limit: undefined,
     offset: undefined,
     temporalMode: "current",

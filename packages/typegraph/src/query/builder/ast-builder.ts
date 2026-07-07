@@ -51,6 +51,9 @@ export function buildQueryAst(
     ...(state.offset !== undefined && { offset: state.offset }),
     ...(state.groupBy !== undefined && { groupBy: state.groupBy }),
     ...(state.having !== undefined && { having: state.having }),
+    ...(state.aggregateOrderBy.length > 0 && {
+      aggregateOrderBy: state.aggregateOrderBy,
+    }),
     ...(state.fusion !== undefined && { fusion: state.fusion }),
   };
 }

@@ -195,6 +195,7 @@ function createQueryBuilderWithContext<
     predicates: [],
     projection: [],
     orderBy: [],
+    aggregateOrderBy: [],
     limit: undefined,
     offset: undefined,
     temporalMode: sealed?.mode ?? "current",

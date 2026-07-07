@@ -551,6 +551,24 @@ export type OrderSpec = Readonly<{
   nulls?: NullOrdering;
 }>;
 
+/**
+ * An ordering specification for aggregate queries.
+ *
+ * Unlike {@link OrderSpec}, this references a projected SELECT-list output
+ * column by name rather than a `FieldRef` into a source table/CTE. Aggregate
+ * query projections always assign an output alias to every grouped field
+ * and aggregate expression (via `.aggregate({ outputName: ... })`), so
+ * ordering by that alias works uniformly for both — and both SQLite and
+ * PostgreSQL allow `ORDER BY` to reference a SELECT-list alias directly, so
+ * no re-derivation of the underlying expression (and no dialect seam) is
+ * needed.
+ */
+export type AggregateOrderSpec = Readonly<{
+  outputName: string;
+  direction: SortDirection;
+  nulls?: NullOrdering;
+}>;
+
 // ============================================================
 // Node Predicate
 // ============================================================
@@ -601,6 +619,12 @@ export type QueryAst = Readonly<{
   groupBy?: GroupBySpec;
   /** HAVING clause - predicates applied after GROUP BY */
   having?: PredicateExpression;
+  /**
+   * ORDER BY specification for aggregate queries, referencing projected
+   * output aliases (grouped fields or aggregate expressions) instead of
+   * source-table field refs. See {@link AggregateOrderSpec}.
+   */
+  aggregateOrderBy?: readonly AggregateOrderSpec[];
   /**
    * Selective fields for optimized queries.
    * When present, the compiler generates SQL that only fetches these specific
