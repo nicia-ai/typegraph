@@ -28,6 +28,7 @@ import {
   merge,
   unwrap,
   type GraphBranch,
+  type MakeBackend,
   type MergeOptions,
   type MergeReport,
   type SimilarityStrategy,
@@ -103,9 +104,24 @@ const careGraph = defineGraph({
     MedicationRequest: { type: MedicationRequest },
   },
   edges: {
-    forPatient,
-    duringEncounter,
-    reasonFor,
+    // FHIR-ish endpoint constraints. The bare `{ forPatient }` shorthand would
+    // accept ANY node kind on either end; the explicit from/to pins each
+    // care-context edge to its real shape.
+    forPatient: {
+      type: forPatient,
+      from: [Encounter, Observation, MedicationRequest],
+      to: [Patient],
+    },
+    duringEncounter: {
+      type: duringEncounter,
+      from: [Observation, MedicationRequest],
+      to: [Encounter],
+    },
+    reasonFor: {
+      type: reasonFor,
+      from: [MedicationRequest],
+      to: [Observation],
+    },
   },
 });
 
@@ -115,27 +131,20 @@ type CareStore = Store<CareGraph>;
 const EHR_BRANCH = asBranchId("ehr-agent");
 const CLAIMS_BRANCH = asBranchId("claims-agent");
 
-async function makeExampleBackend(): Promise<GraphBackend> {
-  return createExampleBackend();
-}
-
 const patientSimilarity: SimilarityStrategy<CareGraph> = {
   kind: "fulltext",
   fields: ["name"],
 };
 
-function blockPatient(node: Node): string | undefined {
-  const patient = node as unknown as { birthDate?: string };
-  // Block by shared birth date. The unique MRN constraint forces exact-identity
-  // matches in its own bucket independently of blocking, so blocking does not
-  // need the MRN — and using it would split the different-MRN fuzzy pair apart.
-  return patient.birthDate;
-}
-
 const mergeOptions: MergeOptions<CareGraph> = {
   resolve: {
     Patient: {
-      block: blockPatient,
+      // Block by shared birth date. `block` is typed to THIS kind's node shape,
+      // so `node.birthDate` needs no cast. The unique MRN constraint forces
+      // exact-identity matches in its own bucket independently of blocking, so
+      // blocking does not need the MRN — and using it would split the
+      // different-MRN fuzzy pair apart.
+      block: (node) => node.birthDate,
       similarity: patientSimilarity,
       // This demo exercises BOTH resolution paths:
       //   - Anna/Ana share MRN-001, so the unique constraint forces that merge
@@ -158,42 +167,55 @@ const mergeOptions: MergeOptions<CareGraph> = {
 
 async function createBranch(
   base: CareStore,
+  makeBackend: MakeBackend,
   id: typeof EHR_BRANCH | typeof CLAIMS_BRANCH,
 ): Promise<GraphBranch<CareGraph>> {
-  return unwrap(await branch(base, makeExampleBackend, { id }));
+  return unwrap(await branch(base, makeBackend, { id }));
 }
 
 async function seedEhrBranch(branchStore: CareStore): Promise<void> {
-  const patient = await branchStore.nodes.Patient.create({
-    fhirId: "Patient/ehr-anna",
-    name: "Anna Rivera",
-    birthDate: "1974-03-09",
-    mrn: "MRN-001",
-  }, {
-    id: "patient-anna",
-  });
-  const encounter = await branchStore.nodes.Encounter.create({
-    fhirId: "Encounter/ehr-follow-up",
-    reason: "Hypertension follow-up",
-    startedAt: "2026-04-11T09:30:00-07:00",
-  }, {
-    id: "encounter-follow-up",
-  });
-  const bloodPressure = await branchStore.nodes.Observation.create({
-    fhirId: "Observation/ehr-bp",
-    display: "Blood pressure panel",
-    value: "152/96 mmHg",
-    interpretation: "high",
-  }, {
-    id: "observation-blood-pressure",
-  });
-  const medication = await branchStore.nodes.MedicationRequest.create({
-    fhirId: "MedicationRequest/ehr-lisinopril",
-    medication: "Lisinopril 10 MG Oral Tablet",
-    dosage: "Take one tablet by mouth daily",
-  }, {
-    id: "medication-lisinopril",
-  });
+  const patient = await branchStore.nodes.Patient.create(
+    {
+      fhirId: "Patient/ehr-anna",
+      name: "Anna Rivera",
+      birthDate: "1974-03-09",
+      mrn: "MRN-001",
+    },
+    {
+      id: "patient-anna",
+    },
+  );
+  const encounter = await branchStore.nodes.Encounter.create(
+    {
+      fhirId: "Encounter/ehr-follow-up",
+      reason: "Hypertension follow-up",
+      startedAt: "2026-04-11T09:30:00-07:00",
+    },
+    {
+      id: "encounter-follow-up",
+    },
+  );
+  const bloodPressure = await branchStore.nodes.Observation.create(
+    {
+      fhirId: "Observation/ehr-bp",
+      display: "Blood pressure panel",
+      value: "152/96 mmHg",
+      interpretation: "high",
+    },
+    {
+      id: "observation-blood-pressure",
+    },
+  );
+  const medication = await branchStore.nodes.MedicationRequest.create(
+    {
+      fhirId: "MedicationRequest/ehr-lisinopril",
+      medication: "Lisinopril 10 MG Oral Tablet",
+      dosage: "Take one tablet by mouth daily",
+    },
+    {
+      id: "medication-lisinopril",
+    },
+  );
 
   await branchStore.edges.forPatient.create(encounter, patient, {
     sourcePath: "Encounter.subject",
@@ -237,29 +259,38 @@ async function seedEhrBranch(branchStore: CareStore): Promise<void> {
 }
 
 async function seedClaimsBranch(branchStore: CareStore): Promise<void> {
-  const patient = await branchStore.nodes.Patient.create({
-    fhirId: "Patient/claims-ana",
-    name: "Ana Rivera",
-    birthDate: "1974-03-09",
-    mrn: "MRN-001",
-  }, {
-    id: "patient-ana",
-  });
-  const encounter = await branchStore.nodes.Encounter.create({
-    fhirId: "Encounter/claims-kidney-review",
-    reason: "Kidney function review",
-    startedAt: "2026-04-14T10:00:00-07:00",
-  }, {
-    id: "encounter-kidney-review",
-  });
-  const kidneyLab = await branchStore.nodes.Observation.create({
-    fhirId: "Observation/claims-egfr",
-    display: "Estimated glomerular filtration rate",
-    value: "54 mL/min/1.73m2",
-    interpretation: "low",
-  }, {
-    id: "observation-egfr",
-  });
+  const patient = await branchStore.nodes.Patient.create(
+    {
+      fhirId: "Patient/claims-ana",
+      name: "Ana Rivera",
+      birthDate: "1974-03-09",
+      mrn: "MRN-001",
+    },
+    {
+      id: "patient-ana",
+    },
+  );
+  const encounter = await branchStore.nodes.Encounter.create(
+    {
+      fhirId: "Encounter/claims-kidney-review",
+      reason: "Kidney function review",
+      startedAt: "2026-04-14T10:00:00-07:00",
+    },
+    {
+      id: "encounter-kidney-review",
+    },
+  );
+  const kidneyLab = await branchStore.nodes.Observation.create(
+    {
+      fhirId: "Observation/claims-egfr",
+      display: "Estimated glomerular filtration rate",
+      value: "54 mL/min/1.73m2",
+      interpretation: "low",
+    },
+    {
+      id: "observation-egfr",
+    },
+  );
 
   await branchStore.edges.forPatient.create(encounter, patient, {
     sourcePath: "Encounter.subject",
@@ -300,12 +331,22 @@ async function seedClaimsBranch(branchStore: CareStore): Promise<void> {
 // Reporting helpers
 // ============================================================
 
+function compareStrings(left: string, right: string): number {
+  return (
+    left < right ? -1
+    : left > right ? 1
+    : 0
+  );
+}
+
 function summarizePatient(node: Node<typeof Patient>): string {
   return `${node.name} (${node.mrn}, ${node.birthDate})`;
 }
 
 /** An `id -> human-readable label` map for every clinical resource in the store. */
-async function resourceDisplays(store: CareStore): Promise<Map<string, string>> {
+async function resourceDisplays(
+  store: CareStore,
+): Promise<Map<string, string>> {
   const displays = new Map<string, string>();
   for (const encounter of await store.nodes.Encounter.find()) {
     displays.set(
@@ -342,12 +383,35 @@ async function careContextFor(
 ): Promise<readonly string[]> {
   const edges = await store.edges.forPatient.findTo(patient);
   return edges
-    .map((edge) => displays.get(edge.fromId) ?? `${edge.fromKind} ${edge.fromId}`)
-    .sort((left, right) =>
-      left < right ? -1
-      : left > right ? 1
-      : 0,
+    .map(
+      (edge) => displays.get(edge.fromId) ?? `${edge.fromKind} ${edge.fromId}`,
+    )
+    .sort((left, right) => compareStrings(left, right));
+}
+
+/**
+ * Prints each entity resolution: which branch records collapsed onto which
+ * canonical patient, and which branches contributed the members.
+ */
+async function printResolutions(
+  store: CareStore,
+  report: MergeReport<CareGraph>,
+): Promise<void> {
+  const patientNamesById = new Map<string, string>();
+  for (const patient of await store.nodes.Patient.find()) {
+    patientNamesById.set(patient.id, patient.name);
+  }
+  console.log(`  entity resolutions (${report.resolutions.length}):`);
+  const resolutions = [...report.resolutions].sort((left, right) =>
+    compareStrings(left.canonicalId, right.canonicalId),
+  );
+  for (const resolution of resolutions) {
+    const display =
+      patientNamesById.get(resolution.canonicalId) ?? resolution.canonicalId;
+    console.log(
+      `    - ${resolution.kind} "${display}": [${resolution.memberIds.join(", ")}] -> canonical "${resolution.canonicalId}" (branches: ${resolution.branchOrigins.join(", ")})`,
     );
+  }
 }
 
 function printConflicts(report: MergeReport<CareGraph>): void {
@@ -365,6 +429,10 @@ function printConflicts(report: MergeReport<CareGraph>): void {
       `    - ${conflict.kind}.${conflict.property} on ${conflict.entityId}: ${values}`,
     );
   }
+  console.log(
+    "  note: fhirId is a source-scoped record id, so cross-system fhirId\n" +
+      "  conflicts are EXPECTED — the real signal is the name/mrn disagreements.",
+  );
 }
 
 function printProvenance(report: MergeReport<CareGraph>): void {
@@ -381,58 +449,73 @@ function printProvenance(report: MergeReport<CareGraph>): void {
 // Demo
 // ============================================================
 
-async function main() {
-  const backend = await makeExampleBackend();
-  const [base] = await createStoreWithSchema(careGraph, backend);
-
-  const ehr = await createBranch(base, EHR_BRANCH);
-  const claims = await createBranch(base, CLAIMS_BRANCH);
-
-  await seedEhrBranch(ehr.store);
-  await seedClaimsBranch(claims.store);
-
-  console.log("=== FHIR Graph Merge ===\n");
-  console.log("Before merge:");
-  console.log("  base patients:", (await base.nodes.Patient.find()).length);
-  console.log("  EHR branch patients:", (await ehr.store.nodes.Patient.find()).length);
-  console.log(
-    "  claims branch patients:",
-    (await claims.store.nodes.Patient.find()).length,
-  );
-
-  const result = await merge(base, [ehr, claims], mergeOptions);
-  if (!isOk(result)) {
-    throw result.error;
+async function main(): Promise<void> {
+  // Every backend this example opens — directly or through `branch()`'s factory —
+  // is tracked here and closed in the finally below.
+  const openedBackends: GraphBackend[] = [];
+  async function makeBackend(): Promise<GraphBackend> {
+    const backend = createExampleBackend();
+    openedBackends.push(backend);
+    return backend;
   }
-  const report = result.data;
 
-  console.log("\nAfter merge:");
-  console.log(`  merged nodes: ${report.merged.nodes}`);
-  console.log(`  merged edges: ${report.merged.edges}`);
-  console.log(`  entity resolutions: ${report.resolutions.length}`);
-  printConflicts(report);
-  printProvenance(report);
+  try {
+    const [base] = await createStoreWithSchema(careGraph, await makeBackend());
 
-  // Two patients collapsed by two different mechanisms — Anna/Ana by the shared
-  // MRN (exact identity), Mohammed/Mohamed by fulltext name similarity. The care
-  // context below is read by following `forPatient` edges INTO each survivor, so
-  // it proves both branches' edges were repointed onto the canonical patient.
-  const patients = (await base.nodes.Patient.find()).sort((left, right) =>
-    left.name < right.name ? -1
-    : left.name > right.name ? 1
-    : 0,
-  );
-  const displays = await resourceDisplays(base);
-  console.log("\nCanonical patients and their repointed care context:");
-  for (const patient of patients) {
-    console.log(`  ${summarizePatient(patient)}`);
-    for (const line of await careContextFor(base, patient, displays)) {
-      console.log(`    - ${line}`);
+    const ehr = await createBranch(base, makeBackend, EHR_BRANCH);
+    const claims = await createBranch(base, makeBackend, CLAIMS_BRANCH);
+
+    await seedEhrBranch(ehr.store);
+    await seedClaimsBranch(claims.store);
+
+    console.log("=== FHIR Graph Merge ===\n");
+    console.log("Before merge:");
+    console.log("  base patients:", (await base.nodes.Patient.find()).length);
+    console.log(
+      "  EHR branch patients:",
+      (await ehr.store.nodes.Patient.find()).length,
+    );
+    console.log(
+      "  claims branch patients:",
+      (await claims.store.nodes.Patient.find()).length,
+    );
+
+    const result = await merge(base, [ehr, claims], mergeOptions);
+    if (!isOk(result)) {
+      throw result.error;
     }
+    const report = result.data;
+
+    console.log("\nAfter merge:");
+    console.log(`  merged nodes: ${report.merged.nodes}`);
+    console.log(`  merged edges: ${report.merged.edges}`);
+    await printResolutions(base, report);
+    printConflicts(report);
+    printProvenance(report);
+
+    // Two patients collapsed by two different mechanisms — Anna/Ana by the shared
+    // MRN (exact identity), Mohammed/Mohamed by fulltext name similarity. The care
+    // context below is read by following `forPatient` edges INTO each survivor, so
+    // it proves both branches' edges were repointed onto the canonical patient.
+    const patients = (await base.nodes.Patient.find()).sort((left, right) =>
+      compareStrings(left.name, right.name),
+    );
+    const displays = await resourceDisplays(base);
+    console.log("\nCanonical patients and their repointed care context:");
+    for (const patient of patients) {
+      console.log(`  ${summarizePatient(patient)}`);
+      for (const line of await careContextFor(base, patient, displays)) {
+        console.log(`    - ${line}`);
+      }
+    }
+  } finally {
+    await Promise.all(openedBackends.map((backend) => backend.close()));
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
