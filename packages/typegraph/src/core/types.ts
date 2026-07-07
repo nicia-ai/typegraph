@@ -1,5 +1,7 @@
 import { type z } from "zod";
 
+import { ValidationError } from "../errors";
+
 // ============================================================
 // Cross-cutting Discriminators
 // ============================================================
@@ -42,6 +44,28 @@ declare const __nodeId: unique symbol;
 
 /** Brand symbol for EdgeId */
 declare const __edgeId: unique symbol;
+
+function assertNonEmptyId(value: string, path: string): void {
+  if (value.length > 0) {
+    return;
+  }
+
+  throw new ValidationError(
+    `${path} must be a non-empty string.`,
+    {
+      issues: [
+        {
+          path,
+          message: "Expected a non-empty string.",
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Use a persisted node or edge id value, or let TypeGraph generate an id on create.",
+    },
+  );
+}
 
 // ============================================================
 // Node Type
@@ -113,6 +137,24 @@ export type NodeId<N extends NodeType> = string &
   }>;
 
 /**
+ * Brands a non-empty string as a {@link NodeId}.
+ *
+ * Use this when a persisted node id has round-tripped through untyped storage
+ * or an external boundary and must be passed back to read/update/delete
+ * surfaces such as `getById`, `getByIds`, `update`, or `delete`.
+ * Write surfaces that mint or claim ids, such as `create({ id })` and
+ * `upsertById`, intentionally accept plain strings.
+ *
+ * @throws {ValidationError} when `value` is empty.
+ */
+export function asNodeId<N extends NodeType = NodeType>(
+  value: string,
+): NodeId<N> {
+  assertNonEmptyId(value, "asNodeId");
+  return value as NodeId<N>;
+}
+
+/**
  * Infer the props type from a NodeType.
  */
 export type NodeProps<N extends NodeType> = z.infer<N["schema"]>;
@@ -175,6 +217,23 @@ export type EdgeId<E extends AnyEdgeType = AnyEdgeType> = string &
   Readonly<{
     [__edgeId]: E;
   }>;
+
+/**
+ * Brands a non-empty string as an {@link EdgeId}.
+ *
+ * Use this when a persisted edge id has round-tripped through untyped storage
+ * or an external boundary and must be passed back to read/update/delete
+ * surfaces such as `getById`, `getByIds`, `update`, or `delete`.
+ * Write surfaces that mint ids intentionally accept plain strings.
+ *
+ * @throws {ValidationError} when `value` is empty.
+ */
+export function asEdgeId<E extends AnyEdgeType = AnyEdgeType>(
+  value: string,
+): EdgeId<E> {
+  assertNonEmptyId(value, "asEdgeId");
+  return value as EdgeId<E>;
+}
 
 /**
  * Infer the props type from an EdgeType.

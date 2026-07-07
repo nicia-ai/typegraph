@@ -596,6 +596,17 @@ Retrieves a node by ID.
 store.nodes.Person.getById(id: NodeId<Person>): Promise<Node<Person> | undefined>;
 ```
 
+When a persisted id crosses an untyped boundary, brand it before passing it to
+read/update/delete APIs:
+
+```typescript
+const id = asNodeId<typeof Person>(row.personId);
+const person = await store.nodes.Person.getById(id);
+```
+
+`create({ id })` and `upsertById` still accept plain strings because those are
+write surfaces that mint or claim ids.
+
 #### `getByIds(ids)`
 
 Retrieves multiple nodes by ID in a single query. Returns results in input order,
@@ -992,6 +1003,16 @@ Retrieves an edge by ID.
 ```typescript
 store.edges.worksAt.getById(id: EdgeId<worksAt>): Promise<Edge<worksAt> | undefined>;
 ```
+
+When a persisted id crosses an untyped boundary, brand it before passing it to
+read/update/delete APIs:
+
+```typescript
+const id = asEdgeId<typeof worksAt>(row.edgeId);
+const edge = await store.edges.worksAt.getById(id);
+```
+
+Edge write APIs that mint ids still accept plain strings.
 
 #### `getByIds(ids)`
 
