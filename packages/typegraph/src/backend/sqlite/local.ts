@@ -132,13 +132,16 @@ export type LocalSqlitePragmaOptions = Readonly<{
   /** `PRAGMA busy_timeout`, in milliseconds. Default: `5000`. */
   busyTimeoutMs?: number;
   /**
-   * `PRAGMA cache_size`, in KiB of page cache (negative, per SQLite's own
-   * convention — e.g. `-131072` for 128MiB). Default: `undefined`, meaning
-   * SQLite's own built-in default (2MiB) is left untouched. Worth raising
-   * for any database whose working set won't fit in 2MiB — SQLite's
-   * default is tuned for small embedded use, not for a table that stops
-   * fitting in a tiny page cache and starts paying a heap-row disk read
-   * per candidate row a query touches.
+   * `PRAGMA cache_size`, in KiB of page cache — must be negative, per
+   * SQLite's own convention (e.g. `-131072` for 128MiB); a positive value
+   * means a page *count* instead, not KiB, so it's rejected outright
+   * rather than silently sizing the cache to something the caller didn't
+   * intend. Default: `undefined`, meaning SQLite's own built-in default
+   * (2MiB) is left untouched. Worth raising for any database whose
+   * working set won't fit in 2MiB — SQLite's default is tuned for small
+   * embedded use, not for a table that stops fitting in a tiny page
+   * cache and starts paying a heap-row disk read per candidate row a
+   * query touches.
    */
   cacheSizeKib?: number | undefined;
   /**
@@ -225,11 +228,14 @@ function applyConnectionPragmas(
   }
   if (
     resolved.cacheSizeKib !== undefined &&
-    !Number.isSafeInteger(resolved.cacheSizeKib)
+    (!Number.isSafeInteger(resolved.cacheSizeKib) || resolved.cacheSizeKib >= 0)
   ) {
     throw new ConfigurationError(
       `Invalid cacheSizeKib pragma: ${String(resolved.cacheSizeKib)}. ` +
-        "Expected a safe integer (negative, per SQLite's cache_size convention).",
+        "Expected a negative safe integer — SQLite's own cache_size pragma " +
+        "interprets a positive value as a page count, not KiB, so a caller " +
+        'who passes e.g. 131072 meaning "131072 KiB" silently gets ' +
+        "131072 pages (~512MiB at the default 4KiB page size) instead.",
       { cacheSizeKib: resolved.cacheSizeKib },
     );
   }

@@ -158,6 +158,15 @@ describe("createLocalSqliteBackend pragma defaults", () => {
     );
   });
 
+  it("rejects a non-negative cacheSizeKib — SQLite reads a positive value as a page count, not KiB", () => {
+    expect(() => openBackend({ pragmas: { cacheSizeKib: 131_072 } })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => openBackend({ pragmas: { cacheSizeKib: 0 } })).toThrow(
+      ConfigurationError,
+    );
+  });
+
   it("supports writes and reads on a WAL file database end to end", async () => {
     const Person = defineNode("Person", {
       schema: z.object({ name: z.string() }),
