@@ -257,5 +257,25 @@ export function registerBulkFindByIndexIntegrationTests(
         ]),
       ).rejects.toBeInstanceOf(ConfigurationError);
     });
+
+    it("rejects a fields-less (keySystemColumns-only) index with ConfigurationError", async () => {
+      const store = context.getStore();
+      // A keySystemColumns/coveringFields-only index carries no prop `fields`,
+      // so bulkFindByIndex has nothing to probe by; it declares the gap rather
+      // than running an unconstrained scan.
+      const caught = await store.nodes.Company.bulkFindByIndex(
+        "company_id_covering",
+        [{ props: { name: "Acme" } }],
+      ).catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).message).toBe(
+        'bulkFindByIndex requires an index with at least one prop-based field on index "company_id_covering" (node kind "Company")',
+      );
+      expect((caught as ConfigurationError).details).toEqual({
+        indexName: "company_id_covering",
+        kind: "Company",
+      });
+    });
   });
 }

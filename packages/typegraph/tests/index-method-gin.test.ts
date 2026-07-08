@@ -14,10 +14,15 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { ConfigurationError } from "../src/errors";
-import { defineNodeIndex } from "../src/indexes";
+import { defineEdgeIndex, defineNodeIndex } from "../src/indexes";
 import { generateIndexDDL } from "../src/indexes/ddl";
 import { serializeSchema } from "../src/schema/serializer";
 
@@ -203,27 +208,174 @@ describe("SQLite behavior", () => {
     }
   });
 
-  it("rejects bulkFindByIndex probes against a gin index", async () => {
+  it("rejects bulkFindByIndex probes against gin and trigram indexes", async () => {
+    // bulkFindByIndex compiles equality probes, which a GIN-family index can
+    // never serve (it indexes one expression for containment/substring, not
+    // ordered key columns). The guard fires in resolveNodeIndex — before any
+    // query runs — so it is backend-independent; SQLite just supplies a store.
     const { backend } = createLocalSqliteBackend();
     try {
-      const ginIndex = defineNodeIndex(Document, {
-        fields: ["tags"],
-        method: "gin",
-        name: "doc_tags_gin_probe",
-      });
       const graph = defineGraph({
         id: "gin-bulk-probe",
         nodes: { Doc: { type: Document } },
         edges: {},
-        indexes: [ginIndex],
+        indexes: [
+          defineNodeIndex(Document, {
+            fields: ["tags"],
+            method: "gin",
+            name: "doc_tags_gin_probe",
+          }),
+          defineNodeIndex(Document, {
+            fields: ["title"],
+            method: "trigram",
+            name: "doc_title_trgm_probe",
+          }),
+        ],
       });
       const [store] = await createStoreWithSchema(graph, backend);
 
-      await expect(
-        store.nodes.Doc.bulkFindByIndex("doc_tags_gin_probe", [
-          { tags: ["x"] },
-        ] as never),
-      ).rejects.toThrow(ConfigurationError);
+      const ginError = await store.nodes.Doc.bulkFindByIndex(
+        "doc_tags_gin_probe",
+        [{ props: { tags: ["x"] } }],
+      ).catch((error: unknown) => error);
+      expectMethodProbeRejection(ginError, "doc_tags_gin_probe", "gin");
+
+      const trigramError = await store.nodes.Doc.bulkFindByIndex(
+        "doc_title_trgm_probe",
+        [{ props: { title: "x" } }],
+      ).catch((error: unknown) => error);
+      expectMethodProbeRejection(
+        trigramError,
+        "doc_title_trgm_probe",
+        "trigram",
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+/**
+ * Asserts the exact ConfigurationError bulkFindByIndex raises when pointed at
+ * a GIN-family index: type, code, message, and structured details (the
+ * `Document` node in this file is declared with kind `"Doc"`).
+ */
+function expectMethodProbeRejection(
+  error: unknown,
+  indexName: string,
+  method: string,
+): void {
+  expect(error).toBeInstanceOf(ConfigurationError);
+  const configError = error as ConfigurationError;
+  expect(configError.code).toBe("CONFIGURATION_ERROR");
+  expect(configError.message).toBe(
+    `bulkFindByIndex cannot probe index "${indexName}" (method "${method}"): ` +
+      "only btree indexes serve equality probes.",
+  );
+  expect(configError.details).toEqual({
+    indexName,
+    kind: "Doc",
+    method,
+  });
+}
+
+describe("defineEdgeIndex GIN-family methods", () => {
+  const Tagged = defineEdge("tagged", {
+    schema: z.object({
+      labels: z.array(z.string()),
+      note: z.string(),
+    }),
+  });
+
+  it("carries gin/trigram onto an edge declaration with a method-name suffix", () => {
+    // Exercises the edge `method` wiring: `allowJsonFields: method === "gin"`
+    // lets the `labels` array field through the btree-only guard, and the
+    // resolved method is stamped onto the declaration with a name suffix.
+    const gin = defineEdgeIndex(Tagged, { fields: ["labels"], method: "gin" });
+    const trigram = defineEdgeIndex(Tagged, {
+      fields: ["note"],
+      method: "trigram",
+    });
+
+    expect(gin.entity).toBe("edge");
+    expect(gin.method).toBe("gin");
+    expect(gin.name.endsWith("_gin")).toBe(true);
+    expect(trigram.method).toBe("trigram");
+    expect(trigram.name.endsWith("_trigram")).toBe(true);
+  });
+
+  it("enforces the field-type contract each method advertises on edges", () => {
+    expect(() =>
+      defineEdgeIndex(Tagged, { fields: ["note"], method: "gin" }),
+    ).toThrow(/use method: "trigram"/);
+    expect(() =>
+      defineEdgeIndex(Tagged, { fields: ["labels"], method: "trigram" }),
+    ).toThrow(/use method: "gin"/);
+  });
+
+  it("emits an expression GIN on typegraph_edges aligned with the dialect extraction", () => {
+    const gin = defineEdgeIndex(Tagged, {
+      fields: ["labels"],
+      method: "gin",
+      name: "tagged_labels_gin",
+    });
+    expect(generateIndexDDL(gin, "postgres")).toBe(
+      `CREATE INDEX IF NOT EXISTS "tagged_labels_gin" ON "typegraph_edges" USING GIN (("props" #> ARRAY['labels']) jsonb_path_ops);`,
+    );
+
+    const trigram = defineEdgeIndex(Tagged, {
+      fields: ["note"],
+      method: "trigram",
+      name: "tagged_note_trgm",
+    });
+    expect(generateIndexDDL(trigram, "postgres")).toBe(
+      `CREATE INDEX IF NOT EXISTS "tagged_note_trgm" ON "typegraph_edges" USING GIN (("props" #>> ARRAY['note']) gin_trgm_ops);`,
+    );
+  });
+
+  it("refuses to generate SQLite DDL for an edge gin index", () => {
+    const gin = defineEdgeIndex(Tagged, {
+      fields: ["labels"],
+      method: "gin",
+      name: "tagged_labels_gin",
+    });
+    expect(() => generateIndexDDL(gin, "sqlite")).toThrow(
+      /requires PostgreSQL/,
+    );
+  });
+
+  it("materializes edge gin/trigram declarations as skipped on SQLite", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const Item = defineNode("Item", {
+        schema: z.object({ label: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "edge-gin-sqlite-skip",
+        nodes: { Item: { type: Item } },
+        edges: {
+          tagged: {
+            type: Tagged,
+            from: [Item],
+            to: [Item],
+            cardinality: "many",
+          },
+        },
+        indexes: [
+          defineEdgeIndex(Tagged, { fields: ["labels"], method: "gin" }),
+          defineEdgeIndex(Tagged, { fields: ["note"], method: "trigram" }),
+        ],
+      });
+      const [store] = await createStoreWithSchema(graph, backend);
+
+      const result = await store.materializeIndexes();
+
+      expect(result.results).toHaveLength(2);
+      for (const entry of result.results) {
+        expect(entry.entity).toBe("edge");
+        expect(entry.status).toBe("skipped");
+        expect(entry.reason).toMatch(/requires PostgreSQL/);
+      }
     } finally {
       await backend.close();
     }

@@ -432,6 +432,134 @@ describe("importGraph batching semantics (must not drift)", () => {
     });
   });
 
+  it("in-slice update that frees a unique key lets a later create claim it", async () => {
+    // p-a holds "shared@example.com". A single onConflict:update slice
+    // updates p-a to release that value, then creates p-b claiming it. The
+    // sequential (one-record-per-slice) path frees the key before the create
+    // runs, so p-b is created. The batched slice primes the uniqueness cache
+    // once up front and must reflect the in-slice update, or it wrongly
+    // rejects p-b against the stale reservation.
+    const outcomes = new Map<number, unknown>();
+    for (const batchSize of [1, 100]) {
+      const outcome = await withCountedStore(async (store) => {
+        await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a", email: "shared@example.com" },
+            },
+          ]),
+          importOptions(),
+        );
+        const result = await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a2", email: "moved@example.com" },
+            },
+            {
+              kind: "Person",
+              id: "p-b",
+              properties: { name: "b", email: "shared@example.com" },
+            },
+          ]),
+          importOptions({ onConflict: "update", batchSize }),
+        );
+        const personA = await store.nodes.Person.getById("p-a" as never);
+        const personB = await store.nodes.Person.getById("p-b" as never);
+        return {
+          created: result.nodes.created,
+          updated: result.nodes.updated,
+          errorIds: result.errors.map((entry) => entry.id),
+          emailA: personA?.email,
+          emailB: personB?.email,
+        };
+      });
+      outcomes.set(batchSize, outcome);
+    }
+
+    const sequential = outcomes.get(1);
+    const batched = outcomes.get(100);
+
+    expect(sequential).toEqual({
+      created: 1,
+      updated: 1,
+      errorIds: [],
+      emailA: "moved@example.com",
+      emailB: "shared@example.com",
+    });
+    expect(batched).toEqual(sequential);
+  });
+
+  it("in-slice update that claims a free unique key makes a later create a per-row error, not an import abort", async () => {
+    // p-a moves onto a currently-free "target@example.com"; a later create
+    // of the same value must become a per-row uniqueness error (as the
+    // sequential path reports), NOT slip past the stale prime cache into a
+    // flush-time constraint violation that throws and rolls back the whole
+    // import.
+    const outcomes = new Map<number, unknown>();
+    for (const batchSize of [1, 100]) {
+      const outcome = await withCountedStore(async (store) => {
+        await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a", email: "a-orig@example.com" },
+            },
+          ]),
+          importOptions(),
+        );
+        const result = await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a2", email: "target@example.com" },
+            },
+            {
+              kind: "Person",
+              id: "p-c",
+              properties: { name: "c", email: "target@example.com" },
+            },
+          ]),
+          importOptions({ onConflict: "update", batchSize }),
+        );
+        const personA = await store.nodes.Person.getById("p-a" as never);
+        const personC = await store.nodes.Person.getById("p-c" as never);
+        return {
+          created: result.nodes.created,
+          updated: result.nodes.updated,
+          errors: result.errors.map((entry) => ({
+            id: entry.id,
+            matchesConstraint: entry.error.includes("person_email"),
+          })),
+          emailA: personA?.email,
+          personCExists: personC !== undefined,
+        };
+      });
+      outcomes.set(batchSize, outcome);
+    }
+
+    const sequential = outcomes.get(1);
+    const batched = outcomes.get(100);
+
+    expect(sequential).toEqual({
+      created: 0,
+      updated: 1,
+      errors: [{ id: "p-c", matchesConstraint: true }],
+      emailA: "target@example.com",
+      personCExists: false,
+    });
+    expect(batched).toEqual(sequential);
+  });
+
   it("skips tombstoned rows under onConflict: update without resurrecting", async () => {
     await withCountedStore(async (store) => {
       const node = await store.nodes.Person.create({

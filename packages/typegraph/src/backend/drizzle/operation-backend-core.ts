@@ -433,7 +433,13 @@ export function createCommonOperationBackend(
     async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
       if (params.ids.length === 0) return;
       const timestamp = nowIso();
-      for (const chunk of chunkArray(params.ids, batchConfig.getEdgesChunkSize)) {
+      // The soft-delete UPDATE binds one extra parameter (the `deleted_at`
+      // timestamp) on top of the graphId + id-list that `getEdgesChunkSize`
+      // is budgeted for, so a full chunk would overflow the bind limit by 1.
+      // Reserve a slot for the timestamp. The hard-delete batch below has no
+      // such extra bind and keeps the full chunk size.
+      const softDeleteChunkSize = Math.max(1, batchConfig.getEdgesChunkSize - 1);
+      for (const chunk of chunkArray(params.ids, softDeleteChunkSize)) {
         const query = operationStrategy.buildDeleteEdgesBatch(
           { graphId: params.graphId, ids: chunk },
           timestamp,

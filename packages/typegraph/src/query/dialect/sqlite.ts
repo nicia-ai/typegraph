@@ -220,21 +220,6 @@ export const sqliteDialect: DialectAdapter = {
   },
 
   // ============================================================
-  // Type Utilities
-  // ============================================================
-
-  currentTimestamp() {
-    // Keep ISO-8601 format aligned with stored timestamps from Date.toISOString()
-    // so string-based temporal comparisons remain correct in SQLite TEXT columns.
-    return sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
-  },
-
-  subqueryMembership(column, subquery) {
-    // SQLite evaluates IN (subquery) with a transient index — optimal as-is.
-    return sql`${column} IN (${subquery})`;
-  },
-
-  // ============================================================
   // Value Binding & Literals
   // ============================================================
 

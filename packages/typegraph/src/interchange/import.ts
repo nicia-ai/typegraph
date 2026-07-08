@@ -9,6 +9,7 @@ import type { z } from "zod";
 import {
   type GraphBackend,
   isLiveNodeRow,
+  rowPropsToObject,
   type TransactionBackend,
 } from "../backend/types";
 import { validateEdgeEndpoints } from "../constraints";
@@ -386,6 +387,7 @@ async function processNodeSlice(
     backend: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
+    registerAppliedNodeUpdate,
     seedNodeRow,
     seedUniqueRow,
   } = createNodeBatchValidationBackend(graphId, registry, backend);
@@ -442,6 +444,19 @@ async function processNodeSlice(
               backend,
             ),
           );
+          if (updateResult.ok) {
+            // The update mutated the real backend's uniqueness rows directly;
+            // reconcile the shared prime caches so a later create in this
+            // slice sees the post-update reservation state (matching the
+            // sequential path). See registerAppliedNodeUpdate.
+            registerAppliedNodeUpdate(
+              node.kind,
+              node.id,
+              rowPropsToObject(existing.props),
+              props,
+              uniqueConstraints,
+            );
+          }
           record(
             node,
             updateResult.ok ?

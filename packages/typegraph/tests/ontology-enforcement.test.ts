@@ -874,6 +874,43 @@ describe("implies() Endpoint Compatibility Validation", () => {
 
     await backend.close();
   });
+
+  it("rejects an implies() chain that bridges incompatible endpoints through an UNREGISTERED intermediate edge", () => {
+    // Transitivity hole: `writes` (Author -> Paper) implies an intermediate
+    // `about` edge that is NOT registered on the graph, which in turn implies
+    // `likes` (Reader -> Reader). Both direct hops touch the unregistered
+    // `about`, so a per-direct-relation gate would skip BOTH — yet the
+    // precomputed transitive closure still folds `writes` rows into any
+    // `expand: "implying"` traversal of `likes`, even though Author/Paper are
+    // endpoint-incompatible with Reader. The gate must validate the effective
+    // closure, not rely on each direct hop being individually checkable.
+    const Author = defineNode("AuthorBridge", { schema: z.object({}) });
+    const Paper = defineNode("PaperBridge", { schema: z.object({}) });
+    const Reader = defineNode("ReaderBridge", { schema: z.object({}) });
+
+    const writes = defineEdge("writesBridge", { schema: z.object({}) });
+    // `about` is intentionally never added to the graph's `edges`.
+    const about = defineEdge("aboutBridge", { schema: z.object({}) });
+    const likes = defineEdge("likesBridge", { schema: z.object({}) });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_transitive_bridge",
+          nodes: {
+            Author: { type: Author },
+            Paper: { type: Paper },
+            Reader: { type: Reader },
+          },
+          edges: {
+            writesBridge: { type: writes, from: [Author], to: [Paper] },
+            likesBridge: { type: likes, from: [Reader], to: [Reader] },
+          },
+          ontology: [implies(writes, about), implies(about, likes)],
+        }),
+      ),
+    ).toThrow(ConfigurationError);
+  });
 });
 
 // ============================================================

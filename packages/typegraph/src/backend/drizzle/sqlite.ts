@@ -215,6 +215,8 @@ export const SQLITE_ANALYZE_ROW_LIMIT = 1000;
 export type SqliteBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  /** Rows per embedding batch upsert (5 binds per row). */
+  embeddingUpsertBatchSize: number;
   /** Rows per fulltext batch upsert (6 binds per row on FTS5). */
   fulltextUpsertBatchSize: number;
   /** Node ids per fulltext batch delete (2 fixed binds + one per id). */
@@ -238,6 +240,10 @@ export function computeSqliteBatchChunkSizes(
     checkUniqueBatchChunkSize: Math.max(
       1,
       maxBindParameters - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+    ),
+    embeddingUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EMBEDDING_UPSERT_PARAM_COUNT),
     ),
     fulltextUpsertBatchSize: Math.max(
       1,
@@ -634,16 +640,12 @@ function createSqliteOperationBackend(
             params.rows.map((row) => [row.nodeId, row] as const),
           );
           const rows = [...rowsById.values()];
-          const chunkSize = Math.max(
-            1,
-            Math.floor(
-              (capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS) /
-                EMBEDDING_UPSERT_PARAM_COUNT,
-            ),
-          );
           const timestamp = nowIso();
           try {
-            for (const chunk of chunkArray(rows, chunkSize)) {
+            for (const chunk of chunkArray(
+              rows,
+              batchConfig.embeddingUpsertBatchSize,
+            )) {
               const statements =
                 vectorStrategy.buildUpsertBatch === undefined ?
                   chunk.flatMap((row) =>

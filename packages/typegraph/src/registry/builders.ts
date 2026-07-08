@@ -59,11 +59,6 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
 
   const registry = new KindRegistry(nodeTypes, edgeTypes, closures);
   validateImpliesEndpointCompatibility(
-    graph.ontology.map((relation) => ({
-      metaEdgeName: relation.metaEdge.name,
-      from: relation.from,
-      to: relation.to,
-    })),
     buildEdgeEndpointKinds(graph.edges),
     registry,
   );

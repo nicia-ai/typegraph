@@ -74,6 +74,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../vector-strategy";
+import { vectorPageClause } from "./pagination";
 
 /** Physical-name prefix for the per-field `vec0` virtual table. */
 const TABLE_PREFIX = "tg_vec";
@@ -332,10 +333,7 @@ export const sqliteVecStrategy: VectorStrategy = {
         vectorMinScoreCondition(distance, params.metric, params.minScore),
       );
     }
-    const pageClause =
-      params.offset === undefined || params.offset === 0 ?
-        sql`LIMIT ${params.limit}`
-      : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
+    const pageClause = vectorPageClause(params.limit, params.offset);
     return sql`
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}

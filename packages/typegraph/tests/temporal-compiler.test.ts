@@ -51,11 +51,16 @@ describe("compileTemporalFilter", () => {
       expect(sql).toContain("e.valid_to");
     });
 
-    it("uses execution-time timestamp expression", () => {
+    it("binds an application-clock instant, not the database clock", () => {
       const sql = getSqlString({ mode: "current" });
 
-      expect(sql).toContain("CURRENT_TIMESTAMP");
-      expect(sql).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      // The current-read "now" is the application clock — an ISO instant bound
+      // at build time — NOT the database `CURRENT_TIMESTAMP` / `NOW()`. This
+      // keeps valid-time visibility on the same clock that stamps `valid_from`,
+      // so a freshly-created row can't be hidden by app/database clock skew
+      // (issue #242).
+      expect(sql).not.toContain("CURRENT_TIMESTAMP");
+      expect(sql).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     });
   });
 

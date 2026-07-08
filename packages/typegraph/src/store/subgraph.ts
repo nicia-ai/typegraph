@@ -32,7 +32,10 @@ import {
   recordedReadSchemaFor,
   type SqlSchema,
 } from "../query/compiler/schema";
-import { compileTemporalFilter } from "../query/compiler/temporal";
+import {
+  compileTemporalFilter,
+  currentReadInstant,
+} from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
 import type { DialectAdapter } from "../query/dialect/types";
@@ -590,11 +593,9 @@ export async function executeSubgraph<
   } else {
     membership = {
       prefix: sql`${reachableCte}${includedIdsCte} `,
-      idFilter: (column) =>
-        ctx.dialect.subqueryMembership(
-          column,
-          sql.raw("SELECT id FROM included_ids"),
-        ),
+      // SQLite: `column IN (subquery)` evaluates via a transient index —
+      // optimal as-is. (Postgres takes the parameterized text[] form above.)
+      idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
       parameterDependentPlan: false,
     };
   }
@@ -813,7 +814,7 @@ async function fetchSubgraphNodes(
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "n",
-    currentTimestamp: ctx.dialect.currentTimestamp(),
+    currentTimestamp: currentReadInstant(),
   });
   const columns: SQL[] = [
     sql`n.kind`,
@@ -849,7 +850,7 @@ async function fetchSubgraphEdges(
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "e",
-    currentTimestamp: ctx.dialect.currentTimestamp(),
+    currentTimestamp: currentReadInstant(),
   });
   const columns: SQL[] = [
     sql`e.id`,

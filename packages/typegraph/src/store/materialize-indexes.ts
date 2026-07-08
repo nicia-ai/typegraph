@@ -49,6 +49,7 @@ import {
   type RelationalIndexDeclaration,
   type VectorIndexDeclaration,
 } from "../indexes/types";
+import { sqlValueList } from "../query/compiler/predicate-utils";
 import { type SqlDialect } from "../query/dialect/types";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
@@ -241,6 +242,22 @@ export async function materializeIndexes(
     statusKeys,
   );
 
+  // Bulk-preload INVALID index leftovers (interrupted CONCURRENTLY builds)
+  // for the relational candidates in one `pg_index` query. On a warm start
+  // `settleAgainstExisting` would otherwise fire one leftover check per
+  // already-materialized index — the same N-round-trip cost the status
+  // preload above just eliminated. Vector entries are excluded: their
+  // per-field physical index leftovers are operator-repair, and
+  // `settleAgainstExisting` only consults this set for non-vector
+  // declarations. Physical names are the declaration names.
+  const relationalPhysicalNames = candidates
+    .filter((declaration) => declaration.entity !== "vector")
+    .map((declaration) => declaration.name);
+  const invalidLeftovers = await preloadInvalidIndexLeftovers(
+    backend,
+    relationalPhysicalNames,
+  );
+
   const materializeEntry = (
     declaration: IndexDeclaration,
   ): Promise<MaterializeIndexesEntry> =>
@@ -251,6 +268,7 @@ export async function materializeIndexes(
         graphId,
         schemaVersion,
         existingByStatusKey,
+        invalidLeftovers,
       )
     : materializeRelationalIndex(
         declaration,
@@ -260,6 +278,7 @@ export async function materializeIndexes(
         graphId,
         schemaVersion,
         existingByStatusKey,
+        invalidLeftovers,
       );
 
   if (options.stopOnError === true) {
@@ -398,6 +417,7 @@ async function materializeRelationalIndex(
   graphId: string,
   schemaVersion: number,
   existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
+  invalidLeftovers: ReadonlySet<string>,
 ): Promise<MaterializeIndexesEntry> {
   // GIN-family methods are PostgreSQL expression GINs; SQLite has no
   // equivalent (its substring-search story is FTS5 fulltext), so the
@@ -440,6 +460,7 @@ async function materializeRelationalIndex(
       await backend.executeDdl!(ddl);
     },
     existingByStatusKey,
+    invalidLeftovers,
   });
 }
 
@@ -449,6 +470,7 @@ async function materializeVectorIndex(
   graphId: string,
   schemaVersion: number,
   existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
+  invalidLeftovers: ReadonlySet<string>,
 ): Promise<MaterializeIndexesEntry> {
   // `indexType: "none"` is a declarative opt-out — the declaration
   // carries shape metadata (dimensions, metric) for tooling but the
@@ -532,6 +554,7 @@ async function materializeVectorIndex(
     driftLabel: "Vector index",
     run: () => backend.createVectorIndex!(params),
     existingByStatusKey,
+    invalidLeftovers,
   });
 }
 
@@ -554,6 +577,7 @@ async function materializeOne(
     driftLabel: string;
     run: () => Promise<void>;
     existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>;
+    invalidLeftovers: ReadonlySet<string>;
   }>,
 ): Promise<MaterializeIndexesEntry> {
   // Narrowed by callsite — guaranteed defined when this is reached
@@ -564,13 +588,21 @@ async function materializeOne(
   const statusOverride =
     statusKey === declaration.name ? undefined : { statusName: statusKey };
 
+  // Pre-claim leftover check reads the bulk-preloaded set (one `pg_index`
+  // query for all candidates), not one round-trip per index.
   const settled = await settleAgainstExisting(
     existingByStatusKey.get(statusKey),
     declaration,
     backend,
     graphId,
     schemaVersion,
-    { statusKey, signature, driftLabel },
+    {
+      statusKey,
+      signature,
+      driftLabel,
+      isInvalidLeftover: (physicalIndexName) =>
+        action.invalidLeftovers.has(physicalIndexName),
+    },
   );
   if (settled !== undefined) return settled;
 
@@ -636,10 +668,19 @@ async function settleAgainstExisting(
     statusKey: string;
     signature: string;
     driftLabel: string;
+    /**
+     * Whether a physical index with this name exists but is INVALID. The
+     * pre-claim caller reads a bulk-preloaded set (one query for all
+     * candidates); the post-claim caller reads fresh (the preload is stale
+     * after waiting on another builder's claim).
+     */
+    isInvalidLeftover: (
+      physicalIndexName: string,
+    ) => boolean | Promise<boolean>;
   }>,
 ): Promise<MaterializeIndexesEntry | undefined> {
   if (existing?.materializedAt === undefined) return undefined;
-  const { statusKey, signature, driftLabel } = action;
+  const { statusKey, signature, driftLabel, isInvalidLeftover } = action;
   if (existing.signature === signature) {
     // A recorded success is only trustworthy while the physical index is
     // valid: a run interrupted after `CREATE ... IF NOT EXISTS` silently
@@ -649,7 +690,7 @@ async function settleAgainstExisting(
     if (
       declaration.entity !== "vector" &&
       hasIndexBuildClaimProtocol(backend) &&
-      (await hasInvalidIndexLeftover(backend, declaration.name))
+      (await isInvalidLeftover(declaration.name))
     ) {
       return undefined;
     }
@@ -741,7 +782,15 @@ async function materializeWithClaim(
         backend,
         graphId,
         schemaVersion,
-        { statusKey, signature, driftLabel },
+        {
+          statusKey,
+          signature,
+          driftLabel,
+          // Post-claim the bulk preload is stale (we may have waited on
+          // another builder's claim), so re-check this index fresh.
+          isInvalidLeftover: (physicalIndexName) =>
+            hasInvalidIndexLeftover(backend, physicalIndexName),
+        },
       );
       if (settled !== undefined) return settled;
 
@@ -782,22 +831,28 @@ async function materializeWithClaim(
         return entry(declaration, "failed", error);
       }
     } finally {
-      await backend.releaseIndexMaterializationClaim!({
-        indexName: statusKey,
-        token,
-      });
+      // A claim-release failure must not mask the build's own outcome — a
+      // successful build must not surface as a thrown rejection, and one
+      // bucket's release error must not abort its siblings. The claim carries
+      // a lease (CLAIM_LEASE_MS) and self-expires, so a missed release is
+      // reclaimed by the next materializer; warn and move on.
+      try {
+        await backend.releaseIndexMaterializationClaim!({
+          indexName: statusKey,
+          token,
+        });
+      } catch (releaseError) {
+        console.warn(
+          `typegraph: failed to release the index materialization claim for ` +
+            `"${statusKey}"; it will expire on its lease and be reclaimed ` +
+            `automatically.`,
+          releaseError,
+        );
+      }
     }
   }
 }
 
-/**
- * Self-heals an interrupted CONCURRENTLY build: a crashed CIC leaves an
- * INVALID index behind, and a later `CREATE INDEX CONCURRENTLY IF NOT
- * EXISTS` would see the name and silently no-op — recording success over
- * an index the planner will never use. Detect via pg_index and drop
- * (also CONCURRENTLY — same no-transaction rule). Valid indexes are never
- * touched.
- */
 /**
  * Whether an index with this name exists but is INVALID (an interrupted
  * CONCURRENTLY build's leftover). False for absent or valid indexes and
@@ -819,6 +874,44 @@ async function hasInvalidIndexLeftover(
   return rows[0]?.invalid === true;
 }
 
+/**
+ * Bulk variant of `hasInvalidIndexLeftover`: the set of INVALID leftover
+ * index names among `physicalIndexNames`, resolved in ONE `pg_index` query.
+ * Empty set on non-Postgres dialects or empty input.
+ *
+ * A warm start (every index already materialized with a matching signature)
+ * would otherwise fire `hasInvalidIndexLeftover` once per already-materialized
+ * relational index inside `settleAgainstExisting` — N `pg_index` round-trips.
+ * Preloading the whole set collapses that to one, mirroring how
+ * `preloadMaterializations` batches the status reads it sits beside.
+ */
+async function preloadInvalidIndexLeftovers(
+  backend: GraphBackend,
+  physicalIndexNames: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (backend.dialect !== "postgres" || physicalIndexNames.length === 0) {
+    return new Set();
+  }
+  const rows = await backend.execute<{ name: string }>(
+    asCompiledRowsSql(sql`
+      SELECT c.relname AS name
+      FROM pg_class c
+      JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
+        AND NOT i.indisvalid
+    `),
+  );
+  return new Set(rows.map((row) => row.name));
+}
+
+/**
+ * Self-heals an interrupted CONCURRENTLY build: a crashed CIC leaves an
+ * INVALID index behind, and a later `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS` would see the name and silently no-op — recording success over an
+ * index the planner will never use. Detect via `hasInvalidIndexLeftover` and
+ * drop (also CONCURRENTLY — same no-transaction rule). Valid indexes are
+ * never touched.
+ */
 async function dropInvalidIndexLeftover(
   backend: GraphBackend,
   physicalIndexName: string,

@@ -1,7 +1,8 @@
 import { type SQL } from "drizzle-orm";
 
+import { type SelectiveField } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
-import { type JsonPointer } from "../json-pointer";
+import { type JsonPointer, jsonPointer } from "../json-pointer";
 
 type JsonExtractFallback = "json" | "text";
 
@@ -45,4 +46,27 @@ export function compileTypedJsonExtract(input: TypedJsonExtractInput): SQL {
         : dialect.jsonExtract(column, pointer);
     }
   }
+}
+
+/**
+ * Extracts a single top-level selective-projection field from a JSON props
+ * column, typed by the field's declared value type.
+ *
+ * Shared by both projection shapes: the standard emitter pushes this extraction
+ * into a CTE synthetic column, while the recursive emitter applies it in the
+ * outer SELECT over the props carried through the recursive CTE. The two SQL
+ * shapes differ by design, but they must extract identically — centralizing the
+ * pointer/valueType wiring here keeps their extraction semantics from drifting.
+ */
+export function compileSelectivePropsExtraction(
+  field: SelectiveField,
+  column: SQL,
+  dialect: DialectAdapter,
+): SQL {
+  return compileTypedJsonExtract({
+    column,
+    dialect,
+    pointer: jsonPointer([field.field]),
+    valueType: field.valueType,
+  });
 }

@@ -9,7 +9,10 @@ import {
   recordedReadSchemaFor,
   type SqlSchema,
 } from "../query/compiler/schema";
-import { compileTemporalFilter } from "../query/compiler/temporal";
+import {
+  compileTemporalFilter,
+  currentReadInstant,
+} from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
 import { type TraversalDirection } from "./algorithms/types";
 
@@ -47,7 +50,7 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     sql.raw("e.kind"),
     options.edgeKinds,
   );
-  const currentTimestamp = options.dialect.currentTimestamp();
+  const currentTimestamp = currentReadInstant();
   const nodeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,

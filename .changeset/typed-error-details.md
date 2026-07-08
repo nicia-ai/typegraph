@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 Every `TypeGraphError` subclass with a fixed-shape `details` payload now

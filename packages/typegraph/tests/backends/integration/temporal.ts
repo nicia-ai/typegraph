@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
@@ -47,6 +47,40 @@ export function registerTemporalIntegrationTests(
 
       expect(results).toHaveLength(2);
       expect(results.toSorted()).toEqual(["Alice", "Bob"]);
+    });
+
+    it("keeps a freshly-created row visible to an immediately-following current read despite app-vs-database clock skew (#242)", async () => {
+      const store = context.getStore();
+
+      // Simulate the app-server clock running AHEAD of the database clock by
+      // pinning `Date` to a far-future instant. An omitted `validFrom` is
+      // stamped from this (app) clock, so a "current" read must compare
+      // against the same app clock to see the row. Under a database-clock read
+      // (`valid_from <= NOW()`), the row's future `validFrom` would exceed the
+      // database's real wall clock and vanish from the very read that created
+      // it — the read-after-write regression from issue #242.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2099-01-01T00:00:00.000Z"));
+
+        const created = await store.nodes.Person.create({
+          name: "Skewed",
+          age: 42,
+        });
+
+        const queried = await store
+          .query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.name.eq("Skewed"))
+          .select((ctx) => ctx.p.name)
+          .execute();
+        expect(queried).toEqual(["Skewed"]);
+
+        const fetched = await store.nodes.Person.getById(created.id);
+        expect(fetched?.name).toBe("Skewed");
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("creates edges with validTo for temporal relationships", async () => {

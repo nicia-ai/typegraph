@@ -12,14 +12,14 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode } from "../../../src";
+import { defineEdge, defineGraph, defineNode } from "../../../src";
 import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
 } from "../../../src/backend/drizzle/ddl";
 import { tables as defaultPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { defineNodeIndex } from "../../../src/indexes";
+import { defineEdgeIndex, defineNodeIndex } from "../../../src/indexes";
 import { createStoreWithSchema } from "../../../src/store";
 
 const TEST_DATABASE_URL =
@@ -344,6 +344,72 @@ describe("Postgres store.materializeIndexes — GIN-family methods", () => {
     expect(substring.map((row) => row.title)).toEqual([
       "Postgres indexing deep dive",
     ]);
+  });
+});
+
+describe("Postgres store.materializeIndexes — edge GIN-family methods", () => {
+  const Tagged = defineEdge("tagged", {
+    schema: z.object({
+      labels: z.array(z.string()),
+      note: z.string(),
+    }),
+  });
+
+  function buildEdgeGinGraph() {
+    return defineGraph({
+      id: "pg_edge_gin_method_test",
+      nodes: { Person: { type: Person } },
+      edges: {
+        tagged: {
+          type: Tagged,
+          from: [Person],
+          to: [Person],
+          cardinality: "many",
+        },
+      },
+      indexes: [
+        defineEdgeIndex(Tagged, {
+          fields: ["labels"],
+          method: "gin",
+          name: "idx_tg_tagged_labels_gin",
+        }),
+        defineEdgeIndex(Tagged, {
+          fields: ["note"],
+          method: "trigram",
+          name: "idx_tg_tagged_note_trgm",
+        }),
+      ],
+    });
+  }
+
+  it("creates edge gin/trigram expression indexes on typegraph_edges and is idempotent", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(buildEdgeGinGraph(), backend);
+
+    const first = await store.materializeIndexes();
+    expect(first.results.map((entry) => entry.status).toSorted()).toEqual([
+      "created",
+      "created",
+    ]);
+    for (const entry of first.results) {
+      expect(entry.entity).toBe("edge");
+    }
+
+    const second = await store.materializeIndexes();
+    expect(
+      second.results.every((entry) => entry.status === "alreadyMaterialized"),
+    ).toBe(true);
+
+    // Physically present on typegraph_edges with the GIN access method.
+    const indexRows = await pool.query<{ indexdef: string; tablename: string }>(
+      `SELECT indexdef, tablename FROM pg_indexes WHERE indexname IN ('idx_tg_tagged_labels_gin', 'idx_tg_tagged_note_trgm')`,
+    );
+    expect(indexRows.rows).toHaveLength(2);
+    for (const row of indexRows.rows) {
+      expect(row.indexdef).toContain("USING gin");
+      expect(row.tablename).toBe("typegraph_edges");
+    }
   });
 });
 

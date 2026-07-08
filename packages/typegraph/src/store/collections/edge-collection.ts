@@ -580,10 +580,15 @@ export function createEdgeCollection<
         return results;
       };
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) => upsertAll(txBackend));
-      }
-      return upsertAll(backend);
+      const results =
+        backend.capabilities.transactions && "transaction" in backend ?
+          await backend.transaction(async (txBackend) => upsertAll(txBackend))
+        : await upsertAll(backend);
+      // Match bulkCreate/bulkInsert: refresh planner statistics after a large
+      // autocommit bulk write. Threshold-gated, and a no-op inside a caller
+      // transaction (the hook is intentionally undefined there).
+      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      return results;
     },
 
     async bulkInsert(

@@ -102,6 +102,7 @@ describe("computeSqliteBatchChunkSizes", () => {
   it("reproduces the historic chunk sizes at the 999 floor", () => {
     expect(computeSqliteBatchChunkSizes(999)).toEqual({
       checkUniqueBatchChunkSize: 996,
+      embeddingUpsertBatchSize: 199,
       edgeInsertBatchSize: 83,
       fulltextUpsertBatchSize: 166,
       fulltextDeleteChunkSize: 997,
@@ -115,6 +116,7 @@ describe("computeSqliteBatchChunkSizes", () => {
   it("scales chunk sizes with the modern budget", () => {
     expect(computeSqliteBatchChunkSizes(MODERN_BETTER_SQLITE3_BUDGET)).toEqual({
       checkUniqueBatchChunkSize: 32_763,
+      embeddingUpsertBatchSize: 6553,
       edgeInsertBatchSize: 2730,
       fulltextUpsertBatchSize: 5461,
       fulltextDeleteChunkSize: 32_764,
@@ -135,6 +137,7 @@ describe("computeSqliteBatchChunkSizes", () => {
   it("never returns a chunk size below one", () => {
     expect(computeSqliteBatchChunkSizes(1)).toEqual({
       checkUniqueBatchChunkSize: 1,
+      embeddingUpsertBatchSize: 1,
       edgeInsertBatchSize: 1,
       fulltextUpsertBatchSize: 1,
       fulltextDeleteChunkSize: 1,

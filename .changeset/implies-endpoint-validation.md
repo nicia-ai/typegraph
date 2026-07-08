@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 Fixes `implies(edgeA, edgeB)` silently accepting endpoint-incompatible edge
