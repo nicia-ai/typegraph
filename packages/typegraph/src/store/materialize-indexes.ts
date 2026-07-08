@@ -52,6 +52,7 @@ import {
 import { type SqlDialect } from "../query/dialect/types";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
+import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import { ensureFocusedStatusTable } from "./materialize-shared";
@@ -940,13 +941,24 @@ function buildAttempt(
  * signature would falsely report "already materialized" after a table
  * rename. Excludes execution flags (`CONCURRENTLY`, `IF NOT EXISTS`)
  * because those are runtime modifiers, not shape.
+ *
+ * `declaration` is canonicalized via `serializeIndexDeclaration` before
+ * hashing — `defineGraph` accepts pre-built `IndexDeclaration`s directly
+ * (bypassing `defineNodeIndex`'s own canonicalization), so a raw
+ * declaration with e.g. a present-but-empty `keySystemColumns: []` would
+ * otherwise hash differently from the same declaration with the field
+ * omitted, spuriously forcing re-materialization for no real shape change.
  */
 export async function computeIndexSignature(
   dialect: SqlDialect,
   targetTableName: string,
   declaration: IndexDeclaration,
 ): Promise<string> {
-  const hashable = { dialect, targetTableName, declaration };
+  const hashable = {
+    dialect,
+    targetTableName,
+    declaration: serializeIndexDeclaration(declaration),
+  };
   const json = JSON.stringify(hashable, sortedReplacer);
   return sha256Hex(json, 16);
 }
