@@ -18,7 +18,12 @@ nodes and edges.
 true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 this, the clone would re-stamp any implicit `validFrom` to the fork's own
 (later) creation time, narrowing the fork's valid-time window relative to
-the base it was cloned from.
+the base it was cloned from. This includes rows that still have a `NULL`
+`valid_from` (predating this fix, or written directly via the backend):
+`exportGraph`/`importGraph` now round-trip a confirmed open-left window as
+an explicit `null` rather than silently dropping it, so a legacy row's
+"valid since forever" semantics survive a clone unchanged instead of being
+narrowed to the clone's own creation time.
 
 `exportGraph`/`importGraph` round trips still default `includeTemporal` to
 `false`; without it, imported records get a fresh `validFrom` at import

@@ -21,14 +21,17 @@
  * only) as the immutable reference, never against the clone (clones regenerate
  * `created_at`/`updated_at`, which would otherwise destabilize `base@V`).
  *
- * `includeTemporal: true` carries `validFrom`/`validTo` through unchanged: an
- * omitted `validFrom` on the base row is never NULL (create-time paths default
- * it to the row's own creation instant — see #240), so exporting it verbatim
- * preserves the base's exact valid-time window on the clone. Without this, the
- * clone's re-import would re-stamp any base row that relied on the default to
- * the CLONE's creation instant instead — narrowing its validity window and
- * making `asOf` reads on the fork diverge from identical reads on the base for
- * any instant between the row's real creation and the clone.
+ * `includeTemporal: true` carries `validFrom`/`validTo` through unchanged,
+ * preserving the base's exact valid-time window on the clone: create-time
+ * paths default an omitted `validFrom` to the row's own creation instant
+ * (see #240), and export/import round-trip a still-open-left `valid_from`
+ * (e.g. a row that predates the #240 fix) as an explicit `null` rather than
+ * silently dropping it — see `InterchangeNodeSchema.validFrom`'s doc.
+ * Without either half of this, the clone's re-import would re-stamp the
+ * affected base rows to the CLONE's creation instant instead — narrowing
+ * their validity window and making `asOf` reads on the fork diverge from
+ * identical reads on the base for any instant between the row's real
+ * creation and the clone.
  *
  * Logical-namespace (copy-on-write within one backend, no full data copy) is a
  * future strategy slot — see the `WorkingCopyStrategy` interface — deferred past

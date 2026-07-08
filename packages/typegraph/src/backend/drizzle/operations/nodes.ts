@@ -32,7 +32,7 @@ export function buildInsertNode(
     INSERT INTO ${nodes} (${columns})
     VALUES (
       ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-      1, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
+      1, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -55,7 +55,7 @@ export function buildInsertNodeNoReturn(
     INSERT INTO ${nodes} (${columns})
     VALUES (
       ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-      1, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
+      1, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
   `;
@@ -73,7 +73,7 @@ export function buildInsertNodesBatch(
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
-    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${resolveValidFrom(nodeParams.validFrom, timestamp)}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveValidFrom(nodeParams.validFrom, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -94,7 +94,7 @@ export function buildInsertNodesBatchReturning(
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
-    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${resolveValidFrom(nodeParams.validFrom, timestamp)}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveValidFrom(nodeParams.validFrom, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`

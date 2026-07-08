@@ -270,8 +270,13 @@ export type InsertNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  /** Defaults to the insert's creation timestamp when omitted. */
-  validFrom?: string;
+  /**
+   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * `null`: preserves an explicit open-left validity window (no lower
+   * bound) — used by interchange import to round-trip a row that was
+   * already NULL, instead of re-stamping it to the import's own timestamp.
+   */
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -310,8 +315,13 @@ export type InsertEdgeParams = Readonly<{
   toKind: string;
   toId: string;
   props: Readonly<Record<string, unknown>>;
-  /** Defaults to the insert's creation timestamp when omitted. */
-  validFrom?: string;
+  /**
+   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * `null`: preserves an explicit open-left validity window (no lower
+   * bound) — used by interchange import to round-trip a row that was
+   * already NULL, instead of re-stamping it to the import's own timestamp.
+   */
+  validFrom?: string | null;
   validTo?: string;
 }>;
 

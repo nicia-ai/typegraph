@@ -51,7 +51,14 @@ export const InterchangeNodeSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
   properties: z.record(z.string(), z.unknown()),
-  validFrom: ValidityTimestampSchema.optional(),
+  /**
+   * `undefined` (key absent): not requested (`includeTemporal: false`) —
+   * import defaults it to the import's own creation timestamp. `null`:
+   * requested and confirmed the row has no lower bound (e.g. a legacy row
+   * predating the "omitted validFrom defaults to creation time" fix) —
+   * import preserves that open-left validity instead of re-stamping it.
+   */
+  validFrom: ValidityTimestampSchema.nullable().optional(),
   validTo: ValidityTimestampSchema.optional(),
   meta: z
     .object({
@@ -86,7 +93,8 @@ export const InterchangeEdgeSchema = z.object({
     id: z.string().min(1),
   }),
   properties: z.record(z.string(), z.unknown()).default({}),
-  validFrom: ValidityTimestampSchema.optional(),
+  /** See {@link InterchangeNodeSchema}'s `validFrom` for the null/undefined contract. */
+  validFrom: ValidityTimestampSchema.nullable().optional(),
   validTo: ValidityTimestampSchema.optional(),
   meta: z
     .object({

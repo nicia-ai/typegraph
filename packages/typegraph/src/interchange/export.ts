@@ -121,9 +121,17 @@ async function exportNodesOfKind(
     };
 
     if (options.includeTemporal) {
-      if (row.valid_from) {
-        (node as { validFrom?: string }).validFrom = row.valid_from;
-      }
+      // validFrom is always emitted (as `null` when the row has no lower
+      // bound) so import can tell "confirmed open-left" apart from "not
+      // requested" and preserve it instead of defaulting to import time —
+      // see the schema doc on InterchangeNodeSchema.validFrom. validTo has
+      // no such ambiguity (it was never defaulted), so it stays gated.
+      // `null` (not `undefined`) is the wire-protocol signal here — JSON has
+      // no other way to say "explicitly cleared" vs. "field absent".
+      const validFrom =
+        // eslint-disable-next-line unicorn/no-null
+        row.valid_from ?? null;
+      (node as { validFrom?: string | null }).validFrom = validFrom;
       if (row.valid_to) {
         (node as { validTo?: string }).validTo = row.valid_to;
       }
@@ -173,9 +181,13 @@ async function exportEdgesOfKind(
     };
 
     if (options.includeTemporal) {
-      if (row.valid_from) {
-        (edge as { validFrom?: string }).validFrom = row.valid_from;
-      }
+      // See exportNodesOfKind's validFrom comment: always emitted (as
+      // `null` when open-left) so import can distinguish "confirmed no
+      // lower bound" from "not requested".
+      const validFrom =
+        // eslint-disable-next-line unicorn/no-null
+        row.valid_from ?? null;
+      (edge as { validFrom?: string | null }).validFrom = validFrom;
       if (row.valid_to) {
         (edge as { validTo?: string }).validTo = row.valid_to;
       }

@@ -37,7 +37,7 @@ export function buildInsertEdge(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -61,7 +61,7 @@ export function buildInsertEdgeNoReturn(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(resolveValidFrom(params.validFrom, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
   `;
@@ -79,7 +79,7 @@ export function buildInsertEdgesBatch(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${resolveValidFrom(edgeParams.validFrom, timestamp)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveValidFrom(edgeParams.validFrom, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -100,7 +100,7 @@ export function buildInsertEdgesBatchReturning(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${resolveValidFrom(edgeParams.validFrom, timestamp)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveValidFrom(edgeParams.validFrom, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`

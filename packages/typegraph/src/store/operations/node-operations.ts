@@ -311,7 +311,11 @@ export function createNodeBatchValidationBackend(
       id: params.id,
       props: JSON.stringify(params.props),
       version: 1,
-      valid_from: params.validFrom,
+      // The simulated cached row only needs a NodeRow-shaped valid_from
+      // (string | undefined, never null) for existence/uniqueness checks,
+      // which don't inspect its value — normalize import's explicit-NULL
+      // sentinel away rather than widen this cache's row shape.
+      valid_from: params.validFrom ?? undefined,
       valid_to: params.validTo,
       created_at: "",
       updated_at: "",

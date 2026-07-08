@@ -192,6 +192,35 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(forkedEdge?.meta.validFrom).toBe(edge?.meta.validFrom);
   });
 
+  it("preserves a legacy row with no lower bound (valid_from = NULL) on the clone, still visible at an ancient asOf", async () => {
+    // Regression test: a row predating the #240 fix (or written directly
+    // via the backend, which the collection API can no longer produce) has
+    // valid_from = NULL — "valid since forever". A faithful clone must NOT
+    // narrow that to the fork's own creation instant.
+    const { baseStore } = await seedBase();
+    const legacy = await baseStore.backend.insertNode({
+      graphId: baseStore.graphId,
+      kind: "Person",
+      id: "legacy-null-validfrom",
+      props: { name: "Legacy" },
+       
+      validFrom: null,
+    });
+    expect(legacy.valid_from).toBeUndefined();
+
+    const result = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(result)).toBe(true);
+    const forkStore = unwrap(result).store;
+
+    const ancientAsOf = "1900-01-01T00:00:00.000Z";
+    const forkedLegacy = await forkStore.nodes.Person.getById(
+      legacy.id as never,
+      { temporalMode: "asOf", asOf: ancientAsOf },
+    );
+    expect(forkedLegacy).toBeDefined();
+    expect(forkedLegacy?.meta.validFrom).toBeUndefined();
+  });
+
   it("honors an explicit branch id from options", async () => {
     const { baseStore } = await seedBase();
     const explicitId = asBranchId("branch-explicit-id");

@@ -14,15 +14,24 @@ export function sqlNull(value: string | undefined): SQL | string {
 }
 
 /**
- * Resolves an omitted `validFrom` to the row's creation timestamp — an
- * explicit value always wins. Keeps every insert path (single, batch,
- * returning/non-returning) agreeing that "no validFrom" means "valid from
- * creation", not open-left NULL (see issue #240).
+ * Resolves a `validFrom` insert value against the row's creation timestamp.
+ * Three states, matching {@link InsertNodeParams.validFrom} /
+ * {@link InsertEdgeParams.validFrom}:
+ *  - `undefined` (omitted): defaults to `timestamp` — every insert path
+ *    (single, batch, returning/non-returning) agrees that "no validFrom"
+ *    means "valid from creation", not open-left NULL (see issue #240).
+ *  - `null`: preserves an explicit open-left window — returned as
+ *    `undefined` here so the caller's {@link sqlNull} wrap emits SQL NULL,
+ *    letting interchange import round-trip a row that predates the #240
+ *    fix without narrowing its validity window on re-import (e.g. via a
+ *    `branch()` clone).
+ *  - a string: passed through unchanged.
  */
 export function resolveValidFrom(
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   timestamp: string,
-): string {
+): string | undefined {
+  if (validFrom === null) return undefined;
   return validFrom ?? timestamp;
 }
 

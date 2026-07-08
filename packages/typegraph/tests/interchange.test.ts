@@ -319,6 +319,63 @@ describe("Export Options", () => {
       expect(node.meta).toBeUndefined();
     }
   });
+
+  it("includes an explicit validFrom when includeTemporal is true", async () => {
+    const exported = await exportGraph(store, { includeTemporal: true });
+
+    for (const node of exported.nodes) {
+      // Every node here was created via the collection API, so validFrom
+      // always defaults to a real creation timestamp (#240) — never null.
+      expect(typeof node.validFrom).toBe("string");
+    }
+  });
+
+  it("omits validFrom entirely by default (includeTemporal: false)", async () => {
+    const exported = await exportGraph(store);
+
+    for (const node of exported.nodes) {
+      expect(node.validFrom).toBeUndefined();
+    }
+  });
+
+  it("round-trips a legacy row with no lower bound (valid_from = NULL) as explicit null, not a re-stamped timestamp", async () => {
+    // Regression test: a row predating the #240 fix (or written directly
+    // via the backend, bypassing the collection API, which can no longer
+    // produce NULL) has valid_from = NULL — "valid since forever". A
+    // faithful includeTemporal: true export/import must preserve that
+    // open-left window, not silently narrow it to the import's own
+    // creation timestamp.
+    const legacy = await backend.insertNode({
+      graphId: store.graphId,
+      kind: "Person",
+      id: "legacy-null-validfrom",
+      props: { name: "Legacy" },
+      // eslint-disable-next-line unicorn/no-null -- simulates a pre-#240 row
+      validFrom: null,
+    });
+    expect(legacy.valid_from).toBeUndefined();
+
+    const exported = await exportGraph(store, { includeTemporal: true });
+    const legacyExport = exported.nodes.find((n) => n.id === legacy.id);
+    expect(legacyExport?.validFrom).toBeNull();
+
+    const targetBackend = createTestBackend();
+    const targetStore = createStore(testGraph, targetBackend);
+    const result = await importGraph(
+      targetStore,
+      exported,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+
+    const ancientAsOf = "1900-01-01T00:00:00.000Z";
+    const importedLegacy = await targetStore.nodes.Person.getById(
+      legacy.id as never,
+      { temporalMode: "asOf", asOf: ancientAsOf },
+    );
+    expect(importedLegacy).toBeDefined();
+    expect(importedLegacy?.meta.validFrom).toBeUndefined();
+  });
 });
 
 // ============================================================

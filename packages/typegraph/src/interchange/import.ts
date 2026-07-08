@@ -369,7 +369,12 @@ async function processNodeSlice(
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
         validatedProps: propsResult.data,
-        validFrom: node.validFrom,
+        // NodeCreateDraft.validFrom is string | undefined (never null) — it
+        // only feeds batch validation-cache priming, which never inspects
+        // it, so normalizing the explicit-NULL sentinel away here is inert.
+        // The actual insert (buildImportInsertParams) reads node.validFrom
+        // directly and preserves the null.
+        validFrom: node.validFrom ?? undefined,
         validTo: node.validTo,
       },
     });
@@ -578,12 +583,18 @@ async function catchUniquenessError<T>(
  */
 function validateValidityWindow(
   entity: Readonly<{
-    validFrom?: string | undefined;
+    validFrom?: string | null | undefined;
     validTo?: string | undefined;
   }>,
 ): string | undefined {
   try {
-    validateOptionalCanonicalIsoDate(entity.validFrom, "validFrom");
+    // null is a confirmed open-left window (see InterchangeNodeSchema's
+    // validFrom doc), not a value to format-check — treat it like
+    // "not provided" here, same as the canonical-date validator does.
+    validateOptionalCanonicalIsoDate(
+      entity.validFrom ?? undefined,
+      "validFrom",
+    );
     validateOptionalCanonicalIsoDate(entity.validTo, "validTo");
     return undefined;
   } catch (error) {
