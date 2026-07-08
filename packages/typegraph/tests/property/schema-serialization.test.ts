@@ -1009,6 +1009,74 @@ describe("Schema Serialization Properties", () => {
       expect(reSerialized).toBe(json);
     });
 
+    // Regression: `keySystemColumns` previously had no entry in
+    // `nodeIndexDeclarationZod`, so `.loose()` let any value ride through the
+    // persisted-schema parse boundary unchecked — a malformed value would
+    // only surface later, inside SQL compilation.
+    it("rejects a malformed keySystemColumns value at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_malformed",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ?
+            { ...index, keySystemColumns: ["not_a_system_column"] }
+          : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
+    // Regression: the malformed-value check above only exercised a value
+    // outside the full `SystemColumnName` enum. A value that IS a valid
+    // system column, but edge-only, needs its own check — `keySystemColumns`
+    // previously validated against the shared 13-member enum, which doesn't
+    // distinguish node-valid from edge-only columns the way
+    // `defineNodeIndex`'s own construction-time check does.
+    it("rejects an edge-only keySystemColumns value on a node index at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_edge_only",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ?
+            { ...index, keySystemColumns: ["from_id"] }
+          : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
     // Conversely, `origin: "runtime"` is emitted explicitly so the
     // restart loader can route it through the runtime compiler.
     it('graph-extension indexes emit `origin: "runtime"` in canonical serialization', () => {

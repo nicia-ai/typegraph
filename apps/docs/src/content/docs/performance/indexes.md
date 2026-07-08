@@ -71,13 +71,25 @@ export const typegraphTables = createSqliteTables({}, {
 
 ## Node Indexes
 
-`defineNodeIndex(nodeType, config)` creates an index definition for node properties.
+`defineNodeIndex(nodeType, config)` creates an index definition for node properties and, via
+`keySystemColumns`, TypeGraph system columns.
 
 **Key options:**
 
-- `fields`: JSON property paths used for filtering/ordering (B-tree expression keys).
+- `fields`: JSON property paths used for filtering/ordering (B-tree expression keys). Optional — an
+  index can instead be keyed entirely by `coveringFields`/`keySystemColumns` — but the declaration
+  must supply at least one of `fields`, `coveringFields`, or `keySystemColumns`.
 - `coveringFields`: additional properties frequently selected with the same filters. These become
   additional index keys to enable index-only reads when combined with smart select.
+- `keySystemColumns`: system columns (e.g. `"id"`) to include in the index key, alongside
+  `fields`/`coveringFields`. A covering index can only serve a query's join index-only if the
+  index's key matches the join's actual predicate — a query that joins on a system column directly
+  (e.g. a compiled `n.id = e.from_id` for a reverse traversal) needs a matching key column that
+  `fields`/`coveringFields` can't provide, since those only ever accept schema properties. Rejects
+  edge-only system columns on a node index and any column `scope` already prefixes the key with;
+  not supported together with `method: "gin"`/`"trigram"`. Rejects `"id"` combined with `unique:
+  true` — every node's `id` is already unique per row, so a unique index keyed on `id` plus other
+  columns can never enforce a meaningful constraint across those other columns.
 - `unique`: create a unique index.
 - `scope`: prefixes index keys with TypeGraph system columns (default is `"graphAndKind"`).
 - `where`: partial index predicate (portable DSL, compiled per dialect).
@@ -206,7 +218,9 @@ Semantics:
   each bucket is a (possibly empty) array — this is candidate retrieval, not a uniqueness guarantee.
   For unique lookups prefer `bulkFindByConstraint` (backed by the uniqueness side-table).
 - TypeGraph computes the lookup key from **`index.fields` only** (JSON-pointer extraction, reusing the
-  index's own extraction expressions). `coveringFields` are not part of the key.
+  index's own extraction expressions). Neither `coveringFields` nor `keySystemColumns` are part of the
+  probe key. An index declared without `fields` (only `coveringFields` and/or `keySystemColumns`) has
+  nothing to probe by and throws `ConfigurationError`.
 - The index's partial `where` is applied in SQL to **stored** rows only; probes carry index-field
   values, nothing else. Only the indexed fields are validated — full records are not required.
 - A missing/`undefined` indexed field matches stored `NULL` (null-safe equality). Live,

@@ -46,17 +46,17 @@ import {
   type SystemColumnName,
 } from "./types";
 
-const NODE_KEY_SYSTEM_COLUMNS: ReadonlySet<SystemColumnName> = new Set([
-  "graph_id",
-  "kind",
-  "id",
-  "deleted_at",
-  "valid_from",
-  "valid_to",
-  "created_at",
-  "updated_at",
-  "version",
-]);
+// `keySystemColumns` on a node index must fail closed: reject anything that
+// isn't a known node-valid column, not just the known edge-only ones. A
+// caller whose array escapes TypeScript's literal-union checking (`any`-typed
+// data, a value round-tripped through JSON) could otherwise pass a typo'd or
+// otherwise-invalid column that silently reaches SQL DDL generation instead
+// of failing here with a clear error. Derived from the single source of
+// truth (`createSystemColumnMapForNode`, hoisted — see below) rather than a
+// second hand-maintained list, so it can't drift from it.
+const NODE_KEY_SYSTEM_COLUMNS: ReadonlySet<SystemColumnName> = new Set(
+  [...createSystemColumnMapForNode().values()].map((entry) => entry.column),
+);
 
 // ============================================================
 // Public API
@@ -71,6 +71,7 @@ export function defineNodeIndex<N extends NodeType>(
   const keySystemColumns = normalizeKeySystemColumnsOrThrow(
     config.keySystemColumns ?? [],
     scope,
+    unique,
   );
 
   const schemaIntrospector = createSchemaIntrospector(
@@ -85,7 +86,7 @@ export function defineNodeIndex<N extends NodeType>(
       "fields",
       // GIN containment indexes exist precisely for array/object fields,
       // which the btree guard otherwise rejects.
-      { allowEmpty: true, allowJsonFields: config.method === "gin" },
+      { allowJsonFields: config.method === "gin" },
     );
 
   const { pointers: coveringFields, valueTypes: coveringFieldValueTypes } =
@@ -94,7 +95,7 @@ export function defineNodeIndex<N extends NodeType>(
       config.coveringFields ?? [],
       schemaIntrospector,
       "coveringFields",
-      { allowEmpty: true },
+      {},
     );
   assertNoOverlap(fields, coveringFields, "fields", "coveringFields");
 
@@ -158,12 +159,15 @@ export function defineNodeIndex<N extends NodeType>(
 /**
  * Validates `keySystemColumns`: must be node system columns (not
  * edge-only `from_kind`/`from_id`/`to_kind`/`to_id`), must not repeat
- * each other, and must not repeat a column `scope` already prefixes the
- * key with.
+ * each other, must not repeat a column `scope` already prefixes the key
+ * with, and must not combine `"id"` with `unique` (every node's `id` is
+ * already unique per row, so that combination can never enforce a
+ * meaningful constraint across the index's other key columns).
  */
 function normalizeKeySystemColumnsOrThrow(
   columns: readonly SystemColumnName[],
   scope: IndexScope,
+  unique: boolean,
 ): readonly SystemColumnName[] {
   if (columns.length === 0) return [];
 
@@ -185,7 +189,17 @@ function normalizeKeySystemColumnsOrThrow(
     }
   }
 
-  return columns;
+  if (unique && columns.includes("id")) {
+    throw new Error(
+      `unique node indexes cannot include keySystemColumns: ["id"]; id is already unique per node, so including it defeats uniqueness across the prop fields`,
+    );
+  }
+
+  // Return a fresh array: the declaration must own an immutable snapshot, not
+  // a reference to the caller's array. Otherwise a post-call mutation of the
+  // original `config.keySystemColumns` bypasses these checks and desyncs the
+  // already-computed name/hash from the compiled index keys.
+  return [...columns];
 }
 
 export function defineEdgeIndex<E extends AnyEdgeType>(
@@ -309,15 +323,16 @@ function resolveAdvancedIndexMethod(
       : `Index method "trigram" requires a string field (it serves substring and case-insensitive matches), got field type "${details.fieldValueType ?? "unresolved"}"`,
     );
   }
-  if (details.coveringFieldCount > 0) {
-    throw new Error(
-      `Index method "${resolved}" does not support coveringFields (GIN indexes cannot serve index-only scans over extra columns)`,
-    );
-  }
-  if (details.keySystemColumnCount > 0) {
-    throw new Error(
-      `Index method "${resolved}" does not support keySystemColumns (GIN indexes cannot serve index-only scans over extra columns)`,
-    );
+  const extraKeyColumns: readonly [string, number][] = [
+    ["coveringFields", details.coveringFieldCount],
+    ["keySystemColumns", details.keySystemColumnCount],
+  ];
+  for (const [label, count] of extraKeyColumns) {
+    if (count > 0) {
+      throw new Error(
+        `Index method "${resolved}" does not support ${label} (GIN indexes cannot serve index-only scans over extra columns)`,
+      );
+    }
   }
   if (details.unique) {
     throw new Error(
@@ -691,12 +706,15 @@ function normalizeNodeIndexFieldsOrThrow<N extends NodeType>(
   inputs: readonly IndexFieldInput<z.infer<N["schema"]>>[],
   schemaIntrospector: ReturnType<typeof createSchemaIntrospector>,
   label: string,
-  options: Readonly<{ allowEmpty: boolean; allowJsonFields?: boolean }>,
+  options: Readonly<{ allowJsonFields?: boolean }>,
 ): NormalizedIndexFields {
-  if (inputs.length === 0 && options.allowEmpty) {
+  // Node `fields`/`coveringFields` are both optional (an index can be keyed
+  // by `keySystemColumns` alone), so unlike the edge equivalent below, an
+  // empty input is always valid here — `defineNodeIndex` enforces that at
+  // least one of `fields`/`coveringFields`/`keySystemColumns` is non-empty.
+  if (inputs.length === 0) {
     return { pointers: [], valueTypes: [] };
   }
-  assertNonEmpty(inputs, label);
 
   const pointers: JsonPointer[] = [];
   const valueTypes: (ValueType | undefined)[] = [];
@@ -888,7 +906,9 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
     "tg",
     parts.kind,
     sanitizeIdentifierComponent(parts.kindName),
-    sanitizeIdentifierComponent(parts.fields.join("_")),
+    parts.fields.length > 0 ?
+      sanitizeIdentifierComponent(parts.fields.join("_"))
+    : undefined,
     parts.coveringFields.length > 0 ?
       `cov_${sanitizeIdentifierComponent(parts.coveringFields.join("_"))}`
     : undefined,
