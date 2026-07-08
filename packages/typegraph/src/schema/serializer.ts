@@ -225,8 +225,15 @@ function serializeNodeIndexDeclaration(
     where: declaration.where,
     // `method: "btree"` is canonicalized by absence, like `origin` below.
     ...(declaration.method === undefined ? {} : { method: declaration.method }),
-    // `keySystemColumns: []` is canonicalized by absence, same rule.
-    ...(declaration.keySystemColumns === undefined ?
+    // `keySystemColumns: []` is canonicalized by absence, same rule. Checked
+    // against length, not just `undefined` — `NodeIndexDeclaration` is
+    // exported and `nodeIndexDeclarationZod` accepts an explicit `[]`, so a
+    // raw/persisted declaration can carry a present-but-empty array that
+    // must still canonicalize to absent.
+    ...((
+      declaration.keySystemColumns === undefined ||
+      declaration.keySystemColumns.length === 0
+    ) ?
       {}
     : { keySystemColumns: declaration.keySystemColumns }),
     // `origin: "compile-time"` is the default and is omitted from the

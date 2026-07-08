@@ -214,7 +214,10 @@ const nodeIndexDeclarationZod = z
     ...indexDeclarationCommonShape,
     // Node-only; canonicalized by absence like `method`, so absent/optional
     // here matches `defineNodeIndex` only emitting it when non-empty.
-    keySystemColumns: z.array(nodeSystemColumnNameZod).optional(),
+    // `.min(1)` rejects an explicit `[]` at the boundary rather than
+    // silently accepting a present-but-empty array that would have to be
+    // canonicalized away again downstream (see `serializeNodeIndexDeclaration`).
+    keySystemColumns: z.array(nodeSystemColumnNameZod).min(1).optional(),
   })
   .loose();
 

@@ -193,9 +193,9 @@ export type IndexFieldInput<T> =
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
   /**
    * Prop-based key fields. May be empty (or omitted) only if
-   * `keySystemColumns` supplies at least one key column instead — an
-   * index needs at least one of `fields`, `coveringFields`, or
-   * `keySystemColumns` to be non-empty.
+   * `coveringFields` or `keySystemColumns` supplies at least one key
+   * column instead — an index needs at least one of `fields`,
+   * `coveringFields`, or `keySystemColumns` to be non-empty.
    */
   fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
   coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;

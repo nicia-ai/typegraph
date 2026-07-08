@@ -978,6 +978,65 @@ describe("Schema Serialization Properties", () => {
       expect(canonical).not.toContain('"keySystemColumns"');
     });
 
+    it("canonicalizes a present-but-empty keySystemColumns to absent, same as omitted", () => {
+      // Regression: `NodeIndexDeclaration` is exported and
+      // `nodeIndexDeclarationZod` used to accept `keySystemColumns: []`, so a
+      // raw/persisted declaration could carry `keySystemColumns: []` (present
+      // but empty) rather than omitting the key entirely.
+      // `serializeNodeIndexDeclaration` only checked `=== undefined`, so that
+      // shape would hash/diff/materialize differently from the omitted form
+      // — contradicting the canonicalize-by-absence promise this field is
+      // supposed to keep, the same way `method: "btree"` does.
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const compiled = defineNodeIndex(Person, { fields: ["email"] });
+      const presentButEmpty: IndexDeclaration = {
+        ...compiled,
+        keySystemColumns: [],
+      };
+
+      const graph = defineGraph({
+        id: "key_system_columns_present_but_empty",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [presentButEmpty],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      for (const index of serialized.indexes ?? []) {
+        expect("keySystemColumns" in index).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"keySystemColumns"');
+    });
+
+    it("rejects an explicit empty keySystemColumns array at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const compiled = defineNodeIndex(Person, { fields: ["email"] });
+
+      const graph = defineGraph({
+        id: "key_system_columns_explicit_empty_rejected",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [compiled],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ? { ...index, keySystemColumns: [] } : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
     it("indexes using keySystemColumns emit and round-trip it in canonical serialization", () => {
       const Person = defineNode("Person", {
         schema: z.object({ name: z.string() }),

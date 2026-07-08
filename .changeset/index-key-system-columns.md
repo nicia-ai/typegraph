@@ -20,7 +20,10 @@ also projects) now lets that same join be served index-only.
 Rejects edge-only system columns (`from_kind`/`from_id`/`to_kind`/
 `to_id`) on a node index, and rejects any column already implied by
 `scope`. Not supported with `method: "gin" | "trigram"` (same restriction
-as `coveringFields`). Canonicalized by absence, like `method`: indexes
-that don't use it produce byte-identical names/hashes to before this
-field existed, so existing stored schema documents and materialization
-signatures are unaffected.
+as `coveringFields`). Also rejects `unique: true` combined with
+`keySystemColumns: ["id"]` — every node's `id` is already unique per
+row, so a unique index keyed on `id` plus other columns can never
+enforce a meaningful constraint across those other columns. Canonicalized
+by absence, like `method`: indexes that don't use it produce byte-identical
+names/hashes to before this field existed, so existing stored schema
+documents and materialization signatures are unaffected.
