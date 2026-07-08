@@ -92,7 +92,7 @@ The node type available in `select()` context. Properties are flattened (not nes
 
 ```typescript
 type SelectableNode<N extends NodeType> = Readonly<{
-  id: string;
+  id: NodeId<N>;
   kind: N["kind"];
   meta: {
     version: number;
@@ -105,12 +105,15 @@ type SelectableNode<N extends NodeType> = Readonly<{
 }> & z.infer<N["schema"]>;  // Properties are flattened
 ```
 
+`id` carries the same `NodeId<N>` brand as `Node<N>`, so a projected id can be
+passed straight into `getById`/`getByIds` without a cast.
+
 **Example:**
 
 ```typescript
 // In select context, access properties directly
 .select((ctx) => ({
-  id: ctx.p.id,           // string
+  id: ctx.p.id,           // NodeId<Person>
   name: ctx.p.name,       // Direct property access (not ctx.p.props.name)
   email: ctx.p.email,
   created: ctx.p.meta.createdAt,
@@ -203,10 +206,53 @@ type SelectableEdge<E extends EdgeType> = Readonly<{
 }> & z.infer<E["schema"]>;  // Edge properties are flattened
 ```
 
+`traverse()` defaults to `expand: "inverse"`, which can match the graph's
+*registered inverse* edge kind alongside the one you asked for — and
+`inverseOf(edgeA, edgeB)` doesn't require `edgeA`/`edgeB` to share a props
+schema — so the row behind an edge alias isn't guaranteed to be the
+requested kind, or to have the requested kind's schema. This affects
+`SelectableEdge` in three different ways:
+
+- **`kind: E["kind"]` can already be wrong today.** It's a literal type
+  (e.g. `"manages"`), not `string` — but the runtime value can be the
+  registered inverse kind (e.g. `"managedBy"`) under the default expansion
+  mode. This isn't a missing brand, it's an existing type-accuracy gap:
+  don't trust `ctx.e.kind` without knowing the traversal can't have
+  expanded into a different kind.
+- **The flattened schema properties have the same gap.** `ctx.e.role` is
+  typed against the requested edge kind's schema, but an inverse-branch
+  row's real props came from a different schema and may not have a `role`
+  field at all — reading it returns `undefined`, not a type error.
+- **`id`/`fromId`/`toId` stay plain `string`**, unlike `SelectableNode<N>.id`
+  — deliberately not branded `EdgeId<E>`/`NodeId<From>`/`NodeId<To>`. This
+  one's just an ergonomics gap (`string` never overclaims), but branding
+  these fields would compile while being actively wrong for the same
+  reason: a mismatched-kind id would compile straight into `getById` and
+  silently return `undefined` instead of erroring.
+
+When you know a traversal is single-kind, re-brand explicitly:
+
+```typescript
+import { asEdgeId, asNodeId } from "@nicia-ai/typegraph";
+
+const rows = await store
+  .query()
+  .from("Person", "p")
+  .traverse("worksAt", "e", { expand: "none" })
+  .to("Company", "c")
+  .select((ctx) => ({ edgeId: ctx.e.id, companyId: ctx.e.toId }))
+  .execute();
+
+const edge = await store.edges.worksAt.getById(asEdgeId<typeof worksAt>(rows[0]!.edgeId));
+const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[0]!.companyId));
+```
+
 **Example:**
 
 ```typescript
-// Access edge properties in select context
+// Access edge properties in select context. expand: "none" makes the
+// schema (and kind/id) trustworthy — see the warning above.
+.traverse("worksAt", "e", { expand: "none" })
 .select((ctx) => ({
   role: ctx.e.role,           // Direct edge property access
   salary: ctx.e.salary,

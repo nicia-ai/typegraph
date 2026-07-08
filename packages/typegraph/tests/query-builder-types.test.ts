@@ -476,6 +476,30 @@ describe("Query Builder Type Safety", () => {
 
       expect(query).toBeDefined();
     });
+
+    it("leaves projected fromId/toId as plain string, not NodeId<From>/NodeId<To>", () => {
+      // Same hazard as ctx.e.id above: fromId/toId describe the traversal's
+      // requested endpoint kinds, but under the default expand: "inverse"
+      // the matched row (and its real endpoints) can belong to the
+      // registered inverse edge kind instead. See SelectableEdge's
+      // docblock and issue #235 for why this is closed as
+      // documentation-only rather than auto-branded.
+      const query = createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "p")
+        .traverse("worksAt", "e")
+        .to("Company", "c")
+        .select((context) => ({
+          fromId: context.e.fromId,
+          toId: context.e.toId,
+        }));
+
+      type Projected = Awaited<ReturnType<(typeof query)["execute"]>>[number];
+
+      expectTypeOf<Projected["fromId"]>().toEqualTypeOf<string>();
+      expectTypeOf<Projected["toId"]>().toEqualTypeOf<string>();
+
+      expect(query).toBeDefined();
+    });
   });
 });
 
