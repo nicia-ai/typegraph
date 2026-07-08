@@ -20,8 +20,9 @@ import {
   inverseOf,
   subClassOf,
 } from "../src";
-import { RestrictedDeleteError } from "../src/errors";
+import { ConfigurationError, RestrictedDeleteError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
+import { deserializeSchema, serializeSchema } from "../src/schema";
 import { createStore } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
@@ -458,6 +459,313 @@ describe("Edge Relationships - implies", () => {
     const registry = buildKindRegistry(graph);
 
     expect(registry.getImpliedEdges("likes")).toEqual([]);
+  });
+});
+
+// ============================================================
+// implies() Endpoint Compatibility Validation (issue #239)
+// ============================================================
+
+describe("implies() Endpoint Compatibility Validation", () => {
+  it("rejects an implication whose endpoints share no compatible kind on either side", () => {
+    // Reproduces #239: about (Paper -> Topic) implying writes (Author -> Paper)
+    // has no relationship between {Paper} and {Author}, nor {Topic} and {Paper}.
+    const Author = defineNode("Author", {
+      schema: z.object({ name: z.string() }),
+    });
+    const Paper = defineNode("Paper", {
+      schema: z.object({ title: z.string() }),
+    });
+    const Topic = defineNode("Topic", {
+      schema: z.object({ name: z.string() }),
+    });
+
+    const writes = defineEdge("writes", { schema: z.object({}) });
+    const about = defineEdge("about", { schema: z.object({}) });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_endpoint_repro",
+          nodes: {
+            Author: { type: Author },
+            Paper: { type: Paper },
+            Topic: { type: Topic },
+          },
+          edges: {
+            writes: { type: writes, from: [Author], to: [Paper] },
+            about: { type: about, from: [Paper], to: [Topic] },
+          },
+          ontology: [implies(about, writes)],
+        }),
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("rejects an implication that is only incompatible on the 'to' side", () => {
+    const Person = defineNode("PersonEp", { schema: z.object({}) });
+    const Document = defineNode("DocumentEp", { schema: z.object({}) });
+    const Report = defineNode("ReportEp", { schema: z.object({}) });
+
+    const authored = defineEdge("authored", { schema: z.object({}) });
+    const filed = defineEdge("filed", { schema: z.object({}) });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_to_mismatch",
+          nodes: {
+            Person: { type: Person },
+            Document: { type: Document },
+            Report: { type: Report },
+          },
+          edges: {
+            authored: { type: authored, from: [Person], to: [Document] },
+            filed: { type: filed, from: [Person], to: [Report] },
+          },
+          ontology: [implies(authored, filed)],
+        }),
+      ),
+    ).toThrow(/endpoint-incompatible/);
+  });
+
+  it("accepts an implication when the implying edge's endpoint is a subclass of the implied edge's endpoint", () => {
+    const Organization = defineNode("OrganizationEp", { schema: z.object({}) });
+    const Company = defineNode("CompanyEp", { schema: z.object({}) });
+    const Person = defineNode("PersonEp2", { schema: z.object({}) });
+
+    const employedBy = defineEdge("employedBy", { schema: z.object({}) });
+    const affiliatedWith = defineEdge("affiliatedWith", {
+      schema: z.object({}),
+    });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_subclass_ok",
+          nodes: {
+            Organization: { type: Organization },
+            Company: { type: Company },
+            Person: { type: Person },
+          },
+          edges: {
+            employedBy: { type: employedBy, from: [Person], to: [Company] },
+            affiliatedWith: {
+              type: affiliatedWith,
+              from: [Person],
+              to: [Organization],
+            },
+          },
+          ontology: [
+            subClassOf(Company, Organization),
+            implies(employedBy, affiliatedWith),
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("requires every implying-side kind to be assignable, not just some", () => {
+    const Organization = defineNode("OrganizationEp2", {
+      schema: z.object({}),
+    });
+    const Company = defineNode("CompanyEp2", { schema: z.object({}) });
+
+    // memberOf allows Company OR Organization as its source; affiliatedWith
+    // only allows Company. Organization is not a Company (and not declared
+    // as its subclass), so this must fail even though Company alone would pass.
+    const memberOf = defineEdge("memberOf", { schema: z.object({}) });
+    const affiliatedWith = defineEdge("affiliatedWith2", {
+      schema: z.object({}),
+    });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_partial_mismatch",
+          nodes: {
+            Organization: { type: Organization },
+            Company: { type: Company },
+          },
+          edges: {
+            memberOf: {
+              type: memberOf,
+              from: [Company, Organization],
+              to: [Company],
+            },
+            affiliatedWith2: {
+              type: affiliatedWith,
+              from: [Company],
+              to: [Company],
+            },
+          },
+          ontology: [
+            subClassOf(Company, Organization),
+            implies(memberOf, affiliatedWith),
+          ],
+        }),
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("does not validate ontology relations naming an edge kind not registered on the graph", () => {
+    const Person = defineNode("PersonEp5", { schema: z.object({}) });
+
+    // "about" is a real EdgeType but is never added to this graph's `edges`
+    // — its declared endpoints can't affect this graph's traversals, so the
+    // relation is inert rather than validated.
+    const about = defineEdge("aboutEp", { schema: z.object({}) });
+    const knowsEp = defineEdge("knowsEp", { schema: z.object({}) });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_unregistered_edge",
+          nodes: { Person: { type: Person } },
+          edges: {
+            knowsEp: { type: knowsEp, from: [Person], to: [Person] },
+          },
+          ontology: [implies(about, knowsEp)],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects an implies() relation whose endpoints are plain kind-name strings, as graph-extension-authored relations carry", () => {
+    // compileOntologyRelation (graph-extension/compiler.ts) resolves an
+    // implies() relation's endpoints to plain edge-kind-name strings, not
+    // EdgeType objects — the shape store.evolve({ ontology }) produces.
+    // Simulate that shape directly rather than round-tripping through the
+    // full extension-merge pipeline.
+    const Author = defineNode("AuthorStr", { schema: z.object({}) });
+    const Paper = defineNode("PaperStr", { schema: z.object({}) });
+    const Topic = defineNode("TopicStr", { schema: z.object({}) });
+
+    const writes = defineEdge("writesStr", { schema: z.object({}) });
+    const about = defineEdge("aboutStr", { schema: z.object({}) });
+    const impliesMetaEdge = implies(writes, about).metaEdge;
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_string_endpoints",
+          nodes: {
+            Author: { type: Author },
+            Paper: { type: Paper },
+            Topic: { type: Topic },
+          },
+          edges: {
+            writesStr: { type: writes, from: [Author], to: [Paper] },
+            aboutStr: { type: about, from: [Paper], to: [Topic] },
+          },
+          ontology: [
+            { metaEdge: impliesMetaEdge, from: "aboutStr", to: "writesStr" },
+          ],
+        }),
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("enforces the same validation when a registry is rebuilt from a persisted schema", () => {
+    const Author = defineNode("AuthorDs", { schema: z.object({}) });
+    const Paper = defineNode("PaperDs", { schema: z.object({}) });
+    const Topic = defineNode("TopicDs", { schema: z.object({}) });
+
+    const writes = defineEdge("writesDs", { schema: z.object({}) });
+    const about = defineEdge("aboutDs", { schema: z.object({}) });
+
+    // defineGraph() alone never validates implies() endpoints (only
+    // buildKindRegistry does), so this graph can be constructed and
+    // serialized without ever going through createStore.
+    const graph = defineGraph({
+      id: "implies_deserialized",
+      nodes: {
+        Author: { type: Author },
+        Paper: { type: Paper },
+        Topic: { type: Topic },
+      },
+      edges: {
+        writesDs: { type: writes, from: [Author], to: [Paper] },
+        aboutDs: { type: about, from: [Paper], to: [Topic] },
+      },
+      ontology: [implies(about, writes)],
+    });
+
+    const serialized = serializeSchema(graph, 1);
+
+    expect(() => deserializeSchema(serialized).buildRegistry()).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it("does not crash when an unregistered edge kind collides with an Object.prototype member name", () => {
+    const Person = defineNode("PersonProto", { schema: z.object({}) });
+
+    // "toString" is never added to this graph's `edges` — the lookup must
+    // resolve to undefined (correctly skipped), not to the inherited
+    // Object.prototype.toString function.
+    const toStringEdge = defineEdge("toString", { schema: z.object({}) });
+    const knowsProto = defineEdge("knowsProto", { schema: z.object({}) });
+
+    expect(() =>
+      buildKindRegistry(
+        defineGraph({
+          id: "implies_prototype_collision",
+          nodes: { Person: { type: Person } },
+          edges: {
+            knowsProto: { type: knowsProto, from: [Person], to: [Person] },
+          },
+          ontology: [implies(toStringEdge, knowsProto)],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("error message scopes the incompatible kinds without implying they are the edge's full allowed set", () => {
+    const Organization = defineNode("OrganizationMsg", {
+      schema: z.object({}),
+    });
+    const Company = defineNode("CompanyMsg", { schema: z.object({}) });
+
+    const memberOf = defineEdge("memberOfMsg", { schema: z.object({}) });
+    const affiliatedWith = defineEdge("affiliatedWithMsg", {
+      schema: z.object({}),
+    });
+
+    expect(
+      () =>
+        buildKindRegistry(
+          defineGraph({
+            id: "implies_message_scope",
+            nodes: {
+              Organization: { type: Organization },
+              Company: { type: Company },
+            },
+            edges: {
+              memberOfMsg: {
+                type: memberOf,
+                from: [Company, Organization],
+                to: [Company],
+              },
+              affiliatedWithMsg: {
+                type: affiliatedWith,
+                from: [Company],
+                to: [Company],
+              },
+            },
+            ontology: [
+              subClassOf(Company, Organization),
+              implies(memberOf, affiliatedWith),
+            ],
+          }),
+        ),
+      // Company is compatible (subClassOf Organization is irrelevant here —
+      // Company matches affiliatedWith's Company directly); only
+      // Organization is incompatible. The message must not read as if
+      // Organization were memberOf's only allowed "from" kind.
+    ).toThrow(
+      /from kind\(s\) \[OrganizationMsg\] declared on "memberOfMsg" cannot be assigned/,
+    );
   });
 });
 

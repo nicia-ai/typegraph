@@ -17,6 +17,10 @@ import {
   createEmptyClosures,
   KindRegistry,
 } from "./kind-registry";
+import {
+  type EdgeEndpointKinds,
+  validateImpliesEndpointCompatibility,
+} from "./validate-implies";
 
 // ============================================================
 // Build Registry from GraphDef
@@ -53,7 +57,38 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
       computeClosuresFromOntology(graph.ontology)
     : createEmptyClosures();
 
-  return new KindRegistry(nodeTypes, edgeTypes, closures);
+  const registry = new KindRegistry(nodeTypes, edgeTypes, closures);
+  validateImpliesEndpointCompatibility(
+    graph.ontology.map((relation) => ({
+      metaEdgeName: relation.metaEdge.name,
+      from: relation.from,
+      to: relation.to,
+    })),
+    buildEdgeEndpointKinds(graph.edges),
+    registry,
+  );
+
+  return registry;
+}
+
+/**
+ * Maps each registered edge kind to its declared domain/range kind names,
+ * for `validateImpliesEndpointCompatibility`. A `Map` (rather than the
+ * plain `graph.edges` object) so a lookup for an edge kind literally named
+ * "toString" or another `Object.prototype` member can't resolve to an
+ * inherited member instead of `undefined`.
+ */
+function buildEdgeEndpointKinds(
+  edges: Record<string, EdgeRegistration>,
+): ReadonlyMap<string, EdgeEndpointKinds> {
+  const result = new Map<string, EdgeEndpointKinds>();
+  for (const [kind, registration] of Object.entries(edges)) {
+    result.set(kind, {
+      from: registration.from.map((node) => node.kind),
+      to: registration.to.map((node) => node.kind),
+    });
+  }
+  return result;
 }
 
 // ============================================================

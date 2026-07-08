@@ -277,6 +277,21 @@ export class KindRegistry {
   }
 
   /**
+   * Checks if a concrete kind is assignable to at least one of the given
+   * target kinds. Shared by every "is this kind usable where one of these
+   * kinds is expected" check (edge endpoint validation, ontology relation
+   * endpoint compatibility) so they can't independently drift.
+   */
+  isAssignableToAny(
+    concreteKind: string,
+    targetKinds: readonly string[],
+  ): boolean {
+    return targetKinds.some((targetKind) =>
+      this.isAssignableTo(concreteKind, targetKind),
+    );
+  }
+
+  /**
    * Validates that a kind exists in the registry.
    */
   hasNodeType(name: string): boolean {

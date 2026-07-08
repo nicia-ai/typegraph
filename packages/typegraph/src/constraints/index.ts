@@ -330,11 +330,7 @@ export function validateEdgeEndpoints(
 ): EndpointError | undefined {
   // Check from kinds
   const validFromKinds = registration.from.map((node) => node.kind);
-  const fromValid = validFromKinds.some((validKind) =>
-    registry.isAssignableTo(fromKind, validKind),
-  );
-
-  if (!fromValid) {
+  if (!registry.isAssignableToAny(fromKind, validFromKinds)) {
     return new EndpointError({
       edgeKind,
       endpoint: "from",
@@ -345,11 +341,7 @@ export function validateEdgeEndpoints(
 
   // Check to kinds
   const validToKinds = registration.to.map((node) => node.kind);
-  const toValid = validToKinds.some((validKind) =>
-    registry.isAssignableTo(toKind, validKind),
-  );
-
-  if (!toValid) {
+  if (!registry.isAssignableToAny(toKind, validToKinds)) {
     return new EndpointError({
       edgeKind,
       endpoint: "to",

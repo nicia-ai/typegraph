@@ -7,6 +7,10 @@
  */
 import { KindRegistry } from "../registry/kind-registry";
 import {
+  type EdgeEndpointKinds,
+  validateImpliesEndpointCompatibility,
+} from "../registry/validate-implies";
+import {
   type SerializedClosures,
   type SerializedEdgeDef,
   type SerializedMetaEdge,
@@ -136,7 +140,7 @@ function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
   const nodeKinds = new Map();
   const edgeKinds = new Map();
 
-  return new KindRegistry(nodeKinds, edgeKinds, {
+  const registry = new KindRegistry(nodeKinds, edgeKinds, {
     subClassAncestors,
     subClassDescendants,
     broaderClosure,
@@ -150,6 +154,35 @@ function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
     edgeImplicationsClosure,
     edgeImplyingClosure,
   });
+
+  validateImpliesEndpointCompatibility(
+    schema.ontology.relations.map((relation) => ({
+      metaEdgeName: relation.metaEdge,
+      from: relation.from,
+      to: relation.to,
+    })),
+    buildEdgeEndpointKinds(schema.edges),
+    registry,
+  );
+
+  return registry;
+}
+
+/**
+ * Maps each edge kind's serialized definition to its domain/range kind
+ * names, for `validateImpliesEndpointCompatibility`. A `Map` (rather than
+ * the plain `schema.edges` object) so a lookup for an edge kind literally
+ * named "toString" or another `Object.prototype` member can't resolve to
+ * an inherited member instead of `undefined`.
+ */
+function buildEdgeEndpointKinds(
+  edges: Record<string, SerializedEdgeDef>,
+): ReadonlyMap<string, EdgeEndpointKinds> {
+  const result = new Map<string, EdgeEndpointKinds>();
+  for (const [kind, def] of Object.entries(edges)) {
+    result.set(kind, { from: def.fromKinds, to: def.toKinds });
+  }
+  return result;
 }
 
 /**
