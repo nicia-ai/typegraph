@@ -341,37 +341,10 @@ type PendingOperationOutcome = Readonly<{
   durationMs: number;
 }>;
 
-type ReceiptTransactionOptions = TransactionOptions &
-  Readonly<{ receipt: true }>;
-
-type StoreTransactionOptions = TransactionOptions | ReceiptTransactionOptions;
-
-function requestsReceipt(
-  options: StoreTransactionOptions | undefined,
-): options is ReceiptTransactionOptions {
-  const receipt = (options as Readonly<{ receipt?: unknown }> | undefined)
-    ?.receipt;
-  if (receipt === undefined || typeof receipt === "boolean") {
-    return receipt === true;
-  }
-  // Untyped callers can pass any truthy value; silently returning the bare
-  // result there would mirror the corruption the receipt exists to prevent.
-  throw new ConfigurationError(
-    "Transaction option `receipt` must be `true` when requesting a receipt.",
-    { receipt },
-  );
-}
-
-function stripReceiptOption(
-  options: StoreTransactionOptions | undefined,
-): TransactionOptions | undefined {
-  if (options === undefined) return undefined;
-  // Omit only the store-level flag; every other (current or future)
-  // TransactionOptions field passes through to the backend untouched.
-  const { receipt: _receipt, ...backendOptions } =
-    options as ReceiptTransactionOptions;
-  return backendOptions;
-}
+type TransactionRunResult<T> = Readonly<{
+  result: T;
+  recordedByGraph: RecordedFlushInstants | undefined;
+}>;
 
 function transactionOutcome<T>(
   result: T,
@@ -1442,36 +1415,7 @@ export class Store<G extends GraphDef> {
    *   fallback ignores it entirely. Stores created with `{ history: true }`
    *   require read-committed semantics for PostgreSQL recorded-clock capture and
    *   reject stronger snapshot isolation levels.
-   *
-   * Pass `{ receipt: true }` to return a {@link TransactionOutcome}. The
-   * receipt counts completed write intents on the transaction-scoped collection
-   * surface. It does not count writes that bypass those collections, such as
-   * direct backend writes, raw SQL, or import helpers. Adopted transactions
-   * (`withTransaction` / `withRecordedTransaction`) do not produce receipts in
-   * this version because their commit belongs to the caller. On
-   * non-transactional backends, the receipt is still returned, but it describes
-   * operations that individually committed rather than one atomic commit. If
-   * the callback rejects on such a backend, no receipt is returned even though
-   * earlier operations committed individually.
-   *
-   * Receipt detection is a runtime check on `options.receipt`. Forwarding
-   * receipt options through a variable typed as plain `TransactionOptions`
-   * (`ReceiptTransactionOptions` is assignable to it) statically selects the
-   * `Promise<T>` overload while the call still returns a
-   * {@link TransactionOutcome} at runtime — keep receipt options literally
-   * typed, or thread the `{ receipt: true }` type through wrapper signatures.
    */
-  transaction<T>(
-    this: HistoryStore<G>,
-    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
-    options: ReceiptTransactionOptions,
-  ): Promise<TransactionOutcome<T>>;
-
-  transaction<T>(
-    fn: (tx: TransactionContext<G>) => Promise<T>,
-    options: ReceiptTransactionOptions,
-  ): Promise<TransactionOutcome<T>>;
-
   transaction<T>(
     this: HistoryStore<G>,
     fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
@@ -1487,17 +1431,88 @@ export class Store<G extends GraphDef> {
     fn:
       | ((tx: TransactionContext<G>) => Promise<T>)
       | ((tx: HistoryTransactionContext<G>) => Promise<T>),
-    options?: StoreTransactionOptions,
-  ): Promise<T | TransactionOutcome<T>> {
+    options?: TransactionOptions,
+  ): Promise<T> {
     const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
-    const receiptRequested = requestsReceipt(options);
-    const receiptRecorder =
-      receiptRequested ? createTransactionReceiptRecorder() : undefined;
-    const backendOptions = stripReceiptOption(options);
+    const { result } = await this.#runTransaction(invoke, options, undefined);
+    return result;
+  }
+
+  /**
+   * Runs a transaction exactly like {@link transaction} and additionally
+   * returns a {@link TransactionOutcome} whose receipt summarizes the
+   * completed write intents on the transaction-scoped collection surface.
+   *
+   * A dedicated method (rather than an option on `transaction()`) keeps the
+   * return type tied to static dispatch: forwarding options through wrappers
+   * can never change what a call returns. See {@link TransactionReceipt} for
+   * exact count semantics.
+   *
+   * The receipt does not count writes that bypass the `tx.nodes.*` /
+   * `tx.edges.*` collections, such as direct backend writes, raw SQL, or
+   * import helpers. Adopted transactions (`withTransaction` /
+   * `withRecordedTransaction`) do not produce receipts in this version
+   * because their commit belongs to the caller. On non-transactional
+   * backends, the receipt is still returned, but it describes operations
+   * that individually committed rather than one atomic commit; if the
+   * callback rejects on such a backend, no receipt is returned even though
+   * earlier operations committed individually.
+   *
+   * For stores created with `{ history: true }`, `receipt.recorded` is the
+   * recorded commit instant this transaction allocated for the store's
+   * graph, or `undefined` when nothing was captured.
+   *
+   * @example
+   * ```typescript
+   * const outcome = await store.transactionWithReceipt(async (tx) => {
+   *   const alice = await tx.nodes.Person.create({ name: "Alice" });
+   *   return alice.id;
+   * });
+   * outcome.result; // Alice's id
+   * outcome.receipt.writes; // { nodes: { Person: 1 }, edges: {}, total: 1 }
+   * ```
+   */
+  transactionWithReceipt<T>(
+    this: HistoryStore<G>,
+    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<TransactionOutcome<T>>;
+
+  transactionWithReceipt<T>(
+    fn: (tx: TransactionContext<G>) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<TransactionOutcome<T>>;
+
+  async transactionWithReceipt<T>(
+    fn:
+      | ((tx: TransactionContext<G>) => Promise<T>)
+      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
+    options?: TransactionOptions,
+  ): Promise<TransactionOutcome<T>> {
+    const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
+    const receiptRecorder = createTransactionReceiptRecorder();
+    const { result, recordedByGraph } = await this.#runTransaction(
+      invoke,
+      options,
+      receiptRecorder,
+    );
+    return transactionOutcome(
+      result,
+      receiptRecorder,
+      recordedByGraph,
+      this.graphId,
+    );
+  }
+
+  async #runTransaction<T>(
+    invoke: (tx: TransactionContext<G>) => Promise<T>,
+    backendOptions: TransactionOptions | undefined,
+    receiptRecorder: TransactionReceiptRecorder | undefined,
+  ): Promise<TransactionRunResult<T>> {
     // Without a real transaction the tx-scoped collections would be
     // bound to the same backend as this.nodes/this.edges and exposing
     // the cached versions avoids rebuilding the proxies on every call.
-    // An isolation-level request in `options` is equally meaningless here.
+    // An isolation-level request in the options is equally meaningless here.
     if (!this.#backend.capabilities.transactions) {
       let nodes = this.nodes;
       let edges = this.edges;
@@ -1526,13 +1541,7 @@ export class Store<G extends GraphDef> {
             hookedFunction,
           ),
       });
-      if (receiptRecorder === undefined) return result;
-      return transactionOutcome(
-        result,
-        receiptRecorder,
-        undefined,
-        this.graphId,
-      );
+      return { result, recordedByGraph: undefined };
     }
 
     // #134/#135: no gate here. The backend's transaction() wraps the
@@ -1579,15 +1588,7 @@ export class Store<G extends GraphDef> {
           durationMs: outcome.durationMs,
         });
       }
-      if (receiptRecorder !== undefined) {
-        return transactionOutcome(
-          result,
-          receiptRecorder,
-          recordedByGraph,
-          this.graphId,
-        );
-      }
-      return result;
+      return { result, recordedByGraph };
     } catch (error) {
       const failure = asError(error);
       for (const outcome of pending) {

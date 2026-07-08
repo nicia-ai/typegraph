@@ -2,6 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Add opt-in transaction receipts that summarize completed collection write
-intents and, for history-enabled stores, return the recorded commit instant
-allocated by the transaction.
+Add `store.transactionWithReceipt()`, which runs a transaction and returns a
+receipt summarizing completed collection write intents and, for
+history-enabled stores, the recorded commit instant allocated by the
+transaction.

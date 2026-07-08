@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  ConfigurationError,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  type GraphBackend,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
 import {
   type TransactionBackend,
   type TransactionOptions,
@@ -119,14 +113,11 @@ async function writeFixture(
   recorded.calls.length = 0;
 
   if (receipt) {
-    await store.transaction(
-      async (tx) => {
-        const person = await tx.nodes.Person.create({ name: "Alice" });
-        const company = await tx.nodes.Company.create({ name: "Acme" });
-        await tx.edges.worksAt.create(person, company, { role: "Engineer" });
-      },
-      { receipt: true },
-    );
+    await store.transactionWithReceipt(async (tx) => {
+      const person = await tx.nodes.Person.create({ name: "Alice" });
+      const company = await tx.nodes.Company.create({ name: "Acme" });
+      await tx.edges.worksAt.create(person, company, { role: "Engineer" });
+    });
   } else {
     await store.transaction(async (tx) => {
       const person = await tx.nodes.Person.create({ name: "Alice" });
@@ -143,15 +134,12 @@ describe("transaction receipts", () => {
     const backend = disableTransactions(createTestBackend());
     const store = await createInitializedStore(receiptGraph, backend);
 
-    const outcome = await store.transaction(
-      async (tx) => {
-        const person = await tx.nodes.Person.create({ name: "Alice" });
-        const company = await tx.nodes.Company.create({ name: "Acme" });
-        await tx.edges.worksAt.create(person, company, { role: "Engineer" });
-        return person.id;
-      },
-      { receipt: true },
-    );
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      const person = await tx.nodes.Person.create({ name: "Alice" });
+      const company = await tx.nodes.Company.create({ name: "Acme" });
+      await tx.edges.worksAt.create(person, company, { role: "Engineer" });
+      return person.id;
+    });
 
     expect(outcome.receipt.writes.nodes).toEqual({ Person: 1, Company: 1 });
     expect(outcome.receipt.writes.edges).toEqual({ worksAt: 1 });
@@ -168,7 +156,7 @@ describe("transaction receipts", () => {
     expect(withReceipt).toEqual(withoutReceipt);
   });
 
-  it("passes isolationLevel through to the backend and strips the receipt flag", async () => {
+  it("passes isolationLevel through to the backend", async () => {
     const backend = createTestBackend();
     const seenOptions: (TransactionOptions | undefined)[] = [];
     const spyingBackend: GraphBackend = {
@@ -181,31 +169,15 @@ describe("transaction receipts", () => {
     const store = await createInitializedStore(receiptGraph, spyingBackend);
     seenOptions.length = 0;
 
-    await store.transaction(
+    await store.transactionWithReceipt(
       async (tx) => {
         await tx.nodes.Person.create({ name: "Alice" });
       },
-      { receipt: true, isolationLevel: "read_committed" },
+      { isolationLevel: "read_committed" },
     );
 
     const forwarded = seenOptions.at(-1);
     expect(forwarded?.isolationLevel).toBe("read_committed");
-    expect(forwarded !== undefined && "receipt" in forwarded).toBe(false);
-  });
-
-  it("rejects a receipt option that is present but not boolean", async () => {
-    const store = await createInitializedStore(
-      receiptGraph,
-      createTestBackend(),
-    );
-    const truthyNonBoolean = { receipt: 1 } as unknown as { receipt: true };
-
-    await expect(
-      store.transaction(async (tx) => {
-        await tx.nodes.Person.create({ name: "Never" });
-      }, truthyNonBoolean),
-    ).rejects.toThrow(ConfigurationError);
-    await expect(store.nodes.Person.count()).resolves.toBe(0);
   });
 
   it("counts a node kind named after an Object.prototype member", async () => {
@@ -214,12 +186,9 @@ describe("transaction receipts", () => {
       createTestBackend(),
     );
 
-    const outcome = await store.transaction(
-      async (tx) => {
-        await tx.nodes.constructor.create({ name: "proto" });
-      },
-      { receipt: true },
-    );
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await tx.nodes.constructor.create({ name: "proto" });
+    });
 
     expect(Object.entries(outcome.receipt.writes.nodes)).toEqual([
       ["constructor", 1],

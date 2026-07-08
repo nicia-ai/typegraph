@@ -401,7 +401,7 @@ export interface StoreRef<T> {
 // ============================================================
 
 /**
- * Summary returned by `store.transaction(fn, { receipt: true })`.
+ * Summary returned by `store.transactionWithReceipt(fn)`.
  */
 export type TransactionOutcome<T> = Readonly<{
   result: T;

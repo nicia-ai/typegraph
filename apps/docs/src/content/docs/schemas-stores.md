@@ -1325,21 +1325,19 @@ const personId = await store.transaction(async (tx) => {
 
 #### Transaction receipts
 
-Pass `{ receipt: true }` when a caller needs a write summary without wrapping the
-transaction context itself:
+Use `store.transactionWithReceipt()` when a caller needs a write summary
+without wrapping the transaction context itself. It runs the callback exactly
+like `store.transaction()` and returns the result together with a receipt:
 
 ```typescript
-const outcome = await store.transaction(
-  async (tx) => {
-    const alice = await tx.nodes.Person.create({ name: "Alice" });
-    const bob = await tx.nodes.Person.create({ name: "Bob" });
-    await tx.edges.knows.getOrCreateByEndpoints(alice, bob, {
-      since: "2026",
-    });
-    return alice.id;
-  },
-  { receipt: true },
-);
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  const alice = await tx.nodes.Person.create({ name: "Alice" });
+  const bob = await tx.nodes.Person.create({ name: "Bob" });
+  await tx.edges.knows.getOrCreateByEndpoints(alice, bob, {
+    since: "2026",
+  });
+  return alice.id;
+});
 
 outcome.result; // Alice's id
 outcome.receipt.writes; // { nodes: { Person: 2 }, edges: { knows: 1 }, total: 3 }
@@ -1377,10 +1375,7 @@ and import helpers — are not counted. Adopted transactions
 version because their commit belongs to the caller. On non-transactional
 backends a receipt describes operations that individually committed; if the
 callback rejects there, no receipt is returned even though earlier operations
-committed. Receipt detection is a runtime check on `options.receipt`, so
-forwarding receipt options through a variable typed as plain
-`TransactionOptions` returns a `TransactionOutcome` at runtime that the static
-`Promise<T>` type will not reflect — keep receipt options literally typed.
+committed.
 
 #### Rollback and error propagation
 

@@ -128,60 +128,57 @@ describe("transaction receipt properties", () => {
             throw new Error("Seed nodes were not created");
           }
 
-          const outcome = await store.transaction(
-            async (tx) => {
-              let sequence = 0;
-              for (const operation of operations) {
-                switch (operation.kind) {
-                  case "personCreate": {
-                    await tx.nodes.ReceiptPerson.create(
-                      { name: `Person ${sequence}` },
-                      { id: `person-${sequence}` },
-                    );
-                    break;
-                  }
-                  case "personBulkCreate": {
-                    await tx.nodes.ReceiptPerson.bulkCreate(
-                      Array.from({ length: operation.count }, (_, index) => ({
-                        props: { name: `Bulk Person ${sequence}-${index}` },
-                        id: `person-${sequence}-${index}`,
-                      })),
-                    );
-                    break;
-                  }
-                  case "companyCreate": {
-                    await tx.nodes.ReceiptCompany.create(
-                      { name: `Company ${sequence}` },
-                      { id: `company-${sequence}` },
-                    );
-                    break;
-                  }
-                  case "edgeCreate": {
-                    await tx.edges.receiptKnows.create(
-                      alice,
-                      bob,
-                      { since: `edge-${sequence}` },
-                      { id: `edge-${sequence}` },
-                    );
-                    break;
-                  }
-                  case "edgeBulkCreate": {
-                    await tx.edges.receiptKnows.bulkCreate(
-                      Array.from({ length: operation.count }, (_, index) => ({
-                        from: alice,
-                        to: bob,
-                        props: { since: `bulk-edge-${sequence}-${index}` },
-                        id: `edge-${sequence}-${index}`,
-                      })),
-                    );
-                    break;
-                  }
+          const outcome = await store.transactionWithReceipt(async (tx) => {
+            let sequence = 0;
+            for (const operation of operations) {
+              switch (operation.kind) {
+                case "personCreate": {
+                  await tx.nodes.ReceiptPerson.create(
+                    { name: `Person ${sequence}` },
+                    { id: `person-${sequence}` },
+                  );
+                  break;
                 }
-                sequence += 1;
+                case "personBulkCreate": {
+                  await tx.nodes.ReceiptPerson.bulkCreate(
+                    Array.from({ length: operation.count }, (_, index) => ({
+                      props: { name: `Bulk Person ${sequence}-${index}` },
+                      id: `person-${sequence}-${index}`,
+                    })),
+                  );
+                  break;
+                }
+                case "companyCreate": {
+                  await tx.nodes.ReceiptCompany.create(
+                    { name: `Company ${sequence}` },
+                    { id: `company-${sequence}` },
+                  );
+                  break;
+                }
+                case "edgeCreate": {
+                  await tx.edges.receiptKnows.create(
+                    alice,
+                    bob,
+                    { since: `edge-${sequence}` },
+                    { id: `edge-${sequence}` },
+                  );
+                  break;
+                }
+                case "edgeBulkCreate": {
+                  await tx.edges.receiptKnows.bulkCreate(
+                    Array.from({ length: operation.count }, (_, index) => ({
+                      from: alice,
+                      to: bob,
+                      props: { since: `bulk-edge-${sequence}-${index}` },
+                      id: `edge-${sequence}-${index}`,
+                    })),
+                  );
+                  break;
+                }
               }
-            },
-            { receipt: true },
-          );
+              sequence += 1;
+            }
+          });
 
           const expected = expectedCountsFor(operations);
           expect(outcome.receipt.writes.nodes).toEqual(expected.nodes);

@@ -155,30 +155,27 @@ export function registerTransactionReceiptIntegrationTests(
     it("counts completed write intents by kind", async () => {
       const store = context.getStore();
 
-      const outcome = await store.transaction(
-        async (tx) => {
-          const alice = await tx.nodes.Person.create({ name: "Alice" });
-          const bob = await tx.nodes.Person.create({ name: "Bob" });
-          await tx.nodes.Company.create({ name: "Acme" });
-          await tx.nodes.Person.update(alice.id, { age: 31 });
-          await tx.nodes.Person.delete(missingPersonId("absent-person"));
-          await tx.nodes.Person.bulkCreate([
-            { props: { name: "Carol" } },
-            { props: { name: "Dana" } },
-          ]);
-          await tx.nodes.Person.bulkCreate([]);
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        const alice = await tx.nodes.Person.create({ name: "Alice" });
+        const bob = await tx.nodes.Person.create({ name: "Bob" });
+        await tx.nodes.Company.create({ name: "Acme" });
+        await tx.nodes.Person.update(alice.id, { age: 31 });
+        await tx.nodes.Person.delete(missingPersonId("absent-person"));
+        await tx.nodes.Person.bulkCreate([
+          { props: { name: "Carol" } },
+          { props: { name: "Dana" } },
+        ]);
+        await tx.nodes.Person.bulkCreate([]);
 
-          await tx.edges.knows.create(alice, bob, { since: "2020" });
-          await tx.edges.knows.bulkCreate([
-            { from: alice, to: bob, props: { since: "2021" } },
-            { from: bob, to: alice, props: { since: "2022" } },
-          ]);
-          await tx.edges.knows.bulkCreate([]);
+        await tx.edges.knows.create(alice, bob, { since: "2020" });
+        await tx.edges.knows.bulkCreate([
+          { from: alice, to: bob, props: { since: "2021" } },
+          { from: bob, to: alice, props: { since: "2022" } },
+        ]);
+        await tx.edges.knows.bulkCreate([]);
 
-          return "done";
-        },
-        { receipt: true },
-      );
+        return "done";
+      });
 
       expect(outcome.result).toBe("done");
       expect(outcome.receipt.writes.nodes).toEqual({
@@ -201,10 +198,8 @@ export function registerTransactionReceiptIntegrationTests(
         return { alice, bob };
       });
 
-      const outcome = await store.transaction(
-        async (tx) =>
-          tx.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "2020" }),
-        { receipt: true },
+      const outcome = await store.transactionWithReceipt(async (tx) =>
+        tx.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "2020" }),
       );
 
       expect(outcome.result.action).toBe("found");
@@ -219,84 +214,81 @@ export function registerTransactionReceiptIntegrationTests(
         context.getStore().backend,
       );
 
-      const outcome = await store.transaction(
-        async (tx) => {
-          const nodes = tx.nodes.ReceiptEntity;
-          const nodeA = await nodes.create({ name: "a", slot: "a" });
-          const nodeB = await nodes.createFromRecord({ name: "b", slot: "b" });
-          await nodes.update(nodeA.id, { name: "a2" });
-          await nodes.upsertById("u1", { name: "u1", slot: "u1" });
-          const nodeU2 = await nodes.upsertByIdFromRecord("u2", {
-            name: "u2",
-            slot: "u2",
-          });
-          const [nodeC, nodeD] = await nodes.bulkCreate([
-            { props: { name: "c", slot: "c" } },
-            { props: { name: "d", slot: "d" } },
-          ]);
-          if (nodeC === undefined || nodeD === undefined) {
-            throw new Error("bulkCreate did not return the created nodes");
-          }
-          await nodes.bulkUpsertById([
-            { id: "u1", props: { name: "u1b", slot: "u1" } },
-            { id: "u3", props: { name: "u3", slot: "u3" } },
-          ]);
-          await nodes.bulkInsert([
-            { props: { name: "n5", slot: "n5" }, id: "n5" },
-            { props: { name: "n6", slot: "n6" }, id: "n6" },
-          ]);
-          await nodes.getOrCreateByConstraint("entity_slot", {
-            name: "g",
-            slot: "g",
-          });
-          // The one method whose bulk input is the SECOND argument.
-          await nodes.bulkGetOrCreateByConstraint("entity_slot", [
-            { props: { name: "h", slot: "h" } },
-            { props: { name: "a-again", slot: "a" } },
-          ]);
-          await nodes.delete(nodeU2.id);
-          await nodes.hardDelete(entityId("u3"));
-          await nodes.bulkDelete([entityId("n5"), entityId("n6")]);
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        const nodes = tx.nodes.ReceiptEntity;
+        const nodeA = await nodes.create({ name: "a", slot: "a" });
+        const nodeB = await nodes.createFromRecord({ name: "b", slot: "b" });
+        await nodes.update(nodeA.id, { name: "a2" });
+        await nodes.upsertById("u1", { name: "u1", slot: "u1" });
+        const nodeU2 = await nodes.upsertByIdFromRecord("u2", {
+          name: "u2",
+          slot: "u2",
+        });
+        const [nodeC, nodeD] = await nodes.bulkCreate([
+          { props: { name: "c", slot: "c" } },
+          { props: { name: "d", slot: "d" } },
+        ]);
+        if (nodeC === undefined || nodeD === undefined) {
+          throw new Error("bulkCreate did not return the created nodes");
+        }
+        await nodes.bulkUpsertById([
+          { id: "u1", props: { name: "u1b", slot: "u1" } },
+          { id: "u3", props: { name: "u3", slot: "u3" } },
+        ]);
+        await nodes.bulkInsert([
+          { props: { name: "n5", slot: "n5" }, id: "n5" },
+          { props: { name: "n6", slot: "n6" }, id: "n6" },
+        ]);
+        await nodes.getOrCreateByConstraint("entity_slot", {
+          name: "g",
+          slot: "g",
+        });
+        // The one method whose bulk input is the SECOND argument.
+        await nodes.bulkGetOrCreateByConstraint("entity_slot", [
+          { props: { name: "h", slot: "h" } },
+          { props: { name: "a-again", slot: "a" } },
+        ]);
+        await nodes.delete(nodeU2.id);
+        await nodes.hardDelete(entityId("u3"));
+        await nodes.bulkDelete([entityId("n5"), entityId("n6")]);
 
-          const edges = tx.edges.receiptLinks;
-          const edge1 = await edges.create(nodeA, nodeB, { label: "e1" });
-          await edges.update(edge1.id, { label: "e1b" });
-          await edges.getOrCreateByEndpoints(nodeA, nodeC, { label: "e2" });
-          const [edge3, edge4] = await edges.bulkCreate([
-            { from: nodeA, to: nodeD, props: { label: "e3" } },
-            { from: nodeB, to: nodeC, props: { label: "e4" } },
-          ]);
-          if (edge3 === undefined || edge4 === undefined) {
-            throw new Error("bulkCreate did not return the created edges");
-          }
-          await edges.bulkUpsertById([
-            {
-              id: linkId("be1"),
-              from: nodeA,
-              to: nodeB,
-              props: { label: "be1" },
-            },
-            {
-              id: linkId("be2"),
-              from: nodeC,
-              to: nodeD,
-              props: { label: "be2" },
-            },
-          ]);
-          await edges.bulkInsert([
-            { from: nodeD, to: nodeA, props: { label: "e5" } },
-            { from: nodeD, to: nodeB, props: { label: "e6" } },
-          ]);
-          await edges.bulkGetOrCreateByEndpoints([
-            { from: nodeB, to: nodeD, props: { label: "e7" } },
-            { from: nodeC, to: nodeA, props: { label: "e8" } },
-          ]);
-          await edges.delete(edge1.id);
-          await edges.hardDelete(edge3.id);
-          await edges.bulkDelete([edge4.id, linkId("be1")]);
-        },
-        { receipt: true },
-      );
+        const edges = tx.edges.receiptLinks;
+        const edge1 = await edges.create(nodeA, nodeB, { label: "e1" });
+        await edges.update(edge1.id, { label: "e1b" });
+        await edges.getOrCreateByEndpoints(nodeA, nodeC, { label: "e2" });
+        const [edge3, edge4] = await edges.bulkCreate([
+          { from: nodeA, to: nodeD, props: { label: "e3" } },
+          { from: nodeB, to: nodeC, props: { label: "e4" } },
+        ]);
+        if (edge3 === undefined || edge4 === undefined) {
+          throw new Error("bulkCreate did not return the created edges");
+        }
+        await edges.bulkUpsertById([
+          {
+            id: linkId("be1"),
+            from: nodeA,
+            to: nodeB,
+            props: { label: "be1" },
+          },
+          {
+            id: linkId("be2"),
+            from: nodeC,
+            to: nodeD,
+            props: { label: "be2" },
+          },
+        ]);
+        await edges.bulkInsert([
+          { from: nodeD, to: nodeA, props: { label: "e5" } },
+          { from: nodeD, to: nodeB, props: { label: "e6" } },
+        ]);
+        await edges.bulkGetOrCreateByEndpoints([
+          { from: nodeB, to: nodeD, props: { label: "e7" } },
+          { from: nodeC, to: nodeA, props: { label: "e8" } },
+        ]);
+        await edges.delete(edge1.id);
+        await edges.hardDelete(edge3.id);
+        await edges.bulkDelete([edge4.id, linkId("be1")]);
+      });
 
       // Node intents: create 1 + createFromRecord 1 + update 1 + upsertById 1
       // + upsertByIdFromRecord 1 + bulkCreate 2 + bulkUpsertById 2
@@ -332,9 +324,8 @@ export function registerTransactionReceiptIntegrationTests(
         return source;
       });
 
-      const outcome = await store.transaction(
-        async (tx) => tx.nodes.ReceiptEntity.delete(source.id),
-        { receipt: true },
+      const outcome = await store.transactionWithReceipt(async (tx) =>
+        tx.nodes.ReceiptEntity.delete(source.id),
       );
 
       // The cascade removes the connected edge through the backend, not the
@@ -350,16 +341,13 @@ export function registerTransactionReceiptIntegrationTests(
     it("counts writes made through tx.getNodeCollection", async () => {
       const store = context.getStore();
 
-      const outcome = await store.transaction(
-        async (tx) => {
-          const people = tx.getNodeCollection("Person");
-          if (people === undefined) {
-            throw new Error("Person collection missing from transaction");
-          }
-          await people.createFromRecord({ name: "Dynamic" });
-        },
-        { receipt: true },
-      );
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        const people = tx.getNodeCollection("Person");
+        if (people === undefined) {
+          throw new Error("Person collection missing from transaction");
+        }
+        await people.createFromRecord({ name: "Dynamic" });
+      });
 
       expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
       expect(outcome.receipt.writes.total).toBe(1);
@@ -368,19 +356,16 @@ export function registerTransactionReceiptIntegrationTests(
     it("does not count a caught rejected write method", async () => {
       const store = context.getStore();
 
-      const outcome = await store.transaction(
-        async (tx) => {
-          try {
-            await tx.nodes.Person.update(missingPersonId("missing"), {
-              name: "Missing",
-            });
-          } catch {
-            // The rejected write intent contributes 0; the transaction continues.
-          }
-          await tx.nodes.Person.create({ name: "Committed" });
-        },
-        { receipt: true },
-      );
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        try {
+          await tx.nodes.Person.update(missingPersonId("missing"), {
+            name: "Missing",
+          });
+        } catch {
+          // The rejected write intent contributes 0; the transaction continues.
+        }
+        await tx.nodes.Person.create({ name: "Committed" });
+      });
 
       expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
       expect(outcome.receipt.writes.edges).toEqual({});
@@ -391,12 +376,10 @@ export function registerTransactionReceiptIntegrationTests(
       const store = context.getStore();
 
       await expect(
-        store.transaction(
-          async (tx) =>
-            tx.nodes.Person.update(missingPersonId("missing"), {
-              name: "Missing",
-            }),
-          { receipt: true },
+        store.transactionWithReceipt(async (tx) =>
+          tx.nodes.Person.update(missingPersonId("missing"), {
+            name: "Missing",
+          }),
         ),
       ).rejects.toThrow();
     });
@@ -405,16 +388,13 @@ export function registerTransactionReceiptIntegrationTests(
       const store = context.getStore();
 
       await expect(
-        store.transaction(
-          async (tx) => {
-            await tx.nodes.Person.create(
-              { name: "Rollback" },
-              { id: "rollback-person" },
-            );
-            throw new Error("rollback");
-          },
-          { receipt: true },
-        ),
+        store.transactionWithReceipt(async (tx) => {
+          await tx.nodes.Person.create(
+            { name: "Rollback" },
+            { id: "rollback-person" },
+          );
+          throw new Error("rollback");
+        }),
       ).rejects.toThrow("rollback");
 
       await expect(
@@ -425,17 +405,14 @@ export function registerTransactionReceiptIntegrationTests(
     it("returns the recorded anchor for a mixed node and edge transaction", async () => {
       const store = await createHistoryStore(context);
 
-      const outcome = await store.transaction(
-        async (tx) => {
-          const alice = await tx.nodes.Person.create({ name: "Alice" });
-          const bob = await tx.nodes.Person.create({ name: "Bob" });
-          const edge = await tx.edges.knows.create(alice, bob, {
-            since: "2020",
-          });
-          return { alice, edge };
-        },
-        { receipt: true },
-      );
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        const alice = await tx.nodes.Person.create({ name: "Alice" });
+        const bob = await tx.nodes.Person.create({ name: "Bob" });
+        const edge = await tx.edges.knows.create(alice, bob, {
+          since: "2020",
+        });
+        return { alice, edge };
+      });
 
       const recorded = requireRecordedInstant(
         outcome.receipt.recorded,
@@ -457,9 +434,8 @@ export function registerTransactionReceiptIntegrationTests(
         return { alice, bob };
       });
 
-      const outcome = await store.transaction(
-        async (tx) => tx.edges.knows.create(alice, bob, { since: "2020" }),
-        { receipt: true },
+      const outcome = await store.transactionWithReceipt(async (tx) =>
+        tx.edges.knows.create(alice, bob, { since: "2020" }),
       );
 
       const recorded = requireRecordedInstant(
@@ -475,9 +451,8 @@ export function registerTransactionReceiptIntegrationTests(
 
     it("leaves recorded undefined without history and for read-only transactions", async () => {
       const historyStore = await createHistoryStore(context);
-      const readOnlyOutcome = await historyStore.transaction(
+      const readOnlyOutcome = await historyStore.transactionWithReceipt(
         async (tx) => tx.nodes.Person.count(),
-        { receipt: true },
       );
       expect(readOnlyOutcome.result).toBe(0);
       expect(readOnlyOutcome.receipt.writes.total).toBe(0);
@@ -485,22 +460,20 @@ export function registerTransactionReceiptIntegrationTests(
 
       const liveOutcome = await context
         .getStore()
-        .transaction(async (tx) => tx.nodes.Person.create({ name: "Live" }), {
-          receipt: true,
-        });
+        .transactionWithReceipt(async (tx) =>
+          tx.nodes.Person.create({ name: "Live" }),
+        );
       expect(liveOutcome.receipt.recorded).toBeUndefined();
     });
 
     it("returns strictly increasing recorded anchors for sequential write transactions", async () => {
       const store = await createHistoryStore(context);
 
-      const first = await store.transaction(
-        async (tx) => tx.nodes.Person.create({ name: "First" }),
-        { receipt: true },
+      const first = await store.transactionWithReceipt(async (tx) =>
+        tx.nodes.Person.create({ name: "First" }),
       );
-      const second = await store.transaction(
-        async (tx) => tx.nodes.Person.create({ name: "Second" }),
-        { receipt: true },
+      const second = await store.transactionWithReceipt(async (tx) =>
+        tx.nodes.Person.create({ name: "Second" }),
       );
 
       const firstRecorded = requireRecordedInstant(
