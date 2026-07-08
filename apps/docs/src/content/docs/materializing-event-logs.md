@@ -126,22 +126,20 @@ transactions.
 
 ## Transaction Receipts
 
-When you need to know what a projector did, request a transaction receipt:
+When you need to know what a projector did, use `store.transactionWithReceipt`
+instead of `store.transaction`:
 
 ```typescript
-const outcome = await store.transaction(
-  async (tx) => {
-    for (const change of batch.changes) {
-      await projectChange(tx, change);
-    }
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  for (const change of batch.changes) {
+    await projectChange(tx, change);
+  }
 
-    await tx.nodes.Cursor.upsertById(`source:${batch.sourceId}`, {
-      offset: batch.endOffset,
-      sourceId: batch.sourceId,
-    });
-  },
-  { receipt: true },
-);
+  await tx.nodes.Cursor.upsertById(`source:${batch.sourceId}`, {
+    offset: batch.endOffset,
+    sourceId: batch.sourceId,
+  });
+});
 
 if (batch.changes.length > 0 && outcome.receipt.writes.total === 0) {
   throw new Error("projector dropped a non-empty batch");
