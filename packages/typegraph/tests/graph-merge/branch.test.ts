@@ -203,7 +203,6 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
       kind: "Person",
       id: "legacy-null-validfrom",
       props: { name: "Legacy" },
-       
       validFrom: null,
     });
     expect(legacy.valid_from).toBeUndefined();

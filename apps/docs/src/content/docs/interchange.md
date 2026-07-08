@@ -58,7 +58,7 @@ interface GraphData {
     kind: string;
     id: string;
     properties: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     meta?: {
       version?: number;
@@ -72,7 +72,7 @@ interface GraphData {
     from: { kind: string; id: string };
     to: { kind: string; id: string };
     properties: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     meta?: {
       createdAt?: string;
@@ -81,6 +81,13 @@ interface GraphData {
   }>;
 }
 ```
+
+`validFrom` has three states: the key **absent** means it wasn't requested
+(`includeTemporal: false`, the default) — import defaults it to the
+import's own creation timestamp. An **explicit `null`** means the source
+row is confirmed to have no lower bound (open-left validity) — import
+preserves that instead of re-stamping it. A **string** is an explicit
+value, carried through unchanged.
 
 ## Exporting Data
 
