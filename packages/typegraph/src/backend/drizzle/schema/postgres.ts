@@ -148,7 +148,12 @@ export function createPostgresTables(
       primaryKey({ columns: [t.graphId, t.id] }),
       index(`${n.edges}_kind_idx`).on(t.graphId, t.kind),
       // Directional traversal index (outgoing): supports endpoint lookups
-      // and extra filtering by edge kind / target kind.
+      // and extra filtering by edge kind / target kind. Includes every
+      // system column the compiled query's soft-delete/temporal-validity
+      // predicate touches (deleted_at, valid_from, valid_to) so a
+      // traversal join can be served index-only instead of a heap fetch
+      // per candidate edge — omitting valid_from left this one predicate
+      // column short of covering.
       index(`${n.edges}_from_idx`).on(
         t.graphId,
         t.fromKind,
@@ -156,6 +161,7 @@ export function createPostgresTables(
         t.kind,
         t.toKind,
         t.deletedAt,
+        t.validFrom,
         t.validTo,
       ),
       // Directional traversal index (incoming): mirrors from_idx for reverse traversals.
@@ -166,6 +172,7 @@ export function createPostgresTables(
         t.kind,
         t.fromKind,
         t.deletedAt,
+        t.validFrom,
         t.validTo,
       ),
       index(`${n.edges}_kind_created_idx`).on(
