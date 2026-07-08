@@ -23,7 +23,7 @@ import {
   defineGraph,
   defineNode,
   field,
-  param,
+  param as parameter,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { createTestBackend } from "./test-utils";
@@ -50,7 +50,7 @@ describe("query builder read freshness", () => {
     const personById = store
       .query()
       .from("Person", "p")
-      .whereNode("p", (p) => p.id.eq(param("id")))
+      .whereNode("p", (p) => p.id.eq(parameter("id")))
       .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
       .prepare();
 

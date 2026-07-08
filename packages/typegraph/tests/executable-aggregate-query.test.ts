@@ -44,6 +44,16 @@ const MOCK_BACKEND_CAPABILITIES = {
   windowFunctions: true,
 } as const;
 
+/** Strips the millisecond-precision "current instant" bound in a compiled
+ * temporal filter, so two genuinely fresh compiles of the same query can be
+ * compared for structural equality. */
+function normalizeTimestamps(sql: string): string {
+  return sql.replaceAll(
+    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g,
+    "<timestamp>",
+  );
+}
+
 // ============================================================
 // ExecutableAggregateQuery toAst
 // ============================================================
@@ -320,7 +330,9 @@ describe("ExecutableAggregateQuery.compile", () => {
     // binds its read instant at compile time, so caching the compiled
     // result would freeze "now" at the first call for the query's entire
     // lifetime (see PreparedQuery's class doc comment). Repeated calls
-    // must still produce the same SQL shape, just not the same object.
+    // must still produce the same SQL shape — but the bound "now" value
+    // itself may legitimately differ by a millisecond between two calls,
+    // so timestamps are normalized before comparing.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
@@ -332,7 +344,9 @@ describe("ExecutableAggregateQuery.compile", () => {
     const firstCompile = query.compile();
     const secondCompile = query.compile();
 
-    expect(toSqlString(secondCompile)).toBe(toSqlString(firstCompile));
+    expect(normalizeTimestamps(toSqlString(secondCompile))).toBe(
+      normalizeTimestamps(toSqlString(firstCompile)),
+    );
   });
 
   it("includes LIMIT and OFFSET in compiled SQL", () => {
