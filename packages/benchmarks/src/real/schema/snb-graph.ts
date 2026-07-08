@@ -80,16 +80,48 @@ const containerOf = defineEdge("containerOf");
 const replyOf = defineEdge("replyOf");
 
 /**
- * Composite covering index matching the competitors' `message(creator_id,
- * creation_date desc, id desc)` index (see the braiddb reference driver):
- * IS2's "last 10 messages by a friend" is served from the index's sorted
- * suffix instead of scanning every message by a friend.
+ * Covering index shaped to match the actual join TypeGraph's IS2 query
+ * compiles (`n.id = e.from_id` over the reverse `hasCreator` edge),
+ * carrying `creationDate` alongside so that join can be served
+ * index-only instead of fetching each candidate's full heap row (which
+ * includes the whole `props` JSONB blob) just to read one field before
+ * most candidates get discarded by the `ORDER BY ... LIMIT 10`.
+ *
+ * A prior version of this index was keyed by `creationDate` alone —
+ * matching the competitors' `message(creator_id, creation_date desc, id
+ * desc)` index in spirit, but the wrong shape for TypeGraph's compiled
+ * query: that key has no `id` column, so the planner could never choose
+ * it for an id-equality join and it went unused (confirmed via `EXPLAIN
+ * (ANALYZE, BUFFERS)` — see reports/snb-lane1-results.md).
+ *
+ * A second version added `id` but still wasn't truly covering: every
+ * compiled query also filters on `deleted_at`/`valid_from`/`valid_to`
+ * (soft-delete + temporal-validity window), which this index didn't
+ * carry — so the candidate scan still fetched the full heap row per
+ * row just to evaluate those three predicates. At SF1 scale (small
+ * table, page-cache-resident) that heap fetch is free; at SF10 scale
+ * (30-50GB table exceeding available page cache) every one of those
+ * fetches became a genuine random disk read, and with thousands of
+ * candidates per IS2 call, that alone produced the real run's 51s
+ * median / 142s p95 (see the IS2 investigation write-up). All three
+ * system columns are now in `keySystemColumns` so the candidate scan is
+ * truly index-only (`EXPLAIN QUERY PLAN` shows `USING COVERING INDEX`,
+ * not `USING INDEX`).
+ *
+ * Declared once (against `Post`'s props schema) and shared by both
+ * `Post` and `Comment` lookups: `kind` is a leading key column here, not
+ * a partial `WHERE` clause, so one non-partial index over the whole
+ * `typegraph_nodes` table serves an id+kind-scoped lookup for either
+ * kind equally well — Comment's `creationDate` field happens to be the
+ * identical shape. Declaring this twice (once per kind, as before)
+ * produced two byte-identical physical indexes: pure redundant
+ * write-time cost paid by every node insert (Person/Forum included,
+ * even though they never benefit) for zero read-side gain.
  */
-const postByCreationDateIndex = defineNodeIndex(Post, {
-  fields: ["creationDate"],
-});
-const commentByCreationDateIndex = defineNodeIndex(Comment, {
-  fields: ["creationDate"],
+const messageByCreationDateIndex = defineNodeIndex(Post, {
+  name: "snb_message_by_creation_date_covering_idx",
+  keySystemColumns: ["id", "deleted_at", "valid_from", "valid_to"],
+  coveringFields: ["creationDate"],
 });
 
 /**
@@ -97,7 +129,7 @@ const commentByCreationDateIndex = defineNodeIndex(Comment, {
  * time (matching packages/benchmarks/src/backend.ts's `perfIndexes`
  * convention) — `defineGraph` itself doesn't take an indexes option.
  */
-export const snbIndexes = [postByCreationDateIndex, commentByCreationDateIndex];
+export const snbIndexes = [messageByCreationDateIndex];
 
 export const snbGraph = defineGraph({
   id: "snb_interactive",

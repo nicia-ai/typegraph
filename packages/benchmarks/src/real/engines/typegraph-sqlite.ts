@@ -5,7 +5,7 @@
  * query is measured (docs/design/benchmark-program-plan.md).
  */
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { totalmem, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
@@ -17,6 +17,31 @@ import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
 import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
 
+const MIN_OS_RESERVE_BYTES = 2 * 1024 ** 3;
+const OS_RESERVE_FRACTION = 0.2;
+
+/**
+ * Host-aware `PRAGMA cache_size`, mirroring `resolveNeo4jMemorySettings` in
+ * neo4j.ts: reserve the larger of 2GiB or 20% of total host memory for the
+ * OS/Node process (lower than Neo4j's 4GiB reserve since there's no JVM
+ * overhead to account for), then dedicate the rest to SQLite's page cache.
+ * SQLite's own built-in default is a tiny 2MiB — fine for the small SF1
+ * dataset, but once the database's working set exceeds available cache
+ * (SF10: 30-50GB), every candidate row a query touches pays a fresh disk
+ * read instead of a cache hit. Runs in-process on the harness host (unlike
+ * Neo4j/Postgres, which run in their own Docker containers), so
+ * `os.totalmem()` is the right host-memory figure with no Docker
+ * indirection needed.
+ */
+function resolveSqliteCacheSizeKib(totalBytes: number): number {
+  const reserve = Math.max(
+    MIN_OS_RESERVE_BYTES,
+    totalBytes * OS_RESERVE_FRACTION,
+  );
+  const usable = Math.max(totalBytes - reserve, MIN_OS_RESERVE_BYTES);
+  return -Math.floor(usable / 1024);
+}
+
 export const createTypegraphSqliteEngine: SnbEngineFactory = async (
   options,
 ): Promise<SnbEngineHandle> => {
@@ -27,6 +52,7 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
     const { backend } = createLocalSqliteBackend({
       tables,
       path: join(tempDir, "snb.db"),
+      pragmas: { cacheSizeKib: resolveSqliteCacheSizeKib(totalmem()) },
     });
     // createStoreWithSchema (not the sync createStore) is the documented
     // production boot path: it runs DDL/bootstrap and durably materializes
@@ -45,9 +71,12 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
       name: "typegraph-sqlite",
       fairness:
         "in-process better-sqlite3, file-backed (WAL, synchronous=NORMAL — " +
-        "createLocalSqliteBackend's documented default); indexes materialized " +
-        "and statistics refreshed after bulk load, matching the documented " +
-        "production path.",
+        "createLocalSqliteBackend's documented default; cache_size sized " +
+        "host-aware from total memory, mirroring the Neo4j memory-" +
+        "recommendation fix — SQLite's own 2MiB default cache silently " +
+        "turns every candidate row past that into a disk read once the " +
+        "working set outgrows it); indexes materialized and statistics " +
+        "refreshed after bulk load, matching the documented production path.",
       async load() {
         const pools = await loadSnbDataset(
           store,

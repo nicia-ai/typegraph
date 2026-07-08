@@ -56,7 +56,10 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
       fairness:
         `imperative docker Postgres container (${container.durabilityLabel}), ` +
         "node-postgres over localhost TCP; indexes materialized and statistics " +
-        "refreshed after bulk load, matching the documented production path.",
+        "refreshed after bulk load, matching the documented production path. " +
+        "VACUUM ANALYZE runs after load — without it, Postgres cannot serve " +
+        "an index-only scan at all regardless of index shape, since a bulk " +
+        "load never populates the visibility map on its own.",
       async load() {
         const pools = await loadSnbDataset(
           store,
@@ -65,6 +68,10 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
         );
         await store.refreshStatistics();
         await store.materializeIndexes();
+        // VACUUM can't run inside a transaction block; a fresh pool.query()
+        // call isn't wrapped in one. Runs after materializeIndexes() so any
+        // indexes it creates are included in the same visibility-map pass.
+        await pool.query("VACUUM ANALYZE");
         return pools;
       },
       queries: createSnbQueries(store),
