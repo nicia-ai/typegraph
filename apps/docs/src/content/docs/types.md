@@ -207,9 +207,11 @@ type SelectableEdge<E extends EdgeType> = Readonly<{
 ```
 
 `traverse()` defaults to `expand: "inverse"`, which can match the graph's
-*registered inverse* edge kind alongside the one you asked for, so the row
-behind an edge alias isn't guaranteed to be the requested kind. This affects
-`SelectableEdge` in two different ways:
+*registered inverse* edge kind alongside the one you asked for — and
+`inverseOf(edgeA, edgeB)` doesn't require `edgeA`/`edgeB` to share a props
+schema — so the row behind an edge alias isn't guaranteed to be the
+requested kind, or to have the requested kind's schema. This affects
+`SelectableEdge` in three different ways:
 
 - **`kind: E["kind"]` can already be wrong today.** It's a literal type
   (e.g. `"manages"`), not `string` — but the runtime value can be the
@@ -217,6 +219,10 @@ behind an edge alias isn't guaranteed to be the requested kind. This affects
   mode. This isn't a missing brand, it's an existing type-accuracy gap:
   don't trust `ctx.e.kind` without knowing the traversal can't have
   expanded into a different kind.
+- **The flattened schema properties have the same gap.** `ctx.e.role` is
+  typed against the requested edge kind's schema, but an inverse-branch
+  row's real props came from a different schema and may not have a `role`
+  field at all — reading it returns `undefined`, not a type error.
 - **`id`/`fromId`/`toId` stay plain `string`**, unlike `SelectableNode<N>.id`
   — deliberately not branded `EdgeId<E>`/`NodeId<From>`/`NodeId<To>`. This
   one's just an ergonomics gap (`string` never overclaims), but branding
@@ -244,7 +250,9 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 **Example:**
 
 ```typescript
-// Access edge properties in select context
+// Access edge properties in select context. expand: "none" makes the
+// schema (and kind/id) trustworthy — see the warning above.
+.traverse("worksAt", "e", { expand: "none" })
 .select((ctx) => ({
   role: ctx.e.role,           // Direct edge property access
   salary: ctx.e.salary,

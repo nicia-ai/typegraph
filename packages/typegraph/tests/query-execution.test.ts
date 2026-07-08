@@ -687,13 +687,19 @@ describe("Query Execution (SQLite)", () => {
       expect(company?.name).toBe("Acme Inc");
     });
 
-    it("proves why edge ids can't be auto-branded: default expand mixes in the inverse kind", async () => {
+    it("proves why edge id/kind/schema props can't be trusted: default expand mixes in the inverse kind", async () => {
       // Concrete reproduction of the hazard SelectableEdge's docblock
       // describes: traverse()'s default expand: "inverse" unions in rows
       // for the registered inverse edge kind, so the row backing an alias
-      // can be a genuinely different edge kind than the one requested.
-      const manages = defineEdge("manages", { schema: z.object({}) });
-      const managedBy = defineEdge("managedBy", { schema: z.object({}) });
+      // can be a genuinely different edge kind than the one requested -
+      // with a genuinely different schema, since inverseOf() doesn't
+      // require the two edge kinds to share one.
+      const manages = defineEdge("manages", {
+        schema: z.object({ note: z.string().optional() }),
+      });
+      const managedBy = defineEdge("managedBy", {
+        schema: z.object({ department: z.string().optional() }),
+      });
       const orgGraph = defineGraph({
         id: "inverse_kind_mismatch",
         nodes: { Person: { type: Person } },
@@ -712,7 +718,7 @@ describe("Query Execution (SQLite)", () => {
       const managedByEdge = await orgStore.edges.managedBy.create(
         report,
         boss,
-        {},
+        { department: "Engineering" },
       );
 
       const rows = await orgStore
@@ -721,7 +727,11 @@ describe("Query Execution (SQLite)", () => {
         .whereNode("boss", (p) => p.name.eq("Boss"))
         .traverse("manages", "e") // default expand: "inverse"
         .to("Person", "report")
-        .select((context) => ({ id: context.e.id, kind: context.e.kind }))
+        .select((context) => ({
+          id: context.e.id,
+          kind: context.e.kind,
+          note: context.e.note,
+        }))
         .execute();
 
       expect(rows).toHaveLength(1);
@@ -729,6 +739,10 @@ describe("Query Execution (SQLite)", () => {
       // managedBy edge matched via inverse expansion.
       expect(rows[0]!.kind).toBe("managedBy");
       expect(rows[0]!.id).toBe(managedByEdge.id);
+      // `note` is typed string | undefined per manages's schema, but the
+      // real row is managedBy's { department } - there's no `note` key at
+      // all, so this silently reads as undefined rather than erroring.
+      expect(rows[0]!.note).toBeUndefined();
 
       // Blindly trusting the requested alias's kind silently loses data...
       const wrongKindLookup = await orgStore.edges.manages.getById(
@@ -736,11 +750,12 @@ describe("Query Execution (SQLite)", () => {
       );
       expect(wrongKindLookup).toBeUndefined();
 
-      // ...the row only resolves under its real kind.
+      // ...the row only resolves under its real kind, with its real schema.
       const rightKindLookup = await orgStore.edges.managedBy.getById(
         asEdgeId<typeof managedBy>(rows[0]!.id),
       );
       expect(rightKindLookup?.id).toBe(managedByEdge.id);
+      expect(rightKindLookup?.department).toBe("Engineering");
     });
   });
 

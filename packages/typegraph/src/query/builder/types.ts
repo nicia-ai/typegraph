@@ -468,15 +468,22 @@ export type SelectableEdgeMeta = Readonly<{
  * requested one — `EdgeAlias<E>`'s `E` stays pinned to the single requested
  * kind regardless, so under the default expansion mode the row backing
  * `alias` can genuinely be a different edge kind (with different endpoint
- * kinds) than `E` says. Two distinct consequences follow:
+ * kinds and a different props schema — `inverseOf(edgeA, edgeB)` doesn't
+ * require `edgeA`/`edgeB` to share a schema) than `E` says. Three distinct
+ * consequences follow:
  *
  * - `kind: E["kind"]` is a **literal type that can already be wrong today**
  *   — not a branding gap, a plain type-accuracy gap. It's typed as the
  *   requested kind (e.g. `"manages"`) but the runtime value can be the
- *   inverse kind (e.g. `"managedBy"`); see the `"proves why edge ids
- *   can't be auto-branded"` test in `tests/query-execution.test.ts` for a
- *   concrete repro. This predates and is independent of the id/endpoint
- *   branding question below.
+ *   inverse kind (e.g. `"managedBy"`); see the `"proves why edge
+ *   id/kind/schema props can't be trusted"` test in
+ *   `tests/query-execution.test.ts` for a concrete repro. This predates
+ *   and is independent of the id/endpoint branding question below.
+ * - The flattened `z.infer<E["schema"]>` properties have the same
+ *   type-accuracy gap as `kind`, for the same reason: `ctx.e.role` is typed
+ *   against the requested kind's schema, but an inverse-branch row's real
+ *   props came from a different schema and may not have a `role` field at
+ *   all (reading it returns `undefined`, not a type error).
  * - `id`/`fromId`/`toId` stay plain `string`, unlike `SelectableNode`'s
  *   `id: NodeId<N>` — a real ergonomics gap, but not an accuracy one: `string`
  *   never overclaims. Branding them would compile but be actively wrong:
@@ -484,15 +491,16 @@ export type SelectableEdgeMeta = Readonly<{
  *   silently returns `undefined` for a mismatched-kind id — worse than the
  *   unsafe cast it would have replaced.
  *
- * Proving either is safe requires tracking `expand` mode (`"none"` vs not)
- * at the type level through `TraversalBuilder`/`EdgeAlias` — evaluated for
- * #235 and deliberately not built: the machinery would touch every
+ * Proving any of these safe requires tracking `expand` mode (`"none"` vs
+ * not) at the type level through `TraversalBuilder`/`EdgeAlias` — evaluated
+ * for #235 and deliberately not built: the machinery would touch every
  * traversal-entry overload for a benefit that only applies when a caller
  * opts out of the default expansion. When you know a traversal is
- * single-kind, re-brand `id`/`fromId`/`toId` explicitly with
- * `asNodeId`/`asEdgeId` (see #223) — e.g.
- * `asNodeId<typeof Company>(edge.fromId)` — and don't trust `kind` without
- * independently verifying the traversal can't have expanded.
+ * single-kind (e.g. via `expand: "none"`), re-brand `id`/`fromId`/`toId`
+ * explicitly with `asNodeId`/`asEdgeId` (see #223) — e.g.
+ * `asNodeId<typeof Person>(edge.fromId)` for a `Person -> Company` edge —
+ * and don't trust `kind` or schema properties without independently
+ * verifying the traversal can't have expanded.
  */
 export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
   IsDynamicEdgeType<E> extends true ? DynamicSelectableEdge
