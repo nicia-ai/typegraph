@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 export function registerTemporalIntegrationTests(
@@ -164,6 +165,54 @@ export function registerTemporalIntegrationTests(
 
       expect(nowResults).toHaveLength(1);
       expect(nowResults[0]).toBe("Alice");
+    });
+
+    it("defaults an omitted validFrom to the create timestamp, not open-left NULL", async () => {
+      // Regression test for #240: an omitted validFrom must stamp the
+      // operation's creation time, not persist as NULL — NULL is
+      // interpreted as "valid since forever" by asOf filters, which made a
+      // node created today visible at any historical asOf, including
+      // instants before it existed.
+      const { PAST } = TEMPORAL_ANCHORS;
+      const store = context.getStore();
+
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+
+      expect(alice.meta.validFrom).toBeDefined();
+
+      const pastNode = await store.nodes.Person.getById(alice.id, {
+        temporalMode: "asOf",
+        asOf: PAST,
+      });
+      expect(pastNode).toBeUndefined();
+    });
+
+    it("defaults an omitted edge validFrom to the create timestamp, even when both endpoints predate it", async () => {
+      // Regression test for #240's "test gap": pair the implicit-validFrom
+      // edge with endpoints that are ALREADY valid at the historical asOf,
+      // so only the edge's own (formerly NULL) validFrom can hide or
+      // surface it — a future-dated endpoint would mask the edge bug.
+      const { PAST, BEFORE } = TEMPORAL_ANCHORS;
+      const store = context.getStore();
+
+      const [alice, bob] = await Promise.all([
+        store.nodes.Person.create({ name: "Alice" }, { validFrom: PAST }),
+        store.nodes.Person.create({ name: "Bob" }, { validFrom: PAST }),
+      ]);
+      const edge = await store.edges.knows.create(alice, bob);
+
+      expect(edge.meta.validFrom).toBeDefined();
+
+      const pastEdges = await store.edges.knows.findFrom(alice, {
+        temporalMode: "asOf",
+        asOf: BEFORE,
+      });
+      expect(pastEdges).toHaveLength(0);
+
+      const currentEdges = await store.edges.knows.findFrom(alice, {
+        temporalMode: "current",
+      });
+      expect(currentEdges.map((row) => row.id)).toEqual([edge.id]);
     });
   });
 }

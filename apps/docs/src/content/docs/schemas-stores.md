@@ -562,6 +562,12 @@ example with multiple graphs.
 
 The store provides typed node and edge collections via `store.nodes.*` and `store.edges.*`.
 
+Every write method below that accepts a `validFrom` option (`create`,
+`createFromRecord`, `upsertById`, `upsertByIdFromRecord`, `bulkCreate`,
+`bulkInsert`, `bulkUpsertById`, and their edge equivalents) defaults it to
+that operation's own creation timestamp when omitted — `validFrom` is never
+left open-ended. `validTo` remains optional and open-ended until set.
+
 ### Node Collections
 
 Each node type has a collection with these methods:

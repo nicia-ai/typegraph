@@ -648,9 +648,10 @@ describe("store.algorithms temporal behavior", () => {
       });
       const reachedIds = reached.map((row) => row.id).toSorted();
 
-      // Eve not yet valid (validFrom = FUTURE), Ghost not yet deleted but also
-      // its edge is current and asOf BEFORE is prior to the edge's implicit
-      // validFrom (ULID-based createdAt). Bob and David are reachable via the
+      // Eve not yet valid (validFrom = FUTURE). Ghost is excluded regardless
+      // of asOf — it's soft-deleted, and deleted_at is unconditional in
+      // asOf mode (see "includeTombstones surfaces the deleted ghost node"
+      // below for that coverage). Bob and David are reachable via the
       // historical edge.
       expect(reachedIds).toContain(temporalIds.bob);
       expect(reachedIds).toContain(temporalIds.david);

@@ -168,6 +168,30 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(await snapshotEdges(branchA.store)).toHaveLength(0);
   });
 
+  it("preserves the base's exact validFrom on the clone, even when it was never set explicitly", async () => {
+    // Regression test: an omitted validFrom defaults to the row's OWN
+    // creation instant (#240), not open-left NULL. A branch is a clone taken
+    // at a LATER instant, so if the export/import round trip dropped
+    // validFrom, the clone would re-stamp it to the clone's own (later)
+    // creation time — silently narrowing the fork's valid-time window and
+    // making asOf reads on the fork diverge from identical reads on the base.
+    const { baseStore, aliceId, edgeId } = await seedBase();
+    const alice = await baseStore.nodes.Person.getById(aliceId);
+    const edge = await baseStore.edges.knows.getById(edgeId);
+
+    const result = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(result)).toBe(true);
+    const forkStore = unwrap(result).store;
+
+    const forkedAlice = await forkStore.nodes.Person.getById(aliceId);
+    const forkedEdge = await forkStore.edges.knows.getById(edgeId);
+
+    expect(forkedAlice?.meta.validFrom).toBeDefined();
+    expect(forkedAlice?.meta.validFrom).toBe(alice?.meta.validFrom);
+    expect(forkedEdge?.meta.validFrom).toBeDefined();
+    expect(forkedEdge?.meta.validFrom).toBe(edge?.meta.validFrom);
+  });
+
   it("honors an explicit branch id from options", async () => {
     const { baseStore } = await seedBase();
     const explicitId = asBranchId("branch-explicit-id");

@@ -21,6 +21,15 @@
  * only) as the immutable reference, never against the clone (clones regenerate
  * `created_at`/`updated_at`, which would otherwise destabilize `base@V`).
  *
+ * `includeTemporal: true` carries `validFrom`/`validTo` through unchanged: an
+ * omitted `validFrom` on the base row is never NULL (create-time paths default
+ * it to the row's own creation instant — see #240), so exporting it verbatim
+ * preserves the base's exact valid-time window on the clone. Without this, the
+ * clone's re-import would re-stamp any base row that relied on the default to
+ * the CLONE's creation instant instead — narrowing its validity window and
+ * making `asOf` reads on the fork diverge from identical reads on the base for
+ * any instant between the row's real creation and the clone.
+ *
  * Logical-namespace (copy-on-write within one backend, no full data copy) is a
  * future strategy slot — see the `WorkingCopyStrategy` interface — deferred past
  * P0.
@@ -71,12 +80,15 @@ export type MakeBackend = () => Promise<GraphBackend>;
  * The P0 default working-copy strategy: faithful clone via export/import.
  *
  * On each `create(baseStore)`:
- *   1. `exportGraph(baseStore, { includeMeta: true, includeDeleted: false })` —
- *      `includeMeta: true` carries `created_at`/`updated_at`; `includeDeleted:
- *      false` keeps the clone to LIVE rows only. Shipping soft-deleted rows is
- *      unsafe: the meta schema has no `deletedAt`, so they would import as live and
- *      resurrect on the fork's diff (see the fidelity note above). `branch()` only
- *      needs the base's live state.
+ *   1. `exportGraph(baseStore, { includeMeta: true, includeTemporal: true,
+ *      includeDeleted: false })` — `includeMeta: true` carries
+ *      `created_at`/`updated_at`; `includeTemporal: true` carries
+ *      `validFrom`/`validTo` so the clone's valid-time window matches the base's
+ *      exactly (see the fidelity note above); `includeDeleted: false` keeps the
+ *      clone to LIVE rows only. Shipping soft-deleted rows is unsafe: the meta
+ *      schema has no `deletedAt`, so they would import as live and resurrect on
+ *      the fork's diff (see the fidelity note above). `branch()` only needs the
+ *      base's live state.
  *   2. Create a fresh store over the caller-provided backend with the SAME graph
  *      definition via `createStoreWithSchema`.
  *   3. `importGraph(freshStore, data, { onConflict: "error", ... })` — ids are
@@ -102,6 +114,7 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
       const data = await exportGraph(baseStore, {
         includeMeta: true,
+        includeTemporal: true,
         includeDeleted: false,
       });
       const backend = await makeBackend();

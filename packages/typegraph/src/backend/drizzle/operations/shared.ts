@@ -13,6 +13,19 @@ export function sqlNull(value: string | undefined): SQL | string {
   return value ?? sql.raw("NULL");
 }
 
+/**
+ * Resolves an omitted `validFrom` to the row's creation timestamp — an
+ * explicit value always wins. Keeps every insert path (single, batch,
+ * returning/non-returning) agreeing that "no validFrom" means "valid from
+ * creation", not open-left NULL (see issue #240).
+ */
+export function resolveValidFrom(
+  validFrom: string | undefined,
+  timestamp: string,
+): string {
+  return validFrom ?? timestamp;
+}
+
 export function quotedColumn(column: { name: string }): SQL {
   return sql.raw(`"${column.name.replaceAll('"', '""')}"`);
 }

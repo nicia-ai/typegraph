@@ -128,6 +128,15 @@ const withDeleted = await exportGraph(store, {
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
 
+**Round-trip caveat:** with the default `includeTemporal: false`, exported
+records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
+defaults to the *import's own* creation timestamp — so a plain
+`exportGraph` + `importGraph` round trip does **not** reproduce the
+source's original valid-time window; every imported record becomes valid
+from import time forward. Pass `includeTemporal: true` on export when the
+clone needs to match the source's `asOf` behavior exactly (this is what
+`branch()` does internally).
+
 ## Importing Data
 
 Use `importGraph` to load data into a store:

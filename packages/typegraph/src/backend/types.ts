@@ -270,6 +270,7 @@ export type InsertNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /** Defaults to the insert's creation timestamp when omitted. */
   validFrom?: string;
   validTo?: string;
 }>;
@@ -309,6 +310,7 @@ export type InsertEdgeParams = Readonly<{
   toKind: string;
   toId: string;
   props: Readonly<Record<string, unknown>>;
+  /** Defaults to the insert's creation timestamp when omitted. */
   validFrom?: string;
   validTo?: string;
 }>;

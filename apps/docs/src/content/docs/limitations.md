@@ -300,7 +300,9 @@ For distributed graph workloads, consider a dedicated graph database.
 Temporal queries (`asOf`, `includeEnded`) work correctly but have some constraints:
 
 - Point-in-time queries cannot be combined with streaming (`.stream()`)
-- Historical data is only available if temporal fields (`validFrom`, `validTo`) were populated at creation time
+- `validFrom` defaults to the record's own creation timestamp when omitted, so `asOf` queries
+  work out of the box; an end boundary still requires an explicit `validTo` — an open `validTo`
+  means "still valid"
 - Clock skew between application servers can affect temporal accuracy
 
 ### Recorded / system time (`history: true`)

@@ -122,7 +122,7 @@ const alice = await store.nodes.Person.create({ name: "Alice", email: "a@example
 //     createdAt: "2024-01-15T10:30:00.000Z",
 //     updatedAt: "2024-01-15T10:30:00.000Z",
 //     deletedAt: undefined,
-//     validFrom: undefined,
+//     validFrom: "2024-01-15T10:30:00.000Z", // defaults to createdAt when omitted
 //     validTo: undefined,
 //   }
 // }

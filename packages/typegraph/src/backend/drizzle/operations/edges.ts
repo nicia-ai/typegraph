@@ -11,7 +11,13 @@ import type {
   InsertEdgeParams,
   UpdateEdgeParams,
 } from "../../types";
-import { edgeColumnList, quotedColumn, sqlNull, type Tables } from "./shared";
+import {
+  edgeColumnList,
+  quotedColumn,
+  resolveValidFrom,
+  sqlNull,
+  type Tables,
+} from "./shared";
 
 /**
  * Builds an INSERT query for an edge.
@@ -31,7 +37,7 @@ export function buildInsertEdge(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(params.validFrom)}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -55,7 +61,7 @@ export function buildInsertEdgeNoReturn(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(params.validFrom)}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${resolveValidFrom(params.validFrom, timestamp)}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
   `;
@@ -73,7 +79,7 @@ export function buildInsertEdgesBatch(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(edgeParams.validFrom)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${resolveValidFrom(edgeParams.validFrom, timestamp)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
@@ -94,7 +100,7 @@ export function buildInsertEdgesBatchReturning(
   const columns = edgeColumnList(edges);
   const values = params.map((edgeParams) => {
     const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(edgeParams.validFrom)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${resolveValidFrom(edgeParams.validFrom, timestamp)}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
   return sql`
