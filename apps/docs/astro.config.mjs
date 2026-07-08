@@ -3,6 +3,7 @@ import { satteri } from "@astrojs/markdown-satteri";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, envField, passthroughImageService } from "astro/config";
+import starlightBlog from "starlight-blog";
 import starlightLlmsTxt from "starlight-llms-txt";
 
 // Pages to include in llms-small.txt (unlisted pages are excluded automatically)
@@ -197,6 +198,9 @@ export default defineConfig({
         ThemeProvider: "./src/components/starlight/ThemeProvider.astro",
       },
       plugins: [
+        starlightBlog({
+          title: "Blog",
+        }),
         starlightLlmsTxt({
           details: [
             "Use these files progressively to control context size:",
@@ -227,7 +231,9 @@ export default defineConfig({
             "errors*",
           ],
           demote: ["ejecting*", "examples/*"],
-          exclude: llmsSmallExclude,
+          // Blog posts are narrative, not reference material — keep them out of
+          // the generated llms-*.txt bundles.
+          exclude: [...llmsSmallExclude, "blog/**"],
           rawContent: true,
           customSets: [
             {
