@@ -99,6 +99,18 @@ const systemColumnNameZod = z.enum([
   "version",
 ]);
 
+// A node index's `keySystemColumns` must reject the 4 edge-only join columns,
+// mirroring the construction-time check in `indexes/define-index.ts`'s
+// `normalizeKeySystemColumnsOrThrow`. Excluding from the shared enum (rather
+// than a second hand-written node-column list) keeps this narrowed exactly in
+// sync with `systemColumnNameZod` as the union evolves.
+const nodeSystemColumnNameZod = systemColumnNameZod.exclude([
+  "from_kind",
+  "from_id",
+  "to_kind",
+  "to_id",
+]);
+
 const indexWhereOperandZod = z.discriminatedUnion("__type", [
   z.object({
     __type: z.literal("index_operand_system"),
@@ -200,6 +212,12 @@ const nodeIndexDeclarationZod = z
     entity: z.literal("node"),
     kind: z.string(),
     ...indexDeclarationCommonShape,
+    // Node-only; canonicalized by absence like `method`, so absent/optional
+    // here matches `defineNodeIndex` only emitting it when non-empty.
+    // `.min(1)` rejects an explicit `[]` at the boundary rather than
+    // silently accepting a present-but-empty array that would have to be
+    // canonicalized away again downstream (see `serializeNodeIndexDeclaration`).
+    keySystemColumns: z.array(nodeSystemColumnNameZod).min(1).optional(),
   })
   .loose();
 

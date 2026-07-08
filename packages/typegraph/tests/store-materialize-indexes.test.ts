@@ -21,6 +21,7 @@ import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { ConfigurationError } from "../src/errors";
 import { defineNodeIndex } from "../src/indexes";
+import { computeIndexSignature } from "../src/store/materialize-indexes";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
@@ -233,6 +234,31 @@ describe("Store.materializeIndexes — signature drift", () => {
     const result = await store.materializeIndexes({ stopOnError: true });
     expect(result.results).toHaveLength(1);
     expect(result.results[0]!.status).toBe("failed");
+  });
+
+  it("computeIndexSignature is unaffected by a present-but-empty keySystemColumns", async () => {
+    // Regression: computeIndexSignature hashed the raw declaration object.
+    // `defineGraph` accepts pre-built `IndexDeclaration`s directly (bypassing
+    // `defineNodeIndex`'s own canonicalization), so a hand-authored
+    // declaration with `keySystemColumns: []` present hashed differently
+    // from the same declaration with the field omitted — spuriously forcing
+    // re-materialization for no real shape change, and narrowly falsifying
+    // the changeset's "materialization signatures are unaffected" claim.
+    const omitted = defineNodeIndex(Person, { fields: ["email"] });
+    const presentButEmpty = { ...omitted, keySystemColumns: [] };
+
+    const signatureOmitted = await computeIndexSignature(
+      "sqlite",
+      "typegraph_nodes",
+      omitted,
+    );
+    const signaturePresentButEmpty = await computeIndexSignature(
+      "sqlite",
+      "typegraph_nodes",
+      presentButEmpty,
+    );
+
+    expect(signaturePresentButEmpty).toBe(signatureOmitted);
   });
 });
 

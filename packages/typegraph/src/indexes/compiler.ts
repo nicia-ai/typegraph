@@ -42,7 +42,11 @@ export function compileNodeIndexKeys(
   const adapter = getDialect(dialect);
   const keys: SQL[] = [];
 
-  for (const column of getNodeScopeColumns(index.scope)) {
+  const systemColumns = [
+    ...getNodeScopeColumns(index.scope),
+    ...(index.keySystemColumns ?? []),
+  ];
+  for (const column of systemColumns) {
     keys.push(systemColumn(column));
   }
 
@@ -158,7 +162,7 @@ function compileIndexKeyValue(
   }
 }
 
-function getNodeScopeColumns(
+export function getNodeScopeColumns(
   scope: NodeIndexDeclaration["scope"],
 ): readonly SystemColumnName[] {
   switch (scope) {

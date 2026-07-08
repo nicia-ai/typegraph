@@ -952,6 +952,190 @@ describe("Schema Serialization Properties", () => {
       expect(canonical).not.toContain('"origin"');
     });
 
+    // `keySystemColumns` follows the same canonicalize-by-absence rule as
+    // `method`/`origin`: indexes that don't use it must hash/serialize
+    // identically to before the field existed.
+    it("indexes without keySystemColumns omit the field from canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const personEmail = defineNodeIndex(Person, { fields: ["email"] });
+
+      const graph = defineGraph({
+        id: "key_system_columns_omit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [personEmail],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      for (const index of serialized.indexes ?? []) {
+        expect("keySystemColumns" in index).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"keySystemColumns"');
+    });
+
+    it("canonicalizes a present-but-empty keySystemColumns to absent, same as omitted", () => {
+      // Regression: `NodeIndexDeclaration` is exported and
+      // `nodeIndexDeclarationZod` used to accept `keySystemColumns: []`, so a
+      // raw/persisted declaration could carry `keySystemColumns: []` (present
+      // but empty) rather than omitting the key entirely.
+      // `serializeNodeIndexDeclaration` only checked `=== undefined`, so that
+      // shape would hash/diff/materialize differently from the omitted form
+      // — contradicting the canonicalize-by-absence promise this field is
+      // supposed to keep, the same way `method: "btree"` does.
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const compiled = defineNodeIndex(Person, { fields: ["email"] });
+      const presentButEmpty: IndexDeclaration = {
+        ...compiled,
+        keySystemColumns: [],
+      };
+
+      const graph = defineGraph({
+        id: "key_system_columns_present_but_empty",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [presentButEmpty],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      expect(serialized.indexes).toBeDefined();
+      for (const index of serialized.indexes ?? []) {
+        expect("keySystemColumns" in index).toBe(false);
+      }
+
+      const canonical = JSON.stringify(serialized, sortedReplacer);
+      expect(canonical).not.toContain('"keySystemColumns"');
+    });
+
+    it("rejects an explicit empty keySystemColumns array at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ email: z.string() }),
+      });
+      const compiled = defineNodeIndex(Person, { fields: ["email"] });
+
+      const graph = defineGraph({
+        id: "key_system_columns_explicit_empty_rejected",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [compiled],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ? { ...index, keySystemColumns: [] } : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
+    it("indexes using keySystemColumns emit and round-trip it in canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_emit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const serializedIndex = serialized.indexes?.[0];
+      expect(serializedIndex?.entity).toBe("node");
+      expect(
+        serializedIndex?.entity === "node" ?
+          serializedIndex.keySystemColumns
+        : undefined,
+      ).toEqual(["id"]);
+
+      const json = JSON.stringify(serialized, sortedReplacer);
+      const parsed = serializedSchemaZod.parse(JSON.parse(json));
+      const reSerialized = JSON.stringify(parsed, sortedReplacer);
+      expect(reSerialized).toBe(json);
+    });
+
+    // Regression: `keySystemColumns` previously had no entry in
+    // `nodeIndexDeclarationZod`, so `.loose()` let any value ride through the
+    // persisted-schema parse boundary unchecked — a malformed value would
+    // only surface later, inside SQL compilation.
+    it("rejects a malformed keySystemColumns value at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_malformed",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ?
+            { ...index, keySystemColumns: ["not_a_system_column"] }
+          : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
+    // Regression: the malformed-value check above only exercised a value
+    // outside the full `SystemColumnName` enum. A value that IS a valid
+    // system column, but edge-only, needs its own check — `keySystemColumns`
+    // previously validated against the shared 13-member enum, which doesn't
+    // distinguish node-valid from edge-only columns the way
+    // `defineNodeIndex`'s own construction-time check does.
+    it("rejects an edge-only keySystemColumns value on a node index at the serializedSchemaZod boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const idCoveringName = defineNodeIndex(Person, {
+        keySystemColumns: ["id"],
+        coveringFields: ["name"],
+      });
+
+      const graph = defineGraph({
+        id: "key_system_columns_edge_only",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [idCoveringName],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const tampered = {
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ?
+            { ...index, keySystemColumns: ["from_id"] }
+          : index,
+        ),
+      };
+
+      expect(serializedSchemaZod.safeParse(tampered).success).toBe(false);
+    });
+
     // Conversely, `origin: "runtime"` is emitted explicitly so the
     // restart loader can route it through the runtime compiler.
     it('graph-extension indexes emit `origin: "runtime"` in canonical serialization', () => {

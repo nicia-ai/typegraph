@@ -181,7 +181,16 @@ function serializeIndexes(
     .map((index) => serializeIndexDeclaration(index));
 }
 
-function serializeIndexDeclaration(
+/**
+ * Canonicalizes a single index declaration to its serialized form (see
+ * {@link serializeIndexes} for the canonical-form rules). Exported so
+ * consumers that hash a declaration directly — e.g.
+ * `computeIndexSignature` in `store/materialize-indexes.ts` — can
+ * normalize it first, rather than hashing the raw object and risking a
+ * present-but-canonically-absent field (like an explicit `keySystemColumns:
+ * []`) producing a different hash than the omitted form.
+ */
+export function serializeIndexDeclaration(
   declaration: IndexDeclaration,
 ): IndexDeclaration {
   if (declaration.entity === "node") {
@@ -225,6 +234,19 @@ function serializeNodeIndexDeclaration(
     where: declaration.where,
     // `method: "btree"` is canonicalized by absence, like `origin` below.
     ...(declaration.method === undefined ? {} : { method: declaration.method }),
+    // `keySystemColumns: []` is canonicalized by absence, same rule. Checked
+    // against length, not just `undefined` — `NodeIndexDeclaration` is
+    // exported and `defineGraph` accepts pre-built declarations directly
+    // (bypassing `defineNodeIndex`'s own canonicalization and the
+    // `nodeIndexDeclarationZod` parse boundary, which rejects an explicit
+    // `[]` via `.min(1)`), so an in-memory declaration can still carry a
+    // present-but-empty array that must canonicalize to absent here.
+    ...((
+      declaration.keySystemColumns === undefined ||
+      declaration.keySystemColumns.length === 0
+    ) ?
+      {}
+    : { keySystemColumns: declaration.keySystemColumns }),
     // `origin: "compile-time"` is the default and is omitted from the
     // canonical form (absence == compile-time). Only `runtime` is
     // emitted explicitly so the restart loader can route the declaration

@@ -937,17 +937,20 @@ const candidates = await store.nodes.Person.bulkFindByIndex("by_tenant", [
 
 Semantics: one bucket per input in input order (empty input → `[]`); live,
 non-soft-deleted nodes only; buckets ordered by node id; only `index.fields`
-are used (not `coveringFields`), with the index's partial `where` applied to
-stored rows. A missing/`undefined` indexed field matches stored `NULL`.
+are used (not `coveringFields` or `keySystemColumns`), with the index's
+partial `where` applied to stored rows. A missing/`undefined` indexed field
+matches stored `NULL`.
 
 - `options.limitPerInput` caps each bucket (positive integer); unbounded by
   default. On backends without SQL window functions
   (`capabilities.windowFunctions: false`) the cap is applied in memory rather
   than via `ROW_NUMBER()` — same result.
-- Throws `NodeIndexNotFoundError` for an unknown index, `ValidationError` for a
-  non-positive `limitPerInput` or a non-scalar probe value, and
-  `ConfigurationError` for a date-typed key field (which can't compare
-  identically across SQLite and PostgreSQL).
+- Throws `NodeIndexNotFoundError` for an unknown index, `ConfigurationError`
+  for an index declared without `fields` (only `coveringFields` and/or
+  `keySystemColumns` — nothing to probe by) or for a date-typed key field
+  (which can't compare identically across SQLite and PostgreSQL), and
+  `ValidationError` for a non-positive `limitPerInput` or a non-scalar probe
+  value.
 
 See [Index-backed lookup](/performance/indexes#batched-index-lookup-bulkfindbyindex)
 for details.

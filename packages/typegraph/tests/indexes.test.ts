@@ -15,6 +15,7 @@ import {
   generateIndexDDL,
   notWhere,
   orWhere,
+  type SystemColumnName,
 } from "../src/indexes";
 
 const Person = defineNode("Person", {
@@ -198,6 +199,140 @@ describe("indexes", () => {
     expect(pg).toContain(`ARRAY['startDate']`);
   });
 
+  it("supports keySystemColumns for index-only join coverage", () => {
+    const idCoveringName = defineNodeIndex(Person, {
+      keySystemColumns: ["id"],
+      coveringFields: ["name"],
+    });
+
+    const pg = generateIndexDDL(idCoveringName, "postgres");
+    expect(pg).toContain('"graph_id"');
+    expect(pg).toContain('"kind"');
+    expect(pg).toContain('"id"');
+    expect(pg).toContain(`ARRAY['name']`);
+
+    const sqlite = generateIndexDDL(idCoveringName, "sqlite");
+    expect(sqlite).toContain('"id"');
+    expect(sqlite).toContain(`$."name"`);
+
+    // Canonicalized by absence, like `method`: an index that never uses
+    // keySystemColumns must not carry the key at all.
+    const plainEmailIndex = defineNodeIndex(Person, { fields: ["email"] });
+    expect(Object.hasOwn(plainEmailIndex, "keySystemColumns")).toBe(false);
+  });
+
+  it("generates a default name with no empty segment for a fields-less index", () => {
+    // Regression: the default-name builder guarded the coveringFields/
+    // keySystemColumns segments against being empty, but not the fields
+    // segment — for a fields-less index (only possible since this PR made
+    // `fields` optional) that left a blank segment in the name, producing a
+    // double underscore.
+    const idCoveringName = defineNodeIndex(Person, {
+      keySystemColumns: ["id"],
+      coveringFields: ["name"],
+    });
+
+    expect(idCoveringName.name).not.toContain("__");
+  });
+
+  it("is unaffected by a caller mutating the keySystemColumns array after the call", () => {
+    // Regression: normalizeKeySystemColumnsOrThrow previously returned the
+    // caller's array by reference after validation, so a later mutation of
+    // the original array would bypass the edge-only/scope/duplicate checks
+    // and desync the declaration's already-computed name/hash from what
+    // the compiler actually reads off `keySystemColumns`.
+    const columns: SystemColumnName[] = ["id"];
+    const declaration = defineNodeIndex(Person, {
+      keySystemColumns: columns,
+      coveringFields: ["name"],
+    });
+    const nameBeforeMutation = declaration.name;
+
+    columns.push("graph_id");
+
+    expect(declaration.keySystemColumns).toEqual(["id"]);
+    expect(declaration.name).toBe(nameBeforeMutation);
+
+    // Default scope "graphAndKind" already prefixes the key with graph_id; if
+    // the mutated ["id", "graph_id"] array leaked through, the compiler would
+    // emit "graph_id" a second time as a keySystemColumns entry.
+    const pg = generateIndexDDL(declaration, "postgres");
+    expect(pg.split('"graph_id"').length - 1).toBe(1);
+  });
+
+  it("rejects edge-only system columns in a node index's keySystemColumns", () => {
+    expect(() => {
+      defineNodeIndex(Person, {
+        keySystemColumns: ["from_id"],
+        coveringFields: ["name"],
+      });
+    }).toThrow(/edge-only system column/);
+  });
+
+  it("fails closed on a keySystemColumns value outside the known system-column set", () => {
+    // Regression: the validity check must be an allowlist of known node
+    // columns, not a denylist of known edge-only ones — a denylist would
+    // silently accept a value that escapes TypeScript's literal-union
+    // checking (e.g. `any`-typed data, a value round-tripped through JSON)
+    // instead of failing here with a clear error.
+    expect(() => {
+      defineNodeIndex(Person, {
+        keySystemColumns: ["not_a_real_column" as SystemColumnName],
+        coveringFields: ["name"],
+      });
+    }).toThrow(/does not support "not_a_real_column"/);
+  });
+
+  it("rejects keySystemColumns that duplicate a column scope already implies", () => {
+    expect(() => {
+      defineNodeIndex(Person, {
+        // Default scope is "graphAndKind", which already prefixes graph_id/kind.
+        keySystemColumns: ["graph_id"],
+        coveringFields: ["name"],
+      });
+    }).toThrow(/must not repeat a column already implied by scope/);
+  });
+
+  it('rejects unique combined with keySystemColumns: ["id"]', () => {
+    // Every node's `id` is already unique per row, so a "unique" index that
+    // also keys on `id` can never enforce a meaningful constraint across its
+    // other key columns (e.g. `unique: true` on `email` + `keySystemColumns:
+    // ["id"]` would let two nodes share the same email, since (email, id) is
+    // always distinct). Reject at declaration time rather than silently
+    // producing a unique index that isn't.
+    expect(() => {
+      defineNodeIndex(Person, {
+        fields: ["email"],
+        keySystemColumns: ["id"],
+        unique: true,
+      });
+    }).toThrow(/unique node indexes cannot include keySystemColumns: \["id"\]/);
+  });
+
+  it("allows unique combined with other keySystemColumns (only id is degenerate)", () => {
+    expect(() =>
+      defineNodeIndex(Person, {
+        fields: ["email"],
+        keySystemColumns: ["deleted_at"],
+        unique: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects keySystemColumns combined with gin/trigram methods", () => {
+    const Tagged = defineNode("Tagged", {
+      schema: z.object({ tags: z.array(z.string()) }),
+    });
+
+    expect(() => {
+      defineNodeIndex(Tagged, {
+        fields: ["tags"],
+        keySystemColumns: ["id"],
+        method: "gin",
+      });
+    }).toThrow(/does not support keySystemColumns/);
+  });
+
   it("throws when covering fields overlap with index fields", () => {
     expect(() => {
       defineNodeIndex(Person, {
@@ -207,13 +342,10 @@ describe("indexes", () => {
     }).toThrow(/must not overlap/);
   });
 
-  it("throws when fields array is empty", () => {
+  it("throws when fields, coveringFields, and keySystemColumns are all empty", () => {
     expect(() => {
-      defineNodeIndex(Person, {
-        // @ts-expect-error Empty fields should be a type error
-        fields: [],
-      });
-    }).toThrow(/must not be empty/);
+      defineNodeIndex(Person, { fields: [] });
+    }).toThrow(/must declare at least one of/);
   });
 
   it("throws for unknown fields in index definition", () => {
