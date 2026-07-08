@@ -14,6 +14,7 @@ import {
   createQueryBuilder,
   defineEdge,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   disjointWith,
   implies,
@@ -23,7 +24,7 @@ import {
 import { ConfigurationError, RestrictedDeleteError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { deserializeSchema, serializeSchema } from "../src/schema";
-import { createStore } from "../src/store/store";
+import { createStore, createStoreWithSchema } from "../src/store/store";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -766,6 +767,112 @@ describe("implies() Endpoint Compatibility Validation", () => {
     ).toThrow(
       /from kind\(s\) \[OrganizationMsg\] declared on "memberOfMsg" cannot be assigned/,
     );
+  });
+
+  it("createStoreWithSchema rejects a bad implies() relation before committing any schema version", async () => {
+    const AuthorCommit = defineNode("AuthorCommit", { schema: z.object({}) });
+    const PaperCommit = defineNode("PaperCommit", { schema: z.object({}) });
+    const TopicCommit = defineNode("TopicCommit", { schema: z.object({}) });
+
+    const writes = defineEdge("writesCommit", { schema: z.object({}) });
+    const about = defineEdge("aboutCommit", { schema: z.object({}) });
+
+    const graph = defineGraph({
+      id: "implies_no_commit_on_reject",
+      nodes: {
+        AuthorCommit: { type: AuthorCommit },
+        PaperCommit: { type: PaperCommit },
+        TopicCommit: { type: TopicCommit },
+      },
+      edges: {
+        writesCommit: {
+          type: writes,
+          from: [AuthorCommit],
+          to: [PaperCommit],
+        },
+        aboutCommit: { type: about, from: [PaperCommit], to: [TopicCommit] },
+      },
+      ontology: [implies(about, writes)],
+    });
+
+    const backend = createTestBackend();
+
+    await expect(createStoreWithSchema(graph, backend)).rejects.toThrow(
+      ConfigurationError,
+    );
+
+    // The rejection must happen before the schema is durably committed —
+    // otherwise the invalid schema becomes the "active" version and every
+    // subsequent store construction against it throws forever, with no
+    // way to recover short of a manual rollback.
+    expect(await backend.getActiveSchema(graph.id)).toBeUndefined();
+
+    await backend.close();
+  });
+
+  it("store.evolve() rejects a bad implies() relation before committing a new schema version", async () => {
+    const AuthorEvolveCommit = defineNode("AuthorEvolveCommit", {
+      schema: z.object({}),
+    });
+    const PaperEvolveCommit = defineNode("PaperEvolveCommit", {
+      schema: z.object({}),
+    });
+    const TopicEvolveCommit = defineNode("TopicEvolveCommit", {
+      schema: z.object({}),
+    });
+
+    const writes = defineEdge("writesEvolveCommit", { schema: z.object({}) });
+    const about = defineEdge("aboutEvolveCommit", { schema: z.object({}) });
+
+    // The compile-time graph is valid on its own — no implies() yet.
+    const graph = defineGraph({
+      id: "implies_evolve_no_commit_on_reject",
+      nodes: {
+        AuthorEvolveCommit: { type: AuthorEvolveCommit },
+        PaperEvolveCommit: { type: PaperEvolveCommit },
+        TopicEvolveCommit: { type: TopicEvolveCommit },
+      },
+      edges: {
+        writesEvolveCommit: {
+          type: writes,
+          from: [AuthorEvolveCommit],
+          to: [PaperEvolveCommit],
+        },
+        aboutEvolveCommit: {
+          type: about,
+          from: [PaperEvolveCommit],
+          to: [TopicEvolveCommit],
+        },
+      },
+    });
+
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const initialRow = await backend.getActiveSchema(graph.id);
+    expect(initialRow?.version).toBe(1);
+
+    // Graph-extension-authored implies() relations carry plain edge-kind
+    // name strings rather than EdgeType objects — this reproduces #239's
+    // other real-world trigger (store.evolve, not compile-time implies()).
+    const badExtension = defineGraphExtension({
+      ontology: [
+        {
+          metaEdge: "implies",
+          from: "aboutEvolveCommit",
+          to: "writesEvolveCommit",
+        },
+      ],
+    });
+
+    await expect(store.evolve(badExtension)).rejects.toThrow(
+      ConfigurationError,
+    );
+
+    // No new schema version was committed — the active version is still 1.
+    const rowAfterRejectedEvolve = await backend.getActiveSchema(graph.id);
+    expect(rowAfterRejectedEvolve?.version).toBe(1);
+
+    await backend.close();
   });
 });
 

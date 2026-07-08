@@ -248,6 +248,15 @@ const connections = await store
 // Returns people connected via "knows", "marriedTo", or "bestFriends"
 ```
 
+`expand: "implying"` is only reachable for endpoint-compatible implications:
+every node kind an implying edge (e.g. `marriedTo`) allows on a side must be
+assignable to a kind the implied edge (`knows`) allows on that same side.
+`implies()` relations that don't satisfy this are rejected with a
+`ConfigurationError` when the graph is built into a store, so an
+`expand: "implying"` traversal can never fold in rows whose kind couldn't
+actually satisfy the traversal's own endpoints. See
+[Ontology → Edge Relationships](/ontology#edge-relationships) for details.
+
 If your ontology defines inverse edge kinds, you can expand traversals to include inverse edges:
 
 ```typescript

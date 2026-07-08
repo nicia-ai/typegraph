@@ -198,6 +198,18 @@ const connections = await store
   .execute();
 ```
 
+**Endpoint compatibility is required.** `implies(edgeA, edgeB)` only makes
+sense if every node kind `edgeA` can connect could also, in principle,
+satisfy `edgeB`'s own domain/range — otherwise `expand: "implying"` would
+traverse rows whose kinds don't match what the traversal actually asked for.
+Every kind `edgeA` allows on a side (`from`/`to`) must be assignable — equal,
+or a `subClassOf` descendant — to at least one kind `edgeB` allows on that
+same side. An incompatible pair (say, `Author -> Paper` implying
+`Paper -> Topic`) throws `ConfigurationError` wherever the graph is built
+into a store or committed as a schema version (`createStore`,
+`createStoreWithSchema`, `store.evolve({ ontology })`) — including relations
+authored through a graph extension, not just `implies()` calls in code.
+
 ## Using the Ontology
 
 ### In Graph Definition
@@ -474,6 +486,12 @@ Declares that one edge type implies another exists.
 ```typescript
 function implies(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
 ```
+
+`edgeA`'s endpoints must be assignable to `edgeB`'s endpoints (equal, or a
+`subClassOf` descendant) on both the `from` and `to` side. Throws
+`ConfigurationError` when the graph is built into a store or committed as a
+schema version if they aren't — see [Edge Relationships](#edge-relationships)
+above.
 
 #### `metaEdge(name, options?)`
 

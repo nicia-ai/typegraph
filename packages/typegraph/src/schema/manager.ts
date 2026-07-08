@@ -15,6 +15,7 @@ import {
   MigrationError,
 } from "../errors";
 import { mergeGraphExtension } from "../graph-extension/merge";
+import { buildKindRegistry } from "../registry";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
 import {
@@ -594,6 +595,12 @@ export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
 ): Promise<SchemaVersionRow> {
+  // Structural gates (e.g. endpoint-incompatible implies() relations)
+  // must reject before the schema is durably committed, not only when a
+  // Store is later constructed against it — buildKindRegistry throws the
+  // same ConfigurationError a Store construction would, just earlier.
+  buildKindRegistry(graph);
+
   const schema = serializeSchema(graph, 1);
   const hash = await computeSchemaHash(schema);
 
@@ -646,6 +653,11 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   graph: G,
   currentVersion: number,
 ): Promise<SchemaVersionRow> {
+  // See initializeSchema: reject structurally invalid graphs (e.g.
+  // endpoint-incompatible implies() relations) before committing, not
+  // only when a Store is later built against the committed version.
+  buildKindRegistry(graph);
+
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);

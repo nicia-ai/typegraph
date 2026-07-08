@@ -248,11 +248,11 @@ const graph = defineGraph({
     // === Edge semantics ===
     inverseOf(cites, citedBy),
     // Both edges are Publication -> Publication, so the implication is
-    // endpoint-compatible. Pitfall: the library does NOT validate this —
-    // an implication between edges with mismatched endpoints (say,
-    // Author->Paper implies Paper->Topic) is silently accepted, and
-    // `expand: "implying"` would then traverse the mismatched edges.
-    // Keep implication chains within compatible endpoint signatures.
+    // endpoint-compatible. The library rejects implications between edges
+    // with mismatched endpoints (say, Author->Paper implies Paper->Topic)
+    // with a ConfigurationError — wherever the graph is built into a store
+    // or committed as a schema version — since `expand: "implying"` would
+    // otherwise traverse the mismatched edges.
     implies(buildsOn, cites),
 
     // === Custom meta-edge relations ===
