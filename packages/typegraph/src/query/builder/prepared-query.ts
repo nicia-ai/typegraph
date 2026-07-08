@@ -1,14 +1,21 @@
 /**
- * PreparedQuery — a pre-compiled, parameterized query.
+ * PreparedQuery — a pre-validated, parameterized query.
  *
- * Created via `ExecutableQuery.prepare()`. Compiles the query AST to SQL once
- * at prepare time, then executes with different parameter bindings on each call.
+ * Created via `ExecutableQuery.prepare()`. Builds and structurally validates
+ * the query AST once at prepare time (so a malformed query fails fast,
+ * before the first `execute()`), then re-compiles it to SQL text on every
+ * `execute()` call — NOT once at prepare time. This is deliberate: a
+ * "current" (live) temporal-validity filter binds the read instant fresh at
+ * compile time (see `currentReadInstant()`); caching that compiled SQL text
+ * across calls would freeze "now" at prepare time and silently hide every
+ * row created after prepare() ran for the entire lifetime of the prepared
+ * query — the AST itself carries no timestamp, only the compiled SQL does.
  *
- * Fast path: when `backend.executeRaw` is available, executes pre-compiled SQL
- * text directly with substituted parameter values.
+ * Fast path: when `backend.executeRaw` is available, executes freshly
+ * compiled SQL text directly with substituted parameter values.
  *
- * Fallback: substitutes parameter refs in the AST, recompiles to SQL, and
- * executes via the standard `backend.execute` path.
+ * Fallback: substitutes parameter refs in the AST, compiles to SQL (also
+ * fresh), and executes via the standard `backend.execute` path.
  */
 import { Placeholder } from "drizzle-orm";
 
@@ -259,10 +266,6 @@ function fillPlaceholders(
 type PreparedQueryConfig<R> = Readonly<{
   ast: QueryAst;
   unoptimizedAst: QueryAst;
-  sqlText: string | undefined;
-  sqlParams: readonly unknown[] | undefined;
-  unoptimizedSqlText: string | undefined;
-  unoptimizedSqlParams: readonly unknown[] | undefined;
   backend: GraphBackend;
   dialect: SqlDialect;
   graphId: string;
@@ -292,10 +295,6 @@ type PreparedQueryConfig<R> = Readonly<{
 export class PreparedQuery<R> {
   readonly #ast: QueryAst;
   readonly #unoptimizedAst: QueryAst;
-  readonly #sqlText: string | undefined;
-  readonly #sqlParams: readonly unknown[] | undefined;
-  readonly #unoptimizedSqlText: string | undefined;
-  readonly #unoptimizedSqlParams: readonly unknown[] | undefined;
   readonly #backend: GraphBackend;
   readonly #dialect: SqlDialect;
   readonly #graphId: string;
@@ -309,10 +308,6 @@ export class PreparedQuery<R> {
   constructor(config: PreparedQueryConfig<R>) {
     this.#ast = config.ast;
     this.#unoptimizedAst = config.unoptimizedAst;
-    this.#sqlText = config.sqlText;
-    this.#sqlParams = config.sqlParams;
-    this.#unoptimizedSqlText = config.unoptimizedSqlText;
-    this.#unoptimizedSqlParams = config.unoptimizedSqlParams;
     this.#backend = config.backend;
     this.#dialect = config.dialect;
     this.#graphId = config.graphId;
@@ -322,6 +317,20 @@ export class PreparedQuery<R> {
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
     this.#parameterMetadata = collectParameterMetadata(this.#ast);
+  }
+
+  /**
+   * Compiles `ast` to SQL text + params, fresh — never cached. See the class
+   * doc comment for why: a "current" temporal filter binds its read instant
+   * at compile time, so the instant must be recomputed on every call, not
+   * reused from a cached compilation.
+   */
+  #compileFresh(
+    ast: QueryAst,
+  ): Readonly<{ sql: string; params: readonly unknown[] }> | undefined {
+    if (this.#backend.compileSql === undefined) return undefined;
+    const compiled = compileQuery(ast, this.#graphId, this.#compileOptions);
+    return this.#backend.compileSql(compiled);
   }
 
   /** The set of parameter names required by this prepared query. */
@@ -371,18 +380,18 @@ export class PreparedQuery<R> {
   async #executeSelectiveRows(
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    if (
-      this.#sqlText !== undefined &&
-      this.#sqlParams !== undefined &&
-      this.#backend.executeRaw !== undefined
-    ) {
+    const fresh =
+      this.#backend.executeRaw === undefined ?
+        undefined
+      : this.#compileFresh(this.#ast);
+    if (fresh !== undefined && this.#backend.executeRaw !== undefined) {
       const filledParams = fillPlaceholders(
-        this.#sqlParams,
+        fresh.params,
         bindings,
         this.#dialect,
       );
       const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
-        this.#sqlText,
+        fresh.sql,
         filledParams,
       );
       return transformPathColumns(rawRows, this.#state, this.#dialect);
@@ -414,18 +423,18 @@ export class PreparedQuery<R> {
   async #executeUnoptimizedRows(
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    if (
-      this.#unoptimizedSqlText !== undefined &&
-      this.#unoptimizedSqlParams !== undefined &&
-      this.#backend.executeRaw !== undefined
-    ) {
+    const fresh =
+      this.#backend.executeRaw === undefined ?
+        undefined
+      : this.#compileFresh(this.#unoptimizedAst);
+    if (fresh !== undefined && this.#backend.executeRaw !== undefined) {
       const filledParams = fillPlaceholders(
-        this.#unoptimizedSqlParams,
+        fresh.params,
         bindings,
         this.#dialect,
       );
       const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
-        this.#unoptimizedSqlText,
+        fresh.sql,
         filledParams,
       );
       return transformPathColumns(rawRows, this.#state, this.#dialect);

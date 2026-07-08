@@ -315,7 +315,12 @@ describe("ExecutableAggregateQuery.compile", () => {
     expect(sqlString).toContain("GROUP BY");
   });
 
-  it("reuses cached compiled SQL for repeated compile calls", () => {
+  it("compiles equivalent SQL on repeated compile calls", () => {
+    // Deliberately NOT cached across calls: a "current" temporal filter
+    // binds its read instant at compile time, so caching the compiled
+    // result would freeze "now" at the first call for the query's entire
+    // lifetime (see PreparedQuery's class doc comment). Repeated calls
+    // must still produce the same SQL shape, just not the same object.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Product", "p")
       .groupBy("p", "category")
@@ -327,7 +332,7 @@ describe("ExecutableAggregateQuery.compile", () => {
     const firstCompile = query.compile();
     const secondCompile = query.compile();
 
-    expect(secondCompile).toBe(firstCompile);
+    expect(toSqlString(secondCompile)).toBe(toSqlString(firstCompile));
   });
 
   it("includes LIMIT and OFFSET in compiled SQL", () => {

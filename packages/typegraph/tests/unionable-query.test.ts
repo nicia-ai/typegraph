@@ -387,7 +387,12 @@ describe("UnionableQuery.compile", () => {
     expect(sqlString).toContain("UNION");
   });
 
-  it("reuses cached compiled SQL for repeated compile calls", () => {
+  it("compiles equivalent SQL on repeated compile calls", () => {
+    // Deliberately NOT cached across calls: a "current" temporal filter
+    // binds its read instant at compile time, so caching the compiled
+    // result would freeze "now" at the first call for the query's entire
+    // lifetime (see PreparedQuery's class doc comment). Repeated calls
+    // must still produce the same SQL shape, just not the same object.
     const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("User", "u")
       .select((ctx) => ({ id: ctx.u.id }));
@@ -400,7 +405,7 @@ describe("UnionableQuery.compile", () => {
     const firstCompile = unionQuery.compile();
     const secondCompile = unionQuery.compile();
 
-    expect(secondCompile).toBe(firstCompile);
+    expect(sqlToString(secondCompile)).toBe(sqlToString(firstCompile));
   });
 
   it("compiles UNION ALL to SQL", () => {

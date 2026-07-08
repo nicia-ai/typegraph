@@ -29,8 +29,6 @@ import {
   type SelectContext,
 } from "./types";
 
-const NOT_COMPUTED = Symbol("NOT_COMPUTED");
-
 function executeOnBackend<T>(
   backend: GraphBackend | TransactionBackend,
   recordedAsOf: string | undefined,
@@ -89,7 +87,6 @@ type UnionableQueryState = Readonly<{
 export class UnionableQuery<G extends GraphDef, R> {
   readonly #config: QueryBuilderConfig;
   readonly #state: UnionableQueryState;
-  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: UnionableQueryState) {
     this.#config = config;
@@ -228,17 +225,15 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Compiles the set operation to SQL.
    */
   compile(): CompiledSelectSql {
-    if (this.#cachedCompiled !== NOT_COMPUTED) {
-      return this.#cachedCompiled;
-    }
-
-    const compiled = compileSetOperation(
+    // Not cached — a "current" temporal filter binds its read instant at
+    // compile time, so caching across calls would freeze "now" at first
+    // compilation (see PreparedQuery's class doc comment for the full
+    // rationale).
+    return compileSetOperation(
       this.toAst(),
       this.#config.graphId,
       this.#compileOptions(),
     );
-    this.#cachedCompiled = compiled;
-    return compiled;
   }
 
   #compileOptions(): CompileQueryOptions {
