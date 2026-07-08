@@ -1,5 +1,6 @@
 import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type Assert, type Equal } from "../utils/type-assert";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
   EdgeWrites,
@@ -11,14 +12,6 @@ import type {
 
 type NodeWriteMethodName = (typeof NODE_WRITE_NAMES)[number];
 type EdgeWriteMethodName = (typeof EDGE_WRITE_NAMES)[number];
-
-type Assert<T extends true> = T;
-type Equal<A, B> =
-  [A] extends [B] ?
-    [B] extends [A] ?
-      true
-    : false
-  : false;
 
 // If these fail, the receipt wrapper drifted away from the collection write
 // surface that defines NodeWrites / EdgeWrites.
@@ -141,126 +134,110 @@ function isObject(value: unknown): value is object {
   return typeof value === "object" && Boolean(value);
 }
 
-function wrapNodeCollection<T extends object>(
-  collection: T,
-  kind: string,
-  recorder: TransactionReceiptRecorder,
-): T {
-  const methodNames = new Set<string>(NODE_WRITE_NAMES);
-  const cache = new Map<PropertyKey, unknown>();
+/**
+ * Which methods on a node/edge collection count as writes, and how each
+ * counts its intent. Bundled into one value per entity kind (below) rather
+ * than passed as separate `methodNames`/`counters` parameters, so a call
+ * site can only pick "the node surface" or "the edge surface" as a unit —
+ * it cannot independently mismatch a method-name set against the wrong
+ * counter table.
+ */
+type WriteIntentSurface<M extends string> = Readonly<{
+  methodNames: ReadonlySet<string>;
+  counters: Record<M, WriteIntentCounter>;
+}>;
 
-  return new Proxy(collection, {
-    get(target, property, receiver) {
-      if (typeof property !== "string" || !methodNames.has(property)) {
-        return Reflect.get(target, property, receiver);
+const NODE_WRITE_SURFACE: WriteIntentSurface<NodeWriteMethodName> = {
+  methodNames: new Set(NODE_WRITE_NAMES),
+  counters: NODE_WRITE_INTENT_COUNTERS,
+};
+
+const EDGE_WRITE_SURFACE: WriteIntentSurface<EdgeWriteMethodName> = {
+  methodNames: new Set(EDGE_WRITE_NAMES),
+  counters: EDGE_WRITE_INTENT_COUNTERS,
+};
+
+/**
+ * Proxies `target`, memoizing the wrapped value for each string-keyed
+ * property after first access. `shouldWrap` gates which properties run
+ * through `wrap`; everything else (including symbol keys) passes through
+ * via `Reflect.get` untouched. Shared by `wrapWriteCollection` (wraps write
+ * methods on one collection) and `wrapCollections` (wraps every collection
+ * in a kind-keyed map) — both are "lazily transform and cache one property
+ * of an object" with a different `shouldWrap`/`wrap` pair.
+ */
+function memoizedProxyGet<T extends object>(
+  target: T,
+  shouldWrap: (property: string) => boolean,
+  wrap: (value: unknown, property: string) => unknown,
+): T {
+  const cache = new Map<string, unknown>();
+
+  return new Proxy(target, {
+    get(proxyTarget, property, receiver) {
+      if (typeof property !== "string" || !shouldWrap(property)) {
+        return Reflect.get(proxyTarget, property, receiver);
       }
 
       const cached = cache.get(property);
       if (cached !== undefined) return cached;
 
-      const value = Reflect.get(target, property, receiver);
+      const value = Reflect.get(proxyTarget, property, receiver);
+      const wrapped = wrap(value, property);
+      cache.set(property, wrapped);
+      return wrapped;
+    },
+  });
+}
+
+/**
+ * Wraps one node/edge collection so every write method on it (per
+ * `surface.methodNames`) counts its intent through `record` before
+ * resolving.
+ */
+function wrapWriteCollection<T extends object, M extends string>(
+  collection: T,
+  kind: string,
+  surface: WriteIntentSurface<M>,
+  record: (kind: string, count: number) => void,
+): T {
+  return memoizedProxyGet(
+    collection,
+    (property) => surface.methodNames.has(property),
+    (value, property) => {
       if (!isWrappedMethod(value)) return value;
 
-      const method = property as NodeWriteMethodName;
+      const method = property as M;
       const wrapped: WrappedMethod = async (...args) => {
         // Pin the intent count at call time: a caller may mutate a bulk input
         // array while the write is in flight, and the backend has already
         // snapshotted the items. Recording still waits for resolution so a
         // rejected write counts 0.
-        const count = NODE_WRITE_INTENT_COUNTERS[method](args);
-        const result = await Reflect.apply(value, target, args);
-        recorder.recordNode(kind, count);
+        const count = surface.counters[method](args);
+        const result = await Reflect.apply(value, collection, args);
+        record(kind, count);
         return result;
       };
-      cache.set(property, wrapped);
       return wrapped;
     },
-  });
+  );
 }
 
-function wrapEdgeCollection<T extends object>(
-  collection: T,
-  kind: string,
-  recorder: TransactionReceiptRecorder,
+/**
+ * Wraps a kind-keyed collection map (`GraphNodeCollections<G>` /
+ * `GraphEdgeCollections<G>`), lazily wrapping each collection with
+ * `wrapOne` on first access.
+ */
+function wrapCollections<T extends object>(
+  collections: T,
+  wrapOne: (collection: object, kind: string) => unknown,
 ): T {
-  const methodNames = new Set<string>(EDGE_WRITE_NAMES);
-  const cache = new Map<PropertyKey, unknown>();
-
-  return new Proxy(collection, {
-    get(target, property, receiver) {
-      if (typeof property !== "string" || !methodNames.has(property)) {
-        return Reflect.get(target, property, receiver);
-      }
-
-      const cached = cache.get(property);
-      if (cached !== undefined) return cached;
-
-      const value = Reflect.get(target, property, receiver);
-      if (!isWrappedMethod(value)) return value;
-
-      const method = property as EdgeWriteMethodName;
-      const wrapped: WrappedMethod = async (...args) => {
-        const count = EDGE_WRITE_INTENT_COUNTERS[method](args);
-        const result = await Reflect.apply(value, target, args);
-        recorder.recordEdge(kind, count);
-        return result;
-      };
-      cache.set(property, wrapped);
-      return wrapped;
-    },
-  });
-}
-
-function wrapNodeCollections<G extends GraphDef>(
-  collections: GraphNodeCollections<G>,
-  recorder: TransactionReceiptRecorder,
-): GraphNodeCollections<G> {
-  const cache = new Map<string, unknown>();
-
-  return new Proxy(collections, {
-    get(target, property, receiver) {
-      if (typeof property !== "string") {
-        return Reflect.get(target, property, receiver);
-      }
-
-      const cached = cache.get(property);
-      if (cached !== undefined) return cached;
-
-      const collection = Reflect.get(target, property, receiver);
-      if (!isObject(collection)) {
-        return collection;
-      }
-      const wrapped = wrapNodeCollection(collection, property, recorder);
-      cache.set(property, wrapped);
-      return wrapped;
-    },
-  });
-}
-
-function wrapEdgeCollections<G extends GraphDef>(
-  collections: GraphEdgeCollections<G>,
-  recorder: TransactionReceiptRecorder,
-): GraphEdgeCollections<G> {
-  const cache = new Map<string, unknown>();
-
-  return new Proxy(collections, {
-    get(target, property, receiver) {
-      if (typeof property !== "string") {
-        return Reflect.get(target, property, receiver);
-      }
-
-      const cached = cache.get(property);
-      if (cached !== undefined) return cached;
-
-      const collection = Reflect.get(target, property, receiver);
-      if (!isObject(collection)) {
-        return collection;
-      }
-      const wrapped = wrapEdgeCollection(collection, property, recorder);
-      cache.set(property, wrapped);
-      return wrapped;
-    },
-  });
+  return memoizedProxyGet(
+    collections,
+    () => true,
+    (collection, kind) =>
+      isObject(collection) ? wrapOne(collection, kind) : collection,
+  );
 }
 
 export function wrapTransactionCollections<G extends GraphDef>(
@@ -272,7 +249,21 @@ export function wrapTransactionCollections<G extends GraphDef>(
   edges: GraphEdgeCollections<G>;
 }> {
   return {
-    nodes: wrapNodeCollections(nodes, recorder),
-    edges: wrapEdgeCollections(edges, recorder),
+    nodes: wrapCollections(nodes, (collection, kind) =>
+      wrapWriteCollection(
+        collection,
+        kind,
+        NODE_WRITE_SURFACE,
+        recorder.recordNode,
+      ),
+    ),
+    edges: wrapCollections(edges, (collection, kind) =>
+      wrapWriteCollection(
+        collection,
+        kind,
+        EDGE_WRITE_SURFACE,
+        recorder.recordEdge,
+      ),
+    ),
   };
 }

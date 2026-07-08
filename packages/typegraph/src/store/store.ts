@@ -586,6 +586,25 @@ export class Store<G extends GraphDef> {
   // === Dynamic Collection Access ===
 
   /**
+   * Resolves `kind` against `collections` (either `this.nodes` or a
+   * transaction-scoped — and possibly receipt-wrapped — node collection map),
+   * or `undefined` when the kind is not registered in this graph. Shared by
+   * `getNodeCollection` and both transaction contexts' `getNodeCollection` so
+   * a receipt-wrapped transaction counts writes made through the dynamic
+   * lookup exactly like `this.#graph.nodes` membership is checked everywhere
+   * else.
+   */
+  #resolveDynamicNodeCollection(
+    collections: GraphNodeCollections<G>,
+    kind: string,
+  ): DynamicNodeCollection | undefined {
+    if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
+    return collections[
+      kind as keyof G["nodes"] & string
+    ] as unknown as DynamicNodeCollection;
+  }
+
+  /**
    * Returns the node collection for the given kind, or undefined if the kind
    * is not registered in this graph.
    *
@@ -596,10 +615,7 @@ export class Store<G extends GraphDef> {
    * throws `KindNotFoundError` instead of forcing a null-check.
    */
   getNodeCollection(kind: string): DynamicNodeCollection | undefined {
-    if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
-    return this.nodes[
-      kind as keyof G["nodes"] & string
-    ] as unknown as DynamicNodeCollection;
+    return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
   /**
@@ -1527,12 +1543,8 @@ export class Store<G extends GraphDef> {
         nodes,
         edges,
         backend: this.#backend,
-        getNodeCollection: (kind) => {
-          if (!Object.hasOwn(this.#graph.nodes, kind)) return;
-          return nodes[
-            kind as keyof G["nodes"] & string
-          ] as unknown as DynamicNodeCollection;
-        },
+        getNodeCollection: (kind) =>
+          this.#resolveDynamicNodeCollection(nodes, kind),
         // No transaction, no deferral: operations apply as they happen, so
         // their hooks fire immediately.
         runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
@@ -1811,12 +1823,8 @@ export class Store<G extends GraphDef> {
 
     const getNodeCollection = (
       kind: string,
-    ): DynamicNodeCollection | undefined => {
-      if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
-      return nodes[
-        kind as keyof G["nodes"] & string
-      ] as unknown as DynamicNodeCollection;
-    };
+    ): DynamicNodeCollection | undefined =>
+      this.#resolveDynamicNodeCollection(nodes, kind);
 
     if (sql === undefined) {
       return {

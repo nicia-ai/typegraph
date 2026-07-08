@@ -11,6 +11,7 @@ import {
   type UpdateEdgeParams,
   type UpdateNodeParams,
 } from "../../backend/types";
+import { type Assert, type Equal } from "../../utils/type-assert";
 
 /**
  * The graph-entity write surface that recorded-time capture must wrap. Both
@@ -95,14 +96,6 @@ type DerivedGraphEntityWriteMethod = {
 type ListedRecordedWriteMethod =
   | (typeof RECORDED_REQUIRED_WRITE_METHODS)[number]
   | (typeof RECORDED_OPTIONAL_WRITE_METHODS)[number];
-
-type Assert<T extends true> = T;
-type Equal<A, B> =
-  [A] extends [B] ?
-    [B] extends [A] ?
-      true
-    : false
-  : false;
 
 // If this line errors, the recorded-capture write lists no longer match the
 // backend's graph-entity write surface — reconcile RECORDED_*_WRITE_METHODS (and
