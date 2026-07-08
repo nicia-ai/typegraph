@@ -346,8 +346,11 @@ export class ExecutableQuery<
   }
 
   /**
-   * Creates a prepared (pre-compiled) query that can be executed
-   * multiple times with different parameter bindings.
+   * Creates a prepared (pre-validated) query that can be executed multiple
+   * times with different parameter bindings. Builds and structurally
+   * validates the AST once (a malformed query fails fast, here, instead of
+   * on first use); SQL text still compiles fresh on every execute() call —
+   * see PreparedQuery's class doc comment for why.
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.

@@ -37,6 +37,21 @@ const graph = defineGraph({
   edges: { knows: { type: knows, from: [Person], to: [Person] } },
 });
 
+/**
+ * Forces a real wall-clock millisecond boundary. `valid_from`/the "current
+ * instant" bound in a compiled temporal filter are both ISO-8601 strings at
+ * millisecond precision — without this, a fast test runner could compile
+ * and insert within the same millisecond, in which case even the buggy
+ * (frozen-instant) behavior would pass `valid_from <= now` by coincidence,
+ * silently weakening these as regression guards.
+ */
+async function waitForNextMillisecond(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() === start) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 describe("query builder read freshness", () => {
   let backend: GraphBackend;
 
@@ -54,7 +69,9 @@ describe("query builder read freshness", () => {
       .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
       .prepare();
 
-    // prepare() ran before this row existed.
+    // prepare() ran before this row existed — force it onto a strictly
+    // later millisecond so the assertion can't pass by timing coincidence.
+    await waitForNextMillisecond();
     const alice = await store.nodes.Person.create({ name: "Alice" });
 
     const result = await personById.execute({ id: alice.id });
@@ -62,6 +79,7 @@ describe("query builder read freshness", () => {
 
     // A second row, created after the FIRST execute() too — pins that
     // execute() itself doesn't freeze anything either.
+    await waitForNextMillisecond();
     const bob = await store.nodes.Person.create({ name: "Bob" });
     const bobResult = await personById.execute({ id: bob.id });
     expect(bobResult).toEqual([{ id: bob.id, name: "Bob" }]);
@@ -78,6 +96,7 @@ describe("query builder read freshness", () => {
     const before = await allPeople.execute();
     expect(before).toHaveLength(0);
 
+    await waitForNextMillisecond();
     await store.nodes.Person.create({ name: "Alice" });
 
     const after = await allPeople.execute();
@@ -102,6 +121,7 @@ describe("query builder read freshness", () => {
     const before = await unioned.execute();
     expect(before).toHaveLength(0);
 
+    await waitForNextMillisecond();
     await store.nodes.Person.create({ name: "Alice" });
 
     const after = await unioned.execute();
@@ -123,6 +143,7 @@ describe("query builder read freshness", () => {
     const before = await countByName.execute();
     expect(before).toHaveLength(0);
 
+    await waitForNextMillisecond();
     await store.nodes.Person.create({ name: "Alice" });
 
     const after = await countByName.execute();

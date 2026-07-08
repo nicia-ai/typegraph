@@ -277,7 +277,8 @@ type PreparedQueryConfig<R> = Readonly<{
 }>;
 
 /**
- * A pre-compiled, parameterized query.
+ * A pre-validated, parameterized query — see the module doc comment above
+ * for why SQL text is compiled fresh per call, not cached from prepare().
  *
  * @example
  * ```typescript

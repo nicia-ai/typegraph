@@ -284,8 +284,9 @@ See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API 
 
 ## Prepared Queries
 
-Prepared queries let you compile a query once and execute it many times with different parameter
-values. This eliminates recompilation overhead for repeated query shapes.
+Prepared queries let you build and structurally validate a query's AST once — so a malformed query
+fails fast, before the first `.execute()` — and execute it many times with different parameter
+values.
 
 ### `param(name)`
 
@@ -297,8 +298,10 @@ import { param } from "@nicia-ai/typegraph";
 
 ### `prepare()`
 
-Call `.prepare()` on an executable query to pre-compile the AST and SQL. Returns a `PreparedQuery<R>`
-that can be executed with different bindings.
+Call `.prepare()` on an executable query to build and validate the AST once. Returns a
+`PreparedQuery<R>` that can be executed with different bindings; SQL text is compiled fresh on each
+`.execute()` call (see [Prepared query SQL compilation](#prepared-query-sql-compilation) below for
+why).
 
 ```typescript
 const findByName = store
@@ -308,7 +311,7 @@ const findByName = store
   .select((ctx) => ctx.p)
   .prepare();
 
-// Execute with different bindings — no recompilation
+// Execute with different bindings
 const alices = await findByName.execute({ name: "Alice" });
 const bobs = await findByName.execute({ name: "Bob" });
 ```
@@ -349,12 +352,20 @@ provided, and unknown binding keys are rejected.
 `param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
 :::
 
-### Performance
+### Prepared Query SQL Compilation
 
-When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the pre-compiled
-SQL text is sent directly to the database driver with substituted parameter values — zero
-recompilation overhead. When `executeRaw` is unavailable, the prepared query substitutes parameters
-into the AST and recompiles.
+`.prepare()` builds and validates the AST once, but does **not** cache compiled SQL text across
+`.execute()` calls — each call recompiles fresh. This is deliberate: a "current" (live) read binds
+its temporal-validity filter to the instant it's compiled at. Caching the compiled text from
+`.prepare()` time would freeze that instant for the prepared query's entire lifetime, silently
+hiding any row created after `.prepare()` ran from every subsequent `.execute()` call — exactly the
+bug this behavior was fixed to avoid. Recompiling is pure, in-memory string-building with no I/O, so
+the cost is negligible next to the query's actual database round-trip.
+
+When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the freshly
+compiled SQL text is sent directly to the database driver with substituted parameter values. When
+`executeRaw` is unavailable, the prepared query substitutes parameters into the AST and compiles
+through the standard path instead — same freshness guarantee, different code path.
 
 ## Query Debugging
 
