@@ -117,8 +117,10 @@ function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
     addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "id");
   }
 
-  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
-    for (const field of ast.selectiveFields) {
+  const hasSelectiveFields = (ast.selectiveFields?.length ?? 0) > 0;
+
+  if (hasSelectiveFields) {
+    for (const field of ast.selectiveFields ?? []) {
       if (field.isSystemField) {
         addRequiredColumn(
           requiredColumnsByAlias,
@@ -163,7 +165,7 @@ function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
     markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.having);
   }
 
-  if (ast.selectiveFields === undefined || ast.selectiveFields.length === 0) {
+  if (!hasSelectiveFields) {
     for (const predicate of ast.predicates) {
       markPredicateFieldsAsRequired(
         requiredColumnsByAlias,

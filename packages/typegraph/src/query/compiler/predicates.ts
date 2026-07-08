@@ -108,7 +108,7 @@ export function compileFieldColumn(
 /**
  * Gets the JSON pointer for a field reference.
  */
-function getFieldPointer(field: FieldRef): JsonPointer | undefined {
+export function getFieldPointer(field: FieldRef): JsonPointer | undefined {
   if (field.jsonPointer !== undefined) {
     return field.jsonPointer;
   }

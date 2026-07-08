@@ -7,6 +7,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { type AggregateExpr, type FieldRef, type SelectiveField } from "../ast";
 import { parseJsonPointer } from "../json-pointer";
+import { getFieldPointer } from "./predicates";
 
 // ============================================================
 // Constants
@@ -124,16 +125,11 @@ export function markSelectiveFieldAsRequired(
 }
 
 function getTopLevelPropsFieldName(field: FieldRef): string | undefined {
-  if (field.path.length === 0 || field.path[0] !== "props") {
-    return undefined;
-  }
+  const pointer = getFieldPointer(field);
+  if (pointer === undefined) return undefined;
 
-  if (field.jsonPointer !== undefined) {
-    const segments = parseJsonPointer(field.jsonPointer);
-    return segments.length === 1 ? segments[0] : undefined;
-  }
-
-  return field.path.length === 2 ? field.path[1] : undefined;
+  const segments = parseJsonPointer(pointer);
+  return segments.length === 1 ? segments[0] : undefined;
 }
 
 export function findSelectivePropsFieldForFieldRef(

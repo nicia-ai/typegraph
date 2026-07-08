@@ -6,9 +6,11 @@ perf: push selected top-level `props` field extractions into the
 start/traversal CTEs instead of carrying the whole raw `props` JSONB/JSON
 column outward for later extraction at the final projection. Each
 selected field is extracted once, inline, as its own typed CTE column
-(`__tg_<alias>_<field>`); the outer projection and any matching
-`ORDER BY` on the same field just reference that column directly instead
-of re-extracting from a carried-forward `<alias>_props` column.
+(named from a length-prefixed encoding of its alias and field, so
+distinct alias/field pairs can never collide on the same column name);
+the outer projection and any matching `ORDER BY` on the same field just
+reference that column directly instead of re-extracting from a
+carried-forward `<alias>_props` column.
 
 Found while investigating why a covering index on a system column (see
 `keySystemColumns`) still couldn't get Postgres to serve an indexed join

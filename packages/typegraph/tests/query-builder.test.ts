@@ -603,7 +603,7 @@ describe("Query Compilation to SQL", () => {
     const { sql } = toSqlWithParams(sqlObject);
 
     expect(sql).toContain(
-      'json_extract(n.props, \'$."name"\') AS "__tg_friend_name"',
+      'json_extract(n.props, \'$."name"\') AS "__tg_6:friend:4:name"',
     );
     expect(sql).not.toContain("p_props");
     expect(sql).not.toContain("p_version");
@@ -647,10 +647,55 @@ describe("Query Compilation to SQL", () => {
     const sqlObject = compileQuery(selectiveAst, graph.id, "postgres");
     const { sql } = toSqlWithParams(sqlObject, "postgres");
 
-    expect(sql).toContain("n.props #>> ARRAY['name'] AS \"__tg_friend_name\"");
-    expect(sql).toContain('cte_friend."__tg_friend_name" AS "friend_name"');
-    expect(sql).toContain('ORDER BY (cte_friend."__tg_friend_name" IS NULL)');
+    expect(sql).toContain(
+      "n.props #>> ARRAY['name'] AS \"__tg_6:friend:4:name\"",
+    );
+    expect(sql).toContain('cte_friend."__tg_6:friend:4:name" AS "friend_name"');
+    expect(sql).toContain(
+      'ORDER BY (cte_friend."__tg_6:friend:4:name" IS NULL)',
+    );
     expect(sql).not.toContain("friend_props");
+  });
+
+  it("does not collide CTE column names for aliases/fields that are ambiguous under naive underscore-joining", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p_full")
+      .traverse("knows", "e")
+      .to("Person", "p")
+      .select((context) => ({
+        a: context.p_full.name,
+        b: context.p.name,
+      }));
+
+    const ast = query.toAst();
+    const selectiveAst = {
+      ...ast,
+      selectiveFields: [
+        {
+          alias: "p_full",
+          field: "name",
+          outputName: "a",
+          isSystemField: false,
+          valueType: "string" as const,
+        },
+        {
+          alias: "p",
+          field: "full_name",
+          outputName: "b",
+          isSystemField: false,
+          valueType: "string" as const,
+        },
+      ],
+    };
+    const sqlObject = compileQuery(selectiveAst, graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    // Naively joining alias + "_" + field would produce the identical
+    // "__tg_p_full_name" column for both (alias="p_full", field="name") and
+    // (alias="p", field="full_name"). The length-prefixed encoding must keep
+    // them distinct so both end up as separate, unambiguous CTE columns.
+    expect(sql).toContain('AS "__tg_6:p_full:4:name"');
+    expect(sql).toContain('AS "__tg_1:p:9:full_name"');
   });
 
   it("compiles LIMIT and OFFSET", () => {

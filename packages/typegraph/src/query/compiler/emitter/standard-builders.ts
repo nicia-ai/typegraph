@@ -70,8 +70,19 @@ function qualifyColumn(owner: string, name: string): SQL {
 
 const SCOPED_RELEVANCE_NODES_ALIAS = "scoped_relevance_nodes";
 
+/**
+ * Builds a synthetic CTE column name for a selectively-extracted props field.
+ *
+ * Length-prefixes each component (`<length>:<value>`) rather than joining
+ * `alias`/`field` on a bare `_`: alias and field are both attacker/user-controlled
+ * strings that may themselves contain `_`, so naive concatenation lets two distinct
+ * (alias, field) pairs collide on the same column name (e.g. alias="p_full",
+ * field="name" vs. alias="p", field="full_name" would otherwise both produce
+ * "__tg_p_full_name"). The length prefix makes the encoding unambiguous regardless
+ * of what characters alias/field contain.
+ */
 function selectivePropsCteColumnName(field: SelectiveField): string {
-  return `__tg_${field.alias}_${field.field}`;
+  return `__tg_${field.alias.length}:${field.alias}:${field.field.length}:${field.field}`;
 }
 
 function buildScopedNodeIdsSubquery(nodeAlias: string): SQL {
@@ -86,18 +97,21 @@ function buildScopedNodeIdsSubquery(nodeAlias: string): SQL {
   `;
 }
 
+type CompileSelectivePropsSelectColumnsInput = Readonly<{
+  alias: string;
+  dialect: DialectAdapter;
+  selectiveFields: readonly SelectiveField[] | undefined;
+  tableAlias: string | undefined;
+}>;
+
 function compileSelectivePropsSelectColumns(
-  input: Readonly<{
-    alias: string;
-    dialect: DialectAdapter;
-    fields: readonly SelectiveField[] | undefined;
-    tableAlias: string | undefined;
-  }>,
+  input: CompileSelectivePropsSelectColumnsInput,
 ): SQL[] {
-  const { alias, dialect, fields, tableAlias } = input;
+  const { alias, dialect, selectiveFields, tableAlias } = input;
   const propsFields =
-    fields?.filter((field) => !field.isSystemField && field.alias === alias) ??
-    [];
+    selectiveFields?.filter(
+      (field) => !field.isSystemField && field.alias === alias,
+    ) ?? [];
   if (propsFields.length === 0) return [];
 
   const propsColumn = compileColumnReference(tableAlias, "props");
@@ -112,15 +126,22 @@ function compileSelectivePropsSelectColumns(
   });
 }
 
-function compileNodeSelectColumns(
-  input: Readonly<{
-    alias: string;
-    dialect: DialectAdapter;
-    requiredColumns: ReadonlySet<string> | undefined;
-    selectiveFields: readonly SelectiveField[] | undefined;
-    tableAlias: string | undefined;
-  }>,
+function appendSelectivePropsColumns(
+  baseColumns: readonly SQL[],
+  input: CompileSelectivePropsSelectColumnsInput,
 ): SQL[] {
+  return [...baseColumns, ...compileSelectivePropsSelectColumns(input)];
+}
+
+type CompileNodeSelectColumnsInput = Readonly<{
+  alias: string;
+  dialect: DialectAdapter;
+  requiredColumns: ReadonlySet<string> | undefined;
+  selectiveFields: readonly SelectiveField[] | undefined;
+  tableAlias: string | undefined;
+}>;
+
+function compileNodeSelectColumns(input: CompileNodeSelectColumnsInput): SQL[] {
   const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
     input;
   const baseColumns = NODE_COLUMNS.filter(
@@ -132,26 +153,23 @@ function compileNodeSelectColumns(
     (column) =>
       sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
   );
-  return [
-    ...baseColumns,
-    ...compileSelectivePropsSelectColumns({
-      alias,
-      dialect,
-      fields: selectiveFields,
-      tableAlias,
-    }),
-  ];
+  return appendSelectivePropsColumns(baseColumns, {
+    alias,
+    dialect,
+    selectiveFields,
+    tableAlias,
+  });
 }
 
-function compileEdgeSelectColumns(
-  input: Readonly<{
-    alias: string;
-    dialect: DialectAdapter;
-    requiredColumns: ReadonlySet<string> | undefined;
-    selectiveFields: readonly SelectiveField[] | undefined;
-    tableAlias: string | undefined;
-  }>,
-): SQL[] {
+type CompileEdgeSelectColumnsInput = Readonly<{
+  alias: string;
+  dialect: DialectAdapter;
+  requiredColumns: ReadonlySet<string> | undefined;
+  selectiveFields: readonly SelectiveField[] | undefined;
+  tableAlias: string | undefined;
+}>;
+
+function compileEdgeSelectColumns(input: CompileEdgeSelectColumnsInput): SQL[] {
   const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
     input;
   const baseColumns = EDGE_COLUMNS.filter((column) =>
@@ -160,15 +178,12 @@ function compileEdgeSelectColumns(
     (column) =>
       sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
   );
-  return [
-    ...baseColumns,
-    ...compileSelectivePropsSelectColumns({
-      alias,
-      dialect,
-      fields: selectiveFields,
-      tableAlias,
-    }),
-  ];
+  return appendSelectivePropsColumns(baseColumns, {
+    alias,
+    dialect,
+    selectiveFields,
+    tableAlias,
+  });
 }
 
 type BuildStandardStartCteInput = Readonly<{
