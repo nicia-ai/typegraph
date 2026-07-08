@@ -20,8 +20,10 @@ import {
   recordedReadSqlSchema,
   requireRecordedReadBinding,
 } from "../query/compiler/schema";
-import { compileTemporalFilter } from "../query/compiler/temporal";
-import { getDialect } from "../query/dialect";
+import {
+  compileTemporalFilter,
+  currentReadInstant,
+} from "../query/compiler/temporal";
 import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
@@ -144,7 +146,7 @@ function recordedTemporalFilter(
     asOf: coordinate.valid.asOf,
     recordedAsOf,
     tableAlias,
-    currentTimestamp: getDialect(backend.dialect).currentTimestamp(),
+    currentTimestamp: currentReadInstant(),
   });
 }
 

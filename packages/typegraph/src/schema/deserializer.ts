@@ -156,11 +156,6 @@ function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
   });
 
   validateImpliesEndpointCompatibility(
-    schema.ontology.relations.map((relation) => ({
-      metaEdgeName: relation.metaEdge,
-      from: relation.from,
-      to: relation.to,
-    })),
     buildEdgeEndpointKinds(schema.edges),
     registry,
   );

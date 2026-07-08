@@ -9,6 +9,7 @@ import type { z } from "zod";
 import {
   type GraphBackend,
   isLiveNodeRow,
+  rowPropsToObject,
   type TransactionBackend,
 } from "../backend/types";
 import { validateEdgeEndpoints } from "../constraints";
@@ -386,6 +387,7 @@ async function processNodeSlice(
     backend: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
+    registerAppliedNodeUpdate,
     seedNodeRow,
     seedUniqueRow,
   } = createNodeBatchValidationBackend(graphId, registry, backend);
@@ -439,9 +441,29 @@ async function processNodeSlice(
                 uniqueConstraints,
                 ...(node.validTo !== undefined && { validTo: node.validTo }),
               },
-              backend,
+              // The pending-aware overlay, not the raw backend: the update's
+              // uniqueness pre-check must see a unique value already reserved by
+              // an unflushed create EARLIER in this slice, so it degrades to a
+              // per-row error exactly as the sequential path does — rather than
+              // claiming the key on the real backend and colliding with that
+              // create at flush (which would throw and roll back the whole
+              // import). Writes still delegate to the real backend.
+              validationBackend,
             ),
           );
+          if (updateResult.ok) {
+            // The update mutated the real backend's uniqueness rows directly;
+            // reconcile the shared prime caches so a later create in this
+            // slice sees the post-update reservation state (matching the
+            // sequential path). See registerAppliedNodeUpdate.
+            registerAppliedNodeUpdate(
+              node.kind,
+              node.id,
+              rowPropsToObject(existing.props),
+              props,
+              uniqueConstraints,
+            );
+          }
           record(
             node,
             updateResult.ok ?

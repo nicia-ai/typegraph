@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 Autocommit `bulkCreate` and `bulkInsert` calls (nodes and edges) now

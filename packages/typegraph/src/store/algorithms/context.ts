@@ -15,6 +15,7 @@ import {
 } from "../../query/compiler/schema";
 import {
   compileTemporalFilter,
+  currentReadInstant,
   type TemporalFilterOptions,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
@@ -115,7 +116,7 @@ export function resolveTemporalFilter(
     asOf: resolved.asOf,
     recordedAsOf: resolved.recordedAsOf,
     tableAlias,
-    currentTimestamp: ctx.dialect.currentTimestamp(),
+    currentTimestamp: currentReadInstant(),
   };
   return compileTemporalFilter(filterOptions);
 }

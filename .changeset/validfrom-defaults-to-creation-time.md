@@ -28,3 +28,8 @@ narrowed to the clone's own creation time.
 `exportGraph`/`importGraph` round trips still default `includeTemporal` to
 `false`; without it, imported records get a fresh `validFrom` at import
 time rather than the source's original value (see the Interchange docs).
+
+Custom `GraphBackend` implementations that build their own inserts (rather
+than reusing the bundled Drizzle operation builders) should apply the same
+rule: an omitted `validFrom` defaults to the row's creation instant, and an
+explicit `null` is preserved as SQL `NULL` (open-left).

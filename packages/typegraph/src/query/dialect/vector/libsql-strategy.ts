@@ -40,6 +40,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../vector-strategy";
+import { vectorPageClause } from "./pagination";
 
 /** Physical-name prefixes for the per-field table and its DiskANN index. */
 const TABLE_PREFIX = "tg_vec";
@@ -254,10 +255,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
       const pageK = params.limit + (params.offset ?? 0);
       const annK =
         candidates === undefined ? pageK : pageK * CANDIDATE_FILTER_OVERFETCH;
-      const pageClause =
-        params.offset === undefined || params.offset === 0 ?
-          sql`LIMIT ${params.limit}`
-        : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
+      const pageClause = vectorPageClause(params.limit, params.offset);
       return sql`
         SELECT ${quoted}."node_id" AS node_id, ${score} AS score
         FROM vector_top_k(${indexName}, ${query}, ${annK})
@@ -278,10 +276,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
         vectorMinScoreCondition(distance, params.metric, params.minScore),
       );
     }
-    const pageClause =
-      params.offset === undefined || params.offset === 0 ?
-        sql`LIMIT ${params.limit}`
-      : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
+    const pageClause = vectorPageClause(params.limit, params.offset);
     return sql`
       SELECT ${quoted}."node_id" AS node_id, ${score} AS score
       FROM ${quoted}

@@ -251,6 +251,13 @@ export function createNodeBatchValidationBackend(
     props: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ) => void;
+  registerAppliedNodeUpdate: (
+    kind: string,
+    id: string,
+    oldProps: Record<string, unknown>,
+    newProps: Record<string, unknown>,
+    constraints: readonly UniqueConstraint[],
+  ) => void;
   seedNodeRow: (kind: string, id: string, row: CachedNodeRow) => void;
   seedUniqueRow: (
     kind: string,
@@ -364,6 +371,77 @@ export function createNodeBatchValidationBackend(
     }
   }
 
+  // Reflects a completed in-slice node update in the uniqueness caches so a
+  // later row's pre-check sees the post-update reservation state — the state
+  // the sequential path's per-row backend read would observe. The batch path
+  // primes the caches ONCE before routing, but an in-slice update mutates the
+  // real backend's uniqueness rows directly; without reconciling here a later
+  // create either (a) claims a value this update just freed yet gets rejected
+  // against the stale reservation, or (b) passes the stale "free" cache for a
+  // value this update just took and then violates the real constraint at
+  // flush, aborting the whole import. Mirrors updateUniquenessEntries' key
+  // diff: for each constraint whose key changed, the released old key becomes
+  // free and the reserved new key becomes owned by this node, across every
+  // kind the constraint's scope checks.
+  function registerAppliedNodeUpdate(
+    kind: string,
+    id: string,
+    oldProps: Record<string, unknown>,
+    newProps: Record<string, unknown>,
+    constraints: readonly UniqueConstraint[],
+  ): void {
+    for (const constraint of constraints) {
+      const oldApplies = checkWherePredicate(constraint, oldProps);
+      const newApplies = checkWherePredicate(constraint, newProps);
+      const oldKey =
+        oldApplies ?
+          computeUniqueKey(oldProps, constraint.fields, constraint.collation)
+        : undefined;
+      const newKey =
+        newApplies ?
+          computeUniqueKey(newProps, constraint.fields, constraint.collation)
+        : undefined;
+      if (oldKey === newKey) continue;
+
+      const kindsToCheck = getKindsForUniquenessCheck(
+        kind,
+        constraint.scope,
+        registry,
+      );
+
+      if (oldKey !== undefined) {
+        for (const kindToCheck of kindsToCheck) {
+          const cacheKey = buildUniqueCacheKey(
+            graphId,
+            kindToCheck,
+            constraint.name,
+            oldKey,
+          );
+          // This node released the key on the real backend, so it is now
+          // free. Clear any pending reservation and record the known-free
+          // state (overwriting a stale seeded owner) so a later create's
+          // pre-check sees a vacancy instead of a redundant backend read.
+          pendingUniqueOwners.delete(cacheKey);
+          uniqueCache.set(cacheKey, undefined);
+        }
+      }
+      if (newKey !== undefined) {
+        for (const kindToCheck of kindsToCheck) {
+          const cacheKey = buildUniqueCacheKey(
+            graphId,
+            kindToCheck,
+            constraint.name,
+            newKey,
+          );
+          // This node now holds the key on the real backend. A pending owner
+          // shadows the seeded uniqueCache entry (checkUniqueCached consults
+          // it first), matching registerPendingUniqueEntries' reservation.
+          pendingUniqueOwners.set(cacheKey, id);
+        }
+      }
+    }
+  }
+
   // Seed functions let batch preparation prime the caches from one
   // getNodes / checkUniqueBatch round trip instead of a per-row probe.
   // Seeding an absent result (`undefined`) is meaningful — it marks the
@@ -396,6 +474,7 @@ export function createNodeBatchValidationBackend(
     backend: validationBackend,
     registerPendingNode,
     registerPendingUniqueEntries,
+    registerAppliedNodeUpdate,
     seedNodeRow,
     seedUniqueRow,
   };

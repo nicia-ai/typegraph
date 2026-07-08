@@ -17,7 +17,6 @@ import {
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
-import { jsonPointer } from "../../json-pointer";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -39,7 +38,7 @@ import {
   HYBRID_CANDIDATES_CTE_ALIAS,
   vectorSlotKey,
 } from "../schema";
-import { compileTypedJsonExtract } from "../typed-json-extract";
+import { compileSelectivePropsExtraction } from "../typed-json-extract";
 import {
   EDGE_COLUMNS,
   EMPTY_REQUIRED_COLUMNS,
@@ -116,12 +115,11 @@ function compileSelectivePropsSelectColumns(
 
   const propsColumn = compileColumnReference(tableAlias, "props");
   return propsFields.map((field) => {
-    const extracted = compileTypedJsonExtract({
-      column: propsColumn,
+    const extracted = compileSelectivePropsExtraction(
+      field,
+      propsColumn,
       dialect,
-      pointer: jsonPointer([field.field]),
-      valueType: field.valueType,
-    });
+    );
     return sql`${extracted} AS ${quoteIdentifier(selectivePropsCteColumnName(field))}`;
   });
 }

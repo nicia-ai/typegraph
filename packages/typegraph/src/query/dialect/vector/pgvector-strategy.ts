@@ -44,6 +44,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../vector-strategy";
+import { vectorPageClause } from "./pagination";
 
 /** Physical-name prefixes for the per-field table and its ANN index. */
 const TABLE_PREFIX = "tg_vec";
@@ -295,10 +296,7 @@ export const pgvectorStrategy: VectorStrategy = {
     // Pagination is rank-relative: the scan fetches `limit + offset`
     // ordered candidates and OFFSET discards the leading page.
     const pageOffset = params.offset ?? 0;
-    const pageClause =
-      pageOffset === 0 ?
-        sql`LIMIT ${params.limit}`
-      : sql`LIMIT ${params.limit} OFFSET ${params.offset}`;
+    const pageClause = vectorPageClause(params.limit, params.offset);
     // IVFFlat's iterative scan only offers `relaxed_order` (no
     // strict_order mode), so under the backend-applied
     // `ivfflat.iterative_scan` the index may emit the candidate set

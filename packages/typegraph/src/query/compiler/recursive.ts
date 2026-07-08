@@ -15,7 +15,6 @@ import {
   type DialectAdapter,
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
-import { jsonPointer } from "../json-pointer";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
   createTemporalFilterPass,
@@ -32,7 +31,7 @@ import {
   type PredicateCompilerContext,
 } from "./predicates";
 import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
-import { compileTypedJsonExtract } from "./typed-json-extract";
+import { compileSelectivePropsExtraction } from "./typed-json-extract";
 import {
   addRequiredColumn,
   EMPTY_REQUIRED_COLUMNS,
@@ -112,10 +111,7 @@ function runRecursiveQueryPassPipeline(
   const temporalPass = runCompilerPass(state, {
     name: "temporal_filters",
     execute(currentState): TemporalFilterPass {
-      return createTemporalFilterPass(
-        currentState.ast,
-        currentState.ctx.dialect.currentTimestamp(),
-      );
+      return createTemporalFilterPass(currentState.ast);
     },
     update(currentState, temporalFilterPass): RecursiveQueryPassState {
       return {
@@ -730,12 +726,7 @@ function compileRecursiveSelectiveProjection(
     }
 
     const column = sql.raw(`${field.alias}_props`);
-    const extracted = compileTypedJsonExtract({
-      column,
-      dialect,
-      pointer: jsonPointer([field.field]),
-      valueType: field.valueType,
-    });
+    const extracted = compileSelectivePropsExtraction(field, column, dialect);
     return sql`${extracted} AS ${quoteIdentifier(field.outputName)}`;
   });
 

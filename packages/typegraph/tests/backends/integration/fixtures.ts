@@ -123,6 +123,14 @@ const documentPublishedAtIndex = defineNodeIndex(Document, {
   fields: ["publishedAt"],
 });
 
+// keySystemColumns-only covering index (index-only join coverage): it carries
+// no prop `fields`, so bulkFindByIndex has nothing to probe by and rejects it.
+const companyIdCoveringIndex = defineNodeIndex(Company, {
+  name: "company_id_covering",
+  keySystemColumns: ["id"],
+  coveringFields: ["name"],
+});
+
 export const integrationTestGraph = defineGraph({
   id: "integration_test",
   nodes: {
@@ -138,6 +146,7 @@ export const integrationTestGraph = defineGraph({
     personActiveNameIndex,
     documentAuthorIndex,
     documentPublishedAtIndex,
+    companyIdCoveringIndex,
   ],
   edges: {
     worksAt: {

@@ -31,6 +31,7 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerImportUniquenessIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -137,6 +138,7 @@ export function createIntegrationTestSuite(
     registerStoreViewIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
+    registerImportUniquenessIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
   });

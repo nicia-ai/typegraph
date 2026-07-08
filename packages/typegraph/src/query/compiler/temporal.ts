@@ -8,6 +8,26 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type TemporalMode } from "../../core/types";
+import { nowIso } from "../../utils/date";
+
+/**
+ * The "current" valid-time read instant, bound as a parameter — the
+ * APPLICATION clock (`nowIso()`), NOT the database clock (`NOW()`).
+ *
+ * `valid_from` is stamped from the application clock on write, so a "current"
+ * read must compare against the same clock. Comparing `valid_from` (app clock)
+ * against the database `NOW()` would hide a freshly-created row from an
+ * immediately-following current read whenever the app server's clock runs
+ * ahead of the database server's clock — a read-after-write consistency
+ * violation on Postgres (issue #242; SQLite is single-process so it was never
+ * exposed). This binds the same clock the facade search-currency filter
+ * (`liveNodeIdsSubquery`) and the recorded/logical clock already use, and the
+ * same form the `asOf` predicate uses (a bound ISO instant), so it needs no
+ * dialect-specific expression.
+ */
+export function currentReadInstant(): SQL {
+  return sql`${nowIso()}`;
+}
 
 /**
  * Temporal filter options.
@@ -70,7 +90,7 @@ export function compileTemporalFilter(options: TemporalFilterOptions): SQL {
         // valid-current when recorded but ended before the read.
         const now =
           recordedAsOf === undefined ?
-            (currentTimestamp ?? sql`CURRENT_TIMESTAMP`)
+            (currentTimestamp ?? currentReadInstant())
           : sql`${recordedAsOf}`;
         return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
       }

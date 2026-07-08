@@ -1,22 +1,24 @@
 import { type SQL } from "drizzle-orm";
 
 import type { QueryAst } from "../../ast";
-import { compileTemporalFilter, extractTemporalOptions } from "../temporal";
+import {
+  compileTemporalFilter,
+  currentReadInstant,
+  extractTemporalOptions,
+} from "../temporal";
 
 export type TemporalFilterPass = Readonly<{
   forAlias: (tableAlias?: string) => SQL;
 }>;
 
 /**
- * Creates a temporal filter pass bound to a query AST and timestamp source.
+ * Creates a temporal filter pass bound to a query AST.
  *
- * Invariant:
- * - All temporal clauses for a query use the same timestamp expression.
+ * Invariant: all temporal clauses for a query use the same "current" instant,
+ * bound once here from the application clock (see {@link currentReadInstant}).
  */
-export function createTemporalFilterPass(
-  ast: QueryAst,
-  currentTimestamp: SQL,
-): TemporalFilterPass {
+export function createTemporalFilterPass(ast: QueryAst): TemporalFilterPass {
+  const currentTimestamp = currentReadInstant();
   return {
     forAlias(tableAlias?: string): SQL {
       return compileTemporalFilter({

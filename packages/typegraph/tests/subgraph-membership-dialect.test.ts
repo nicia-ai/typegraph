@@ -1,52 +1,28 @@
 /**
- * Dialect-mediated CTE membership (`subqueryMembership`).
+ * Subgraph CTE membership emission.
  *
  * The subgraph extractor's final fetches filter node/edge ids against the
- * `included_ids` CTE. On SQLite, `IN (subquery)` is evaluated with a
- * transient index and is optimal. On PostgreSQL, the same form is pulled
- * up into a join whose recursive-CTE row estimate (~10 rows for a
- * single-row seed) drives the planner into a nested-loop join FILTER —
- * measured at ~10M discarded rows / 383ms on the depth-3 subgraph stress
- * bench. `= ANY(ARRAY(subquery))` collapses the CTE once via InitPlan and
- * is hash-probed and index-condition eligible (~15ms for the same fetch).
+ * `included_ids` CTE. On SQLite this is inlined as `IN (subquery)` — evaluated
+ * with a transient index and optimal as-is. On PostgreSQL the same
+ * `IN (subquery)` form is pulled up into a join whose recursive-CTE row
+ * estimate (~10 rows for a single-row seed) drives the planner into a
+ * nested-loop join FILTER (measured at ~10M discarded rows / 383ms on the
+ * depth-3 subgraph stress bench), so the PG path instead fetches the closure
+ * ids once and passes them as a single `text[]` parameter, filtered via an
+ * `unnest` semi-join (see `store/subgraph.ts`).
  *
- * These tests pin each dialect's emitted form and that the subgraph
- * fetches actually route through it; cross-backend subgraph semantics are
- * covered by the shared integration suite.
+ * This test pins SQLite's emitted membership form and that the subgraph fetches
+ * actually route through it; cross-backend subgraph semantics — including the
+ * PostgreSQL parameterized form — are covered by the shared integration suite.
  */
-import { sql } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
-import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
-import { getDialect } from "../src/query/dialect";
 
-describe("subqueryMembership dialect forms", () => {
-  const column = sql.raw("e.to_id");
-  const subquery = sql.raw("SELECT id FROM included_ids");
-
-  it("emits IN (subquery) on SQLite", () => {
-    const rendered = new SQLiteSyncDialect().sqlToQuery(
-      getDialect("sqlite").subqueryMembership(column, subquery),
-    );
-    expect(rendered.sql).toBe("e.to_id IN (SELECT id FROM included_ids)");
-  });
-
-  it("emits = ANY(ARRAY(subquery)) on PostgreSQL", () => {
-    const rendered = new PgDialect().sqlToQuery(
-      getDialect("postgres").subqueryMembership(column, subquery),
-    );
-    expect(rendered.sql).toBe(
-      "e.to_id = ANY(ARRAY(SELECT id FROM included_ids))",
-    );
-  });
-});
-
-describe("subgraph fetches route membership through the dialect", () => {
+describe("subgraph fetches inline the SQLite CTE membership form", () => {
   const Person = defineNode("Person", {
     schema: z.object({ name: z.string() }),
   });

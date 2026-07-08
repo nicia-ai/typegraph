@@ -3,32 +3,17 @@
  *
  * Every place that builds a query-capable `KindRegistry` — `buildKindRegistry`
  * for a live `GraphDef`, and the schema deserializer for a persisted schema —
- * calls this so an endpoint-incompatible `implies(edgeA, edgeB)` can never
- * reach `KindRegistry.expandImplyingEdges()`. Without this gate, `edgeA`
- * would be folded into any `expand: "implying"` traversal for `edgeB` even
- * when `edgeA` connects entirely different node kinds — the query compiler
- * filters by expanded edge kind plus the *queried* node aliases, not by
- * `edgeB`'s own domain/range, so a mismatched edge would silently satisfy
- * whatever kinds the traversal alias happens to ask for.
+ * calls this so an endpoint-incompatible implication can never reach
+ * `KindRegistry.expandImplyingEdges()`. Without this gate, an implying edge
+ * would be folded into any `expand: "implying"` traversal for the edge it
+ * implies even when it connects entirely different node kinds — the query
+ * compiler filters by expanded edge kind plus the *queried* node aliases, not
+ * by the implied edge's own domain/range, so a mismatched edge would silently
+ * satisfy whatever kinds the traversal alias happens to ask for.
  */
 import { ConfigurationError } from "../errors/index";
 import { META_EDGE_IMPLIES } from "../ontology/constants";
-import { getTypeName, type OntologyRelation } from "../ontology/types";
 import { type KindRegistry } from "./kind-registry";
-
-/**
- * The minimal shape both a live `OntologyRelation` (`metaEdge` is a
- * `MetaEdge` object, `from`/`to` may be `EdgeType` objects) and a
- * `SerializedOntologyRelation` (`metaEdge`/`from`/`to` are all plain
- * strings) can be adapted to — this validator only needs the meta-edge
- * name and each endpoint's kind name. `from`/`to` reuse `OntologyRelation`'s
- * own field type so this can never drift from what `getTypeName()` accepts.
- */
-export type ImpliesRelationLike = Readonly<{
-  metaEdgeName: string;
-  from: OntologyRelation["from"];
-  to: OntologyRelation["to"];
-}>;
 
 /** An edge kind's declared domain (`from`) and range (`to`) kind names. */
 export type EdgeEndpointKinds = Readonly<{
@@ -37,51 +22,54 @@ export type EdgeEndpointKinds = Readonly<{
 }>;
 
 /**
- * Rejects `implies(edgeA, edgeB)` relations whose declared endpoints can
- * never be compatible with the edge they imply.
+ * Rejects implications whose implying edge can never be endpoint-compatible
+ * with the edge it implies.
  *
- * A relation is compatible when every kind the implying edge allows on a
- * side is assignable — via `registry.isAssignableToAny` (equal, or a
- * `subClassOf` descendant) — to at least one kind the implied edge allows
- * on that same side. Relations naming an edge kind absent from
- * `edgeEndpoints` are skipped — they cannot affect this graph's traversals.
+ * The check runs over the *effective transitive closure*, not the authored
+ * direct relations: for every registered edge `C`, every edge `A` that
+ * `registry.expandImplyingEdges(C)` reports as (transitively) implying `C` is
+ * validated directly against `C`. This is what keeps the gate sound through an
+ * unregistered intermediate — given `A implies B implies C` with `B` absent
+ * from `edgeEndpoints`, neither direct hop is individually checkable, yet the
+ * precomputed closure still folds `A` into a traversal of `C`, so `A` must be
+ * validated against `C` regardless of `B`.
  *
- * Soundness holds transitively: validating each direct relation certifies
- * the whole `edgeImplyingClosure`, since subclass assignability composes
- * (if A implies B and B implies C, A→B and B→C compatibility together
- * guarantee A→C compatibility) — no separate check of the expanded closure
- * is needed.
+ * A relation is compatible when every kind the implying edge allows on a side
+ * is assignable — via `registry.isAssignableToAny` (equal, or a `subClassOf`
+ * descendant) — to at least one kind the implied edge allows on that same
+ * side. An implying edge kind absent from `edgeEndpoints` is skipped: it is
+ * unregistered on this graph, has no stored rows, and so can never fold
+ * anything into a traversal.
  */
 export function validateImpliesEndpointCompatibility(
-  relations: readonly ImpliesRelationLike[],
   edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>,
   registry: KindRegistry,
 ): void {
-  for (const relation of relations) {
-    if (relation.metaEdgeName !== META_EDGE_IMPLIES) continue;
-
-    const implyingEdgeKind = getTypeName(relation.from);
-    const impliedEdgeKind = getTypeName(relation.to);
-    const implyingEndpoints = edgeEndpoints.get(implyingEdgeKind);
-    const impliedEndpoints = edgeEndpoints.get(impliedEdgeKind);
-    if (!implyingEndpoints || !impliedEndpoints) continue;
-
-    assertEndpointCompatible(
-      "from",
-      implyingEdgeKind,
-      implyingEndpoints.from,
+  for (const [impliedEdgeKind, impliedEndpoints] of edgeEndpoints) {
+    for (const implyingEdgeKind of registry.expandImplyingEdges(
       impliedEdgeKind,
-      impliedEndpoints.from,
-      registry,
-    );
-    assertEndpointCompatible(
-      "to",
-      implyingEdgeKind,
-      implyingEndpoints.to,
-      impliedEdgeKind,
-      impliedEndpoints.to,
-      registry,
-    );
+    )) {
+      if (implyingEdgeKind === impliedEdgeKind) continue;
+      const implyingEndpoints = edgeEndpoints.get(implyingEdgeKind);
+      if (!implyingEndpoints) continue;
+
+      assertEndpointCompatible(
+        "from",
+        implyingEdgeKind,
+        implyingEndpoints.from,
+        impliedEdgeKind,
+        impliedEndpoints.from,
+        registry,
+      );
+      assertEndpointCompatible(
+        "to",
+        implyingEdgeKind,
+        implyingEndpoints.to,
+        impliedEdgeKind,
+        impliedEndpoints.to,
+        registry,
+      );
+    }
   }
 }
 

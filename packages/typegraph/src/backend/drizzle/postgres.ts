@@ -1169,15 +1169,26 @@ function createPostgresOperationBackend(
     });
   }
 
+  const batchConfig = {
+    checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
+    edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
+    // Unlike the static siblings, the embedding upsert honors a runtime
+    // `maxBindParameters` override so its chunk size tracks the connection's
+    // actual bind budget.
+    embeddingUpsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS) /
+          EMBEDDING_UPSERT_PARAM_COUNT,
+      ),
+    ),
+    getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
+    getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
+    nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
+    uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
+  };
   const commonBackend = createCommonOperationBackend({
-    batchConfig: {
-      checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
-      edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
-      getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
-      getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
-      nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
-      uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
-    },
+    batchConfig,
     execution: {
       execAll,
       execGet,
@@ -1240,16 +1251,12 @@ function createPostgresOperationBackend(
             params.rows.map((row) => [row.nodeId, row] as const),
           );
           const rows = [...rowsById.values()];
-          const chunkSize = Math.max(
-            1,
-            Math.floor(
-              (capabilities.maxBindParameters ??
-                POSTGRES_MAX_BIND_PARAMETERS) / EMBEDDING_UPSERT_PARAM_COUNT,
-            ),
-          );
           const timestamp = nowIso();
           try {
-            for (const chunk of chunkArray(rows, chunkSize)) {
+            for (const chunk of chunkArray(
+              rows,
+              batchConfig.embeddingUpsertBatchSize,
+            )) {
               const statements =
                 vectorStrategy.buildUpsertBatch === undefined ?
                   chunk.flatMap((row) =>
