@@ -38,6 +38,8 @@ import {
   type SqlTableNames,
   type Store,
   type StoreOptions,
+  type TransactionOutcome,
+  type TransactionReceipt,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -313,6 +315,29 @@ void store.transaction(async (tx) => {
   expectType<typeof tx.sql>(tx.sql);
   expectType<typeof tx.backend.executeStatement>(tx.backend.executeStatement);
   expectType<typeof tx.backend.executeDdl>(tx.backend.executeDdl);
+});
+
+// transactionWithReceipt mirrors transaction()'s callback signature, but
+// wraps the result in a TransactionOutcome carrying the write receipt
+// alongside it.
+const receiptOutcome = store.transactionWithReceipt(async (tx) => {
+  expectType<typeof tx.sql>(tx.sql);
+  return tx.nodes.Person.create({ email: "alice@example.com", name: "Alice" });
+});
+expectType<
+  Promise<
+    TransactionOutcome<Awaited<ReturnType<typeof store.nodes.Person.create>>>
+  >
+>(receiptOutcome);
+void receiptOutcome.then(({ receipt }) => {
+  expectType<TransactionReceipt>(receipt);
+});
+
+// The history-store overload narrows `tx` to HistoryTransactionContext, same
+// as transaction() does above.
+void historyStore.transactionWithReceipt(async (tx) => {
+  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
+  expectError(tx.sql?.select());
 });
 
 const nodeKinds = getNodeKinds(graph);
