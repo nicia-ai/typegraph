@@ -13,10 +13,25 @@
  * loader materializes both directions so a `from = person` traversal sees
  * the full friend list, matching every other engine driver in this program.
  *
- * Files are streamed line-by-line; lookaside maps (creator, container,
- * reply-of, moderator, city) hold numeric ids only and are released as soon
- * as the dependent entity finishes, so SF1 (5.3M rows) loads within a
- * default Node heap.
+ * Files are streamed line-by-line. Every "which person created this post"
+ * style relationship is resolved with a zip-join against the companion
+ * relationship file (`readZippedRow` / `assertZipStreamExhausted` below)
+ * instead of a lookaside `Map` — empirically verified (row-by-row, against
+ * both the real SF1 datagen fixture and the committed smoke fixture) that
+ * CsvBasic datagen output, and the committed smoke fixture generator, always
+ * emit a relationship file in the same row order as its driving entity file.
+ * A zip join needs only the current row of each file in memory, so peak
+ * memory no longer scales with total row count — the old lookaside-map
+ * approach held one Map entry per Post/Comment in the *entire* dataset until
+ * that entity's whole stream finished, which OOM'd a real SF10 run (~10M
+ * posts, ~20M+ comments) around 4.2GB. If the row-order assumption is ever
+ * violated — different datagen configuration, a corrupt file — the zip join
+ * throws immediately instead of silently mis-joining rows.
+ *
+ * `SnbIdPools` (harvested ids for benchmark request sampling) is similarly
+ * bounded: `request-plan.ts` only ever draws a small, fixed number of
+ * random picks per query type, so each pool is a fixed-size reservoir
+ * sample (Algorithm R) rather than every id in the dataset.
  */
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -92,11 +107,20 @@ export type SnbRowSink = Readonly<{
   stageComplete?: () => Promise<void>;
 }>;
 
-/** Real entity ids harvested during the load, for benchmark request sampling. */
+/**
+ * Ids harvested during the load, for benchmark request sampling. Each field
+ * is a bounded reservoir sample (Algorithm R, up to `ID_SAMPLE_POOL_SIZE`
+ * ids) drawn uniformly from the full stream, NOT the full set of ids in the
+ * dataset: `request-plan.ts` only ever draws a small, fixed number of
+ * random picks per query type, so retaining every id (millions, at LDBC
+ * SF10 scale) would be wasted memory. `counts` carries the true totals
+ * (unaffected by the reservoir bound) for reporting.
+ */
 export type SnbIdPools = Readonly<{
   persons: readonly string[];
   posts: readonly string[];
   comments: readonly string[];
+  counts: Readonly<{ persons: number; posts: number; comments: number }>;
 }>;
 
 export type SnbCsvLoadResult = Readonly<{
@@ -125,6 +149,56 @@ const forumId = (id: string): string => `forum:${id}`;
 const messageId = (id: string): string => `message:${id}`;
 
 /**
+ * Fixed-capacity reservoir sample (Algorithm R): after `offer` has been
+ * called any number of times, `values()` holds a uniform random sample of
+ * up to `capacity` of the offered items, in O(capacity) memory regardless
+ * of how many items were offered.
+ */
+function createReservoirSampler<T>(
+  capacity: number,
+  random: () => number,
+): Readonly<{ offer: (item: T) => void; values: () => readonly T[] }> {
+  const reservoir: T[] = [];
+  let seen = 0;
+  return {
+    offer(item: T): void {
+      seen += 1;
+      if (reservoir.length < capacity) {
+        reservoir.push(item);
+        return;
+      }
+      const index = Math.floor(random() * seen);
+      if (index < capacity) {
+        reservoir[index] = item;
+      }
+    },
+    values: () => reservoir,
+  };
+}
+
+/**
+ * xorshift32 PRNG, matching the generator used by `request-plan.ts` and this
+ * program's other benchmark seeders (each keeps its own small copy rather
+ * than sharing a module — established convention in this package). Fixed
+ * seed: the reservoir sample must be identical across every engine's
+ * independent load of the same dataset (every engine streams the same files
+ * in the same order), not just internally consistent within one run.
+ */
+function createRng(seed_: number): () => number {
+  let seed = seed_;
+  return function next(): number {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    return (seed >>> 0) / 4_294_967_295;
+  };
+}
+
+/** Reservoir capacity, comfortably above any realistic `--requests-per-query`. */
+const ID_SAMPLE_POOL_SIZE = 10_000;
+const ID_SAMPLE_SEED = 1_469_598_103;
+
+/**
  * Stream the datagen CSVs under `root` (containing `dynamic/`) into `sink`
  * as Person/Forum/Post/Comment node rows plus knows/hasCreator/containerOf/
  * replyOf edge rows.
@@ -136,19 +210,35 @@ export async function streamSnbCsvDataset(
 ): Promise<SnbCsvLoadResult> {
   const dynamicFile = (name: string) =>
     path.join(root, "dynamic", `${name}_0_0.csv`);
-  const persons: string[] = [];
-  const posts: string[] = [];
-  const comments: string[] = [];
+  const sampleRandom = createRng(ID_SAMPLE_SEED);
+  const personSample = createReservoirSampler<string>(
+    ID_SAMPLE_POOL_SIZE,
+    sampleRandom,
+  );
+  const postSample = createReservoirSampler<string>(
+    ID_SAMPLE_POOL_SIZE,
+    sampleRandom,
+  );
+  const commentSample = createReservoirSampler<string>(
+    ID_SAMPLE_POOL_SIZE,
+    sampleRandom,
+  );
+  let personCount = 0;
+  let postCount = 0;
+  let commentCount = 0;
   let rows = 0;
 
-  const personCity = await pairMap(
-    dynamicFile("person_isLocatedIn_place"),
-    0,
-    1,
-  );
+  const personCityRows = csvRows(dynamicFile("person_isLocatedIn_place"), 2);
   for await (const parts of csvRows(dynamicFile("person"), 8)) {
     const id = parts[0]!;
-    persons.push(personId(id));
+    const cityRow = await readZippedRow(
+      personCityRows,
+      0,
+      id,
+      "person_isLocatedIn_place",
+    );
+    personSample.offer(personId(id));
+    personCount += 1;
     rows += 1;
     await sink.person({
       id: personId(id),
@@ -159,12 +249,16 @@ export async function streamSnbCsvDataset(
       creationDate: isoFromMillis(parts[5]),
       locationIp: parts[6]!,
       browserUsed: parts[7]!,
-      cityId: `place:${requireMapped(personCity, id, "person city")}`,
+      cityId: `place:${cityRow[1]}`,
     });
   }
-  personCity.clear();
+  await assertZipStreamExhausted(
+    personCityRows,
+    "person_isLocatedIn_place",
+    "person",
+  );
   await sink.stageComplete?.();
-  log(`persons: ${persons.length}`);
+  log(`persons: ${personCount}`);
 
   let knowsDirected = 0;
   for await (const parts of csvRows(dynamicFile("person_knows_person"), 3)) {
@@ -186,38 +280,55 @@ export async function streamSnbCsvDataset(
   await sink.stageComplete?.();
   log(`knows edges (directed): ${knowsDirected}`);
 
-  const forumModerator = await pairMap(
+  const forumModeratorRows = csvRows(
     dynamicFile("forum_hasModerator_person"),
-    0,
-    1,
+    2,
   );
   let forums = 0;
   for await (const parts of csvRows(dynamicFile("forum"), 3)) {
     const id = parts[0]!;
+    const moderatorRow = await readZippedRow(
+      forumModeratorRows,
+      0,
+      id,
+      "forum_hasModerator_person",
+    );
     forums += 1;
     rows += 1;
     await sink.forum({
       id: forumId(id),
       title: parts[1]!,
       creationDate: isoFromMillis(parts[2]),
-      moderatorId: personId(
-        String(requireMapped(forumModerator, id, "forum moderator")),
-      ),
+      moderatorId: personId(moderatorRow[1]!),
     });
   }
-  forumModerator.clear();
+  await assertZipStreamExhausted(
+    forumModeratorRows,
+    "forum_hasModerator_person",
+    "forum",
+  );
   await sink.stageComplete?.();
   log(`forums: ${forums}`);
 
-  const postCreator = await pairMap(
-    dynamicFile("post_hasCreator_person"),
-    0,
-    1,
-  );
-  const postForum = await pairMap(dynamicFile("forum_containerOf_post"), 1, 0);
+  const postCreatorRows = csvRows(dynamicFile("post_hasCreator_person"), 2);
+  const postForumRows = csvRows(dynamicFile("forum_containerOf_post"), 2);
   for await (const parts of csvRows(dynamicFile("post"), 8)) {
     const id = parts[0]!;
-    posts.push(messageId(id));
+    const creatorRow = await readZippedRow(
+      postCreatorRows,
+      0,
+      id,
+      "post_hasCreator_person",
+    );
+    // forum_containerOf_post is `Forum.id|Post.id` — the zip key is column 1.
+    const forumRow = await readZippedRow(
+      postForumRows,
+      1,
+      id,
+      "forum_containerOf_post",
+    );
+    postSample.offer(messageId(id));
+    postCount += 1;
     rows += 1;
     await sink.post({
       id: messageId(id),
@@ -230,50 +341,72 @@ export async function streamSnbCsvDataset(
       kind: "hasCreator",
       fromId: messageId(id),
       fromKind: "Post",
-      toId: personId(String(requireMapped(postCreator, id, "post creator"))),
+      toId: personId(creatorRow[1]!),
     });
     await sink.edge({
       kind: "containerOf",
-      fromId: forumId(String(requireMapped(postForum, id, "post forum"))),
+      fromId: forumId(forumRow[0]!),
       toId: messageId(id),
     });
   }
-  postCreator.clear();
-  postForum.clear();
+  await assertZipStreamExhausted(
+    postCreatorRows,
+    "post_hasCreator_person",
+    "post",
+  );
+  await assertZipStreamExhausted(
+    postForumRows,
+    "forum_containerOf_post",
+    "post",
+  );
   await sink.stageComplete?.();
-  log(`posts: ${posts.length}`);
+  log(`posts: ${postCount}`);
 
-  const commentParent = await pairMap(
-    dynamicFile("comment_replyOf_post"),
-    0,
-    1,
-  );
-  const commentParentKind = new Map<string, "Post" | "Comment">(
-    [...commentParent.keys()].map((comment) => [comment, "Post" as const]),
-  );
-  for (const [comment, parent] of await pairMap(
-    dynamicFile("comment_replyOf_comment"),
-    0,
-    1,
-  )) {
-    commentParent.set(comment, parent);
-    commentParentKind.set(comment, "Comment");
-  }
-  const commentCreator = await pairMap(
+  // Every comment replies to exactly one thing — a Post or another
+  // Comment — recorded in one of two disjoint relationship files. Each
+  // file, restricted to the comments it covers, preserves comment.csv's row
+  // order (verified empirically, like the other zip joins above), so a
+  // 3-way merge — advance whichever companion cursor's buffered row matches
+  // the current comment id — resolves parent + kind with only one buffered
+  // row per companion file, instead of a Map holding every comment in the
+  // dataset.
+  const postParentRows = csvRows(dynamicFile("comment_replyOf_post"), 2);
+  const commentParentRows = csvRows(dynamicFile("comment_replyOf_comment"), 2);
+  const commentCreatorRows = csvRows(
     dynamicFile("comment_hasCreator_person"),
-    0,
-    1,
+    2,
   );
+  let nextPostParent = await postParentRows.next();
+  let nextCommentParent = await commentParentRows.next();
+
   for await (const parts of csvRows(dynamicFile("comment"), 6)) {
     const id = parts[0]!;
-    const parent = requireMapped(commentParent, id, "comment parent");
-    const parentKind = commentParentKind.get(id);
-    if (parentKind === undefined) {
+    let parent: string;
+    let parentKind: "Post" | "Comment";
+    if (!nextPostParent.done && nextPostParent.value[0] === id) {
+      parent = nextPostParent.value[1]!;
+      parentKind = "Post";
+      nextPostParent = await postParentRows.next();
+    } else if (!nextCommentParent.done && nextCommentParent.value[0] === id) {
+      parent = nextCommentParent.value[1]!;
+      parentKind = "Comment";
+      nextCommentParent = await commentParentRows.next();
+    } else {
       throw new Error(
-        `LDBC dataset is missing the comment parent kind mapping for id ${id}`,
+        `LDBC dataset row-order alignment assumption violated: comment ${id} is not ` +
+          "the next row in either comment_replyOf_post or comment_replyOf_comment " +
+          "(datagen output no longer emits relationship files in entity row order).",
       );
     }
-    comments.push(messageId(id));
+    const creatorRow = await readZippedRow(
+      commentCreatorRows,
+      0,
+      id,
+      "comment_hasCreator_person",
+    );
+
+    commentSample.offer(messageId(id));
+    commentCount += 1;
     rows += 1;
     await sink.comment({
       id: messageId(id),
@@ -284,31 +417,46 @@ export async function streamSnbCsvDataset(
       kind: "hasCreator",
       fromId: messageId(id),
       fromKind: "Comment",
-      toId: personId(
-        String(requireMapped(commentCreator, id, "comment creator")),
-      ),
+      toId: personId(creatorRow[1]!),
     });
     await sink.edge({
       kind: "replyOf",
       fromId: messageId(id),
-      toId: messageId(String(parent)),
+      toId: messageId(parent),
       toKind: parentKind,
     });
   }
-  commentParent.clear();
-  commentParentKind.clear();
-  commentCreator.clear();
+  if (!nextPostParent.done || !nextCommentParent.done) {
+    throw new Error(
+      "comment_replyOf_post/comment_replyOf_comment has more rows than comment " +
+        "— the row-order alignment assumption is violated",
+    );
+  }
+  await assertZipStreamExhausted(
+    commentCreatorRows,
+    "comment_hasCreator_person",
+    "comment",
+  );
   await sink.stageComplete?.();
-  log(`comments: ${comments.length}`);
+  log(`comments: ${commentCount}`);
 
   return {
-    pools: { persons, posts, comments },
+    pools: {
+      persons: personSample.values(),
+      posts: postSample.values(),
+      comments: commentSample.values(),
+      counts: {
+        persons: personCount,
+        posts: postCount,
+        comments: commentCount,
+      },
+    },
     counts: {
-      persons: persons.length,
+      persons: personCount,
       knowsDirected,
       forums,
-      posts: posts.length,
-      comments: comments.length,
+      posts: postCount,
+      comments: commentCount,
       rows,
     },
   };
@@ -337,32 +485,49 @@ async function* csvRows(
   }
 }
 
-/** Two-column id file as a string-keyed map; column indexes select key/value. */
-async function pairMap(
-  file: string,
+/**
+ * Reads the next row of a companion relationship stream and asserts its
+ * `keyColumn` matches `expectedId` — the id from the driving entity stream
+ * at this same position. Relies on the row-order alignment documented at
+ * the top of this file; throws immediately (rather than silently
+ * mis-joining) if a mismatch is ever found.
+ */
+async function readZippedRow(
+  companionRows: AsyncGenerator<string[]>,
   keyColumn: number,
-  valueColumn: number,
-): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  const columns = Math.max(keyColumn, valueColumn) + 1;
-  for await (const parts of csvRows(file, columns)) {
-    map.set(parts[keyColumn]!, parts[valueColumn]!);
-  }
-  return map;
-}
-
-function requireMapped(
-  map: Map<string, string>,
-  key: string,
-  what: string,
-): string {
-  const value = map.get(key);
-  if (value === undefined) {
+  expectedId: string,
+  file: string,
+): Promise<string[]> {
+  const { value, done } = await companionRows.next();
+  if (done || value === undefined) {
     throw new Error(
-      `LDBC dataset is missing the ${what} mapping for id ${key}`,
+      `${file}: expected a row zip-joined to id ${expectedId}, but the stream ended first ` +
+        "— the row-order alignment assumption is violated",
+    );
+  }
+  const actualId = value[keyColumn];
+  if (actualId !== expectedId) {
+    throw new Error(
+      `${file}: row-order alignment assumption violated — expected id ${expectedId} ` +
+        `zip-joined at this position, found ${actualId}`,
     );
   }
   return value;
+}
+
+/** Asserts a zip-joined companion stream has no rows left over. */
+async function assertZipStreamExhausted(
+  companionRows: AsyncGenerator<string[]>,
+  file: string,
+  drivingFile: string,
+): Promise<void> {
+  const { done } = await companionRows.next();
+  if (!done) {
+    throw new Error(
+      `${file} has more rows than ${drivingFile} — the row-order alignment ` +
+        "assumption is violated",
+    );
+  }
 }
 
 function isoFromMillis(value: string | undefined): string {

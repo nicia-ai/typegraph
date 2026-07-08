@@ -150,7 +150,7 @@ async function runEngine(
     const loadMs = nowMs() - loadStarted;
     console.log(
       `${engineName} loaded in ${formatMs(loadMs)} ` +
-        `(${pools.persons.length} persons, ${pools.posts.length} posts, ${pools.comments.length} comments)`,
+        `(${pools.counts.persons} persons, ${pools.counts.posts} posts, ${pools.counts.comments} comments)`,
     );
 
     const requestPlan = getOrBuildRequestPlan(pools);
