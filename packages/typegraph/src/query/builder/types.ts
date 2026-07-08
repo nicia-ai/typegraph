@@ -462,19 +462,37 @@ export type SelectableEdgeMeta = Readonly<{
  *
  * Dynamic-mode counterpart: see `SelectableNode`.
  *
- * `id`/`kind`/`fromId`/`toId` stay plain `string`, unlike `SelectableNode`'s
- * `id: NodeId<N>`. `traverse(edgeKind, alias)` defaults to
- * `expand: "inverse"` (see `GraphAlgorithms`/`QueryBuilder.traverse`'s
- * `defaultTraversalExpansion`), which UNIONs in rows for the *registered
- * inverse* edge kind alongside the requested one — `EdgeAlias<E>`'s `E`
- * stays pinned to the single requested kind regardless, so under the
- * default expansion mode the row backing `alias` can genuinely be a
- * different edge kind than `E` says. Branding `id` as `EdgeId<E>` there
- * would compile but be actively wrong: `store.edges.<E>.getById()` filters
- * on `row.kind !== kind` and silently returns `undefined` for a
- * mismatched-kind id — worse than the unsafe cast it would have replaced.
- * Safe to brand once `EdgeAlias` tracks whether expansion could have
- * produced a different kind (`expand: "none"` vs not); see #235's note.
+ * `traverse(edgeKind, alias)` defaults to `expand: "inverse"` (see
+ * `GraphAlgorithms`/`QueryBuilder.traverse`'s `defaultTraversalExpansion`),
+ * which UNIONs in rows for the *registered inverse* edge kind alongside the
+ * requested one — `EdgeAlias<E>`'s `E` stays pinned to the single requested
+ * kind regardless, so under the default expansion mode the row backing
+ * `alias` can genuinely be a different edge kind (with different endpoint
+ * kinds) than `E` says. Two distinct consequences follow:
+ *
+ * - `kind: E["kind"]` is a **literal type that can already be wrong today**
+ *   — not a branding gap, a plain type-accuracy gap. It's typed as the
+ *   requested kind (e.g. `"manages"`) but the runtime value can be the
+ *   inverse kind (e.g. `"managedBy"`); see the `"proves why edge ids
+ *   can't be auto-branded"` test in `tests/query-execution.test.ts` for a
+ *   concrete repro. This predates and is independent of the id/endpoint
+ *   branding question below.
+ * - `id`/`fromId`/`toId` stay plain `string`, unlike `SelectableNode`'s
+ *   `id: NodeId<N>` — a real ergonomics gap, but not an accuracy one: `string`
+ *   never overclaims. Branding them would compile but be actively wrong:
+ *   e.g. `store.edges.<E>.getById()` filters on `row.kind !== kind` and
+ *   silently returns `undefined` for a mismatched-kind id — worse than the
+ *   unsafe cast it would have replaced.
+ *
+ * Proving either is safe requires tracking `expand` mode (`"none"` vs not)
+ * at the type level through `TraversalBuilder`/`EdgeAlias` — evaluated for
+ * #235 and deliberately not built: the machinery would touch every
+ * traversal-entry overload for a benefit that only applies when a caller
+ * opts out of the default expansion. When you know a traversal is
+ * single-kind, re-brand `id`/`fromId`/`toId` explicitly with
+ * `asNodeId`/`asEdgeId` (see #223) — e.g.
+ * `asNodeId<typeof Company>(edge.fromId)` — and don't trust `kind` without
+ * independently verifying the traversal can't have expanded.
  */
 export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
   IsDynamicEdgeType<E> extends true ? DynamicSelectableEdge

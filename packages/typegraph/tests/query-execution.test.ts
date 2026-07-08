@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  asNodeId,
   count,
   defineEdge,
   defineGraph,
@@ -655,6 +656,35 @@ describe("Query Execution (SQLite)", () => {
 
       const edge = await store.edges.worksAt.getById(brandedWorksAtId);
       expect(edge?.role).toBe("Engineer");
+    });
+
+    it("keeps projected fromId/toId as string, requiring asNodeId to re-brand them", async () => {
+      // Same hazard as edge id (see SelectableEdge's docblock and #235):
+      // fromId/toId describe the requested traversal's endpoint kinds, but
+      // under expand: "inverse" the matched row's real endpoints can
+      // differ. asNodeId is the sanctioned way to re-apply the brand once
+      // the caller knows the traversal is actually single-kind.
+      const rows = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq("Alice"))
+        .traverse("worksAt", "e")
+        .to("Company", "c")
+        .select((context) => ({
+          fromId: context.e.fromId,
+          toId: context.e.toId,
+        }))
+        .execute();
+
+      const [row] = rows;
+      expect(row).toBeDefined();
+
+      const [person, company] = await Promise.all([
+        store.nodes.Person.getById(asNodeId<typeof Person>(row!.fromId)),
+        store.nodes.Company.getById(asNodeId<typeof Company>(row!.toId)),
+      ]);
+      expect(person?.name).toBe("Alice");
+      expect(company?.name).toBe("Acme Inc");
     });
 
     it("proves why edge ids can't be auto-branded: default expand mixes in the inverse kind", async () => {
