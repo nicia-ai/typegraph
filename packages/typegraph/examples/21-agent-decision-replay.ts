@@ -19,8 +19,6 @@
  * Run with:
  *   npx tsx examples/21-agent-decision-replay.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineEdge,
@@ -28,6 +26,8 @@ import {
   defineNode,
   type RecordedStoreView,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
 
 // ============================================================
@@ -109,120 +109,122 @@ export async function main(): Promise<void> {
     history: true,
   });
 
-  console.log("━".repeat(70));
-  console.log(" Replay an agent's decision over the graph it actually saw");
-  console.log("━".repeat(70));
+  try {
+    console.log("━".repeat(70));
+    console.log(" Replay an agent's decision over the graph it actually saw");
+    console.log("━".repeat(70));
 
-  // ----------------------------------------------------------
-  // Build the knowledge graph the agent will reason over
-  // ----------------------------------------------------------
+    // ----------------------------------------------------------
+    // Build the knowledge graph the agent will reason over
+    // ----------------------------------------------------------
 
-  const claim = await store.nodes.Claim.create({
-    text: "Scaling model size improves downstream accuracy",
-  });
+    const claim = await store.nodes.Claim.create({
+      text: "Scaling model size improves downstream accuracy",
+    });
 
-  const kaplan = await store.nodes.Paper.create({
-    title: "Kaplan — Scaling Laws",
-  });
-  const chinchilla = await store.nodes.Paper.create({
-    title: "Hoffmann — Compute-Optimal LLMs",
-  });
-  const ablation = await store.nodes.Paper.create({
-    title: "Internal ablation memo",
-  });
+    const kaplan = await store.nodes.Paper.create({
+      title: "Kaplan — Scaling Laws",
+    });
+    const chinchilla = await store.nodes.Paper.create({
+      title: "Hoffmann — Compute-Optimal LLMs",
+    });
+    const ablation = await store.nodes.Paper.create({
+      title: "Internal ablation memo",
+    });
 
-  // All three support the claim.
-  for (const p of [kaplan, chinchilla, ablation]) {
-    await store.edges.supports.create(p, claim, {});
-  }
+    // All three support the claim.
+    for (const p of [kaplan, chinchilla, ablation]) {
+      await store.edges.supports.create(p, claim, {});
+    }
 
-  // Citation authority: Kaplan is cited by 3 papers, Chinchilla by 1, memo by 0.
-  const citers: Array<Awaited<ReturnType<typeof store.nodes.Paper.create>>> =
-    [];
-  for (let index = 0; index < 4; index += 1) {
-    citers.push(
-      await store.nodes.Paper.create({ title: `Follow-up paper ${index + 1}` }),
+    // Citation authority: Kaplan is cited by 3 papers, Chinchilla by 1, memo by 0.
+    const citers: Awaited<ReturnType<typeof store.nodes.Paper.create>>[] =
+      [];
+    for (let index = 0; index < 4; index += 1) {
+      citers.push(
+        await store.nodes.Paper.create({ title: `Follow-up paper ${index + 1}` }),
+      );
+    }
+    await store.edges.cites.create(citers[0]!, kaplan, {});
+    await store.edges.cites.create(citers[1]!, kaplan, {});
+    await store.edges.cites.create(citers[2]!, kaplan, {});
+    await store.edges.cites.create(citers[3]!, chinchilla, {});
+
+    // ----------------------------------------------------------
+    // The agent decides — and we note WHEN it decided
+    // ----------------------------------------------------------
+
+    // A deterministic recorded anchor for the exact graph the agent reasoned over.
+    const decisionTime = await requireRecordedNow(store);
+
+    const original = await recommendSource(
+      store.view({ mode: "current" }),
+      claim.id,
     );
+    console.log("\n  Agent answers: 'best source for the claim?'\n");
+    console.log(`    → ${original?.title}  (${original?.citations} citations)`);
+    console.log(`    recorded at: ${decisionTime}`);
+
+    // ----------------------------------------------------------
+    // The world moves on
+    // ----------------------------------------------------------
+
+    console.log("\n" + "─".repeat(70));
+    console.log("  …time passes. The evidence graph changes:");
+    console.log("    • the Kaplan paper is RETRACTED (removed from the corpus)");
+    console.log("    • two new follow-ups now cite the Chinchilla paper");
+    console.log("─".repeat(70));
+
+    await store.nodes.Paper.hardDelete(kaplan.id); // retraction cascades its edges
+    const late1 = await store.nodes.Paper.create({ title: "Follow-up paper 5" });
+    const late2 = await store.nodes.Paper.create({ title: "Follow-up paper 6" });
+    await store.edges.cites.create(late1, chinchilla, {});
+    await store.edges.cites.create(late2, chinchilla, {});
+
+    // ----------------------------------------------------------
+    // The audit: "why did the agent recommend Kaplan?"
+    // ----------------------------------------------------------
+
+    console.log("\n" + "━".repeat(70));
+    console.log(" The audit asks: why did the agent recommend that source?");
+    console.log("━".repeat(70));
+
+    // Same agent code, on the LIVE graph — the evidence has moved, so it can't
+    // explain the original decision.
+    const liveNow = await recommendSource(
+      store.view({ mode: "current" }),
+      claim.id,
+    );
+    console.log("\n  Re-run on the CURRENT graph (the evidence moved):");
+    console.log(`    → ${liveNow?.title}  (${liveNow?.citations} citations)`);
+    console.log("    ✗ This is a different answer. The live graph no longer");
+    console.log("      explains what the agent did — Kaplan isn't even in it.");
+
+    // Same agent code, pinned to the recorded graph as of the decision instant.
+    const replay = await recommendSource(
+      store.asOfRecorded(decisionTime),
+      claim.id,
+    );
+    console.log("\n  Replay on `store.asOfRecorded(decisionTime)` (same code):");
+    console.log(`    → ${replay?.title}  (${replay?.citations} citations)`);
+    console.log("    ✓ Reproduced exactly — the retracted paper, its citations,");
+    console.log("      and the ranking, reconstructed as the agent saw them.");
+
+    console.log("\n" + "━".repeat(70));
+    console.log(
+      " Point-in-time-correct reasoning: the same query, pinned to the",
+    );
+    console.log(
+      " instant the agent acted. No event log, no snapshots, one file.",
+    );
+    console.log("━".repeat(70) + "\n");
+  } finally {
+    await store.close();
   }
-  await store.edges.cites.create(citers[0]!, kaplan, {});
-  await store.edges.cites.create(citers[1]!, kaplan, {});
-  await store.edges.cites.create(citers[2]!, kaplan, {});
-  await store.edges.cites.create(citers[3]!, chinchilla, {});
-
-  // ----------------------------------------------------------
-  // The agent decides — and we note WHEN it decided
-  // ----------------------------------------------------------
-
-  // A deterministic recorded anchor for the exact graph the agent reasoned over.
-  const decisionTime = await requireRecordedNow(store);
-
-  const original = await recommendSource(
-    store.view({ mode: "current" }),
-    claim.id,
-  );
-  console.log("\n  Agent answers: 'best source for the claim?'\n");
-  console.log(`    → ${original?.title}  (${original?.citations} citations)`);
-  console.log(`    recorded at: ${decisionTime}`);
-
-  // ----------------------------------------------------------
-  // The world moves on
-  // ----------------------------------------------------------
-
-  console.log("\n" + "─".repeat(70));
-  console.log("  …time passes. The evidence graph changes:");
-  console.log("    • the Kaplan paper is RETRACTED (removed from the corpus)");
-  console.log("    • two new follow-ups now cite the Chinchilla paper");
-  console.log("─".repeat(70));
-
-  await store.nodes.Paper.hardDelete(kaplan.id); // retraction cascades its edges
-  const late1 = await store.nodes.Paper.create({ title: "Follow-up paper 5" });
-  const late2 = await store.nodes.Paper.create({ title: "Follow-up paper 6" });
-  await store.edges.cites.create(late1, chinchilla, {});
-  await store.edges.cites.create(late2, chinchilla, {});
-
-  // ----------------------------------------------------------
-  // The audit: "why did the agent recommend Kaplan?"
-  // ----------------------------------------------------------
-
-  console.log("\n" + "━".repeat(70));
-  console.log(" The audit asks: why did the agent recommend that source?");
-  console.log("━".repeat(70));
-
-  // Same agent code, on the LIVE graph — the evidence has moved, so it can't
-  // explain the original decision.
-  const liveNow = await recommendSource(
-    store.view({ mode: "current" }),
-    claim.id,
-  );
-  console.log("\n  Re-run on the CURRENT graph (the evidence moved):");
-  console.log(`    → ${liveNow?.title}  (${liveNow?.citations} citations)`);
-  console.log("    ✗ This is a different answer. The live graph no longer");
-  console.log("      explains what the agent did — Kaplan isn't even in it.");
-
-  // Same agent code, pinned to the recorded graph as of the decision instant.
-  const replay = await recommendSource(
-    store.asOfRecorded(decisionTime),
-    claim.id,
-  );
-  console.log("\n  Replay on `store.asOfRecorded(decisionTime)` (same code):");
-  console.log(`    → ${replay?.title}  (${replay?.citations} citations)`);
-  console.log("    ✓ Reproduced exactly — the retracted paper, its citations,");
-  console.log("      and the ranking, reconstructed as the agent saw them.");
-
-  console.log("\n" + "━".repeat(70));
-  console.log(
-    " Point-in-time-correct reasoning: the same query, pinned to the",
-  );
-  console.log(
-    " instant the agent acted. No event log, no snapshots, one file.",
-  );
-  console.log("━".repeat(70) + "\n");
-
-  await store.close();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

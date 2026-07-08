@@ -42,7 +42,6 @@ const DETERMINISM_RESTRICTIONS = [
 export default [
   ...createLibraryConfig(import.meta.dirname, {
     ignores: [
-      "examples/**",
       "test-d/**",
       "type-smoke/**",
       "tmp/**",
@@ -55,6 +54,21 @@ export default [
       "tests/do-sqlite/**",
     ],
   }),
+
+  // Examples are runnable teaching scripts (`npx tsx examples/NN-*.ts`) as
+  // well as importable modules, and they lint with the full library ruleset.
+  // Console output and process.exit(1) in the runner need no relaxation here:
+  // `no-console` is not enabled by the base config and
+  // `unicorn/no-process-exit` is already off globally.
+  {
+    files: ["examples/**/*.ts"],
+    rules: {
+      // Every example self-executes behind an `import.meta.url` guard so that
+      // importing it never runs it; top-level await would execute on import,
+      // which is fundamentally at odds with that runner idiom.
+      "unicorn/prefer-top-level-await": "off",
+    },
+  },
 
   // graph-merge is intentionally heavy on deterministic ordering helpers plus
   // branch-dependent assertions. Relax only STYLE-ONLY Unicorn/Vitest

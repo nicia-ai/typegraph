@@ -6,15 +6,15 @@
  * - Query-time expansion to include implying edges
  * - Building semantic hierarchies of relationships
  */
-import { z } from "zod";
-
 import {
   createStore,
-  defineGraph,
   defineEdge,
+  defineGraph,
   defineNode,
   implies,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -128,125 +128,130 @@ export async function main() {
   const backend = createExampleBackend();
   const store = createStore(graph, backend);
 
-  console.log("=== Edge Implications Examples ===\n");
+  try {
+    console.log("=== Edge Implications Examples ===\n");
 
-  // Create some people
-  const alice = await store.nodes.Person.create({ name: "Alice", birthYear: 1990 });
-  const bob = await store.nodes.Person.create({ name: "Bob", birthYear: 1988 });
-  const charlie = await store.nodes.Person.create({ name: "Charlie", birthYear: 1992 });
-  const diana = await store.nodes.Person.create({ name: "Diana", birthYear: 1995 });
-  const eve = await store.nodes.Person.create({ name: "Eve", birthYear: 1965 });
+    // Create some people
+    const alice = await store.nodes.Person.create({ name: "Alice", birthYear: 1990 });
+    const bob = await store.nodes.Person.create({ name: "Bob", birthYear: 1988 });
+    const charlie = await store.nodes.Person.create({ name: "Charlie", birthYear: 1992 });
+    const diana = await store.nodes.Person.create({ name: "Diana", birthYear: 1995 });
+    const eve = await store.nodes.Person.create({ name: "Eve", birthYear: 1965 });
 
-  console.log("Created people: Alice, Bob, Charlie, Diana, Eve\n");
+    console.log("Created people: Alice, Bob, Charlie, Diana, Eve\n");
 
-  // Create various relationships - pass nodes directly
-  console.log("Creating relationships...");
+    // Create various relationships - pass nodes directly
+    console.log("Creating relationships...");
 
-  // Alice and Bob are married
-  await store.edges.marriedTo.create(alice, bob, { marriageDate: "2018-06-15" });
-  console.log("  Alice marriedTo Bob");
+    // Alice and Bob are married
+    await store.edges.marriedTo.create(alice, bob, { marriageDate: "2018-06-15" });
+    console.log("  Alice marriedTo Bob");
 
-  // Alice and Charlie are best friends
-  await store.edges.bestFriends.create(alice, charlie, { since: "2005-09-01" });
-  console.log("  Alice bestFriends Charlie");
+    // Alice and Charlie are best friends
+    await store.edges.bestFriends.create(alice, charlie, { since: "2005-09-01" });
+    console.log("  Alice bestFriends Charlie");
 
-  // Diana is just a friend
-  await store.edges.friends.create(alice, diana, { since: "2020-01-01" });
-  console.log("  Alice friends Diana");
+    // Diana is just a friend
+    await store.edges.friends.create(alice, diana, { since: "2020-01-01" });
+    console.log("  Alice friends Diana");
 
-  // Eve is Alice's parent
-  await store.edges.parentOf.create(eve, alice, {});
-  console.log("  Eve parentOf Alice");
+    // Eve is Alice's parent
+    await store.edges.parentOf.create(eve, alice, {});
+    console.log("  Eve parentOf Alice");
 
-  // Show implication hierarchy
-  console.log("\n=== Implication Hierarchy ===\n");
+    // Show implication hierarchy
+    console.log("\n=== Implication Hierarchy ===\n");
 
-  const registry = store.registry;
+    const registry = store.registry;
 
-  console.log("What does 'marriedTo' imply?");
-  const marriedImplies = registry.getImpliedEdges("marriedTo");
-  console.log(`  marriedTo implies: [${marriedImplies.join(", ")}]`);
+    console.log("What does 'marriedTo' imply?");
+    const marriedImplies = registry.getImpliedEdges("marriedTo");
+    console.log(`  marriedTo implies: [${marriedImplies.join(", ")}]`);
 
-  console.log("\nWhat does 'bestFriends' imply?");
-  const bestFriendsImplies = registry.getImpliedEdges("bestFriends");
-  console.log(`  bestFriends implies: [${bestFriendsImplies.join(", ")}]`);
+    console.log("\nWhat does 'bestFriends' imply?");
+    const bestFriendsImplies = registry.getImpliedEdges("bestFriends");
+    console.log(`  bestFriends implies: [${bestFriendsImplies.join(", ")}]`);
 
-  console.log("\nWhat does 'parentOf' imply?");
-  const parentImplies = registry.getImpliedEdges("parentOf");
-  console.log(`  parentOf implies: [${parentImplies.join(", ")}]`);
+    console.log("\nWhat does 'parentOf' imply?");
+    const parentImplies = registry.getImpliedEdges("parentOf");
+    console.log(`  parentOf implies: [${parentImplies.join(", ")}]`);
 
-  console.log("\nWhat edges imply 'knows'? (reverse lookup)");
-  const knowsImplyingEdges = registry.getImplyingEdges("knows");
-  console.log(`  These edges imply knows: [${knowsImplyingEdges.join(", ")}]`);
+    console.log("\nWhat edges imply 'knows'? (reverse lookup)");
+    const knowsImplyingEdges = registry.getImplyingEdges("knows");
+    console.log(`  These edges imply knows: [${knowsImplyingEdges.join(", ")}]`);
 
-  // Query with implications
-  console.log("\n=== Query with Edge Implication Expansion ===\n");
+    // Query with implications
+    console.log("\n=== Query with Edge Implication Expansion ===\n");
 
-  // Query: "Who does Alice know?" using implication expansion
-  console.log('Query: Who does Alice know? (expand: "implying")');
-  console.log("  This will find: knows, friends, bestFriends, marriedTo, etc.\n");
+    // Query: "Who does Alice know?" using implication expansion
+    console.log('Query: Who does Alice know? (expand: "implying")');
+    console.log("  This will find: knows, friends, bestFriends, marriedTo, etc.\n");
 
-  const aliceKnows = await store
-    .query()
-    .from("Person", "alice")
-    .traverse("knows", "e", { expand: "implying" })
-    .to("Person", "other")
-    .select((ctx) => ({
-      person: ctx.other.name,
-    }))
-    .execute();
+    const aliceKnows = await store
+      .query()
+      .from("Person", "alice")
+      .whereNode("alice", ({ name }) => name.eq("Alice"))
+      .traverse("knows", "e", { expand: "implying" })
+      .to("Person", "other")
+      .select((ctx) => ({
+        person: ctx.other.name,
+      }))
+      .execute();
 
-  console.log("  Alice knows (via any implying relationship):");
-  for (const row of aliceKnows) {
-    console.log(`    - ${row.person}`);
-  }
-
-  // Query without expansion
-  console.log("\nQuery: Who does Alice explicitly 'knows'? (no expansion)");
-
-  const aliceExplicitlyKnows = await store
-    .query()
-    .from("Person", "alice")
-    .traverse("knows", "e") // No implying-edge expansion
-    .to("Person", "other")
-    .select((ctx) => ({
-      person: ctx.other.name,
-    }))
-    .execute();
-
-  if (aliceExplicitlyKnows.length === 0) {
-    console.log("  No explicit 'knows' edges (all relationships are more specific)");
-  } else {
-    for (const row of aliceExplicitlyKnows) {
+    console.log("  Alice knows (via any implying relationship):");
+    for (const row of aliceKnows) {
       console.log(`    - ${row.person}`);
     }
+
+    // Query without expansion
+    console.log("\nQuery: Who does Alice explicitly 'knows'? (default expansion)");
+
+    const aliceExplicitlyKnows = await store
+      .query()
+      .from("Person", "alice")
+      .whereNode("alice", ({ name }) => name.eq("Alice"))
+      .traverse("knows", "e") // Default expansion — implying edges are not included
+      .to("Person", "other")
+      .select((ctx) => ({
+        person: ctx.other.name,
+      }))
+      .execute();
+
+    if (aliceExplicitlyKnows.length === 0) {
+      console.log("  No explicit 'knows' edges (all relationships are more specific)");
+    } else {
+      for (const row of aliceExplicitlyKnows) {
+        console.log(`    - ${row.person}`);
+      }
+    }
+
+    // Query friends (including best friends)
+    console.log('\nQuery: Who is Alice friends with? (expand: "implying")');
+
+    const aliceFriends = await store
+      .query()
+      .from("Person", "alice")
+      .whereNode("alice", ({ name }) => name.eq("Alice"))
+      .traverse("friends", "e", { expand: "implying" })
+      .to("Person", "friend")
+      .select((ctx) => ({
+        friend: ctx.friend.name,
+      }))
+      .execute();
+
+    console.log("  Alice's friends (including best friends):");
+    for (const row of aliceFriends) {
+      console.log(`    - ${row.friend}`);
+    }
+
+    console.log("\n=== Edge implications example complete ===");
+  } finally {
+    await backend.close();
   }
-
-  // Query friends (including best friends)
-  console.log('\nQuery: Who is Alice friends with? (expand: "implying")');
-
-  const aliceFriends = await store
-    .query()
-    .from("Person", "alice")
-    .traverse("friends", "e", { expand: "implying" })
-    .to("Person", "friend")
-    .select((ctx) => ({
-      friend: ctx.friend.name,
-    }))
-    .execute();
-
-  console.log("  Alice's friends (including best friends):");
-  for (const row of aliceFriends) {
-    console.log(`    - ${row.friend}`);
-  }
-
-  console.log("\n=== Edge implications example complete ===");
-
-  await backend.close();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });

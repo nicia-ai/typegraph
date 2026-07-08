@@ -5,21 +5,19 @@
  * `mergeIncremental()` folds a new source's branch into a `target` that already
  * holds committed entities: it re-discovers an already-committed company (by its
  * unique `domain`) and merges the new spelling ONTO it instead of creating a
- * duplicate, commits the genuinely-new company, handles inherited edits against
- * the fork-point, flags the name disagreement, and persists a queryable
- * provenance trail.
+ * duplicate, commits the genuinely-new company, carries the branch's inherited
+ * edit against the fork-point into the merge (flagging it where the live target
+ * has advanced past the fork), and persists a queryable provenance trail.
  *
  * Run with:
  *   npx tsx examples/19-incremental-merge.ts
  */
-import { z } from "zod";
-
 import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  searchable,
   type GraphBackend,
+  searchable,
   type Store,
 } from "@nicia-ai/typegraph";
 import {
@@ -27,11 +25,12 @@ import {
   branch,
   isOk,
   mergeIncremental,
+  type MergeIncrementalArgs,
   openProvenanceStore,
   readProvenance,
   unwrap,
-  type MergeIncrementalArgs,
 } from "@nicia-ai/typegraph/graph-merge";
+import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";
 
@@ -69,120 +68,185 @@ const kbGraph = defineGraph({
 type KbGraph = typeof kbGraph;
 type KbStore = Store<KbGraph>;
 
-async function makeBackend(): Promise<GraphBackend> {
-  return createExampleBackend();
-}
-
 const PROVIDER = asBranchId("provider-crunchbase");
+
+function compareStrings(left: string, right: string): number {
+  return (
+    left < right ? -1
+    : left > right ? 1
+    : 0
+  );
+}
 
 async function listCompanies(store: KbStore): Promise<readonly string[]> {
   const companies = await store.nodes.Company.find();
   return companies
     .map((company) => `${company.name} (${company.domain})`)
-    .sort((left, right) =>
-      left < right ? -1
-      : left > right ? 1
-      : 0,
-    );
+    .toSorted((left, right) => compareStrings(left, right));
 }
 
 async function main(): Promise<void> {
-  // The LIVE target graph, already holding one canonical company from an earlier
-  // ingestion wave. This is the "base that has advanced" mergeIncremental targets.
-  const [target] = await createStoreWithSchema(kbGraph, await makeBackend());
-  await target.nodes.Company.create(
-    { name: "Acme Corp", domain: "acme.com" },
-    { id: "acme" },
-  );
-
-  // The frozen fork-point a new provider's branch forks from. This example keeps
-  // it empty so the provider's company rows are additions, but mergeIncremental()
-  // also propagates inherited modifications and deletions relative to this store.
-  const [forkPoint] = await createStoreWithSchema(kbGraph, await makeBackend());
-  const provider = unwrap(await branch(forkPoint, makeBackend, { id: PROVIDER }));
-
-  // The provider re-reports Acme (same domain, different spelling) and adds a
-  // genuinely new company.
-  await provider.store.nodes.Company.create(
-    { name: "ACME Corporation", domain: "acme.com" },
-    { id: "cb-acme" },
-  );
-  await provider.store.nodes.Company.create(
-    { name: "Globex", domain: "globex.io" },
-    { id: "cb-globex" },
-  );
-
-  console.log("=== Incremental Graph Merge ===\n");
-  console.log("Target before:", await listCompanies(target));
-
-  const args: MergeIncrementalArgs<KbGraph> = {
-    forkPoint,
-    target,
-    branches: [provider],
-    options: {
-      resolve: {
-        Company: {
-          // `similarity` is required, but the unique `domain` constraint forces the
-          // new-vs-base match here regardless of the name-spelling difference.
-          similarity: { kind: "fulltext", fields: ["name"] },
-          threshold: 0.9,
-        },
-      },
-      onPropertyConflict: "flag",
-      onBasePropertyConflict: "flag", // required by mergeIncremental (keep-base)
-      branchOrder: [PROVIDER],
-      persistProvenance: true,
-    },
-  };
-
-  const result = await mergeIncremental(args);
-  if (!isOk(result)) {
-    throw result.error;
+  // Every backend this example opens — directly or through `branch()`'s factory —
+  // is tracked here and closed in the finally below.
+  const openedBackends: GraphBackend[] = [];
+  function makeBackend(): Promise<GraphBackend> {
+    const backend = createExampleBackend();
+    openedBackends.push(backend);
+    return Promise.resolve(backend);
   }
-  const report = result.data;
 
-  console.log("Target after: ", await listCompanies(target));
-  console.log(
-    `\nNo duplicate was created: the provider's "ACME Corporation" merged onto the`,
-  );
-  console.log(`committed "Acme Corp" via the shared domain.\n`);
-  console.log(`Merged nodes: ${report.merged.nodes}`);
-  console.log(`Entity resolutions: ${report.resolutions.length}`);
-  if (report.conflicts.length === 0) {
-    console.log("Conflicts: none");
-  } else {
-    for (const conflict of report.conflicts) {
-      const values = conflict.values
-        .map((value) => `${value.branchId}=${JSON.stringify(value.value)}`)
-        .join(", ");
+  try {
+    // The LIVE target graph, already holding committed companies from earlier
+    // ingestion waves. This is the "base that has advanced" mergeIncremental
+    // targets: Initech was renamed ON THE TARGET after the fork-point snapshot
+    // below was frozen.
+    const [target] = await createStoreWithSchema(kbGraph, await makeBackend());
+    await target.nodes.Company.create(
+      { name: "Acme Corp", domain: "acme.com" },
+      { id: "acme" },
+    );
+    await target.nodes.Company.create(
+      { name: "Initech Software", domain: "initech.com" },
+      { id: "initech" },
+    );
+
+    // The frozen fork-point the provider's branch forks from. It carries Initech
+    // as it looked AT FORK TIME — before the target's rename — so the provider's
+    // edit to its inherited copy is a genuine inherited edit against the
+    // fork-point that collides with the target's own committed rename.
+    const [forkPoint] = await createStoreWithSchema(
+      kbGraph,
+      await makeBackend(),
+    );
+    const initechAtFork = await forkPoint.nodes.Company.create(
+      { name: "Initech", domain: "initech.com" },
+      { id: "initech" },
+    );
+    const provider = unwrap(
+      await branch(forkPoint, makeBackend, { id: PROVIDER }),
+    );
+
+    // The provider re-reports Acme (same domain, different spelling), adds a
+    // genuinely new company, and RENAMES its inherited fork-point copy of
+    // Initech — an inherited edit the live target disagrees with.
+    await provider.store.nodes.Company.create(
+      { name: "ACME Corporation", domain: "acme.com" },
+      { id: "cb-acme" },
+    );
+    await provider.store.nodes.Company.create(
+      { name: "Globex", domain: "globex.io" },
+      { id: "cb-globex" },
+    );
+    await provider.store.nodes.Company.update(initechAtFork.id, {
+      name: "Initech Inc",
+    });
+
+    console.log("=== Incremental Graph Merge ===\n");
+    console.log("Target before:", await listCompanies(target));
+
+    const args: MergeIncrementalArgs<KbGraph> = {
+      forkPoint,
+      target,
+      branches: [provider],
+      options: {
+        resolve: {
+          Company: {
+            // `similarity` is required, but the unique `domain` constraint forces the
+            // new-vs-base match here regardless of the name-spelling difference.
+            similarity: { kind: "fulltext", fields: ["name"] },
+            threshold: 0.9,
+          },
+        },
+        onPropertyConflict: "flag",
+        // Optional — "flag" is already the default (MERGE_OPTION_DEFAULTS), and the
+        // ONLY value mergeIncremental() accepts. Spelled out to document the
+        // deliberate keep-base policy: committed target values always survive.
+        onBasePropertyConflict: "flag",
+        branchOrder: [PROVIDER],
+        persistProvenance: true,
+      },
+    };
+
+    const result = await mergeIncremental(args);
+    if (!isOk(result)) {
+      throw result.error;
+    }
+    const report = result.data;
+
+    console.log("Target after:", await listCompanies(target));
+    console.log(
+      `\nNo duplicate was created: the provider's "ACME Corporation" merged onto`,
+    );
+    console.log(
+      `the committed "Acme Corp" via the shared domain, and the provider's rename`,
+    );
+    console.log(
+      `of inherited Initech was flagged against the target's own rename — the`,
+    );
+    console.log(`committed value survived both disagreements.\n`);
+    console.log(`Merged nodes: ${report.merged.nodes}`);
+    console.log(`Entity resolutions: ${report.resolutions.length}`);
+    if (report.conflicts.length === 0) {
+      console.log("Conflicts: none");
+    } else {
+      // A conflict on a cluster canonical is a NEW entity matched onto a committed
+      // row; any other conflicted id is an inherited fork-point row that BOTH the
+      // branch and the live target edited. Either way keep-base means the committed
+      // value survives (printed as "kept"); the branch's value is the "incoming".
+      const clusterCanonicalIds = new Set<string>(
+        report.resolutions.map((resolution) => resolution.canonicalId),
+      );
+      console.log("Conflicts:");
+      for (const conflict of report.conflicts) {
+        const incoming = conflict.values
+          .map((value) => `${value.branchId}=${JSON.stringify(value.value)}`)
+          .join(", ");
+        const origin =
+          clusterCanonicalIds.has(conflict.entityId) ? "new-entity match" : (
+            "inherited edit"
+          );
+        console.log(
+          `  - [${origin}] ${conflict.kind}.${conflict.property} @ ${conflict.entityId}: kept ${JSON.stringify(conflict.resolution)}, incoming ${incoming}`,
+        );
+      }
+    }
+    if (report.provenancePersisted !== undefined) {
       console.log(
-        `Conflict on ${conflict.kind}.${conflict.property} @ ${conflict.entityId}: ${values}`,
+        `\nProvenance persisted: ${report.provenancePersisted.count} row(s) in sidecar "${report.provenancePersisted.graphId}"`,
       );
     }
-  }
-  if (report.provenancePersisted !== undefined) {
-    console.log(
-      `\nProvenance persisted: ${report.provenancePersisted.count} row(s) in sidecar "${report.provenancePersisted.graphId}"`,
-    );
-  }
 
-  // Query the DURABLE provenance back later: "what did this provider contribute?"
-  const provenanceStore = await openProvenanceStore(
-    target.backend,
-    target.graphId,
-  );
-  const contributed = await readProvenance(provenanceStore, {
-    branchId: PROVIDER,
-  });
-  console.log("\nProvenance — canonical entities this provider contributed to:");
-  for (const node of contributed) {
-    console.log(
-      `  - ${node.canonicalKind} "${node.canonicalId}" (from source "${node.sourceId}")`,
+    // Query the DURABLE provenance back later: "what did this provider
+    // contribute?" The sidecar store SHARES the target's backend, so it must not
+    // be closed separately — it goes away when the target's backend closes below.
+    const provenanceStore = await openProvenanceStore(
+      target.backend,
+      target.graphId,
     );
+    const contributed = await readProvenance(provenanceStore, {
+      branchId: PROVIDER,
+    });
+    const companyNameById = new Map<string, string>();
+    for (const company of await target.nodes.Company.find()) {
+      companyNameById.set(company.id, company.name);
+    }
+    console.log(
+      "\nProvenance — canonical entities this provider contributed to:",
+    );
+    for (const node of contributed) {
+      const display = companyNameById.get(node.canonicalId) ?? node.canonicalId;
+      console.log(
+        `  - ${node.canonicalKind} "${display}" (canonical id "${node.canonicalId}", from source "${node.sourceId}")`,
+      );
+    }
+  } finally {
+    await Promise.all(openedBackends.map((backend) => backend.close()));
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
