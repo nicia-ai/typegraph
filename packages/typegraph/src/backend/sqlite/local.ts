@@ -131,20 +131,46 @@ export type LocalSqlitePragmaOptions = Readonly<{
   synchronous?: LocalSqliteSynchronousMode;
   /** `PRAGMA busy_timeout`, in milliseconds. Default: `5000`. */
   busyTimeoutMs?: number;
+  /**
+   * `PRAGMA cache_size`, in KiB of page cache — must be negative, per
+   * SQLite's own convention (e.g. `-131072` for 128MiB); a positive value
+   * means a page *count* instead, not KiB, so it's rejected outright
+   * rather than silently sizing the cache to something the caller didn't
+   * intend. Default: `undefined`, meaning SQLite's own built-in default
+   * (2MiB) is left untouched. Worth raising for any database whose
+   * working set won't fit in 2MiB — SQLite's default is tuned for small
+   * embedded use, not for a table that stops fitting in a tiny page
+   * cache and starts paying a heap-row disk read per candidate row a
+   * query touches.
+   */
+  cacheSizeKib?: number | undefined;
+  /**
+   * `PRAGMA mmap_size`, in bytes. Default: `undefined`, meaning SQLite's
+   * own built-in default (0, i.e. disabled) is left untouched. Memory-maps
+   * let reads bypass SQLite's own page cache entirely for pages already
+   * resident in the OS page cache, which helps once the working set
+   * exceeds `cacheSizeKib` but still fits in available RAM.
+   */
+  mmapSizeBytes?: number | undefined;
 }>;
 
 /**
  * Pragma defaults for connections the local backend owns: WAL journaling
  * with `synchronous=NORMAL` (the standard durable-and-fast local-SQLite
  * baseline — WAL survives crashes; at NORMAL a power loss can lose the
- * final commits but never corrupts) and a 5s busy timeout so concurrent
- * openers wait for the write lock instead of failing with SQLITE_BUSY.
+ * final commits but never corrupts), a 5s busy timeout so concurrent
+ * openers wait for the write lock instead of failing with SQLITE_BUSY, and
+ * `cacheSizeKib`/`mmapSizeBytes` left `undefined` (SQLite's own tiny
+ * defaults) since the right size is workload- and host-dependent — set
+ * them explicitly once the database's working set is known.
  */
 export const DEFAULT_LOCAL_SQLITE_PRAGMAS: Required<LocalSqlitePragmaOptions> =
   {
     journalMode: "wal",
     synchronous: "normal",
     busyTimeoutMs: 5000,
+    cacheSizeKib: undefined,
+    mmapSizeBytes: undefined,
   };
 
 const LOCAL_SQLITE_JOURNAL_MODES: readonly LocalSqliteJournalMode[] = [
@@ -200,12 +226,42 @@ function applyConnectionPragmas(
       { busyTimeoutMs: resolved.busyTimeoutMs },
     );
   }
+  if (
+    resolved.cacheSizeKib !== undefined &&
+    (!Number.isSafeInteger(resolved.cacheSizeKib) || resolved.cacheSizeKib >= 0)
+  ) {
+    throw new ConfigurationError(
+      `Invalid cacheSizeKib pragma: ${String(resolved.cacheSizeKib)}. ` +
+        "Expected a negative safe integer — SQLite's own cache_size pragma " +
+        "interprets a positive value as a page count, not KiB, so a caller " +
+        'who passes e.g. 131072 meaning "131072 KiB" silently gets ' +
+        "131072 pages (~512MiB at the default 4KiB page size) instead.",
+      { cacheSizeKib: resolved.cacheSizeKib },
+    );
+  }
+  if (
+    resolved.mmapSizeBytes !== undefined &&
+    (!Number.isSafeInteger(resolved.mmapSizeBytes) ||
+      resolved.mmapSizeBytes < 0)
+  ) {
+    throw new ConfigurationError(
+      `Invalid mmapSizeBytes pragma: ${String(resolved.mmapSizeBytes)}. ` +
+        "Expected a non-negative safe integer number of bytes.",
+      { mmapSizeBytes: resolved.mmapSizeBytes },
+    );
+  }
 
   // ":memory:" databases always journal in memory; SQLite answers the WAL
   // request with "memory" instead of erroring, so no special-casing needed.
   sqlite.pragma(`journal_mode = ${resolved.journalMode}`);
   sqlite.pragma(`synchronous = ${resolved.synchronous}`);
   sqlite.pragma(`busy_timeout = ${resolved.busyTimeoutMs}`);
+  if (resolved.cacheSizeKib !== undefined) {
+    sqlite.pragma(`cache_size = ${resolved.cacheSizeKib}`);
+  }
+  if (resolved.mmapSizeBytes !== undefined) {
+    sqlite.pragma(`mmap_size = ${resolved.mmapSizeBytes}`);
+  }
 }
 
 /**
@@ -221,10 +277,14 @@ export type LocalSqliteBackendOptions = Readonly<{
   /**
    * Connection pragmas applied at open. Defaults to
    * {@link DEFAULT_LOCAL_SQLITE_PRAGMAS} (WAL, `synchronous=NORMAL`, 5s busy
-   * timeout). Individual values merge over the defaults; pass `false` to
-   * skip pragma configuration entirely and keep the driver defaults
-   * (rollback journal, `synchronous=FULL`, and better-sqlite3's own 5s busy
-   * timeout from its `timeout` constructor option).
+   * timeout, and SQLite's own tiny built-in page cache / disabled mmap
+   * left untouched). Individual values merge over the defaults; pass
+   * `false` to skip pragma configuration entirely and keep the driver
+   * defaults (rollback journal, `synchronous=FULL`, and better-sqlite3's
+   * own 5s busy timeout from its `timeout` constructor option). Set
+   * `cacheSizeKib`/`mmapSizeBytes` explicitly once a database's working
+   * set is known to exceed SQLite's 2MiB default cache — otherwise every
+   * query pays a fresh disk read per page past that tiny working set.
    */
   pragmas?: LocalSqlitePragmaOptions | false;
 

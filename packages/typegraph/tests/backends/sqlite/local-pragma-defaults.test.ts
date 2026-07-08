@@ -121,6 +121,52 @@ describe("createLocalSqliteBackend pragma defaults", () => {
     );
   });
 
+  it("applies cacheSizeKib and mmapSizeBytes when explicitly set", () => {
+    const result = openBackend({
+      path: createTemporaryDbPath(),
+      pragmas: { cacheSizeKib: -131_072, mmapSizeBytes: 268_435_456 },
+    });
+
+    expect(readPragma(result, "cache_size")).toBe(-131_072);
+    expect(readPragma(result, "mmap_size")).toBe(268_435_456);
+  });
+
+  it("leaves cacheSizeKib and mmapSizeBytes at SQLite's own defaults when unset", () => {
+    const withDefaults = openBackend({ path: createTemporaryDbPath() });
+    const withoutPragmas = openBackend({
+      path: createTemporaryDbPath(),
+      pragmas: false,
+    });
+
+    expect(readPragma(withDefaults, "cache_size")).toBe(
+      readPragma(withoutPragmas, "cache_size"),
+    );
+    expect(readPragma(withDefaults, "mmap_size")).toBe(
+      readPragma(withoutPragmas, "mmap_size"),
+    );
+  });
+
+  it("rejects a non-integer cacheSizeKib or a negative mmapSizeBytes", () => {
+    expect(() => openBackend({ pragmas: { cacheSizeKib: 1.5 } })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => openBackend({ pragmas: { mmapSizeBytes: -1 } })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => openBackend({ pragmas: { mmapSizeBytes: 1.5 } })).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it("rejects a non-negative cacheSizeKib — SQLite reads a positive value as a page count, not KiB", () => {
+    expect(() => openBackend({ pragmas: { cacheSizeKib: 131_072 } })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => openBackend({ pragmas: { cacheSizeKib: 0 } })).toThrow(
+      ConfigurationError,
+    );
+  });
+
   it("supports writes and reads on a WAL file database end to end", async () => {
     const Person = defineNode("Person", {
       schema: z.object({ name: z.string() }),
