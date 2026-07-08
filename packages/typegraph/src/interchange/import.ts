@@ -441,7 +441,14 @@ async function processNodeSlice(
                 uniqueConstraints,
                 ...(node.validTo !== undefined && { validTo: node.validTo }),
               },
-              backend,
+              // The pending-aware overlay, not the raw backend: the update's
+              // uniqueness pre-check must see a unique value already reserved by
+              // an unflushed create EARLIER in this slice, so it degrades to a
+              // per-row error exactly as the sequential path does — rather than
+              // claiming the key on the real backend and colliding with that
+              // create at flush (which would throw and roll back the whole
+              // import). Writes still delegate to the real backend.
+              validationBackend,
             ),
           );
           if (updateResult.ok) {

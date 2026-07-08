@@ -201,5 +201,57 @@ export function registerImportUniquenessIntegrationTests(
       });
       expect(batched).toEqual(sequential);
     });
+
+    it("in-slice create reserving a unique value makes a later update to it a per-row error, not an import abort", async () => {
+      const outcomes = new Map<number, unknown>();
+      for (const batchSize of [1, 100]) {
+        const store = await createGraphStore();
+        await importGraph(
+          store,
+          payload([personNode("inv-a", "a", "a-orig@example.com")]),
+          options(1),
+        );
+        const result = await importGraph(
+          store,
+          payload([
+            personNode("inv-b", "b", "target@example.com"),
+            personNode("inv-a", "a2", "target@example.com"),
+          ]),
+          options(batchSize),
+        );
+        const personA = await store.nodes.ImportPerson.getById(
+          personId("inv-a"),
+        );
+        const personB = await store.nodes.ImportPerson.getById(
+          personId("inv-b"),
+        );
+        outcomes.set(batchSize, {
+          created: result.nodes.created,
+          updated: result.nodes.updated,
+          errors: result.errors.map((entry) => ({
+            id: entry.id,
+            matchesConstraint: entry.error.includes("import_person_email"),
+          })),
+          emailA: personA?.email,
+          emailB: personB?.email,
+        });
+      }
+
+      const sequential = outcomes.get(1);
+      const batched = outcomes.get(100);
+
+      // Sequential creates B owning "target", then A's update to "target" is a
+      // per-row uniqueness error (A keeps its original value). Batched must
+      // match: the update's pre-check has to see B's still-unflushed
+      // reservation instead of claiming the key and colliding at flush.
+      expect(sequential).toEqual({
+        created: 1,
+        updated: 0,
+        errors: [{ id: "inv-a", matchesConstraint: true }],
+        emailA: "a-orig@example.com",
+        emailB: "target@example.com",
+      });
+      expect(batched).toEqual(sequential);
+    });
   });
 }
