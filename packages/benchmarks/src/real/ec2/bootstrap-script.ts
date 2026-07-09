@@ -77,6 +77,16 @@ trap 'echo "bootstrap failed at $(date -u --iso-8601=seconds)" > ${BOOTSTRAP_FAI
 # Dead-man's switch: self-terminate if the benchmark is never collected.
 shutdown -h +${options.deadManSwitchMinutes} || true
 
+# Fresh Ubuntu cloud images run apt-daily.timer / apt-daily-upgrade.timer /
+# unattended-upgrades.service within the first minute or two after boot,
+# which races this script for the dpkg lock and reliably fails an apt-get
+# call ("Could not get lock /var/lib/dpkg/lock-frontend") if it loses.
+# Disable the periodic offenders so nothing new grabs the lock, then wait
+# out whichever one might already be mid-run before touching apt ourselves.
+systemctl stop apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+flock -w 300 /var/lib/dpkg/lock-frontend true
+
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg git zstd
 
