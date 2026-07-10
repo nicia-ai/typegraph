@@ -19,8 +19,6 @@ import {
   type QueryBuilderState,
 } from "./types";
 
-const NOT_COMPUTED = Symbol("NOT_COMPUTED");
-
 /**
  * Result type for aggregate queries.
  * Maps field refs to their value types and aggregates to numbers.
@@ -44,7 +42,6 @@ export class ExecutableAggregateQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #fields: R;
-  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R) {
     this.#config = config;
@@ -142,17 +139,12 @@ export class ExecutableAggregateQuery<
    * Compiles the query to a Drizzle SQL object.
    */
   compile(): CompiledSelectSql {
-    if (this.#cachedCompiled !== NOT_COMPUTED) {
-      return this.#cachedCompiled;
-    }
+    // Not cached — a "current" temporal filter binds its read instant at
+    // compile time, so caching across calls would freeze "now" at first
+    // compilation (see PreparedQuery's class doc comment for the full
+    // rationale).
     const ast = this.toAst();
-    const compiled = compileQuery(
-      ast,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
-    this.#cachedCompiled = compiled;
-    return compiled;
+    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
   }
 
   #compileOptions(): CompileQueryOptions {

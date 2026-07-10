@@ -80,6 +80,16 @@ const graph = defineGraph({
 
 const registry = buildKindRegistry(graph);
 
+/** Strips the millisecond-precision "current instant" bound in a compiled
+ * temporal filter, so two genuinely fresh compiles of the same query can be
+ * compared for structural equality. */
+function normalizeTimestamps(sql: string): string {
+  return sql.replaceAll(
+    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g,
+    "<timestamp>",
+  );
+}
+
 // ============================================================
 // UnionableQuery.union
 // ============================================================
@@ -387,7 +397,14 @@ describe("UnionableQuery.compile", () => {
     expect(sqlString).toContain("UNION");
   });
 
-  it("reuses cached compiled SQL for repeated compile calls", () => {
+  it("compiles equivalent SQL on repeated compile calls", () => {
+    // Deliberately NOT cached across calls: a "current" temporal filter
+    // binds its read instant at compile time, so caching the compiled
+    // result would freeze "now" at the first call for the query's entire
+    // lifetime (see PreparedQuery's class doc comment). Repeated calls
+    // must still produce the same SQL shape — but the bound "now" value
+    // itself may legitimately differ by a millisecond between two calls,
+    // so timestamps are normalized before comparing.
     const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("User", "u")
       .select((ctx) => ({ id: ctx.u.id }));
@@ -400,7 +417,9 @@ describe("UnionableQuery.compile", () => {
     const firstCompile = unionQuery.compile();
     const secondCompile = unionQuery.compile();
 
-    expect(secondCompile).toBe(firstCompile);
+    expect(normalizeTimestamps(sqlToString(secondCompile))).toBe(
+      normalizeTimestamps(sqlToString(firstCompile)),
+    );
   });
 
   it("compiles UNION ALL to SQL", () => {

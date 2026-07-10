@@ -1857,7 +1857,7 @@ const results = await store
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
-| `prepare()` | `PreparedQuery<T>` | Pre-compile query for repeated execution with parameters |
+| `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
 #### `store.batch(...queries)`
 

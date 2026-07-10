@@ -104,9 +104,6 @@ export class ExecutableQuery<
   readonly #selectFn: (
     context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>,
   ) => R;
-  #cachedCompiled: CompiledSelectSql | typeof NOT_COMPUTED = NOT_COMPUTED;
-  #cachedOptimizedCompiled: CompiledSelectSql | typeof NOT_COMPUTED =
-    NOT_COMPUTED;
   #cachedSelectiveFieldsForExecute:
     readonly SelectiveField[] | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
   #cachedSelectiveFieldsForPagination:
@@ -341,20 +338,19 @@ export class ExecutableQuery<
    * with db.all(), db.get(), etc.
    */
   compile(): CompiledSelectSql {
-    if (this.#cachedCompiled !== NOT_COMPUTED) return this.#cachedCompiled;
+    // Not cached — see #tryOptimizedExecution's comment for why: a "current"
+    // temporal filter binds its read instant at compile time, so caching
+    // across calls would freeze "now" at first compilation.
     const ast = this.toAst();
-    const compiled = compileQuery(
-      ast,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
-    this.#cachedCompiled = compiled;
-    return compiled;
+    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
   }
 
   /**
-   * Creates a prepared (pre-compiled) query that can be executed
-   * multiple times with different parameter bindings.
+   * Creates a prepared (pre-validated) query that can be executed multiple
+   * times with different parameter bindings. Builds and structurally
+   * validates the AST once (a malformed query fails fast, here, instead of
+   * on first use); SQL text still compiles fresh on every execute() call —
+   * see PreparedQuery's class doc comment for why.
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.
@@ -392,38 +388,20 @@ export class ExecutableQuery<
       selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields };
     const unoptimizedAst = baseAst;
 
-    // Compile once
+    // Compile once here purely to fail fast on a malformed query — the AST
+    // itself carries no timestamp, so this validation compile is safe to
+    // discard. PreparedQuery re-compiles to SQL text fresh on every
+    // execute() call instead of caching it from here: a "current" temporal
+    // filter binds its read instant at compile time, and caching that
+    // compiled text would freeze "now" at prepare() time for the prepared
+    // query's entire lifetime (see PreparedQuery's class doc comment).
     const compileOptions = this.#compileOptions();
-    const compiled = compileQuery(ast, this.#config.graphId, compileOptions);
-
-    // Pre-compile to SQL text if the backend supports it
-    let sqlText: string | undefined;
-    let sqlParams: readonly unknown[] | undefined;
-    let unoptimizedSqlText: string | undefined;
-    let unoptimizedSqlParams: readonly unknown[] | undefined;
-    if (this.#config.backend.compileSql !== undefined) {
-      const result = this.#config.backend.compileSql(compiled);
-      sqlText = result.sql;
-      sqlParams = result.params;
-
-      const unoptimizedCompiled = compileQuery(
-        unoptimizedAst,
-        this.#config.graphId,
-        compileOptions,
-      );
-      const unoptimizedResult =
-        this.#config.backend.compileSql(unoptimizedCompiled);
-      unoptimizedSqlText = unoptimizedResult.sql;
-      unoptimizedSqlParams = unoptimizedResult.params;
-    }
+    compileQuery(ast, this.#config.graphId, compileOptions);
+    compileQuery(unoptimizedAst, this.#config.graphId, compileOptions);
 
     return new PreparedQuery({
       ast,
       unoptimizedAst,
-      sqlText,
-      sqlParams,
-      unoptimizedSqlText,
-      unoptimizedSqlParams,
       backend: this.#config.backend,
       dialect: this.#config.dialect ?? "sqlite",
       graphId: this.#config.graphId,
@@ -573,23 +551,19 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    // Build and compile optimized query (cached per instance)
-    let compiled: CompiledSelectSql;
-    if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
-      const baseAst = buildQueryAst(this.#config, this.#state);
-      const selectiveAst = {
-        ...baseAst,
-        selectiveFields,
-      };
-      compiled = compileQuery(
-        selectiveAst,
-        this.#config.graphId,
-        this.#compileOptions(),
-      );
-      this.#cachedOptimizedCompiled = compiled;
-    } else {
-      compiled = this.#cachedOptimizedCompiled;
-    }
+    // Compile fresh on every call — NOT cached. A "current" temporal filter
+    // binds its read instant at compile time (see PreparedQuery's class doc
+    // comment for the full rationale); caching the compiled SQL across
+    // `.execute()` calls on a reused query instance would freeze "now" at
+    // whichever call first triggered compilation and silently hide any row
+    // created after that, for every subsequent call on this instance.
+    const baseAst = buildQueryAst(this.#config, this.#state);
+    const selectiveAst = { ...baseAst, selectiveFields };
+    const compiled = compileQuery(
+      selectiveAst,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
 
     const backend = this.#requireBackend();
     const rawSelectiveRows = await this.#executeOnBackend(
@@ -612,12 +586,10 @@ export class ExecutableQuery<
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
-        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
-        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       throw error;
@@ -636,22 +608,14 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    let compiled: CompiledSelectSql;
-    if (this.#cachedOptimizedCompiled === NOT_COMPUTED) {
-      const baseAst = buildQueryAst(this.#config, this.#state);
-      const selectiveAst = {
-        ...baseAst,
-        selectiveFields,
-      };
-      compiled = compileQuery(
-        selectiveAst,
-        this.#config.graphId,
-        this.#compileOptions(),
-      );
-      this.#cachedOptimizedCompiled = compiled;
-    } else {
-      compiled = this.#cachedOptimizedCompiled;
-    }
+    // Compile fresh on every call — see #tryOptimizedExecution's comment.
+    const baseAst = buildQueryAst(this.#config, this.#state);
+    const selectiveAst = { ...baseAst, selectiveFields };
+    const compiled = compileQuery(
+      selectiveAst,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
 
     const rawSelectiveRows = await this.#executeOnBackend(
       backend,
@@ -672,12 +636,10 @@ export class ExecutableQuery<
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
-        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForExecute = undefined;
-        this.#cachedOptimizedCompiled = NOT_COMPUTED;
         return undefined;
       }
       throw error;

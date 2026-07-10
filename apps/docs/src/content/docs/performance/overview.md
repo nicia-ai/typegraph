@@ -307,12 +307,18 @@ The default TypeGraph schema includes optimized indexes for the most common acce
 
 For application-specific indexes on JSON properties, see [Indexes](/performance/indexes).
 
-### Compilation Caching
+### SQL Compilation
 
 Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
-The compiled SQL for each instance is cached internally — repeated `.execute()` calls on the same
-builder skip recompilation entirely. This applies to standard queries, aggregate queries, and
-set-operation queries (`union`, `intersect`, `except`). This is transparent and requires no API changes.
+`.execute()`/`.toSQL()`/`.compile()` compile fresh SQL from the AST on every call — this applies to
+standard queries, aggregate queries, and set-operation queries (`union`, `intersect`, `except`).
+Compilation is pure, in-memory string-building with no I/O, so recompiling is cheap; the query's
+actual database round-trip dominates the cost either way.
+
+This is deliberate, not just unoptimized: a "current" (live) read binds its temporal-validity filter
+to the instant it's compiled at. Caching compiled SQL across calls would freeze that instant at
+whichever call first triggered compilation, silently hiding any row created afterward from every
+later call on the same query instance.
 
 ```typescript
 const activeUsers = store
@@ -321,23 +327,27 @@ const activeUsers = store
   .whereNode("u", (u) => u.status.eq("active"))
   .select((ctx) => ctx.u);
 
-// First call: compiles AST → SQL → executes
+// Each call compiles AST → SQL fresh, so a user created between these two
+// calls is visible to the second one.
 await activeUsers.execute();
-
-// Second call: reuses cached SQL → executes
 await activeUsers.execute();
 ```
 
 ### Prepared Queries
 
-For hot paths that execute the same query shape with different values, `.prepare()` pre-compiles the
-entire query pipeline (AST build, SQL compilation, text extraction) once. Subsequent
-`.execute(bindings)` calls only substitute parameter values and execute.
+For hot paths that execute the same query shape with different values, `.prepare()` builds and
+structurally validates the query AST once — a malformed query fails fast, before the first
+`.execute()`, instead of on first use. The AST itself carries no timestamp, so this validation is
+safe to do once and reuse. SQL text is still compiled fresh on every `.execute(bindings)` call, for
+the same reason as above: the compiled text is what carries the current-read instant, the bound
+parameter values, and the query's structure.
 
-When `executeRaw` is available (both SQLite and PostgreSQL backends), the pre-compiled SQL text is
-sent directly to the driver — zero recompilation overhead.
+When `executeRaw` is available (both SQLite and PostgreSQL backends), the freshly compiled SQL text
+is sent directly to the driver with the bindings substituted in.
 
-Best for: API endpoints, hot loops, or any code path that runs the same query shape repeatedly.
+Best for: validating a query shape once (fail fast on a malformed query) and reusing it with
+different parameter values — not for avoiding SQL compilation cost, which is negligible next to the
+database round-trip.
 
 See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 
