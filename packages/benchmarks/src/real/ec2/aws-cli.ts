@@ -57,6 +57,14 @@ export type RunInstanceOptions = Readonly<{
   userData: string;
   name: string;
   runId: string;
+  /**
+   * Requests a public IP even if the subnet's own `MapPublicIpOnLaunch`
+   * is false. Only useful (and only reachable) if `subnetId` also routes
+   * to an Internet Gateway — a private, NAT-egress-only subnet still won't
+   * accept inbound traffic to the assigned IP. Off by default: SSM is the
+   * default control channel and doesn't need this.
+   */
+  associatePublicIp: boolean;
 }>;
 
 /** Launches one instance and returns its id. Caller waits for `running` separately. */
@@ -109,6 +117,7 @@ export async function runInstance(
     ...tagSpec,
     "--count",
     "1",
+    ...(input.associatePublicIp ? ["--associate-public-ip-address"] : []),
   ]);
   const instanceId = result.Instances[0]?.InstanceId;
   if (instanceId === undefined) {
@@ -120,6 +129,7 @@ export async function runInstance(
 export type InstanceState = Readonly<{
   state: string;
   privateIp: string | undefined;
+  publicIp: string | undefined;
 }>;
 
 export async function describeInstanceState(
@@ -131,6 +141,7 @@ export async function describeInstanceState(
       Instances: readonly {
         State: { Name: string };
         PrivateIpAddress?: string;
+        PublicIpAddress?: string;
       }[];
     }[];
   }>(options, ["ec2", "describe-instances", "--instance-ids", instanceId]);
@@ -141,6 +152,7 @@ export async function describeInstanceState(
   return {
     state: instance.State.Name,
     privateIp: instance.PrivateIpAddress,
+    publicIp: instance.PublicIpAddress,
   };
 }
 

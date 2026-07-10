@@ -246,6 +246,8 @@ async function launch(argv: readonly string[]): Promise<void> {
     sshPublicKeyPath === undefined ? undefined : (
       (await readFile(sshPublicKeyPath, "utf8")).trim()
     );
+  const associatePublicIp =
+    parseArgValue(argv, "associate-public-ip") === "true";
 
   const bootstrapTimeoutSeconds = Number(
     parseArgValue(argv, "bootstrap-timeout-seconds") ??
@@ -292,14 +294,23 @@ async function launch(argv: readonly string[]): Promise<void> {
     userData,
     name,
     runId,
+    associatePublicIp,
   });
   console.log(`Instance: ${instanceId}`);
 
   console.log("Waiting for instance to reach 'running'...");
+  let runningState:
+    Awaited<ReturnType<typeof describeInstanceState>> | undefined;
   await waitUntil("instance running", 5_000, 5 * 60_000, async () => {
     const state = await describeInstanceState(awsOptions, instanceId);
+    if (state.state === "running") runningState = state;
     return state.state === "running";
   });
+  if (sshPublicKey !== undefined && runningState?.publicIp !== undefined) {
+    console.log(
+      `SSH diagnostic access: ssh -i <private-key-path> ubuntu@${runningState.publicIp}`,
+    );
+  }
 
   console.log("Waiting for SSM agent to register...");
   await waitUntil("SSM online", 5_000, 5 * 60_000, () =>

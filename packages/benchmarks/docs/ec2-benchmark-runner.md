@@ -38,6 +38,16 @@ for you — the caller is responsible for adding (and later removing) an
 ingress rule on the security group, scoped as narrowly as possible (e.g. a
 single `/32`). Treat this as break-glass, not a standing configuration.
 
+A key alone isn't enough if the subnet is private: `--subnet-id` needs to
+route to an Internet Gateway (not just NAT egress) for an inbound SSH
+connection to reach the instance at all, and you also need
+`--associate-public-ip=true` since `MapPublicIpOnLaunch` is commonly `false`
+even on IGW-routed subnets. Check `aws ec2 describe-route-tables` for a
+`0.0.0.0/0` route pointing at an `igw-*` (not a `nat-*`) before relying on
+this — a NAT-routed private subnet will accept the key but stay
+unreachable, which looks identical to success until you actually try to
+connect.
+
 ## Usage
 
 ```bash
@@ -81,8 +91,9 @@ a fresh clone), `--profile` (`smoke`, `sf1`, or `sf10`; default `sf1`),
 sqlite+postgres+neo4j load phases alone took ~2.6h pre-fix, so a 6h default
 proved too tight in practice — sf10 129600 / 36h, deliberately generous
 since SF10 is ~10x SF1's row counts with no direct measurement yet of how
-each engine's load time actually scales), `--ssh-public-key-path` (see
-"Diagnostic-only SSH fallback" above; omit for the SSM-only default).
+each engine's load time actually scales), `--ssh-public-key-path` and
+`--associate-public-ip=true` (see "Diagnostic-only SSH fallback" above; omit
+both for the SSM-only default).
 
 `collect` (required): `--region`, `--instance-id`, `--command-id`.
 
