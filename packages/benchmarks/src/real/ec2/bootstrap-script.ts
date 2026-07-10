@@ -90,6 +90,22 @@ flock -w 300 /var/lib/dpkg/lock-frontend true
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg git zstd
 
+# A real SF10 run against instance i-021c312ac05b1720a (2026-07-09) went
+# network-unreachable ~3h in — AWS's own instance-reachability check and the
+# SSM agent both went dark while CPU utilization stayed rock steady, with no
+# kernel panic or OOM-kill in the console log — while Docker was running
+# heavy, high-churn connection traffic across 4 benchmarked engines at 10x
+# scale. That signature matches conntrack-table exhaustion degrading the
+# whole instance's networking, a well-documented failure mode for exactly
+# this kind of workload. Raise the ceiling before Docker's first iptables
+# NAT rule loads the module with the (much smaller) default hashsize.
+mkdir -p /etc/modprobe.d
+echo "options nf_conntrack hashsize=131072" > /etc/modprobe.d/nf_conntrack.conf
+modprobe nf_conntrack
+mkdir -p /etc/sysctl.d
+echo "net.netfilter.nf_conntrack_max = 1048576" > /etc/sysctl.d/99-typegraph-bench-conntrack.conf
+sysctl --system
+
 # Docker Engine (official apt repo).
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
