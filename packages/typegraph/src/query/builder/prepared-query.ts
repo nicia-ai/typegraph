@@ -2,23 +2,22 @@
  * PreparedQuery — a pre-validated, parameterized query.
  *
  * Created via `ExecutableQuery.prepare()`. Builds and structurally validates
- * the query AST once at prepare time (so a malformed query fails fast,
- * before the first `execute()`), then re-compiles it to SQL text on every
- * `execute()` call — NOT once at prepare time. This is deliberate: a
- * "current" (live) temporal-validity filter binds the read instant fresh at
- * compile time (see `currentReadInstant()`); caching that compiled SQL text
- * across calls would freeze "now" at prepare time and silently hide every
- * row created after prepare() ran for the entire lifetime of the prepared
- * query — the AST itself carries no timestamp, only the compiled SQL does.
+ * the query AST once at prepare time (so a malformed query fails fast, before
+ * the first `execute()`).
  *
- * Fast path: when `backend.executeRaw` is available, executes freshly
- * compiled SQL text directly with substituted parameter values.
+ * Fast path: when the backend can compile and run raw SQL (`compileSql` +
+ * `executeRaw`), the statement is compiled ONCE into a cached template whose
+ * "current" read instant and user `param()` refs are reserved placeholders
+ * (see {@link buildReadInstantTemplate}). Every `execute()` fills those
+ * placeholders — a fresh instant plus the call's bindings — and runs the
+ * cached SQL text directly, so a reused prepared query never recompiles and
+ * never freezes "now" the way a cached literal instant would (the #246
+ * regression).
  *
- * Fallback: substitutes parameter refs in the AST, compiles to SQL (also
- * fresh), and executes via the standard `backend.execute` path.
+ * Fallback: on a backend without raw execution (custom/async), substitutes
+ * parameter refs into the AST, compiles fresh per call, and executes via the
+ * standard `backend.execute` path.
  */
-import { Placeholder } from "drizzle-orm";
-
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
 import {
@@ -32,7 +31,6 @@ import {
   type StringPredicate,
 } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
-import { getDialect } from "../dialect";
 import { type SqlDialect } from "../dialect/types";
 import {
   mapResults,
@@ -42,6 +40,11 @@ import {
 } from "../execution";
 import { isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import {
+  buildQueryTemplate,
+  type CompiledTemplate,
+  fillTemplateParams,
+} from "./read-instant-template";
 import {
   type AliasMap,
   type EdgeAliasMap,
@@ -227,39 +230,6 @@ function substituteParameters(
 }
 
 // ============================================================
-// Placeholder Substitution for executeRaw Fast Path
-// ============================================================
-
-/**
- * Fills placeholder values in a parameter array.
- *
- * Drizzle's `sql.placeholder()` produces `Placeholder` objects in the params
- * array. This function replaces them with the actual bound values.
- */
-function fillPlaceholders(
-  params: readonly unknown[],
-  bindings: Readonly<Record<string, unknown>>,
-  dialect: SqlDialect,
-): unknown[] {
-  const adapter = getDialect(dialect);
-  return params.map((parameter) => {
-    if (parameter instanceof Placeholder) {
-      const name = parameter.name as string;
-      const value = bindings[name];
-      if (value === undefined) {
-        throw new ConfigurationError(
-          `Missing binding for parameter "${name}"`,
-          { parameterName: name },
-        );
-      }
-      if (value instanceof Date) return value.toISOString();
-      return adapter.bindValue(value);
-    }
-    return parameter;
-  });
-}
-
-// ============================================================
 // PreparedQuery
 // ============================================================
 
@@ -277,8 +247,9 @@ type PreparedQueryConfig<R> = Readonly<{
 }>;
 
 /**
- * A pre-validated, parameterized query — see the module doc comment above
- * for why SQL text is compiled fresh per call, not cached from prepare().
+ * A pre-validated, parameterized query — see the module doc comment above for
+ * how a reused prepared query runs a cached SQL template with a fresh read
+ * instant filled per call.
  *
  * @example
  * ```typescript
@@ -305,6 +276,14 @@ export class PreparedQuery<R> {
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
   readonly #parameterMetadata: ParameterMetadata;
+  /**
+   * Per-AST cached placeholder template, keyed by AST reference so the
+   * optimized (`#ast`) and unoptimized (`#unoptimizedAst`) variants cache
+   * independently. A cached `undefined` records "no fast-path template" (the
+   * backend lacks `compileSql`, or the statement was not safely cacheable) so
+   * we don't rebuild it on every call.
+   */
+  readonly #templateCache = new Map<QueryAst, CompiledTemplate | undefined>();
 
   constructor(config: PreparedQueryConfig<R>) {
     this.#ast = config.ast;
@@ -321,17 +300,25 @@ export class PreparedQuery<R> {
   }
 
   /**
-   * Compiles `ast` to SQL text + params, fresh — never cached. See the class
-   * doc comment for why: a "current" temporal filter binds its read instant
-   * at compile time, so the instant must be recomputed on every call, not
-   * reused from a cached compilation.
+   * The cached placeholder template for `ast`, or `undefined` when no fast
+   * path applies. Compiled once (in placeholder mode) and reused across every
+   * `execute()`; the read instant is refreshed per call by
+   * {@link fillTemplateParams}, never frozen into the cache.
    */
-  #compileFresh(
-    ast: QueryAst,
-  ): Readonly<{ sql: string; params: readonly unknown[] }> | undefined {
-    if (this.#backend.compileSql === undefined) return undefined;
-    const compiled = compileQuery(ast, this.#graphId, this.#compileOptions);
-    return this.#backend.compileSql(compiled);
+  #template(ast: QueryAst): CompiledTemplate | undefined {
+    if (this.#templateCache.has(ast)) return this.#templateCache.get(ast);
+    const template = this.#buildTemplate(ast);
+    this.#templateCache.set(ast, template);
+    return template;
+  }
+
+  #buildTemplate(ast: QueryAst): CompiledTemplate | undefined {
+    return buildQueryTemplate(
+      ast,
+      this.#graphId,
+      this.#compileOptions,
+      this.#backend,
+    );
   }
 
   /** The set of parameter names required by this prepared query. */
@@ -381,32 +368,7 @@ export class PreparedQuery<R> {
   async #executeSelectiveRows(
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    const fresh =
-      this.#backend.executeRaw === undefined ?
-        undefined
-      : this.#compileFresh(this.#ast);
-    if (fresh !== undefined && this.#backend.executeRaw !== undefined) {
-      const filledParams = fillPlaceholders(
-        fresh.params,
-        bindings,
-        this.#dialect,
-      );
-      const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
-        fresh.sql,
-        filledParams,
-      );
-      return transformPathColumns(rawRows, this.#state, this.#dialect);
-    }
-
-    const concreteAst = substituteParameters(this.#ast, bindings);
-    const compiled = compileQuery(
-      concreteAst,
-      this.#graphId,
-      this.#compileOptions,
-    );
-    const rawRows =
-      await this.#backend.execute<Record<string, unknown>>(compiled);
-    return transformPathColumns(rawRows, this.#state, this.#dialect);
+    return this.#executeRows(this.#ast, bindings);
   }
 
   async #executeUnoptimized(
@@ -424,24 +386,36 @@ export class PreparedQuery<R> {
   async #executeUnoptimizedRows(
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    const fresh =
-      this.#backend.executeRaw === undefined ?
-        undefined
-      : this.#compileFresh(this.#unoptimizedAst);
-    if (fresh !== undefined && this.#backend.executeRaw !== undefined) {
-      const filledParams = fillPlaceholders(
-        fresh.params,
+    return this.#executeRows(this.#unoptimizedAst, bindings);
+  }
+
+  /**
+   * Runs one AST variant with the given bindings. Prefers the cached template
+   * + `executeRaw` fast path; falls back to substituting bindings into the AST
+   * and compiling fresh when the backend cannot execute raw SQL text.
+   */
+  async #executeRows(
+    ast: QueryAst,
+    bindings: Readonly<Record<string, unknown>>,
+  ): Promise<readonly Record<string, unknown>[]> {
+    const executeRaw = this.#backend.executeRaw;
+    const template = executeRaw === undefined ? undefined : this.#template(ast);
+    if (template !== undefined && executeRaw !== undefined) {
+      const params = fillTemplateParams(
+        template.params,
         bindings,
         this.#dialect,
       );
-      const rawRows = await this.#backend.executeRaw<Record<string, unknown>>(
-        fresh.sql,
-        filledParams,
+      // Method call (not the detached `executeRaw` local) so a this-using
+      // backend implementation keeps its receiver.
+      const rawRows = await this.#backend.executeRaw!<Record<string, unknown>>(
+        template.sql,
+        params,
       );
       return transformPathColumns(rawRows, this.#state, this.#dialect);
     }
 
-    const concreteAst = substituteParameters(this.#unoptimizedAst, bindings);
+    const concreteAst = substituteParameters(ast, bindings);
     const compiled = compileQuery(
       concreteAst,
       this.#graphId,

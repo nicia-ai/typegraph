@@ -272,6 +272,9 @@ describe("Node Collections (SQLite)", () => {
       let rootExecuteCount = 0;
       let txExecuteCount = 0;
 
+      // Reads may run through backend.execute (Drizzle path) or the cached
+      // template's executeRaw fast path; count both so "ran on the tx backend"
+      // holds regardless of which path a where-filtered find() takes.
       const observedBackend: GraphBackend = {
         ...baseBackend,
         async execute<T>(
@@ -279,6 +282,10 @@ describe("Node Collections (SQLite)", () => {
         ): Promise<readonly T[]> {
           rootExecuteCount++;
           return baseBackend.execute<T>(query);
+        },
+        async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
+          rootExecuteCount++;
+          return baseBackend.executeRaw!<T>(sqlText, params);
         },
         async transaction<T>(
           fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
@@ -292,6 +299,10 @@ describe("Node Collections (SQLite)", () => {
               ): Promise<readonly T[]> {
                 txExecuteCount++;
                 return txBackend.execute<T>(query);
+              },
+              async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
+                txExecuteCount++;
+                return txBackend.executeRaw!<T>(sqlText, params);
               },
             };
             return fn(observedTxBackend, sql);

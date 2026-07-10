@@ -41,7 +41,7 @@ export {
   extractTemporalOptions,
   type TemporalFilterOptions,
 } from "./temporal";
-import { withPinnedReadInstant } from "./temporal";
+import { type ReadInstantMode, withPinnedReadInstant } from "./temporal";
 
 // Re-export dialect helpers and types
 export { getDialect } from "../dialect";
@@ -172,6 +172,14 @@ export type CompileQueryOptions = Readonly<{
    * the store was only configured for live/valid-time reads.
    */
   recordedReadBinding?: RecordedReadBinding | undefined;
+  /**
+   * How the "current" valid-time read instant is emitted. Defaults to
+   * `"literal"` (a value frozen at compile time). The query builder's
+   * compiled template cache passes `"placeholder"` so the instant is a
+   * reserved execution-time slot, letting one compiled statement be reused
+   * across executions with a fresh "now" each call. See {@link ReadInstantMode}.
+   */
+  readInstant?: ReadInstantMode | undefined;
 }>;
 
 /**
@@ -233,6 +241,7 @@ export function compileQuery(
     dialect: adapter,
     schema,
     annIndexTypes,
+    readInstant: options_.readInstant ?? "literal",
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
@@ -441,6 +450,9 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.recordedReadBinding === undefined ?
       {}
     : { recordedReadBinding: options_.recordedReadBinding }),
+    ...(options_.readInstant === undefined ?
+      {}
+    : { readInstant: options_.readInstant }),
   };
 }
 

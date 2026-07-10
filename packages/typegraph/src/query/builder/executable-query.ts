@@ -24,6 +24,7 @@ import {
   decodeCursor,
   validateCursorColumns,
 } from "../cursor";
+import { type SqlDialect } from "../dialect/types";
 import {
   buildCursorPredicate,
   buildPaginatedResult,
@@ -47,6 +48,11 @@ import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
+import {
+  buildQueryTemplate,
+  type CompiledTemplate,
+  fillTemplateParams,
+} from "./read-instant-template";
 import {
   type AliasMap,
   type EdgeAliasMap,
@@ -108,6 +114,19 @@ export class ExecutableQuery<
     readonly SelectiveField[] | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
   #cachedSelectiveFieldsForPagination:
     readonly SelectiveField[] | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
+  // The instance is immutable (every builder method returns a new instance),
+  // so the AST and its param-ref check are invariant — compute each once and
+  // reuse across execute()/paginate()/stream() instead of rebuilding per call.
+  #cachedAst: QueryAst | undefined;
+  #cachedHasParameterReferences: boolean | undefined;
+  // Per-instance compiled placeholder templates for the full and
+  // selective-field ASTs (NOT_COMPUTED = not yet built; undefined = no fast
+  // path). Reused across execute()/executeOn() calls so a repeated query
+  // compiles once; the read instant is filled fresh per call, never cached.
+  #fullTemplate: CompiledTemplate | typeof NOT_COMPUTED | undefined =
+    NOT_COMPUTED;
+  #selectiveTemplate: CompiledTemplate | typeof NOT_COMPUTED | undefined =
+    NOT_COMPUTED;
 
   constructor(
     config: QueryBuilderConfig,
@@ -122,10 +141,17 @@ export class ExecutableQuery<
   }
 
   /**
-   * Builds the query AST.
+   * Builds the query AST (memoized — the instance is immutable).
    */
   toAst(): QueryAst {
-    return buildQueryAst(this.#config, this.#state);
+    return (this.#cachedAst ??= buildQueryAst(this.#config, this.#state));
+  }
+
+  /** Whether this query uses `param()` refs (memoized). */
+  #hasParameterReferences(): boolean {
+    return (this.#cachedHasParameterReferences ??= hasParameterReferences(
+      this.toAst(),
+    ));
   }
 
   /**
@@ -338,9 +364,9 @@ export class ExecutableQuery<
    * with db.all(), db.get(), etc.
    */
   compile(): CompiledSelectSql {
-    // Not cached — see #tryOptimizedExecution's comment for why: a "current"
-    // temporal filter binds its read instant at compile time, so caching
-    // across calls would freeze "now" at first compilation.
+    // Emits a directly-runnable statement with the read instant as a literal
+    // (a caller may hand the result straight to db.all()), so this is not the
+    // reusable placeholder template execute() caches — see #templateFor.
     const ast = this.toAst();
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
   }
@@ -348,9 +374,10 @@ export class ExecutableQuery<
   /**
    * Creates a prepared (pre-validated) query that can be executed multiple
    * times with different parameter bindings. Builds and structurally
-   * validates the AST once (a malformed query fails fast, here, instead of
-   * on first use); SQL text still compiles fresh on every execute() call —
-   * see PreparedQuery's class doc comment for why.
+   * validates the AST once (a malformed query fails fast, here, instead of on
+   * first use); the prepared query then compiles once into a reusable template
+   * and fills a fresh read instant per execute() — see PreparedQuery's class
+   * doc comment.
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.
@@ -380,7 +407,7 @@ export class ExecutableQuery<
     }
 
     // Build AST once
-    const baseAst = buildQueryAst(this.#config, this.#state);
+    const baseAst = this.toAst();
 
     // Attempt selective field optimization
     const selectiveFields = this.#getSelectiveFieldsForExecute();
@@ -388,13 +415,10 @@ export class ExecutableQuery<
       selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields };
     const unoptimizedAst = baseAst;
 
-    // Compile once here purely to fail fast on a malformed query — the AST
-    // itself carries no timestamp, so this validation compile is safe to
-    // discard. PreparedQuery re-compiles to SQL text fresh on every
-    // execute() call instead of caching it from here: a "current" temporal
-    // filter binds its read instant at compile time, and caching that
-    // compiled text would freeze "now" at prepare() time for the prepared
-    // query's entire lifetime (see PreparedQuery's class doc comment).
+    // Compile once here purely to fail fast on a malformed query. PreparedQuery
+    // caches its own reusable placeholder template (built lazily on first
+    // execute), so this validation compile is safe to discard — it only exists
+    // to surface a structural error at prepare() time rather than first use.
     const compileOptions = this.#compileOptions();
     compileQuery(ast, this.#config.graphId, compileOptions);
     compileQuery(unoptimizedAst, this.#config.graphId, compileOptions);
@@ -444,6 +468,73 @@ export class ExecutableQuery<
     });
   }
 
+  #dialect(): SqlDialect {
+    return this.#config.dialect ?? "sqlite";
+  }
+
+  /**
+   * The cached placeholder template for one AST variant (`"full"` or
+   * `"selective"`), or `undefined` when no fast path applies. Built once per
+   * instance from the store backend's compiler; reusable across executions and
+   * across store/transaction backends of the same dialect, since SQL text and
+   * parameters depend only on the AST and dialect. The read instant is filled
+   * fresh per call by {@link fillTemplateParams}, never frozen into the cache.
+   */
+  #templateFor(
+    ast: QueryAst,
+    slot: "full" | "selective",
+  ): CompiledTemplate | undefined {
+    const cached =
+      slot === "full" ? this.#fullTemplate : this.#selectiveTemplate;
+    if (cached !== NOT_COMPUTED) return cached;
+    const built = this.#buildTemplate(ast);
+    if (slot === "full") this.#fullTemplate = built;
+    else this.#selectiveTemplate = built;
+    return built;
+  }
+
+  #buildTemplate(ast: QueryAst): CompiledTemplate | undefined {
+    return buildQueryTemplate(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+      this.#config.backend,
+    );
+  }
+
+  /**
+   * Fetches raw rows for one AST variant, path-column-normalized. Prefers the
+   * cached template + `executeRaw` fast path; falls back to a fresh literal
+   * compile via `backend.execute` when the backend cannot run raw SQL text (in
+   * which case no template is built). Callers map the returned rows to typed
+   * results.
+   */
+  async #fetchRows(
+    backend: GraphBackend | TransactionBackend,
+    ast: QueryAst,
+    slot: "full" | "selective",
+    surface: string,
+  ): Promise<readonly Record<string, unknown>[]> {
+    const executeRaw = backend.executeRaw;
+    const template =
+      executeRaw === undefined ? undefined : this.#templateFor(ast, slot);
+    const rawRows = await this.#executeOnBackend(
+      backend,
+      template !== undefined && executeRaw !== undefined ?
+        // Method call (not the detached `executeRaw` local) so a this-using
+        // backend implementation keeps its receiver.
+        backend.executeRaw!<Record<string, unknown>>(
+          template.sql,
+          fillTemplateParams(template.params, {}, this.#dialect()),
+        )
+      : backend.execute<Record<string, unknown>>(
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+        ),
+      surface,
+    );
+    return transformPathColumns(rawRows, this.#state, this.#dialect());
+  }
+
   /**
    * Executes the query and returns typed results.
    *
@@ -464,7 +555,8 @@ export class ExecutableQuery<
     const backend = this.#config.backend;
 
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
-    if (hasParameterReferences(this.toAst())) {
+    const ast = this.toAst();
+    if (this.#hasParameterReferences()) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
@@ -476,17 +568,9 @@ export class ExecutableQuery<
       return optimizedResult;
     }
 
-    // Phase 2: Fall back to full fetch (existing behavior)
-    const compiled = this.compile();
-    const rawRows = await this.#executeOnBackend(
-      backend,
-      backend.execute<Record<string, unknown>>(compiled),
-      "recorded-query",
-    );
-
-    // Transform path columns for SQLite (converts "|id1|id2|" to ["id1", "id2"])
-    const dialect = this.#config.dialect ?? "sqlite";
-    const rows = transformPathColumns(rawRows, this.#state, dialect);
+    // Phase 2: Fall back to full fetch (cached template + executeRaw, or a
+    // fresh literal compile on backends without raw execution).
+    const rows = await this.#fetchRows(backend, ast, "full", "recorded-query");
 
     // Cast: runtime context includes recursive aliases; type erasure in mapResults is safe
     return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
@@ -509,7 +593,7 @@ export class ExecutableQuery<
   ): Promise<readonly R[]> {
     const ast = this.toAst();
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
-    if (hasParameterReferences(ast)) {
+    if (this.#hasParameterReferences()) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
@@ -521,15 +605,14 @@ export class ExecutableQuery<
       return optimizedResult;
     }
 
-    // Fall back to full fetch
-    const compiled = this.compile();
-    const rawRows = await this.#executeOnBackend(
+    // Fall back to full fetch (cached template + executeRaw on the provided
+    // backend, or a fresh literal compile when it can't run raw SQL).
+    const rows = await this.#fetchRows(
       backend,
-      backend.execute<Record<string, unknown>>(compiled),
+      ast,
+      "full",
       "recorded-batch-query",
     );
-    const dialect = this.#config.dialect ?? "sqlite";
-    const rows = transformPathColumns(rawRows, this.#state, dialect);
 
     return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
       rows,
@@ -551,28 +634,19 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    // Compile fresh on every call — NOT cached. A "current" temporal filter
-    // binds its read instant at compile time (see PreparedQuery's class doc
-    // comment for the full rationale); caching the compiled SQL across
-    // `.execute()` calls on a reused query instance would freeze "now" at
-    // whichever call first triggered compilation and silently hide any row
-    // created after that, for every subsequent call on this instance.
-    const baseAst = buildQueryAst(this.#config, this.#state);
+    // Cached template + executeRaw when available; the read instant is filled
+    // fresh per call, so a reused query never freezes "now" (the #246
+    // regression) yet compiles only once.
+    const baseAst = this.toAst();
     const selectiveAst = { ...baseAst, selectiveFields };
-    const compiled = compileQuery(
-      selectiveAst,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
 
     const backend = this.#requireBackend();
-    const rawSelectiveRows = await this.#executeOnBackend(
+    const rows = await this.#fetchRows(
       backend,
-      backend.execute<Record<string, unknown>>(compiled),
+      selectiveAst,
+      "selective",
       "recorded-query",
     );
-    const dialect = this.#config.dialect ?? "sqlite";
-    const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
 
     try {
       // RecursiveAliases are populated at runtime but erased in mapSelectiveResults' signature
@@ -608,22 +682,17 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    // Compile fresh on every call — see #tryOptimizedExecution's comment.
-    const baseAst = buildQueryAst(this.#config, this.#state);
+    // Cached template + executeRaw on the provided backend; see
+    // #tryOptimizedExecution.
+    const baseAst = this.toAst();
     const selectiveAst = { ...baseAst, selectiveFields };
-    const compiled = compileQuery(
-      selectiveAst,
-      this.#config.graphId,
-      this.#compileOptions(),
-    );
 
-    const rawSelectiveRows = await this.#executeOnBackend(
+    const rows = await this.#fetchRows(
       backend,
-      backend.execute<Record<string, unknown>>(compiled),
+      selectiveAst,
+      "selective",
       "recorded-batch-query",
     );
-    const dialect = this.#config.dialect ?? "sqlite";
-    const rows = transformPathColumns(rawSelectiveRows, this.#state, dialect);
 
     try {
       return mapSelectiveResults<Aliases, EdgeAliases, R>(

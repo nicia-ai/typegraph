@@ -111,7 +111,10 @@ function runRecursiveQueryPassPipeline(
   const temporalPass = runCompilerPass(state, {
     name: "temporal_filters",
     execute(currentState): TemporalFilterPass {
-      return createTemporalFilterPass(currentState.ast);
+      return createTemporalFilterPass(
+        currentState.ast,
+        currentState.ctx.readInstant,
+      );
     },
     update(currentState, temporalFilterPass): RecursiveQueryPassState {
       return {

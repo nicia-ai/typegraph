@@ -66,3 +66,19 @@ export function markAnnIndexScan(
 export function annIndexScanTypes(query: SQL): readonly string[] | undefined {
   return annIndexScanQueries.get(query);
 }
+
+/**
+ * Whether a compiled statement can be run as raw text (`executeRaw`) without
+ * losing execution semantics. Both brands above ride on the SQL *object* and
+ * are honored only by `backend.execute`: the force-custom-plan flag makes
+ * PostgreSQL re-plan against the actual parameters (opposed to reusing a
+ * cached statement), and the ANN-scan brand drives the pgvector iterative-scan
+ * GUC wrapper. A statement carrying either must not be flattened to text and
+ * cached — callers fall back to `backend.execute`. Keeping this predicate
+ * beside the brands means a future brand updates one place, not every caller.
+ */
+export function isRawExecutable(query: SQL): boolean {
+  return (
+    !shouldForceCustomPlan(query) && annIndexScanTypes(query) === undefined
+  );
+}

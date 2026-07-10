@@ -102,7 +102,14 @@ const schemaIntrospector = createSchemaIntrospector(
 // SQL Helpers
 // ============================================================
 
-function sqlToStrings(sqlObject: SQL): { sql: string; params: unknown[] } {
+function sqlToStrings(sqlObject: SQL | string): {
+  sql: string;
+  params: unknown[];
+} {
+  // The cached-template fast path runs via executeRaw, which the recording
+  // backend captures as already-serialized SQL text.
+  if (typeof sqlObject === "string") return { sql: sqlObject, params: [] };
+
   const params: unknown[] = [];
 
   function flatten(object: unknown): string {
@@ -133,16 +140,23 @@ function sqlToStrings(sqlObject: SQL): { sql: string; params: unknown[] } {
 
 function createRecordingBackend(): Readonly<{
   backend: GraphBackend;
-  getLastQuery: () => SQL | undefined;
+  getLastQuery: () => SQL | string | undefined;
 }> {
   const backend = createTestBackend();
-  let lastQuery: SQL | undefined;
+  let lastQuery: SQL | string | undefined;
 
   const recordingBackend: GraphBackend = {
     ...backend,
     execute: async <T>(query: CompiledRowsSql) => {
       lastQuery = query;
       return backend.execute<T>(query);
+    },
+    // Reads run through the cached-template fast path (executeRaw); capture the
+    // already-serialized SQL text so the projection assertions still see the
+    // statement the query actually ran.
+    executeRaw: async <T>(sqlText: string, params: readonly unknown[]) => {
+      lastQuery = sqlText;
+      return backend.executeRaw!<T>(sqlText, params);
     },
   };
 
@@ -307,7 +321,7 @@ describe("buildSelectiveFields", () => {
 
 describe("Smart Select Integration", () => {
   let store: Store<typeof testGraph>;
-  let getLastQuery: () => SQL | undefined;
+  let getLastQuery: () => SQL | string | undefined;
   let aliceId: string;
 
   beforeEach(async () => {

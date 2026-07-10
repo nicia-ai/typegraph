@@ -23,6 +23,12 @@ import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
 import { composableQueryHasParameterReferences } from "./prepared-query";
 import {
+  buildReadInstantTemplate,
+  type CompiledTemplate,
+  composableNeedsCurrentReadInstant,
+  fillTemplateParams,
+} from "./read-instant-template";
+import {
   type AliasMap,
   type EdgeAliasMap,
   type QueryBuilderConfig,
@@ -84,9 +90,16 @@ type UnionableQueryState = Readonly<{
  * A query formed by combining multiple queries with set operations.
  * Supports chaining: q1.union(q2).intersect(q3)
  */
+/** Sentinel distinguishing "template not yet built" from a built `undefined`. */
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
 export class UnionableQuery<G extends GraphDef, R> {
   readonly #config: QueryBuilderConfig;
   readonly #state: UnionableQueryState;
+  // Per-instance compiled placeholder template, reused across
+  // execute()/executeOn() calls; the read instant is filled fresh per call.
+  // NOT_COMPUTED = not yet built; undefined = no fast path.
+  #template: CompiledTemplate | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: UnionableQueryState) {
     this.#config = config;
@@ -225,10 +238,9 @@ export class UnionableQuery<G extends GraphDef, R> {
    * Compiles the set operation to SQL.
    */
   compile(): CompiledSelectSql {
-    // Not cached — a "current" temporal filter binds its read instant at
-    // compile time, so caching across calls would freeze "now" at first
-    // compilation (see PreparedQuery's class doc comment for the full
-    // rationale).
+    // Emits a directly-runnable statement with the read instant as a literal;
+    // this is not the reusable placeholder template execute() caches (see
+    // #resolveTemplate).
     return compileSetOperation(
       this.toAst(),
       this.#config.graphId,
@@ -238,6 +250,76 @@ export class UnionableQuery<G extends GraphDef, R> {
 
   #compileOptions(): CompileQueryOptions {
     return buildCompileOptions(this.#config);
+  }
+
+  /**
+   * The cached placeholder template for this set operation, or `undefined`
+   * when no fast path applies. Built once per instance; every operand's read
+   * instant is the shared placeholder, filled fresh per execution by
+   * {@link fillTemplateParams}.
+   */
+  #resolveTemplate(ast: SetOperation): CompiledTemplate | undefined {
+    if (this.#template !== NOT_COMPUTED) return this.#template;
+    this.#template = buildReadInstantTemplate({
+      compile: () =>
+        compileSetOperation(ast, this.#config.graphId, {
+          ...this.#compileOptions(),
+          readInstant: "placeholder",
+        }),
+      backend: this.#config.backend,
+      needsReadInstant: composableNeedsCurrentReadInstant(ast),
+    });
+    return this.#template;
+  }
+
+  /**
+   * Fetches raw rows for the set operation: cached template + `executeRaw`
+   * when available, else a fresh literal compile via `backend.execute`.
+   */
+  async #fetchRows(
+    backend: GraphBackend | TransactionBackend,
+    ast: SetOperation,
+    surface: string,
+  ): Promise<readonly Record<string, unknown>[]> {
+    const executeRaw = backend.executeRaw;
+    const template =
+      executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
+    return executeOnBackend(
+      backend,
+      recordedAsOfForComposableQuery(ast),
+      template !== undefined && executeRaw !== undefined ?
+        // Method call (not the detached `executeRaw` local) so a this-using
+        // backend implementation keeps its receiver.
+        backend.executeRaw!<Record<string, unknown>>(
+          template.sql,
+          fillTemplateParams(
+            template.params,
+            {},
+            this.#config.dialect ?? "sqlite",
+          ),
+        )
+      : backend.execute<Record<string, unknown>>(
+          compileSetOperation(
+            ast,
+            this.#config.graphId,
+            this.#compileOptions(),
+          ),
+        ),
+      surface,
+    );
+  }
+
+  /** Applies the select-function transformation, if one is attached. */
+  #mapRows(rows: readonly Record<string, unknown>[]): readonly R[] {
+    if (this.#state.selectFn && this.#state.startAlias) {
+      return mapResults(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals ?? [],
+        this.#state.selectFn,
+      ) as readonly R[];
+    }
+    return rows as readonly R[];
   }
 
   /**
@@ -259,25 +341,7 @@ export class UnionableQuery<G extends GraphDef, R> {
       );
     }
 
-    const compiled = this.compile();
-    const rows = await executeOnBackend(
-      backend,
-      recordedAsOfForComposableQuery(ast),
-      backend.execute<Record<string, unknown>>(compiled),
-      "recorded-query",
-    );
-
-    // Apply select function transformation if available
-    if (this.#state.selectFn && this.#state.startAlias) {
-      return mapResults(
-        rows,
-        this.#state.startAlias,
-        this.#state.traversals ?? [],
-        this.#state.selectFn,
-      ) as readonly R[];
-    }
-
-    return rows as readonly R[];
+    return this.#mapRows(await this.#fetchRows(backend, ast, "recorded-query"));
   }
 
   /**
@@ -295,24 +359,8 @@ export class UnionableQuery<G extends GraphDef, R> {
       );
     }
 
-    const compiled = this.compile();
-    const recordedAsOf = recordedAsOfForComposableQuery(ast);
-    const rows = await executeOnBackend(
-      backend,
-      recordedAsOf,
-      backend.execute<Record<string, unknown>>(compiled),
-      "recorded-batch-query",
+    return this.#mapRows(
+      await this.#fetchRows(backend, ast, "recorded-batch-query"),
     );
-
-    if (this.#state.selectFn && this.#state.startAlias) {
-      return mapResults(
-        rows,
-        this.#state.startAlias,
-        this.#state.traversals ?? [],
-        this.#state.selectFn,
-      ) as readonly R[];
-    }
-
-    return rows as readonly R[];
   }
 }

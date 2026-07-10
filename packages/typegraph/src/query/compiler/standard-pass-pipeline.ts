@@ -426,7 +426,7 @@ export function runStandardQueryPassPipeline(
   const temporalPass = runCompilerPass(state, {
     name: "temporal_filters",
     execute(currentState): TemporalFilterPass {
-      return createTemporalFilterPass(currentState.ast);
+      return createTemporalFilterPass(currentState.ast, ctx.readInstant);
     },
     update(currentState, temporalFilterPass): StandardQueryPassState {
       return {
