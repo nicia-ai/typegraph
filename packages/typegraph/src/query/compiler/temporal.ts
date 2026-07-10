@@ -62,6 +62,49 @@ export function currentReadInstant(): SQL {
 }
 
 /**
+ * How a "current" valid-time read instant is emitted into compiled SQL:
+ *
+ * - `"literal"` — bound as a concrete value at compile time
+ *   ({@link currentReadInstant}). The instant is frozen into the compiled
+ *   statement, so the statement must be recompiled to observe a newer "now".
+ * - `"placeholder"` — bound as a reserved execution-time placeholder
+ *   ({@link currentReadInstantPlaceholder}). The statement can be compiled
+ *   once and reused across executions, filling a fresh instant each call.
+ *
+ * Defaults to `"literal"` everywhere except the query builder's compiled
+ * template cache, which opts into `"placeholder"` so a reused/prepared query
+ * never freezes "now" the way a cached literal would (the #246 regression).
+ */
+export type ReadInstantMode = "literal" | "placeholder";
+
+/**
+ * Reserved Drizzle placeholder name for the "current" valid-time read instant.
+ * The query builder's template cache fills it with a fresh application-clock
+ * value on every execution. The `__typegraph_` prefix keeps it disjoint from
+ * every user `param()` name.
+ */
+export const CURRENT_READ_INSTANT_PLACEHOLDER =
+  "__typegraph_current_read_instant__";
+
+/**
+ * The "current" read instant as a reserved execution-time placeholder rather
+ * than a frozen value. Compiles to the same SQL text as
+ * {@link currentReadInstant} (a bound parameter), but leaves the value unbound
+ * so one compiled statement can be reused across executions with a fresh
+ * instant filled in per call. See {@link CURRENT_READ_INSTANT_PLACEHOLDER}.
+ */
+function currentReadInstantPlaceholder(): SQL {
+  return sql`${sql.placeholder(CURRENT_READ_INSTANT_PLACEHOLDER)}`;
+}
+
+/** Emits the "current" read instant for the requested {@link ReadInstantMode}. */
+export function currentReadInstantFor(mode: ReadInstantMode): SQL {
+  return mode === "placeholder" ?
+      currentReadInstantPlaceholder()
+    : currentReadInstant();
+}
+
+/**
  * Temporal filter options.
  */
 export type TemporalFilterOptions = Readonly<{

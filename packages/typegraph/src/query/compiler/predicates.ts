@@ -41,6 +41,7 @@ import {
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
 import { type SqlSchema, type VectorSlotMap } from "./schema";
+import { type ReadInstantMode } from "./temporal";
 
 const COMPARISON_OP_SQL: Record<string, string> = {
   eq: "=",
@@ -440,6 +441,13 @@ export type PredicateCompilerContext = Readonly<{
    * the finished statement with them (see markAnnIndexScan).
    */
   annIndexTypes?: Set<string>;
+  /**
+   * How the temporal pass emits the "current" read instant. Threaded from
+   * {@link CompileQueryOptions.readInstant} so the standard and recursive
+   * pipelines can compile a reusable placeholder statement for the query
+   * builder's template cache. Absent means `"literal"`.
+   */
+  readInstant?: ReadInstantMode;
 }>;
 
 /**

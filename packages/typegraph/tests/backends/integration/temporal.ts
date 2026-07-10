@@ -1,7 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { param as parameter } from "../../../src";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
+
+/**
+ * Forces a real wall-clock millisecond boundary. The bound "current" read
+ * instant is an ISO-8601 string at millisecond precision, so without this a
+ * fast runner could compile-and-cache then insert within the same
+ * millisecond — a frozen-instant cache would pass `valid_from <= now` by
+ * coincidence, silently weakening the freshness guard below.
+ */
+async function waitForNextMillisecond(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() === start) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 export function registerTemporalIntegrationTests(
   context: IntegrationTestContext,
@@ -81,6 +96,31 @@ export function registerTemporalIntegrationTests(
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("a reused prepared current query stays fresh across writes (compiled-template cache refreshes the read instant)", async () => {
+      const store = context.getStore();
+
+      // A "current" query compiles once into a cached template whose read
+      // instant is a placeholder filled fresh per execute(). prepare() runs
+      // before either row exists; both must still be visible on the execute()
+      // that queries them, or the cache has frozen "now" (the #246 regression).
+      const personByName = store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq(parameter("name")))
+        .select((ctx) => ctx.p.name)
+        .prepare();
+
+      await waitForNextMillisecond();
+      await store.nodes.Person.create({ name: "Alice", age: 30 });
+      expect(await personByName.execute({ name: "Alice" })).toEqual(["Alice"]);
+
+      // Created after the FIRST execute() too: the cached template must not
+      // have frozen the instant on first use either.
+      await waitForNextMillisecond();
+      await store.nodes.Person.create({ name: "Bob", age: 25 });
+      expect(await personByName.execute({ name: "Bob" })).toEqual(["Bob"]);
     });
 
     it("creates edges with validTo for temporal relationships", async () => {

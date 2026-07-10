@@ -1,17 +1,21 @@
 /**
  * A "current" (live) temporal-validity filter binds its read instant at SQL
- * compile time (`currentReadInstant()`). `ExecutableQuery`, `UnionableQuery`,
- * `ExecutableAggregateQuery`, and `PreparedQuery` all used to cache their
- * compiled SQL across calls — `.prepare()` compiled once and every
+ * compile time. `ExecutableQuery`, `UnionableQuery`,
+ * `ExecutableAggregateQuery`, and `PreparedQuery` once cached their compiled
+ * SQL *with that instant frozen in* — `.prepare()` compiled once and every
  * `execute()` reused that SQL text forever; a reused `ExecutableQuery`
  * instance cached its first `.execute()`'s compilation the same way. Both
  * froze "now" at the moment of first compilation, silently hiding every row
- * created afterward from that query for its entire remaining lifetime — a
- * severe regression, since `.prepare()`-once-`.execute()`-many is this
- * library's own documented, recommended pattern. Compiled SQL text is no
- * longer cached across calls in any of the four classes; these tests pin
- * that a row created after prepare()/first-execute() is visible on the very
- * next execute() call.
+ * created afterward for the query's entire remaining lifetime — a severe
+ * regression, since `.prepare()`-once-`.execute()`-many is this library's own
+ * documented, recommended pattern.
+ *
+ * The four classes now DO cache compiled SQL, but as a template whose read
+ * instant is a reserved placeholder filled fresh on every execution (see
+ * `read-instant-template.ts`), so reuse is both fast and fresh. These tests
+ * pin the freshness half: a row created after prepare()/first-execute() is
+ * visible on the very next execute() call. (`compiled-sql-template-cache.test`
+ * pins the caching half.)
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -160,7 +164,7 @@ describe("query builder read freshness", () => {
     expect(after).toEqual([{ name: "Alice", total: 1 }]);
   });
 
-  it("recompiles to byte-identical SQL, differing only in the bound instant", async () => {
+  it("toSQL() recompiles to byte-identical SQL, differing only in the bound instant", async () => {
     const store = createStore(graph, backend);
     const query = store
       .query()
@@ -171,9 +175,11 @@ describe("query builder read freshness", () => {
     await waitForNextMillisecond();
     const second = query.toSQL();
 
-    // Recompiling per call is what keeps a reused query fresh. It must cost
-    // nothing else: same statement text, same parameter arity, same parameter
-    // values apart from the instant the clock advanced past.
+    // toSQL()/compile() emit a directly-runnable statement with the instant as
+    // a literal (execute() uses the placeholder template instead). Each call
+    // recompiles fresh, and that must cost nothing else: same statement text,
+    // same parameter arity, same parameter values apart from the instant the
+    // clock advanced past.
     expect(second.sql).toBe(first.sql);
     expect(second.params).toHaveLength(first.params.length);
 

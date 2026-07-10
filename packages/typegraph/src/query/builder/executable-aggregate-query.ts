@@ -13,11 +13,20 @@ import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { hasParameterReferences } from "./prepared-query";
+import {
+  buildQueryTemplate,
+  type CompiledTemplate,
+  fillTemplateParams,
+} from "./read-instant-template";
 import {
   type AliasMap,
   type QueryBuilderConfig,
   type QueryBuilderState,
 } from "./types";
+
+/** Sentinel distinguishing "template not yet built" from a built `undefined`. */
+const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
 /**
  * Result type for aggregate queries.
@@ -42,6 +51,10 @@ export class ExecutableAggregateQuery<
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
   readonly #fields: R;
+  // Per-instance compiled placeholder template, reused across execute() calls
+  // (see #resolveTemplate). NOT_COMPUTED = not yet built; undefined = no fast
+  // path.
+  #template: CompiledTemplate | typeof NOT_COMPUTED | undefined = NOT_COMPUTED;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R) {
     this.#config = config;
@@ -139,10 +152,9 @@ export class ExecutableAggregateQuery<
    * Compiles the query to a Drizzle SQL object.
    */
   compile(): CompiledSelectSql {
-    // Not cached — a "current" temporal filter binds its read instant at
-    // compile time, so caching across calls would freeze "now" at first
-    // compilation (see PreparedQuery's class doc comment for the full
-    // rationale).
+    // Emits a directly-runnable statement with the read instant as a literal;
+    // this is not the reusable placeholder template execute() caches (see
+    // #resolveTemplate).
     const ast = this.toAst();
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
   }
@@ -152,21 +164,63 @@ export class ExecutableAggregateQuery<
   }
 
   /**
+   * The cached placeholder template for this aggregate query, or `undefined`
+   * when no fast path applies. Built once per instance; the read instant is
+   * filled fresh per execution by {@link fillTemplateParams}.
+   */
+  #resolveTemplate(ast: QueryAst): CompiledTemplate | undefined {
+    if (this.#template !== NOT_COMPUTED) return this.#template;
+    this.#template = buildQueryTemplate(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+      this.#config.backend,
+    );
+    return this.#template;
+  }
+
+  /**
    * Executes the query and returns typed results.
    *
    * @throws Error if no backend is configured
    */
   async execute(): Promise<readonly AggregateResult<R>[]> {
-    if (!this.#config.backend) {
+    const backend = this.#config.backend;
+    if (!backend) {
       throw new Error(
         "Cannot execute query: no backend configured. " +
           "Use store.query() or pass a backend to createQueryBuilder().",
       );
     }
 
-    const compiled = this.compile();
+    const ast = this.toAst();
+    // Aggregate queries expose no `.prepare()`, so a param() ref can never be
+    // bound — reject it with clear guidance instead of a downstream "missing
+    // binding" error once it reaches the template's placeholder fill.
+    if (hasParameterReferences(ast)) {
+      throw new Error(
+        "Aggregate queries do not support param() references; bind a concrete value instead.",
+      );
+    }
+
+    const executeRaw = backend.executeRaw;
+    const template =
+      executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
     const rows =
-      await this.#config.backend.execute<Record<string, unknown>>(compiled);
+      template !== undefined && executeRaw !== undefined ?
+        // Method call (not the detached `executeRaw` local) so a this-using
+        // backend implementation keeps its receiver.
+        await backend.executeRaw!<Record<string, unknown>>(
+          template.sql,
+          fillTemplateParams(
+            template.params,
+            {},
+            this.#config.dialect ?? "sqlite",
+          ),
+        )
+      : await backend.execute<Record<string, unknown>>(
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+        );
 
     return this.#mapResults(rows);
   }

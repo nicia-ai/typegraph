@@ -5,7 +5,7 @@
  */
 import { type FulltextQueryMode } from "../backend/types";
 import { type NullCheckOp } from "../core/types";
-import { UnsupportedPredicateError } from "../errors";
+import { ConfigurationError, UnsupportedPredicateError } from "../errors";
 import {
   type ArrayOp,
   type ArrayPredicate,
@@ -29,6 +29,7 @@ import {
   type VectorMetricType,
   type VectorSimilarityPredicate,
 } from "./ast";
+import { CURRENT_READ_INSTANT_PLACEHOLDER } from "./compiler/temporal";
 import { resolveFieldTypeInfoAtJsonPointer } from "./field-type-info";
 import {
   joinJsonPointers,
@@ -110,6 +111,15 @@ function predicate(expr: PredicateExpression): Predicate {
  */
 // eslint-disable-next-line unicorn/name-replacements -- concise public API
 export function param(name: string): ParameterRef {
+  // The compiled template fills this reserved placeholder with the current read
+  // instant, so a user param of the same name would be silently overwritten by
+  // the wall clock (see fillTemplateParams). Reject it up front.
+  if (name === CURRENT_READ_INSTANT_PLACEHOLDER) {
+    throw new ConfigurationError(
+      `Parameter name "${name}" is reserved for internal use`,
+      { parameterName: name },
+    );
+  }
   return { __type: "parameter", name };
 }
 

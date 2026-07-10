@@ -56,6 +56,13 @@ async function withCapturingStore<T>(
         }
         return raw.execute(query);
       },
+      // Reads run through the cached-template fast path (executeRaw), which
+      // receives SQL text with the read-instant/user placeholders already
+      // filled to concrete values — directly EXPLAIN-able.
+      async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
+        captured.push({ sql: sqlText, params });
+        return raw.executeRaw!<T>(sqlText, params);
+      },
     };
     const store = createStore(buildGraph(), backend);
     const client = (db as unknown as { $client: Database.Database }).$client;
