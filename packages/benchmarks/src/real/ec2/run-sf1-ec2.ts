@@ -16,13 +16,18 @@
  *            the new lines to reports/history.jsonl, and terminates the
  *            instance (unless --keep).
  *
- * No SSH, no key pairs: the only supported control channel is SSM Session
- * Manager / Run Command. The launched instance's IAM instance profile MUST
- * have the AWS-managed `AmazonSSMManagedInstanceCore` policy attached — see
- * docs/ec2-benchmark-runner.md for the flags this account uses and how to
- * adapt them to a different AWS account.
+ * SSM Session Manager / Run Command is the default and only required
+ * control channel — no key pairs to manage. The launched instance's IAM
+ * instance profile MUST have the AWS-managed `AmazonSSMManagedInstanceCore`
+ * policy attached — see docs/ec2-benchmark-runner.md for the flags this
+ * account uses and how to adapt them to a different AWS account.
+ *
+ * `--ssh-public-key-path` is an opt-in diagnostic fallback for when SSM
+ * itself is the thing that's broken (see BootstrapOptions.sshPublicKey) —
+ * the caller is responsible for opening/closing port 22 on the security
+ * group around its use.
  */
-import { mkdir, appendFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -236,6 +241,12 @@ async function launch(argv: readonly string[]): Promise<void> {
       `Unsupported --profile "${benchProfile}". Expected "smoke", "sf1", or "sf10".`,
     );
   }
+  const sshPublicKeyPath = parseArgValue(argv, "ssh-public-key-path");
+  const sshPublicKey =
+    sshPublicKeyPath === undefined ? undefined : (
+      (await readFile(sshPublicKeyPath, "utf8")).trim()
+    );
+
   const bootstrapTimeoutSeconds = Number(
     parseArgValue(argv, "bootstrap-timeout-seconds") ??
       DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS,
@@ -267,6 +278,7 @@ async function launch(argv: readonly string[]): Promise<void> {
     ref,
     profile: benchProfile,
     deadManSwitchMinutes,
+    sshPublicKey,
   });
 
   console.log(`Launching ${instanceType} (${runId})...`);

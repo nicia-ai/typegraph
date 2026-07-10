@@ -13,14 +13,14 @@ dataset, runs the unmodified `pnpm bench:snb:<profile> --check`, and pulls
 the results back into your local `bench-results/` and
 `reports/history.jsonl`.
 
-## Access model: SSM only, no SSH
+## Access model: SSM by default, SSH as an opt-in diagnostic fallback
 
-The runner never opens an SSH port or manages a key pair. All control goes
-through **AWS Systems Manager (SSM) Run Command** — `aws ssm send-command` /
-`get-command-invocation`. This is a deliberate choice, not just a workaround:
-it needs no inbound firewall rule and no key-pair distribution, which is
-generally the more portable and secure default for both a locked-down
-account and a stranger's own AWS account.
+The runner's default and only required control channel is **AWS Systems
+Manager (SSM) Run Command** — `aws ssm send-command` / `get-command-invocation`.
+This is a deliberate choice, not just a workaround: it needs no inbound
+firewall rule and no key-pair distribution, which is generally the more
+portable and secure default for both a locked-down account and a stranger's
+own AWS account.
 
 **Prerequisite:** whatever IAM instance profile you pass via
 `--iam-instance-profile` must have the AWS-managed
@@ -28,6 +28,15 @@ account and a stranger's own AWS account.
 must be able to reach the SSM service (either through NAT/IGW internet
 egress, or through VPC interface endpoints for `ssm`, `ssmmessages`, and
 `ec2messages` if the subnet is fully private).
+
+**Diagnostic-only SSH fallback:** SSM is itself the thing that can fail
+(agent connectivity loss, instance network impairment) — precisely when you
+most need shell access. Pass `--ssh-public-key-path=<path>` to `launch` to
+have the bootstrap script append that key to the `ubuntu` user's
+`authorized_keys` before anything else runs. This does **not** open port 22
+for you — the caller is responsible for adding (and later removing) an
+ingress rule on the security group, scoped as narrowly as possible (e.g. a
+single `/32`). Treat this as break-glass, not a standing configuration.
 
 ## Usage
 
@@ -72,7 +81,8 @@ a fresh clone), `--profile` (`smoke`, `sf1`, or `sf10`; default `sf1`),
 sqlite+postgres+neo4j load phases alone took ~2.6h pre-fix, so a 6h default
 proved too tight in practice — sf10 129600 / 36h, deliberately generous
 since SF10 is ~10x SF1's row counts with no direct measurement yet of how
-each engine's load time actually scales).
+each engine's load time actually scales), `--ssh-public-key-path` (see
+"Diagnostic-only SSH fallback" above; omit for the SSM-only default).
 
 `collect` (required): `--region`, `--instance-id`, `--command-id`.
 
@@ -130,8 +140,10 @@ but if you walk away mid-run, don't assume the box is gone until either
 - **No S3.** Results are small structured JSON (a few KB across 4 engines),
   so they travel through SSM command stdout directly rather than needing an
   S3 bucket, bucket policy, or KMS key.
-- **No SSH/key-pair fallback.** One code path, matching the account's own
-  hardening.
+- **No standing SSH/key-pair management.** SSM remains the only *required*
+  path, matching the account's own hardening; `--ssh-public-key-path` is an
+  opt-in, break-glass diagnostic fallback (see "Diagnostic-only SSH
+  fallback" above), not a second first-class control channel.
 - **No auto-scaling/spot/reuse logic.** Every run is a fresh instance,
   terminated at the end.
 

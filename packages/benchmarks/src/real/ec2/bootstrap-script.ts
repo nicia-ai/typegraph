@@ -42,6 +42,15 @@ export type BootstrapOptions = Readonly<{
    * thing that kills a benchmark that's still legitimately running.
    */
   deadManSwitchMinutes: number;
+  /**
+   * Optional `authorized_keys` line for the `ubuntu` user. The runner's
+   * default control channel is SSM only (see the module doc comment) — this
+   * exists purely as an opt-in diagnostic fallback for when SSM itself is
+   * the thing that's broken, so it's written before anything else that
+   * could fail, and the caller is responsible for opening/closing port 22
+   * on the security group around its use.
+   */
+  sshPublicKey: string | undefined;
 }>;
 
 export const BOOTSTRAP_LOG_PATH = "/var/log/typegraph-bootstrap.log";
@@ -76,6 +85,15 @@ trap 'echo "bootstrap failed at $(date -u --iso-8601=seconds)" > ${BOOTSTRAP_FAI
 
 # Dead-man's switch: self-terminate if the benchmark is never collected.
 shutdown -h +${options.deadManSwitchMinutes} || true
+${
+  options.sshPublicKey === undefined ?
+    "# No SSH key supplied — SSM remains the only control channel."
+  : `# Diagnostic-only SSH fallback (opt-in, see BootstrapOptions.sshPublicKey).
+install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
+echo "${options.sshPublicKey}" >> /home/ubuntu/.ssh/authorized_keys
+chmod 0600 /home/ubuntu/.ssh/authorized_keys
+chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys`
+}
 
 # Fresh Ubuntu cloud images run apt-daily.timer / apt-daily-upgrade.timer /
 # unattended-upgrades.service within the first minute or two after boot,
