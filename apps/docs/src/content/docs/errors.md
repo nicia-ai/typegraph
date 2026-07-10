@@ -409,6 +409,14 @@ the orphaned promise yourself. To avoid orphaning writes at all, use
 transaction ends — so this error cannot arise there. It remains the caller's
 job to await every graph write before committing.
 
+**The serialization covers TypeGraph's own statements, not `tx.sql`.** The raw
+Drizzle handle you get for writing your own relational tables in the same
+transaction shares the one pinned connection but bypasses the queue. Running a
+raw statement concurrently with a graph write — or with another raw statement —
+races two queries on that connection (the overlap `pg@9` removes), and the
+boundary cannot drain a raw statement it never saw. Await each `tx.sql`
+statement before the next write.
+
 ## Error Handling Patterns
 
 ### Using Error Utilities

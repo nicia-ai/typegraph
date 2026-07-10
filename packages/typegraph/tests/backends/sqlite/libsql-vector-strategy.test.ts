@@ -385,9 +385,9 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
     }
 
     it("declares that a filtered DiskANN page can under-fill", () => {
-      expect(libsqlVectorStrategy.capabilities.filteredApproximateSearch).toBe(
-        "post-filter",
-      );
+      expect(
+        libsqlVectorStrategy.capabilities.filteredApproximateSearch,
+      ).toEqual({ mode: "post-filter", guaranteesFullPage: false });
     });
 
     it("fills the page when the surviving candidates sit inside the over-fetch headroom", async () => {

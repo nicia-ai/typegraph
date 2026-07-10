@@ -120,6 +120,7 @@ export type {
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   FilteredApproximateSearch,
+  FilteredApproximateSearchMode,
   FulltextBatchRow,
   FulltextCapabilities,
   FulltextOperationBackend,

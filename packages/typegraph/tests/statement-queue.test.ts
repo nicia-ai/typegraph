@@ -192,6 +192,71 @@ describe("createSerialExecutionAdapter", () => {
     expect(probe.trace.maxInFlight).toBe(1);
   });
 
+  it("runExclusive holds the connection for a whole statement group", async () => {
+    const probe = createProbeAdapter();
+    const serial = createSerialExecutionAdapter(probe.adapter);
+
+    // A GUC-scoped search: snapshot → set → select → restore. A lone statement
+    // enqueued alongside it must not slip between those four.
+    const group = serial.runExclusive(async (connection) => {
+      await connection.execute(statement("snapshot"));
+      await connection.execute(statement("set"));
+      await connection.execute(statement("select"));
+      await connection.execute(statement("restore"));
+    });
+    const intruder = serial.execute(statement("intruder"));
+
+    for (const label of ["snapshot", "set", "select", "restore"]) {
+      await drainMicrotasks();
+      expect(probe.trace.started.at(-1)).toBe(label);
+      probe.settle(label);
+    }
+    await group;
+
+    // The intruder only reaches the wire after the whole group finished.
+    await drainMicrotasks();
+    expect(probe.trace.started).toEqual([
+      "snapshot",
+      "set",
+      "select",
+      "restore",
+      "intruder",
+    ]);
+    probe.settle("intruder");
+    await intruder;
+    expect(probe.trace.maxInFlight).toBe(1);
+  });
+
+  it("runExclusive keeps two groups from interleaving", async () => {
+    const probe = createProbeAdapter();
+    const serial = createSerialExecutionAdapter(probe.adapter);
+
+    const groupA = serial.runExclusive(async (connection) => {
+      await connection.execute(statement("A-set"));
+      await connection.execute(statement("A-select"));
+    });
+    const groupB = serial.runExclusive(async (connection) => {
+      await connection.execute(statement("B-set"));
+      await connection.execute(statement("B-select"));
+    });
+
+    for (const label of ["A-set", "A-select", "B-set", "B-select"]) {
+      await drainMicrotasks();
+      expect(probe.trace.started.at(-1)).toBe(label);
+      probe.settle(label);
+    }
+    await Promise.all([groupA, groupB]);
+
+    // Never `A-set, B-set, …` — B's group cannot open until A's has closed.
+    expect(probe.trace.started).toEqual([
+      "A-set",
+      "A-select",
+      "B-set",
+      "B-select",
+    ]);
+    expect(probe.trace.maxInFlight).toBe(1);
+  });
+
   it("does not strand the queue when a statement rejects", async () => {
     const probe = createProbeAdapter();
     const serial = createSerialExecutionAdapter(probe.adapter);

@@ -200,6 +200,86 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
     });
   });
 
+  it("keeps two concurrent searches' GUC groups from interleaving", async (ctx) => {
+    requirePostgres(ctx);
+    // A transaction has ONE GUC namespace. Serializing statements individually
+    // is not enough: `A snapshot → B snapshot → A set → B set → A select` puts
+    // A's SELECT under B's ef_search. The whole snapshot/set/select/restore
+    // group has to hold the connection.
+    const pinned = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    // The driver fills a query config's `values` after we see it, so keep the
+    // reference and read it back once the transaction has committed.
+    type QueryConfig = Readonly<{ text?: string; values?: readonly unknown[] }>;
+    const issued: QueryConfig[] = [];
+    pinned.on("connect", (client) => {
+      const original = client.query.bind(client);
+      Object.defineProperty(client, "query", {
+        configurable: true,
+        value: (...args: readonly unknown[]): unknown => {
+          const [config, values] = args;
+          issued.push(
+            typeof config === "string" ?
+              { text: config, values: values as readonly unknown[] }
+            : (config as QueryConfig),
+          );
+          return (original as (...a: readonly unknown[]) => unknown)(...args);
+        },
+      });
+    });
+
+    try {
+      const { backend } = await seed(pinned, "ef_guc_group");
+      const params = {
+        graphId: "ef_guc_group",
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        queryEmbedding: [1, 0, 0, 0],
+        metric: "cosine",
+        dimensions: 4,
+        indexType: "hnsw",
+        limit: 3,
+      } as const;
+
+      issued.length = 0;
+      await backend.transaction(async (tx) => {
+        await Promise.all([
+          tx.vectorSearch!({ ...params, efSearch: 111 }),
+          tx.vectorSearch!({ ...params, efSearch: 222 }),
+        ]);
+      });
+
+      function appliesEfSearch(statement: QueryConfig, value: string): boolean {
+        return (
+          statement.text?.includes("set_config") === true &&
+          statement.values?.[0] === "hnsw.ef_search" &&
+          statement.values[1] === value
+        );
+      }
+
+      const applyFirst = issued.findIndex((s) => appliesEfSearch(s, "111"));
+      const applySecond = issued.findIndex((s) => appliesEfSearch(s, "222"));
+      // The per-field ensure DDL also names the table, so match the ranked
+      // SELECT itself rather than any statement mentioning it.
+      const firstSearch = issued.findIndex(
+        (s) =>
+          s.text?.includes("tg_vec_ef_guc_group") === true &&
+          s.text.includes("AS node_id"),
+      );
+
+      expect(applyFirst).toBeGreaterThanOrEqual(0);
+      expect(applySecond).toBeGreaterThanOrEqual(0);
+      expect(firstSearch).toBeGreaterThanOrEqual(0);
+
+      // Exactly one search applies its override before the first SELECT runs.
+      // Both applying first is the interleave: whichever SELECT goes next would
+      // run under the other search's frontier.
+      expect(Math.min(applyFirst, applySecond)).toBeLessThan(firstSearch);
+      expect(Math.max(applyFirst, applySecond)).toBeGreaterThan(firstSearch);
+    } finally {
+      await pinned.end();
+    }
+  });
+
   it("returns correct nearest-neighbor rows on the transactional path", async (ctx) => {
     const { pool } = requirePostgres(ctx);
     const { store } = await seed(pool, "ef_functional");

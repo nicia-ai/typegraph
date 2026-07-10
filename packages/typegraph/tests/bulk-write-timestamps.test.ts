@@ -1,22 +1,37 @@
 /**
- * A batched write stamps ONE instant, across every bind-budget chunk.
+ * The scope of a generated write timestamp: one backend batch call.
  *
- * `bulkCreate` splits its rows into chunks sized by the connection's bind
- * budget. That split is an implementation detail of the driver, and it must
- * stay one: two rows created by the same call cannot be given different
- * `created_at` values just because a chunk boundary fell between them.
+ * `bulkCreate` issues ONE `insertNodesBatch` call, and every row it generates a
+ * timestamp for shares that call's single `nowIso()` — even across the
+ * bind-budget chunks the driver splits the call into. Two rows created by one
+ * call cannot get different `created_at` values just because a chunk boundary
+ * fell between them.
  *
- * The sequential `create()` path samples the clock per row, so the same rows
- * inserted one at a time get distinct timestamps. That difference is intended —
- * one logical write, one point in valid time — and is documented in the
- * changelog. These tests pin both halves so neither drifts.
+ * The boundary is the *call*, not the operation:
+ *  - `create()` is one call per row, so sequential creates get distinct
+ *    timestamps.
+ *  - `importGraph()` drives one backend call per `batchSize` slice, so its
+ *    slices get distinct timestamps — it is NOT one instant.
+ *
+ * These tests pin all three so none drifts.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createStore, defineGraph, defineNode } from "../src";
+import {
+  createStore,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "../src";
+import * as rowMappers from "../src/backend/drizzle/row-mappers";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
+import {
+  FORMAT_VERSION,
+  type GraphData,
+  importGraph,
+} from "../src/interchange";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -96,5 +111,57 @@ describe("bulk write timestamps", () => {
     const rows = await store.nodes.Person.find();
     const instants = new Set(rows.map((row) => row.meta.createdAt));
     expect(instants.size).toBe(2);
+  });
+
+  it("samples a fresh timestamp per importGraph batch, not once for the whole import", async () => {
+    // A monotonic fake clock (one tick per read) makes "one sample per batch"
+    // observable without depending on wall-clock timing: distinct instants can
+    // only appear if the import re-reads the clock per batch.
+    let tick = 0;
+    const clock = vi
+      .spyOn(rowMappers, "nowIso")
+      .mockImplementation(
+        () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`,
+      );
+
+    try {
+      // Construct the backend AFTER installing the spy. The operation backend
+      // captures `nowIso` at construction, so the `beforeEach` backend would
+      // have closed over the real clock and ignored the fake one — leaving the
+      // test dependent on wall-clock timing instead of the batch count.
+      const spiedBackend = createTestBackend();
+      const [store] = await createStoreWithSchema(graph, spiedBackend);
+
+      // batchSize 1 forces one backend call per node → one nowIso() read each.
+      const nodes: GraphData["nodes"] = [];
+      for (let index = 0; index < 3; index += 1) {
+        nodes.push({
+          kind: "Person",
+          id: `p-${index}`,
+          properties: { name: `person-${index}` },
+        });
+      }
+
+      await importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: "2026-01-01T00:00:00.000Z",
+          source: { type: "external", description: "batch-timestamp test" },
+          nodes,
+          edges: [],
+        },
+        { batchSize: 1, onConflict: "error" },
+      );
+
+      const rows = await store.nodes.Person.find();
+      expect(rows).toHaveLength(3);
+      // Three batches, three distinct created_at instants — NOT one. A
+      // whole-import single sample would collapse these to one value.
+      const instants = new Set(rows.map((row) => row.meta.createdAt));
+      expect(instants.size).toBe(3);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

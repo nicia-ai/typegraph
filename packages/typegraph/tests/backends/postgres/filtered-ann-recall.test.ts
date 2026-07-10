@@ -8,12 +8,14 @@
  * the liveness filter" fixture:
  *
  * - libSQL's DiskANN `vector_top_k` post-filters a fixed `4 * limit` neighbor
- *   window and returns a SHORT page — `capabilities.filteredApproximateSearch
- *   === "post-filter"`. Its test asserts `rows.length < 2`.
- * - pgvector >= 0.8 keeps re-entering the HNSW index under
- *   `hnsw.iterative_scan = strict_order` until `limit` live rows survive the
- *   filter, so the page FILLS — `filteredApproximateSearch === "iterative-scan"`.
- *   This test asserts both survivors come back.
+ *   window and returns a SHORT page — `filteredApproximateSearch.mode ===
+ *   "post-filter"`. Its test asserts `rows.length < 2`.
+ * - pgvector >= 0.8 re-enters the HNSW index under
+ *   `hnsw.iterative_scan = strict_order`, gathering more candidates until
+ *   `limit` live rows survive the filter. This test asserts both survivors come
+ *   back at this scale. That is recovery, NOT a guarantee: the iterative scan
+ *   stops at `hnsw.max_scan_tuples` (default 20000), which is why
+ *   `filteredApproximateSearch.guaranteesFullPage` is `false` for pgvector.
  *
  * Skipped automatically when POSTGRES_URL is unset or pgvector < 0.8 (the
  * recovery only exists there; older servers stay `ef_search`-bounded and behave

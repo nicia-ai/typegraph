@@ -40,6 +40,7 @@ import {
  */
 export type SerialExecutionAdapter = SqlExecutionAdapter &
   Readonly<{
+    runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
     /**
      * Waits for the statement currently on the wire, then refuses every
      * later one with a {@link TransactionClosedError}.
@@ -120,6 +121,16 @@ export function createSerialExecutionAdapter(
 
     execute<TRow>(query: SQL): Promise<readonly TRow[]> {
       return enqueue(() => adapter.execute<TRow>(query));
+    },
+
+    runExclusive<T>(
+      critical: (connection: SqlExecutionAdapter) => Promise<T>,
+    ): Promise<T> {
+      // One queue slot for the whole group. `critical` receives the UNQUEUED
+      // adapter: re-entering the queue from inside the slot it already holds
+      // would deadlock, and it needs no serializing anyway — nothing else can
+      // reach the connection until the slot is released.
+      return enqueue(() => critical(adapter));
     },
 
     ...(executeCompiled === undefined ?

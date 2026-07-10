@@ -61,8 +61,11 @@ const LIBSQL_CAPABILITIES: VectorCapabilities = {
   // the index. A filtered DiskANN search over-fetches by
   // CANDIDATE_FILTER_OVERFETCH and filters afterwards, so it under-fills once
   // more than the headroom is filtered out. Unlike sqlite-vec (pushdown) and
-  // pgvector >= 0.8 (iterative scan), libSQL has no recovery.
-  filteredApproximateSearch: "post-filter",
+  // pgvector >= 0.8 (iterative scan), libSQL has no recovery at all.
+  filteredApproximateSearch: {
+    mode: "post-filter",
+    guaranteesFullPage: false,
+  },
 };
 
 /** Whether a slot's declared index type maps to a real libSQL ANN index. */
@@ -253,7 +256,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
       // Over-fetch the DiskANN k to leave headroom for filtered-out rows;
       // recall is bounded by the over-fetch, and the page under-fills once
       // more than the headroom is filtered out. Declared, not merely noted:
-      // `capabilities.filteredApproximateSearch === "post-filter"`.
+      // `capabilities.filteredApproximateSearch.mode === "post-filter"`.
       if (candidates !== undefined) {
         conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
       }
@@ -336,7 +339,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
  * Mirrors the hybrid facade's 4x over-fetch. Recall for the filtered search
  * is bounded by this headroom — if more than `3k` of the top `4k` neighbors
  * are filtered out, fewer than `k` rows return. That is the observable
- * meaning of `capabilities.filteredApproximateSearch === "post-filter"`.
+ * meaning of `capabilities.filteredApproximateSearch.guaranteesFullPage`.
  */
 const CANDIDATE_FILTER_OVERFETCH = 4;
 

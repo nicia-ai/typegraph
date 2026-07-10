@@ -371,9 +371,10 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
     }
 
     it("declares that a filtered KNN page is exact", () => {
-      expect(sqliteVecStrategy.capabilities.filteredApproximateSearch).toBe(
-        "filter-pushdown",
-      );
+      expect(sqliteVecStrategy.capabilities.filteredApproximateSearch).toEqual({
+        mode: "filter-pushdown",
+        guaranteesFullPage: true,
+      });
     });
 
     it("fills the page even when the surviving candidates rank last", () => {

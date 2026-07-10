@@ -2,8 +2,9 @@
 "@nicia-ai/typegraph": patch
 ---
 
-Fix: serialize statements on a transaction's pinned Postgres connection, so a
-transaction can never present two queries to one connection at once.
+Fix: serialize the statements TypeGraph issues on a transaction's pinned
+Postgres connection, so its own graph writes never present two queries to one
+connection at once.
 
 A transaction pins one connection, and the PostgreSQL wire protocol carries one
 statement at a time. node-postgres hid that behind an internal queue, deprecated
@@ -19,10 +20,13 @@ external async flow control mechanism instead"), and removes the queue in
 - **User-driven.** `store.transaction(async (tx) => { await Promise.all([...]) })`
   is a documented, recommended pattern.
 
-Transaction-scoped backends now run every statement through a per-connection
-queue. Concurrency at the API surface is unchanged — `Promise.all` still works,
-and on a pooled (non-transactional) backend the statements still run genuinely
-concurrently. The queue serializes only what already had to be serial.
+Transaction-scoped backends now run every statement they issue through a
+per-connection queue. Concurrency at the API surface is unchanged — a
+`Promise.all` of graph writes still works, and on a pooled (non-transactional)
+backend the statements still run genuinely concurrently. The queue serializes
+only what already had to be serial. A multi-statement `SET LOCAL`-scoped vector
+search (snapshot / set / select / restore) runs as one exclusive group, so two
+concurrent searches can no longer interleave and apply each other's `efSearch`.
 
 The transaction boundary also **drains and closes** the queue before the driver
 emits `COMMIT` / `ROLLBACK`. Those control statements do not travel through the
@@ -33,6 +37,12 @@ it, executing inside an unrelated transaction. Such a statement is now refused
 with a new `TransactionClosedError` (normally invisible — `Promise.all` has
 already rejected with the original failure and discards this one).
 
-`adoptTransaction()` still serializes, but cannot close: only the caller knows
-when their transaction ends, so it remains their job to await every graph write
-before committing.
+**Scope: the queue mediates only TypeGraph's own statements.** The raw Drizzle
+handle exposed as `tx.sql` (for writing your own relational tables in the same
+atomic boundary) bypasses it. Running a raw statement concurrently with a graph
+write — or with another raw statement — still races on the one pinned
+connection, and `drainAndClose` cannot wait for a raw statement it never saw.
+Await each `tx.sql` statement before the next write; this is inherent to a
+single-connection transaction, not something TypeGraph can enforce over a handle
+it doesn't mediate. `adoptTransaction()` likewise serializes the statements it
+issues but never closes the queue — the caller owns that transaction's end.
