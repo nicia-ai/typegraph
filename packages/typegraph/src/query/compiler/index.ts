@@ -41,6 +41,7 @@ export {
   extractTemporalOptions,
   type TemporalFilterOptions,
 } from "./temporal";
+import { withPinnedReadInstant } from "./temporal";
 
 // Re-export dialect helpers and types
 export { getDialect } from "../dialect";
@@ -333,12 +334,12 @@ export function compileSetOperation(
     }
     return compiled;
   };
-  const combined = compileSetOp(
-    op,
-    graphId,
-    adapter,
-    compileOperand,
-    options_.vectorStrategy,
+  // One statement, one "current" instant. Each operand compiles its own
+  // temporal filter, so without this pin an INTERSECT/EXCEPT could bind two
+  // clock samples microseconds apart and disagree about a row created between
+  // them.
+  const combined = withPinnedReadInstant(() =>
+    compileSetOp(op, graphId, adapter, compileOperand, options_.vectorStrategy),
   );
   if (annIndexTypes.size > 0) {
     markAnnIndexScan(combined, [...annIndexTypes]);

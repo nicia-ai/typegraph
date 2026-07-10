@@ -608,6 +608,16 @@ How you open the transaction depends on whether your driver is async or
 synchronous. `withTransaction` itself is driver-agnostic — it adopts whatever
 connection you hand it.
 
+:::caution[One connection — sequence your writes, don't overlap them]
+A transaction pins one connection, and both layers share it. TypeGraph
+serializes the statements *its own* collections issue, but your raw Drizzle
+writes are yours to order. Awaiting each write (as every example below does) is
+correct; a `Promise.all` that mixes a graph write with a relational write — or
+runs two relational writes at once — races two queries on the one connection,
+the overlap PostgreSQL removes in `pg@9`. The same holds for
+`store.withRecordedTransaction(...)`.
+:::
+
 **Async drivers** — node-postgres, `neon-serverless` (Pool/WebSocket), libsql.
 Use Drizzle's `db.transaction(async …)`:
 

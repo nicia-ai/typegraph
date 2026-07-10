@@ -342,5 +342,14 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       "ivfflat",
       "none",
     ]);
+    // pgvector >= 0.8 re-enters the index under `hnsw.iterative_scan` for more
+    // candidates — better recall than post-filtering a fixed neighbor window
+    // (libSQL), but NOT a full-page guarantee: the scan stops at
+    // `hnsw.max_scan_tuples`, and pgvector < 0.8 has no iterative scan at all.
+    // Only sqlite-vec's filter pushdown can promise a full page.
+    expect(pgvectorStrategy.capabilities.filteredApproximateSearch).toEqual({
+      mode: "iterative-scan",
+      guaranteesFullPage: false,
+    });
   });
 });

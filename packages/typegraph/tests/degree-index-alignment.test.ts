@@ -1,14 +1,19 @@
 /**
- * degree() direction filters must be servable by the default edge indexes.
+ * degree() direction filters must be servable by the default edge indexes —
+ * and must count every incident edge while doing it.
  *
  * The edge composite indexes lead with `from_kind` / `to_kind` before the
  * id (`edges_from_idx (graph_id, from_kind, from_id, …)`), so a bare
  * `from_id = ?` filter can never seek — degree() scanned the graph's whole
- * edge partition. The direction filters now enumerate the endpoint kinds
- * the graph declaration permits for the counted edge kinds (expanded
- * through the subClassOf closure, since a stored `from_kind` may be any
- * subclass of a declared endpoint), which makes both indexes seekable on
- * both engines with no schema change.
+ * edge partition. The direction filters supply the missing kind equality from
+ * the counted node's own kind, read back with an uncorrelated scalar subquery:
+ * a stored `from_kind` IS the kind of the node at `from_id`, always, because
+ * the write path copies it off the endpoint node and a node's kind never
+ * changes.
+ *
+ * Enumerating the graph's *declared* endpoint kinds instead would seek just as
+ * well but is only complete for rows written under the current declaration —
+ * see the endpoint-drift case below.
  */
 import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
@@ -141,9 +146,9 @@ describe("degree() direction filter index alignment", () => {
       const team = await store.nodes.Team.create({ name: "team" });
 
       // knows declares from/to [Person]; Employee is a subclass, so the
-      // stored from_kind is "Employee" — the enumerated endpoint kinds
-      // must include subclasses or these edges silently vanish from the
-      // count.
+      // stored from_kind is "Employee" — a filter derived from the declaration
+      // alone must expand subclasses or these edges silently vanish from the
+      // count. Deriving it from the node's own kind is exact by construction.
       await store.edges.knows.create(employee as never, person);
       await store.edges.memberOf.create(employee as never, team);
 
@@ -175,6 +180,60 @@ describe("degree() direction filter index alignment", () => {
       expect(await store.algorithms.degree(solo.id, { direction: "in" })).toBe(
         1,
       );
+    });
+  });
+
+  it("counts edges written before an endpoint declaration narrowed", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      // Edges are written while `knows` still admits Person on both sides.
+      const wide = createStore(buildGraph(), backend);
+      const employee = await wide.nodes.Employee.create({ name: "emp" });
+      const person = await wide.nodes.Person.create({ name: "per" });
+      await wide.edges.knows.create(person, employee as never);
+      await wide.edges.knows.create(employee as never, person);
+
+      // The declaration then narrows to Employee-only endpoints. The rows on
+      // disk still carry from_kind/to_kind = "Person" for `person`, which no
+      // declared endpoint of `knows` now names. A filter enumerating the
+      // declared kinds would count 0 for `person`; its actual degree is 2.
+      const narrowed = createStore(
+        defineGraph({
+          id: "degree-idx",
+          nodes: {
+            Person: { type: Person },
+            Employee: { type: Employee },
+            Team: { type: Team },
+          },
+          edges: {
+            knows: { type: knows, from: [Employee], to: [Employee] },
+            memberOf: { type: memberOf, from: [Employee], to: [Team] },
+          },
+          ontology: [subClassOf(Employee, Person)],
+        }),
+        backend,
+      );
+
+      expect(await narrowed.algorithms.degree(person.id)).toBe(2);
+      expect(
+        await narrowed.algorithms.degree(person.id, { direction: "out" }),
+      ).toBe(1);
+      expect(
+        await narrowed.algorithms.degree(person.id, { direction: "in" }),
+      ).toBe(1);
+      expect(await narrowed.algorithms.degree(employee.id)).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("reports degree 0 for an id that names no node", async () => {
+    await withCapturingStore(async (store) => {
+      const person = await store.nodes.Person.create({ name: "per" });
+      await store.edges.knows.create(person, person);
+
+      // The kind subquery yields NULL, and `from_kind = NULL` matches nothing.
+      expect(await store.algorithms.degree("no-such-node")).toBe(0);
     });
   });
 });

@@ -14,8 +14,12 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
-import type { FulltextQueryMode, FulltextSearchParams } from "../../types";
-import { quotedTableName } from "./shared";
+import type {
+  FulltextQueryMode,
+  FulltextSearchParams,
+  SqlDialect,
+} from "../../types";
+import { codePointOrderKey, quotedTableName } from "./shared";
 
 function resolveMode(mode: FulltextQueryMode | undefined): FulltextQueryMode {
   return mode ?? "websearch";
@@ -25,6 +29,7 @@ export function buildFulltextSearch(
   tableName: string,
   params: FulltextSearchParams,
   strategy: FulltextStrategy,
+  dialect: SqlDialect,
   candidates?: SQL,
 ): SQL {
   assertValidSearchParams(params);
@@ -86,7 +91,7 @@ export function buildFulltextSearch(
       ${snippetExpr} AS snippet
     FROM ${table}
     WHERE ${sql.join(conditions, sql` AND `)}
-    ORDER BY ${rankExpression} DESC, "node_id" ASC
+    ORDER BY ${rankExpression} DESC, ${codePointOrderKey(sql.raw('"node_id"'), dialect)} ASC
     ${pageClause}
   `;
 }

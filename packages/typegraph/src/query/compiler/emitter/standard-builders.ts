@@ -1,6 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { UnsupportedPredicateError } from "../../../errors";
+import { boundPgIdentifier } from "../../../utils/identifier";
 import {
   type AggregateExpr,
   DEFAULT_RRF_K,
@@ -79,9 +80,16 @@ const SCOPED_RELEVANCE_NODES_ALIAS = "scoped_relevance_nodes";
  * field="name" vs. alias="p", field="full_name" would otherwise both produce
  * "__tg_p_full_name"). The length prefix makes the encoding unambiguous regardless
  * of what characters alias/field contain.
+ *
+ * The encoding is unbounded, but PostgreSQL truncates identifiers at 63 bytes,
+ * so `boundPgIdentifier` hash-guards long names: two pairs whose encodings share
+ * a >63-byte prefix would otherwise collapse onto the same physical column.
+ * Short names are returned verbatim, preserving the readable `__tg_...` form.
  */
 function selectivePropsCteColumnName(field: SelectiveField): string {
-  return `__tg_${field.alias.length}:${field.alias}:${field.field.length}:${field.field}`;
+  const { alias, field: fieldName } = field;
+  const encoded = `__tg_${alias.length}:${alias}:${fieldName.length}:${fieldName}`;
+  return boundPgIdentifier(encoded, `${alias}\0${fieldName}`);
 }
 
 function buildScopedNodeIdsSubquery(nodeAlias: string): SQL {

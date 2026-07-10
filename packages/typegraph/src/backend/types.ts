@@ -39,6 +39,65 @@ export type VectorMetric = "cosine" | "l2" | "inner_product";
 export type VectorIndexType = "hnsw" | "ivfflat" | "none";
 
 /**
+ * The mechanism a strategy uses to combine a row filter with an *approximate*
+ * (ANN) vector search.
+ *
+ * Every approximate search TypeGraph issues carries at least one filter: the
+ * liveness predicate that excludes soft-deleted and out-of-validity rows. Add
+ * a `.where(...)` predicate and it narrows further. Engines differ in where
+ * they apply it relative to the index traversal:
+ *
+ * - `"filter-pushdown"` — the filter constrains the ANN candidate set itself.
+ *   sqlite-vec's `vec0` KNN accepts primary-key `IN (SELECT …)` pushdown.
+ * - `"iterative-scan"` — the engine re-enters the index, gathering more
+ *   candidates until `LIMIT` rows survive the filter *or* it hits its own scan
+ *   bound. pgvector >= 0.8 (`hnsw.iterative_scan` / `ivfflat.iterative_scan`,
+ *   applied automatically by the backend).
+ * - `"post-filter"` — the engine retrieves a fixed multiple of the page from
+ *   the ANN index and applies the filter afterwards. libSQL's DiskANN
+ *   `vector_top_k` is a table function with no filter pushdown, so this is the
+ *   only shape available to it.
+ *
+ * This names what the strategy *asks the engine to do*. Whether the engine can
+ * honor it — and whether honoring it is enough to fill a page — is
+ * {@link FilteredApproximateSearch.guaranteesFullPage}.
+ */
+export type FilteredApproximateSearchMode =
+  "filter-pushdown" | "iterative-scan" | "post-filter";
+
+/**
+ * How a filtered approximate (ANN) vector search behaves, and whether it can
+ * silently return fewer rows than `limit` while more matches exist.
+ *
+ * Read `guaranteesFullPage` — not `mode` — to decide whether a short page is
+ * possible. Only `"filter-pushdown"` guarantees a full page:
+ *
+ * - **sqlite-vec** pushes the filter into the KNN. Exact.
+ * - **pgvector** re-enters the index, but the iterative scan stops at
+ *   `hnsw.max_scan_tuples` / `ivfflat.max_probes`, and on **pgvector < 0.8**
+ *   there is no iterative scan at all — the backend detects that at runtime,
+ *   warns once, and the search stays `ef_search`-bounded, behaving like
+ *   `"post-filter"`. Neither case is visible in a statically-declared `mode`,
+ *   which is exactly why the guarantee is a separate field.
+ * - **libSQL** over-fetches a fixed multiple of the page and filters
+ *   afterwards, so it under-fills once more than that headroom is filtered out.
+ *
+ * A store with heavy tombstone drift — routine in a temporal store — is what
+ * turns a short page from a theoretical caveat into an observed one. Exact
+ * (`approximate: false`) searches are unaffected on every engine: they scan, so
+ * the filter reaches every row.
+ */
+export type FilteredApproximateSearch = Readonly<{
+  mode: FilteredApproximateSearchMode;
+  /**
+   * `true` only when a filtered approximate search is guaranteed to return
+   * `limit` rows whenever `limit` matching rows exist — no engine-side scan
+   * bound, no version dependence, no over-fetch headroom to exhaust.
+   */
+  guaranteesFullPage: boolean;
+}>;
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -50,6 +109,14 @@ export type VectorCapabilities = Readonly<{
   indexTypes: readonly VectorIndexType[];
   /** Maximum dimensions supported */
   maxDimensions: number;
+  /**
+   * How a filtered approximate search bounds recall — and whether it can
+   * silently return a short page. See {@link FilteredApproximateSearch}.
+   *
+   * Required, so a new vector strategy cannot omit the declaration and inherit
+   * an engine promise it does not keep.
+   */
+  filteredApproximateSearch: FilteredApproximateSearch;
 }>;
 
 // ============================================================
@@ -1451,6 +1518,13 @@ export type GraphBackend = Readonly<{
    * handle the tx-scoped backend writes through (the Postgres/libsql
    * tx handle; for better-sqlite3 / do-sqlite the bound connection),
    * never a fresh one.
+   *
+   * The tx-scoped backend serializes the statements *it* issues onto the
+   * pinned connection, but the raw handle bypasses that queue. It is the
+   * caller's responsibility not to run raw statements concurrently with graph
+   * writes (or with each other) on the shared connection — a constraint
+   * inherent to a single-connection transaction, not something this method can
+   * enforce over a handle it does not mediate.
    */
   transaction: <T>(
     fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,

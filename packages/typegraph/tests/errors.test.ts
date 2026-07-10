@@ -51,6 +51,7 @@ import {
   SchemaMismatchError,
   StaleVersionError,
   StoreNotInitializedError,
+  TransactionClosedError,
   TypeGraphError,
   UniquenessError,
   UnsupportedPredicateError,
@@ -917,6 +918,24 @@ describe("StoreNotInitializedError", () => {
       reason: "stale",
       logicalName: "vector:summary",
     });
+  });
+});
+
+describe("TransactionClosedError", () => {
+  it("is a user error naming the released connection and the fix", () => {
+    const error = new TransactionClosedError();
+
+    expect(error.code).toBe("TRANSACTION_CLOSED");
+    expect(error.name).toBe("TransactionClosedError");
+    expect(error.category).toBe("user");
+    expect(error.message).toContain("transaction boundary returned");
+    expect(error.message).toContain("was not run");
+    expect(error.suggestion).toContain("Promise.allSettled");
+  });
+
+  it("carries a cause when one is supplied", () => {
+    const cause = new Error("original failure");
+    expect(new TransactionClosedError({ cause }).cause).toBe(cause);
   });
 });
 

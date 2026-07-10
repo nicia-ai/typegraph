@@ -7,7 +7,7 @@
  * and delete all execute and rank correctly on libSQL's native engine.
  */
 import { type Client, createClient } from "@libsql/client";
-import { type SQL } from "drizzle-orm";
+import { type SQL, sql } from "drizzle-orm";
 import { SQLiteAsyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -32,6 +32,14 @@ async function runAll(client: Client, queries: readonly SQL[]): Promise<void> {
 
 const GRAPH = "g1";
 const TS = "2026-06-01T00:00:00.000Z";
+
+/** `nodeIds` as a one-column SELECT, the shape `buildSearch` expects. */
+function candidateIds(nodeIds: readonly string[]): SQL {
+  return sql.join(
+    nodeIds.map((nodeId) => sql`SELECT ${nodeId}`),
+    sql` UNION ALL `,
+  );
+}
 
 function slot(indexType: VectorSlot["indexType"]): VectorSlot {
   return {
@@ -351,5 +359,83 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
     expect(libsqlVectorStrategy.capabilities.metrics).not.toContain(
       "inner_product",
     );
+  });
+
+  // ============================================================
+  // Filtered DiskANN recall — the `"post-filter"` capability, executed.
+  //
+  // `vector_top_k` has no filter pushdown and no way to re-enter the index, so
+  // a filtered search fetches `4 * (limit + offset)` neighbors and filters
+  // afterwards. Inside that headroom the page fills; past it the page is short
+  // even though more matching rows exist. sqlite-vec and pgvector >= 0.8 both
+  // recover; libSQL cannot. The asymmetry is declared on `capabilities`, and
+  // these tests are what that declaration means.
+  // ============================================================
+  describe("filtered approximate search (capabilities.filteredApproximateSearch)", () => {
+    const FAN_SIZE = 200;
+
+    /**
+     * A fan of `FAN_SIZE` vectors around `[1, 0, 0]`. Cosine distance to the
+     * query grows monotonically with the index, so `dN` has rank `N + 1`.
+     */
+    async function seedRankedFan(s: VectorSlot): Promise<void> {
+      for (let index = 0; index < FAN_SIZE; index += 1) {
+        await upsert(s, `d${index}`, [1, index * 0.001, 0]);
+      }
+    }
+
+    it("declares that a filtered DiskANN page can under-fill", () => {
+      expect(
+        libsqlVectorStrategy.capabilities.filteredApproximateSearch,
+      ).toEqual({ mode: "post-filter", guaranteesFullPage: false });
+    });
+
+    it("fills the page when the surviving candidates sit inside the over-fetch headroom", async () => {
+      const s = slot("hnsw");
+      await createStorage(s);
+      await seedRankedFan(s);
+
+      // limit 2 ⇒ DiskANN fetches 4 × 2 = 8 neighbors. Ranks 3 and 4 survive.
+      const result = await run(
+        client,
+        libsqlVectorStrategy.buildSearch(
+          s,
+          searchParams([1, 0, 0], { limit: 2, indexType: "hnsw" }),
+          candidateIds(["d2", "d3"]),
+        ),
+      );
+      expect(result.rows.map((row) => row.node_id)).toEqual(["d2", "d3"]);
+    });
+
+    it("under-fills when tombstone drift pushes the survivors past the headroom", async () => {
+      const s = slot("hnsw");
+      await createStorage(s);
+      await seedRankedFan(s);
+
+      // The only two live rows rank 199th and 200th — far outside the 8
+      // neighbors `vector_top_k` is asked for. Both match; neither can be seen.
+      const survivors = ["d198", "d199"];
+      const approximate = await run(
+        client,
+        libsqlVectorStrategy.buildSearch(
+          s,
+          searchParams([1, 0, 0], { limit: 2, indexType: "hnsw" }),
+          candidateIds(survivors),
+        ),
+      );
+      expect(approximate.rows.length).toBeLessThan(2);
+
+      // Same filter, same limit, exact search: the matches are there. The short
+      // page is the ANN path's post-filter, not a missing row.
+      const exact = await run(
+        client,
+        libsqlVectorStrategy.buildSearch(
+          { ...s, indexType: "none" },
+          searchParams([1, 0, 0], { limit: 2, indexType: "none" }),
+          candidateIds(survivors),
+        ),
+      );
+      expect(exact.rows.map((row) => row.node_id)).toEqual(survivors);
+    });
   });
 });

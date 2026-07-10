@@ -1153,6 +1153,47 @@ export class BackendDisposedError extends TypeGraphError {
   }
 }
 
+/**
+ * Thrown when a statement is issued on a transaction-scoped backend after
+ * its transaction boundary has already returned.
+ *
+ * The usual source is a callback that lets work escape it. `Promise.all`
+ * rejects on its first rejection while its siblings keep running, so
+ *
+ * ```typescript
+ * await store.transaction(async (tx) => {
+ *   await Promise.all([tx.nodes.Doc.create(a), tx.nodes.Doc.create(b)]);
+ * });
+ * ```
+ *
+ * leaves `b`'s remaining statements in flight when `a` fails. Those
+ * statements have nowhere safe to go: the driver is about to emit `ROLLBACK`
+ * on the same pinned connection and then hand it back to the pool, where a
+ * late arrival would execute inside somebody else's transaction. TypeGraph
+ * refuses them here instead.
+ *
+ * The error is normally invisible — `Promise.all` has already rejected with
+ * the original failure, and discards this one.
+ */
+export class TransactionClosedError extends TypeGraphError {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "Statement issued on a transaction-scoped backend after its transaction " +
+        "boundary returned. The connection has been released; the statement was not run.",
+      "TRANSACTION_CLOSED",
+      {
+        category: "user",
+        suggestion:
+          "Await every write started inside store.transaction(...) before the " +
+          "callback returns. Prefer awaiting a Promise.allSettled(...) over a " +
+          "Promise.all(...) whose rejection would orphan its siblings.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionClosedError";
+  }
+}
+
 // ============================================================
 // Utility Functions
 // ============================================================

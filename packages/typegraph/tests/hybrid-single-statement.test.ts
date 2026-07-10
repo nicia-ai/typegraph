@@ -103,6 +103,9 @@ type ScopedOptions = Readonly<{
     weights?: Readonly<{ vector?: number; fulltext?: number }>;
   }>;
   vectorMinScore?: number;
+  fulltextMinScore?: number;
+  fulltextLanguage?: string;
+  fulltextQuery?: string;
   includeSnippets?: boolean;
   whereCategory?: string;
 }>;
@@ -206,10 +209,16 @@ function runHybrid(
       : { minScore: options.vectorMinScore }),
     },
     fulltext: {
-      query: FULLTEXT_QUERY,
+      query: options.fulltextQuery ?? FULLTEXT_QUERY,
       ...(options.includeSnippets === undefined ?
         {}
       : { includeSnippets: options.includeSnippets }),
+      ...(options.fulltextMinScore === undefined ?
+        {}
+      : { minScore: options.fulltextMinScore }),
+      ...(options.fulltextLanguage === undefined ?
+        {}
+      : { language: options.fulltextLanguage }),
     },
     limit: options.limit,
     ...(options.offset === undefined ? {} : { offset: options.offset }),
@@ -237,6 +246,23 @@ function projectHit(hit: HybridSearchHit) {
     fulltextRank: hit.fulltext?.rank,
     hasSnippet: hit.fulltext?.snippet !== undefined,
   };
+}
+
+/**
+ * A `minScore` strictly between the smallest and largest fulltext score, so it
+ * prunes the lowest-scored candidate and keeps the highest — active on every
+ * backend regardless of the engine's score scale (SQLite bm25 vs Postgres
+ * ts_rank), which a fixed literal could not achieve.
+ */
+function pickActiveFulltextMinScore(scores: readonly number[]): number {
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  if (min === max) {
+    throw new Error(
+      `fulltext scores are uniform (${min}); cannot pick a discriminating minScore`,
+    );
+  }
+  return (min + max) / 2;
 }
 
 describe("single-statement hybrid search", () => {
@@ -356,6 +382,91 @@ describe("single-statement hybrid search", () => {
           case: label,
           hits: fallback.map((hit) => projectHit(hit)),
         });
+      }
+
+      // --- Parity for the fulltext leg's `minScore`. Computed to sit strictly
+      //     between the corpus's fulltext scores so it prunes SOME but not ALL
+      //     candidates on every backend. `limit === CORPUS.length` keeps every
+      //     doc in the fused output through the vector leg, so a pruned fulltext
+      //     contribution surfaces as a hit whose `fulltext` is absent. ---
+      const fulltextHits = await store.search.fulltext("Document", {
+        query: FULLTEXT_QUERY,
+        limit: CORPUS.length,
+      });
+      const fulltextScores = fulltextHits.map((hit) => hit.score);
+      const activeMinScore = pickActiveFulltextMinScore(fulltextScores);
+      const floorNative = await runHybrid(store, {
+        limit: CORPUS.length,
+        fulltextMinScore: activeMinScore,
+      });
+      const floorFallback = await runHybrid(fallbackStore, {
+        limit: CORPUS.length,
+        fulltextMinScore: activeMinScore,
+      });
+      expect({
+        case: "fulltext minScore",
+        hits: floorNative.map((hit) => projectHit(hit)),
+      }).toEqual({
+        case: "fulltext minScore",
+        hits: floorFallback.map((hit) => projectHit(hit)),
+      });
+      // Non-vacuity: the floor must prune at least one fulltext contribution
+      // and keep at least one — otherwise both paths could ignore it and still
+      // agree. Every doc survives via the vector leg, so the count is exact.
+      expect(floorNative).toHaveLength(CORPUS.length);
+      const keptFulltext = floorNative.filter(
+        (hit) => hit.fulltext !== undefined,
+      ).length;
+      expect(keptFulltext).toBeGreaterThan(0);
+      expect(keptFulltext).toBeLessThan(floorNative.length);
+
+      // --- Fulltext language override. Postgres honors a per-query regconfig;
+      //     SQLite/libSQL FTS5 cannot (the tokenizer is fixed at table
+      //     creation), so the facade must REFUSE it on both the fast and the
+      //     fallback path rather than silently ignore it. ---
+      if (backend.fulltextStrategy?.supportsLanguageOverride === true) {
+        // "signals" stems to "signal" under the declared english config
+        // (matching the corpus) but stays "signals" under simple (matching
+        // nothing), so the override provably reshapes the fulltext leg.
+        const simpleNative = await runHybrid(store, {
+          limit: 4,
+          fulltextQuery: "signals",
+          fulltextLanguage: "simple",
+        });
+        const simpleFallback = await runHybrid(fallbackStore, {
+          limit: 4,
+          fulltextQuery: "signals",
+          fulltextLanguage: "simple",
+        });
+        expect({
+          case: "fulltext language simple",
+          hits: simpleNative.map((hit) => projectHit(hit)),
+        }).toEqual({
+          case: "fulltext language simple",
+          hits: simpleFallback.map((hit) => projectHit(hit)),
+        });
+        // Non-vacuity: the simple override must diverge from the declared
+        // english config, or the fast path could ignore it and still match.
+        const englishNative = await runHybrid(store, {
+          limit: 4,
+          fulltextQuery: "signals",
+        });
+        expect(simpleNative.map((hit) => projectHit(hit))).not.toEqual(
+          englishNative.map((hit) => projectHit(hit)),
+        );
+      } else {
+        const languageCase: ScopedOptions = {
+          limit: 4,
+          fulltextLanguage: "simple",
+        };
+        await expect(
+          runHybrid(store, languageCase),
+          "fast path must refuse a per-query language override",
+        ).rejects.toThrow(/does not honor a per-query .language. override/);
+        await expect(
+          runHybrid(fallbackStore, languageCase),
+          "fallback path must refuse a per-query language override",
+        ).rejects.toThrow(/does not honor a per-query .language. override/);
       }
 
       // Invalid source depths reject identically on both paths — the fast

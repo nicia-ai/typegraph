@@ -94,6 +94,14 @@ const SQLITE_VEC_CAPABILITIES: VectorCapabilities = {
   // Both map to the same vec0 table — only `buildSearch` differs.
   indexTypes: ["hnsw", "none"],
   maxDimensions: SQLITE_VEC_MAX_DIMENSIONS,
+  // vec0's KNN accepts primary-key `IN (SELECT …)` pushdown (verified on
+  // sqlite-vec v0.1.9), so the candidate filter constrains the KNN itself and
+  // a filtered search returns `k` live rows — no over-fetch, no scan bound, no
+  // under-fill. The only bundled engine that can promise a full page.
+  filteredApproximateSearch: {
+    mode: "filter-pushdown",
+    guaranteesFullPage: true,
+  },
 };
 
 /** Whether a slot's declared index type maps to vec0's `MATCH … k =` KNN. */

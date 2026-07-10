@@ -96,6 +96,19 @@ const PGVECTOR_CAPABILITIES: VectorCapabilities = {
   metrics: ["cosine", "l2", "inner_product"],
   indexTypes: ["hnsw", "ivfflat", "none"],
   maxDimensions: PGVECTOR_MAX_DIMENSIONS,
+  // The backend probes `pg_extension.extversion` once and turns on
+  // `hnsw.iterative_scan` / `ivfflat.iterative_scan` when pgvector >= 0.8, so a
+  // filtered scan re-enters the index for more candidates.
+  //
+  // NOT a full-page guarantee, on either axis. The iterative scan stops at
+  // `hnsw.max_scan_tuples` / `ivfflat.max_probes`; and on pgvector < 0.8 there
+  // is no iterative scan at all, so the search stays `ef_search`-bounded and
+  // behaves like a post-filter. A statically-declared mode cannot express
+  // either, which is why the guarantee is its own field.
+  filteredApproximateSearch: {
+    mode: "iterative-scan",
+    guaranteesFullPage: false,
+  },
 };
 
 /** Whether a slot's declared index type materializes a real pgvector ANN index. */

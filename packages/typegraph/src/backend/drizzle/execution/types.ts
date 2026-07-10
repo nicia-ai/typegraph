@@ -16,6 +16,24 @@ export type SqlExecutionAdapter = Readonly<{
     compiledQuery: CompiledSqlQuery,
   ) => Promise<readonly TRow[]>;
   prepare?: (sqlText: string) => PreparedSqlStatement;
+  /**
+   * Runs `critical` with exclusive use of the connection: no statement from
+   * anywhere else can interleave with the ones it issues.
+   *
+   * Statement-at-a-time serialization is not enough for a *sequence* that must
+   * be atomic. `SET LOCAL` around a query is the motivating case — snapshot,
+   * set, select, restore. Two searches whose statements merely take turns can
+   * still interleave as `A snapshot → B snapshot → A set → B set → A select`,
+   * and `A` then runs under `B`'s settings.
+   *
+   * `critical` is handed the unqueued adapter, so it must not attempt to
+   * re-enter the queue. Present only on transaction-scoped (serialized)
+   * adapters; a pooled adapter needs no exclusion because every statement gets
+   * its own connection.
+   */
+  runExclusive?: <T>(
+    critical: (connection: SqlExecutionAdapter) => Promise<T>,
+  ) => Promise<T>;
 }>;
 
 type SqlCompiler = Readonly<{

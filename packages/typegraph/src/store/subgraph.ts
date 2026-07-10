@@ -48,6 +48,7 @@ import {
 } from "../query/schema-introspector";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { fnv1aBase36 } from "../utils/hash";
+import { truncateToBytes } from "../utils/identifier";
 import { buildReachableCte } from "./recursive-cte";
 import { validateProjectionField } from "./reserved-keys";
 import {
@@ -65,26 +66,6 @@ import type { Edge, EdgeMeta, Node, NodeMeta } from "./types";
 // ============================================================
 
 const DEFAULT_SUBGRAPH_MAX_DEPTH = 10;
-
-const TEXT_ENCODER = new TextEncoder();
-
-/**
- * Truncates a string so its UTF-8 byte length does not exceed maxBytes.
- * Avoids splitting in the middle of a multi-byte character.
- */
-function truncateToBytes(value: string, maxBytes: number): string {
-  const encoded = TEXT_ENCODER.encode(value);
-  if (encoded.byteLength <= maxBytes) return value;
-
-  // Walk backwards from the limit to find a clean character boundary.
-  // UTF-8 continuation bytes have the form 10xxxxxx (0x80..0xBF).
-  let end = maxBytes;
-  while (end > 0 && encoded[end]! >= 0x80 && encoded[end]! < 0xc0) {
-    end--;
-  }
-
-  return new TextDecoder().decode(encoded.slice(0, end));
-}
 
 /**
  * Generates a short, deterministic column alias safe for PostgreSQL.

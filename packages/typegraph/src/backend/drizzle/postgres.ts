@@ -40,7 +40,7 @@ import {
 } from "drizzle-orm";
 import { PgDatabase, PgTransaction } from "drizzle-orm/pg-core";
 
-import { ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import { quoteIdentifier } from "../../query/compiler/utils";
 import {
@@ -117,6 +117,7 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -339,6 +340,10 @@ export function createPostgresBackend(
   // Absent when vector support is disabled.
   const vectorSlotLatch =
     vectorStrategy === undefined ? undefined : createVectorSlotLatch();
+  // One probe per backend instance, shared with every transaction-scoped
+  // backend so the pgvector version check runs — and its pre-0.8 warning
+  // fires — at most once per backend, not once per `store.transaction()`.
+  const iterativeScanProbe = createIterativeScanProbe();
   const baseCapabilities = buildPostgresCapabilities(
     fulltextStrategy,
     vectorStrategy,
@@ -414,6 +419,7 @@ export function createPostgresBackend(
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
+    iterativeScanProbe,
   });
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
@@ -468,7 +474,7 @@ export function createPostgresBackend(
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
       // Advisory lock is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
-      const txBackend = createTransactionBackend({
+      const { backend: txBackend, drainAndClose } = createTransactionBackend({
         db: tx,
         adapterOptions,
         operationStrategy,
@@ -477,8 +483,13 @@ export function createPostgresBackend(
         fulltextStrategy,
         vectorStrategy,
         vectorSlotLatch,
+        iterativeScanProbe,
       });
-      return fn(txBackend);
+      try {
+        return await fn(txBackend);
+      } finally {
+        await drainAndClose();
+      }
     });
   }
 
@@ -554,8 +565,11 @@ export function createPostgresBackend(
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgDatabase): TransactionBackend {
-    const txBackend = createTransactionBackend({
+  function bindTransactionBackend(tx: AnyPgDatabase): Readonly<{
+    backend: TransactionBackend;
+    drainAndClose: () => Promise<void>;
+  }> {
+    const { backend, drainAndClose } = createTransactionBackend({
       db: tx,
       adapterOptions,
       operationStrategy,
@@ -564,8 +578,15 @@ export function createPostgresBackend(
       fulltextStrategy,
       vectorStrategy,
       vectorSlotLatch,
+      iterativeScanProbe,
     });
-    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+    return {
+      backend: gateFulltext(
+        backend,
+        contributionMaterializer.assertInitialized,
+      ),
+      drainAndClose,
+    };
   }
 
   const backend: GraphBackend = {
@@ -880,10 +901,21 @@ export function createPostgresBackend(
           }
         : undefined;
 
-      return db.transaction(
-        async (tx) => fn(bindTransactionBackend(tx), tx),
-        txConfig,
-      );
+      return db.transaction(async (tx) => {
+        const { backend: txBackend, drainAndClose } = bindTransactionBackend(tx);
+        try {
+          return await fn(txBackend, tx);
+        } finally {
+          // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+          // instant the callback settles, and those control statements do not
+          // travel through the backend's statement queue. Wait for whatever is
+          // on the wire, and refuse anything the callback left running — a
+          // `Promise.all` that rejects orphans its siblings, whose statements
+          // would otherwise overlap the ROLLBACK and then land on a connection
+          // the pool had already handed to somebody else.
+          await drainAndClose();
+        }
+      }, txConfig);
     },
 
     adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
@@ -911,7 +943,11 @@ export function createPostgresBackend(
       // `db.transaction(...)`. We adopt the literal `tx` client and run
       // pure DML on it — no transaction is opened or closed here, and no
       // DDL is emitted inside the caller's business transaction.
-      return bindTransactionBackend(externalTx);
+      //
+      // Statements still serialize onto the pinned connection, but the queue
+      // is never closed: only the caller knows when their transaction ends,
+      // so it is on them to await every graph write before committing.
+      return bindTransactionBackend(externalTx).backend;
     },
 
     async close(): Promise<void> {
@@ -921,6 +957,71 @@ export function createPostgresBackend(
   };
 
   return backend;
+}
+
+/**
+ * Memoized "does this server's pgvector support the iterative scan (>= 0.8)?"
+ * probe, plus a one-shot warning when it does not.
+ *
+ * Created once per {@link createPostgresBackend} and shared with every
+ * transaction-scoped operation backend, so the probe query runs once and the
+ * pre-0.8 warning fires once per backend instance rather than once per
+ * `store.transaction()`. The answer is connection-independent
+ * (`pg_extension.extversion`), so caching it across connections is sound.
+ */
+export type IterativeScanProbe = Readonly<{
+  isSupported: (
+    execAll: <T>(query: SQL) => Promise<readonly T[]>,
+  ) => Promise<boolean>;
+}>;
+
+/**
+ * Exported for unit testing the memoization / warn-once behavior in isolation;
+ * production code reaches it only through {@link createPostgresBackend}.
+ */
+export function createIterativeScanProbe(): IterativeScanProbe {
+  let probe: Promise<boolean> | undefined;
+  let warned = false;
+
+  function warnUnavailable(version: string): void {
+    if (warned) return;
+    warned = true;
+    if (typeof console === "undefined" || typeof console.warn !== "function") {
+      return;
+    }
+    console.warn(
+      `[typegraph] pgvector ${version} has no iterative scan (added in 0.8), ` +
+        "so a filtered approximate vector search stays ef_search-bounded and " +
+        "can return fewer rows than `limit` while more matches exist. Upgrade " +
+        "pgvector to >= 0.8, or use an exact search (`approximate: false`) " +
+        "where a full page matters.",
+    );
+  }
+
+  return {
+    isSupported(execAll) {
+      // Probing the GUC directly is unreliable — extension GUCs register only
+      // once the extension library has loaded into the session, so a fresh
+      // pooled connection reports NULL even on 0.8+. `extversion` is truth.
+      probe ??= (async () => {
+        try {
+          const [row] = await execAll<{ v: string | null }>(
+            sql`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`,
+          );
+          if (typeof row?.v !== "string") return false;
+          const [major = 0, minor = 0] = row.v
+            .split(".")
+            .map((part) => Number.parseInt(part, 10));
+          const supported = major > 0 || (major === 0 && minor >= 8);
+          if (!supported) warnUnavailable(row.v);
+          return supported;
+        } catch {
+          return false;
+        }
+      })();
+      return probe;
+    },
+  };
 }
 
 type CreatePostgresOperationBackendOptions = Readonly<{
@@ -946,11 +1047,16 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * `vectorStrategy`: both present, or both `undefined`.
    */
   vectorSlotLatch: VectorSlotLatch | undefined;
+  /**
+   * Shared pgvector iterative-scan probe (memoized version check + one-shot
+   * pre-0.8 warning). Owned by the top-level backend and reused by every
+   * transaction backend so the warning fires once per backend instance.
+   */
+  iterativeScanProbe: IterativeScanProbe;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
   db: AnyPgDatabase;
-  executionAdapter?: PostgresExecutionAdapter;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
@@ -960,6 +1066,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   vectorStrategy: VectorStrategy | undefined;
   /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
   vectorSlotLatch: VectorSlotLatch | undefined;
+  /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
+  iterativeScanProbe: IterativeScanProbe;
 }>;
 
 function createPostgresOperationBackend(
@@ -975,6 +1083,7 @@ function createPostgresOperationBackend(
     fulltextStrategy,
     vectorStrategy,
     vectorSlotLatch,
+    iterativeScanProbe,
   } = options;
 
   // Route through the execution adapter so driver-specific result shapes
@@ -1016,28 +1125,13 @@ function createPostgresOperationBackend(
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
 
-  // Probed once per backend instance: `hnsw.iterative_scan` exists on
-  // pgvector >= 0.8. Probing the GUC directly is unreliable — extension
-  // GUCs register only once the extension library has loaded into the
-  // session, so a fresh pooled connection reports NULL even on 0.8+.
-  // `pg_extension.extversion` is connection-independent truth.
-  let pgvectorIterativeScanProbe: Promise<boolean> | undefined;
+  // `hnsw.iterative_scan` exists on pgvector >= 0.8. The probe + "warn once"
+  // state lives on the top-level backend and is SHARED with every
+  // transaction-scoped operation backend (see `iterativeScanProbe` in the
+  // options), so a pre-0.8 server is probed and warned about once per backend
+  // instance — not once per `store.transaction()`.
   function pgvectorIterativeScanSupported(): Promise<boolean> {
-    pgvectorIterativeScanProbe ??= (async () => {
-      try {
-        const [row] = await execAll<{ v: string | null }>(
-          sql`SELECT extversion AS v FROM pg_extension WHERE extname = 'vector'`,
-        );
-        if (typeof row?.v !== "string") return false;
-        const [major = 0, minor = 0] = row.v
-          .split(".")
-          .map((part) => Number.parseInt(part, 10));
-        return major > 0 || (major === 0 && minor >= 8);
-      } catch {
-        return false;
-      }
-    })();
-    return pgvectorIterativeScanProbe;
+    return iterativeScanProbe.isSupported(execAll);
   }
 
   /**
@@ -1051,10 +1145,11 @@ function createPostgresOperationBackend(
    *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
    *   candidates BEFORE those filters — so a filter-heavy neighborhood can
    *   under-fill top-k. The iterative scan keeps yielding until `LIMIT`
-   *   rows pass, making the filtered search exact. `strict_order`
-   *   preserves the distance ordering the plan relies on (`relaxed_order`
-   *   may emit slightly out of order beneath our LIMIT). On older pgvector
-   *   the search stays `ef_search`-bounded — documented caveat.
+   *   rows pass or it hits `hnsw.max_scan_tuples` — better recall, not a
+   *   full-page guarantee. `strict_order` preserves the distance ordering the
+   *   plan relies on (`relaxed_order` may emit slightly out of order beneath
+   *   our LIMIT). On pgvector < 0.8 the search stays `ef_search`-bounded and
+   *   the backend warns once (see `warnIterativeScanUnavailable`).
    * - `ivfflat.iterative_scan = relaxed_order` on IVFFlat slots (same
    *   pgvector floor): IVFFlat has no strict_order mode, so the strategy's
    *   IVFFlat search SQL re-sorts the relaxed candidate set inside a
@@ -1105,6 +1200,48 @@ function createPostgresOperationBackend(
    * onto one connection. With none we take the unchanged single-statement
    * fast path and open no transaction.
    */
+  /**
+   * The `SET LOCAL`-scoped vector SELECT, run as one exclusive group on the
+   * transaction's connection. See {@link runVectorSearch}.
+   */
+  async function runVectorSearchGucGroup<Row>(
+    overrides: readonly SearchGucOverride[],
+    query: SQL,
+  ): Promise<readonly Row[]> {
+    const runExclusive = executionAdapter.runExclusive;
+    if (runExclusive === undefined) {
+      throw new CompilerInvariantError(
+        "A transaction-scoped Postgres backend must expose runExclusive; " +
+          "its execution adapter was not wrapped by createSerialExecutionAdapter.",
+      );
+    }
+    return runExclusive(async (connection) => {
+      const snapshots: SearchGucOverride[] = [];
+      for (const override of overrides) {
+        const [setting] = await connection.execute<{ v: string }>(
+          sql`SELECT current_setting(${override.name}) AS v`,
+        );
+        if (setting !== undefined) {
+          snapshots.push({ name: override.name, value: setting.v });
+        }
+        await connection.execute(
+          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
+        );
+      }
+      const rows = await connection.execute<Row>(query);
+      // Restore only on success: a failed SELECT aborts the caller's
+      // transaction, so its rollback discards the overrides anyway and a
+      // restore here would just fail against the aborted tx, masking the
+      // real error.
+      for (const snapshot of snapshots) {
+        await connection.execute(
+          sql`SELECT set_config(${snapshot.name}, ${snapshot.value}, true)`,
+        );
+      }
+      return rows;
+    });
+  }
+
   async function runVectorSearch<Row = VectorSearchRow>(
     overrides: readonly SearchGucOverride[],
     query: SQL,
@@ -1121,34 +1258,22 @@ function createPostgresOperationBackend(
       // the current values, apply the overrides, then restore them once
       // the SELECT has materialized so the overrides stay scoped to this
       // one search.
-      const snapshots: SearchGucOverride[] = [];
-      for (const override of overrides) {
-        const [setting] = await execAll<{ v: string }>(
-          sql`SELECT current_setting(${override.name}) AS v`,
-        );
-        if (setting !== undefined) {
-          snapshots.push({ name: override.name, value: setting.v });
-        }
-        await execRun(
-          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
-        );
-      }
-      const rows = await execAll<Row>(query);
-      // Restore only on success: a failed SELECT aborts the caller's
-      // transaction, so its rollback discards the overrides anyway and a
-      // restore here would just fail against the aborted tx, masking the
-      // real error.
-      for (const snapshot of snapshots) {
-        await execRun(
-          sql`SELECT set_config(${snapshot.name}, ${snapshot.value}, true)`,
-        );
-      }
-      return rows;
+      //
+      // The four steps are ONE critical section, not four serialized
+      // statements. A transaction has a single GUC namespace, so two searches
+      // that merely take turns interleave as `A snapshot → B snapshot → A set
+      // → B set → A select` and `A` runs under `B`'s efSearch. `runExclusive`
+      // holds the connection for the whole group; it is always present on a
+      // transaction-scoped adapter (see `createTransactionBackend`).
+      return runVectorSearchGucGroup(overrides, query);
     }
     return db.transaction(async (tx) => {
       // Bind an equivalently-configured adapter to the tx client so the
-      // SELECT keeps the server-side prepared-statement fast path and the
-      // driver result-shape normalization, rather than a bespoke execute.
+      // SELECT keeps the driver result-shape normalization rather than a
+      // bespoke execute. A Drizzle transaction carries no `$client`, so this
+      // adapter routes through Drizzle's session (no server-side prepared
+      // statement) — correct either way, and the statements below are
+      // sequential, so they need no serializing wrapper.
       const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
       for (const override of overrides) {
         await txAdapter.execute(
@@ -1607,12 +1732,28 @@ function createPostgresOperationBackend(
   return operationBackend;
 }
 
+/**
+ * A transaction-scoped backend plus the hook that shuts its statement queue
+ * at the transaction boundary. See {@link SerialExecutionAdapter.drainAndClose}.
+ */
+type BoundTransactionBackend = Readonly<{
+  backend: InternalOperationBackend;
+  drainAndClose: () => Promise<void>;
+}>;
+
 function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
-): InternalOperationBackend {
-  const txExecutionAdapter =
-    options.executionAdapter ??
-    createPostgresExecutionAdapter(options.db, options.adapterOptions);
+): BoundTransactionBackend {
+  // Every statement this backend issues rides one pinned connection, which
+  // can carry exactly one query at a time. Serialize them here rather than
+  // relying on the driver's own queue: node-postgres deprecated
+  // `client.query()` on a busy client in 8.22 and removes the queue in pg@9.
+  // The wrap is unconditional because the overlap is created inside TypeGraph
+  // (the node write pipeline syncs embeddings and fulltext concurrently), not
+  // only by user code.
+  const txExecutionAdapter = createSerialExecutionAdapter(
+    createPostgresExecutionAdapter(options.db, options.adapterOptions),
+  );
 
   // A transaction-scoped backend gets its OWN per-field ensure-latch, never
   // the outer process-global one: a `CREATE TABLE/INDEX` that runs inside the
@@ -1621,7 +1762,7 @@ function createTransactionBackend(
   // later write fail with "relation does not exist"). The fresh latch is
   // discarded with the transaction, so the next write re-ensures idempotently.
   // No latch when vector support is disabled (`vector: false`).
-  return createPostgresOperationBackend({
+  const backend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
     adapterOptions: options.adapterOptions,
@@ -1632,7 +1773,12 @@ function createTransactionBackend(
     vectorStrategy: options.vectorStrategy,
     vectorSlotLatch:
       options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
+    // The probe is process-wide truth, so — unlike the slot latch — the outer
+    // instance's is reused rather than a fresh one per transaction.
+    iterativeScanProbe: options.iterativeScanProbe,
   });
+
+  return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
 }
 
 // Re-export schema utilities

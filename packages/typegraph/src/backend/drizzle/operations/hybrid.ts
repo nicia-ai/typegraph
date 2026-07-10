@@ -22,9 +22,21 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { type SqlDialect } from "../../../query/dialect/types";
 import { type HybridSearchRow, type NodeRow } from "../../types";
 import { coerceNumericScore } from "../row-mappers";
-import { quotedColumn, type Tables } from "./shared";
+import { codePointOrderKey, quotedColumn, type Tables } from "./shared";
+
+/**
+ * The `node_id` tiebreak this statement uses three times: once in each
+ * per-source `ROW_NUMBER()` rank, and once in the final fused ordering. Those
+ * ranks *produce* the fused scores, so the tiebreak decides the page twice
+ * over. Code-point ordered on both engines (see {@link codePointOrderKey}) so
+ * it matches the multi-statement fallback's JS fusion row for row.
+ */
+function nodeIdOrderKey(dialect: SqlDialect): SQL {
+  return codePointOrderKey(sql.raw("node_id"), dialect);
+}
 
 export type HybridStatementInput = Readonly<{
   /**
@@ -46,6 +58,8 @@ export type HybridStatementInput = Readonly<{
   /** Fulltext source SQL: `(node_id, score, snippet)`, score-descending. */
   fulltextSql: SQL;
   nodes: Tables["nodes"];
+  /** Selects the collation-independent `node_id` tiebreak. */
+  dialect: SqlDialect;
   graphId: string;
   nodeKind: string;
   fusionK: number;
@@ -74,10 +88,11 @@ export function hybridCandidatesRef(): SQL {
 
 export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
   const { nodes } = input;
+  const nodeIdOrder = nodeIdOrderKey(input.dialect);
   const vectorOrder =
     input.vectorScoreDescending ?
-      sql.raw("score DESC, node_id ASC")
-    : sql.raw("score ASC, node_id ASC");
+      sql`score DESC, ${nodeIdOrder} ASC`
+    : sql`score ASC, ${nodeIdOrder} ASC`;
 
   const columnPairs: readonly (readonly [{ name: string }, string])[] = [
     [nodes.graphId, "graph_id"],
@@ -114,7 +129,7 @@ export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
     ),
     tg_hybrid_fts AS (
       SELECT node_id, score, snippet,
-             ROW_NUMBER() OVER (ORDER BY score DESC, node_id ASC) AS ord
+             ROW_NUMBER() OVER (ORDER BY score DESC, ${nodeIdOrder} ASC) AS ord
       FROM (${input.fulltextSql}) AS tg_hybrid_fts_src
     ),
     tg_hybrid_pairs AS (
@@ -154,7 +169,7 @@ export function buildHybridSearchStatement(input: HybridStatementInput): SQL {
      AND ${qualified(nodes, "kind")} = ${input.nodeKind}
      AND ${qualified(nodes, "id")} = tg_hybrid_fused.node_id
      AND ${qualified(nodes, "deletedAt")} IS NULL
-    ORDER BY fused_score DESC, node_id ASC
+    ORDER BY fused_score DESC, ${nodeIdOrder} ASC
     LIMIT ${input.limit} OFFSET ${input.offset}
   `;
 }

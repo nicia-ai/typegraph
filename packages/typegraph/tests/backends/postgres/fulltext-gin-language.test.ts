@@ -136,6 +136,7 @@ describe("fulltext GIN index usage (constant declared language)", () => {
         language: "english",
       },
       tsvectorStrategy,
+      "postgres",
       liveNodeIdsSubquery(tables.nodes, "gin_plan", "GinArticle", nowIso()),
     );
     const compiled = backend.compileSql!(query);
@@ -187,6 +188,7 @@ describe("fulltext GIN index usage (constant declared language)", () => {
         limit: 10,
       },
       tsvectorStrategy,
+      "postgres",
       liveNodeIdsSubquery(tables.nodes, "gin_plan", "GinArticle", nowIso()),
     );
     const compiledPerRow = backend.compileSql!(perRow);

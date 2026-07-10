@@ -1409,6 +1409,16 @@ export class Store<G extends GraphDef> {
    * });
    * ```
    *
+   * **`tx.sql` shares the one pinned connection — await it, don't overlap it.**
+   * TypeGraph serializes the statements *its own* collections issue, so a
+   * `Promise.all` of graph writes is safe. A statement you issue through
+   * `tx.sql` bypasses that queue: run it concurrently with a graph write (or
+   * with another `tx.sql` statement) and two queries race on the one
+   * transaction connection — the exact overlap Postgres removes in `pg@9`.
+   * Await each `tx.sql` statement before starting the next write. TypeGraph
+   * cannot police this: it never sees the raw handle's traffic, so it also
+   * cannot drain a raw statement still in flight when the transaction commits.
+   *
    * **Backends without transactions.** When `backend.capabilities.transactions`
    * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method runs the
    * callback against the same backend used outside `transaction()` — writes
@@ -1652,6 +1662,14 @@ export class Store<G extends GraphDef> {
    * }); // one COMMIT / ROLLBACK across both layers
    * ```
    *
+   * **The caller owns the connection — don't overlap writes on it.** The graph
+   * store and your Drizzle writes share the one connection the caller's
+   * transaction pinned. TypeGraph serializes the statements *its* collections
+   * issue, but your raw Drizzle statements (and any graph write run alongside
+   * them) are yours to sequence: a `Promise.all` mixing the two races two
+   * queries on that connection — the overlap Postgres removes in `pg@9`. Await
+   * each write before starting the next.
+   *
    * Not available when the store was created with `{ history: true }`: a
    * caller-owned transaction context would let writes happen after capture has
    * lost its flush point, so this throws `ConfigurationError`
@@ -1708,6 +1726,12 @@ export class Store<G extends GraphDef> {
    * returns (e.g. retaining `tx` and writing once more before the caller's
    * COMMIT) throws rather than committing uncaptured — the post-flush write
    * cannot silently diverge history from live state.
+   *
+   * Like {@link Store.withTransaction}, the graph writes and any raw `tx.sql`
+   * statements share the caller's one pinned connection. TypeGraph serializes
+   * the statements its collections issue; sequence your own raw statements (and
+   * don't `Promise.all` them with graph writes) so two queries never race on
+   * that connection.
    */
   withRecordedTransaction<T>(
     this: HistoryStore<G>,
