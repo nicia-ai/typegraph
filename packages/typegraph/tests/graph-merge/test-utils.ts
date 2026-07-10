@@ -4,9 +4,16 @@ import type { GraphBackend } from "@nicia-ai/typegraph";
 import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
 import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { getTableName, is, Table } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Client, Pool } from "pg";
 
+import { generatePostgresMigrationSQL } from "../../src/backend/drizzle/ddl";
+import {
+  createPostgresTables,
+  type PostgresTableNames,
+  type PostgresTables,
+} from "../../src/backend/drizzle/schema/postgres";
 import type { Embedder } from "../../src/graph-merge/types";
 
 /**
@@ -63,6 +70,76 @@ export async function createPgliteMergeBackend(): Promise<MergeBackendFixture> {
       await backend.close();
     },
   };
+}
+
+/**
+ * A shared PGlite engine with independently named table sets for merge tests.
+ *
+ * Graph-merge property cases need several stores alive concurrently: a base and
+ * its branches, and sometimes two independent materializations. Reusing one
+ * default table set would make those stores collide. Instead, the engine stays
+ * alive for the test file while each fixture receives its own tables and drops
+ * them at cleanup. This removes repeated WASM/pgvector boot cost without
+ * weakening fixture isolation.
+ */
+export type SharedPgliteMergeEngine = Readonly<{
+  makeFixture: () => Promise<MergeBackendFixture>;
+  dispose: () => Promise<void>;
+}>;
+
+/**
+ * Starts a reusable PGlite engine for a graph-merge property test file.
+ */
+export async function setupSharedPgliteMergeEngine(): Promise<SharedPgliteMergeEngine> {
+  const { client, db } = await createLocalPgliteBackend();
+  let fixtureSequence = 0;
+
+  return {
+    makeFixture: async () => {
+      fixtureSequence += 1;
+      const tables = createPostgresTables(
+        sharedPgliteTableNames(fixtureSequence),
+      );
+      await client.exec(generatePostgresMigrationSQL(tables));
+
+      const backend = createPostgresBackend(db, { tables });
+      return {
+        backend,
+        cleanup: async () => {
+          await backend.close();
+          await client.exec(dropTablesSql(tables));
+        },
+      };
+    },
+    dispose: async () => {
+      await client.close();
+    },
+  };
+}
+
+function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
+  const prefix = `merge_fixture_${fixtureSequence}`;
+  return {
+    nodes: `${prefix}_nodes`,
+    edges: `${prefix}_edges`,
+    recordedNodes: `${prefix}_recorded_nodes`,
+    recordedEdges: `${prefix}_recorded_edges`,
+    recordedClock: `${prefix}_recorded_clock`,
+    uniques: `${prefix}_uniques`,
+    schemaVersions: `${prefix}_schema_versions`,
+    fulltext: `${prefix}_fulltext`,
+    indexMaterializations: `${prefix}_index_materializations`,
+    contributionMaterializations: `${prefix}_contribution_materializations`,
+    kindRemovals: `${prefix}_kind_removals`,
+    reconciliationMarkers: `${prefix}_reconciliation_markers`,
+  };
+}
+
+function dropTablesSql(tables: PostgresTables): string {
+  const names = Object.values(tables)
+    .filter((value) => is(value, Table))
+    .map((table) => `"${getTableName(table)}"`);
+  return `DROP TABLE IF EXISTS ${names.join(", ")} CASCADE`;
 }
 
 /**

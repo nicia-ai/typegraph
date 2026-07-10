@@ -36,7 +36,7 @@ import {
   subClassOf,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../../src/graph-merge/branch";
@@ -49,7 +49,11 @@ import type {
   SimilarityStrategy,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
-import { backendMatrix } from "../../graph-merge/test-utils";
+import {
+  backendMatrix,
+  setupSharedPgliteMergeEngine,
+  type SharedPgliteMergeEngine,
+} from "../../graph-merge/test-utils";
 import type { DeterminismScenario } from "./arbitraries";
 import { determinismScenarioArb } from "./arbitraries";
 import { normalizeGraph, normalizeReport } from "./normalize";
@@ -109,12 +113,11 @@ const BRANCH_B = asBranchId("branch-b");
 const FIXED_BRANCH_ORDER: readonly BranchId[] = [BRANCH_A, BRANCH_B];
 
 /**
- * fast-check iterations. Each run boots ~6 in-process PGlite (WASM Postgres)
- * engines (two materializations × base + two branches), which is markedly slower
- * on CI runners — 30 runs there blow past any sane timeout. So CI runs fewer
- * iterations (still meaningful, and the order-independence property is ALSO pinned
- * by the deterministic, non-property tests on both backends); a dev box runs the
- * full set. (A shared-PGlite-engine fixture would let CI run the full count.)
+ * fast-check iterations. Each run needs ~6 PGlite-backed stores (two
+ * materializations × base + two branches), so CI keeps a smaller run budget even
+ * though the PGlite engine is reused with isolated tables within this file. The
+ * deterministic, non-property tests pin the same order-independence paths on both
+ * backends; a dev box runs the full set.
  */
 const DETERMINISM_RUNS = process.env.CI ? 12 : 30;
 
@@ -175,9 +178,21 @@ type Fixture = Readonly<{
 describe.each(backendMatrix())(
   "determinism property — shuffled branch order [$name]",
   (entry) => {
+    let sharedPglite: SharedPgliteMergeEngine | undefined;
+
+    beforeAll(async () => {
+      if (entry.name === "PGlite") {
+        sharedPglite = await setupSharedPgliteMergeEngine();
+      }
+    });
+
+    afterAll(async () => {
+      await sharedPglite?.dispose();
+    });
+
     // Disposers for backends still open at test end (belt-and-suspenders — the
-    // property body also disposes each iteration's backends inline so PGlite's
-    // in-process engines never accumulate across the 30 runs).
+    // property body also disposes each iteration's backends inline so the
+    // shared PGlite engine's fixture tables never accumulate).
     let cleanups: (() => Promise<void>)[];
 
     afterEach(async () => {
@@ -189,7 +204,10 @@ describe.each(backendMatrix())(
     async function makeBackend(
       disposers: (() => Promise<void>)[],
     ): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        sharedPglite === undefined ?
+          await entry.make()
+        : await sharedPglite.makeFixture();
       disposers.push(fixture.cleanup);
       return fixture.backend;
     }

@@ -34,7 +34,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../../src/graph-merge/branch";
@@ -47,7 +47,11 @@ import type {
   SimilarityStrategy,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
-import { backendMatrix } from "../../graph-merge/test-utils";
+import {
+  backendMatrix,
+  setupSharedPgliteMergeEngine,
+  type SharedPgliteMergeEngine,
+} from "../../graph-merge/test-utils";
 import type { MergeLawScenario } from "./arbitraries";
 import { mergeLawScenarioArb } from "./arbitraries";
 import { normalizeGraph, normalizeReport } from "./normalize";
@@ -88,9 +92,10 @@ const BRANCH_A = asBranchId("law-branch-a");
 const BRANCH_B = asBranchId("law-branch-b");
 
 /**
- * fast-check iterations. Each idempotence iteration boots up to 5 in-process
- * backends (two bases + three branches), so CI runs fewer iterations — same
- * rationale as the determinism gate's run budget.
+ * fast-check iterations. Each idempotence iteration needs up to 5 stores (two
+ * bases + three branches). CI keeps a smaller run budget while reusing one
+ * PGlite engine with isolated tables for this file, matching the determinism
+ * gate's rationale.
  */
 const LAW_RUNS = process.env.CI ? 8 : 16;
 
@@ -136,7 +141,18 @@ const ADDED_ENCOUNTER_ID = "enc-added";
 const ADDED_EDGE_ID = "edge-added";
 
 describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
+  let sharedPglite: SharedPgliteMergeEngine | undefined;
   let cleanups: (() => Promise<void>)[];
+
+  beforeAll(async () => {
+    if (entry.name === "PGlite") {
+      sharedPglite = await setupSharedPgliteMergeEngine();
+    }
+  });
+
+  afterAll(async () => {
+    await sharedPglite?.dispose();
+  });
 
   afterEach(async () => {
     for (const cleanup of cleanups) {
@@ -147,7 +163,10 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
   async function makeBackend(
     disposers: (() => Promise<void>)[],
   ): Promise<GraphBackend> {
-    const fixture = await entry.make();
+    const fixture =
+      sharedPglite === undefined ?
+        await entry.make()
+      : await sharedPglite.makeFixture();
     disposers.push(fixture.cleanup);
     return fixture.backend;
   }

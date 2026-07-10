@@ -34,7 +34,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../../src/graph-merge/branch";
@@ -46,7 +46,11 @@ import type {
   MergeOptions,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
-import { backendMatrix } from "../../graph-merge/test-utils";
+import {
+  backendMatrix,
+  setupSharedPgliteMergeEngine,
+  type SharedPgliteMergeEngine,
+} from "../../graph-merge/test-utils";
 import { normalizeGraph, normalizeReport } from "./normalize";
 
 const Patient = defineNode("Patient", {
@@ -77,10 +81,10 @@ const B = asBranchId("provider-b");
 const FIXED_ORDER: readonly BranchId[] = [A, B];
 
 /**
- * fast-check iterations. Each run boots 5 backends (forkBase + two branches + two
- * targets); PGlite (in-process WASM Postgres) makes that the slow axis, so CI runs
- * fewer (still meaningful — the deterministic new-vs-base tests pin the same paths on
- * both backends). A dev box runs the full set.
+ * fast-check iterations. Each run needs 5 stores (forkBase + two branches + two
+ * targets); PGlite makes that the slow axis, so CI runs fewer while reusing one
+ * engine with isolated tables within this file. The deterministic new-vs-base
+ * tests pin the same paths on both backends; a dev box runs the full set.
  */
 const RUNS = process.env.CI ? 8 : 16;
 
@@ -207,10 +211,25 @@ function options(
 describe.each(backendMatrix())(
   "new-vs-base determinism property — shuffled branch order [$name]",
   (entry) => {
+    let sharedPglite: SharedPgliteMergeEngine | undefined;
+
+    beforeAll(async () => {
+      if (entry.name === "PGlite") {
+        sharedPglite = await setupSharedPgliteMergeEngine();
+      }
+    });
+
+    afterAll(async () => {
+      await sharedPglite?.dispose();
+    });
+
     async function makeBackend(
       disposers: (() => Promise<void>)[],
     ): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        sharedPglite === undefined ?
+          await entry.make()
+        : await sharedPglite.makeFixture();
       disposers.push(fixture.cleanup);
       return fixture.backend;
     }
