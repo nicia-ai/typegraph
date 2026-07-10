@@ -117,6 +117,7 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -468,7 +469,7 @@ export function createPostgresBackend(
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
       // Advisory lock is held here, so the schema-write-capable
       // InternalOperationBackend is used intentionally (see its type).
-      const txBackend = createTransactionBackend({
+      const { backend: txBackend, drainAndClose } = createTransactionBackend({
         db: tx,
         adapterOptions,
         operationStrategy,
@@ -478,7 +479,11 @@ export function createPostgresBackend(
         vectorStrategy,
         vectorSlotLatch,
       });
-      return fn(txBackend);
+      try {
+        return await fn(txBackend);
+      } finally {
+        await drainAndClose();
+      }
     });
   }
 
@@ -554,8 +559,11 @@ export function createPostgresBackend(
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgDatabase): TransactionBackend {
-    const txBackend = createTransactionBackend({
+  function bindTransactionBackend(tx: AnyPgDatabase): Readonly<{
+    backend: TransactionBackend;
+    drainAndClose: () => Promise<void>;
+  }> {
+    const { backend, drainAndClose } = createTransactionBackend({
       db: tx,
       adapterOptions,
       operationStrategy,
@@ -565,7 +573,13 @@ export function createPostgresBackend(
       vectorStrategy,
       vectorSlotLatch,
     });
-    return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
+    return {
+      backend: gateFulltext(
+        backend,
+        contributionMaterializer.assertInitialized,
+      ),
+      drainAndClose,
+    };
   }
 
   const backend: GraphBackend = {
@@ -880,10 +894,21 @@ export function createPostgresBackend(
           }
         : undefined;
 
-      return db.transaction(
-        async (tx) => fn(bindTransactionBackend(tx), tx),
-        txConfig,
-      );
+      return db.transaction(async (tx) => {
+        const { backend: txBackend, drainAndClose } = bindTransactionBackend(tx);
+        try {
+          return await fn(txBackend, tx);
+        } finally {
+          // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+          // instant the callback settles, and those control statements do not
+          // travel through the backend's statement queue. Wait for whatever is
+          // on the wire, and refuse anything the callback left running — a
+          // `Promise.all` that rejects orphans its siblings, whose statements
+          // would otherwise overlap the ROLLBACK and then land on a connection
+          // the pool had already handed to somebody else.
+          await drainAndClose();
+        }
+      }, txConfig);
     },
 
     adoptTransaction(externalTx: AdoptedTransaction): TransactionBackend {
@@ -911,7 +936,11 @@ export function createPostgresBackend(
       // `db.transaction(...)`. We adopt the literal `tx` client and run
       // pure DML on it — no transaction is opened or closed here, and no
       // DDL is emitted inside the caller's business transaction.
-      return bindTransactionBackend(externalTx);
+      //
+      // Statements still serialize onto the pinned connection, but the queue
+      // is never closed: only the caller knows when their transaction ends,
+      // so it is on them to await every graph write before committing.
+      return bindTransactionBackend(externalTx).backend;
     },
 
     async close(): Promise<void> {
@@ -950,7 +979,6 @@ type CreatePostgresOperationBackendOptions = Readonly<{
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
   db: AnyPgDatabase;
-  executionAdapter?: PostgresExecutionAdapter;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
@@ -1147,8 +1175,11 @@ function createPostgresOperationBackend(
     }
     return db.transaction(async (tx) => {
       // Bind an equivalently-configured adapter to the tx client so the
-      // SELECT keeps the server-side prepared-statement fast path and the
-      // driver result-shape normalization, rather than a bespoke execute.
+      // SELECT keeps the driver result-shape normalization rather than a
+      // bespoke execute. A Drizzle transaction carries no `$client`, so this
+      // adapter routes through Drizzle's session (no server-side prepared
+      // statement) — correct either way, and the statements below are
+      // sequential, so they need no serializing wrapper.
       const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
       for (const override of overrides) {
         await txAdapter.execute(
@@ -1607,12 +1638,28 @@ function createPostgresOperationBackend(
   return operationBackend;
 }
 
+/**
+ * A transaction-scoped backend plus the hook that shuts its statement queue
+ * at the transaction boundary. See {@link SerialExecutionAdapter.drainAndClose}.
+ */
+type BoundTransactionBackend = Readonly<{
+  backend: InternalOperationBackend;
+  drainAndClose: () => Promise<void>;
+}>;
+
 function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
-): InternalOperationBackend {
-  const txExecutionAdapter =
-    options.executionAdapter ??
-    createPostgresExecutionAdapter(options.db, options.adapterOptions);
+): BoundTransactionBackend {
+  // Every statement this backend issues rides one pinned connection, which
+  // can carry exactly one query at a time. Serialize them here rather than
+  // relying on the driver's own queue: node-postgres deprecated
+  // `client.query()` on a busy client in 8.22 and removes the queue in pg@9.
+  // The wrap is unconditional because the overlap is created inside TypeGraph
+  // (the node write pipeline syncs embeddings and fulltext concurrently), not
+  // only by user code.
+  const txExecutionAdapter = createSerialExecutionAdapter(
+    createPostgresExecutionAdapter(options.db, options.adapterOptions),
+  );
 
   // A transaction-scoped backend gets its OWN per-field ensure-latch, never
   // the outer process-global one: a `CREATE TABLE/INDEX` that runs inside the
@@ -1621,7 +1668,7 @@ function createTransactionBackend(
   // later write fail with "relation does not exist"). The fresh latch is
   // discarded with the transaction, so the next write re-ensures idempotently.
   // No latch when vector support is disabled (`vector: false`).
-  return createPostgresOperationBackend({
+  const backend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
     adapterOptions: options.adapterOptions,
@@ -1633,6 +1680,8 @@ function createTransactionBackend(
     vectorSlotLatch:
       options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
   });
+
+  return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
 }
 
 // Re-export schema utilities

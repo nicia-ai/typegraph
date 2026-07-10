@@ -1,5 +1,6 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import type { SqlDialect } from "../../types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
@@ -46,6 +47,24 @@ export function quotedColumn(column: { name: string }): SQL {
  */
 export function quotedTableName(tableName: string): SQL {
   return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
+}
+
+/**
+ * `column` rendered so that ORDER BY sorts it by code point on both engines.
+ *
+ * Relevance-ranking SQL breaks score ties on `node_id`. Left bare, Postgres
+ * sorts it under the column's collation — a linguistic collation such as
+ * `en_US.UTF-8` orders `a, A, b, B` where byte order gives `A, B, a, b`, so
+ * the same query returns different pages on two databases whose `datcollate`
+ * differs. SQLite's default `BINARY` collation is already code-point order,
+ * as is the store's `compareCodePoints`, which ranks the same rows whenever a
+ * search falls back to fusing in JavaScript.
+ *
+ * Forcing the `C` collation on Postgres makes all three agree. The ranking is
+ * sorted anyway (no index supplies the order), so this costs nothing.
+ */
+export function codePointOrderKey(column: SQL, dialect: SqlDialect): SQL {
+  return dialect === "postgres" ? sql`${column} COLLATE "C"` : column;
 }
 
 /**

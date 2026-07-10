@@ -377,6 +377,38 @@ try {
 }
 ```
 
+## Transaction Errors
+
+### `TransactionClosedError`
+
+Thrown when a statement reaches a transaction-scoped backend after its
+transaction boundary has already returned.
+
+A transaction pins one database connection, which carries one statement at a
+time. When `store.transaction(...)` resolves or rejects, the driver emits
+`COMMIT` or `ROLLBACK` on that connection and hands it back to the pool. Any
+statement still in flight then has nowhere safe to go — it would execute inside
+somebody else's transaction — so TypeGraph refuses it.
+
+The usual source is a callback that lets work escape it. `Promise.all` rejects
+on its first rejection while its siblings keep running:
+
+```typescript
+await store.transaction(async (tx) => {
+  // If `a` fails, `b`'s remaining statements are orphaned.
+  await Promise.all([tx.nodes.Doc.create(a), tx.nodes.Doc.create(b)]);
+});
+```
+
+You will normally never see this error: `Promise.all` has already rejected with
+the original failure and discards the orphan's. It surfaces only if you await
+the orphaned promise yourself. To avoid orphaning writes at all, use
+`Promise.allSettled` and inspect the results, or await the writes in sequence.
+
+`adoptTransaction()` never closes its queue — only the caller knows when their
+transaction ends — so this error cannot arise there. It remains the caller's
+job to await every graph write before committing.
+
 ## Error Handling Patterns
 
 ### Using Error Utilities

@@ -11,6 +11,35 @@ import { type TemporalMode } from "../../core/types";
 import { nowIso } from "../../utils/date";
 
 /**
+ * The instant every `currentReadInstant()` inside {@link withPinnedReadInstant}
+ * returns. Compilation is synchronous and single-threaded, so this dynamic
+ * scope needs no async-context machinery: nothing can interleave between the
+ * assignment and the `finally` that clears it.
+ */
+let pinnedReadInstant: string | undefined;
+
+/**
+ * Compiles `emit` with one shared "current" instant.
+ *
+ * A set operation is a single statement whose operands are compiled
+ * independently, so each operand would otherwise sample its own `nowIso()`.
+ * Two instants microseconds apart mean the two halves of an `INTERSECT` or
+ * `EXCEPT` disagree about whether a row created between them is current — the
+ * one thing a compound SELECT, evaluated against one snapshot, must never do.
+ *
+ * Re-entrant: a nested set operation keeps the outer pin rather than resampling.
+ */
+export function withPinnedReadInstant<T>(emit: () => T): T {
+  if (pinnedReadInstant !== undefined) return emit();
+  pinnedReadInstant = nowIso();
+  try {
+    return emit();
+  } finally {
+    pinnedReadInstant = undefined;
+  }
+}
+
+/**
  * The "current" valid-time read instant, bound as a parameter — the
  * APPLICATION clock (`nowIso()`), NOT the database clock (`NOW()`).
  *
@@ -24,9 +53,12 @@ import { nowIso } from "../../utils/date";
  * (`liveNodeIdsSubquery`) and the recorded/logical clock already use, and the
  * same form the `asOf` predicate uses (a bound ISO instant), so it needs no
  * dialect-specific expression.
+ *
+ * Samples the clock per call unless a {@link withPinnedReadInstant} scope is
+ * open, in which case every call in that scope binds the same instant.
  */
 export function currentReadInstant(): SQL {
-  return sql`${nowIso()}`;
+  return sql`${pinnedReadInstant ?? nowIso()}`;
 }
 
 /**

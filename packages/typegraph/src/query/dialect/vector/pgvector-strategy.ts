@@ -96,6 +96,12 @@ const PGVECTOR_CAPABILITIES: VectorCapabilities = {
   metrics: ["cosine", "l2", "inner_product"],
   indexTypes: ["hnsw", "ivfflat", "none"],
   maxDimensions: PGVECTOR_MAX_DIMENSIONS,
+  // The backend probes `pg_extension.extversion` once and turns on
+  // `hnsw.iterative_scan` / `ivfflat.iterative_scan` when pgvector >= 0.8, so
+  // a filtered scan re-enters the index until `LIMIT` rows survive the filter.
+  // On pgvector < 0.8 no such GUC exists and the scan stays `ef_search`-bounded
+  // — the `"post-filter"` shape, with the same under-fill caveat.
+  filteredApproximateSearch: "iterative-scan",
 };
 
 /** Whether a slot's declared index type materializes a real pgvector ANN index. */

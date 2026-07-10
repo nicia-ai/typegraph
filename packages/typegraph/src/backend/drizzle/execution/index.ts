@@ -11,6 +11,7 @@ export {
   type SqliteExecutionProfileHints,
   type SqliteTransactionMode,
 } from "./sqlite-execution";
+export { createSerialExecutionAdapter } from "./statement-queue";
 export {
   type CompiledSqlQuery,
   compileQueryWithDialect,

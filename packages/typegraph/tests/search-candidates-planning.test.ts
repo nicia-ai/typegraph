@@ -13,6 +13,7 @@
  *   predicate exists; unfiltered searches use the flat backend form.
  */
 import { type SQL, sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -27,7 +28,11 @@ import {
   buildHybridSearchStatement,
   hybridCandidatesRef,
 } from "../src/backend/drizzle/operations/hybrid";
-import { liveNodeIdsSubquery } from "../src/backend/drizzle/operations/shared";
+import {
+  liveNodeIdsSubquery,
+  type Tables,
+} from "../src/backend/drizzle/operations/shared";
+import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
@@ -36,6 +41,18 @@ const sqliteDialect = new SQLiteSyncDialect();
 function sqlToText(query: SQL): string {
   return sqliteDialect.sqlToQuery(query).sql;
 }
+
+const postgresDialect = new PgDialect();
+function pgSqlToText(query: SQL): string {
+  return postgresDialect.sqlToQuery(query).sql;
+}
+
+// Proving each table is a member of the `Tables` union once, here, keeps the
+// assignability check out of `buildHybridSearchStatement`'s heavy
+// object-literal argument position — where tsc's depth-limited comparison of
+// Drizzle's table types can spuriously fail against the other dialect's branch.
+const sqliteNodes: Tables["nodes"] = tables.nodes;
+const postgresNodes: Tables["nodes"] = postgresTables.nodes;
 
 describe("search candidates planning shapes", () => {
   it("materializes the hybrid fused CTE", () => {
@@ -59,7 +76,8 @@ describe("search candidates planning shapes", () => {
         "Doc",
         "2026-01-01T00:00:00.000Z",
       ),
-      nodes: tables.nodes,
+      nodes: sqliteNodes,
+      dialect: "sqlite",
       graphId: "g",
       nodeKind: "Doc",
       fusionK: 60,
@@ -69,6 +87,82 @@ describe("search candidates planning shapes", () => {
       offset: 0,
     });
     expect(sqlToText(statement)).toContain("tg_hybrid_fused AS MATERIALIZED");
+  });
+
+  it("forces the C collation on every node_id tiebreak on postgres", () => {
+    const statement = buildHybridSearchStatement({
+      candidatesSql: liveNodeIdsSubquery(
+        postgresTables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      vectorSql: liveNodeIdsSubquery(
+        postgresTables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      vectorScoreDescending: true,
+      fulltextSql: liveNodeIdsSubquery(
+        postgresTables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      nodes: postgresNodes,
+      dialect: "postgres",
+      graphId: "g",
+      nodeKind: "Doc",
+      fusionK: 60,
+      vectorWeight: 1,
+      fulltextWeight: 1,
+      limit: 10,
+      offset: 0,
+    });
+    const text = pgSqlToText(statement);
+    // A linguistic default collation (e.g. en_US.UTF-8) reorders tied
+    // node_ids; forcing `C` makes the two per-source ROW_NUMBER() windows and
+    // the final fused ORDER BY sort by byte order, matching SQLite and the JS
+    // fusion fallback. All three tiebreaks must carry it — exactly 3.
+    expect(text).toContain('node_id COLLATE "C"');
+    expect(text.match(/node_id COLLATE "C"/g)).toHaveLength(3);
+  });
+
+  it("leaves node_id bare (BINARY collation) on sqlite", () => {
+    const statement = buildHybridSearchStatement({
+      candidatesSql: liveNodeIdsSubquery(
+        tables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      vectorSql: liveNodeIdsSubquery(
+        tables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      vectorScoreDescending: true,
+      fulltextSql: liveNodeIdsSubquery(
+        tables.nodes,
+        "g",
+        "Doc",
+        "2026-01-01T00:00:00.000Z",
+      ),
+      nodes: sqliteNodes,
+      dialect: "sqlite",
+      graphId: "g",
+      nodeKind: "Doc",
+      fusionK: 60,
+      vectorWeight: 1,
+      fulltextWeight: 1,
+      limit: 10,
+      offset: 0,
+    });
+    // SQLite's default BINARY collation already sorts by code point, so no
+    // COLLATE override is emitted (or needed) on this dialect.
+    expect(sqlToText(statement)).not.toContain("COLLATE");
   });
 
   it("emits the candidates set once as a shared CTE both legs reference", () => {
@@ -87,7 +181,8 @@ describe("search candidates planning shapes", () => {
       vectorSql,
       vectorScoreDescending: true,
       fulltextSql,
-      nodes: tables.nodes,
+      nodes: sqliteNodes,
+      dialect: "sqlite",
       graphId: "g",
       nodeKind: "Doc",
       fusionK: 60,

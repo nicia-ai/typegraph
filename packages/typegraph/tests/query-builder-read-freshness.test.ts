@@ -52,6 +52,16 @@ async function waitForNextMillisecond(): Promise<void> {
   }
 }
 
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+/** The bound "current" instants among a compiled statement's parameters. */
+function isoInstants(params: readonly unknown[]): readonly string[] {
+  return params.filter(
+    (value): value is string =>
+      typeof value === "string" && ISO_INSTANT.test(value),
+  );
+}
+
 describe("query builder read freshness", () => {
   let backend: GraphBackend;
 
@@ -148,5 +158,68 @@ describe("query builder read freshness", () => {
 
     const after = await countByName.execute();
     expect(after).toEqual([{ name: "Alice", total: 1 }]);
+  });
+
+  it("recompiles to byte-identical SQL, differing only in the bound instant", async () => {
+    const store = createStore(graph, backend);
+    const query = store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ({ id: ctx.p.id }));
+
+    const first = query.toSQL();
+    await waitForNextMillisecond();
+    const second = query.toSQL();
+
+    // Recompiling per call is what keeps a reused query fresh. It must cost
+    // nothing else: same statement text, same parameter arity, same parameter
+    // values apart from the instant the clock advanced past.
+    expect(second.sql).toBe(first.sql);
+    expect(second.params).toHaveLength(first.params.length);
+
+    const changed = first.params.filter(
+      (value, index) => value !== second.params[index],
+    );
+    expect(changed).toEqual(isoInstants(first.params));
+    expect(changed.length).toBeGreaterThan(0);
+  });
+
+  it("binds one read instant across both operands of a set operation", () => {
+    const store = createStore(graph, backend);
+    const alice = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq("Alice"))
+      .select((ctx) => ({ id: ctx.p.id }));
+    const bob = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq("Bob"))
+      .select((ctx) => ({ id: ctx.p.id }));
+
+    // Each operand compiles its own temporal filter. A compound SELECT is
+    // evaluated against ONE snapshot, so both halves must agree on "now" —
+    // otherwise an INTERSECT/EXCEPT can disagree about a row created between
+    // the two clock samples.
+    const instants = new Set(isoInstants(alice.union(bob).toSQL().params));
+
+    expect(instants.size).toBe(1);
+  });
+
+  it("binds one read instant across a nested set operation's three operands", () => {
+    const store = createStore(graph, backend);
+    const operand = (name: string) =>
+      store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq(name))
+        .select((ctx) => ({ id: ctx.p.id }));
+
+    const compiled = operand("Alice")
+      .union(operand("Bob"))
+      .except(operand("Carol"))
+      .toSQL();
+
+    expect(new Set(isoInstants(compiled.params)).size).toBe(1);
   });
 });

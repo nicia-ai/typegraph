@@ -32,7 +32,7 @@ import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
 import { type Predicate } from "../query/predicates";
 import { type KindRegistry } from "../registry/kind-registry";
-import { compareStrings } from "../utils/compare";
+import { compareCodePoints } from "../utils/compare";
 import { getEmbeddingFields } from "./embedding-sync";
 import { rowToNode } from "./row-mappers";
 import { type Node } from "./types";
@@ -473,8 +473,8 @@ export async function executeFulltextSearch<N = Node>(
         .toSorted(
           (a, b) =>
             b.score - a.score ||
-            compareStrings(a.kind, b.kind) ||
-            compareStrings(a.nodeId, b.nodeId),
+            compareCodePoints(a.kind, b.kind) ||
+            compareCodePoints(a.nodeId, b.nodeId),
         )
         .slice(offset, offset + options.limit);
   if (merged.length === 0) return [];
@@ -642,7 +642,17 @@ function resolveVectorSearchKinds(
   return resolved;
 }
 
-/** Merges per-kind ranked rows into one globally ordered list. */
+/**
+ * Merges per-kind ranked rows into one globally ordered list.
+ *
+ * Applied even to a single kind's rows, whose SQL already ordered them. The
+ * vector source SQL breaks a score tie arbitrarily (no `node_id` tiebreak — a
+ * second sort key would cost pgvector its ordered index scan), so trusting its
+ * arrival order would make the rank a source of nondeterminism. The
+ * single-statement hybrid path re-ranks the very same rows with
+ * `ROW_NUMBER() OVER (ORDER BY score …, node_id)`; this is that window, in JS.
+ * Ranks feed the fusion, so the two paths must assign them identically.
+ */
 function mergeVectorRows(
   perKindRows: readonly (readonly RankedSourceRow[])[],
   metric: VectorMetric,
@@ -653,8 +663,22 @@ function mergeVectorRows(
     .toSorted(
       (a, b) =>
         (descending ? b.score - a.score : a.score - b.score) ||
-        compareStrings(a.kind, b.kind) ||
-        compareStrings(a.nodeId, b.nodeId),
+        compareCodePoints(a.kind, b.kind) ||
+        compareCodePoints(a.nodeId, b.nodeId),
+    );
+}
+
+/** {@link mergeVectorRows} for the fulltext leg, whose score always descends. */
+function mergeFulltextRows(
+  perKindRows: readonly (readonly RankedSourceRow[])[],
+): readonly RankedSourceRow[] {
+  return perKindRows
+    .flat()
+    .toSorted(
+      (a, b) =>
+        b.score - a.score ||
+        compareCodePoints(a.kind, b.kind) ||
+        compareCodePoints(a.nodeId, b.nodeId),
     );
 }
 
@@ -863,11 +887,7 @@ export async function executeHybridSearch<N = Node>(
         }));
       },
     ),
-  ).then((perKind) =>
-    perKind.length === 1 ?
-      perKind[0]!
-    : mergeVectorRows(perKind, vectorMetric).slice(0, vectorK),
-  );
+  ).then((perKind) => mergeVectorRows(perKind, vectorMetric).slice(0, vectorK));
 
   const fulltextPromise = Promise.all(
     fulltextKinds.map(async (kind): Promise<readonly RankedSourceRow[]> => {
@@ -899,19 +919,7 @@ export async function executeHybridSearch<N = Node>(
         ...(row.snippet === undefined ? {} : { snippet: row.snippet }),
       }));
     }),
-  ).then((perKind) =>
-    perKind.length === 1 ?
-      perKind[0]!
-    : perKind
-        .flat()
-        .toSorted(
-          (a, b) =>
-            b.score - a.score ||
-            compareStrings(a.kind, b.kind) ||
-            compareStrings(a.nodeId, b.nodeId),
-        )
-        .slice(0, fulltextK),
-  );
+  ).then((perKind) => mergeFulltextRows(perKind).slice(0, fulltextK));
 
   const [vectorRows, fulltextRows] = await Promise.all([
     vectorPromise,
@@ -965,12 +973,17 @@ export async function executeHybridSearch<N = Node>(
     fused.set(key, entry);
   }
 
+  // Code points, not code units: the single-statement path breaks the same tie
+  // with `ORDER BY fused_score DESC, node_id` under SQLite's BINARY collation
+  // or Postgres's forced `C` collation (see `buildHybridSearchStatement`). A
+  // fused-score tie at the page boundary must pick the same winner on both
+  // paths, and only code-point order agrees with byte order.
   const ranked = [...fused.values()]
     .toSorted(
       (a, b) =>
         b.fusedScore - a.fusedScore ||
-        compareStrings(a.kind, b.kind) ||
-        compareStrings(a.nodeId, b.nodeId),
+        compareCodePoints(a.kind, b.kind) ||
+        compareCodePoints(a.nodeId, b.nodeId),
     )
     .slice(offset, offset + options.limit);
 

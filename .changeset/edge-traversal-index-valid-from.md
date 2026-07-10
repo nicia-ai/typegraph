@@ -30,12 +30,14 @@ confirmed via `EXPLAIN QUERY PLAN` against the actual SQL `execute()`
 sends (not `toSQL()`'s wider, unoptimized output) to flip to `USING
 COVERING INDEX`.
 
-**Existing databases**: this only changes the DDL emitted for new
-tables — `generateSqliteMigrationSQL()` / `generatePostgresMigrationSQL()`
-emit `CREATE INDEX IF NOT EXISTS`, which is a no-op against an index that
-already exists under that name, regardless of column-list changes.
-Databases bootstrapped before this fix need a manual rebuild to pick it
-up:
+**Existing databases get none of this until you rebuild the indexes.**
+The widened indexes materialize on **fresh databases only**.
+`generateSqliteMigrationSQL()` / `generatePostgresMigrationSQL()` emit
+`CREATE INDEX IF NOT EXISTS` under the *same index name*, and that is a
+no-op against an index that already exists — regardless of how the column
+list changed. An upgraded deployment silently keeps its narrow index, and
+keeps the latency cliff, until it runs the rebuild below. Upgrading the
+package is not enough; there is no automatic migration.
 
 ```sql
 -- SQLite: no CONCURRENTLY equivalent; drop and let the next migration

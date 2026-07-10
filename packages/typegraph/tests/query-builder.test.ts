@@ -698,6 +698,61 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain('AS "__tg_1:p:9:full_name"');
   });
 
+  it("bounds CTE column names to 63 bytes and keeps long alias/field pairs distinct", () => {
+    // Two 63-char aliases sharing a long prefix: the length-prefixed encoding
+    // `__tg_63:<alias>:4:name` overflows PostgreSQL's 63-byte identifier limit
+    // and both encodings collide once truncated. boundPgIdentifier must keep
+    // them distinct (and within the limit) in the SAME compiled SQL.
+    const aliasOne =
+      "traversal_alias_long_enough_to_overflow_pg_identifier_limit_one";
+    const aliasTwo =
+      "traversal_alias_long_enough_to_overflow_pg_identifier_limit_two";
+
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", aliasOne)
+      .traverse("knows", "e")
+      .to("Person", aliasTwo)
+      .select((context) => ({
+        a: context[aliasOne].name,
+        b: context[aliasTwo].name,
+      }));
+
+    const ast = query.toAst();
+    const selectiveAst = {
+      ...ast,
+      selectiveFields: [
+        {
+          alias: aliasOne,
+          field: "name",
+          outputName: "a",
+          isSystemField: false,
+          valueType: "string" as const,
+        },
+        {
+          alias: aliasTwo,
+          field: "name",
+          outputName: "b",
+          isSystemField: false,
+          valueType: "string" as const,
+        },
+      ],
+    };
+    const sqlObject = compileQuery(selectiveAst, graph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+
+    const boundedNames = [
+      ...new Set(
+        [...sql.matchAll(/"(__tg_[^"]+)"/g)].map((match) => match[1]!),
+      ),
+    ];
+
+    // One bounded column per selective props field, both distinct.
+    expect(boundedNames).toHaveLength(2);
+    for (const name of boundedNames) {
+      expect(Buffer.byteLength(name, "utf8")).toBeLessThanOrEqual(63);
+    }
+  });
+
   it("compiles LIMIT and OFFSET", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")

@@ -789,13 +789,31 @@ backend only:
 | --- | --- | --- | --- |
 | Vector metric `inner_product` | ✗ | ✓ | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
 | Vector index type `ivfflat` | ✗ | ✓ | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`) |
+| Filtered approximate search fills its page | ✓ `sqlite-vec` / ✗ `libsql-native` | ✓ (`pgvector` ≥ 0.8) | `libsql-native` returns **fewer than `limit`** rows under heavy filtering — see below |
 | Per-query fulltext `language` override | ✗ | ✓ | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query |
 | HNSW `efSearch` query tuning | ✗ | ✓ | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results |
 
+### Filtered approximate search
+
+Every approximate (ANN) vector search carries at least one row filter: the liveness predicate that hides
+soft-deleted and out-of-validity rows. A `.where(...)` predicate narrows it further. Engines differ in where they
+apply that filter relative to the index traversal, which decides whether a page can come back short. Read it from
+`backend.capabilities.vector.filteredApproximateSearch`:
+
+| Value | Strategy | Meaning |
+| --- | --- | --- |
+| `"filter-pushdown"` | `sqlite-vec` | The filter constrains the `vec0` KNN candidate set itself. Exact: `limit` matching rows come back whenever `limit` exist. |
+| `"iterative-scan"` | `pgvector` | The index is re-entered until `LIMIT` rows survive the filter (`hnsw.iterative_scan` / `ivfflat.iterative_scan`, applied automatically on pgvector ≥ 0.8). On **pgvector < 0.8** the scan stays `ef_search`-bounded and behaves like `"post-filter"`. |
+| `"post-filter"` | `libsql-native` | DiskANN's `vector_top_k` is a table function with no filter pushdown and no way to re-enter the index. TypeGraph over-fetches `4 × (limit + offset)` neighbors and filters afterwards, so once more than that headroom is filtered out **the search silently returns fewer than `limit` rows while more matches exist**. |
+
+Heavy tombstone drift — routine in a temporal store — is what turns `"post-filter"` from a theoretical caveat into
+a short page. If you need an exact page on libSQL, use an exact search (`approximate: false`), which scans and so
+applies the filter to every row; or declare the field's index as `"none"` so it is always brute-forced.
+
 Vector and fulltext capabilities are populated from the configured strategy, so the matrix above reflects the
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
-different `metrics`/`indexTypes` shifts these rows accordingly — always check `backend.capabilities` at runtime
-rather than hard-coding the dialect.
+different `metrics`/`indexTypes`/`filteredApproximateSearch` shifts these rows accordingly — always check
+`backend.capabilities` at runtime rather than hard-coding the dialect.
 
 Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile

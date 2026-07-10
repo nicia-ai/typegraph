@@ -317,6 +317,7 @@ function createCommonOperationStrategy(
         fulltextTable,
         params,
         fulltextStrategy,
+        dialect,
         // Store-compiled candidates (predicates + subclass + currency)
         // take precedence; the live-node default covers direct backend use.
         params.candidates ??
@@ -358,6 +359,7 @@ function createCommonOperationStrategy(
           : { includeSnippets: params.fulltext.includeSnippets }),
         },
         fulltextStrategy,
+        dialect,
         // Reference, not copy: the statement evaluates the shared
         // tg_hybrid_cand CTE once for both legs.
         hybridCandidatesRef(),
@@ -368,6 +370,7 @@ function createCommonOperationStrategy(
         vectorScoreDescending,
         fulltextSql,
         nodes: tables.nodes,
+        dialect,
         graphId: params.graphId,
         nodeKind: params.nodeKind,
         fusionK: params.fusion.k,

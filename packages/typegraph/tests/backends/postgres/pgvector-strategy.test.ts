@@ -342,5 +342,12 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       "ivfflat",
       "none",
     ]);
+    // pgvector >= 0.8 re-enters the index under `hnsw.iterative_scan` until
+    // LIMIT rows survive the filter, so a filtered approximate search recovers
+    // a full page rather than post-filtering a fixed neighbor window (libSQL)
+    // or pushing the filter into the KNN (sqlite-vec).
+    expect(pgvectorStrategy.capabilities.filteredApproximateSearch).toBe(
+      "iterative-scan",
+    );
   });
 });

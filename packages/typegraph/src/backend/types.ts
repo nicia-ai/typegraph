@@ -39,6 +39,37 @@ export type VectorMetric = "cosine" | "l2" | "inner_product";
 export type VectorIndexType = "hnsw" | "ivfflat" | "none";
 
 /**
+ * How an engine applies a row filter to an *approximate* (ANN) vector search,
+ * and therefore whether such a search can under-fill its page.
+ *
+ * Every approximate search TypeGraph issues carries at least one filter: the
+ * liveness predicate that excludes soft-deleted and out-of-validity rows. Add
+ * a `.where(...)` predicate and the filter narrows further. Engines differ in
+ * where that filter is applied relative to the ANN traversal:
+ *
+ * - `"filter-pushdown"` — the filter constrains the ANN candidate set itself,
+ *   so the search yields `limit` matching rows whenever `limit` exist.
+ *   sqlite-vec's `vec0` KNN accepts primary-key `IN (SELECT …)` pushdown.
+ * - `"iterative-scan"` — the engine keeps re-entering the index until `LIMIT`
+ *   rows survive the filter. pgvector >= 0.8 (`hnsw.iterative_scan` /
+ *   `ivfflat.iterative_scan`, applied automatically). On pgvector < 0.8 the
+ *   scan stays `ef_search`-bounded and behaves like `"post-filter"`.
+ * - `"post-filter"` — the engine retrieves a fixed multiple of the page from
+ *   the ANN index and applies the filter afterwards. When more than the
+ *   over-fetch headroom is filtered out, **the search returns fewer than
+ *   `limit` rows even though more matches exist**. libSQL's DiskANN
+ *   `vector_top_k` is a table function with no filter pushdown, so this is the
+ *   only shape available to it.
+ *
+ * A store with heavy tombstone drift — routine in a temporal store — is the
+ * case that turns `"post-filter"` from a theoretical caveat into a short page.
+ * Exact (`approximate: false`) searches are unaffected on every engine: they
+ * scan, so the filter is applied to every row.
+ */
+export type FilteredApproximateSearch =
+  "filter-pushdown" | "iterative-scan" | "post-filter";
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -50,6 +81,14 @@ export type VectorCapabilities = Readonly<{
   indexTypes: readonly VectorIndexType[];
   /** Maximum dimensions supported */
   maxDimensions: number;
+  /**
+   * How a filtered approximate search bounds recall — and whether it can
+   * silently return a short page. See {@link FilteredApproximateSearch}.
+   *
+   * Required, so a new vector strategy cannot omit the declaration and inherit
+   * an engine promise it does not keep.
+   */
+  filteredApproximateSearch: FilteredApproximateSearch;
 }>;
 
 // ============================================================

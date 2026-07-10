@@ -12,6 +12,7 @@ import {
   type GraphBackend,
   type NodeId,
   type RecordedInstant,
+  ValidationError,
 } from "../../../src";
 import { RECORDED_MAX } from "../../../src/core/temporal";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
@@ -400,6 +401,84 @@ export function registerTransactionReceiptIntegrationTests(
       await expect(
         store.nodes.Person.getById(missingPersonId("rollback-person")),
       ).resolves.toBeUndefined();
+    });
+
+    it("rethrows the callback's exact error instance and rolls back every write", async () => {
+      const store = context.getStore();
+      const before = await store.nodes.Person.count();
+      const sentinel = new Error("explicit rollback sentinel");
+
+      const rejection = await store
+        .transactionWithReceipt(async (tx) => {
+          await tx.nodes.Person.create(
+            { name: "Doomed" },
+            { id: "rollback-explicit" },
+          );
+          throw sentinel;
+        })
+        .then(
+          () => {
+            throw new Error("expected the throwing callback to reject");
+          },
+          (error: unknown) => error,
+        );
+
+      // The receipt path rethrows the ORIGINAL instance: it neither wraps the
+      // error nor resolves with a (partial) receipt for a rolled-back
+      // transaction. `.then(resolve → throw, reject → return)` also asserts the
+      // call rejected rather than returning an outcome.
+      expect(rejection).toBe(sentinel);
+
+      // The in-flight write rolled back — nothing persisted, count unchanged.
+      await expect(
+        store.nodes.Person.getById(missingPersonId("rollback-explicit")),
+      ).resolves.toBeUndefined();
+      expect(await store.nodes.Person.count()).toBe(before);
+    });
+
+    it("rolls back on a data-integrity failure and rethrows it unchanged", async () => {
+      const store = context.getStore();
+      const before = await store.nodes.Person.count();
+
+      let captured: unknown;
+      const rejection = await store
+        .transactionWithReceipt(async (tx) => {
+          await tx.nodes.Person.create(
+            { name: "First" },
+            { id: "rollback-dup" },
+          );
+          // A second explicit-id collision is a data-integrity failure raised
+          // INSIDE the write, not a synthetic `throw` in the callback body.
+          try {
+            await tx.nodes.Person.create(
+              { name: "Second" },
+              { id: "rollback-dup" },
+            );
+          } catch (error) {
+            captured = error;
+            throw error;
+          }
+        })
+        .then(
+          () => {
+            throw new Error(
+              "expected the duplicate id to reject the transaction",
+            );
+          },
+          (error: unknown) => error,
+        );
+
+      expect(captured).toBeInstanceOf(ValidationError);
+      // The data-integrity rejection surfaces unchanged (same instance) — the
+      // receipt path does not re-wrap a backend/store write failure either.
+      expect(rejection).toBe(captured);
+
+      // Both the first (committed-in-tx) and the failing second write rolled
+      // back, so the shared id never materializes and the count is unchanged.
+      await expect(
+        store.nodes.Person.getById(missingPersonId("rollback-dup")),
+      ).resolves.toBeUndefined();
+      expect(await store.nodes.Person.count()).toBe(before);
     });
 
     it("returns the recorded anchor for a mixed node and edge transaction", async () => {
