@@ -237,8 +237,50 @@ SQLite, not penalize it. It's also the only backend whose slowdown is
 worse than linear: postgres's load time grew ~9.6x for SF10's ~10.65x row
 count over SF1 (2026-07-07 SF1 run: 693.8s), essentially linear, while
 SQLite's grew ~13.4x over its own SF1 baseline (2,408.2s) for the same
-~10.65x data increase. Root-cause investigation is tracked as a follow-up
-(see [Next steps](#next-steps)).
+~10.65x data increase.
+
+#### SQLite's load-time root cause
+
+A local, controlled repro (real TypeGraph SQLite backend, real SNB
+`Comment` schema/indexes, real `bulkInsert()` calls at 100K/500K/2M
+synthetic rows — not the real SF10 dataset) confirmed the slowdown isn't a
+flat constant factor: per-row insert cost genuinely degrades as the table
+grows.
+
+| Scale | µs/row (cumulative) | rows/sec | 20K-row batch time spread |
+| --- | --- | --- | --- |
+| 100K | 18.9 | 51,525 | 300–449ms |
+| 500K | 38.6 | 22,692 | 442–1,336ms |
+| 2M | 99.9 | 8,270 | 838–14,459ms |
+
+~5x throughput drop across a 20x row-count increase, with intra-phase
+variance widening even faster than the average (some 20K-row batches at 2M
+rows took 17x longer than others). Two candidate causes were ruled out
+directly: statement-cache thrashing (only ~2 distinct SQL shapes are
+generated per node kind, well under the 256-entry cache cap) and the known
+SQLite/Postgres bind-parameter batch-size gap (real — SQLite's 32,766-param
+cap vs. Postgres's larger effective batch — but only ~2x, not enough to
+explain a 5x–13x effect on its own).
+
+Root cause: `packages/typegraph/src/backend/sqlite/local.ts` sets WAL
+journaling and `synchronous=NORMAL` but never overrides `PRAGMA
+wal_autocheckpoint`, leaving it at SQLite's default of 1,000 pages (~4MB
+of WAL growth between checkpoints). Every checkpoint that size has to
+flush WAL frames back into a B-tree that's larger, and less
+page-cache-resident, than the one before it — checkpoint cost climbs with
+database size over the course of the load, and that rising cost integrates
+into the super-linear total observed above. The batching/insert code
+itself (`operation-backend-core.ts`, `insertNodesBatch`) is correctly
+shared between the SQLite and Postgres backends and structurally sound —
+this is a checkpoint-tuning gap, not a batching bug.
+
+Proposed fix (investigated, not yet implemented): raise
+`wal_autocheckpoint` during bulk load, or run an explicit `PRAGMA
+wal_checkpoint(TRUNCATE)` on a coarser, row-count-driven cadence instead of
+SQLite's size-driven default, so checkpoint I/O amortizes over far more
+rows. A follow-up repro sweeping checkpoint intervals at the same
+100K/500K/2M scales would quantify the win before touching the real
+loader — tracked in [Next steps](#next-steps).
 
 ### SF10 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
 
@@ -318,10 +360,17 @@ posts, 80 comments; 15 samples / 3 warmups per query).
       [SF10 results](#sf10-results) above. Took five EC2 attempts to
       root-cause a memory-exhaustion failure on 32GB instances; a 128GB
       instance completed cleanly.
-- [ ] Investigate why TypeGraph's SQLite backend is ~4.85x slower than
+- [x] ~~Investigate why TypeGraph's SQLite backend is ~4.85x slower than
       Postgres at SF10 despite sharing the exact same `bulkInsert` loader
       code path and running in-process (no network round trip) — and why
-      that gap is worse-than-linear (SQLite's own load time grew ~13.4x for
-      SF10 vs SF1's ~10.65x row-count increase, while Postgres grew ~9.6x,
-      essentially linear). See [SF10 load time](#sf10-load-time-65645-persons-595453-forums-7435696-posts-21865475-comments)
+      that gap is worse-than-linear.~~ Root-caused: `wal_autocheckpoint` is
+      never tuned for bulk load, left at SQLite's size-driven default
+      (~4MB), so checkpoint I/O cost climbs as the database file grows over
+      the load. See [SQLite's load-time root cause](#sqlites-load-time-root-cause)
       above.
+- [ ] Implement and measure the proposed fix (raise `wal_autocheckpoint`
+      during bulk load, or checkpoint on an explicit row-count cadence
+      instead of SQLite's size-driven default) — a repro sweeping
+      checkpoint intervals at 100K/500K/2M scale first, before touching the
+      real loader or re-running the full SF10 EC2 benchmark to confirm the
+      win.
