@@ -15,7 +15,7 @@ import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
-import { snbGraph, snbIndexes } from "../schema/snb-graph";
+import { snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
 import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
@@ -65,7 +65,12 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
   const tempDir = mkdtempSync(join(tmpdir(), "typegraph-bench-snb-sqlite-"));
 
   try {
-    const tables = createSqliteTables({}, { indexes: snbIndexes });
+    // No `indexes` option here — snb-graph.ts's SNB-specific covering
+    // index is declared via `defineGraph({ indexes })` instead, so
+    // `store.materializeIndexes()` below genuinely defers its creation to
+    // after the bulk load, instead of baking it into this eager DDL where
+    // every insert would pay its maintenance cost live.
+    const tables = createSqliteTables({});
     const { backend, db } = createLocalSqliteBackend({
       tables,
       path: join(tempDir, "snb.db"),

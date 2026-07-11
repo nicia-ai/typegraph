@@ -125,11 +125,19 @@ const messageByCreationDateIndex = defineNodeIndex(Post, {
 });
 
 /**
- * Passed to `createSqliteTables`/`createPostgresTables` at table-creation
- * time (matching packages/benchmarks/src/backend.ts's `perfIndexes`
- * convention) — `defineGraph` itself doesn't take an indexes option.
+ * Passed to `defineGraph({ indexes })` below — the declaration `store
+ * .materializeIndexes()` reads at runtime — NOT to `createSqliteTables`/
+ * `createPostgresTables`'s own `indexes` option. That option bakes an index
+ * straight into the initial `CREATE TABLE`/migration DDL, i.e. it exists
+ * from row 1 and every insert during the benchmark's bulk load pays its
+ * maintenance cost live — the opposite of what every engine driver's
+ * fairness label claims ("indexes materialized... after bulk load,
+ * matching the documented production path"). Each engine driver calls
+ * `store.materializeIndexes()` once after `loadSnbDataset()` finishes,
+ * which is what actually defers this index's creation to post-load, same
+ * as the documented production path for a bulk import.
  */
-export const snbIndexes = [messageByCreationDateIndex];
+const snbIndexes = [messageByCreationDateIndex];
 
 export const snbGraph = defineGraph({
   id: "snb_interactive",
@@ -152,6 +160,7 @@ export const snbGraph = defineGraph({
     replyOf: { type: replyOf, from: [Comment], to: [Post, Comment, Message] },
   },
   ontology: [subClassOf(Post, Message), subClassOf(Comment, Message)],
+  indexes: snbIndexes,
 });
 
 type SnbGraph = typeof snbGraph;

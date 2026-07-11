@@ -16,7 +16,7 @@ import {
 } from "@nicia-ai/typegraph/postgres";
 
 import { startPostgresContainer } from "../harness/postgres-container";
-import { snbGraph, snbIndexes } from "../schema/snb-graph";
+import { snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
 import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
@@ -38,7 +38,13 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
     // create tables itself (unlike createLocalSqliteBackend), so the
     // migration SQL still has to run explicitly before createStoreWithSchema
     // materializes the runtime-contribution markers materializeIndexes() needs.
-    const tables = createPostgresTables({}, { indexes: snbIndexes });
+    // No `indexes` option here — same reasoning as typegraph-sqlite.ts:
+    // snb-graph.ts's SNB-specific covering index goes through
+    // `defineGraph({ indexes })` + `store.materializeIndexes()` instead, so
+    // it's actually deferred to after the bulk load below, not baked into
+    // this migration DDL where every insert would pay its maintenance cost
+    // live.
+    const tables = createPostgresTables({});
     await pool.query(generatePostgresMigrationSQL(tables));
     const backend = createPostgresBackend(drizzleDb, { tables });
     // Auto-refresh-after-bulk would otherwise re-run refreshStatistics()
