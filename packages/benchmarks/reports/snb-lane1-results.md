@@ -1,14 +1,18 @@
 # Lane 1 (LDBC SNB Interactive short reads) — results
 
-**Status: real SF1-scale numbers, single run — not a publishable comparison
-yet.** Per the program plan, SF1 is the minimum scale for any claim about
-relative engine performance, and this file now has it: a full run (~9.9k
-persons, ~1M posts, ~2.05M comments, official CsvBasic datagen export)
-completed cleanly across all four engines with 100% row-count parity on
-every query. Treat the numbers below as a first real data point, not a
-final verdict — this is one run on one machine, not the multiple runs /
-statistical-confidence bar a published comparison would need. The
-smoke-scale table is kept below for harness-wiring reference.
+**Status: real SF1- and SF10-scale numbers, single run each — not a
+publishable comparison yet.** Per the program plan, SF1 is the minimum
+scale for any claim about relative engine performance, and this file has
+had that since 2026-07-07: a full run (~9.9k persons, ~1M posts, ~2.05M
+comments, official CsvBasic datagen export) completed cleanly across all
+four engines with 100% row-count parity on every query. SF10 (10x scale,
+~65.6k persons, ~7.4M posts, ~21.9M comments) was a stretch goal gated on
+SF1 being trusted — it's now done too (2026-07-11), after root-causing a
+genuine memory-exhaustion failure that killed four earlier attempts (see
+[SF10 results](#sf10-results) below). Treat all numbers below as a first
+real data point, not a final verdict — each is one run on one machine, not
+the multiple runs / statistical-confidence bar a published comparison would
+need. The smoke-scale table is kept below for harness-wiring reference.
 
 Reaching a working SF1 run required finding and fixing three real scaling
 bugs (one in TypeGraph itself, two in this benchmark's own Neo4j/LadybugDB
@@ -156,6 +160,108 @@ with raising this benchmark's loader batch size (2,000 → 20,000 rows per
 Postgres's by ~7x (see [SF1 load time](#sf1-load-time-9892-persons-90492-forums-1003605-posts-2052169-comments)
 above).
 
+## SF10 results
+
+**Status: real SF10-scale numbers, single run — not a publishable
+comparison yet**, same caveat as SF1 above. Getting one clean run took five
+EC2 attempts.
+
+### SF10 environment
+
+| | |
+| --- | --- |
+| Date | 2026-07-11 |
+| Machine | AWS EC2 `r7i.4xlarge`, Ubuntu 24.04 LTS |
+| CPU / RAM | Intel(R) Xeon(R) Platinum 8488C, 16 vCPU, 123.8 GiB |
+| Node.js | v24.18.0 |
+| `@nicia-ai/typegraph` | 0.34.0 |
+| `better-sqlite3` | 12.11.1 |
+| `pg` | 8.22.0 |
+| `neo4j-driver` | 6.2.0 (server image `neo4j:2026.05.0`) |
+| `@ladybugdb/core` | 0.18.0 |
+| Command | `tsx src/real/snb-short-reads.ts --profile=sf10 --check` |
+| Samples / warmups | 20 / 5 per query (sf10 profile defaults) |
+| Runner | `pnpm bench:snb:sf10:ec2` — dedicated ephemeral instance, no other workload sharing the box |
+| Total wall clock | ~11h10m |
+
+Full machine-readable detail:
+`bench-results/current/snb-sf10-ec2-ec2-20260711T004520Z/{summary,results}.json`
+(gitignored — regenerate with `pnpm bench:snb:sf10:ec2` then the printed
+`collect` command).
+
+### Why it took five attempts: memory exhaustion, not networking
+
+The first four attempts all ran on `c7i.4xlarge` (32GB RAM) — the same
+instance family SF1 used successfully — and all four died between ~3-9h in
+with symptoms that looked network-related: SSM agent connectivity loss,
+eventually total unreachability, no kernel panic or OOM-kill logged. That
+signature was initially chased as conntrack-table exhaustion (a real,
+separately-confirmed issue, fixed by raising `nf_conntrack_max` in the EC2
+bootstrap script) and later as a dpkg-lock race with cloud-init's own
+unattended-upgrade timers (also real, also fixed). Both fixes were
+necessary but not sufficient.
+
+Root cause, confirmed by a controlled experiment: SQLite's SF10 load phase
+(loading 21.8M comment rows and building indexes over ~9h) consumes memory
+proportional to available RAM, not a fixed budget. On the 32GB instance,
+diagnostic monitoring (a `conntrack`/`free`/`ss` loop polled every 20s over
+SSH — SSM's own agent was part of what became unreachable) caught available
+memory dropping to double- then single-digit megabytes, a
+`systemd-journald: Under memory pressure, flushing caches` kernel event,
+and then genuine total connectivity loss as the box became too
+memory-starved to fork new processes at all — not a network problem, a
+resource-exhaustion problem that happened to take the network stack down
+with it. Switching to `r7i.4xlarge` (128GB, same 16 vCPU) with the
+identical code and dataset completed the exact same SQLite phase cleanly,
+never dropping below ~40GB available. Neo4j's own offline bulk-import step
+later showed the same shape at smaller scale on the 128GB box (available
+memory dipped to ~7GB, then fully recovered within a minute once that step
+finished) — confirming this is a load-time memory-proportional pattern
+general to bulk-loading at this row count, not unique to SQLite.
+
+### SF10 load time (65,645 persons, 595,453 forums, 7,435,696 posts, 21,865,475 comments)
+
+| Engine | Load time |
+| --- | --- |
+| ladybugdb | 338.9 s (5.6 min) |
+| neo4j | 490.2 s (8.2 min) |
+| typegraph-postgres | 6,652.2 s (1.85 h) |
+| typegraph-sqlite | 32,248.9 s (8.96 h) |
+
+SQLite's load time is the standout finding at this scale: ~4.85x slower
+than Postgres running the *same* `bulkInsert` code path
+(`packages/benchmarks/src/real/engines/typegraph-load.ts` is shared between
+both SQL backends — identical batch size, identical row counts per call),
+despite being in-process with no network round trip, which should favor
+SQLite, not penalize it. It's also the only backend whose slowdown is
+worse than linear: postgres's load time grew ~9.6x for SF10's ~10.65x row
+count over SF1 (2026-07-07 SF1 run: 693.8s), essentially linear, while
+SQLite's grew ~13.4x over its own SF1 baseline (2,408.2s) for the same
+~10.65x data increase. Root-cause investigation is tracked as a follow-up
+(see [Next steps](#next-steps)).
+
+### SF10 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
+
+| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
+| --- | --- | --- | --- | --- |
+| IS1 (person profile) | 0.031 / 0.041 / 0.045 | 0.697 / 1.059 / 1.116 | 5.256 / 13.795 / 72.785 | 1.220 / 2.571 / 2.692 |
+| IS2 (friends' recent messages) | 188.060 / 589.581 / 706.721 | 2698.716 / 12161.358 / 13515.001 | 482.176 / 3414.382 / 5967.279 | 311.378 / 476.792 / 586.377 |
+| IS3 (friends with dates) | 0.529 / 1.199 / 2.240 | 14.402 / 29.690 / 90.602 | 39.828 / 114.855 / 345.590 | 14.102 / 41.705 / 50.618 |
+| IS4 (message content) | 0.022 / 0.030 / 0.042 | 0.890 / 1.725 / 2.378 | 4.168 / 5.927 / 9.163 | 1.031 / 1.358 / 1.391 |
+| IS5 (message creator) | 0.033 / 0.040 / 0.052 | 3.523 / 4.384 / 4.759 | 4.807 / 6.430 / 9.884 | 2.750 / 3.438 / 3.942 |
+| IS6 (root forum + moderator) | 0.071 / 0.120 / 0.125 | 4.555 / 8.862 / 9.550 | 5.766 / 6.643 / 13.169 | 3.926 / 9.374 / 10.476 |
+| IS7 (replies + knows check) | 0.061 / 0.747 / 0.899 | 5.218 / 10.013 / 11.935 | 7.425 / 32.357 / 86.011 | 6.972 / 10.366 / 11.291 |
+
+At SF10, the earlier SF1-scale IS2 latency cliff (a covering-index gap in
+this benchmark's own schema, closed before this run — see the "IS2 SF10
+latency cliff" fix in git history) stays closed: SQLite's IS2 p50 (188ms)
+is proportionate to its SF1 number, not the 689x blowup that motivated that
+fix. Query latency ordering is otherwise consistent with SF1: SQLite fastest
+across the board (in-process, no network, no query-plan interpretation
+overhead), Postgres and LadybugDB next, Neo4j generally slowest at the
+tails (its p99s are consistently the noisiest — Cypher planner and JVM GC
+pauses are the likely contributors, not investigated further here).
+
 ## Query-latency experiment: concurrent per-message root walks (tried, reverted)
 
 IS2 and IS7 each make 2+ independent, single-seed lookups per request
@@ -205,7 +311,17 @@ posts, 80 comments; 15 samples / 3 warmups per query).
 - [x] ~~Re-run the full SF1 EC2 benchmark to capture clean, comparable
       numbers.~~ Done — see above (also used to test and correctly
       reject the concurrent-root-walk experiment).
-- [ ] Run SF1 multiple times and report a distribution, not a single
-      sample, before making any comparative claim publicly.
-- [ ] SF10 remains a stretch goal per the plan, gated on SF1 numbers being
-      trusted (multi-run, not single-sample).
+- [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
+      single sample, before making any comparative claim publicly.
+- [x] ~~SF10 remains a stretch goal per the plan, gated on SF1 numbers being
+      trusted (multi-run, not single-sample).~~ Done — see
+      [SF10 results](#sf10-results) above. Took five EC2 attempts to
+      root-cause a memory-exhaustion failure on 32GB instances; a 128GB
+      instance completed cleanly.
+- [ ] Investigate why TypeGraph's SQLite backend is ~4.85x slower than
+      Postgres at SF10 despite sharing the exact same `bulkInsert` loader
+      code path and running in-process (no network round trip) — and why
+      that gap is worse-than-linear (SQLite's own load time grew ~13.4x for
+      SF10 vs SF1's ~10.65x row-count increase, while Postgres grew ~9.6x,
+      essentially linear). See [SF10 load time](#sf10-load-time-65645-persons-595453-forums-7435696-posts-21865475-comments)
+      above.
