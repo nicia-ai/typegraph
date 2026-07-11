@@ -71,6 +71,7 @@ beforeAll(async () => {
   try {
     await candidate.query("SELECT 1");
     await candidate.query(`
+      DROP TABLE IF EXISTS typegraph_revision_origins CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
@@ -102,7 +103,8 @@ afterAll(async () => {
 beforeEach(async () => {
   if (pool === undefined) return;
   await pool.query(
-    `TRUNCATE typegraph_recorded_clock,
+    `TRUNCATE typegraph_revision_origins,
+              typegraph_recorded_clock,
               typegraph_recorded_edges,
               typegraph_recorded_nodes,
               typegraph_node_uniques,

@@ -32,8 +32,10 @@ export type BranchId = string & Readonly<{ readonly __brand: "BranchId" }>;
 
 /**
  * Opaque token identifying the immutable `base@V` a branch was forked from.
- * Combines a schema hash with a content fingerprint (computed in T3). Branded so
- * it cannot be confused with an arbitrary string.
+ * Combines a schema hash with a staleness component. Branded so it cannot be
+ * confused with an arbitrary string. The second component is a
+ * durable revision anchor for stores with revision tracking enabled and a
+ * compatibility content fingerprint otherwise.
  */
 export type BaseVersion = string &
   Readonly<{ readonly __brand: "BaseVersion" }>;

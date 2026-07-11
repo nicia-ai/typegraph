@@ -8,7 +8,8 @@
  * branch's own backend seeded with the base's live state.
  *
  * The copy mechanism is pluggable behind {@link WorkingCopyStrategy}. The P0
- * default is the faithful export/import clone ({@link cloneWorkingCopyStrategy}),
+ * default is the faithful streamed-interchange clone
+ * ({@link cloneWorkingCopyStrategy}),
  * which keeps this primitive backend-agnostic: the caller supplies a
  * `makeBackend` factory, and `branch()` never names a concrete backend.
  */
@@ -34,7 +35,7 @@ import { cloneWorkingCopyStrategy } from "./working-copy";
  * logical-namespace copy-on-write).
  *
  * Returns a {@link Result}: success yields the {@link GraphBranch}; any failure
- * (base-version stamping, backend construction, export/import) is wrapped in a
+ * (base-version stamping, backend construction, streamed interchange) is wrapped in a
  * {@link BranchError} with the underlying cause attached. Errors are returned,
  * never thrown — this is internal-logic surface (the caller converts to a thrown
  * error at the framework boundary).

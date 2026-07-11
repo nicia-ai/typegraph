@@ -47,8 +47,11 @@ import {
 } from "./recorded-capture/guards";
 
 export {
+  advanceRevisionClock,
+  ensureRevisionOrigin,
   lockRecordedGraphWrite,
   readRecordedClock,
+  readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
   toCanonicalIso,
@@ -56,7 +59,9 @@ export {
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
   assertRecordedCaptureTransactionIsolation,
+  assertRevisionTrackableBackend,
   createHistoryUnsafeSqlRef,
+  createRevisionTrackingUnsafeSqlRef,
   recordedCaptureRequiresCallbackTransactionError,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";

@@ -958,6 +958,7 @@ export function createSqliteBackend(
     recordedNodes: getTableName(tables.recordedNodes),
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
+    revisionOrigins: getTableName(tables.revisionOrigins),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -1245,6 +1246,12 @@ export function createSqliteBackend(
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
+    },
+
+    async ensureRevisionOriginsTable(): Promise<void> {
+      await db.run(
+        sql.raw(generateSqliteCreateTableSQL(tables.revisionOrigins)),
+      );
     },
 
     // Every fulltext-touching method asserts the durable marker instead

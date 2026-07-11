@@ -12,7 +12,13 @@
  *      This is content-addressed (the public `computeSchemaHash` deliberately
  *      excludes the version number and `generatedAt`, so it is stable across
  *      re-saves of the same schema).
- *   2. A **content fingerprint** — a SHA-256 digest (truncated to a fixed-width
+ *   2. A **revision anchor** when the Store has `revisionTracking` (or
+ *      `history`) enabled — a durable random per-graph origin plus the
+ *      monotonic revision clock. This is O(1) to read and changes after every
+ *      successful Store write; the origin prevents independent stores with
+ *      coincident timestamps from sharing an anchor.
+ *      Stores without tracking retain the compatibility fallback: a
+ *      **content fingerprint**, a SHA-256 digest (truncated to a fixed-width
  *      hex string) of every LIVE node and edge over the base store (`id`,
  *      `updated_at`, the bitemporal `valid_from`/`valid_to`, and canonicalized
  *      `props`; edges also carry their endpoint ids), sorted by id, so two stores
@@ -27,9 +33,10 @@
  * fingerprint would not match its source. (See the working-copy fidelity note in
  * T4.)
  *
- * `computeBaseVersion` is async because schema hashing and live-content
- * enumeration go through async TypeGraph internals. The design's synchronous
- * illustrative signature does not survive contact with the real store surface.
+ * `computeBaseVersion` is async because schema hashing, revision reads, and the
+ * compatibility live-content enumeration go through async TypeGraph internals.
+ * The design's synchronous illustrative signature does not survive contact with
+ * the real store surface.
  */
 
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
@@ -47,11 +54,14 @@ import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
 
 /**
- * Separator between the schema-hash and content-fingerprint token components.
- * Both components are fixed-width hex digests (no NUL byte), so a single NUL
- * unambiguously delimits the two components.
+ * Separator between the schema-hash and revision-or-content token components.
+ * The schema hash contains no NUL byte, so one NUL unambiguously delimits the
+ * two components.
  */
 const TOKEN_SEPARATOR = "\0";
+const REVISION_COMPONENT_PREFIX = "revision:";
+const REVISION_COMPONENT_SEPARATOR = ":";
+const INITIAL_REVISION = "initial";
 
 /**
  * Falls back to schema version `1` when the backend has not recorded an active
@@ -200,14 +210,26 @@ export async function computeContentComponent<G extends GraphDef>(
 
 /**
  * Computes the immutable `base@V` token for a store. Combines the schema hash
- * with a live-content fingerprint into a single branded {@link BaseVersion}.
+ * with a durable revision anchor when tracking is enabled, otherwise with the
+ * compatibility live-content fingerprint.
  *
  * MUST be called on the ORIGINAL base store, not a clone (clones regenerate
- * timestamps and would fingerprint differently).
+ * timestamps and would fingerprint differently when the compatibility path is
+ * in use).
  */
 export async function computeBaseVersion<G extends GraphDef>(
   store: Store<G>,
 ): Promise<BaseVersion> {
+  if (store.revisionTrackingEnabled) {
+    const [schemaComponent, origin, revision] = await Promise.all([
+      computeSchemaComponent(store),
+      store.revisionOriginNow(),
+      store.revisionNow(),
+    ]);
+    return asBaseVersion(
+      `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
+    );
+  }
   const [schemaComponent, contentComponent] = await Promise.all([
     computeSchemaComponent(store),
     computeContentComponent(store.backend, store.graphId, store.graph),
@@ -217,15 +239,60 @@ export async function computeBaseVersion<G extends GraphDef>(
   );
 }
 
+function revisionComponent(
+  origin: string,
+  revision: string | undefined,
+): string {
+  return `${REVISION_COMPONENT_PREFIX}${origin}${REVISION_COMPONENT_SEPARATOR}${revision ?? INITIAL_REVISION}`;
+}
+
+/** True when a base token uses the O(1) durable revision-anchor component. */
+export function hasRevisionAnchor(version: BaseVersion): boolean {
+  return contentComponentOf(version).startsWith(REVISION_COMPONENT_PREFIX);
+}
+
 /**
- * Extracts the content-fingerprint component from a `base@V` token. The schema
- * component is a fixed-width hex digest with no NUL byte, so the substring after
- * the single NUL separator is exactly the content fingerprint.
+ * Extracts the durable revision from a revision-anchored base token. Undefined
+ * represents the stable initial state before the first tracked write.
+ */
+export function revisionAnchorOf(version: BaseVersion): string | undefined {
+  const revision = revisionPartsOf(version)?.revision;
+  return revision === undefined || revision === INITIAL_REVISION ?
+      undefined
+    : revision;
+}
+
+/**
+ * Extracts the durable store-specific namespace from a revision-anchored base
+ * token. Undefined denotes a legacy timestamp-only anchor, which must never
+ * be treated as equivalent to a current store's namespaced revision.
+ */
+export function revisionOriginOf(version: BaseVersion): string | undefined {
+  return revisionPartsOf(version)?.origin;
+}
+
+function revisionPartsOf(
+  version: BaseVersion,
+): Readonly<{ origin: string; revision: string }> | undefined {
+  const component = contentComponentOf(version);
+  if (!component.startsWith(REVISION_COMPONENT_PREFIX)) return undefined;
+  const encoded = component.slice(REVISION_COMPONENT_PREFIX.length);
+  const separator = encoded.indexOf(REVISION_COMPONENT_SEPARATOR);
+  if (separator <= 0 || separator === encoded.length - 1) return undefined;
+  return {
+    origin: encoded.slice(0, separator),
+    revision: encoded.slice(separator + 1),
+  };
+}
+
+/**
+ * Extracts the second component from a `base@V` token. The schema component
+ * contains no NUL byte, so the substring after the separator is exactly the
+ * durable revision or compatibility content fingerprint.
  *
- * Used by the in-transaction re-validation: the SCHEMA component is a pure
- * function of the in-memory graph definition (it cannot drift between the
- * precondition check and the commit), so only the content component needs to be
- * re-compared against live rows.
+ * Used by both revision-token parsing and legacy in-transaction content
+ * re-validation. The schema component is a pure function of the in-memory
+ * graph definition, so only the second component needs runtime checking.
  */
 export function contentComponentOf(version: BaseVersion): string {
   const separatorIndex = (version as string).indexOf(TOKEN_SEPARATOR);

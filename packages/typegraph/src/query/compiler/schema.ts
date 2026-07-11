@@ -33,6 +33,8 @@ export type SqlTableNames = Readonly<{
   recordedEdges?: string | undefined;
   /** Recorded-time commit clock table name (default: "typegraph_recorded_clock") */
   recordedClock?: string | undefined;
+  /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
+  revisionOrigins?: string | undefined;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
@@ -50,6 +52,8 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedEdges: string;
   /** Recorded-time commit clock table name */
   recordedClock: string;
+  /** Durable per-graph revision-origin table name */
+  revisionOrigins: string;
   /** Node fulltext table name */
   fulltext: string;
   /** Node uniques table name */
@@ -69,6 +73,8 @@ type SqlSchemaFields = Readonly<{
   recordedEdgesTable: SQL;
   /** Get a SQL reference to the recorded-time commit clock */
   recordedClockTable: SQL;
+  /** Get a SQL reference to the durable per-graph revision origins */
+  revisionOriginsTable: SQL;
   /** Get a SQL reference to the fulltext table */
   fulltextTable: SQL;
 }>;
@@ -91,6 +97,7 @@ class SqlSchemaDescriptor implements SqlSchemaFields {
   readonly recordedNodesTable: SQL;
   readonly recordedEdgesTable: SQL;
   readonly recordedClockTable: SQL;
+  readonly revisionOriginsTable: SQL;
   readonly fulltextTable: SQL;
 
   constructor(fields: SqlSchemaFields) {
@@ -100,6 +107,7 @@ class SqlSchemaDescriptor implements SqlSchemaFields {
     this.recordedNodesTable = fields.recordedNodesTable;
     this.recordedEdgesTable = fields.recordedEdgesTable;
     this.recordedClockTable = fields.recordedClockTable;
+    this.revisionOriginsTable = fields.revisionOriginsTable;
     this.fulltextTable = fields.fulltextTable;
     void this.#brand;
     Object.freeze(this);
@@ -115,6 +123,7 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  revisionOrigins: "typegraph_revision_origins",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
 };
@@ -128,6 +137,8 @@ function resolveTableNames(
     recordedNodes: names.recordedNodes ?? DEFAULT_TABLE_NAMES.recordedNodes,
     recordedEdges: names.recordedEdges ?? DEFAULT_TABLE_NAMES.recordedEdges,
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
+    revisionOrigins:
+      names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
   };
@@ -228,6 +239,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedNodes, "recordedNodes");
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
+  validateTableName(tables.revisionOrigins, "revisionOrigins");
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
 
@@ -238,6 +250,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     recordedNodesTable: sql.raw(quoteIdentifier(tables.recordedNodes)),
     recordedEdgesTable: sql.raw(quoteIdentifier(tables.recordedEdges)),
     recordedClockTable: sql.raw(quoteIdentifier(tables.recordedClock)),
+    revisionOriginsTable: sql.raw(quoteIdentifier(tables.revisionOrigins)),
     fulltextTable: sql.raw(quoteIdentifier(tables.fulltext)),
   });
 }
@@ -408,6 +421,7 @@ export function recordedReadSqlSchema(binding: RecordedReadBinding): SqlSchema {
     recordedNodesTable: schema.recordedNodesTable,
     recordedEdgesTable: schema.recordedEdgesTable,
     recordedClockTable: schema.recordedClockTable,
+    revisionOriginsTable: schema.revisionOriginsTable,
     fulltextTable: schema.fulltextTable,
   });
 }

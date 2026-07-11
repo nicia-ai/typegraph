@@ -15,8 +15,8 @@ export {
 export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
 export { TypeGraphError, type TypeGraphErrorOptions } from "../errors";
-export { exportGraph } from "../interchange/export";
-export { importGraph } from "../interchange/import";
+export { exportGraphStream } from "../interchange/export";
+export { importGraphStream } from "../interchange/import";
 export { computeTransitiveClosure, isReachable } from "../ontology/closures";
 export { sortedReplacer } from "../schema/canonical";
 export { computeSchemaHash, serializeSchema } from "../schema/serializer";
@@ -24,6 +24,11 @@ export {
   type OntologyIntrospection,
   type UniqueIntrospection,
 } from "../store/introspect";
+export {
+  lockRecordedGraphWrite,
+  readRecordedClock,
+  readRevisionOrigin,
+} from "../store/recorded-capture";
 export type { Store } from "../store/store";
 export { createStoreWithSchema } from "../store/store";
 export type { Edge, Node } from "../store/types";

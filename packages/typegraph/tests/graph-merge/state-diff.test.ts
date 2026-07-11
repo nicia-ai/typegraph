@@ -6,10 +6,15 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import { exportGraph, importGraph } from "@nicia-ai/typegraph/interchange";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { computeBaseVersion } from "../../src/graph-merge/base-version";
+import {
+  computeBaseVersion,
+  hasRevisionAnchor,
+  revisionAnchorOf,
+  revisionOriginOf,
+} from "../../src/graph-merge/base-version";
 import {
   diffAgainstBase,
   enumerateAllEdges,
@@ -282,5 +287,98 @@ describe.each(backendMatrix())("computeBaseVersion [$name]", (entry) => {
     // Live content is back to just `keep`, so the fingerprint returns to baseline.
     expect(await computeBaseVersion(store)).toBe(baseline);
     expect(keep.id).toBeDefined();
+  });
+
+  it("uses an O(1) durable revision anchor when revision tracking is enabled", async () => {
+    const rawBackend = await makeBackend();
+    let entityEnumerationCalls = 0;
+    const backend = new Proxy(rawBackend, {
+      get(target, property, receiver) {
+        if (property === "findNodesByKind") {
+          const findNodesByKind = target.findNodesByKind.bind(target);
+          return async (
+            ...args: Parameters<GraphBackend["findNodesByKind"]>
+          ) => {
+            entityEnumerationCalls++;
+            return findNodesByKind(...args);
+          };
+        }
+        if (property === "findEdgesByKind") {
+          const findEdgesByKind = target.findEdgesByKind.bind(target);
+          return async (
+            ...args: Parameters<GraphBackend["findEdgesByKind"]>
+          ) => {
+            entityEnumerationCalls++;
+            return findEdgesByKind(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const [store] = await createStoreWithSchema(graph, backend, {
+      revisionTracking: true,
+    });
+
+    const initial = await computeBaseVersion(store);
+    expect(hasRevisionAnchor(initial)).toBe(true);
+    expect(revisionAnchorOf(initial)).toBeUndefined();
+    expect(entityEnumerationCalls).toBe(0);
+
+    const node = await store.nodes.Person.create({ name: "Alice" });
+    entityEnumerationCalls = 0;
+    const afterCreate = await computeBaseVersion(store);
+    expect(hasRevisionAnchor(afterCreate)).toBe(true);
+    expect(revisionAnchorOf(afterCreate)).toBeDefined();
+    expect(afterCreate).not.toBe(initial);
+    expect(entityEnumerationCalls).toBe(0);
+
+    await store.nodes.Person.update(node.id, { name: "Alice Renamed" });
+    const afterUpdate = await computeBaseVersion(store);
+    expect(afterUpdate).not.toBe(afterCreate);
+    expect(revisionAnchorOf(afterUpdate)).not.toBe(
+      revisionAnchorOf(afterCreate),
+    );
+
+    await store.clear();
+    const afterClear = await computeBaseVersion(store);
+    expect(afterClear).not.toBe(afterUpdate);
+    expect(revisionAnchorOf(afterClear)).toBeDefined();
+  });
+
+  it("bootstraps revision origins for an existing tracked-store schema", async () => {
+    const backend = await makeBackend();
+    const [store] = await createStoreWithSchema(graph, backend, {
+      revisionTracking: true,
+    });
+    if (backend.executeDdl === undefined) {
+      throw new Error("Backend matrix entries must expose executeDdl");
+    }
+    await backend.executeDdl(
+      `DROP TABLE "${store.revisionSchema.tables.revisionOrigins}"`,
+    );
+
+    const baseVersion = await computeBaseVersion(store);
+    expect(revisionOriginOf(baseVersion)).toBeDefined();
+  });
+
+  it("keeps the revision anchor monotonic when clear reseeds under a frozen clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      const [store] = await createStoreWithSchema(graph, await makeBackend(), {
+        revisionTracking: true,
+      });
+      await store.nodes.Person.create({ name: "Alice" });
+      const beforeClear = revisionAnchorOf(await computeBaseVersion(store));
+
+      await store.clear();
+      const afterClear = revisionAnchorOf(await computeBaseVersion(store));
+
+      expect(afterClear).toBeDefined();
+      expect(Date.parse(afterClear!)).toBeGreaterThan(Date.parse(beforeClear!));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

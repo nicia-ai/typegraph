@@ -28,6 +28,7 @@ import {
   ValidationError,
 } from "../../errors";
 import { validateEdgeProps } from "../../errors/validation";
+import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
@@ -65,6 +66,8 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
   historyEnabled: boolean;
+  revisionTrackingEnabled: boolean;
+  revisionSchema: SqlSchema;
   registry: KindRegistry;
   createOperationContext: (
     operation: "create" | "update" | "delete",

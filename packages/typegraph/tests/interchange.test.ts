@@ -3,7 +3,7 @@
  *
  * Tests that graphs can be exported and imported while preserving data integrity.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
@@ -11,8 +11,11 @@ import type { GraphBackend } from "../src/backend/types";
 import { UniquenessError } from "../src/errors";
 import {
   exportGraph,
+  exportGraphStream,
   type GraphData,
+  type GraphInterchangeChunk,
   importGraph,
+  importGraphStream,
   ImportOptionsSchema,
   InterchangeEdgeSchema,
   InterchangeNodeSchema,
@@ -85,6 +88,25 @@ function importOptions(
   return ImportOptionsSchema.parse(overrides);
 }
 
+async function collectChunks(
+  chunks: AsyncIterable<GraphInterchangeChunk>,
+): Promise<GraphInterchangeChunk[]> {
+  const collected: GraphInterchangeChunk[] = [];
+  for await (const chunk of chunks) {
+    collected.push(chunk);
+  }
+  return collected;
+}
+
+async function* chunkStream(
+  chunks: readonly GraphInterchangeChunk[],
+): AsyncIterable<GraphInterchangeChunk> {
+  for (const chunk of chunks) {
+    await Promise.resolve();
+    yield chunk;
+  }
+}
+
 // ============================================================
 // Round-Trip Tests
 // ============================================================
@@ -118,6 +140,185 @@ describe("Interchange Round-Trip", () => {
     expect(result.success).toBe(true);
     expect(result.nodes.created).toBe(0);
     expect(result.edges.created).toBe(0);
+  });
+
+  it("streams bounded header, node, and edge chunks before importing them", async () => {
+    const alice = await sourceStore.nodes.Person.create({ name: "Alice" });
+    const bob = await sourceStore.nodes.Person.create({ name: "Bob" });
+    const acme = await sourceStore.nodes.Company.create({ name: "Acme" });
+    await sourceStore.edges.knows.create(alice, bob, { since: "2020" });
+    await sourceStore.edges.worksAt.create(alice, acme, { role: "Engineer" });
+
+    const chunks = await collectChunks(
+      exportGraphStream(sourceStore, { batchSize: 1 }),
+    );
+    expect(chunks.map((chunk) => chunk.type)).toEqual([
+      "header",
+      "nodes",
+      "nodes",
+      "nodes",
+      "edges",
+      "edges",
+    ]);
+    expect(
+      chunks
+        .filter((chunk) => chunk.type === "nodes")
+        .map((chunk) => chunk.nodes),
+    ).toEqual([[expect.anything()], [expect.anything()], [expect.anything()]]);
+    expect(
+      chunks
+        .filter((chunk) => chunk.type === "edges")
+        .map((chunk) => chunk.edges),
+    ).toEqual([[expect.anything()], [expect.anything()]]);
+
+    const targetStore = createStore(testGraph, createTestBackend());
+    const result = await importGraphStream(
+      targetStore,
+      exportGraphStream(sourceStore, { batchSize: 1 }),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      nodes: { created: 3, updated: 0, skipped: 0 },
+      edges: { created: 2, updated: 0, skipped: 0 },
+      errors: [],
+    });
+    expect(await targetStore.nodes.Person.getById(alice.id)).toMatchObject({
+      name: "Alice",
+    });
+  });
+
+  it("rejects malformed streamed-chunk ordering before it writes later chunks", async () => {
+    const [headerChunk] = await collectChunks(exportGraphStream(sourceStore));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    const header = headerChunk.header;
+    const targetStore = createStore(testGraph, createTestBackend());
+
+    await expect(
+      importGraphStream(
+        targetStore,
+        chunkStream([
+          { type: "header", header },
+          { type: "edges", edges: [] },
+          { type: "nodes", nodes: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("cannot emit nodes after edges");
+  });
+
+  it("rejects streams with missing or duplicate headers before importing rows", async () => {
+    const [headerChunk] = await collectChunks(exportGraphStream(sourceStore));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    const header = headerChunk.header;
+
+    await expect(
+      importGraphStream(
+        createStore(testGraph, createTestBackend()),
+        chunkStream([{ type: "nodes", nodes: [] }]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("must start with a header");
+    await expect(
+      importGraphStream(
+        createStore(testGraph, createTestBackend()),
+        chunkStream([
+          { type: "header", header },
+          { type: "header", header },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("more than one header");
+  });
+
+  it("rejects streams that end before emitting a header", async () => {
+    await expect(
+      importGraphStream(
+        createStore(testGraph, createTestBackend()),
+        chunkStream([]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("ended before emitting a header");
+  });
+
+  it("aborts a streamed import on the first entity error unless best-effort is explicit", async () => {
+    const alice = await sourceStore.nodes.Person.create({ name: "Alice" });
+    const chunks = await collectChunks(exportGraphStream(sourceStore));
+    const header = chunks[0];
+    if (header?.type !== "header") throw new Error("Expected stream header.");
+    const duplicate = chunks.find((chunk) => chunk.type === "nodes");
+    if (duplicate?.type !== "nodes") throw new Error("Expected node chunk.");
+
+    const targetStore = createStore(testGraph, createTestBackend());
+    await expect(
+      importGraphStream(
+        targetStore,
+        chunkStream([
+          { type: "header", header: header.header },
+          duplicate,
+          duplicate,
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("stream aborted after a chunk reported import errors");
+    expect(await targetStore.nodes.Person.getById(alice.id)).toBeDefined();
+  });
+
+  it.each(["skip", "update"] as const)(
+    "aggregates %s conflicts across streamed chunks",
+    async (onConflict) => {
+      await sourceStore.nodes.Person.create({ name: "Alice" });
+      const chunks = await collectChunks(exportGraphStream(sourceStore));
+      const [header, nodes] = chunks;
+      if (header?.type !== "header" || nodes?.type !== "nodes") {
+        throw new Error("Expected a header followed by a node chunk.");
+      }
+
+      const result = await importGraphStream(
+        createStore(testGraph, createTestBackend()),
+        chunkStream([header, nodes, nodes]),
+        importOptions({ onConflict }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.nodes.created).toBe(1);
+      expect(result.nodes[onConflict === "skip" ? "skipped" : "updated"]).toBe(
+        1,
+      );
+    },
+  );
+
+  it("warns without failing when streamed-import statistics refresh fails", async () => {
+    await sourceStore.nodes.Person.create({ name: "Alice" });
+    const targetStore = createStore(testGraph, createTestBackend());
+    const refreshError = new Error("planner unavailable");
+    const refreshStatistics = vi
+      .spyOn(targetStore, "refreshStatistics")
+      .mockRejectedValue(refreshError);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => false);
+
+    try {
+      const result = await importGraphStream(
+        targetStore,
+        exportGraphStream(sourceStore),
+        importOptions({ onConflict: "error" }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(refreshStatistics).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("importGraphStream committed its rows"),
+        refreshError,
+      );
+    } finally {
+      refreshStatistics.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it("preserves nodes after round-trip", async () => {

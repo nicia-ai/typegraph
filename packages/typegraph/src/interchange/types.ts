@@ -164,6 +164,13 @@ export const ImportOptionsSchema = z.object({
    * the engine catches up on its own. Default: true.
    */
   refreshStatistics: z.boolean().optional(),
+  /**
+   * How a streamed import reacts when one chunk reports entity-level errors.
+   * `abort` is the safe default: earlier chunks are already committed, so
+   * callers must not mistake a partial stream for a successful retryable load.
+   * `continue` is reserved for explicit best-effort ingestion.
+   */
+  onStreamChunkError: z.enum(["abort", "continue"]).default("abort"),
 });
 
 /**
@@ -220,6 +227,27 @@ export const GraphDataSchema = z.object({
 });
 
 export type GraphData = z.infer<typeof GraphDataSchema>;
+
+/** The metadata envelope emitted before streamed graph entities. */
+export const GraphDataHeaderSchema = GraphDataSchema.omit({
+  nodes: true,
+  edges: true,
+});
+
+export type GraphDataHeader = z.infer<typeof GraphDataHeaderSchema>;
+
+/**
+ * One bounded unit in the streamed interchange protocol. Nodes always precede
+ * edges, so an importer can validate endpoints from rows already written to its
+ * target without retaining all prior nodes in memory.
+ */
+export const GraphInterchangeChunkSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("header"), header: GraphDataHeaderSchema }),
+  z.object({ type: z.literal("nodes"), nodes: z.array(InterchangeNodeSchema) }),
+  z.object({ type: z.literal("edges"), edges: z.array(InterchangeEdgeSchema) }),
+]);
+
+export type GraphInterchangeChunk = z.infer<typeof GraphInterchangeChunkSchema>;
 
 // ============================================================
 // Import Result
@@ -284,3 +312,16 @@ export type ExportOptions = z.infer<typeof ExportOptionsSchema>;
 
 /** Export options as accepted by exportGraph (input type with optional defaults) */
 export type ExportOptionsInput = z.input<typeof ExportOptionsSchema>;
+
+/**
+ * Export options for {@link exportGraphStream}. `batchSize` bounds the number
+ * of node or edge entities retained for one yielded chunk.
+ */
+export const ExportStreamOptionsSchema = ExportOptionsSchema.extend({
+  batchSize: z.number().int().positive().default(1000),
+});
+
+export type ExportStreamOptions = z.infer<typeof ExportStreamOptionsSchema>;
+export type ExportStreamOptionsInput = z.input<
+  typeof ExportStreamOptionsSchema
+>;
