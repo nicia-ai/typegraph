@@ -61,7 +61,7 @@ export function snbDownloadUrl(profile: SnbRealProfile): string {
   return `https://datasets.ldbcouncil.org/snb-interactive-v1/${SNB_DATASET_SPECS[profile].archive}`;
 }
 
-export function snbCacheDir(profile: SnbRealProfile): string {
+function snbCacheDir(profile: SnbRealProfile): string {
   return path.join(
     homedir(),
     ...SNB_DATASET_SPECS[profile].cacheRelativeSegments,
