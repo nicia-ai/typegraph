@@ -368,9 +368,21 @@ posts, 80 comments; 15 samples / 3 warmups per query).
       (~4MB), so checkpoint I/O cost climbs as the database file grows over
       the load. See [SQLite's load-time root cause](#sqlites-load-time-root-cause)
       above.
-- [ ] Implement and measure the proposed fix (raise `wal_autocheckpoint`
-      during bulk load, or checkpoint on an explicit row-count cadence
-      instead of SQLite's size-driven default) — a repro sweeping
-      checkpoint intervals at 100K/500K/2M scale first, before touching the
-      real loader or re-running the full SF10 EC2 benchmark to confirm the
-      win.
+- [x] ~~Implement and measure the proposed fix.~~ Done: a repro sweeping
+      `wal_autocheckpoint` at 100K/500K/2M scale (values 1,000/10,000/
+      50,000/100,000, then 0/250,000/500,000/1,000,000 to find the
+      plateau) found the win holds through 50,000-100,000 pages and
+      regresses again above that. `@nicia-ai/typegraph`'s
+      `createLocalSqliteBackend` now exposes `walAutocheckpointPages`
+      (`PRAGMA wal_autocheckpoint`, defaults to SQLite's own untouched
+      setting); this benchmark's SQLite driver sets it to 100,000 and runs
+      an explicit `wal_checkpoint(TRUNCATE)` right after load finishes, so
+      query latency never pays a WAL-scan cost for whatever didn't land on
+      a checkpoint boundary. Verified end to end via
+      `bench:snb:smoke --engines=typegraph-sqlite --check`; full-scale
+      improvement not yet re-measured against the real SF10 dataset — that
+      needs another EC2 run.
+- [ ] Re-run the full SF10 EC2 benchmark to confirm the `wal_autocheckpoint`
+      fix's real-world load-time improvement and capture a second SF10
+      data point (also moves toward the multi-run statistical-confidence
+      bar noted above).
