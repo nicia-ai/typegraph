@@ -589,7 +589,20 @@ this same fixture, not just row-count parity.
       who authors 25 same-creationDate comments; that person's correct IS2
       answer is knowable in advance (the cluster's 10 smallest message
       ids), and the new script checks each doctor-runnable engine's actual
-      result against that known answer directly. All 4 engines pass.
+      result against that known answer directly.
+- [x] ~~The oracle's first version didn't actually reproduce the bug it
+      claimed to guard against~~ — its 25 tie-cluster ids were one
+      contiguous 3-digit range (120..144), so unpadded lexicographic order
+      and numeric order coincide by construction (same-length numeral
+      strings always compare identically both ways); the check would pass
+      whether or not the zero-padding fix was actually applied. Fixed:
+      split into two blocks of different digit widths (120..129, 4-digit
+      1000..1014) — unpadded order now ranks every 4-digit id ahead of
+      every 3-digit one ("1000" < "120"), so an unpadded engine returns the
+      wrong answer (1000..1009 instead of 120..129). Verified directly:
+      temporarily reverted the padding fix, confirmed all 4 engines fail
+      with exactly that wrong answer, then restored it and confirmed they
+      pass again.
 - [ ] **Re-run SF1 and SF10 with every fix above in place** and replace
       every invalidated number/paragraph flagged in this doc. This
       supersedes the multi-run-distribution item below in urgency —
