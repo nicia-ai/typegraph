@@ -19,6 +19,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type MaterializeIndexesResult,
   subClassOf,
 } from "@nicia-ai/typegraph";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
@@ -165,3 +166,33 @@ export const snbGraph = defineGraph({
 
 type SnbGraph = typeof snbGraph;
 export type SnbStore = ReturnType<typeof createStore<SnbGraph>>;
+
+/**
+ * `store.materializeIndexes()` is deliberately best-effort — it reports
+ * failures as a `status` per index rather than throwing (see
+ * `MaterializeIndexesEntry`'s doc) — so a caller that awaits the call and
+ * discards the result silently proceeds even if the SNB covering index
+ * this benchmark's fairness label depends on was never created. Every
+ * engine driver's `load()` must call this immediately after
+ * `store.materializeIndexes()` instead of ignoring its return value.
+ */
+export function assertMessageIndexMaterialized(
+  result: MaterializeIndexesResult,
+): void {
+  const entry = result.results.find(
+    (entry) => entry.indexName === messageByCreationDateIndex.name,
+  );
+  if (entry === undefined) {
+    throw new Error(
+      `materializeIndexes() reported no result for "${messageByCreationDateIndex.name}" — ` +
+        "the SNB covering index this benchmark's fairness label depends on may not exist.",
+    );
+  }
+  if (entry.status !== "created" && entry.status !== "alreadyMaterialized") {
+    throw new Error(
+      `SNB covering index "${messageByCreationDateIndex.name}" was not materialized ` +
+        `(status: ${entry.status}${entry.reason === undefined ? "" : `, reason: ${entry.reason}`}` +
+        `${entry.error === undefined ? "" : `, error: ${entry.error.message}`}).`,
+    );
+  }
+}

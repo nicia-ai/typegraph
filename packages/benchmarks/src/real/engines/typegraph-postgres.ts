@@ -16,7 +16,7 @@ import {
 } from "@nicia-ai/typegraph/postgres";
 
 import { startPostgresContainer } from "../harness/postgres-container";
-import { snbGraph } from "../schema/snb-graph";
+import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
 import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
@@ -73,7 +73,7 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
           options.log,
         );
         await store.refreshStatistics();
-        await store.materializeIndexes();
+        assertMessageIndexMaterialized(await store.materializeIndexes());
         // VACUUM can't run inside a transaction block; a fresh pool.query()
         // call isn't wrapped in one. Runs after materializeIndexes() so any
         // indexes it creates are included in the same visibility-map pass.

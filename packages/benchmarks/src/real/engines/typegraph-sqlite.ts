@@ -15,7 +15,7 @@ import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
 
-import { snbGraph } from "../schema/snb-graph";
+import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
 import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
@@ -122,7 +122,7 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
         );
         sqliteClient.pragma("wal_checkpoint(TRUNCATE)");
         await store.refreshStatistics();
-        await store.materializeIndexes();
+        assertMessageIndexMaterialized(await store.materializeIndexes());
         return pools;
       },
       queries: createSnbQueries(store),
