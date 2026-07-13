@@ -27,7 +27,7 @@
  * the caller is responsible for opening/closing port 22 on the security
  * group around its use.
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,7 +53,20 @@ import {
   REPO_DIR,
 } from "./bootstrap-script";
 
-const DEFAULT_INSTANCE_TYPE = "c7i.4xlarge";
+// Profile-aware: SF10's load phase consumes memory proportional to
+// available RAM, not a fixed budget (see reports/snb-lane1-results.md's
+// "memory exhaustion, not networking" section) — four EC2 attempts on
+// c7i.4xlarge (32GB) died from exactly this before r7i.4xlarge (128GB,
+// same 16 vCPU) completed cleanly. Defaulting sf10 to c7i.4xlarge would
+// silently reproduce that failure for anyone who doesn't already know to
+// override --instance-type.
+const DEFAULT_INSTANCE_TYPE_BY_PROFILE: Readonly<
+  Record<"smoke" | "sf1" | "sf10", string>
+> = {
+  smoke: "c7i.4xlarge",
+  sf1: "c7i.4xlarge",
+  sf10: "r7i.4xlarge",
+};
 const DEFAULT_VOLUME_SIZE_GIB = 150;
 // gp3 decouples IOPS/throughput from volume size — an unprovisioned volume
 // silently gets the account's gp3 *baseline* (3,000 IOPS / 125 MB/s)
@@ -72,9 +85,12 @@ const DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 1800; // 30 min
 // run's sqlite (74.5min) + postgres (78.4min) + neo4j (4.5min) load phases
 // alone already used ~2.6h, leaving too little margin once query
 // benchmarking, container startup, and ladybugdb's own load are added.
-// SF10 is ~10x SF1's row counts with no direct measurement yet of how each
-// engine's load time actually scales, so its default is deliberately much
-// larger rather than a naive 10x extrapolation.
+// SF10 has since been measured directly (a full run with every load-time
+// fix in place completes in ~5.4h total, per reports/snb-lane1-results.md),
+// but its timeout stays deliberately generous rather than tightened to
+// that number — a slower, non-fatal run (a busier shared host, a cold
+// Docker image pull) shouldn't hit a timeout that a full re-run can't
+// afford to trigger.
 const DEFAULT_BENCHMARK_TIMEOUT_SECONDS_BY_PROFILE: Readonly<
   Record<string, number>
 > = {
@@ -258,8 +274,19 @@ async function launch(argv: readonly string[]): Promise<void> {
   const subnetId = requireArgValue(argv, "subnet-id");
   const securityGroupId = requireArgValue(argv, "security-group-id");
   const iamInstanceProfile = requireArgValue(argv, "iam-instance-profile");
+  const benchProfile = parseArgValue(argv, "profile") ?? "sf1";
+  if (
+    benchProfile !== "smoke" &&
+    benchProfile !== "sf1" &&
+    benchProfile !== "sf10"
+  ) {
+    throw new Error(
+      `Unsupported --profile "${benchProfile}". Expected "smoke", "sf1", or "sf10".`,
+    );
+  }
   const instanceType =
-    parseArgValue(argv, "instance-type") ?? DEFAULT_INSTANCE_TYPE;
+    parseArgValue(argv, "instance-type") ??
+    DEFAULT_INSTANCE_TYPE_BY_PROFILE[benchProfile];
   const volumeSizeGib = Number(
     parseArgValue(argv, "volume-size-gib") ?? DEFAULT_VOLUME_SIZE_GIB,
   );
@@ -272,16 +299,6 @@ async function launch(argv: readonly string[]): Promise<void> {
   );
   const repoUrl = parseArgValue(argv, "repo-url") ?? DEFAULT_REPO_URL;
   const ref = parseArgValue(argv, "ref") ?? resolveGitSha();
-  const benchProfile = parseArgValue(argv, "profile") ?? "sf1";
-  if (
-    benchProfile !== "smoke" &&
-    benchProfile !== "sf1" &&
-    benchProfile !== "sf10"
-  ) {
-    throw new Error(
-      `Unsupported --profile "${benchProfile}". Expected "smoke", "sf1", or "sf10".`,
-    );
-  }
   const sshPublicKeyPath = parseArgValue(argv, "ssh-public-key-path");
   const sshPublicKey =
     sshPublicKeyPath === undefined ? undefined : (
@@ -524,26 +541,12 @@ async function collect(argv: readonly string[]): Promise<void> {
       renderHistoryTailScript(),
     );
 
-    if (resultsText.length === 0 || resultsText === "{}") {
-      console.error("Could not find parseable results on the instance.");
-      if (exitCodeText !== "0") {
-        console.error(
-          "--- last 200 lines of benchmark console log (failure diagnostic) ---",
-        );
-        console.error(
-          await fetchRemoteText(
-            awsOptions,
-            instanceId,
-            renderFailureLogTailScript(),
-            30,
-          ),
-        );
-      }
-      throw new Error(
-        `SSM command ${commandId} produced no parseable results (status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}).`,
-      );
-    }
+    const hasParseableResults = resultsText.length > 0 && resultsText !== "{}";
 
+    // Collection is best-effort and unconditional: a failed --check run can
+    // still produce real timing data for whichever engines completed before
+    // the failure, and that's worth keeping for post-mortem even though the
+    // run as a whole must still be reported as a failure below.
     const localDir = path.join(
       benchmarksRoot(),
       "bench-results",
@@ -552,25 +555,75 @@ async function collect(argv: readonly string[]): Promise<void> {
     );
     await mkdir(localDir, { recursive: true });
 
-    await writeJsonFile(
-      path.join(localDir, "results.json"),
-      JSON.parse(resultsText),
-    );
+    if (hasParseableResults) {
+      await writeJsonFile(
+        path.join(localDir, "results.json"),
+        JSON.parse(resultsText),
+      );
+    }
     if (summaryText.length > 0) {
       await writeJsonFile(
         path.join(localDir, "summary.json"),
         JSON.parse(summaryText),
       );
     }
+    // Raw history lines are always preserved locally (run-scoped, not the
+    // shared canonical file) for post-mortem on a failed run — appending to
+    // the *canonical* reports/history.jsonl happens only after every success
+    // condition below passes, so a failed run's partial per-engine rows
+    // never get mixed into the trend log looking like an ordinary result.
+    if (historyText.length > 0) {
+      await writeFile(
+        path.join(localDir, "history-lines.jsonl"),
+        `${historyText}\n`,
+        "utf-8",
+      );
+    }
+
+    if (hasParseableResults) {
+      console.log(`Results written to ${localDir}`);
+    }
+    console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
+
+    // A `--check` run reports row-count-parity/engine failures via a
+    // nonzero exit code, not by omitting results.json — some engines can
+    // have completed and produced real timings before a later engine
+    // failed. Checking only "did results.json parse" previously let a
+    // failed run collect as a successful local command with exit code 0;
+    // conversely, checking only the exit code let a `Success` SSM
+    // invocation that happened to produce no results.json (e.g. the `cat`
+    // fetch itself failed) collect as if it had real data.
+    if (
+      invocation.status !== "Success" ||
+      exitCodeText === undefined ||
+      exitCodeText !== "0" ||
+      !hasParseableResults
+    ) {
+      console.error(
+        "--- last 200 lines of benchmark console log (failure diagnostic) ---",
+      );
+      console.error(
+        await fetchRemoteText(
+          awsOptions,
+          instanceId,
+          renderFailureLogTailScript(),
+          30,
+        ),
+      );
+      throw new Error(
+        `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}, parseable results: ${hasParseableResults}).` +
+          (hasParseableResults ?
+            ` Partial artifacts were written to ${localDir}.`
+          : " No parseable results were found on the instance."),
+      );
+    }
+
     if (historyText.length > 0) {
       await appendFile(resolveHistoryPath(), `${historyText}\n`, "utf-8");
       console.log(
         `Appended ${historyText.split("\n").length} line(s) to ${resolveHistoryPath()}`,
       );
     }
-
-    console.log(`Results written to ${localDir}`);
-    console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
   } finally {
     // Always reached: a parse failure or non-Success status above must not
     // leave a billable instance orphaned.
