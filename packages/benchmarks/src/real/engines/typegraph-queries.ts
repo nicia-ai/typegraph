@@ -201,18 +201,20 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
   // (single person id, not a variable-length list), so — unlike the old
   // friend-list join — these are genuinely prepare()-able.
   //
-  // Deliberately unlimited: a native LIMIT here would apply *before* this
-  // file's numeric-aware final sort, ordered by the SQL layer's own plain
-  // lexicographic id tie-break (see `compareIdsAscending`'s doc). A large
-  // enough same-creationDate tie cluster (more messages sharing one
-  // timestamp than any fixed buffer) can rank a genuinely-top-10 message
-  // (e.g. "message:3") past any LIMIT the lexicographic order chose ahead
-  // of it (e.g. after "message:10".."message:19") — no fixed buffer size
-  // is provably safe against this, only fetching every candidate and
-  // limiting after the correct sort is. A person's own authored-message
-  // count is bounded by realistic LDBC activity levels, not this
-  // benchmark's row-count scale, so this stays a cheap point-adjacent
-  // fetch, not a table scan.
+  // Native `ORDER BY ... LIMIT 10` restored (matching the official query's
+  // own `ORDER BY messageCreationDate DESC, messageId ASC LIMIT 10`,
+  // applied before the root-post-author walk) — this schema splits
+  // Post/Comment into separate node types, so IS2's true top 10 across the
+  // union is derived by fetching *each* type's own top 10 (this file's
+  // `ID_PAD_WIDTH`-zero-padded ids, see dataset/ldbc-csv.ts, make this
+  // native ordering numerically correct, not just lexicographic) and
+  // merging in `recentMessagesOfPerson` below: any message ranking in the
+  // true top 10 of the union can have at most 9 messages of its own type
+  // ranked above it, so it's necessarily in that type's own top 10 too —
+  // this makes "top 10 of (top 10 posts ∪ top 10 comments)" provably equal
+  // to the true top 10, for any candidate-pool size or tie-cluster size,
+  // while transferring at most 20 rows regardless of how many messages the
+  // person has actually authored.
   const recentPostsOfPerson = store
     .query()
     .from("Person", "author")
@@ -224,6 +226,9 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       content: ctx.post.content,
       creationDate: ctx.post.creationDate,
     }))
+    .orderBy("post", "creationDate", "desc")
+    .orderBy("post", "id", "asc")
+    .limit(10)
     .prepare();
   const recentCommentsOfPerson = store
     .query()
@@ -236,6 +241,9 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       content: ctx.comment.content,
       creationDate: ctx.comment.creationDate,
     }))
+    .orderBy("comment", "creationDate", "desc")
+    .orderBy("comment", "id", "asc")
+    .limit(10)
     .prepare();
 
   async function recentMessagesOfPerson(personId: string): Promise<
@@ -251,7 +259,12 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       recentCommentsOfPerson.execute({ id: personId }),
     ]);
 
-    // Official IS2 tie-break is creationDate DESC, messageId ASC.
+    // Official IS2 tie-break is creationDate DESC, messageId ASC. Each
+    // input list is already that engine's own top 10 for its type (native
+    // ORDER BY/LIMIT above); re-sorting this small (<=20 row) merged set
+    // with the numeric-aware comparator guarantees the final order is
+    // identical across engines regardless of native collation differences
+    // (see compareIdsAscending's doc).
     return [
       ...posts.map((row) => ({ ...row, kind: "Post" as const })),
       ...comments.map((row) => ({ ...row, kind: "Comment" as const })),

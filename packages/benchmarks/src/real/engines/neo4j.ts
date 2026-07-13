@@ -721,26 +721,27 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
       // that the default planner compiles to a full scan instead of a
       // NodeUniqueIndexSeek; pinning the legacy language version restores
       // the seek (verify via PROFILE against a real instance).
-      // Deliberately unlimited: a native LIMIT here would apply before the
-      // numeric-aware final sort below, ordered by Cypher's own plain
-      // lexicographic id tie-break. A same-creationDate tie cluster larger
-      // than any fixed buffer could rank a genuinely-top-10 message past
-      // whatever cutoff that lexicographic order chose ahead of it — no
-      // fixed buffer size is provably safe against this, only fetching
-      // every candidate and limiting after the correct sort is. A person's
-      // own authored-message count is bounded by realistic LDBC activity
-      // levels, so this stays a cheap point-adjacent fetch, not a scan.
+      // Native ORDER BY/LIMIT restored, matching the official query's own
+      // `ORDER BY messageCreationDate DESC, messageId ASC LIMIT 10` (applied
+      // before the root-post-author walk): dataset/ldbc-csv.ts zero-pads
+      // every id's numeric portion to a fixed width, so Cypher's own
+      // lexicographic `m.id ASC` now agrees with numeric order — no tie
+      // cluster, however large, can put a genuinely-top-10 message past
+      // this LIMIT.
       `CYPHER 5
        MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(m:Message)
-       RETURN m.id AS id, m.content AS content, m.creationDate AS creationDate`,
+       RETURN m.id AS id, m.content AS content, m.creationDate AS creationDate
+       ORDER BY m.creationDate DESC, m.id ASC
+       LIMIT ${IS2_MESSAGE_LIMIT}`,
       { id: personId },
     );
 
-    // Final row order/count is re-derived with a numeric-aware id
-    // comparator (see compareIdsAscending's doc) instead of trusting
-    // Cypher's own plain-string id tie-break, so this engine's digest is
-    // comparable against the others regardless of what its own native
-    // ordering did on a tie.
+    // Re-derived with a numeric-aware id comparator (see
+    // compareIdsAscending's doc) instead of trusting Cypher's own ordering
+    // directly, so this engine's digest is comparable against the others
+    // regardless of subtle native collation differences — cheap since
+    // candidates is already bounded to IS2_MESSAGE_LIMIT rows by the
+    // native LIMIT above, not the person's full authored-message count.
     const top10 = candidates
       .toSorted(
         (left, right) =>

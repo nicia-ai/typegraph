@@ -445,22 +445,25 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       "friend.firstName AS firstName, friend.lastName AS lastName, e.since AS since " +
       "ORDER BY e.since DESC, friend.id ASC;",
   );
-  // Deliberately unlimited: a native LIMIT here would apply before the
-  // numeric-aware final sort in recentMessagesOfPerson below, ordered by
-  // Cypher's own plain lexicographic id tie-break. A same-creationDate tie
-  // cluster larger than any fixed buffer could rank a genuinely-top-10
-  // message past whatever cutoff that lexicographic order chose ahead of
-  // it — no fixed buffer size is provably safe against this, only
-  // fetching every candidate and limiting after the correct sort is. A
-  // person's own authored-message count is bounded by realistic LDBC
-  // activity levels, so this stays a cheap point-adjacent fetch.
+  // Native ORDER BY/LIMIT restored, matching the official query's own
+  // `ORDER BY messageCreationDate DESC, messageId ASC LIMIT 10` (applied
+  // before the root-post-author walk) — this schema splits Post/Comment
+  // into separate node types, so IS2's true top 10 across the union comes
+  // from fetching *each* type's own top 10 (dataset/ldbc-csv.ts's
+  // zero-padded ids make this native ordering numerically correct, not
+  // just lexicographic) and merging in recentMessagesOfPerson below: see
+  // that function's doc for why "top 10 of (top 10 posts ∪ top 10
+  // comments)" is provably equal to the true top 10 regardless of
+  // candidate-pool or tie-cluster size, while transferring at most 20 rows.
   const postsByPersonStatement = await conn.prepare(
     "MATCH (person:Person {id: $id})<-[:HasCreator]-(post:Post) " +
-      "RETURN post.id AS id, post.content AS content, post.creationDate AS creationDate;",
+      "RETURN post.id AS id, post.content AS content, post.creationDate AS creationDate " +
+      "ORDER BY post.creationDate DESC, post.id ASC LIMIT 10;",
   );
   const commentsByPersonStatement = await conn.prepare(
     "MATCH (person:Person {id: $id})<-[:HasCreator]-(comment:Comment) " +
-      "RETURN comment.id AS id, comment.content AS content, comment.creationDate AS creationDate;",
+      "RETURN comment.id AS id, comment.content AS content, comment.creationDate AS creationDate " +
+      "ORDER BY comment.creationDate DESC, comment.id ASC LIMIT 10;",
   );
   const is4PostStatement = await conn.prepare(
     "MATCH (m:Post {id: $id}) RETURN m.content AS content, m.creationDate AS creationDate;",
@@ -531,12 +534,12 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       rowsOf(await conn.execute(commentsByPersonStatement, { id: personId })),
     ]);
 
-    // Official IS2 tie-break is creationDate DESC, messageId ASC. Cypher's
-    // own id ASC above is a plain string compare on this benchmark's
-    // prefixed ids; re-sorted here with a numeric-aware comparator (see
-    // compareIdsAscending's doc) so this engine's digest is comparable
-    // against the others regardless of what its own native ordering did
-    // on a tie.
+    // Official IS2 tie-break is creationDate DESC, messageId ASC. Each
+    // input list is already that engine's own top 10 for its type (native
+    // ORDER BY/LIMIT above); re-sorting this small (<=20 row) merged set
+    // with the numeric-aware comparator guarantees the final order is
+    // identical across engines regardless of native collation differences
+    // (see compareIdsAscending's doc).
     return [
       ...posts.map((row) => ({
         id: row.id as string,

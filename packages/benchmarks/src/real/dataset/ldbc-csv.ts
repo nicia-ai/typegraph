@@ -144,9 +144,31 @@ export async function isSnbDatagenDirectory(root: string): Promise<boolean> {
   }
 }
 
-const personId = (id: string): string => `person:${id}`;
-const forumId = (id: string): string => `forum:${id}`;
-const messageId = (id: string): string => `message:${id}`;
+// LDBC's own ids are plain numeric (BIGINT, up to 64-bit), but every kind
+// shares one `id` column in this schema, so each id is prefixed with its
+// kind (`"message:123"`). A plain lexicographic compare — what every native
+// `ORDER BY id ASC` in this codebase does, SQL or Cypher alike — puts
+// `"message:10"` before `"message:2"`, which none of the LDBC-defined
+// id-ascending tie-breaks (IS2/IS3/IS7) do. Zero-padding the numeric portion
+// to a fixed width makes lexicographic order equal numeric order for every
+// value up to that width, so the *engine's own* `ORDER BY`/`LIMIT` can be
+// trusted directly instead of needing to fetch every candidate and re-sort
+// client-side (see typegraph-queries.ts's IS2 doc for why that mattered).
+// 20 digits covers the full unsigned 64-bit range (max ~1.8x10^19, 19
+// digits) with a digit of headroom.
+const ID_PAD_WIDTH = 20;
+const paddedNumericId = (id: string): string => id.padStart(ID_PAD_WIDTH, "0");
+
+// Exported (not just used internally) so callers that need to construct a
+// specific id deterministically — e.g. verify-is2-tie-break.ts's oracle
+// check, which computes the exact expected message ids for a known fixture
+// row rather than sampling for them — can format ids identically to every
+// engine driver, instead of duplicating (and risking drift from) this
+// padding scheme.
+export const personId = (id: string): string => `person:${paddedNumericId(id)}`;
+const forumId = (id: string): string => `forum:${paddedNumericId(id)}`;
+export const messageId = (id: string): string =>
+  `message:${paddedNumericId(id)}`;
 
 /**
  * Fixed-capacity reservoir sample (Algorithm R): after `offer` has been

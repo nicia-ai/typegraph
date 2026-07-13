@@ -46,22 +46,20 @@ export function canonicalDigest(rows: readonly unknown[]): string {
 
 /**
  * Numeric-aware comparator for this benchmark's LDBC-derived ids (e.g.
- * `"message:12"`, `"person:2"`). Official LDBC ids are plain numeric
- * (BIGINT); this benchmark prefixes every id with its kind so a single
- * `Message`/`Person`/`Forum` id column can serve every node kind, but that
- * means a plain lexicographic compare — what every native `ORDER BY id
- * ASC` in this codebase actually does, SQL or Cypher alike — puts
- * `"message:10"` before `"message:2"`, which the LDBC-defined tie-breaks
- * in IS2/IS3/IS7 don't. `numeric: true` makes `Intl` collation treat
- * embedded digit runs as numbers rather than characters, which works
- * correctly across the identical shared prefix on both sides.
+ * `"message:00000000000000000012"`, `"person:00000000000000000002"`).
+ * `dataset/ldbc-csv.ts` zero-pads every id's numeric portion to a fixed
+ * width specifically so a native `ORDER BY id ASC` (SQL or Cypher alike)
+ * already agrees with numeric order — `numeric: true` here is a defensive
+ * backstop, not load-bearing for correctness.
  *
  * Every engine applies this same comparator as the final, authoritative
  * sort immediately before building a digest (even where its own native
- * query already applied an `ORDER BY`) so the row order captured in the
- * digest can't drift between engines depending on what their own native
- * ordering happened to do on a tie — the one thing that must be identical
- * across engines for `digest` to be a meaningful comparison at all.
+ * query already applied an `ORDER BY`/`LIMIT`, over the small — at most
+ * ~20-row — result that native step already narrowed things down to) so the
+ * row order captured in the digest can't drift between engines depending on
+ * subtle native collation differences — the one thing that must be
+ * identical across engines for `digest` to be a meaningful comparison at
+ * all.
  */
 export function compareIdsAscending(left: string, right: string): number {
   return left.localeCompare(right, undefined, { numeric: true });
