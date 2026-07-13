@@ -69,10 +69,15 @@ pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:sf1:ec2:collect -- \
   --run-id=<printed-run-id>
 ```
 
-`collect` writes results to
+`collect` writes results (including `competitor-doctor.json`) to
 `bench-results/current/snb-<profile>-ec2-<run-id>/`, appends the new lines
 to `reports/history.jsonl`, and terminates the instance when done. Pass
-`--keep` to leave the instance running for debugging instead.
+`--keep` to leave the instance running for debugging instead. Unlike a
+local/CI invocation of the benchmark script itself — which tolerates a
+partial engine set so a no-Docker environment still exits 0 — `collect`
+requires all four engines to have actually produced results; a run where
+one engine's container failed to start on the instance is reported as a
+failure, not silently accepted as a smaller-than-requested success.
 
 ### Flags
 

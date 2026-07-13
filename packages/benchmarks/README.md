@@ -63,14 +63,21 @@ polymorphic endpoints natively.
 # Preflight: which engines are actually runnable on this machine right now
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:doctor
 
-# Tiny committed fixture (30 persons, 40 posts, 80 comments) — fast, always
-# runnable in CI regardless of Docker/optional-package availability
+# Tiny committed fixture (31 persons, 40 posts, 105 comments — including a
+# dedicated 25-comment same-creationDate tie cluster, see "Parity gate"
+# below) — fast, always runnable in CI regardless of Docker/optional-package
+# availability
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke
 
 # Same, but exits non-zero on a genuine parity mismatch (row count or
 # value digest) between 2+ engines that ran (the CI-safe form: 0 or 1
 # runnable engines still exits 0)
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke:check
+
+# Adversarial correctness check, independent of cross-engine consensus: one
+# fixture person's IS2 answer is known in advance (see "Parity gate" below),
+# checked against each doctor-runnable engine's actual result directly
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:verify-is2-tie-break
 
 # Real LDBC SF1 (~9.9k persons, ~361k knows (directed), ~1M posts, ~2.05M
 # comments). Takes under an hour on typical hardware (TypeGraph/SQLite
@@ -140,6 +147,23 @@ gate compares values now, not just counts. `--check` turns a genuine
 mismatch (2+ engines disagreeing, on either signal) into a non-zero exit;
 it never fires when fewer than 2 engines ran, so a no-Docker CI
 environment (only the two embedded engines runnable) still exits 0.
+
+Cross-engine agreement is still only consensus, not proof — this lane has
+shipped bugs (a shared wrong workload, a shared lexicographic-vs-numeric
+tie-break) that every engine reproduced identically, which parity alone
+can never catch. `bench:snb:verify-is2-tie-break` checks against a known
+answer instead: the smoke fixture's dedicated tie-cluster person (25
+same-creationDate comments, `dataset/smoke-fixture-constants.ts`) has an
+IS2 result computable in advance, since an identical creationDate leaves
+ascending message id as the only tie-break — each doctor-runnable engine's
+actual result is checked against that oracle directly, independent of
+what any other engine returned.
+
+The EC2 runner (`bench:snb:sf1:ec2:collect`) additionally requires the
+full four-engine set to have actually produced results — see
+`src/real/ec2/run-sf1-ec2.ts`'s `collect()` doc comment for why a paid,
+multi-hour run can't tolerate the same partial-engine leniency a local/CI
+invocation intentionally allows.
 
 #### Competitor doctor
 

@@ -1,9 +1,9 @@
 # Lane 1 (LDBC SNB Interactive short reads) — results
 
 > **Every query-latency number below is invalidated, pending a fresh
-> run.** Two rounds of review found this benchmark's query implementations
-> diverged from the official LDBC queries in ways row-count-only parity
-> could never catch:
+> run.** Several rounds of review found this benchmark's query
+> implementations diverged from the official LDBC queries in ways
+> row-count-only parity could never catch:
 >
 > - **IS2 measured the wrong workload** in all three engine drivers —
 >   traversing to the given person's *friends* and measuring messages
@@ -15,16 +15,33 @@
 >   id/title — meaning several engines were doing measurably *less work*
 >   than the official query requires.
 > - **Id tie-breaks were lexicographic, not numeric** (`"message:10"`
->   sorting before `"message:2"`), on every engine's native ordering.
+>   sorting before `"message:2"`), on every engine's native ordering. Fixed
+>   at the root: `dataset/ldbc-csv.ts` zero-pads every id's numeric portion
+>   to a fixed width, so a plain lexicographic `ORDER BY id ASC` (SQL or
+>   Cypher alike) already agrees with numeric order.
+> - **IS2's own `LIMIT` was, in turn, briefly removed entirely** to work
+>   around the tie-break bug above (a same-timestamp cluster larger than
+>   any fixed candidate buffer could rank a genuinely-top-10 message past
+>   the cutoff) — correct, but this diverged from the official query's own
+>   engine-side `ORDER BY ... LIMIT 10` (applied before the root-post-author
+>   walk), changing IS2's measured workload and disproportionately
+>   penalizing networked engines with full-content transfer for every
+>   message a person ever authored. Once ids were zero-padded (previous
+>   bullet), native `ORDER BY ... LIMIT 10` was restored everywhere — this
+>   schema's split Post/Comment node types mean TypeGraph/LadybugDB fetch
+>   each type's own top 10 and merge (provably equal to the true top 10 of
+>   the union, for any candidate-pool or tie-cluster size), while Neo4j's
+>   unified `:Message` label needs only one query.
 >
-> All fixed — see `typegraph-queries.ts`, `neo4j.ts`, `ladybug.ts` — and
-> the parity gate itself was upgraded from row-count-only to a
-> value-level canonical digest per row (`engines/types.ts`'s
-> `canonicalDigest`/`compareIdsAscending`, `harness/parity.ts`), specifically
-> because row-count agreement had already let the IS2 workload bug and
-> the field-omission bugs both through undetected. Verified end-to-end on
-> the smoke fixture: all 7 queries now pass **value-level** parity
-> (`comparable=yes`) across all four engines, not just row-count parity.
+> All fixed — see `typegraph-queries.ts`, `neo4j.ts`, `ladybug.ts`,
+> `dataset/ldbc-csv.ts` — and the parity gate itself was upgraded from
+> row-count-only to a value-level canonical digest per row
+> (`engines/types.ts`'s `canonicalDigest`/`compareIdsAscending`,
+> `harness/parity.ts`), specifically because row-count agreement had
+> already let the IS2 workload bug and the field-omission bugs both
+> through undetected. Verified end-to-end on the smoke fixture: all 7
+> queries now pass **value-level** parity (`comparable=yes`) across all
+> four engines, not just row-count parity.
 >
 > **Every IS1-IS7 latency number in this doc reflects the old, wrong
 > queries** and needs a fresh SF1 + SF10 run before any of it (including
@@ -451,11 +468,12 @@ fixed setup costs like container startup, not row count).
 | typegraph-postgres | 185.0 ms (includes imperative container startup) |
 | neo4j | 5993.2 ms (includes imperative container startup + constraint/index `awaitIndexes`) |
 
-Row-count parity: 7/7 queries comparable=yes (30 persons, 5 forums, 40
-posts, 80 comments; 15 samples / 3 warmups per query). Re-verified after
-the IS2/IS3/IS6/IS7 fixes and the row-count-to-value-level parity
-upgrade above — all 7 queries pass **value-level** digest parity on this
-same fixture, not just row-count parity.
+Row-count parity: 7/7 queries comparable=yes (31 persons, 5 forums, 40
+posts, 105 comments — including a dedicated 25-comment same-creationDate
+tie cluster, see "Next steps" below; 15 samples / 3 warmups per query).
+Re-verified after the IS2/IS3/IS6/IS7 fixes and the row-count-to-value-level
+parity upgrade above — all 7 queries pass **value-level** digest parity on
+this same fixture, not just row-count parity.
 
 ## Next steps
 
@@ -538,6 +556,40 @@ same fixture, not just row-count parity.
       field name `personId`, Neo4j/LadybugDB used `id` — same values,
       incomparable digests) before landing at all 7 queries passing true
       value-level parity across all four engines.
+- [x] ~~IS2's first fix for the lexicographic-tie-break bug (a fixed-size
+      native `LIMIT` re-sorted numerically in JS) wasn't actually
+      correctness-proof — a same-creationDate tie cluster larger than the
+      buffer could still rank a genuinely-top-10 message past the
+      cutoff.~~ Root-caused instead: `dataset/ldbc-csv.ts` now zero-pads
+      every id's numeric portion to a fixed width, making native
+      `ORDER BY id ASC` agree with numeric order regardless of tie-cluster
+      size. This let engine-side `ORDER BY ... LIMIT 10` be restored
+      everywhere (matching the official query's own semantics, applied
+      before the root-post-author walk) instead of fetching every message
+      a person ever authored — the intermediate "fetch everything, sort in
+      JS" fix was correct but changed IS2's measured workload and
+      disproportionately penalized networked engines with full-content
+      transfer.
+- [x] ~~The EC2 `collect()` path could still report success with fewer
+      than the full four-engine set~~ — a container failing to start on
+      the instance would get silently doctor-filtered out of the run
+      rather than recorded as a failure, and nothing checked how many
+      engines actually produced results. Fixed: `collect()` now parses
+      `results.json.engines` and requires all four canonical names
+      (`harness/doctor.ts`'s `SNB_ENGINE_NAMES`) to be present, and fetches
+      + preserves `competitor-doctor.json` locally (success or failure) so
+      an incomplete run is diagnosable without re-connecting to the
+      instance.
+- [x] Added `pnpm bench:snb:verify-is2-tie-break`, an adversarial
+      correctness check independent of cross-engine consensus — every
+      engine agreeing has already gone wrong twice in this lane (the
+      friend-workload bug, the lexicographic-tie-break bug), so consensus
+      alone doesn't prove correctness. The committed smoke fixture now
+      includes a dedicated person (`dataset/smoke-fixture-constants.ts`)
+      who authors 25 same-creationDate comments; that person's correct IS2
+      answer is knowable in advance (the cluster's 10 smallest message
+      ids), and the new script checks each doctor-runnable engine's actual
+      result against that known answer directly. All 4 engines pass.
 - [ ] **Re-run SF1 and SF10 with every fix above in place** and replace
       every invalidated number/paragraph flagged in this doc. This
       supersedes the multi-run-distribution item below in urgency —
