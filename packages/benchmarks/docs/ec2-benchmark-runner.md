@@ -81,7 +81,12 @@ to `reports/history.jsonl`, and terminates the instance when done. Pass
 
 `launch` (optional): `--aws-profile` (SSO/named profile; omit to use the
 instance-metadata credential chain or a role already assumed in the shell),
-`--instance-type` (default `c7i.4xlarge`), `--volume-size-gib` (default
+`--instance-type` (default is **profile-aware**: `c7i.4xlarge` for `smoke`/
+`sf1`, `r7i.4xlarge` for `sf10` — SF10's load phase consumes memory
+proportional to available RAM, not a fixed budget, and four attempts on
+32GB instances died from exactly that before 128GB completed cleanly; see
+reports/snb-lane1-results.md's "memory exhaustion, not networking" section
+— an explicit `--instance-type` always overrides this default), `--volume-size-gib` (default
 150), `--volume-iops` (default 10000) and `--volume-throughput-mbps`
 (default 400) — gp3 decouples IOPS/throughput from volume size entirely, so
 an unprovisioned volume silently gets the account's gp3 *baseline* (3,000
@@ -96,11 +101,16 @@ a fresh clone), `--profile` (`smoke`, `sf1`, or `sf10`; default `sf1`),
 `--bootstrap-timeout-seconds` (default 1800), `--benchmark-timeout-seconds`
 (defaults per profile: smoke 3600, sf1 36000 — a real SF1 run's
 sqlite+postgres+neo4j load phases alone took ~2.6h pre-fix, so a 6h default
-proved too tight in practice — sf10 129600 / 36h, deliberately generous
-since SF10 is ~10x SF1's row counts with no direct measurement yet of how
-each engine's load time actually scales), `--ssh-public-key-path` and
+proved too tight in practice — sf10 129600 / 36h; SF10 has since been
+measured directly at ~5.4h total with every load-time fix in place, but the
+timeout stays deliberately generous rather than tightened to that number),
+`--ssh-public-key-path` and
 `--associate-public-ip=true` (see "Diagnostic-only SSH fallback" above; omit
 both for the SSM-only default).
+
+Note that `--profile=sf10` uses the same `bench:snb:sf1:ec2` script as SF1
+and smoke — there is no separate `bench:snb:sf10:ec2` script; `--profile`
+is what selects the dataset scale.
 
 `collect` (required): `--region`, `--instance-id`, `--command-id`.
 

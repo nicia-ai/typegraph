@@ -1,5 +1,40 @@
 # Lane 1 (LDBC SNB Interactive short reads) — results
 
+> **Every query-latency number below is invalidated, pending a fresh
+> run.** Two rounds of review found this benchmark's query implementations
+> diverged from the official LDBC queries in ways row-count-only parity
+> could never catch:
+>
+> - **IS2 measured the wrong workload** in all three engine drivers —
+>   traversing to the given person's *friends* and measuring messages
+>   *they* authored, instead of official LDBC IS2's own definition ("recent
+>   messages of a person": the given person's own messages, tie-broken
+>   `messageId ASC`, not the `DESC` these drivers used).
+> - **IS2/IS3/IS6/IS7 silently omitted official output fields** in one or
+>   more engines — message content, author/moderator names, forum
+>   id/title — meaning several engines were doing measurably *less work*
+>   than the official query requires.
+> - **Id tie-breaks were lexicographic, not numeric** (`"message:10"`
+>   sorting before `"message:2"`), on every engine's native ordering.
+>
+> All fixed — see `typegraph-queries.ts`, `neo4j.ts`, `ladybug.ts` — and
+> the parity gate itself was upgraded from row-count-only to a
+> value-level canonical digest per row (`engines/types.ts`'s
+> `canonicalDigest`/`compareIdsAscending`, `harness/parity.ts`), specifically
+> because row-count agreement had already let the IS2 workload bug and
+> the field-omission bugs both through undetected. Verified end-to-end on
+> the smoke fixture: all 7 queries now pass **value-level** parity
+> (`comparable=yes`) across all four engines, not just row-count parity.
+>
+> **Every IS1-IS7 latency number in this doc reflects the old, wrong
+> queries** and needs a fresh SF1 + SF10 run before any of it (including
+> "SQLite fastest across the board," which was only ever true at SF10,
+> not SF1) can be trusted again. **Neo4j's load time is also invalidated**
+> — the `Post`/`Comment` constraint removal (see "Why attempts 6-8" below)
+> changes work done inside its timed `load()`, not just its query-time
+> fairness. SQLite/Postgres/LadybugDB's load times are unaffected — their
+> load paths weren't touched by any of this.
+
 **Status: real SF1- and SF10-scale numbers, single run each — not a
 publishable comparison yet.** Per the program plan, SF1 is the minimum
 scale for any claim about relative engine performance, and this file has
@@ -67,27 +102,14 @@ larger relative gain makes sense: eliminating a redundant round trip
 matters far more over a network connection than for SQLite's in-process
 calls. Further load-time work remains a follow-up (see Next steps).
 
-## SF1 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
+## SF1 query latency (p50 / p95 / p99, milliseconds) — pre-fix numbers, superseded
 
-| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
-| --- | --- | --- | --- | --- |
-| IS1 (person profile) | 0.038 / 0.066 / 0.074 | 0.089 / 0.116 / 0.179 | 0.921 / 1.192 / 4.931 | 0.344 / 0.434 / 0.442 |
-| IS2 (friends' recent messages) | 81.575 / 264.280 / 381.127 | 203.229 / 605.720 / 876.873 | 25.035 / 102.378 / 172.022 | 62.142 / 82.944 / 90.185 |
-| IS3 (friends with dates) | 0.225 / 0.987 / 0.996 | 0.569 / 2.114 / 2.311 | 1.101 / 2.127 / 3.985 | 2.289 / 3.429 / 3.703 |
-| IS4 (message content) | 0.020 / 0.027 / 0.035 | 0.088 / 0.124 / 0.139 | 0.768 / 2.502 / 2.813 | 0.272 / 0.300 / 0.306 |
-| IS5 (message creator) | 0.035 / 0.036 / 0.037 | 0.124 / 0.135 / 0.137 | 0.691 / 0.862 / 3.289 | 0.954 / 0.999 / 1.025 |
-| IS6 (root forum + moderator) | 0.095 / 0.125 / 0.160 | 0.721 / 0.792 / 1.185 | 0.721 / 0.965 / 4.556 | 3.027 / 3.333 / 3.347 |
-| IS7 (replies + knows check) | 0.090 / 1.202 / 1.324 | 0.265 / 3.890 / 7.061 | 1.222 / 27.811 / 47.521 | 2.906 / 4.955 / 5.077 |
-
-Several queries are flagged noisy (CV > 25%, see `results.json`'s `noisy`
-field) — expected for a single-run measurement of sub-millisecond-to-
-low-double-digit-millisecond operations on a shared cloud instance. IS2's
-much higher latency across every engine reflects real work (merging and
-re-ranking up to 10 messages across a friend frontier, then a root-post
-walk per message), not overhead — the same query is also the noisiest,
-consistent with its cost scaling with each sampled person's actual friend
-count and message volume rather than being a fixed-cost point read like
-IS1/IS4/IS5.
+**Every row below is invalidated — see the notice at the top of this
+file.** Same reasons as the SF10 table below: wrong IS2 workload, missing
+official fields on IS2/IS3/IS6/IS7, lexicographic id tie-breaks. Deleted
+here rather than kept as "mostly still right" — a fresh SF1 run with
+every fix in place (including the new value-level digest parity gate)
+replaces this table and the analysis that used to follow it.
 
 ## Fixes made to reach a working SF1 run
 
@@ -190,14 +212,14 @@ provisioning — actually in place together.
 | `@ladybugdb/core` | 0.18.0 |
 | Command | `tsx src/real/snb-short-reads.ts --profile=sf10 --check` |
 | Samples / warmups | 20 / 5 per query (sf10 profile defaults) |
-| Runner | `pnpm bench:snb:sf10:ec2` — dedicated ephemeral instance, no other workload sharing the box |
+| Runner | `pnpm bench:snb:sf1:ec2 -- --profile=sf10` (same script as SF1, `--profile` selects the scale) — dedicated ephemeral instance, no other workload sharing the box |
 | Ref | `a58ae38ebb34ab161ab66b5c344f185988525292` |
 | Total wall clock | ~5h22m (down from attempt 5's 11h10m — see below) |
 
 Full machine-readable detail:
 `bench-results/current/snb-sf10-ec2-ec2-20260712T030715Z/{summary,results}.json`
-(gitignored — regenerate with `pnpm bench:snb:sf10:ec2` then the printed
-`collect` command).
+(gitignored — regenerate with `pnpm bench:snb:sf1:ec2 -- --profile=sf10`
+then the printed `collect` command).
 
 ### Why attempts 1-5 took so long: memory exhaustion, not networking
 
@@ -376,62 +398,28 @@ complementary, not redundant, once the ceiling masking the second one is
 gone. Only then was attempt 8 launched, with the results in the tables
 above and below.
 
-### SF10 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
+### SF10 query latency (p50 / p95 / p99, milliseconds) — pre-fix numbers, superseded
 
-| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
-| --- | --- | --- | --- | --- |
-| IS1 (person profile) | 0.029 / 0.046 / 0.050 | 0.972 / 1.058 / 1.093 | 5.809 / 16.071 / 79.061 | 1.3 / 3.1 / 3.4 |
-| IS2 (friends' recent messages) | 180.118 / 572.669 / 730.910 | 2364.555 / 10213.892 / 13689.845 | 462.733 / 3517.198 / 6830.945 | 321.8 / 492.9 / 618.0 |
-| IS3 (friends with dates) | 0.364 / 1.184 / 2.175 | 6.724 / 10.931 / 42.728 | 39.847 / 125.169 / 352.234 | 16.5 / 48.6 / 67.3 |
-| IS4 (message content) | 0.023 / 0.032 / 0.039 | 0.938 / 1.778 / 1.882 | 3.489 / 6.268 / 6.337 | 1.1 / 1.2 / 1.3 |
-| IS5 (message creator) | 0.033 / 0.037 / 0.041 | 2.698 / 3.531 / 3.925 | 4.371 / 6.545 / 8.142 | 2.8 / 3.8 / 4.4 |
-| IS6 (root forum + moderator) | 0.070 / 0.116 / 0.132 | 4.087 / 6.257 / 6.300 | 4.662 / 6.687 / 11.886 | 4.1 / 8.9 / 10.6 |
-| IS7 (replies + knows check) | 0.067 / 0.744 / 0.966 | 4.581 / 9.229 / 11.303 | 6.812 / 30.694 / 86.789 | 8.6 / 13.9 / 14.4 |
+**Every row below is invalidated — see the notice at the top of this
+file.** IS2 measured the wrong workload (friends' messages, not the given
+person's own); IS3/IS6/IS7 were missing official output fields on one or
+more engines (message content, author/moderator names, forum id/title);
+id tie-breaks were lexicographic instead of numeric. The old table (and
+every paragraph of analysis that used to follow it) is deleted here
+rather than kept as "mostly still right" — Neo4j's IS6 and TypeGraph's/
+LadybugDB's IS7 in particular now do measurably *more* real work (fetching
+fields they previously skipped), so even queries whose *shape* didn't
+change (IS1, IS4, IS5) can't be assumed unaffected by association. A
+fresh SF10 run with every fix in place — including the new value-level
+digest parity gate, verified passing on the smoke fixture — replaces this
+whole subsection.
 
-Attempt 8 numbers (query latency doesn't depend on the load-time fixes
-above, so this barely moved from attempt 5). Ladybugdb's per-query
-`cvPercent`/`noisy` figures were lost to a since-fixed SSM
-output-truncation bug in the collection tooling — only its p50/p95/p99
-survived from the console log, hence 1 fewer decimal of precision than
-the other three columns; not fabricated to fill the gap.
-
-At SF10, the earlier SF1-scale IS2 latency cliff (a covering-index gap in
-this benchmark's own schema, closed before this run — see the "IS2 SF10
-latency cliff" fix in git history) stays closed: SQLite's IS2 p50 (180ms)
-is proportionate to its SF1 number, not the 689x blowup that motivated that
-fix.
-
-The latency *ordering* across queries (IS1/IS4/IS5 fastest, IS3/IS6/IS7
-mid, IS2 far slower than everything else) is identical on all four
-engines because it's driven by query shape, not engine: IS1/IS4/IS5 are
-single-round-trip point lookups; IS3/IS6/IS7 chain up to 3 sequential
-round trips; IS2 (`typegraph-queries.ts`'s `IS2` function) is a friend
-list, two parallel top-10 queries, a merge, then — for each of the ~10
-resulting messages, one at a time — a recursive root-walk and an author
-lookup, up to ~21 sequential round trips for one logical "query." That's
-a deliberate readability-over-batching tradeoff, not an oversight (see
-the function's doc comment). It's why SQLite's IS1→IS2 ratio (~6,200x) is
-the *highest* of the four despite SQLite being fastest overall: its
-single-hop cost is closest to zero, so there's nothing to amortize IS2's
-~21 hops against. Postgres's *absolute* IS2 numbers are the worst in the
-table (p50 2.36s, p99 13.7s) because each of those ~21 hops pays a real
-Docker+TCP round trip, compounding serially — the concrete cost of the
-un-batched design on a networked backend.
-
-Beyond IS2: SQLite is fastest across the board by a wide margin
-(in-process, no network hop, no query-plan interpretation overhead at
-request time). LadybugDB is second-fastest and keeps tight p50→p99 ratios
-even on IS2 (322→618ms, ~1.9x) — also embedded, so no network cost, and
-none of Neo4j's tail blowups. Neo4j is slowest at the median and has the
-most extreme p99/p50 ratios of the four on almost *every* query, not just
-IS2 (IS1: 5.8→79ms, 13.6x; IS7: 6.8→86.8ms, 12.8x) — a different, more
-systemic failure mode than Postgres's IS2-specific problem, pointing at
-JVM GC pauses and/or Cypher planner variance, not investigated further
-this round. Almost every query on every engine is flagged noisy
-(CV > 25%) at 20 samples — expected, and the reason this whole doc leads
-with "not a publishable comparison yet." Row-count parity stays clean
-(7/7, all four engines) — the thing that makes any of this latency
-comparison meaningful in the first place.
+The one thing worth keeping ahead of that re-run: the *structural* reason
+IS2 will likely still dominate every engine's latency is unchanged by any
+of these fixes — it's still a top-10 selection followed by a per-message
+root-walk (batched or not), inherently more round-trip-heavy than a
+single-hop point lookup like IS1/IS4/IS5. The specific numbers that
+reasoning used to cite are gone; the shape of the explanation isn't.
 
 ## Query-latency experiment: concurrent per-message root walks (tried, reverted)
 
@@ -463,7 +451,10 @@ fixed setup costs like container startup, not row count).
 | neo4j | 5993.2 ms (includes imperative container startup + constraint/index `awaitIndexes`) |
 
 Row-count parity: 7/7 queries comparable=yes (30 persons, 5 forums, 40
-posts, 80 comments; 15 samples / 3 warmups per query).
+posts, 80 comments; 15 samples / 3 warmups per query). Re-verified after
+the IS2/IS3/IS6/IS7 fixes and the row-count-to-value-level parity
+upgrade above — all 7 queries pass **value-level** digest parity on this
+same fixture, not just row-count parity.
 
 ## Next steps
 
@@ -518,12 +509,90 @@ posts, 80 comments; 15 samples / 3 warmups per query).
       24,000-character `StandardOutputContent` cap, silently dropping
       ladybugdb's history entry). `collect()` now fetches each artifact via
       its own separate SSM command instead of one shared command's stdout.
+- [x] ~~A PR review found IS2 implements the wrong workload in all three
+      engine drivers (traverses to friends and measures messages they
+      authored; official LDBC IS2 is the given person's own messages,
+      tie-broken `messageId ASC` not the `DESC` these drivers used) — see
+      the notice at the top of this file.~~ Fixed in `typegraph-queries.ts`,
+      `neo4j.ts`, and `ladybug.ts`.
+- [x] ~~A second review round found the round-1 IS2 fix was still
+      incomplete (missing message content in TypeGraph; missing content
+      *and* author names in Neo4j/LadybugDB; id tie-breaks were
+      lexicographic — `"message:10"` before `"message:2"` — not numeric),
+      and that IS3/IS5/IS6/IS7 weren't equivalent across engines either
+      (TypeGraph's IS3 had no ordering at all; Neo4j's/LadybugDB's IS6
+      omitted forum id/title; TypeGraph's/LadybugDB's IS7 omitted reply
+      content and author names) — none of which row-count-only parity
+      could ever have caught.~~ Fixed: every query across all three
+      engines now returns exactly the official LDBC output fields,
+      correctly ordered; a shared `compareIdsAscending()` helper
+      (`engines/types.ts`) makes every id tie-break numeric-aware.
+- [x] ~~The parity gate itself only ever compared row counts, which is
+      exactly how the bugs above went undetected for as long as they
+      did.~~ Upgraded to a value-level canonical digest per row
+      (`SnbQueryResult.digest`, `canonicalDigest()` in `engines/types.ts`,
+      `harness/parity.ts`). Verified on the smoke fixture: this
+      immediately caught one more real bug (TypeGraph's IS3 digest used
+      field name `personId`, Neo4j/LadybugDB used `id` — same values,
+      incomparable digests) before landing at all 7 queries passing true
+      value-level parity across all four engines.
+- [ ] **Re-run SF1 and SF10 with every fix above in place** and replace
+      every invalidated number/paragraph flagged in this doc. This
+      supersedes the multi-run-distribution item below in urgency —
+      there's no valid single data point yet, for any query, to build a
+      distribution from.
 - [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
-      single sample, before making any comparative claim publicly. Now the
-      main open item gating a genuinely publishable comparison — everything
-      else in this doc is a single-run data point.
+      single sample, before making any comparative claim publicly. Main
+      open item gating a genuinely publishable comparison once the re-run
+      above lands.
 - [ ] TypeGraph's `bulkInsert` has no equivalent of Neo4j's batched
       `UNWIND ... IN TRANSACTIONS` or LadybugDB's `COPY FROM` — both
       engines still load 15-60x faster than TypeGraph/SQLite even after
       the fixes above. A larger, separate investigation if pursued
       further (noted since the SF1 section; still true at SF10).
+- [x] ~~A PR review found `materializeIndexes()`'s best-effort result was
+      discarded in both SQLite and Postgres drivers — a failed or skipped
+      SNB covering index would silently produce apparently-valid timings
+      without the index the fairness label promises.~~ Fixed:
+      `assertMessageIndexMaterialized()` (`schema/snb-graph.ts`) checks the
+      result and throws if the index wasn't created or already
+      materialized; both drivers now call it.
+- [x] ~~A PR review found `collect()` (`run-sf1-ec2.ts`) extracted the
+      benchmark's exit code but never checked it — a failed `--check` run
+      (e.g. a genuine row-count-parity mismatch) that still produced
+      partial results.json collected as a successful local command with
+      exit code 0.~~ Fixed: artifact collection stays best-effort and
+      unconditional, but `collect()` now throws (after writing whatever
+      partial artifacts exist) when the SSM status isn't `Success`, the
+      exit-code marker is missing, or the exit code is nonzero.
+- [x] ~~A PR review found `--profile=sf10` always defaulted to
+      `c7i.4xlarge` regardless of profile — the same instance type that
+      OOM'd on four separate SF10 attempts before `r7i.4xlarge` was found
+      to be required.~~ Fixed: the default is now profile-aware
+      (`DEFAULT_INSTANCE_TYPE_BY_PROFILE`), defaulting `sf10` to
+      `r7i.4xlarge`; `--instance-type` still overrides it explicitly.
+- [x] ~~A PR review found Neo4j's `snb_post_id`/`snb_comment_id`
+      uniqueness constraints have no current query-time consumer (every
+      IS2/IS4-IS7 by-id match goes through `:Message`, not the concrete
+      label) — biasing Neo4j's measured load time against write-time cost
+      with zero query-time benefit.~~ Removed; `snb_message_id` alone
+      covers every current by-id lookup. (They were a real, separate
+      necessity for the retired batched-Cypher load path's edge-wiring,
+      which no longer exists — the offline `neo4j-admin` importer never
+      issues a Cypher `MATCH`.)
+- [x] ~~A second review round found a successful SSM command with no
+      results could still report success (`resultsText === "{}"` wasn't
+      part of `collect()`'s failure predicate).~~ Fixed: `!hasParseableResults`
+      added to the failure check.
+- [x] ~~Failed runs could contaminate canonical history — `reports/
+      history.jsonl` was appended before the run's success was
+      validated.~~ Fixed: raw history lines are always preserved locally
+      (run-scoped) for post-mortem; the canonical file is only appended
+      after every success condition passes.
+- [x] ~~Four smoke-test history rows this session accidentally generated
+      recorded a git SHA that didn't actually contain the uncommitted
+      fixes producing them.~~ Reverted, not committed.
+- [x] ~~Neo4j's fairness label still described the just-removed Post/
+      Comment constraints, and this doc's top notice claimed Neo4j's load
+      time was unaffected by the constraint-removal fix when constraint
+      creation actually runs inside its timed `load()`.~~ Both fixed.
