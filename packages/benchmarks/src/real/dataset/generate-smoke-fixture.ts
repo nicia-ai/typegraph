@@ -12,6 +12,17 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  COMMENT_COUNT,
+  FORUM_COUNT,
+  KNOWS_PER_PERSON,
+  PERSON_COUNT,
+  POST_COUNT,
+  TIE_CLUSTER_FIRST_MESSAGE_ID,
+  TIE_CLUSTER_PERSON_ID,
+  TIE_CLUSTER_SIZE,
+} from "./smoke-fixture-constants";
+
 const FIXTURE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -21,14 +32,9 @@ const FIXTURE_ROOT = path.resolve(
   "ldbc-snb-smoke",
 );
 
-const PERSON_COUNT = 30;
-const KNOWS_PER_PERSON = 4;
-const FORUM_COUNT = 5;
-const POST_COUNT = 40;
-const COMMENT_COUNT = 80;
-
 const BASE_MILLIS = Date.UTC(2024, 0, 1);
 const DAY_MILLIS = 86_400_000;
+const TIE_CLUSTER_CREATION_DATE = BASE_MILLIS - 500 * DAY_MILLIS;
 
 /** xorshift32 PRNG, matching the request-plan sampler's generator. */
 function createRng(seed_: number): () => number {
@@ -197,6 +203,41 @@ async function main(): Promise<void> {
     }
   }
 
+  // Deliberately adversarial (see smoke-fixture-constants.ts's doc): every
+  // field below is hardcoded, not drawn from `random()`/`below()`, so this
+  // block can't perturb any of the existing rows' deterministic values —
+  // it only adds new ones. One dedicated person authors TIE_CLUSTER_SIZE
+  // comments that all share the exact same creationDate, replying to the
+  // same post; ascending message id is the only remaining tie-break.
+  person.rows.push(
+    [
+      TIE_CLUSTER_PERSON_ID,
+      "TieCluster",
+      "Person",
+      "male",
+      BASE_MILLIS - 20_000 * DAY_MILLIS,
+      BASE_MILLIS - 400 * DAY_MILLIS,
+      "10.0.255.255",
+      "Chrome",
+    ].join("|"),
+  );
+  personIsLocatedInPlace.rows.push([TIE_CLUSTER_PERSON_ID, 0].join("|"));
+  for (let index = 0; index < TIE_CLUSTER_SIZE; index += 1) {
+    const id = TIE_CLUSTER_FIRST_MESSAGE_ID + index;
+    comment.rows.push(
+      [
+        id,
+        TIE_CLUSTER_CREATION_DATE,
+        "10.2.255.255",
+        "Firefox",
+        `tie-cluster comment content ${id}`,
+        15,
+      ].join("|"),
+    );
+    commentHasCreatorPerson.rows.push([id, TIE_CLUSTER_PERSON_ID].join("|"));
+    commentReplyOfPost.rows.push([id, 0].join("|"));
+  }
+
   await Promise.all(
     [
       person,
@@ -215,9 +256,11 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `Wrote smoke fixture to ${FIXTURE_ROOT}: ${PERSON_COUNT} persons, ` +
+    `Wrote smoke fixture to ${FIXTURE_ROOT}: ${PERSON_COUNT + 1} persons, ` +
       `${knowsPairs.size * 2} directed knows edges, ${FORUM_COUNT} forums, ` +
-      `${POST_COUNT} posts, ${COMMENT_COUNT} comments.`,
+      `${POST_COUNT} posts, ${COMMENT_COUNT + TIE_CLUSTER_SIZE} comments ` +
+      `(including a ${TIE_CLUSTER_SIZE}-comment same-creationDate tie ` +
+      `cluster authored by person ${TIE_CLUSTER_PERSON_ID}).`,
   );
 }
 

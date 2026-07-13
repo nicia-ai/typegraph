@@ -54,6 +54,8 @@
     "bench:snb:sf1:ec2": "tsx src/real/ec2/run-sf1-ec2.ts launch",
     "bench:snb:sf1:ec2:collect": "tsx src/real/ec2/run-sf1-ec2.ts collect",
     "bench:snb:generate-smoke-fixture": "tsx src/real/dataset/generate-smoke-fixture.ts",
+    "prebench:snb:verify-is2-tie-break": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:snb:verify-is2-tie-break": "tsx src/real/verify-is2-tie-break.ts",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {

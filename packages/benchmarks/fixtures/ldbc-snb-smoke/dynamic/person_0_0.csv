@@ -29,3 +29,4 @@ id|firstName|lastName|gender|birthday|creationDate|locationIP|browserUsed
 27|First27|Last27|female|-43804800000|1700611200000|10.0.27.240|Chrome
 28|First28|Last28|male|-62294400000|1685836800000|10.0.28.17|Firefox
 29|First29|Last29|female|-434592000000|1695427200000|10.0.29.203|Safari
+30|TieCluster|Person|male|-23932800000|1669507200000|10.0.255.255|Chrome
