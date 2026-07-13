@@ -18,7 +18,7 @@ import {
   KNOWS_PER_PERSON,
   PERSON_COUNT,
   POST_COUNT,
-  TIE_CLUSTER_FIRST_MESSAGE_ID,
+  TIE_CLUSTER_MESSAGE_IDS,
   TIE_CLUSTER_PERSON_ID,
   TIE_CLUSTER_SIZE,
 } from "./smoke-fixture-constants";
@@ -222,8 +222,7 @@ async function main(): Promise<void> {
     ].join("|"),
   );
   personIsLocatedInPlace.rows.push([TIE_CLUSTER_PERSON_ID, 0].join("|"));
-  for (let index = 0; index < TIE_CLUSTER_SIZE; index += 1) {
-    const id = TIE_CLUSTER_FIRST_MESSAGE_ID + index;
+  for (const id of TIE_CLUSTER_MESSAGE_IDS) {
     comment.rows.push(
       [
         id,

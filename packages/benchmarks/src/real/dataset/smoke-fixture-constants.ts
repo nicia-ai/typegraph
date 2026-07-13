@@ -33,5 +33,43 @@ if (TIE_CLUSTER_PERSON_ID !== PERSON_COUNT) {
     `TIE_CLUSTER_PERSON_ID (${TIE_CLUSTER_PERSON_ID}) must equal PERSON_COUNT (${PERSON_COUNT}) — update both together.`,
   );
 }
-export const TIE_CLUSTER_SIZE = 25;
-export const TIE_CLUSTER_FIRST_MESSAGE_ID = POST_COUNT + COMMENT_COUNT;
+/**
+ * Two disjoint id blocks of *different digit widths*, not one contiguous
+ * range — a contiguous range starting at TIE_CLUSTER_LOW_BLOCK.start (all
+ * 3-digit ids, e.g. 120..144) would make unpadded lexicographic order and
+ * numeric order coincide by construction (same-length numeral strings
+ * always compare identically both ways), so the oracle would pass whether
+ * or not dataset/ldbc-csv.ts's zero-padding fix is actually in place —
+ * catching nothing. With a 3-digit block (120..129) and a 4-digit block
+ * (1000..1014), unpadded lexicographic order ranks every 4-digit id ahead
+ * of every 3-digit one ("1000" < "120" character-by-character) — the
+ * wrong answer, which only zero-padding corrects.
+ */
+const TIE_CLUSTER_LOW_BLOCK = {
+  start: POST_COUNT + COMMENT_COUNT,
+  count: 10,
+};
+const TIE_CLUSTER_HIGH_BLOCK = { start: 1000, count: 15 };
+if (
+  TIE_CLUSTER_LOW_BLOCK.start + TIE_CLUSTER_LOW_BLOCK.count >
+  TIE_CLUSTER_HIGH_BLOCK.start
+) {
+  throw new Error(
+    "TIE_CLUSTER_LOW_BLOCK and TIE_CLUSTER_HIGH_BLOCK overlap — update the block bounds.",
+  );
+}
+export const TIE_CLUSTER_SIZE =
+  TIE_CLUSTER_LOW_BLOCK.count + TIE_CLUSTER_HIGH_BLOCK.count;
+
+function blockIds(block: Readonly<{ start: number; count: number }>): number[] {
+  return Array.from(
+    { length: block.count },
+    (_unused, index) => block.start + index,
+  );
+}
+
+/** Every tie-cluster message id, across both blocks — the input the true top-10 answer is computed from. */
+export const TIE_CLUSTER_MESSAGE_IDS: readonly number[] = [
+  ...blockIds(TIE_CLUSTER_LOW_BLOCK),
+  ...blockIds(TIE_CLUSTER_HIGH_BLOCK),
+];

@@ -7,13 +7,18 @@
  * didn't catch them (see reports/snb-lane1-results.md's IS2 saga).
  *
  * The committed smoke fixture's dedicated tie-cluster person
- * (dataset/smoke-fixture-constants.ts) authors TIE_CLUSTER_SIZE comments
- * that all share one creationDate, replying to the same post — with no
- * other tie-breaking signal but ascending message id, that person's exact
- * correct IS2 answer (the cluster's 10 smallest message ids, in ascending
- * order) is known in advance. This checks each doctor-runnable engine's
- * actual result against that known answer directly, not against the other
- * engines.
+ * (dataset/smoke-fixture-constants.ts) authors comments spanning
+ * TIE_CLUSTER_LOW_BLOCK (3-digit ids) and TIE_CLUSTER_HIGH_BLOCK (4-digit
+ * ids), all sharing one creationDate and replying to the same post — with
+ * no other tie-breaking signal but ascending message id, that person's
+ * exact correct IS2 answer (the 10 numerically smallest message ids
+ * across both blocks, in ascending order) is known in advance. The two
+ * different digit widths matter: a single contiguous range of same-length
+ * ids would make unpadded lexicographic order and numeric order coincide
+ * by construction, so this check would pass whether or not
+ * dataset/ldbc-csv.ts's zero-padding fix is actually applied. This checks
+ * each doctor-runnable engine's actual result against the true numeric
+ * answer directly, not against the other engines.
  *
  * Usage: tsx src/real/verify-is2-tie-break.ts [--engines=a,b,c]
  */
@@ -21,7 +26,7 @@ import { parseSnbCliOptions } from "./cli";
 import { messageId, personId } from "./dataset/ldbc-csv";
 import { resolveDatasetRoot } from "./dataset/resolve";
 import {
-  TIE_CLUSTER_FIRST_MESSAGE_ID,
+  TIE_CLUSTER_MESSAGE_IDS,
   TIE_CLUSTER_PERSON_ID,
 } from "./dataset/smoke-fixture-constants";
 import { createLadybugEngine } from "./engines/ladybug";
@@ -38,9 +43,13 @@ const ENGINE_FACTORIES: Readonly<Record<SnbEngineName, SnbEngineFactory>> = {
   ladybugdb: createLadybugEngine,
 };
 
-const EXPECTED_TOP_10 = Array.from({ length: 10 }, (_unused, index) =>
-  messageId(String(TIE_CLUSTER_FIRST_MESSAGE_ID + index)),
-);
+// The true answer, derived numerically from the full candidate set — not
+// assumed from a contiguous range — so this stays correct regardless of
+// how the two blocks are shaped.
+const EXPECTED_TOP_10 = [...TIE_CLUSTER_MESSAGE_IDS]
+  .sort((left, right) => left - right)
+  .slice(0, 10)
+  .map((id) => messageId(String(id)));
 
 /** IS2's digest is `JSON.stringify` of its canonical rows (see canonicalDigest) — decoding it back out is the only way to inspect which messages an engine actually picked, without adding a raw-rows accessor to the engine API just for this check. */
 function messageIdsFromDigest(digest: string): readonly string[] {
