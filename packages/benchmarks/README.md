@@ -8,12 +8,12 @@ Two benchmark programs live in this package:
   before/after comparisons during development.
 - **`src/real/`** — the real-workload benchmark program described below:
   industry-standard datasets and queries, run against TypeGraph and named
-  competitors, with a fairness harness (row-count parity, noisy-sample
-  detection, a competitor doctor, and a `summary.json` per run). This
-  supersedes `neo4j-compare/` (a 7.2k-node microbenchmark) for anything
-  beyond order-of-magnitude anchors — see that directory's README for what
-  it still remains useful for (a same-machine two-command sanity check with
-  no dataset to fetch).
+  competitors, with a fairness harness (row-count + value-level digest
+  parity, noisy-sample detection, a competitor doctor, and a
+  `summary.json` per run). This supersedes `neo4j-compare/` (a 7.2k-node
+  microbenchmark) for anything beyond order-of-magnitude anchors — see
+  that directory's README for what it still remains useful for (a
+  same-machine two-command sanity check with no dataset to fetch).
 
 The full program design lives in `docs/design/benchmark-program-plan.md`
 (gitignored, local to the repo checkout that approved it).
@@ -22,9 +22,20 @@ The full program design lives in `docs/design/benchmark-program-plan.md`
 
 ### Lane 1 — LDBC SNB Interactive short reads (IS1-IS7)
 
-The headline lane: the official LDBC Social Network Benchmark's seven
-short-read queries (point reads, neighbor lists, reply-chain walks) — the
-closest standard workload to TypeGraph's operational profile.
+The headline lane: LDBC SNB Interactive's seven short-read queries (point
+reads, neighbor lists, reply-chain walks), adapted to this schema — the
+closest standard workload to TypeGraph's operational profile. Every
+query's output fields and result ordering match the official LDBC
+reference implementation (verified against
+`ldbc/ldbc_snb_interactive_v1_impls`) — but the schema itself
+deliberately flattens two relationships the official schema models as
+edges into plain properties instead: `Person.cityId` (official IS1
+traverses `IS_LOCATED_IN` to a `City` node; this schema has no `City`
+node at all) and `Forum.moderatorId` (official IS6 traverses
+`HAS_MODERATOR`; see `src/real/schema/snb-graph.ts`'s module doc for why).
+Both are simplifications applied identically across all four engines, not
+a TypeGraph-specific shortcut — call this lane "LDBC SNB-derived," not a
+claim of full official schema conformance.
 
 **Engines** (docs/design/benchmark-program-plan.md's fair pairings):
 
@@ -56,15 +67,18 @@ pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:doctor
 # runnable in CI regardless of Docker/optional-package availability
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke
 
-# Same, but exits non-zero on a genuine row-count mismatch between 2+
-# engines that ran (the CI-safe form: 0 or 1 runnable engines still exits 0)
+# Same, but exits non-zero on a genuine parity mismatch (row count or
+# value digest) between 2+ engines that ran (the CI-safe form: 0 or 1
+# runnable engines still exits 0)
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke:check
 
 # Real LDBC SF1 (~9.9k persons, ~361k knows (directed), ~1M posts, ~2.05M
-# comments). Takes 1-2 hours on typical hardware (TypeGraph/SQLite and
-# TypeGraph/Postgres each load in ~75-80 minutes; Neo4j ~5 minutes;
-# LadybugDB under a minute — see reports/snb-lane1-results.md for a real
-# run's numbers and why the load times differ this much across engines).
+# comments). Takes under an hour on typical hardware (TypeGraph/SQLite
+# ~40 minutes, TypeGraph/Postgres ~12 minutes, Neo4j ~5 minutes, LadybugDB
+# under a minute, as of the most recent real run — see
+# reports/snb-lane1-results.md for the numbers and why the load times
+# differ this much across engines; that doc is the canonical source, this
+# README's numbers can drift).
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:sf1
 
 # Or run it on a dedicated ephemeral EC2 instance instead of local
@@ -101,7 +115,7 @@ gitignored).
 
 - `bench-results/current/snb-<profile>/results.json` — per-query,
   per-engine latency stats (p50/p95/p99/mean/CV, flagged noisy above 25%
-  CV) plus the row-count parity verdict.
+  CV) plus the parity verdict (row count and value digest).
 - `bench-results/current/snb-<profile>/summary.json` — exact commands,
   engine versions, dataset parameters, hardware, git commit.
 - `bench-results/current/snb-<profile>/competitor-doctor.json` — which
@@ -110,16 +124,22 @@ gitignored).
   `snb:IS1`..`snb:IS7`, alongside the synthetic suite's rows in the same
   file.
 
-#### Row-count parity gate
+#### Parity gate
 
 Every engine executes the identical seeded request sequence (same sampled
-person/message ids, same order), so per-request row counts are directly
+person/message ids, same order), so per-request results are directly
 comparable index-for-index. A query is "comparable" only when every engine
-that ran returned the same result-set size for every sampled request — see
-`src/real/harness/parity.ts`. `--check` turns a genuine mismatch (2+
-engines disagreeing) into a non-zero exit; it never fires when fewer than
-2 engines ran, so a no-Docker CI environment (only the two embedded
-engines runnable) still exits 0.
+that ran agrees on **both** the result-set size (row count) **and** a
+canonical value digest built from the query's actual LDBC-defined output
+fields (message content, names, ids, ordering — not just how many rows
+came back) — see `src/real/harness/parity.ts`'s `evaluateParity()` and
+`src/real/engines/types.ts`'s `canonicalDigest()`. Row-count agreement
+alone previously let a real semantic bug (all four engines measuring the
+wrong IS2 workload) go undetected for as long as it did, which is why the
+gate compares values now, not just counts. `--check` turns a genuine
+mismatch (2+ engines disagreeing, on either signal) into a non-zero exit;
+it never fires when fewer than 2 engines ran, so a no-Docker CI
+environment (only the two embedded engines runnable) still exits 0.
 
 #### Competitor doctor
 

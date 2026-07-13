@@ -1,9 +1,10 @@
 /**
  * Builds the fixed request sequence every engine executes for a given IS
  * query. Generating the sample ids ONCE (not per engine) and replaying the
- * identical sequence against each engine is what makes per-request
- * row-count comparison meaningful (see harness/parity.ts) — every engine
- * sees the same person/message id at request index N.
+ * identical sequence against each engine is what makes per-request parity
+ * comparison — row count and value digest alike (see harness/parity.ts) —
+ * meaningful: every engine sees the same person/message id at request
+ * index N.
  */
 import { type SnbIdPools } from "./dataset/ldbc-csv";
 import { type MessageRef } from "./engines/types";

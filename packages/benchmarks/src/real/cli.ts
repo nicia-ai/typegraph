@@ -16,7 +16,7 @@ export type SnbCliOptions = Readonly<{
   warmupRequests: number;
   seed: number;
   outputDir: string;
-  /** Exit non-zero on a genuine row-count mismatch between 2+ engines that ran. */
+  /** Exit non-zero on a genuine parity mismatch (row count or value digest) between 2+ engines that ran. */
   runChecks: boolean;
 }>;
 

@@ -347,7 +347,7 @@ async function main(argv: readonly string[]): Promise<void> {
     });
   }
 
-  console.log("\n=== Row-count parity ===");
+  console.log("\n=== Parity (row count + value digest) ===");
   const mismatches: string[] = [];
   for (const queryId of IS_QUERY_IDS) {
     const [first] = resultsByQuery[queryId];
@@ -357,10 +357,12 @@ async function main(argv: readonly string[]): Promise<void> {
       `  ${queryId}: comparable=${comparable ? "yes" : "no"}${reason === undefined ? "" : ` (${reason})`}`,
     );
     // Every engine that ran executed all 7 queries, so `runs.length >= 2`
-    // guarantees evaluateParity had 2+ engines' row counts to compare —
+    // guarantees evaluateParity had 2+ engines' outcomes to compare —
     // `!comparable` here is a genuine mismatch, never "not enough data".
+    // evaluateParity() always sets `reason` on a mismatch (see
+    // harness/parity.ts) — this fallback is defensive, not expected to fire.
     if (runs.length >= 2 && !comparable) {
-      mismatches.push(`${queryId}: ${reason ?? "row-count mismatch"}`);
+      mismatches.push(`${queryId}: ${reason ?? "parity mismatch"}`);
     }
   }
 
@@ -403,10 +405,10 @@ async function main(argv: readonly string[]): Promise<void> {
   // A doctor-runnable engine that then failed mid-run is a real regression
   // signal (unlike "not runnable", which is expected in a no-Docker CI
   // environment and must stay green) — --check treats it the same as a
-  // genuine row-count mismatch.
+  // genuine parity mismatch.
   if (options.runChecks && (mismatches.length > 0 || failures.length > 0)) {
     if (mismatches.length > 0) {
-      console.error("\nRow-count mismatches between engines:");
+      console.error("\nParity mismatches between engines:");
       for (const mismatch of mismatches) {
         console.error(`  ${mismatch}`);
       }

@@ -92,7 +92,8 @@ Full machine-readable detail:
 
 TypeGraph's SQLite/Postgres backends are still slower to *load* at this
 scale than Neo4j or LadybugDB — both of the latter use engine-native bulk
-paths (Neo4j's batched `UNWIND ... IN TRANSACTIONS OF 5000 ROWS`, Ladybug's
+paths (Neo4j's offline `neo4j-admin database import full`, which replaced
+an earlier batched-Cypher `UNWIND ... IN TRANSACTIONS` loader; Ladybug's
 `COPY FROM`), while TypeGraph's backends go through the general-purpose
 `bulkInsert` API — but both improved substantially since the first SF1 run
 (sqlite 74.2 min → 40.1 min, ~1.85x; postgres 80.9 min → 11.6 min, ~7x),
@@ -468,8 +469,9 @@ same fixture, not just row-count parity.
       #227) plus tuned this benchmark's loader batch size — cut sqlite
       load ~1.85x and postgres ~7x. Neo4j/LadybugDB's engine-native bulk
       paths remain faster still; TypeGraph's `bulkInsert` has no
-      equivalent of `COPY FROM` or `UNWIND ... IN TRANSACTIONS`, which
-      is a larger, separate investigation if pursued further.
+      equivalent of Ladybug's `COPY FROM` or Neo4j's offline
+      `neo4j-admin database import`, which is a larger, separate
+      investigation if pursued further.
 - [x] ~~Re-run the full SF1 EC2 benchmark to capture clean, comparable
       numbers.~~ Done — see above (also used to test and correctly
       reject the concurrent-root-walk experiment).
@@ -545,8 +547,8 @@ same fixture, not just row-count parity.
       single sample, before making any comparative claim publicly. Main
       open item gating a genuinely publishable comparison once the re-run
       above lands.
-- [ ] TypeGraph's `bulkInsert` has no equivalent of Neo4j's batched
-      `UNWIND ... IN TRANSACTIONS` or LadybugDB's `COPY FROM` — both
+- [ ] TypeGraph's `bulkInsert` has no equivalent of Neo4j's offline
+      `neo4j-admin database import` or LadybugDB's `COPY FROM` — both
       engines still load 15-60x faster than TypeGraph/SQLite even after
       the fixes above. A larger, separate investigation if pursued
       further (noted since the SF1 section; still true at SF10).
