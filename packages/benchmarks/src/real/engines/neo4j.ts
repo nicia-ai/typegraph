@@ -111,6 +111,8 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import {
+  canonicalDigest,
+  compareIdsAscending,
   type MessageRef,
   type SnbEngineFactory,
   type SnbEngineHandle,
@@ -134,6 +136,13 @@ const CONTAINER_POLL_INTERVAL_MS = 1_000;
 
 const ROOT_WALK_MAX_HOPS = 100;
 const IS2_MESSAGE_LIMIT = 10;
+// Cypher's `ORDER BY m.id ASC` tie-break is a plain string compare on this
+// benchmark's kind-prefixed ids (e.g. "message:10" sorts before
+// "message:2") — see `compareIdsAscending`'s doc. Fetching more than the
+// official top-10 cutoff and re-sorting/trimming in JS with that
+// numeric-aware comparator (below) means an exact-creationDate tie can't
+// silently exclude a message that belongs in the true top 10.
+const IS2_CANDIDATE_LIMIT = 20;
 
 // ---- Memory sizing ----
 
@@ -348,39 +357,37 @@ async function waitForNeo4jBolt(
 }
 
 /**
- * Unique constraints on Person/Message/Post/Comment/Forum(id), awaited
- * ONLINE right after the server starts — but AFTER every node and
- * relationship is already in place, unlike the retired batched-Cypher load
- * path this replaced. The offline `neo4j-admin database import` (module doc
- * / `runNeo4jAdminImport` below) resolves every relationship against its own
- * id index at import time, never via a Cypher `MATCH`, so these constraints
- * aren't needed to avoid a load-time label-scan the way they used to be.
- * They're still required here so IS1-IS7's by-id lookups below are
- * index-backed at query time, matching the pk btrees the SQL-backed engines
- * get (same-index fairness, docs/design/benchmark-program-plan.md).
+ * Unique constraints on Person/Message/Forum(id), awaited ONLINE right
+ * after the server starts — but AFTER every node and relationship is
+ * already in place, unlike the retired batched-Cypher load path this
+ * replaced. The offline `neo4j-admin database import` (module doc /
+ * `runNeo4jAdminImport` below) resolves every relationship against its own
+ * id index at import time, never via a Cypher `MATCH`, so these
+ * constraints aren't needed to avoid a load-time label-scan the way they
+ * used to be. They're still required here so IS1-IS7's by-id lookups below
+ * are index-backed at query time, matching the pk btrees the SQL-backed
+ * engines get (same-index fairness, docs/design/benchmark-program-plan.md).
  *
- * No `Message(creationDate)` index: a prior version created one, but a
- * dedicated query-plan audit (`PROFILE` against every IS1-IS7 query at real
- * scale) confirmed it's never chosen by any of them — every message access
- * goes through the `Message(id)`/`Post(id)`/`Comment(id)` uniqueness
- * constraints, since IS2's "recent messages" ordering happens over an
- * already-small, already-fetched candidate set, not as an index-driven scan.
- * Keeping an unused index would only add write-time cost during the load
- * with zero query-time benefit, which is exactly the kind of asymmetry a
- * fair comparison shouldn't carry.
+ * No `Post(id)`/`Comment(id)` constraints: an earlier version created
+ * them, on the theory that Neo4j's schema indexes are scoped to one label
+ * each (never inherited across a multi-label node's other labels) and
+ * IS4-IS7's by-id lookups needed a concrete-label seek. Checking the
+ * actual query code below shows every one of IS2/IS4/IS5/IS6/IS7's by-id
+ * matches goes through `:Message` — none matches `:Post`/`:Comment`
+ * directly — so `snb_message_id` alone already covers every current
+ * query-time consumer; the extra constraints only added write-time cost
+ * during the load with zero query-time benefit, exactly the kind of
+ * asymmetry a fair comparison shouldn't carry. (Post/Comment-scoped
+ * constraints were a real, separate necessity for the *load-time*
+ * `containerOf`/`replyOf` edge-wiring in the old batched-Cypher load path,
+ * whose `MATCH`es did filter on the concrete label — but that path is
+ * retired; the offline importer never issues a Cypher `MATCH` at all.)
  *
- * Post and Comment BOTH need their own constraint even though every Post/
- * Comment node also carries `:Message`: Neo4j's schema indexes are scoped
- * to one label each, never inherited across the other labels a multi-label
- * node happens to carry. Discovered the hard way against the old load path
- * — its `containerOf`/`replyOf` edge-wiring steps MATCHed by id filtered on
- * the concrete `:Post`/`:Comment` label (not `:Message`), and without a
- * label-specific index those MATCHes silently fell back to a full label
- * scan per row: a 5,000-row batch against SF1's ~1M Post nodes turned one
- * `containerOf` batch into billions of comparisons and multi-hour hangs.
- * The offline importer has no such failure mode (it never issues a Cypher
- * MATCH), but IS4-IS7's own by-id `MATCH`es below would hit the identical
- * label-scan trap without these same constraints, so they stay.
+ * No `Message(creationDate)` index either: a dedicated query-plan audit
+ * (`PROFILE` against every IS1-IS7 query at real scale) confirmed it's
+ * never chosen by any of them, including IS2 — its "recent messages"
+ * ordering happens over an already-small, already-fetched per-person
+ * candidate set, not as an index-driven scan.
  */
 async function ensureSchema(session: Session): Promise<void> {
   await session.run(
@@ -388,12 +395,6 @@ async function ensureSchema(session: Session): Promise<void> {
   );
   await session.run(
     "CREATE CONSTRAINT snb_message_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
-  );
-  await session.run(
-    "CREATE CONSTRAINT snb_post_id IF NOT EXISTS FOR (post:Post) REQUIRE post.id IS UNIQUE",
-  );
-  await session.run(
-    "CREATE CONSTRAINT snb_comment_id IF NOT EXISTS FOR (c:Comment) REQUIRE c.id IS UNIQUE",
   );
   await session.run(
     "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
@@ -688,66 +689,108 @@ async function runRows<Row extends Record<string, unknown>>(
  */
 function createNeo4jQueries(getSession: () => Session): SnbQueries {
   async function IS1(personId: string) {
-    const rows = await runRows<{ id: string }>(
+    const rows = await runRows<{
+      firstName: string;
+      lastName: string;
+      birthday: string;
+      locationIp: string;
+      browserUsed: string;
+      cityId: string;
+      gender: string;
+      creationDate: string;
+    }>(
       getSession(),
       `MATCH (p:Person {id: $id})
-       RETURN p.id AS id, p.firstName AS firstName, p.lastName AS lastName, p.birthday AS birthday,
+       RETURN p.firstName AS firstName, p.lastName AS lastName, p.birthday AS birthday,
               p.locationIp AS locationIp, p.browserUsed AS browserUsed, p.cityId AS cityId,
               p.gender AS gender, p.creationDate AS creationDate`,
       { id: personId },
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
-  // Real LDBC IS2: friend frontier, then the merged top-10 (:Message covers
-  // both Post and Comment) authored by those friends, then the root post +
-  // root author of each of those 10 messages — required for realistic
-  // timing but excluded from rowCount.
+  // Official LDBC IS2: the given person's own last 10 messages (:Message
+  // covers both Post and Comment), tie-broken creationDate DESC / id ASC,
+  // then the root post + root author of each of those 10 messages.
+  // Previously this traversed to friends first and measured messages
+  // *they* authored — a materially different (and heavier) workload than
+  // the official query, which reads directly off the given person.
   async function IS2(personId: string) {
     const session = getSession();
-    const friends = await runRows<{ id: string }>(
+    const candidates = await runRows<{
+      id: string;
+      content: string;
+      creationDate: string;
+    }>(
       session,
-      // CYPHER 5: the default (25) planner compiles this equality-matched-
-      // node-then-Expand shape to a full NodeIndexScan + Filter instead of a
-      // NodeUniqueIndexSeek (confirmed via PROFILE) — a real, previously
-      // undiscovered planner regression for this exact pattern, not a
-      // missing index. Pinning the legacy language version restores the
-      // seek. Same fix applied to IS3 and IS7's knows-check below, which
-      // share the identical `MATCH (:Person {id: $id})-[:KNOWS]->` shape.
+      // CYPHER 5: see IS3/IS7's identical fix below — this is the same
+      // equality-matched-node-then-Expand shape (`MATCH (:Person {id})<-...`)
+      // that the default planner compiles to a full scan instead of a
+      // NodeUniqueIndexSeek; pinning the legacy language version restores
+      // the seek (verify via PROFILE against a real instance).
       `CYPHER 5
-       MATCH (:Person {id: $id})-[:KNOWS]->(friend:Person) RETURN friend.id AS id`,
+       MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(m:Message)
+       RETURN m.id AS id, m.content AS content, m.creationDate AS creationDate
+       ORDER BY m.creationDate DESC, m.id ASC
+       LIMIT ${IS2_CANDIDATE_LIMIT}`,
       { id: personId },
     );
-    const friendIds = friends.map((row) => row.id);
-    if (friendIds.length === 0) return { rowCount: 0 };
 
-    const recent = await runRows<{ id: string }>(
-      session,
-      `MATCH (friend:Person)<-[:HAS_CREATOR]-(m:Message)
-       WHERE friend.id IN $friendIds
-       RETURN m.id AS id
-       ORDER BY m.creationDate DESC, m.id DESC
-       LIMIT ${IS2_MESSAGE_LIMIT}`,
-      { friendIds },
-    );
+    // Final row order/count is re-derived with a numeric-aware id
+    // comparator (see compareIdsAscending's doc) instead of trusting the
+    // Cypher ORDER BY's own plain-string id tie-break, so this engine's
+    // digest is comparable against the others regardless of what its own
+    // native ordering did on a tie.
+    const top10 = candidates
+      .toSorted(
+        (left, right) =>
+          right.creationDate.localeCompare(left.creationDate) ||
+          compareIdsAscending(left.id, right.id),
+      )
+      .slice(0, IS2_MESSAGE_LIMIT);
 
-    for (const message of recent) {
-      await runRows<{ rootId: string; authorId: string }>(
+    const canonicalRows = [];
+    for (const message of top10) {
+      const rootRows = await runRows<{
+        rootId: string;
+        authorId: string;
+        authorFirstName: string;
+        authorLastName: string;
+      }>(
         session,
         `MATCH (m:Message {id: $id})
          OPTIONAL MATCH (m)-[:REPLY_OF*1..${ROOT_WALK_MAX_HOPS}]->(rootAncestor:Post)
          WITH coalesce(rootAncestor, m) AS root
          MATCH (root)-[:HAS_CREATOR]->(author:Person)
-         RETURN root.id AS rootId, author.id AS authorId`,
+         RETURN root.id AS rootId, author.id AS authorId,
+                author.firstName AS authorFirstName, author.lastName AS authorLastName`,
         { id: message.id },
       );
+      const root = rootRows[0];
+      canonicalRows.push({
+        messageId: message.id,
+        content: message.content,
+        creationDate: message.creationDate,
+        postId: root?.rootId,
+        personId: root?.authorId,
+        firstName: root?.authorFirstName,
+        lastName: root?.authorLastName,
+      });
     }
 
-    return { rowCount: recent.length };
+    return {
+      rowCount: top10.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   async function IS3(personId: string) {
-    const rows = await runRows<{ id: string }>(
+    const rows = await runRows<{
+      id: string;
+      firstName: string;
+      lastName: string;
+      since: string;
+    }>(
       getSession(),
       // CYPHER 5: see IS2's identical fix above — same equality-matched-node-
       // then-Expand shape, same planner regression, same restored seek.
@@ -758,7 +801,29 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
        ORDER BY since DESC, friend.id ASC`,
       { id: personId },
     );
-    return { rowCount: rows.length };
+    // Cypher's own id tie-break above is a plain string compare on this
+    // benchmark's prefixed ids; re-sorted here with a numeric-aware
+    // comparator (see compareIdsAscending's doc) so this engine's digest is
+    // comparable against the others regardless of what its own native
+    // ordering did on a tie. Canonical field is `personId` (matching the
+    // official LDBC output name and every other engine's digest), not this
+    // query's own `id` alias.
+    const canonicalRows = rows
+      .toSorted(
+        (left, right) =>
+          right.since.localeCompare(left.since) ||
+          compareIdsAscending(left.id, right.id),
+      )
+      .map((row) => ({
+        personId: row.id,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        since: row.since,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   async function IS4(message: MessageRef) {
@@ -767,7 +832,7 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
       "MATCH (m:Message {id: $id}) RETURN m.content AS content, m.creationDate AS creationDate",
       { id: message.id },
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS5(message: MessageRef) {
@@ -781,11 +846,13 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
        RETURN author.id AS id, author.firstName AS firstName, author.lastName AS lastName`,
       { id: message.id },
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS6(message: MessageRef) {
     const rows = await runRows<{
+      forumId: string;
+      forumTitle: string;
       id: string;
       firstName: string;
       lastName: string;
@@ -796,10 +863,24 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
        WITH coalesce(rootAncestor, m) AS root
        MATCH (f:Forum)-[:CONTAINER_OF]->(root)
        MATCH (moderator:Person {id: f.moderatorId})
-       RETURN moderator.id AS id, moderator.firstName AS firstName, moderator.lastName AS lastName`,
+       RETURN f.id AS forumId, f.title AS forumTitle,
+              moderator.id AS id, moderator.firstName AS firstName, moderator.lastName AS lastName`,
       { id: message.id },
     );
-    return { rowCount: rows.length };
+    const row = rows[0];
+    const canonicalRows =
+      row === undefined ?
+        []
+      : [
+          {
+            forumId: row.forumId,
+            forumTitle: row.forumTitle,
+            moderatorId: row.id,
+            moderatorFirstName: row.firstName,
+            moderatorLastName: row.lastName,
+          },
+        ];
+    return { rowCount: rows.length, digest: canonicalDigest(canonicalRows) };
   }
 
   async function IS7(message: MessageRef) {
@@ -829,9 +910,9 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     );
     const replyAuthorIds = [...new Set(replies.map((row) => row.authorId))];
 
-    // Not counted toward rowCount, but must actually run for realistic timing.
+    let knowsAuthorIds = new Set<string>();
     if (parentAuthorId !== undefined && replyAuthorIds.length > 0) {
-      await runRows<{ id: string }>(
+      const knowsRows = await runRows<{ id: string }>(
         session,
         // CYPHER 5: see IS2's identical fix above.
         `CYPHER 5
@@ -840,9 +921,34 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
          RETURN friend.id AS id`,
         { authorId: parentAuthorId, replyAuthorIds },
       );
+      knowsAuthorIds = new Set(knowsRows.map((row) => row.id));
     }
 
-    return { rowCount: replies.length };
+    // Cypher's own id tie-break above is a plain string compare; re-sorted
+    // here with a numeric-aware comparator (see compareIdsAscending's doc)
+    // for cross-engine digest consistency.
+    const canonicalRows = replies
+      .toSorted(
+        (left, right) =>
+          right.creationDate.localeCompare(left.creationDate) ||
+          compareIdsAscending(left.authorId, right.authorId),
+      )
+      .map((reply) => ({
+        commentId: reply.id,
+        content: reply.content,
+        creationDate: reply.creationDate,
+        replyAuthorId: reply.authorId,
+        replyAuthorFirstName: reply.firstName,
+        replyAuthorLastName: reply.lastName,
+        replyAuthorKnowsOriginalMessageAuthor: knowsAuthorIds.has(
+          reply.authorId,
+        ),
+      }));
+
+    return {
+      rowCount: replies.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
@@ -890,9 +996,11 @@ export const createNeo4jEngine: SnbEngineFactory = async (
       "bulk-load path above roughly 10M records into an empty database, " +
       "replacing the batched online `UNWIND ... IN TRANSACTIONS` writes " +
       "this driver used previously; unique constraints on Person/Message/" +
-      "Post/Comment/Forum(id), awaited ONLINE after the server starts (the " +
+      "Forum(id), awaited ONLINE after the server starts (the " +
       "offline import resolves relationships by id directly, so these " +
-      "aren't needed until IS1-IS7 query time; no Message(creationDate) " +
+      "aren't needed until IS1-IS7 query time; no Post/Comment(id) " +
+      "constraints — every by-id query below matches the shared :Message " +
+      "label, so Message(id) alone already covers them; no Message(creationDate) " +
       "index — a query-plan audit confirmed it's never used); heap/page-" +
       "cache sized from the memory actually visible " +
       "to the Docker daemon via `neo4j-admin server memory-recommendation` " +

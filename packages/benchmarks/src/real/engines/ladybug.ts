@@ -56,6 +56,8 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import {
+  canonicalDigest,
+  compareIdsAscending,
   type MessageRef,
   type SnbEngineFactory,
   type SnbEngineHandle,
@@ -73,6 +75,11 @@ import {
  * TypeGraph driver's constant.
  */
 const ROOT_WALK_MAX_HOPS = 30;
+// See IS2_CANDIDATE_LIMIT's identical doc in typegraph-queries.ts: this
+// benchmark's kind-prefixed ids sort lexicographically under a native
+// `ORDER BY id ASC`, not numerically, so candidates are over-fetched here
+// and the true top 10 resolved by a numeric-aware JS sort below.
+const IS2_CANDIDATE_LIMIT = 20;
 
 /** Read every row out of a (possibly multi-statement) query result. */
 async function rowsOf(
@@ -436,24 +443,22 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       "p.cityId AS cityId, p.gender AS gender, p.creationDate AS creationDate;",
   );
   const personByIdStatement = await conn.prepare(
-    "MATCH (p:Person) WHERE p.id = $id RETURN p.id AS id;",
-  );
-  const friendIdsStatement = await conn.prepare(
-    "MATCH (p:Person {id: $id})-[:Knows]->(friend:Person) RETURN friend.id AS id;",
+    "MATCH (p:Person) WHERE p.id = $id RETURN p.id AS id, p.firstName AS firstName, p.lastName AS lastName;",
   );
   const friendsWithSinceStatement = await conn.prepare(
-    "MATCH (p:Person {id: $id})-[e:Knows]->(friend:Person) RETURN friend.id AS id, e.since AS since " +
+    "MATCH (p:Person {id: $id})-[e:Knows]->(friend:Person) RETURN friend.id AS id, " +
+      "friend.firstName AS firstName, friend.lastName AS lastName, e.since AS since " +
       "ORDER BY e.since DESC, friend.id ASC;",
   );
-  const postsByFriendsStatement = await conn.prepare(
-    "MATCH (friend:Person)<-[:HasCreator]-(post:Post) WHERE friend.id IN $ids " +
-      "RETURN post.id AS id, post.creationDate AS creationDate " +
-      "ORDER BY post.creationDate DESC, post.id DESC LIMIT 10;",
+  const postsByPersonStatement = await conn.prepare(
+    "MATCH (person:Person {id: $id})<-[:HasCreator]-(post:Post) " +
+      "RETURN post.id AS id, post.content AS content, post.creationDate AS creationDate " +
+      `ORDER BY post.creationDate DESC, post.id ASC LIMIT ${IS2_CANDIDATE_LIMIT};`,
   );
-  const commentsByFriendsStatement = await conn.prepare(
-    "MATCH (friend:Person)<-[:HasCreator]-(comment:Comment) WHERE friend.id IN $ids " +
-      "RETURN comment.id AS id, comment.creationDate AS creationDate " +
-      "ORDER BY comment.creationDate DESC, comment.id DESC LIMIT 10;",
+  const commentsByPersonStatement = await conn.prepare(
+    "MATCH (person:Person {id: $id})<-[:HasCreator]-(comment:Comment) " +
+      "RETURN comment.id AS id, comment.content AS content, comment.creationDate AS creationDate " +
+      `ORDER BY comment.creationDate DESC, comment.id ASC LIMIT ${IS2_CANDIDATE_LIMIT};`,
   );
   const is4PostStatement = await conn.prepare(
     "MATCH (m:Post {id: $id}) RETURN m.content AS content, m.creationDate AS creationDate;",
@@ -462,10 +467,12 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     "MATCH (m:Comment {id: $id}) RETURN m.content AS content, m.creationDate AS creationDate;",
   );
   const authorOfPostStatement = await conn.prepare(
-    "MATCH (m:Post {id: $id})-[:HasCreator]->(author:Person) RETURN author.id AS id;",
+    "MATCH (m:Post {id: $id})-[:HasCreator]->(author:Person) " +
+      "RETURN author.id AS id, author.firstName AS firstName, author.lastName AS lastName;",
   );
   const authorOfCommentStatement = await conn.prepare(
-    "MATCH (m:Comment {id: $id})-[:HasCreator]->(author:Person) RETURN author.id AS id;",
+    "MATCH (m:Comment {id: $id})-[:HasCreator]->(author:Person) " +
+      "RETURN author.id AS id, author.firstName AS firstName, author.lastName AS lastName;",
   );
   // Terminal node type is constrained to `:Post` directly in the pattern —
   // ReplyOf can only continue through Comment nodes (Post has no outgoing
@@ -476,15 +483,20 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     `MATCH (c:Comment {id: $id})-[:ReplyOf*1..${ROOT_WALK_MAX_HOPS}]->(root:Post) RETURN DISTINCT root.id AS id;`,
   );
   const forumOfPostStatement = await conn.prepare(
-    "MATCH (f:Forum)-[:ContainerOf]->(post:Post) WHERE post.id = $id RETURN f.moderatorId AS moderatorId;",
+    "MATCH (f:Forum)-[:ContainerOf]->(post:Post) WHERE post.id = $id " +
+      "RETURN f.id AS forumId, f.title AS forumTitle, f.moderatorId AS moderatorId;",
   );
   const repliesOfPostStatement = await conn.prepare(
     "MATCH (reply:Comment)-[:ReplyOf]->(m:Post {id: $id}) MATCH (reply)-[:HasCreator]->(author:Person) " +
-      "RETURN reply.id AS id, author.id AS authorId ORDER BY reply.creationDate DESC, author.id ASC;",
+      "RETURN reply.id AS id, reply.content AS content, reply.creationDate AS creationDate, " +
+      "author.id AS authorId, author.firstName AS authorFirstName, author.lastName AS authorLastName " +
+      "ORDER BY reply.creationDate DESC, author.id ASC;",
   );
   const repliesOfCommentStatement = await conn.prepare(
     "MATCH (reply:Comment)-[:ReplyOf]->(m:Comment {id: $id}) MATCH (reply)-[:HasCreator]->(author:Person) " +
-      "RETURN reply.id AS id, author.id AS authorId ORDER BY reply.creationDate DESC, author.id ASC;",
+      "RETURN reply.id AS id, reply.content AS content, reply.creationDate AS creationDate, " +
+      "author.id AS authorId, author.firstName AS authorFirstName, author.lastName AS authorLastName " +
+      "ORDER BY reply.creationDate DESC, author.id ASC;",
   );
   const knowsCheckStatement = await conn.prepare(
     "MATCH (author:Person {id: $authorId})-[:Knows]->(friend:Person) WHERE friend.id IN $ids " +
@@ -504,32 +516,35 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     return root.id as string;
   }
 
-  async function recentMessagesByFriends(friendIds: readonly string[]): Promise<
+  async function recentMessagesOfPerson(personId: string): Promise<
     readonly Readonly<{
       id: string;
+      content: string;
       creationDate: string;
       kind: "Post" | "Comment";
     }>[]
   > {
-    if (friendIds.length === 0) return [];
-
     const [posts, comments] = await Promise.all([
-      rowsOf(
-        await conn.execute(postsByFriendsStatement, { ids: [...friendIds] }),
-      ),
-      rowsOf(
-        await conn.execute(commentsByFriendsStatement, { ids: [...friendIds] }),
-      ),
+      rowsOf(await conn.execute(postsByPersonStatement, { id: personId })),
+      rowsOf(await conn.execute(commentsByPersonStatement, { id: personId })),
     ]);
 
+    // Official IS2 tie-break is creationDate DESC, messageId ASC. Cypher's
+    // own id ASC above is a plain string compare on this benchmark's
+    // prefixed ids; re-sorted here with a numeric-aware comparator (see
+    // compareIdsAscending's doc) so this engine's digest is comparable
+    // against the others regardless of what its own native ordering did
+    // on a tie.
     return [
       ...posts.map((row) => ({
         id: row.id as string,
+        content: row.content as string,
         creationDate: row.creationDate as string,
         kind: "Post" as const,
       })),
       ...comments.map((row) => ({
         id: row.id as string,
+        content: row.content as string,
         creationDate: row.creationDate as string,
         kind: "Comment" as const,
       })),
@@ -537,7 +552,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       .toSorted(
         (left, right) =>
           right.creationDate.localeCompare(left.creationDate) ||
-          right.id.localeCompare(left.id),
+          compareIdsAscending(left.id, right.id),
       )
       .slice(0, 10);
   }
@@ -546,38 +561,73 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const rows = await rowsOf(
       await conn.execute(is1Statement, { id: personId }),
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
-  // Real LDBC IS2: friend frontier, then a merged top-10 by creationDate
-  // across the (polymorphic) Post/Comment kinds authored by those friends,
-  // then the root post + root author of each of those 10 messages — merged
-  // and re-sliced in JS rather than a single Cypher UNION, because Ladybug
-  // scopes a trailing `ORDER BY ... LIMIT` to only the last UNION branch,
-  // not the union as a whole (verified against the installed engine).
+  // Official LDBC IS2: the given person's own last 10 messages (creationDate
+  // DESC, id ASC), then the root post + root author of each of those 10
+  // messages — merged and re-sliced in JS rather than a single Cypher UNION,
+  // because Ladybug scopes a trailing `ORDER BY ... LIMIT` to only the last
+  // UNION branch, not the union as a whole (verified against the installed
+  // engine). Previously this traversed to friends first and measured
+  // messages *they* authored — a materially different (and heavier)
+  // workload than the official query, which reads directly off the given
+  // person.
   async function IS2(personId: string) {
-    const friends = await rowsOf(
-      await conn.execute(friendIdsStatement, { id: personId }),
-    );
-    const friendIds = friends.map((row) => row.id as string);
-    const recent = await recentMessagesByFriends(friendIds);
+    const recent = await recentMessagesOfPerson(personId);
 
+    const canonicalRows = [];
     for (const message of recent) {
       const rootId =
         message.kind === "Post" ?
           message.id
         : await resolveRootPostId(message.id);
-      await conn.execute(authorOfPostStatement, { id: rootId });
+      const authorRows = await rowsOf(
+        await conn.execute(authorOfPostStatement, { id: rootId }),
+      );
+      const author = authorRows[0];
+      canonicalRows.push({
+        messageId: message.id,
+        content: message.content,
+        creationDate: message.creationDate,
+        postId: rootId,
+        personId: author?.id,
+        firstName: author?.firstName,
+        lastName: author?.lastName,
+      });
     }
 
-    return { rowCount: recent.length };
+    return {
+      rowCount: recent.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   async function IS3(personId: string) {
     const rows = await rowsOf(
       await conn.execute(friendsWithSinceStatement, { id: personId }),
     );
-    return { rowCount: rows.length };
+    // Cypher's own id tie-break above is a plain string compare; re-sorted
+    // here with a numeric-aware comparator (see compareIdsAscending's doc)
+    // for cross-engine digest consistency. Canonical field is `personId`
+    // (matching the official LDBC output name and every other engine's
+    // digest), not this query's own `id` alias.
+    const canonicalRows = rows
+      .toSorted(
+        (left, right) =>
+          (right.since as string).localeCompare(left.since as string) ||
+          compareIdsAscending(left.id as string, right.id as string),
+      )
+      .map((row) => ({
+        personId: row.id,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        since: row.since,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   async function IS4(message: MessageRef) {
@@ -586,7 +636,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const rows = await rowsOf(
       await conn.execute(statement, { id: message.id }),
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS5(message: MessageRef) {
@@ -597,7 +647,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const rows = await rowsOf(
       await conn.execute(statement, { id: message.id }),
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS6(message: MessageRef) {
@@ -608,12 +658,26 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     const forumRows = await rowsOf(
       await conn.execute(forumOfPostStatement, { id: rootId }),
     );
-    const moderatorId = forumRows[0]?.moderatorId as string | undefined;
-    if (moderatorId === undefined) return { rowCount: 0 };
+    const forum = forumRows[0];
+    const moderatorId = forum?.moderatorId as string | undefined;
+    if (moderatorId === undefined) {
+      return { rowCount: 0, digest: canonicalDigest([]) };
+    }
     const moderatorRows = await rowsOf(
       await conn.execute(personByIdStatement, { id: moderatorId }),
     );
-    return { rowCount: moderatorRows.length };
+    const moderator = moderatorRows[0];
+    const canonicalRow = {
+      forumId: forum!.forumId,
+      forumTitle: forum!.forumTitle,
+      moderatorId,
+      moderatorFirstName: moderator?.firstName,
+      moderatorLastName: moderator?.lastName,
+    };
+    return {
+      rowCount: moderatorRows.length,
+      digest: canonicalDigest([canonicalRow]),
+    };
   }
 
   async function IS7(message: MessageRef) {
@@ -637,14 +701,47 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       ...new Set(replies.map((row) => row.authorId as string)),
     ];
 
+    let knowsAuthorIds = new Set<string>();
     if (parentAuthorId !== undefined && authorIds.length > 0) {
-      await conn.execute(knowsCheckStatement, {
-        authorId: parentAuthorId,
-        ids: authorIds,
-      });
+      const knowsRows = await rowsOf(
+        await conn.execute(knowsCheckStatement, {
+          authorId: parentAuthorId,
+          ids: authorIds,
+        }),
+      );
+      knowsAuthorIds = new Set(knowsRows.map((row) => row.id as string));
     }
 
-    return { rowCount: replies.length };
+    // Cypher's own id tie-break above is a plain string compare; re-sorted
+    // here with a numeric-aware comparator (see compareIdsAscending's doc)
+    // for cross-engine digest consistency.
+    const canonicalRows = replies
+      .toSorted(
+        (left, right) =>
+          (right.creationDate as string).localeCompare(
+            left.creationDate as string,
+          ) ||
+          compareIdsAscending(
+            left.authorId as string,
+            right.authorId as string,
+          ),
+      )
+      .map((reply) => ({
+        commentId: reply.id,
+        content: reply.content,
+        creationDate: reply.creationDate,
+        replyAuthorId: reply.authorId,
+        replyAuthorFirstName: reply.authorFirstName,
+        replyAuthorLastName: reply.authorLastName,
+        replyAuthorKnowsOriginalMessageAuthor: knowsAuthorIds.has(
+          reply.authorId as string,
+        ),
+      }));
+
+    return {
+      rowCount: replies.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };

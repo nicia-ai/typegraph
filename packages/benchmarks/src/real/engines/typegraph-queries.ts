@@ -14,10 +14,28 @@
  */
 import { param } from "@nicia-ai/typegraph";
 
-import { type MessageRef, type SnbQueries } from "./types";
+import {
+  canonicalDigest,
+  compareIdsAscending,
+  type MessageRef,
+  type SnbQueries,
+} from "./types";
 import { type SnbStore } from "../schema/snb-graph";
 
 const ROOT_WALK_MAX_HOPS = 100;
+
+// IS2 official semantics are "top 10 of the person's own messages," a
+// single LIMIT 10 over posts+comments merged. This benchmark fetches each
+// kind's own top candidates separately (see module doc on the un-batched
+// design) then merges in JS, so each per-kind fetch needs a limit — set
+// above 10 as a defensive buffer, since the per-kind SQL ORDER BY's id
+// tie-break is a plain lexicographic compare (see `compareIdsAscending`'s
+// doc), which could in principle rank a genuine top-10 message just past
+// a LIMIT 10 cutoff on an exact creationDate tie. The buffer doesn't
+// change what's *returned* (still exactly the correct top 10, resolved by
+// this file's own numeric-aware final sort) — only what's fetched as
+// candidates before that final sort trims to 10.
+const IS2_CANDIDATE_LIMIT = 20;
 
 export function createSnbQueries(store: SnbStore): SnbQueries {
   const personById = store
@@ -160,8 +178,11 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     .to("Person", "author")
     .select((ctx) => ({
       id: ctx.reply.id,
+      content: ctx.reply.content,
       creationDate: ctx.reply.creationDate,
       authorId: ctx.author.id,
+      authorFirstName: ctx.author.firstName,
+      authorLastName: ctx.author.lastName,
     }))
     .orderBy("reply", "creationDate", "desc")
     .orderBy("author", "id", "asc")
@@ -176,51 +197,67 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     .to("Person", "author")
     .select((ctx) => ({
       id: ctx.reply.id,
+      content: ctx.reply.content,
       creationDate: ctx.reply.creationDate,
       authorId: ctx.author.id,
+      authorFirstName: ctx.author.firstName,
+      authorLastName: ctx.author.lastName,
     }))
     .orderBy("reply", "creationDate", "desc")
     .orderBy("author", "id", "asc")
     .prepare();
 
-  async function recentMessagesByFriends(
-    friendIds: readonly string[],
-  ): Promise<
-    readonly { id: string; creationDate: string; kind: "Post" | "Comment" }[]
-  > {
-    if (friendIds.length === 0) return [];
+  // Official LDBC IS2 fetches the *given* person's own messages
+  // (`(:Person {id})<-[:HAS_CREATOR]-(message)`), not friends' — this
+  // benchmark's implementations previously traversed to friends first,
+  // measuring a materially different (and heavier) workload. Fixed shape
+  // (single person id, not a variable-length list), so — unlike the old
+  // friend-list join — these are genuinely prepare()-able.
+  const recentPostsOfPerson = store
+    .query()
+    .from("Person", "author")
+    .whereNode("author", (person) => person.id.eq(param("id")))
+    .traverse("hasCreator", "e", { expand: "none", direction: "in" })
+    .to("Post", "post")
+    .select((ctx) => ({
+      id: ctx.post.id,
+      content: ctx.post.content,
+      creationDate: ctx.post.creationDate,
+    }))
+    .orderBy("post", "creationDate", "desc")
+    .orderBy("post", "id", "asc")
+    .limit(IS2_CANDIDATE_LIMIT)
+    .prepare();
+  const recentCommentsOfPerson = store
+    .query()
+    .from("Person", "author")
+    .whereNode("author", (person) => person.id.eq(param("id")))
+    .traverse("hasCreator", "e", { expand: "none", direction: "in" })
+    .to("Comment", "comment")
+    .select((ctx) => ({
+      id: ctx.comment.id,
+      content: ctx.comment.content,
+      creationDate: ctx.comment.creationDate,
+    }))
+    .orderBy("comment", "creationDate", "desc")
+    .orderBy("comment", "id", "asc")
+    .limit(IS2_CANDIDATE_LIMIT)
+    .prepare();
 
+  async function recentMessagesOfPerson(personId: string): Promise<
+    readonly {
+      id: string;
+      content: string;
+      creationDate: string;
+      kind: "Post" | "Comment";
+    }[]
+  > {
     const [posts, comments] = await Promise.all([
-      store
-        .query()
-        .from("Person", "friend")
-        .whereNode("friend", (friend) => friend.id.in(friendIds))
-        .traverse("hasCreator", "e", { expand: "none", direction: "in" })
-        .to("Post", "post")
-        .select((ctx) => ({
-          id: ctx.post.id,
-          creationDate: ctx.post.creationDate,
-        }))
-        .orderBy("post", "creationDate", "desc")
-        .orderBy("post", "id", "desc")
-        .limit(10)
-        .execute(),
-      store
-        .query()
-        .from("Person", "friend")
-        .whereNode("friend", (friend) => friend.id.in(friendIds))
-        .traverse("hasCreator", "e", { expand: "none", direction: "in" })
-        .to("Comment", "comment")
-        .select((ctx) => ({
-          id: ctx.comment.id,
-          creationDate: ctx.comment.creationDate,
-        }))
-        .orderBy("comment", "creationDate", "desc")
-        .orderBy("comment", "id", "desc")
-        .limit(10)
-        .execute(),
+      recentPostsOfPerson.execute({ id: personId }),
+      recentCommentsOfPerson.execute({ id: personId }),
     ]);
 
+    // Official IS2 tie-break is creationDate DESC, messageId ASC.
     return [
       ...posts.map((row) => ({ ...row, kind: "Post" as const })),
       ...comments.map((row) => ({ ...row, kind: "Comment" as const })),
@@ -228,40 +265,58 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       .toSorted(
         (left, right) =>
           right.creationDate.localeCompare(left.creationDate) ||
-          right.id.localeCompare(left.id),
+          compareIdsAscending(left.id, right.id),
       )
       .slice(0, 10);
   }
 
   async function IS1(personId: string) {
     const rows = await is1.execute({ id: personId });
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
-  // Real LDBC IS2: friend frontier, then a merged top-10 by creationDate
-  // across the (polymorphic) Post/Comment kinds authored by those friends,
-  // then the root post + root author of each of those 10 messages. This is
-  // the un-batched per-message root walk (readability over the batched
-  // multi-seed CTE the SQL reference driver uses — see module doc).
+  // Official LDBC IS2: the given person's own last 10 messages (creationDate
+  // DESC, id ASC), then the root post + root author of each of those 10
+  // messages. This is the un-batched per-message root walk (readability
+  // over the batched multi-seed CTE the SQL reference driver uses — see
+  // module doc).
   async function IS2(personId: string) {
-    const friends = await friendsOf.execute({ id: personId });
-    const friendIds = friends.map((row) => row.personId);
-    const recent = await recentMessagesByFriends(friendIds);
+    const recent = await recentMessagesOfPerson(personId);
 
+    const canonicalRows = [];
     for (const message of recent) {
       const rootId =
         message.kind === "Post" ?
           message.id
         : await resolveRootPostId(message.id);
-      await authorOfPost.execute({ id: rootId });
+      const authorRows = await authorOfPost.execute({ id: rootId });
+      const author = authorRows[0];
+      canonicalRows.push({
+        messageId: message.id,
+        content: message.content,
+        creationDate: message.creationDate,
+        postId: rootId,
+        personId: author?.id,
+        firstName: author?.firstName,
+        lastName: author?.lastName,
+      });
     }
 
-    return { rowCount: recent.length };
+    return {
+      rowCount: recent.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   async function IS3(personId: string) {
     const rows = await friendsOf.execute({ id: personId });
-    return { rowCount: rows.length };
+    // Official IS3 ordering is friendshipCreationDate DESC, personId ASC.
+    const sorted = rows.toSorted(
+      (left, right) =>
+        right.since.localeCompare(left.since) ||
+        compareIdsAscending(left.personId, right.personId),
+    );
+    return { rowCount: sorted.length, digest: canonicalDigest(sorted) };
   }
 
   async function IS4(message: MessageRef) {
@@ -270,7 +325,7 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
         id: message.id,
       },
     );
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS5(message: MessageRef) {
@@ -280,7 +335,7 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       : authorOfComment).execute({
       id: message.id,
     });
-    return { rowCount: rows.length };
+    return { rowCount: rows.length, digest: canonicalDigest(rows) };
   }
 
   async function IS6(message: MessageRef) {
@@ -289,11 +344,25 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
         message.id
       : await resolveRootPostId(message.id);
     const forumRows = await forumOfPost.execute({ id: rootId });
-    if (forumRows.length === 0) return { rowCount: 0 };
+    if (forumRows.length === 0) {
+      return { rowCount: 0, digest: canonicalDigest([]) };
+    }
+    const forum = forumRows[0]!;
     const moderatorRows = await personById.execute({
-      id: forumRows[0]!.moderatorId,
+      id: forum.moderatorId,
     });
-    return { rowCount: moderatorRows.length };
+    const moderator = moderatorRows[0];
+    const canonicalRow = {
+      forumId: forum.forumId,
+      forumTitle: forum.title,
+      moderatorId: forum.moderatorId,
+      moderatorFirstName: moderator?.firstName,
+      moderatorLastName: moderator?.lastName,
+    };
+    return {
+      rowCount: moderatorRows.length,
+      digest: canonicalDigest([canonicalRow]),
+    };
   }
 
   async function IS7(message: MessageRef) {
@@ -311,8 +380,9 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     });
     const authorIds = [...new Set(replies.map((row) => row.authorId))];
 
+    let knowsAuthorIds = new Set<string>();
     if (parentAuthorId !== undefined && authorIds.length > 0) {
-      await store
+      const knowsRows = await store
         .query()
         .from("Person", "author")
         .whereNode("author", (author) => author.id.eq(parentAuthorId))
@@ -321,9 +391,32 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
         .whereNode("friend", (friend) => friend.id.in(authorIds))
         .select((ctx) => ({ id: ctx.friend.id }))
         .execute();
+      knowsAuthorIds = new Set(knowsRows.map((row) => row.id));
     }
 
-    return { rowCount: replies.length };
+    // Official IS7 ordering is commentCreationDate DESC, replyAuthorId ASC.
+    const canonicalRows = replies
+      .toSorted(
+        (left, right) =>
+          right.creationDate.localeCompare(left.creationDate) ||
+          compareIdsAscending(left.authorId, right.authorId),
+      )
+      .map((reply) => ({
+        commentId: reply.id,
+        content: reply.content,
+        creationDate: reply.creationDate,
+        replyAuthorId: reply.authorId,
+        replyAuthorFirstName: reply.authorFirstName,
+        replyAuthorLastName: reply.authorLastName,
+        replyAuthorKnowsOriginalMessageAuthor: knowsAuthorIds.has(
+          reply.authorId,
+        ),
+      }));
+
+    return {
+      rowCount: replies.length,
+      digest: canonicalDigest(canonicalRows),
+    };
   }
 
   return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
