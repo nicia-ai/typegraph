@@ -152,6 +152,25 @@ export type LocalSqlitePragmaOptions = Readonly<{
    * exceeds `cacheSizeKib` but still fits in available RAM.
    */
   mmapSizeBytes?: number | undefined;
+  /**
+   * `PRAGMA wal_autocheckpoint`, in WAL pages (a no-op unless `journalMode`
+   * is `"wal"`). Default: `undefined`, meaning SQLite's own built-in
+   * default (1,000 pages, ~4MiB) is left untouched. Every automatic
+   * checkpoint that size has to flush WAL frames back into the main
+   * database file's B-tree — cheap while the file is small, but the cost
+   * climbs as the file (and the fraction of it *not* resident in the page
+   * cache) grows, so a database built by one large bulk load pays
+   * increasingly expensive checkpoints as the load progresses. Raising
+   * this amortizes checkpoint I/O over far more rows; `0` disables
+   * automatic checkpointing entirely (the WAL grows unbounded until a
+   * manual `PRAGMA wal_checkpoint` or the connection closes) for callers
+   * that would rather run one explicit checkpoint after a bulk load
+   * finishes than pay checkpoint cost mid-load at all. Worth raising for
+   * any bulk-insert-heavy workload; leave at the default for a
+   * normal read/write mix, where a large uncheckpointed WAL just makes
+   * every read pay a bigger WAL scan.
+   */
+  walAutocheckpointPages?: number | undefined;
 }>;
 
 /**
@@ -171,6 +190,7 @@ export const DEFAULT_LOCAL_SQLITE_PRAGMAS: Required<LocalSqlitePragmaOptions> =
     busyTimeoutMs: 5000,
     cacheSizeKib: undefined,
     mmapSizeBytes: undefined,
+    walAutocheckpointPages: undefined,
   };
 
 const LOCAL_SQLITE_JOURNAL_MODES: readonly LocalSqliteJournalMode[] = [
@@ -188,6 +208,8 @@ const LOCAL_SQLITE_SYNCHRONOUS_MODES: readonly LocalSqliteSynchronousMode[] = [
   "full",
   "extra",
 ];
+
+const SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES = 2_147_483_647;
 
 function applyConnectionPragmas(
   sqlite: Database.Database,
@@ -250,6 +272,19 @@ function applyConnectionPragmas(
       { mmapSizeBytes: resolved.mmapSizeBytes },
     );
   }
+  if (
+    resolved.walAutocheckpointPages !== undefined &&
+    (!Number.isSafeInteger(resolved.walAutocheckpointPages) ||
+      resolved.walAutocheckpointPages < 0 ||
+      resolved.walAutocheckpointPages > SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES)
+  ) {
+    throw new ConfigurationError(
+      `Invalid walAutocheckpointPages pragma: ${String(resolved.walAutocheckpointPages)}. ` +
+        `Expected an integer between 0 and ${SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES} ` +
+        "WAL pages (0 disables automatic checkpointing entirely).",
+      { walAutocheckpointPages: resolved.walAutocheckpointPages },
+    );
+  }
 
   // ":memory:" databases always journal in memory; SQLite answers the WAL
   // request with "memory" instead of erroring, so no special-casing needed.
@@ -261,6 +296,9 @@ function applyConnectionPragmas(
   }
   if (resolved.mmapSizeBytes !== undefined) {
     sqlite.pragma(`mmap_size = ${resolved.mmapSizeBytes}`);
+  }
+  if (resolved.walAutocheckpointPages !== undefined) {
+    sqlite.pragma(`wal_autocheckpoint = ${resolved.walAutocheckpointPages}`);
   }
 }
 
@@ -284,7 +322,10 @@ export type LocalSqliteBackendOptions = Readonly<{
    * own 5s busy timeout from its `timeout` constructor option). Set
    * `cacheSizeKib`/`mmapSizeBytes` explicitly once a database's working
    * set is known to exceed SQLite's 2MiB default cache — otherwise every
-   * query pays a fresh disk read per page past that tiny working set.
+   * query pays a fresh disk read per page past that tiny working set. Set
+   * `walAutocheckpointPages` explicitly for a bulk-insert-heavy workload —
+   * SQLite's own default checkpoints every ~4MiB of WAL growth, which gets
+   * more expensive as the database file grows over a large load.
    */
   pragmas?: LocalSqlitePragmaOptions | false;
 
