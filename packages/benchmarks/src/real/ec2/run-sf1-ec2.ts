@@ -555,8 +555,7 @@ async function collect(argv: readonly string[]): Promise<void> {
     );
     await mkdir(localDir, { recursive: true });
 
-    const hasParseableSummary =
-      summaryText.length > 0 && summaryText !== "{}";
+    const hasParseableSummary = summaryText.length > 0 && summaryText !== "{}";
     const hasHistoryLines = historyText.length > 0;
 
     if (hasParseableResults) {
