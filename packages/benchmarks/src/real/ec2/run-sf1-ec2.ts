@@ -85,22 +85,19 @@ const DEFAULT_BENCHMARK_TIMEOUT_SECONDS_BY_PROFILE: Readonly<
 const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 const HEARTBEAT_EVERY_N_POLLS = 5;
 
-const RESULTS_MARKER = {
-  start: "===RESULTS_JSON_START===",
-  end: "===RESULTS_JSON_END===",
-};
-const SUMMARY_MARKER = {
-  start: "===SUMMARY_JSON_START===",
-  end: "===SUMMARY_JSON_END===",
-};
-const HISTORY_MARKER = {
-  start: "===HISTORY_LINES_START===",
-  end: "===HISTORY_LINES_END===",
-};
 const EXIT_CODE_MARKER = {
   start: "===EXIT_CODE_START===",
   end: "===EXIT_CODE_END===",
 };
+
+/**
+ * Sentinel file the backgrounded benchmark script writes at startup, so
+ * `collect()` can compute the correct `tail -n +N` offset into
+ * `reports/history.jsonl` in a later, separate SSM command — the run may
+ * finish hours after it started, long after any in-process variable holding
+ * this value would be gone.
+ */
+const HISTORY_LINES_BEFORE_SENTINEL = "/root/typegraph-bench-lines-before";
 
 function parseArgValue(
   argv: readonly string[],
@@ -199,31 +196,57 @@ exit 1
 `;
 }
 
-/** Renders the SSM command that runs the benchmark and prints delimited result sections. */
+/** Absolute path to the benchmarks package on the remote instance. */
+function remoteBenchDir(): string {
+  return `${REPO_DIR}/packages/benchmarks`;
+}
+
+/**
+ * Renders the SSM command that runs the (potentially many-hour) benchmark
+ * and reports only its exit code inline.
+ *
+ * Earlier versions of this script also `cat`ed results.json/summary.json and
+ * `tail`ed the new history.jsonl lines + a console-log tail directly into
+ * this same command's stdout. That works right up until all four engines
+ * succeed on the same run: SSM's `StandardOutputContent` is hard-capped at
+ * 24,000 characters, and the combined size of all those sections finally
+ * exceeded it on the first fully-successful SF10 attempt — silently
+ * truncating mid-JSON and losing the history entry for whichever engine's
+ * data came last (see reports/snb-lane1-results.md). `collect()` now fetches
+ * each artifact via its own separate, later SSM command instead — each gets
+ * its own 24,000-character budget, so no single artifact's growth can crowd
+ * out another's.
+ */
 function renderBenchmarkRunScript(profile: string): string {
-  const benchDir = `${REPO_DIR}/packages/benchmarks`;
+  const benchDir = remoteBenchDir();
   return `#!/bin/bash
 set +e
 cd ${benchDir}
-LINES_BEFORE=$(wc -l < reports/history.jsonl 2>/dev/null || echo 0)
+wc -l < reports/history.jsonl 2>/dev/null > ${HISTORY_LINES_BEFORE_SENTINEL} || echo 0 > ${HISTORY_LINES_BEFORE_SENTINEL}
 pnpm bench:snb:${profile} --check > /var/log/typegraph-bench.log 2>&1
 EXIT_CODE=$?
 echo "${EXIT_CODE_MARKER.start}"
 echo $EXIT_CODE
 echo "${EXIT_CODE_MARKER.end}"
-echo "${RESULTS_MARKER.start}"
-cat bench-results/current/snb-${profile}/results.json 2>/dev/null || echo '{}'
-echo "${RESULTS_MARKER.end}"
-echo "${SUMMARY_MARKER.start}"
-cat bench-results/current/snb-${profile}/summary.json 2>/dev/null || echo '{}'
-echo "${SUMMARY_MARKER.end}"
-echo "${HISTORY_MARKER.start}"
-tail -n +$((LINES_BEFORE+1)) reports/history.jsonl 2>/dev/null || true
-echo "${HISTORY_MARKER.end}"
-echo "--- last 60 lines of benchmark console log ---"
-tail -n 60 /var/log/typegraph-bench.log 2>/dev/null || true
 exit $EXIT_CODE
 `;
+}
+
+/** Renders the SSM command that `cat`s one remote file, defaulting to `{}` if it's missing. */
+function renderCatJsonScript(remotePath: string): string {
+  return `cat ${remotePath} 2>/dev/null || echo '{}'`;
+}
+
+/** Renders the SSM command that tails only the history.jsonl lines this run appended. */
+function renderHistoryTailScript(): string {
+  const benchDir = remoteBenchDir();
+  return `LINES_BEFORE=$(cat ${HISTORY_LINES_BEFORE_SENTINEL} 2>/dev/null || echo 0)
+tail -n +$((LINES_BEFORE+1)) ${benchDir}/reports/history.jsonl 2>/dev/null || true`;
+}
+
+/** Renders the SSM command that tails the benchmark console log — failure diagnostics only. */
+function renderFailureLogTailScript(): string {
+  return "tail -n 200 /var/log/typegraph-bench.log 2>/dev/null || true";
 }
 
 async function launch(argv: readonly string[]): Promise<void> {
@@ -417,6 +440,26 @@ async function pollCommand(
   }
 }
 
+/** Runs a short shell command via SSM and returns its stdout, trimmed. */
+async function fetchRemoteText(
+  awsOptions: AwsCliOptions,
+  instanceId: string,
+  script: string,
+  timeoutSeconds = 60,
+): Promise<string> {
+  const commandId = await sendShellCommand(awsOptions, instanceId, script, {
+    timeoutSeconds,
+  });
+  const result = await pollCommand(
+    awsOptions,
+    instanceId,
+    commandId,
+    2_000,
+    timeoutSeconds + 30,
+  );
+  return result.stdout.trim();
+}
+
 async function collect(argv: readonly string[]): Promise<void> {
   const region = requireArgValue(argv, "region");
   const awsProfile = parseArgValue(argv, "aws-profile");
@@ -455,20 +498,49 @@ async function collect(argv: readonly string[]): Promise<void> {
 
   try {
     const exitCodeText = extractSection(invocation.stdout, EXIT_CODE_MARKER);
-    const resultsText = extractSection(invocation.stdout, RESULTS_MARKER);
-    const summaryText = extractSection(invocation.stdout, SUMMARY_MARKER);
-    const historyText = extractSection(invocation.stdout, HISTORY_MARKER);
 
-    if (resultsText === undefined) {
-      console.error(
-        "Could not find delimited results section in command output.",
-      );
-      console.error("--- stdout ---");
-      console.error(invocation.stdout);
-      console.error("--- stderr ---");
-      console.error(invocation.stderr);
+    // Fetched via separate SSM commands (not embedded in the main command's
+    // own stdout) so each artifact gets its own 24,000-character
+    // StandardOutputContent budget — see renderBenchmarkRunScript's doc
+    // comment for why that matters.
+    const benchDir = remoteBenchDir();
+    const resultsText = await fetchRemoteText(
+      awsOptions,
+      instanceId,
+      renderCatJsonScript(
+        `${benchDir}/bench-results/current/snb-${benchProfile}/results.json`,
+      ),
+    );
+    const summaryText = await fetchRemoteText(
+      awsOptions,
+      instanceId,
+      renderCatJsonScript(
+        `${benchDir}/bench-results/current/snb-${benchProfile}/summary.json`,
+      ),
+    );
+    const historyText = await fetchRemoteText(
+      awsOptions,
+      instanceId,
+      renderHistoryTailScript(),
+    );
+
+    if (resultsText.length === 0 || resultsText === "{}") {
+      console.error("Could not find parseable results on the instance.");
+      if (exitCodeText !== "0") {
+        console.error(
+          "--- last 200 lines of benchmark console log (failure diagnostic) ---",
+        );
+        console.error(
+          await fetchRemoteText(
+            awsOptions,
+            instanceId,
+            renderFailureLogTailScript(),
+            30,
+          ),
+        );
+      }
       throw new Error(
-        `SSM command ${commandId} produced no parseable results (status: ${invocation.status}).`,
+        `SSM command ${commandId} produced no parseable results (status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}).`,
       );
     }
 
@@ -480,19 +552,17 @@ async function collect(argv: readonly string[]): Promise<void> {
     );
     await mkdir(localDir, { recursive: true });
 
-    if (resultsText.length > 0) {
-      await writeJsonFile(
-        path.join(localDir, "results.json"),
-        JSON.parse(resultsText),
-      );
-    }
-    if (summaryText !== undefined && summaryText.length > 0) {
+    await writeJsonFile(
+      path.join(localDir, "results.json"),
+      JSON.parse(resultsText),
+    );
+    if (summaryText.length > 0) {
       await writeJsonFile(
         path.join(localDir, "summary.json"),
         JSON.parse(summaryText),
       );
     }
-    if (historyText !== undefined && historyText.length > 0) {
+    if (historyText.length > 0) {
       await appendFile(resolveHistoryPath(), `${historyText}\n`, "utf-8");
       console.log(
         `Appended ${historyText.split("\n").length} line(s) to ${resolveHistoryPath()}`,
