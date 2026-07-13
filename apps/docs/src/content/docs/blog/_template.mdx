@@ -1,0 +1,25 @@
+---
+# Copy this file to start a new post. Rename it to something URL-friendly
+# (the filename becomes the slug, e.g. blog/my-new-post) and delete this
+# comment block.
+title: Post title
+# A valid YAML date. Posts are listed newest-first by this field.
+date: 2026-07-06
+# Shown in the blog index and tag/author pages. Supports basic Markdown.
+excerpt: One or two sentences summarizing the post.
+tags:
+  - announcements
+# Set featured: true to pin the post to a "Featured posts" sidebar group.
+# featured: true
+# draft: true keeps the post visible in `pnpm dev` but out of production builds.
+draft: true
+---
+
+import NewsletterSignup from "../../../components/landing/NewsletterSignup.astro";
+
+Write the post body here as Markdown. Because this is an `.mdx` file you can
+also import and use Astro components.
+
+End every post with the newsletter call-to-action so readers can subscribe:
+
+<NewsletterSignup />

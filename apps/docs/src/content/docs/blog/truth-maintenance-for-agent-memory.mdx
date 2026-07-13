@@ -1,0 +1,178 @@
+---
+title: "Bitemporal Recorded Time and Provenance Retraction in TypeGraph"
+excerpt: "The last two releases complete TypeGraph's truth-maintenance story: 0.33 adds a second temporal axis, 0.34 adds provenance-backed retraction. Together they let a graph say why it believes a fact and recompute that belief when a source turns out to be wrong."
+date: 2026-07-07
+tags:
+  - announcements
+---
+
+import NewsletterSignup from "../../../components/landing/NewsletterSignup.astro";
+
+The last two TypeGraph releases finish a feature we'd been building toward for a while: a truth-maintenance layer for graph data, running on ordinary Postgres and SQLite tables.
+
+- **0.33** adds *recorded time* — a second temporal axis alongside TypeGraph's existing valid-time history — so you can reconstruct what the graph believed as of a given commit instant.
+- **0.34** adds the `@nicia-ai/typegraph/provenance` subpath: a way to record *why* a derived fact is believed, and to retract a bad source and have the graph recompute which facts still hold.
+
+This post walks through what each release shipped, then works a single example — a security pipeline whose overnight run turned out to be wrong — to show what the two together actually buy you.
+
+## Recorded time, the second temporal axis
+
+TypeGraph already had valid-time history. 0.33 adds the orthogonal axis, so the graph is now bitemporal:
+
+- **Valid time** is when a fact was true in the world — an invoice's effective date, a role grant's window — controlled by `validFrom` / `validTo` and read with `store.asOf(T)`.
+- **Recorded time** is when TypeGraph captured that fact — what the system knew, as of a commit instant. It's the SQL:2011 `FOR SYSTEM_TIME` axis, or Datomic's system-time axis, read with `store.asOfRecorded(T)`.
+
+Enable capture per store:
+
+```typescript
+const store = createStore(graph, backend, { history: true });
+```
+
+Managed collection writes through that store are then captured into recorded-time relations, each stamped with a per-graph monotonic commit instant (serialized on PostgreSQL via a per-graph advisory lock). Read at a recorded instant with `store.asOfRecorded(T)`, which returns a narrow, read-only reconstructing view; `store.recordedNow()` gives you the current high-water mark to use as an "as things stand now" anchor.
+
+The two axes are independent read lenses, and because they're lenses, they compose:
+
+```typescript
+store.asOf(validTime).asOfRecorded(recordedTime)
+```
+
+`store.asOf(T)` alone answers "what was true in the world at `T`." `store.asOfRecorded(T)` alone is diagonal bitemporal sugar — recorded and valid axes pinned to the same instant. Chain the two to pin them independently.
+
+One naming note, since it trips people coming from other systems: TypeGraph's `asOf` is valid time — the reverse of SQL:2011's `FOR SYSTEM_TIME AS OF` and Datomic's `d/as-of`, where a bare "as of" means system time. Valid-time reads are the common case here, so they got the short name; system time is the more explicit `asOfRecorded`.
+
+A few sharp edges worth knowing up front, because recorded time is deliberately an audit-and-replay lens, not a hot path:
+
+- **The recorded view reconstructs, so it only exposes reads that can be faithfully rebuilt** from the history relations: point reads (`getById` / `getByIds` and edge equivalents), a sealed `query()`, `subgraph()`, and the graph algorithms. Broad collection reads (`find` / `count`), `search`, and fulltext / vector predicates refuse with a typed error — those indexes reflect current state only.
+- **No backfill.** Capture is opt-in; enable it on a fresh graph. An entity that already existed is first recorded the next time it's written.
+- **Writes under `history: true` go through the typed collections.** Raw `tx.sql` is disabled (it would bypass capture), and external transactions adopt the callback form `store.withRecordedTransaction(externalTx, async (tx) => ...)` so capture has a flush point before the caller commits.
+
+## Provenance and retraction
+
+Recorded time answers "what did the graph believe, and when." 0.34 answers the harder question: *why* does it believe a derived fact, and what should happen to that fact when one of its premises turns out to be wrong.
+
+The new `@nicia-ai/typegraph/provenance` subpath maps your existing graph kinds onto four roles — sources, justifications, facts, and the edges between them — and gives you a `retract` operation that recomputes support instead of deleting blindly. It requires `{ history: true }`, so it builds directly on the 0.33 axis.
+
+```typescript
+import { createRetractionCapability } from "@nicia-ai/typegraph/provenance";
+
+const provenance = createRetractionCapability(store, {
+  source: { kinds: ["ScannerSource", "VendorSource"] },
+  justification: { kind: "Justification" },
+  fact: { kinds: ["Vulnerability", "DeployDecision"] },
+  premiseOf: { kind: "premiseOf" },
+  derives: { kind: "derives" },
+});
+```
+
+A fact stays believed while it has at least one justification whose premises are all still supported. Premises bottom out at sources. Retract a source and every justification that leaned on it stops counting — a fact loses currency only once it runs out of surviving justifications.
+
+Two properties make this safe to reach for:
+
+- **Retraction is scoped.** A transition only touches facts reachable from the sources that flipped.
+- **Retraction is reversible.** Closing a fact's currency is a belief-status change, not a domain delete — its edges are left untouched, so `unRetract` is an exact inverse of `retract`. And because it's a normal write under `history: true`, the whole before/after is replayable through `asOfRecorded`.
+
+This is deliberately the well-founded, monotonic slice of classic truth maintenance rather than a reimplementation of it wholesale. The storage follows the JTMS shape from Doyle's 1979 *A Truth Maintenance System* — AND-justifications over premises, sources as the base case, a fact believed only if some justification has all its premises supported. The question `retract` answers — which facts keep support after a source drops out — is the ATMS question from de Kleer's 1986 work: which combinations of sources hold each fact up. JTMS-shaped storage, ATMS-flavored query, ordinary SQL underneath. You configure it by mapping your own node kinds onto the roles, so an agent keeps writing ordinary graph data — it doesn't move to a dedicated reasoning engine to get retraction semantics.
+
+## What this enables: truth maintenance for agent memory
+
+The reason these two releases matter together is easiest to see on a concrete failure.
+
+Agent memory usually means retrieval: embed everything, fetch nearest neighbors, let the model sort it out. That works for recall. It doesn't work for belief. Retrieval remembers what was said. It doesn't remember *why* something was concluded, or what should happen to that conclusion when one of its sources turns out to be wrong. As agents move from a single chat transcript to a fleet that writes into shared memory — ingesting feeds, running scans, triaging into decisions — that gap stops being theoretical.
+
+Say a security pipeline runs overnight. A vuln-feed agent flags 60 services as shipping a vulnerable library, blocks their deploys, opens fix PRs, and pages the owning teams. By morning it turns out the feed had a bad package-name mapping and pinned a real CVE to the wrong package across a class of entries.
+
+What should happen to the 60 flags?
+
+You can't wipe them from the graph — some were independently confirmed by a SAST run or an SBOM check, and those services are genuinely vulnerable. You can't leave them either, because most were only ever the feed talking, and right now they're blocking shipments and paging people for nothing.
+
+What you actually want is the blast radius: of the 60, which flags die when the feed goes, and which stand on their own?
+
+Most memory stores can't answer that, because they store conclusions — messages, summaries, embeddings, rows — without recording which premises made each conclusion current. With the provenance layer, the support structure is right there in the graph:
+
+```plaintext
+VulnFeed ──▶ Vulnerable(svc-14) ──▶ BlockDeploy(svc-14)
+SASTRun  ──▶ Vulnerable(svc-14)          two sources, survives
+
+VulnFeed ──▶ Vulnerable(svc-22) ──▶ BlockDeploy(svc-22)
+                                         feed only, dies
+```
+
+Retract the feed, and `Vulnerable(svc-22)` loses its only source and goes non-current, which means `BlockDeploy(svc-22)` loses its premise and goes non-current too — the deploy unblocks. `Vulnerable(svc-14)` survives because the SAST run still backs it, so that block stands.
+
+```typescript
+const report = await provenance.retract({
+  kind: "VulnFeed",
+  id: badMappingSnapshotId,
+});
+
+// report.died:
+//   flags and deploy blocks that had only the feed behind them
+//
+// report.survivedVia:
+//   flags still confirmed by SAST or the SBOM check
+```
+
+Run that across all 60 services and `report` is the cleanup list: `died` is "unblock these and close the PRs," `survivedVia` is "these are still real." That's the query you can't run by hand at that scale.
+
+The source doesn't have to be a feed — it can be another agent's run. If a triage agent combined an overnight feed-ingest run, a SAST scan, and an SBOM rebuild into block-and-page decisions, and the feed-ingest run turns out to have trusted bad data, you retract that run as a source, not the whole fleet's memory:
+
+```typescript
+const report = await provenance.retract({
+  kind: "AgentRun",
+  id: overnightFeedRunId,
+});
+```
+
+Flags that only that run raised go non-current. Flags another run also supports survive. One agent can be wrong locally; shared memory recovers locally too, because it knows the blast radius.
+
+And because retraction lands on recorded time, the whole thing is replayable. It doesn't hard-delete — it flips unsupported facts to non-current and leaves the justification edges in place, so you can still see why something used to be believed:
+
+```typescript
+const before = await store.recordedNow();
+
+await provenance.retract({
+  kind: "VulnFeed",
+  id: badMappingSnapshotId,
+});
+
+const after = await store.recordedNow();
+
+await store.asOfRecorded(before)
+  .nodes.BlockDeploy
+  .getById("svc-22"); // current
+
+await store.asOfRecorded(after)
+  .nodes.BlockDeploy
+  .getById("svc-22"); // non-current
+```
+
+"Why did the agent block svc-22 at 2am, and why doesn't it anymore" becomes a query instead of an archaeology dig through logs.
+
+## Why plain SQL, and what it costs
+
+There's no portable, engine-native system-versioning story across Postgres and SQLite — Postgres needs an extension or an application-level pattern for it, and SQLite has no system-versioned table type at all. So TypeGraph stores history explicitly in its own relations and reconstructs point-in-time views in the query compiler, rather than delegating to a backend feature that only one engine has. One implementation runs on both backends: the same memory model works from a local SQLite file up to shared Postgres, with the provenance semantics unchanged. A solo agent can run this locally; a fleet writes into shared infrastructure with the same API.
+
+That reconstruction isn't free, and it's worth being upfront about the shape of the cost:
+
+- Only TypeGraph-managed writes are captured — raw SQL bypasses it. This is a provenance and audit layer for graph writes, not a database-level CDC/audit system.
+- There's no backfill. Enable history on a fresh graph; an entity that already existed before capture was enabled is first recorded the next time it's written.
+- Point-in-time reads reconstruct from history relations, so they're slower than current-state reads — most noticeably for full-graph reconstructions on PostgreSQL. Treat `asOfRecorded` as an audit and replay tool, not a hot path.
+- Per-write overhead runs roughly 2.5–6× uncaptured writes if each write is its own transaction, dropping to roughly 1–1.5× when writes are batched into one transaction.
+
+## Where this leaves agent memory
+
+A fact stored without provenance is organizational hearsay — memory that can't tell you why it believes what it believes, or what should happen when a source goes bad. That's fine for a single chat agent, where a lot of inconsistency can hide inside one transcript. It stops being fine the moment agents share memory: they'll read stale feeds, trust bad mappings, call flaky tools, and inherit each other's wrong assumptions, constantly.
+
+An agent memory that gates deploys, or maintains any long-lived model of a company, needs to answer three questions: what do we believe, why do we believe it, and what changes if this source turns out to be wrong. Truth maintenance stopped being a research curiosity the moment agents started keeping shared memory — TypeGraph 0.33 and 0.34 are that layer, built on graphs-on-SQL rather than a dedicated reasoning engine.
+
+## Try it
+
+- [Provenance and Retraction docs](/provenance)
+- [Provenance Retraction example](/examples/provenance-retraction/)
+- [Bitemporal Time Travel example](/examples/bitemporal-time-travel/)
+- [Full changelog](/changelog)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+If you've mapped JTMS/ATMS-style truth maintenance onto relational storage elsewhere, or know of prior art doing the same, I'd like to hear about it — there's plenty written on truth maintenance systems and not much on doing it directly on ordinary SQL tables.
+
+<NewsletterSignup />
