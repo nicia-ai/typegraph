@@ -141,6 +141,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     recordedNodes: `${prefix}_recorded_nodes`,
     recordedEdges: `${prefix}_recorded_edges`,
     recordedClock: `${prefix}_recorded_clock`,
+    revisionOrigins: `${prefix}_revision_origins`,
     uniques: `${prefix}_uniques`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,
