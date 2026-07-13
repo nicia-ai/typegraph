@@ -555,13 +555,17 @@ async function collect(argv: readonly string[]): Promise<void> {
     );
     await mkdir(localDir, { recursive: true });
 
+    const hasParseableSummary =
+      summaryText.length > 0 && summaryText !== "{}";
+    const hasHistoryLines = historyText.length > 0;
+
     if (hasParseableResults) {
       await writeJsonFile(
         path.join(localDir, "results.json"),
         JSON.parse(resultsText),
       );
     }
-    if (summaryText.length > 0) {
+    if (hasParseableSummary) {
       await writeJsonFile(
         path.join(localDir, "summary.json"),
         JSON.parse(summaryText),
@@ -572,7 +576,7 @@ async function collect(argv: readonly string[]): Promise<void> {
     // the *canonical* reports/history.jsonl happens only after every success
     // condition below passes, so a failed run's partial per-engine rows
     // never get mixed into the trend log looking like an ordinary result.
-    if (historyText.length > 0) {
+    if (hasHistoryLines) {
       await writeFile(
         path.join(localDir, "history-lines.jsonl"),
         `${historyText}\n`,
@@ -585,19 +589,28 @@ async function collect(argv: readonly string[]): Promise<void> {
     }
     console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
 
-    // A `--check` run reports row-count-parity/engine failures via a
+    // A `--check` run reports parity/engine failures via a
     // nonzero exit code, not by omitting results.json — some engines can
     // have completed and produced real timings before a later engine
     // failed. Checking only "did results.json parse" previously let a
     // failed run collect as a successful local command with exit code 0;
     // conversely, checking only the exit code let a `Success` SSM
     // invocation that happened to produce no results.json (e.g. the `cat`
-    // fetch itself failed) collect as if it had real data.
+    // fetch itself failed) collect as if it had real data. summary.json
+    // (engine versions, hardware, git sha — the reproducibility metadata
+    // the results doc cites) and at least one new history.jsonl line (one
+    // per engine that completed) are both written unconditionally by a
+    // genuinely complete run, so missing either is just as much a real
+    // failure as missing results — a successful collect that silently
+    // dropped either would report success while losing the metadata
+    // needed to reproduce or trend the run at all.
     if (
       invocation.status !== "Success" ||
       exitCodeText === undefined ||
       exitCodeText !== "0" ||
-      !hasParseableResults
+      !hasParseableResults ||
+      !hasParseableSummary ||
+      !hasHistoryLines
     ) {
       console.error(
         "--- last 200 lines of benchmark console log (failure diagnostic) ---",
@@ -611,10 +624,11 @@ async function collect(argv: readonly string[]): Promise<void> {
         ),
       );
       throw new Error(
-        `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}, parseable results: ${hasParseableResults}).` +
-          (hasParseableResults ?
+        `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}, ` +
+          `parseable results: ${hasParseableResults}, parseable summary: ${hasParseableSummary}, history lines: ${hasHistoryLines}).` +
+          (hasParseableResults || hasParseableSummary || hasHistoryLines ?
             ` Partial artifacts were written to ${localDir}.`
-          : " No parseable results were found on the instance."),
+          : " No parseable artifacts were found on the instance."),
       );
     }
 
