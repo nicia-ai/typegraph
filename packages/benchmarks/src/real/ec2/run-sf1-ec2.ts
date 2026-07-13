@@ -12,9 +12,12 @@
  *            confirms bootstrap succeeded, then fires the (long) benchmark
  *            command in fire-and-forget mode and exits.
  *   collect  Polls the benchmark command until it finishes (with periodic
- *            log-tail heartbeats), writes results/summary locally, appends
- *            the new lines to reports/history.jsonl, and terminates the
- *            instance (unless --keep).
+ *            log-tail heartbeats), writes results/summary/competitor-doctor
+ *            locally, appends the new lines to reports/history.jsonl, and
+ *            terminates the instance (unless --keep). Requires all four
+ *            engines to have actually run — unlike a local/CI invocation of
+ *            the benchmark script itself, which tolerates a partial engine
+ *            set (see collect()'s doc comment for why a paid EC2 run can't).
  *
  * SSM Session Manager / Run Command is the default and only required
  * control channel — no key pairs to manage. The launched instance's IAM
@@ -33,6 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { resolveGitSha } from "../../git";
 import { resolveHistoryPath } from "../../history";
+import { SNB_ENGINE_NAMES } from "../harness/doctor";
 import { stringifyError, writeJsonFile } from "../harness/process";
 import {
   type AwsCliOptions,
@@ -540,8 +544,38 @@ async function collect(argv: readonly string[]): Promise<void> {
       instanceId,
       renderHistoryTailScript(),
     );
+    const doctorText = await fetchRemoteText(
+      awsOptions,
+      instanceId,
+      renderCatJsonScript(
+        `${benchDir}/bench-results/current/snb-${benchProfile}/competitor-doctor.json`,
+      ),
+    );
 
     const hasParseableResults = resultsText.length > 0 && resultsText !== "{}";
+
+    // A doctor-runnable-engine filter (see snb-short-reads.ts) is the right
+    // behavior for a local/CI run — a no-Docker environment should still
+    // exit 0 on the two embedded engines. It's the wrong behavior for a
+    // paid, multi-hour EC2 run, whose entire point is a complete four-engine
+    // comparison: if a container failed to start on the instance, the run
+    // would otherwise silently proceed on the remaining engines, still write
+    // valid (just incomplete) results.json/summary.json/history lines, and
+    // exit 0. `results.json.engines` lists only engines that actually ran
+    // (`snb-short-reads.ts`'s `runs.map(...)`), so comparing it against the
+    // full canonical engine set is how this EC2-only strictness is enforced,
+    // without changing `--check`'s intentionally lenient local/CI semantics.
+    const parsedResults: { engines?: readonly { name: string }[] } | undefined =
+      hasParseableResults ?
+        (JSON.parse(resultsText) as { engines?: readonly { name: string }[] })
+      : undefined;
+    const ranEngineNames = new Set(
+      (parsedResults?.engines ?? []).map((engine) => engine.name),
+    );
+    const missingEngines = SNB_ENGINE_NAMES.filter(
+      (name) => !ranEngineNames.has(name),
+    );
+    const hasAllEngines = hasParseableResults && missingEngines.length === 0;
 
     // Collection is best-effort and unconditional: a failed --check run can
     // still produce real timing data for whichever engines completed before
@@ -557,6 +591,7 @@ async function collect(argv: readonly string[]): Promise<void> {
 
     const hasParseableSummary = summaryText.length > 0 && summaryText !== "{}";
     const hasHistoryLines = historyText.length > 0;
+    const hasParseableDoctor = doctorText.length > 0 && doctorText !== "{}";
 
     if (hasParseableResults) {
       await writeJsonFile(
@@ -568,6 +603,16 @@ async function collect(argv: readonly string[]): Promise<void> {
       await writeJsonFile(
         path.join(localDir, "summary.json"),
         JSON.parse(summaryText),
+      );
+    }
+    // Preserved whenever present (success or failure) — it's the diagnostic
+    // record of which engines the instance itself considered runnable,
+    // needed to tell "an engine failed mid-run" apart from "an engine was
+    // never attempted" when missingEngines is non-empty below.
+    if (hasParseableDoctor) {
+      await writeJsonFile(
+        path.join(localDir, "competitor-doctor.json"),
+        JSON.parse(doctorText),
       );
     }
     // Raw history lines are always preserved locally (run-scoped, not the
@@ -602,14 +647,18 @@ async function collect(argv: readonly string[]): Promise<void> {
     // genuinely complete run, so missing either is just as much a real
     // failure as missing results — a successful collect that silently
     // dropped either would report success while losing the metadata
-    // needed to reproduce or trend the run at all.
+    // needed to reproduce or trend the run at all. `hasAllEngines` closes
+    // the last gap: a run where one engine was never doctor-runnable (e.g.
+    // its container failed to start) still satisfies every check above, so
+    // it's checked independently.
     if (
       invocation.status !== "Success" ||
       exitCodeText === undefined ||
       exitCodeText !== "0" ||
       !hasParseableResults ||
       !hasParseableSummary ||
-      !hasHistoryLines
+      !hasHistoryLines ||
+      !hasAllEngines
     ) {
       console.error(
         "--- last 200 lines of benchmark console log (failure diagnostic) ---",
@@ -624,9 +673,10 @@ async function collect(argv: readonly string[]): Promise<void> {
       );
       throw new Error(
         `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}, ` +
-          `parseable results: ${hasParseableResults}, parseable summary: ${hasParseableSummary}, history lines: ${hasHistoryLines}).` +
+          `parseable results: ${hasParseableResults}, parseable summary: ${hasParseableSummary}, history lines: ${hasHistoryLines}, ` +
+          `missing engines: ${missingEngines.length > 0 ? missingEngines.join(", ") : "none"}).` +
           (hasParseableResults || hasParseableSummary || hasHistoryLines ?
-            ` Partial artifacts were written to ${localDir}.`
+            ` Partial artifacts were written to ${localDir}${hasParseableDoctor ? " (including competitor-doctor.json)" : ""}.`
           : " No parseable artifacts were found on the instance."),
       );
     }
