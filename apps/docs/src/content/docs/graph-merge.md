@@ -51,10 +51,14 @@ report you can act on.**
 
 The mental model is a three-act lifecycle:
 
-1. **`branch()`** stamps the base store's `base@V` (a hash of its schema *and*
-   live content) and materializes an isolated, independently-mutable working
-   copy. Writers edit the working copy with the normal store API; the base is
-   never touched.
+1. **`branch()`** stamps the base store's `base@V` and materializes an
+   isolated, independently-mutable working copy. With `revisionTracking: true`
+   (or `history: true`), `base@V` uses the store's durable revision anchor: a
+   per-graph random origin plus a monotonic clock. Validation therefore does
+   not fingerprint every live row or mistake a coincident revision in a
+   separately created store for the branch's base. Existing stores retain the
+   schema-and-content-fingerprint fallback. Writers edit the working copy with
+   the normal store API; the base is never touched.
 2. Writers do whatever they want — create nodes/edges, modify inherited rows,
    delete inherited rows.
 3. **`merge()`** diffs every branch against the base, then runs a fixed
@@ -86,7 +90,10 @@ then merge them back into the target.
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { asBranchId, branch, isOk, merge, unwrap } from "@nicia-ai/typegraph/graph-merge";
 
-const [base] = await createStoreWithSchema(graph, baseBackend);
+const [base] = await createStoreWithSchema(graph, baseBackend, {
+  // Recommended for graphs that branch repeatedly or stay live while agents work.
+  revisionTracking: true,
+});
 
 // branch() is backend-agnostic: you supply a factory for each branch's backend.
 const makeBranchBackend = async () => createFreshBackend();
@@ -116,7 +123,50 @@ console.log(result.data.conflicts); // the "Anna" vs "Ana" spelling disagreement
 
 `branch()` returns a `Result`; `unwrap` throws on failure (or branch on
 `isOk`). The default working-copy strategy clones the base through TypeGraph's
-export/import, so each branch gets a fresh backend from your factory.
+streaming interchange, so each branch gets a fresh backend from your factory
+without building a graph-sized export document in memory.
+
+## Scaling branches and interchange
+
+`revisionTracking: true` is the recommended mode for long-lived, repeatedly
+branched graphs. It advances one durable revision anchor inside each successful
+Store write transaction. The anchor combines a per-graph random origin with the
+monotonic commit clock, so a branch can only match the store that created it —
+not an independent database whose clock happens to share the same timestamp. A
+branch and its merge precondition then read that constant-size anchor instead of
+hashing every live node and edge. Stores created with `history: true` already
+have the same guarantee through their recorded-time commit clock.
+
+On PostgreSQL, the guarantee serializes writes to the same graph with a
+transaction-scoped advisory lock. That is the correct trade-off for a live graph
+whose branch merges must fail closed, but it can reduce throughput and increase
+write latency for a high-concurrency, single-graph workload. Partition that
+workload across graphs or leave revision tracking off when the content-fingerprint
+fallback is acceptable.
+
+This unlocks:
+
+- Many concurrent agent, importer, or review branches without base-version
+  validation growing with the graph.
+- Large graph copies, backup/export, and transfer pipelines that keep only one
+  interchange batch resident at a time via `exportGraphStream()` and
+  `importGraphStream()`.
+- A safe fast path for a live base: a branch is rejected if any tracked base
+  write lands before its merge commits, rather than silently merging a stale
+  plan.
+
+Streaming removes the graph-sized heap spike, but a physical working copy still
+copies `O(graph)` rows and snapshot merge staging still compares branch state to
+the base. Copy-on-write logical branches and delta-only staging remain the next
+larger architectural step; they are not hidden behind a micro-optimization.
+
+Revision tracking covers writes through the Store API. Direct backend writes and
+raw graph-table writes through `tx.sql` bypass the anchor, so applications using
+either escape hatch must avoid them for a branchable graph or retain the default
+content-fingerprint validation. Streaming export is likewise not a transactional
+backup snapshot: concurrent writes can produce a stream that spans multiple
+committed graph states. Use a database snapshot or quiesce writes when backup
+consistency matters.
 
 ## Entity resolution
 
@@ -386,8 +436,11 @@ const whoMadeX = await readProvenance(store, { canonicalId: "patient-123" }); //
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
-and a fingerprint of its live content. The two merge entry points differ in how
-they treat that token.
+with either its durable revision anchor (`revisionTracking: true` / `history:
+true`) or the compatibility fingerprint of live content. A revision anchor is
+namespaced by a durable per-graph origin, so it is not transferable between
+independently created stores. The two merge entry points differ in how they treat
+that token.
 
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,

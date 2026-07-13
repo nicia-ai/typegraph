@@ -317,6 +317,25 @@ type BaseStoreOptions = Readonly<{
   /** Observability hooks for monitoring */
   hooks?: StoreHooks;
   /**
+   * Maintain a durable, graph-wide revision anchor for TypeGraph writes:
+   * a random per-graph origin plus a monotonic revision clock. `branch()` uses
+   * this anchor to validate that its base has not moved without
+   * re-fingerprinting every live row, and cannot confuse a coincident clock in
+   * a separately created store for its original base. `history: true` enables
+   * the same tracking automatically through its recorded-time commit clock.
+   *
+   * This is intentionally opt-in for live stores: each successful graph write
+   * advances the anchor inside its write transaction. On PostgreSQL, those
+   * transactions take a graph-scoped advisory lock until commit; writes to the
+   * same graph therefore serialize. Enable it for branchable graphs, but size
+   * high-throughput multi-writer workloads for that trade-off.
+   *
+   * Writes performed directly through a backend — including raw graph-table
+   * writes through `tx.sql` — bypass the anchor and are outside the
+   * revision-tracking contract.
+   */
+  revisionTracking?: boolean;
+  /**
    * Automatic planner-statistics refresh after large autocommit bulk
    * writes (bulkCreate and bulkInsert on nodes and edges). Stale statistics after a
    * bulk load are a whole class of planner cliffs: the planner keeps
@@ -1420,9 +1439,10 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
  * Its type is the `AdoptedTransaction` union; cast to your concrete
  * Drizzle database type at the call site.
  *
- * When the store was created with `{ history: true }`, `tx.sql` is present but
- * replaced by a fail-loud guard because raw SQL would bypass recorded-time
- * capture. Use the typed `tx.nodes` / `tx.edges` collections inside
+ * When the store was created with `{ history: true }` or
+ * `{ revisionTracking: true }`, `tx.sql` is present but replaced by a fail-loud
+ * guard because raw SQL would bypass recorded-time capture or the revision
+ * anchor. Use the typed `tx.nodes` / `tx.edges` collections inside
  * `transaction()`, or use `store.withRecordedTransaction(externalTx, fn)` when
  * the relational layer owns the transaction boundary.
  *

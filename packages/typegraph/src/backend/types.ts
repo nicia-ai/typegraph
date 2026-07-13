@@ -1252,6 +1252,17 @@ export type GraphBackend = Readonly<{
   ensureIndexMaterializationsTable?: () => Promise<void>;
 
   /**
+   * Idempotently ensure ONLY the `typegraph_revision_origins` table exists.
+   *
+   * Revision-tracked stores use this per-graph, durable random origin together
+   * with the recorded clock to prevent two independent stores with coincident
+   * timestamps from sharing a merge base anchor. It is focused rather than
+   * using `bootstrapTables` so existing deployments can adopt revision anchors
+   * without replaying all base-table DDL during a merge read.
+   */
+  ensureRevisionOriginsTable?: () => Promise<void>;
+
+  /**
    * Look up a recorded materialization for a declared index by its
    * physical SQL index name. Returns `undefined` if no row exists.
    */

@@ -117,6 +117,7 @@ async function setupTestDatabase(): Promise<void> {
   if (!sharedPool) return;
 
   await sharedPool.query(`
+    DROP TABLE IF EXISTS typegraph_revision_origins CASCADE;
     DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
     DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
     DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
@@ -173,6 +174,7 @@ async function clearTestData(): Promise<void> {
               typegraph_kind_removals,
               typegraph_reconciliation_markers,
               typegraph_node_fulltext,
+              typegraph_revision_origins,
               typegraph_recorded_clock,
               typegraph_recorded_nodes,
               typegraph_recorded_edges,

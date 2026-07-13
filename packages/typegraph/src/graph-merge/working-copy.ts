@@ -2,12 +2,12 @@
  * Pluggable working-copy strategy: how `branch()` produces an isolated,
  * independently-mutable copy of a base store.
  *
- * The P0 default is a faithful CLONE via the public interchange API
- * ({@link cloneWorkingCopyStrategy}): `exportGraph` the base, then `importGraph`
- * into a fresh store on a caller-provided backend. IDs are preserved by
- * interchange, so the diff engine (T3) can key on stable ids across base and
- * fork. This leverages public entrypoints only, needs zero schema changes, and
- * behaves identically across SQLite and Postgres.
+ * The P0 default is a faithful CLONE via streamed public interchange
+ * ({@link cloneWorkingCopyStrategy}): `exportGraphStream` the base, then
+ * `importGraphStream` into a fresh store on a caller-provided backend. IDs are
+ * preserved by interchange, so the diff engine (T3) can key on stable ids across
+ * base and fork. This leverages public entrypoints only, needs zero schema
+ * changes, and behaves identically across SQLite and Postgres.
  *
  * INTERCHANGE FIDELITY LIMITATION (verified, design §13.x): the interchange
  * `meta` schema has no `deletedAt` field, so a base row that is already
@@ -41,10 +41,10 @@
 import { BranchError } from "./errors";
 import type { GraphBackend, GraphDef, Store } from "./typegraph-internal";
 import { createStoreWithSchema } from "./typegraph-internal";
-import { exportGraph, importGraph } from "./typegraph-internal";
+import { exportGraphStream, importGraphStream } from "./typegraph-internal";
 
 /**
- * Batch size for the clone's `importGraph` pass. Large enough to keep
+ * Batch size for the clone's `importGraphStream` pass. Large enough to keep
  * round-trips low on demo-scale graphs; correctness is independent of the value.
  */
 const CLONE_IMPORT_BATCH_SIZE = 1000;
@@ -73,17 +73,20 @@ export type WorkingCopyStrategy<G extends GraphDef> = Readonly<{
  * in-process Postgres engine) be constructed lazily at branch time.
  *
  * The returned backend MUST be EMPTY (no rows for the base graph): the clone
- * seeds it from the base via `importGraph` with `onConflict: "error"`, so a
+ * seeds it from the base via `importGraphStream` with `onConflict: "error"`, so a
  * pre-existing row is surfaced as a {@link BranchError} rather than silently
  * skipped (which would leave the working copy diverging from the base).
+ * When the source store uses `revisionTracking`, the backend must also satisfy
+ * that option's transactional revision-clock requirements because the clone
+ * preserves the source's branchability contract.
  */
 export type MakeBackend = () => Promise<GraphBackend>;
 
 /**
- * The P0 default working-copy strategy: faithful clone via export/import.
+ * The P0 default working-copy strategy: faithful clone via streamed interchange.
  *
  * On each `create(baseStore)`:
- *   1. `exportGraph(baseStore, { includeMeta: true, includeTemporal: true,
+ *   1. `exportGraphStream(baseStore, { includeMeta: true, includeTemporal: true,
  *      includeDeleted: false })` — `includeMeta: true` carries
  *      `created_at`/`updated_at`; `includeTemporal: true` carries
  *      `validFrom`/`validTo` so the clone's valid-time window matches the base's
@@ -94,12 +97,12 @@ export type MakeBackend = () => Promise<GraphBackend>;
  *      base's live state.
  *   2. Create a fresh store over the caller-provided backend with the SAME graph
  *      definition via `createStoreWithSchema`.
- *   3. `importGraph(freshStore, data, { onConflict: "error", ... })` — ids are
+ *   3. `importGraphStream(freshStore, data, { onConflict: "error", ... })` — ids are
  *      preserved so the diff engine can key on them. `onConflict: "error"`
  *      requires the backend to be EMPTY: a pre-existing row is a contract
  *      violation that must surface loudly, never be silently skipped (a skipped
  *      row would leave the clone diverging from the base, so the fork's diff would
- *      report phantom modifications/deletions). `importGraph` RETURNS
+ *      report phantom modifications/deletions). `importGraphStream` RETURNS
  *      `{ success, errors }` rather than throwing on a per-row rejection, so its
  *      result is checked and any failure fails the branch.
  *
@@ -115,23 +118,32 @@ export function cloneWorkingCopyStrategy<G extends GraphDef>(
 ): WorkingCopyStrategy<G> {
   return {
     create: async (baseStore: Store<G>): Promise<Store<G>> => {
-      const data = await exportGraph(baseStore, {
-        includeMeta: true,
-        includeTemporal: true,
-        includeDeleted: false,
-      });
       const backend = await makeBackend();
       try {
         const [freshStore] = await createStoreWithSchema(
           baseStore.graph,
           backend,
+          {
+            // Keep descendants branchable with the same O(1) anchor contract,
+            // but do not copy recorded-time history into the disposable fork.
+            revisionTracking: baseStore.revisionTrackingEnabled,
+          },
         );
-        const result = await importGraph(freshStore, data, {
-          onConflict: "error",
-          onUnknownProperty: "error",
-          validateReferences: true,
-          batchSize: CLONE_IMPORT_BATCH_SIZE,
-        });
+        const result = await importGraphStream(
+          freshStore,
+          exportGraphStream(baseStore, {
+            includeMeta: true,
+            includeTemporal: true,
+            includeDeleted: false,
+            batchSize: CLONE_IMPORT_BATCH_SIZE,
+          }),
+          {
+            onConflict: "error",
+            onUnknownProperty: "error",
+            validateReferences: true,
+            batchSize: CLONE_IMPORT_BATCH_SIZE,
+          },
+        );
         if (!result.success) {
           throw new BranchError(
             "Clone import failed: the working copy could not be seeded from the base store. The backend returned by makeBackend() must be empty.",

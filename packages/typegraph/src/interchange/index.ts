@@ -35,11 +35,18 @@ export {
   type ExportOptions,
   type ExportOptionsInput,
   ExportOptionsSchema,
+  type ExportStreamOptions,
+  type ExportStreamOptionsInput,
+  ExportStreamOptionsSchema,
   FORMAT_VERSION,
   type GraphData,
+  type GraphDataHeader,
+  GraphDataHeaderSchema,
   GraphDataSchema,
   type GraphDataSource,
   GraphDataSourceSchema,
+  type GraphInterchangeChunk,
+  GraphInterchangeChunkSchema,
   type ImportError,
   ImportErrorSchema,
   type ImportOptions,
@@ -58,5 +65,5 @@ export {
 // Functions
 // ============================================================
 
-export { exportGraph } from "./export";
-export { importGraph } from "./import";
+export { exportGraph, exportGraphStream } from "./export";
+export { importGraph, importGraphStream } from "./import";

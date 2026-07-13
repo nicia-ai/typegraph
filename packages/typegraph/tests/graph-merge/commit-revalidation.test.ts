@@ -23,9 +23,14 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import {
+  computeBaseVersion,
+  revisionAnchorOf,
+  revisionOriginOf,
+} from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
 import { merge, mergeAgainstBase } from "../../src/graph-merge/merge";
@@ -122,7 +127,9 @@ describe.each(backendMatrix())(
     }
 
     /** Base with one anchor patient plus a branch that adds two more. */
-    async function seedScenario(): Promise<
+    async function seedScenario(
+      options?: Readonly<{ history?: boolean; revisionTracking?: boolean }>,
+    ): Promise<
       Readonly<{
         baseStore: Store<DriftGraph>;
         branchA: GraphBranch<DriftGraph>;
@@ -131,6 +138,7 @@ describe.each(backendMatrix())(
       const [baseStore] = await createStoreWithSchema(
         driftGraph,
         await makeBackend(),
+        options,
       );
       await baseStore.nodes.Patient.bulkCreate([
         {
@@ -194,6 +202,78 @@ describe.each(backendMatrix())(
         "pat-base",
         "pat-drift",
       ]);
+    });
+
+    it.each([
+      { name: "revision tracking", options: { revisionTracking: true } },
+      { name: "recorded history", options: { history: true } },
+    ])(
+      "rechecks the durable anchor inside the commit transaction for $name",
+      async ({ options }) => {
+        const { baseStore, branchA } = await seedScenario(options);
+
+        const result = await merge<DriftGraph>(
+          baseStore,
+          [branchA],
+          revalidationMergeOptions(driftingEmbedder(baseStore)),
+        );
+
+        expect(isErr(result)).toBe(true);
+        if (isErr(result)) {
+          expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+          expect(result.error.message).toContain(
+            "modified between the revision-anchor check and the commit transaction",
+          );
+        }
+        expect(await livePatientIds(baseStore)).toEqual([
+          "pat-base",
+          "pat-drift",
+        ]);
+      },
+    );
+
+    it("rejects a branch from another store when their revision timestamps coincide", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      try {
+        const [source] = await createStoreWithSchema(
+          driftGraph,
+          await makeBackend(),
+          { revisionTracking: true },
+        );
+        await source.nodes.Patient.create({
+          name: "Same content",
+          birthDate: "2000-01-01",
+        });
+        const foreignBranch = await makeBranch(source, BRANCH_A);
+
+        const [target] = await createStoreWithSchema(
+          driftGraph,
+          await makeBackend(),
+          { revisionTracking: true },
+        );
+        await target.nodes.Patient.create({
+          name: "Same content",
+          birthDate: "2000-01-01",
+        });
+
+        const targetVersion = await computeBaseVersion(target);
+        expect(revisionAnchorOf(targetVersion)).toBe(
+          revisionAnchorOf(foreignBranch.base),
+        );
+        expect(revisionOriginOf(targetVersion)).not.toBe(
+          revisionOriginOf(foreignBranch.base),
+        );
+
+        const result = await merge(target, [foreignBranch]);
+        expect(isErr(result)).toBe(true);
+        if (isErr(result)) {
+          expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        }
+        expect(await livePatientIds(target)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("commits normally when no write lands in the window (control)", async () => {

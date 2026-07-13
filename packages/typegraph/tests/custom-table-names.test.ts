@@ -50,6 +50,7 @@ describe("custom table names", () => {
     recordedNodes: "app_recorded_nodes",
     recordedEdges: "app_recorded_edges",
     recordedClock: "app_recorded_clock",
+    revisionOrigins: "app_revision_origins",
     fulltext: "app_fulltext",
     uniques: "app_uniques",
   } as const;
@@ -63,6 +64,7 @@ describe("custom table names", () => {
       recordedNodes: CUSTOM_NAMES.recordedNodes,
       recordedEdges: CUSTOM_NAMES.recordedEdges,
       recordedClock: CUSTOM_NAMES.recordedClock,
+      revisionOrigins: CUSTOM_NAMES.revisionOrigins,
       fulltext: CUSTOM_NAMES.fulltext,
       uniques: CUSTOM_NAMES.uniques,
     });
@@ -159,6 +161,7 @@ describe("custom table names", () => {
       recordedNodes: "typegraph_recorded_nodes",
       recordedEdges: "typegraph_recorded_edges",
       recordedClock: "typegraph_recorded_clock",
+      revisionOrigins: "typegraph_revision_origins",
       fulltext: "typegraph_node_fulltext",
       uniques: "typegraph_node_uniques",
     });

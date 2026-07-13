@@ -5,7 +5,7 @@
  *
  *   1. PRECONDITION — compute the target's `base@V` and reject any branch whose
  *      `base` token does not match it (`BaseVersionMismatchError`). A branch
- *      forked from a divergent schema or content fingerprint cannot be merged
+ *      forked from a divergent schema or base revision cannot be merged
  *      safely (design §5.2 / §13.6).
  *   2. STAGE — `stageBranches` (T7): the provenance-tagged UNION of every
  *      branch's state-diff against the immutable base.
@@ -45,6 +45,9 @@ import {
   computeContentComponent,
   computeSchemaComponent,
   contentComponentOf,
+  hasRevisionAnchor,
+  revisionAnchorOf,
+  revisionOriginOf,
 } from "./base-version";
 import { blockNodes } from "./blocking";
 import { canonicalizeProps, edgeStateSignature } from "./canonical-props";
@@ -121,6 +124,11 @@ import type {
   TransactionBackend,
   TransactionOptions,
   UniqueIntrospection,
+} from "./typegraph-internal";
+import {
+  lockRecordedGraphWrite,
+  readRecordedClock,
+  readRevisionOrigin,
 } from "./typegraph-internal";
 import type {
   BaseAmbiguity,
@@ -1291,12 +1299,10 @@ export async function commitPlan<G extends GraphDef>(
     target.transaction(async (tx) => {
       // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
       // transaction, so the target may have been written between the base@V
-      // precondition and this commit. Re-deriving the content fingerprint
-      // through the tx-scoped backend (this transaction's snapshot) and
-      // comparing it to the captured token proves the plan still describes the
-      // live target; SERIALIZABLE isolation makes the proof race-free — a
-      // concurrent write that invalidates these reads aborts one transaction
-      // with a retryable serialization failure instead of committing silently.
+      // precondition and this commit. Revision-anchored stores check their
+      // durable clock under the graph write lock; legacy stores re-derive the
+      // content fingerprint through this transaction's snapshot. Either proof
+      // ensures the plan still describes the live target before committing.
       if (expectedBaseVersion !== undefined) {
         await assertTargetUnchanged(tx.backend, target, expectedBaseVersion);
       }
@@ -1305,7 +1311,7 @@ export async function commitPlan<G extends GraphDef>(
         tx.nodes as unknown as TxNodes,
         tx.edges as unknown as TxEdges,
       );
-    }, MERGE_COMMIT_TX_OPTIONS),
+    }, mergeCommitTransactionOptions(target)),
   );
 }
 
@@ -1320,18 +1326,68 @@ const MERGE_COMMIT_TX_OPTIONS = {
   isolationLevel: "serializable",
 } as const satisfies TransactionOptions;
 
+function mergeCommitTransactionOptions<G extends GraphDef>(
+  target: Store<G>,
+): TransactionOptions | undefined {
+  // Recorded-time capture only supports read-committed transactions because it
+  // allocates its durable clock inside the write transaction. Revision-anchored
+  // merges hold that same per-graph lock before checking the anchor, which
+  // closes the TOCTOU gap without asking a history store for SERIALIZABLE.
+  return target.historyEnabled ? undefined : MERGE_COMMIT_TX_OPTIONS;
+}
+
 /**
- * The in-transaction half of the base@V guard: recomputes the target's content
- * fingerprint through the TRANSACTION-SCOPED backend and compares it to the
- * token captured by the precondition (`merge()`) or at plan start
- * (`mergeAgainstBase()`). The schema component cannot drift (it is a pure
- * function of the in-memory graph definition), so only content is compared.
+ * The in-transaction half of the base@V guard: revision-anchored targets read
+ * their durable clock under the graph lock; legacy targets recompute their
+ * content fingerprint through the transaction-scoped backend. The schema
+ * component cannot drift because it is a pure function of the in-memory graph
+ * definition.
  */
 async function assertTargetUnchanged<G extends GraphDef>(
   txBackend: TransactionBackend,
   target: Store<G>,
   expectedBaseVersion: BaseVersion,
 ): Promise<void> {
+  if (hasRevisionAnchor(expectedBaseVersion)) {
+    // All tracked writers acquire this lock before touching graph rows and
+    // advance the same clock before committing. Holding it around the
+    // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
+    // relying on the transaction's snapshot being the latest committed state.
+    await lockRecordedGraphWrite(txBackend, target.graphId);
+    const expectedOrigin = revisionOriginOf(expectedBaseVersion);
+    const liveOrigin = await readRevisionOrigin(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+    );
+    if (liveOrigin !== expectedOrigin) {
+      throw new BaseVersionMismatchError(
+        "The merge branch was forked from a different revision-tracked store; the resolved plan was not applied.",
+        {
+          details: { expectedOrigin, liveOrigin },
+          suggestion:
+            "Merge the branch back into its original base store, or fork a new branch from this target.",
+        },
+      );
+    }
+    const liveRevision = await readRecordedClock(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+    );
+    const expectedRevision = revisionAnchorOf(expectedBaseVersion);
+    if (liveRevision !== expectedRevision) {
+      throw new BaseVersionMismatchError(
+        "The merge target was modified between the revision-anchor check and the commit transaction; the resolved plan was not applied.",
+        {
+          details: { expectedRevision, liveRevision },
+          suggestion:
+            "Re-run the merge (and re-branch if the divergence is real), or route all graph writes through the revision-tracked Store.",
+        },
+      );
+    }
+    return;
+  }
   const liveContent = await computeContentComponent(
     txBackend,
     target.graphId,
@@ -1445,7 +1501,7 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
 /**
  * Validates the `base@V` precondition: every branch's `base` token MUST equal the
  * target's current base version. A mismatch means the branch forked from a
- * divergent schema or content fingerprint, which cannot be merged safely.
+ * divergent schema or base revision, which cannot be merged safely.
  */
 async function validateBaseVersions<G extends GraphDef>(
   target: Store<G>,
@@ -2597,12 +2653,19 @@ async function commitIncrementalPlan<G extends GraphDef>(
     );
   }
 
-  // SERIALIZABLE + retry for the same reason as `commitPlan`: the per-row
-  // guards read inside this transaction, and SSI turns a concurrent write that
-  // invalidates those reads into a retryable abort instead of a lost update.
-  // Every retry re-runs the guards, so a real hazard fails typed, never stale.
+  // Legacy targets use SERIALIZABLE + retry: the per-row guards read inside
+  // this transaction, and SSI turns a conflicting concurrent write into a
+  // retryable abort. Recorded-history targets cannot use SERIALIZABLE because
+  // capture allocates its clock in read-committed mode; they instead acquire the
+  // same graph write lock as every captured write before the guards run. In
+  // PostgreSQL read committed each subsequent statement sees committed work that
+  // landed before the lock was acquired, while the lock excludes later tracked
+  // writes until this plan commits.
   return withTxConflictRetry(() =>
     target.transaction(async (tx) => {
+      if (target.revisionTrackingEnabled) {
+        await lockRecordedGraphWrite(tx.backend, target.graphId);
+      }
       const nodesApi = tx.nodes as unknown as TxNodes;
       const edgesApi = tx.edges as unknown as TxEdges;
       // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
@@ -2616,7 +2679,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
       await validateIncrementalNodeWrites(target, nodesApi, plan);
       await validateIncrementalEdgeWrites(target, edgesApi, plan);
       return applyMergePlan(plan, nodesApi, edgesApi);
-    }, MERGE_COMMIT_TX_OPTIONS),
+    }, mergeCommitTransactionOptions(target)),
   );
 }
 

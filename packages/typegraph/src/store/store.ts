@@ -153,10 +153,14 @@ import {
   type NodeOperationContext,
 } from "./operations";
 import {
+  advanceRevisionClock,
   assertRecordedCaptureTransactionIsolation,
+  assertRevisionTrackableBackend,
   createHistoryUnsafeSqlRef,
   createRecordedBackend,
   createRecordedTransactionScope,
+  createRevisionTrackingUnsafeSqlRef,
+  ensureRevisionOrigin,
   lockRecordedGraphWrite,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
@@ -370,6 +374,8 @@ export class Store<G extends GraphDef> {
   readonly #baseBackend: RawBackend;
   readonly #backend: GraphWriteBackend;
   readonly #captureEnabled: boolean;
+  readonly #revisionTrackingEnabled: boolean;
+  #revisionOrigin: Promise<string> | undefined;
   readonly #recordedReadBinding: RecordedReadBinding | undefined;
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
@@ -396,6 +402,11 @@ export class Store<G extends GraphDef> {
     this.#graph = graph;
     this.#baseBackend = asRawBackend(backend);
     this.#captureEnabled = options?.history === true;
+    this.#revisionTrackingEnabled =
+      this.#captureEnabled || options?.revisionTracking === true;
+    if (this.#revisionTrackingEnabled) {
+      assertRevisionTrackableBackend(backend);
+    }
     // Resolve the schema before wrapping so recorded-time capture targets the
     // same relations recorded reads do (the explicit `schema` option, not just
     // `backend.tableNames`).
@@ -474,6 +485,24 @@ export class Store<G extends GraphDef> {
    */
   get historyEnabled(): boolean {
     return this.#captureEnabled;
+  }
+
+  /**
+   * Whether this Store advances a durable revision anchor for graph writes.
+   *
+   * @internal
+   */
+  get revisionTrackingEnabled(): boolean {
+    return this.#revisionTrackingEnabled;
+  }
+
+  /**
+   * SQL schema that owns the durable revision clock relation.
+   *
+   * @internal
+   */
+  get revisionSchema(): SqlSchema {
+    return this.#sqlSchema();
   }
 
   /**
@@ -1115,6 +1144,51 @@ export class Store<G extends GraphDef> {
   }
 
   /**
+   * Returns the durable graph revision used by graph branching. It is undefined
+   * until the first successful tracked write, which is itself a stable initial
+   * anchor. Unlike {@link recordedNow}, this is also available on a live Store
+   * created with `{ revisionTracking: true }`.
+   *
+   * @internal
+   */
+  async revisionNow(): Promise<string | undefined> {
+    if (!this.#revisionTrackingEnabled) return undefined;
+    return readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId);
+  }
+
+  /**
+   * Returns the durable random namespace for this graph's revision clock. A
+   * tracked base token combines it with {@link revisionNow}, preventing a
+   * branch from one independent store from matching a coincident timestamp in
+   * another store.
+   *
+   * @internal
+   */
+  async revisionOriginNow(): Promise<string> {
+    if (!this.#revisionTrackingEnabled) {
+      throw new ConfigurationError(
+        "revisionOriginNow() requires revisionTracking: true or history: true.",
+        { code: "REVISION_ORIGIN_REQUIRES_TRACKING" },
+      );
+    }
+    const pendingOrigin =
+      this.#revisionOrigin ??
+      ensureRevisionOrigin(this.#baseBackend, this.#sqlSchema(), this.graphId);
+    this.#revisionOrigin = pendingOrigin;
+    try {
+      return await pendingOrigin;
+    } catch (error) {
+      // A transient DDL/connection failure must not permanently poison this
+      // Store's cached initialization promise. Preserve a newer in-flight
+      // attempt if another caller replaced it before this rejection arrived.
+      if (this.#revisionOrigin === pendingOrigin) {
+        this.#revisionOrigin = undefined;
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Returns a read-only {@link StoreView} pinned to an arbitrary public
    * temporal mode. Use {@link Store.asOf} for the common valid-time case;
    * reach for `view` to pin `"current"`, `"includeEnded"`, or
@@ -1381,9 +1455,10 @@ export class Store<G extends GraphDef> {
    *   {@link Store.withTransaction}). See {@link TransactionContext}
    *   for per-backend semantics; it is `undefined` only on the
    *   non-transactional fallback.
-   *   When the store was created with `{ history: true }`, `tx.sql` is
-   *   replaced by a fail-loud guard because raw SQL would bypass
-   *   recorded-time capture; use the typed collections inside
+   *   When the store was created with `{ history: true }` or
+   *   `{ revisionTracking: true }`, `tx.sql` is replaced by a fail-loud guard
+   *   because raw SQL would bypass recorded-time capture or revision tracking;
+   *   use the typed collections inside
    *   `transaction()` or {@link Store.withRecordedTransaction}.
    *
    * @example
@@ -1859,7 +1934,10 @@ export class Store<G extends GraphDef> {
         runNodeOperationHooks,
       };
     }
-    const exposedSql = this.#captureEnabled ? createHistoryUnsafeSqlRef() : sql;
+    const exposedSql =
+      this.#captureEnabled ? createHistoryUnsafeSqlRef()
+      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
+      : sql;
     return {
       nodes,
       edges,
@@ -1885,7 +1963,29 @@ export class Store<G extends GraphDef> {
     const doClear = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
+      if (this.#revisionTrackingEnabled) {
+        await lockRecordedGraphWrite(target, this.graphId);
+      }
+      const previousRevision =
+        this.#revisionTrackingEnabled && !this.#captureEnabled ?
+          await readRecordedClock(target, this.#sqlSchema(), this.graphId)
+        : undefined;
       await target.clearGraph(this.graphId);
+      // `clearGraph` deletes the recorded-clock row alongside graph data.
+      // Live revision tracking immediately seeds a fresh anchor so a pre-clear
+      // branch cannot match a now-empty graph. History capture intentionally
+      // preserves its long-standing `recordedNow() === undefined` clear
+      // contract; a pre-clear history branch already carries a non-empty clock
+      // value and therefore still fails the base-version precondition.
+      if (this.#revisionTrackingEnabled && !this.#captureEnabled) {
+        await advanceRevisionClock(
+          target,
+          this.#sqlSchema(),
+          this.graphId,
+          this.#baseBackend.capabilities.transactions,
+          previousRevision,
+        );
+      }
     };
 
     await (this.#baseBackend.capabilities.transactions ?
@@ -2784,6 +2884,8 @@ export class Store<G extends GraphDef> {
       graph: this.#graph,
       graphId: this.graphId,
       historyEnabled: this.#captureEnabled,
+      revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
@@ -2798,6 +2900,8 @@ export class Store<G extends GraphDef> {
       graph: this.#graph,
       graphId: this.graphId,
       historyEnabled: this.#captureEnabled,
+      revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),

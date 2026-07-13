@@ -99,6 +99,7 @@ async function clearTestData(): Promise<void> {
               typegraph_kind_removals,
               typegraph_reconciliation_markers,
               typegraph_node_fulltext,
+              typegraph_revision_origins,
               typegraph_recorded_clock,
               typegraph_recorded_nodes,
               typegraph_recorded_edges,

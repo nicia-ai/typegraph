@@ -48,6 +48,7 @@ beforeAll(async () => {
   try {
     await candidate.query("SELECT 1");
     await candidate.query(`
+      DROP TABLE IF EXISTS typegraph_revision_origins CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
       DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;

@@ -1,17 +1,26 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import {
-  type GraphBackend,
-  type TransactionBackend,
-} from "../../backend/types";
+import { type GraphBackend } from "../../backend/types";
 import { RECORDED_MAX } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { nowIso } from "../../utils/date";
+import { generateId } from "../../utils/id";
 import { executeStatement } from "./guards";
 
 type ClockRow = Readonly<{ recorded_at: unknown }>;
+type RevisionOriginRow = Readonly<{ origin: unknown }>;
+
+type RecordedClockBackend = Pick<
+  GraphBackend,
+  "dialect" | "execute" | "executeStatement"
+>;
+
+type RevisionOriginBackend = Pick<
+  GraphBackend,
+  "dialect" | "ensureRevisionOriginsTable" | "execute" | "executeStatement"
+>;
 
 /**
  * Floor sentinel used only to seed-and-lock a graph's clock row before the
@@ -134,7 +143,7 @@ export function registerRecordedGraphLockMemo(
 }
 
 async function acquireRecordedGraphWriteLock(
-  target: Pick<TransactionBackend, "execute">,
+  target: Pick<GraphBackend, "execute">,
   graphId: string,
 ): Promise<void> {
   await target.execute(
@@ -143,7 +152,7 @@ async function acquireRecordedGraphWriteLock(
 }
 
 export async function lockRecordedGraphWrite(
-  target: Pick<TransactionBackend, "dialect" | "execute">,
+  target: Pick<GraphBackend, "dialect" | "execute">,
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
@@ -271,8 +280,77 @@ export async function readRecordedClock(
   return first === undefined ? undefined : toCanonicalIso(first.recorded_at);
 }
 
+/**
+ * Reads the durable, random origin assigned to one graph's revision clock.
+ * The origin namespaces an otherwise timestamp-only revision anchor, so a
+ * branch cannot mistake another store's coincident clock value for its base.
+ */
+export async function readRevisionOrigin(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string | undefined> {
+  const rows = await target.execute<RevisionOriginRow>(
+    asCompiledRowsSql(sql`
+      SELECT origin
+      FROM ${schema.revisionOriginsTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+  const first = rows[0];
+  if (first === undefined) return undefined;
+  if (typeof first.origin !== "string" || first.origin.length === 0) {
+    throw new ConfigurationError(
+      "Revision origin row contained an invalid origin",
+      { graphId, origin: first.origin },
+    );
+  }
+  return first.origin;
+}
+
+/**
+ * Returns a graph's durable revision-origin nonce, creating it exactly once.
+ * The unique graph-id row makes concurrent first readers converge on the
+ * winner's origin rather than manufacturing incompatible anchors.
+ */
+export async function ensureRevisionOrigin(
+  target: RevisionOriginBackend,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
+  const ensureTable = target.ensureRevisionOriginsTable;
+  if (ensureTable === undefined) {
+    throw new ConfigurationError(
+      "Revision tracking requires a backend that can bootstrap revision origins.",
+      { dialect: target.dialect },
+      {
+        suggestion:
+          "Use a built-in SQLite/PostgreSQL backend, or implement ensureRevisionOriginsTable on the custom backend.",
+      },
+    );
+  }
+  await ensureTable();
+  const existing = await readRevisionOrigin(target, schema, graphId);
+  if (existing !== undefined) return existing;
+
+  await executeStatement(
+    target,
+    sql`
+      INSERT INTO ${schema.revisionOriginsTable} (graph_id, origin)
+      VALUES (${graphId}, ${generateId()})
+      ON CONFLICT (graph_id) DO NOTHING
+    `,
+  );
+  const origin = await readRevisionOrigin(target, schema, graphId);
+  if (origin !== undefined) return origin;
+  throw new ConfigurationError(
+    "Revision origin was not persisted after initialization.",
+    { graphId, dialect: target.dialect },
+  );
+}
+
 async function writeRecordedClock(
-  target: TransactionBackend,
+  target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
   recordedAt: string,
@@ -288,7 +366,7 @@ async function writeRecordedClock(
 }
 
 async function lockRecordedClock(
-  target: TransactionBackend,
+  target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
   ownsWriteLock: boolean,
@@ -323,13 +401,15 @@ async function lockRecordedClock(
 }
 
 export async function allocateRecordedCommit(
-  target: TransactionBackend,
+  target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
   ownsWriteLock: boolean,
+  previousRevision?: string,
 ): Promise<string> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
-  const previous = await readRecordedClock(target, schema, graphId);
+  const previous =
+    previousRevision ?? (await readRecordedClock(target, schema, graphId));
   const recordedCommitTime = nextRecordedCommitTime(previous);
   if (
     !Number.isFinite(recordedCommitTime) ||
@@ -347,4 +427,32 @@ export async function allocateRecordedCommit(
   const recordedCommit = new Date(recordedCommitTime).toISOString();
   await writeRecordedClock(target, schema, graphId, recordedCommit);
   return recordedCommit;
+}
+
+/**
+ * Advances the durable graph revision after a successful live-store write.
+ *
+ * Revision tracking deliberately reuses the monotonic per-graph clock already
+ * owned by recorded-time capture. The write path holds the graph write lock
+ * before this runs. Callers additionally state whether their SQLite
+ * transaction owns the write lock so `allocateRecordedCommit` can skip its
+ * redundant seed-UPSERT only on bundled `BEGIN IMMEDIATE` paths. It preserves
+ * monotonicity even when wall-clock milliseconds repeat. History capture calls
+ * `allocateRecordedCommit` during its own flush instead, so a captured write
+ * remains one revision rather than being advanced twice.
+ */
+export async function advanceRevisionClock(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  ownsWriteLock: boolean,
+  previousRevision?: string,
+): Promise<string> {
+  return allocateRecordedCommit(
+    target,
+    schema,
+    graphId,
+    ownsWriteLock,
+    previousRevision,
+  );
 }

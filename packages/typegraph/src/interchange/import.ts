@@ -38,6 +38,8 @@ import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
+  type GraphDataHeader,
+  type GraphInterchangeChunk,
   type ImportError,
   type ImportOptions,
   ImportOptionsSchema,
@@ -82,12 +84,7 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
-  const result: ImportResult = {
-    success: true,
-    nodes: { created: 0, updated: 0, skipped: 0 },
-    edges: { created: 0, updated: 0, skipped: 0 },
-    errors: [],
-  };
+  const result = emptyImportResult();
 
   const errors: ImportError[] = [];
   const graph = store.graph;
@@ -142,6 +139,144 @@ export async function importGraph<G extends GraphDef>(
   // statistics refresh must not convert the completed (non-atomic on some
   // backends, non-retryable) import into a thrown failure — it degrades to
   // a warning, and the caller can run `store.refreshStatistics()`.
+  await refreshStatisticsAfterImport(store, options, result, "importGraph");
+
+  return {
+    ...result,
+    success: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Imports a header-first stream of bounded interchange chunks.
+ *
+ * Each chunk is committed through the same {@link importGraph} implementation
+ * as an in-memory import, so validation and conflict semantics stay identical.
+ * Chunks are individually atomic on transactional backends; a consumer needing
+ * all-or-nothing behavior can import into a disposable working-copy backend and
+ * publish it only after this function succeeds.
+ *
+ * Nodes must precede edges. Once a node chunk commits, edge validation reads the
+ * target store rather than retaining every imported node id in memory.
+ */
+export async function importGraphStream<G extends GraphDef>(
+  store: Store<G>,
+  chunks: AsyncIterable<GraphInterchangeChunk>,
+  rawOptions: ImportOptions,
+): Promise<ImportResult> {
+  const options = ImportOptionsSchema.parse(rawOptions);
+  const result = emptyImportResult();
+  let header: GraphDataHeader | undefined;
+  let receivedEdges = false;
+
+  for await (const chunk of chunks) {
+    switch (chunk.type) {
+      case "header": {
+        if (header !== undefined) {
+          throw new Error(
+            "Graph interchange stream emitted more than one header.",
+          );
+        }
+        header = chunk.header;
+        break;
+      }
+      case "nodes": {
+        if (header === undefined) {
+          throw new Error("Graph interchange stream must start with a header.");
+        }
+        if (receivedEdges) {
+          throw new Error(
+            "Graph interchange stream cannot emit nodes after edges.",
+          );
+        }
+        if (chunk.nodes.length === 0) break;
+        mergeImportResult(
+          result,
+          await importGraph(store, graphDataForChunk(header, chunk.nodes, []), {
+            ...options,
+            refreshStatistics: false,
+          }),
+        );
+        throwIfStreamChunkFailed(result, options);
+        break;
+      }
+      case "edges": {
+        if (header === undefined) {
+          throw new Error("Graph interchange stream must start with a header.");
+        }
+        receivedEdges = true;
+        if (chunk.edges.length === 0) break;
+        mergeImportResult(
+          result,
+          await importGraph(store, graphDataForChunk(header, [], chunk.edges), {
+            ...options,
+            refreshStatistics: false,
+          }),
+        );
+        throwIfStreamChunkFailed(result, options);
+        break;
+      }
+    }
+  }
+
+  if (header === undefined) {
+    throw new Error("Graph interchange stream ended before emitting a header.");
+  }
+  await refreshStatisticsAfterImport(
+    store,
+    options,
+    result,
+    "importGraphStream",
+  );
+  return { ...result, success: result.errors.length === 0 };
+}
+
+function throwIfStreamChunkFailed(
+  result: ImportResult,
+  options: ResolvedImportOptions,
+): void {
+  if (options.onStreamChunkError === "continue" || result.errors.length === 0) {
+    return;
+  }
+  throw new Error(
+    "Graph interchange stream aborted after a chunk reported import errors. " +
+      'Earlier chunks remain committed; use onStreamChunkError: "continue" for best-effort ingestion.',
+  );
+}
+
+function emptyImportResult(): ImportResult {
+  return {
+    success: true,
+    nodes: { created: 0, updated: 0, skipped: 0 },
+    edges: { created: 0, updated: 0, skipped: 0 },
+    errors: [],
+  };
+}
+
+function graphDataForChunk(
+  header: GraphDataHeader,
+  nodes: GraphData["nodes"],
+  edges: GraphData["edges"],
+): GraphData {
+  return { ...header, nodes, edges };
+}
+function mergeImportResult(target: ImportResult, source: ImportResult): void {
+  target.nodes.created += source.nodes.created;
+  target.nodes.updated += source.nodes.updated;
+  target.nodes.skipped += source.nodes.skipped;
+  target.edges.created += source.edges.created;
+  target.edges.updated += source.edges.updated;
+  target.edges.skipped += source.edges.skipped;
+  target.errors.push(...source.errors);
+}
+
+async function refreshStatisticsAfterImport<G extends GraphDef>(
+  store: Store<G>,
+  options: ResolvedImportOptions,
+  result: ImportResult,
+  surface: "importGraph" | "importGraphStream",
+): Promise<void> {
   const mutationCount =
     result.nodes.created +
     result.nodes.updated +
@@ -156,7 +291,7 @@ export async function importGraph<G extends GraphDef>(
         typeof console.warn === "function"
       ) {
         console.warn(
-          "[typegraph] importGraph committed its rows but the follow-up " +
+          `[typegraph] ${surface} committed its rows but the follow-up ` +
             "statistics refresh failed; run store.refreshStatistics() to " +
             "give the planner fresh statistics.",
           error,
@@ -164,12 +299,6 @@ export async function importGraph<G extends GraphDef>(
       }
     }
   }
-
-  return {
-    ...result,
-    success: errors.length === 0,
-    errors,
-  };
 }
 
 // ============================================================

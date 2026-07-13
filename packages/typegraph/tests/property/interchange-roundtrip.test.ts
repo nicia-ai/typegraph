@@ -22,7 +22,12 @@ import {
   defineNode,
   searchable,
 } from "../../src";
-import { exportGraph, importGraph } from "../../src/interchange";
+import {
+  exportGraph,
+  exportGraphStream,
+  importGraph,
+  importGraphStream,
+} from "../../src/interchange";
 import {
   type GraphData,
   ImportOptionsSchema,
@@ -189,6 +194,28 @@ describe("interchange round-trip laws", () => {
           expect(second).toEqual(first);
         },
       ),
+      { numRuns: 20 },
+    );
+  }, 60_000);
+
+  it("streaming export/import reproduces the current state without graph-sized chunks", async () => {
+    await fc.assert(
+      fc.asyncProperty(worldArb, async (world) => {
+        const source = await seedWorld(world);
+        const [target] = await createStoreWithSchema(
+          graph,
+          createTestBackend(),
+        );
+        const result = await importGraphStream(
+          target,
+          exportGraphStream(source, { batchSize: 2 }),
+          importOptions({ onConflict: "error" }),
+        );
+        expect(result.success).toBe(true);
+        expect(currentState(await dumpObservableState(target))).toEqual(
+          currentState(await dumpObservableState(source)),
+        );
+      }),
       { numRuns: 20 },
     );
   }, 60_000);
