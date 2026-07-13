@@ -24,19 +24,6 @@ import { type SnbStore } from "../schema/snb-graph";
 
 const ROOT_WALK_MAX_HOPS = 100;
 
-// IS2 official semantics are "top 10 of the person's own messages," a
-// single LIMIT 10 over posts+comments merged. This benchmark fetches each
-// kind's own top candidates separately (see module doc on the un-batched
-// design) then merges in JS, so each per-kind fetch needs a limit — set
-// above 10 as a defensive buffer, since the per-kind SQL ORDER BY's id
-// tie-break is a plain lexicographic compare (see `compareIdsAscending`'s
-// doc), which could in principle rank a genuine top-10 message just past
-// a LIMIT 10 cutoff on an exact creationDate tie. The buffer doesn't
-// change what's *returned* (still exactly the correct top 10, resolved by
-// this file's own numeric-aware final sort) — only what's fetched as
-// candidates before that final sort trims to 10.
-const IS2_CANDIDATE_LIMIT = 20;
-
 export function createSnbQueries(store: SnbStore): SnbQueries {
   const personById = store
     .query()
@@ -213,6 +200,19 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
   // measuring a materially different (and heavier) workload. Fixed shape
   // (single person id, not a variable-length list), so — unlike the old
   // friend-list join — these are genuinely prepare()-able.
+  //
+  // Deliberately unlimited: a native LIMIT here would apply *before* this
+  // file's numeric-aware final sort, ordered by the SQL layer's own plain
+  // lexicographic id tie-break (see `compareIdsAscending`'s doc). A large
+  // enough same-creationDate tie cluster (more messages sharing one
+  // timestamp than any fixed buffer) can rank a genuinely-top-10 message
+  // (e.g. "message:3") past any LIMIT the lexicographic order chose ahead
+  // of it (e.g. after "message:10".."message:19") — no fixed buffer size
+  // is provably safe against this, only fetching every candidate and
+  // limiting after the correct sort is. A person's own authored-message
+  // count is bounded by realistic LDBC activity levels, not this
+  // benchmark's row-count scale, so this stays a cheap point-adjacent
+  // fetch, not a table scan.
   const recentPostsOfPerson = store
     .query()
     .from("Person", "author")
@@ -224,9 +224,6 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       content: ctx.post.content,
       creationDate: ctx.post.creationDate,
     }))
-    .orderBy("post", "creationDate", "desc")
-    .orderBy("post", "id", "asc")
-    .limit(IS2_CANDIDATE_LIMIT)
     .prepare();
   const recentCommentsOfPerson = store
     .query()
@@ -239,9 +236,6 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
       content: ctx.comment.content,
       creationDate: ctx.comment.creationDate,
     }))
-    .orderBy("comment", "creationDate", "desc")
-    .orderBy("comment", "id", "asc")
-    .limit(IS2_CANDIDATE_LIMIT)
     .prepare();
 
   async function recentMessagesOfPerson(personId: string): Promise<

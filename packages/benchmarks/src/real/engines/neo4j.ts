@@ -136,13 +136,6 @@ const CONTAINER_POLL_INTERVAL_MS = 1_000;
 
 const ROOT_WALK_MAX_HOPS = 100;
 const IS2_MESSAGE_LIMIT = 10;
-// Cypher's `ORDER BY m.id ASC` tie-break is a plain string compare on this
-// benchmark's kind-prefixed ids (e.g. "message:10" sorts before
-// "message:2") — see `compareIdsAscending`'s doc. Fetching more than the
-// official top-10 cutoff and re-sorting/trimming in JS with that
-// numeric-aware comparator (below) means an exact-creationDate tie can't
-// silently exclude a message that belongs in the true top 10.
-const IS2_CANDIDATE_LIMIT = 20;
 
 // ---- Memory sizing ----
 
@@ -728,19 +721,26 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
       // that the default planner compiles to a full scan instead of a
       // NodeUniqueIndexSeek; pinning the legacy language version restores
       // the seek (verify via PROFILE against a real instance).
+      // Deliberately unlimited: a native LIMIT here would apply before the
+      // numeric-aware final sort below, ordered by Cypher's own plain
+      // lexicographic id tie-break. A same-creationDate tie cluster larger
+      // than any fixed buffer could rank a genuinely-top-10 message past
+      // whatever cutoff that lexicographic order chose ahead of it — no
+      // fixed buffer size is provably safe against this, only fetching
+      // every candidate and limiting after the correct sort is. A person's
+      // own authored-message count is bounded by realistic LDBC activity
+      // levels, so this stays a cheap point-adjacent fetch, not a scan.
       `CYPHER 5
        MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(m:Message)
-       RETURN m.id AS id, m.content AS content, m.creationDate AS creationDate
-       ORDER BY m.creationDate DESC, m.id ASC
-       LIMIT ${IS2_CANDIDATE_LIMIT}`,
+       RETURN m.id AS id, m.content AS content, m.creationDate AS creationDate`,
       { id: personId },
     );
 
     // Final row order/count is re-derived with a numeric-aware id
-    // comparator (see compareIdsAscending's doc) instead of trusting the
-    // Cypher ORDER BY's own plain-string id tie-break, so this engine's
-    // digest is comparable against the others regardless of what its own
-    // native ordering did on a tie.
+    // comparator (see compareIdsAscending's doc) instead of trusting
+    // Cypher's own plain-string id tie-break, so this engine's digest is
+    // comparable against the others regardless of what its own native
+    // ordering did on a tie.
     const top10 = candidates
       .toSorted(
         (left, right) =>

@@ -75,11 +75,6 @@ import {
  * TypeGraph driver's constant.
  */
 const ROOT_WALK_MAX_HOPS = 30;
-// See IS2_CANDIDATE_LIMIT's identical doc in typegraph-queries.ts: this
-// benchmark's kind-prefixed ids sort lexicographically under a native
-// `ORDER BY id ASC`, not numerically, so candidates are over-fetched here
-// and the true top 10 resolved by a numeric-aware JS sort below.
-const IS2_CANDIDATE_LIMIT = 20;
 
 /** Read every row out of a (possibly multi-statement) query result. */
 async function rowsOf(
@@ -450,15 +445,22 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
       "friend.firstName AS firstName, friend.lastName AS lastName, e.since AS since " +
       "ORDER BY e.since DESC, friend.id ASC;",
   );
+  // Deliberately unlimited: a native LIMIT here would apply before the
+  // numeric-aware final sort in recentMessagesOfPerson below, ordered by
+  // Cypher's own plain lexicographic id tie-break. A same-creationDate tie
+  // cluster larger than any fixed buffer could rank a genuinely-top-10
+  // message past whatever cutoff that lexicographic order chose ahead of
+  // it — no fixed buffer size is provably safe against this, only
+  // fetching every candidate and limiting after the correct sort is. A
+  // person's own authored-message count is bounded by realistic LDBC
+  // activity levels, so this stays a cheap point-adjacent fetch.
   const postsByPersonStatement = await conn.prepare(
     "MATCH (person:Person {id: $id})<-[:HasCreator]-(post:Post) " +
-      "RETURN post.id AS id, post.content AS content, post.creationDate AS creationDate " +
-      `ORDER BY post.creationDate DESC, post.id ASC LIMIT ${IS2_CANDIDATE_LIMIT};`,
+      "RETURN post.id AS id, post.content AS content, post.creationDate AS creationDate;",
   );
   const commentsByPersonStatement = await conn.prepare(
     "MATCH (person:Person {id: $id})<-[:HasCreator]-(comment:Comment) " +
-      "RETURN comment.id AS id, comment.content AS content, comment.creationDate AS creationDate " +
-      `ORDER BY comment.creationDate DESC, comment.id ASC LIMIT ${IS2_CANDIDATE_LIMIT};`,
+      "RETURN comment.id AS id, comment.content AS content, comment.creationDate AS creationDate;",
   );
   const is4PostStatement = await conn.prepare(
     "MATCH (m:Post {id: $id}) RETURN m.content AS content, m.creationDate AS creationDate;",
