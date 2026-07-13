@@ -34,7 +34,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../../src/graph-merge/branch";
@@ -142,7 +142,6 @@ const ADDED_EDGE_ID = "edge-added";
 
 describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
   let sharedPglite: SharedPgliteMergeEngine | undefined;
-  let cleanups: (() => Promise<void>)[];
 
   beforeAll(async () => {
     if (entry.name === "PGlite") {
@@ -152,12 +151,6 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
 
   afterAll(async () => {
     await sharedPglite?.dispose();
-  });
-
-  afterEach(async () => {
-    for (const cleanup of cleanups) {
-      await cleanup();
-    }
   });
 
   async function makeBackend(
@@ -294,7 +287,6 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDENTITY — an unchanged branch merges as a no-op",
     { timeout: 300_000 },
     async () => {
-      cleanups = [];
       await fc.assert(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
@@ -340,7 +332,6 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "DIFF-COHERENCE — a single branch's non-colliding diff is applied faithfully",
     { timeout: 300_000 },
     async () => {
-      cleanups = [];
       await fc.assert(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
@@ -390,7 +381,6 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDEMPOTENCE — merging an identical twin branch adds nothing",
     { timeout: 300_000 },
     async () => {
-      cleanups = [];
       await fc.assert(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];

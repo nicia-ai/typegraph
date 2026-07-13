@@ -78,9 +78,11 @@ export async function createPgliteMergeBackend(): Promise<MergeBackendFixture> {
  * Graph-merge property cases need several stores alive concurrently: a base and
  * its branches, and sometimes two independent materializations. Reusing one
  * default table set would make those stores collide. Instead, the engine stays
- * alive for the test file while each fixture receives its own tables and drops
- * them at cleanup. This removes repeated WASM/pgvector boot cost without
- * weakening fixture isolation.
+ * alive for the test file while each fixture receives its own core TypeGraph
+ * tables and drops them at cleanup. This removes repeated WASM/pgvector boot
+ * cost without weakening fixture isolation. Strategy-owned vector and index
+ * tables remain keyed by graph identity; these property fixtures do not
+ * materialize those strategies.
  */
 export type SharedPgliteMergeEngine = Readonly<{
   makeFixture: () => Promise<MergeBackendFixture>;
@@ -108,6 +110,20 @@ export async function setupSharedPgliteMergeEngine(): Promise<SharedPgliteMergeE
         cleanup: async () => {
           await backend.close();
           await client.exec(dropTablesSql(tables));
+          const remaining = await client.query<{ tablename: string }>(
+            `SELECT tablename
+             FROM pg_tables
+             WHERE schemaname = 'public'
+               AND left(tablename, length($1)) = $1`,
+            [prefixForFixture(tables)],
+          );
+          if (remaining.rows.length > 0) {
+            throw new Error(
+              `Shared PGlite fixture cleanup left tables: ${remaining.rows
+                .map((row) => row.tablename)
+                .join(", ")}`,
+            );
+          }
         },
       };
     },
@@ -133,6 +149,12 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     kindRemovals: `${prefix}_kind_removals`,
     reconciliationMarkers: `${prefix}_reconciliation_markers`,
   };
+}
+
+function prefixForFixture(tables: PostgresTables): string {
+  const tableName = getTableName(tables.nodes);
+  const prefix = tableName.slice(0, tableName.lastIndexOf("_nodes"));
+  return prefix;
 }
 
 function dropTablesSql(tables: PostgresTables): string {

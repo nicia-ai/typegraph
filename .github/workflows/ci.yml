@@ -201,8 +201,9 @@ jobs:
         run: >-
           pnpm --filter @nicia-ai/typegraph exec vitest run --coverage
           --shard=${{ matrix.shard }}
+          --reporter=default
           --reporter=blob
-          --outputFile=.vitest-reports/blob-${{ matrix.artifact }}.json
+          --outputFile.blob=.vitest-reports/blob-${{ matrix.artifact }}.json
           --coverage.thresholds.branches=0
           --coverage.thresholds.functions=0
           --coverage.thresholds.lines=0
@@ -214,6 +215,7 @@ jobs:
           path: packages/typegraph/.vitest-reports/*.json
           if-no-files-found: error
           include-hidden-files: true
+          overwrite: true
 
   test-coverage-merge:
     name: Test (Coverage)
@@ -221,8 +223,9 @@ jobs:
     needs: [detect-release-metadata-push, test-coverage]
     if: >-
       ${{
+        always() &&
         needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' &&
-        needs.test-coverage.result == 'success'
+        needs.test-coverage.result != 'skipped'
       }}
     timeout-minutes: 10
     steps:
@@ -237,6 +240,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Fail when a coverage shard failed
+        if: ${{ needs.test-coverage.result != 'success' }}
+        run: |
+          echo "Coverage shards finished with result: ${{ needs.test-coverage.result }}"
+          exit 1
 
       - name: Download coverage blobs
         uses: actions/download-artifact@v4

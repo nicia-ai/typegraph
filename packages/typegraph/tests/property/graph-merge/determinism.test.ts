@@ -36,7 +36,7 @@ import {
   subClassOf,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../../src/graph-merge/branch";
@@ -188,17 +188,6 @@ describe.each(backendMatrix())(
 
     afterAll(async () => {
       await sharedPglite?.dispose();
-    });
-
-    // Disposers for backends still open at test end (belt-and-suspenders — the
-    // property body also disposes each iteration's backends inline so the
-    // shared PGlite engine's fixture tables never accumulate).
-    let cleanups: (() => Promise<void>)[];
-
-    afterEach(async () => {
-      for (const cleanup of cleanups) {
-        await cleanup();
-      }
     });
 
     async function makeBackend(
@@ -366,7 +355,6 @@ describe.each(backendMatrix())(
       "yields a deep-equal normalized report + graph for any branch ordering",
       { timeout: 300_000 },
       async () => {
-        cleanups = [];
         await fc.assert(
           fc.asyncProperty(
             determinismScenarioArb,

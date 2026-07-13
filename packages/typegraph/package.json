@@ -102,7 +102,7 @@
     "test:postgres": "./scripts/test-postgres.sh",
     "test:do": "vitest run --config vitest.workers.config.ts",
     "test:coverage": "vitest run --coverage",
-    "test:coverage:merge": "vitest --merge-reports=.vitest-reports --coverage",
+    "test:coverage:merge": "vitest run --merge-reports=.vitest-reports --coverage",
     "test:mutation": "stryker run",
     "test:mutation:critical": "stryker run stryker.critical.config.json"
   },

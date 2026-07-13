@@ -221,6 +221,9 @@ describe("setupSharedPgliteMergeEngine", () => {
       const created = await firstStore.nodes.Person.create({ name: "Ada" });
 
       await expect(
+        firstStore.nodes.Person.getById(created.id),
+      ).resolves.toEqual(created);
+      await expect(
         secondStore.nodes.Person.getById(created.id),
       ).resolves.toBeUndefined();
     } finally {
