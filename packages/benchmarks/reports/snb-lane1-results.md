@@ -7,12 +7,17 @@ had that since 2026-07-07: a full run (~9.9k persons, ~1M posts, ~2.05M
 comments, official CsvBasic datagen export) completed cleanly across all
 four engines with 100% row-count parity on every query. SF10 (10x scale,
 ~65.6k persons, ~7.4M posts, ~21.9M comments) was a stretch goal gated on
-SF1 being trusted — it's now done too (2026-07-11), after root-causing a
-genuine memory-exhaustion failure that killed four earlier attempts (see
-[SF10 results](#sf10-results) below). Treat all numbers below as a first
-real data point, not a final verdict — each is one run on one machine, not
-the multiple runs / statistical-confidence bar a published comparison would
-need. The smoke-scale table is kept below for harness-wiring reference.
+SF1 being trusted — it's now done too, and took eight EC2 attempts total
+across two separate root-causing efforts: a genuine memory-exhaustion
+failure that looked like a networking problem (attempts 1-5, 2026-07-11)
+and, once that was fixed, an EBS volume's default IOPS ceiling that made a
+correctly-implemented, locally-validated SQLite load-time fix show zero
+real-world improvement (attempts 6-8, 2026-07-12) — see
+[SF10 results](#sf10-results) below for both. Treat all numbers below as a
+first real data point, not a final verdict — each is one run on one
+machine, not the multiple runs / statistical-confidence bar a published
+comparison would need. The smoke-scale table is kept below for
+harness-wiring reference.
 
 Reaching a working SF1 run required finding and fixing three real scaling
 bugs (one in TypeGraph itself, two in this benchmark's own Neo4j/LadybugDB
@@ -163,16 +168,20 @@ above).
 ## SF10 results
 
 **Status: real SF10-scale numbers, single run — not a publishable
-comparison yet**, same caveat as SF1 above. Getting one clean run took five
-EC2 attempts.
+comparison yet**, same caveat as SF1 above. Getting one clean, *fast* run
+took eight EC2 attempts across two root-causing efforts (below). The numbers
+in this section are from attempt 8, the first run with every fix — deferred
+covering index, tuned `wal_autocheckpoint`, and explicit gp3 IOPS/throughput
+provisioning — actually in place together.
 
 ### SF10 environment
 
 | | |
 | --- | --- |
-| Date | 2026-07-11 |
+| Date | 2026-07-12 |
 | Machine | AWS EC2 `r7i.4xlarge`, Ubuntu 24.04 LTS |
 | CPU / RAM | Intel(R) Xeon(R) Platinum 8488C, 16 vCPU, 123.8 GiB |
+| EBS volume | 150 GiB gp3, explicit 10,000 IOPS / 400 MB/s (see [why](#sqlites-load-time-root-cause-round-two-the-ebs-iops-ceiling)) |
 | Node.js | v24.18.0 |
 | `@nicia-ai/typegraph` | 0.34.0 |
 | `better-sqlite3` | 12.11.1 |
@@ -182,14 +191,15 @@ EC2 attempts.
 | Command | `tsx src/real/snb-short-reads.ts --profile=sf10 --check` |
 | Samples / warmups | 20 / 5 per query (sf10 profile defaults) |
 | Runner | `pnpm bench:snb:sf10:ec2` — dedicated ephemeral instance, no other workload sharing the box |
-| Total wall clock | ~11h10m |
+| Ref | `a58ae38ebb34ab161ab66b5c344f185988525292` |
+| Total wall clock | ~5h22m (down from attempt 5's 11h10m — see below) |
 
 Full machine-readable detail:
-`bench-results/current/snb-sf10-ec2-ec2-20260711T004520Z/{summary,results}.json`
+`bench-results/current/snb-sf10-ec2-ec2-20260712T030715Z/{summary,results}.json`
 (gitignored — regenerate with `pnpm bench:snb:sf10:ec2` then the printed
 `collect` command).
 
-### Why it took five attempts: memory exhaustion, not networking
+### Why attempts 1-5 took so long: memory exhaustion, not networking
 
 The first four attempts all ran on `c7i.4xlarge` (32GB RAM) — the same
 instance family SF1 used successfully — and all four died between ~3-9h in
@@ -219,27 +229,56 @@ memory dipped to ~7GB, then fully recovered within a minute once that step
 finished) — confirming this is a load-time memory-proportional pattern
 general to bulk-loading at this row count, not unique to SQLite.
 
+Attempt 5 was clean, but slow: it landed on the same
+unoptimized-checkpoint SQLite load time (8.96h) that later analysis
+below root-caused and fixed. Fixing that took three more attempts.
+
+### Why attempts 6-8 took so long: a correct, locally-validated fix that did nothing at scale
+
+Attempt 6 caught a second, unrelated bug before it even finished: the SNB
+covering index (`snb-graph.ts`'s `messageByCreationDateIndex`) was being
+baked straight into the initial `CREATE TABLE` DDL instead of genuinely
+deferred to after the bulk load via `store.materializeIndexes()`, despite
+every engine driver's `fairness` label claiming otherwise — every insert
+during the load was paying live index-maintenance cost it was supposed to
+be exempt from. Killed mid-run and fixed (`a58ae38e`).
+
+Attempt 7 combined that fix with the `wal_autocheckpoint` tuning from
+[round one of SQLite's load-time root cause](#sqlites-load-time-root-cause-round-one-wal_autocheckpoint)
+below, both independently validated: the covering-index fix via `EXPLAIN
+QUERY PLAN`, the checkpoint fix via a local repro projecting 40-60% off
+the load time. Real result: live monitoring watched it sit inside the
+SQLite load phase past the 7-hour mark, on pace to land at or above the
+original 8.96-hour baseline — no visible improvement. A fix that's
+correct in isolation and does nothing at scale is worth taking as
+seriously as an outright failure; see
+[round two](#sqlites-load-time-root-cause-round-two-the-ebs-iops-ceiling)
+below for why.
+
 ### SF10 load time (65,645 persons, 595,453 forums, 7,435,696 posts, 21,865,475 comments)
 
 | Engine | Load time |
 | --- | --- |
-| ladybugdb | 338.9 s (5.6 min) |
-| neo4j | 490.2 s (8.2 min) |
-| typegraph-postgres | 6,652.2 s (1.85 h) |
-| typegraph-sqlite | 32,248.9 s (8.96 h) |
+| ladybugdb | 319.8 s (5.3 min) |
+| neo4j | 371.5 s (6.2 min) |
+| typegraph-postgres | 6,635.7 s (1.84 h) |
+| typegraph-sqlite | 11,159.3 s (3.10 h) |
 
-SQLite's load time is the standout finding at this scale: ~4.85x slower
-than Postgres running the *same* `bulkInsert` code path
-(`packages/benchmarks/src/real/engines/typegraph-load.ts` is shared between
-both SQL backends — identical batch size, identical row counts per call),
-despite being in-process with no network round trip, which should favor
-SQLite, not penalize it. It's also the only backend whose slowdown is
-worse than linear: postgres's load time grew ~9.6x for SF10's ~10.65x row
-count over SF1 (2026-07-07 SF1 run: 693.8s), essentially linear, while
-SQLite's grew ~13.4x over its own SF1 baseline (2,408.2s) for the same
-~10.65x data increase.
+Attempt 5's unoptimized numbers (SQLite 8.96h) are what motivated the two
+rounds of root-causing below; this table is the outcome — SQLite's load
+time falls **2.89x**, and the gap to Postgres (running the exact same
+`bulkInsert` code path) narrows from ~4.85x to ~1.68x. Total wall clock
+for the whole run (all four engines, all seven queries) drops from
+attempt 5's 11h10m to ~5h22m. SQLite is still the slowest loader of the
+four — Neo4j and LadybugDB's engine-native bulk paths remain much faster
+still (see [Next steps](#next-steps)) — but the gap that looked
+structural turned out to be two fixable infrastructure problems, not an
+architectural ceiling. (SF1's own numbers predate both fixes, so the
+earlier SF1-vs-SF10 growth-rate comparison isn't re-derived here — it
+would need a fresh SF1 run under the same fixes to be a fair
+like-for-like.)
 
-#### SQLite's load-time root cause
+#### SQLite's load-time root cause, round one: `wal_autocheckpoint`
 
 A local, controlled repro (real TypeGraph SQLite backend, real SNB
 `Comment` schema/indexes, real `bulkInsert()` calls at 100K/500K/2M
@@ -274,35 +313,125 @@ itself (`operation-backend-core.ts`, `insertNodesBatch`) is correctly
 shared between the SQLite and Postgres backends and structurally sound —
 this is a checkpoint-tuning gap, not a batching bug.
 
-Proposed fix (investigated, not yet implemented): raise
-`wal_autocheckpoint` during bulk load, or run an explicit `PRAGMA
-wal_checkpoint(TRUNCATE)` on a coarser, row-count-driven cadence instead of
-SQLite's size-driven default, so checkpoint I/O amortizes over far more
-rows. A follow-up repro sweeping checkpoint intervals at the same
-100K/500K/2M scales would quantify the win before touching the real
-loader — tracked in [Next steps](#next-steps).
+Fix (implemented and locally validated, `443c8d21`): raise
+`wal_autocheckpoint` during bulk load and run an explicit `PRAGMA
+wal_checkpoint(TRUNCATE)` right after load finishes. A follow-up repro
+sweeping checkpoint intervals (0 / 250K / 500K / 1M pages, on top of the
+original 1K-100K sweep) found the win holds through roughly
+50,000-100,000 pages, then regresses again — an oversized WAL has its own
+costs. `@nicia-ai/typegraph`'s `createLocalSqliteBackend` now exposes
+`walAutocheckpointPages` (defaults to SQLite's own untouched setting);
+this benchmark's SQLite driver sets it to 100,000. Verified end-to-end
+against the harness (smoke profile, full load + all seven queries) — but
+**this fix alone produced zero real-world improvement on the actual SF10
+dataset (attempt 7)**. Round two, below, is why.
+
+#### SQLite's load-time root cause, round two: the EBS IOPS ceiling
+
+Root cause: `packages/benchmarks/src/real/ec2/aws-cli.ts`'s `runInstance`
+provisioned its root volume as gp3 but never set an explicit `Iops` or
+`Throughput` — which silently gets the account's gp3 *baseline* (3,000
+IOPS / 125 MB/s) regardless of volume size. gp3, unlike gp2, decouples
+IOPS/throughput from size entirely; a bigger volume buys zero extra IOPS
+unless it's explicitly requested.
+
+On a small, fresh database, checkpoint flushes batch dirty pages into
+large sequential writes (~90-120 MB/s observed on real EBS — throughput-
+bound, comfortably under the unprovisioned ceiling). Once the B-tree has
+real size — the exact condition SF10's comments table always reaches —
+the same checkpoint mechanism reverts to small, scattered, effectively
+single-page (~4.2 KB average) random writes, and *those* pin against the
+IOPS ceiling: `iostat -x` on real EC2/EBS infrastructure showed write
+IOPS capped at *exactly* 3,000/s, independent of the `wal_autocheckpoint`
+interval. Round one's checkpoint-tuning fix genuinely works — it just
+could only spend its benefit while the database stayed small, and SF10's
+real load never stays small for long. This is also why the round-one
+local repro (100K/500K/2M synthetic rows on dev-machine NVMe) never
+caught it: there's no IOPS ceiling to hit on local NVMe at this scale.
+The gap only exists on real cloud block storage.
+
+**Validated cheaply before spending another 8 hours.** Rather than commit
+to another full SF10 attempt on a guess, the fix (explicit
+`Iops: 10_000, Throughput: 400` on the launcher's gp3 volume — now the
+default in `run-sf1-ec2.ts`, overridable via `--volume-iops`/
+`--volume-throughput-mbps`) was validated on a small, short-lived,
+throwaway diagnostic instance with the same volume config: a synthetic
+SQLite bulk-insert workload, `iostat -x 5` running throughout.
+
+| Phase | Checkpoint | Starting DB | Rows/sec |
+| --- | --- | --- | --- |
+| fresh, default | 1,000 pages | empty | 15,570 |
+| fresh, tuned | 100,000 pages | empty | 22,056 |
+| prepopulated, tuned | 100,000 pages | ~1.8 GB | 12,235 |
+| prepopulated, default | 1,000 pages | ~1.9 GB | 9,944 |
+
+Two things needed confirming before trusting another 8-hour run: that the
+IOPS ceiling was actually gone, and that checkpoint tuning was still
+worth having once it was. `iostat` confirmed the first — write IOPS
+sustained 3,000-11,000+ throughout the diagnostic, never pinned at the
+old hard 3,000 ceiling. The last two rows confirm the second: on the
+identical prepopulated starting condition, tuned checkpointing beat
+SQLite's default by 23% (245s vs. 302s) — the two fixes are
+complementary, not redundant, once the ceiling masking the second one is
+gone. Only then was attempt 8 launched, with the results in the tables
+above and below.
 
 ### SF10 query latency (p50 / p95 / p99, milliseconds) — row-count parity: **7/7 queries comparable=yes, 0 engine failures**
 
 | Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
 | --- | --- | --- | --- | --- |
-| IS1 (person profile) | 0.031 / 0.041 / 0.045 | 0.697 / 1.059 / 1.116 | 5.256 / 13.795 / 72.785 | 1.220 / 2.571 / 2.692 |
-| IS2 (friends' recent messages) | 188.060 / 589.581 / 706.721 | 2698.716 / 12161.358 / 13515.001 | 482.176 / 3414.382 / 5967.279 | 311.378 / 476.792 / 586.377 |
-| IS3 (friends with dates) | 0.529 / 1.199 / 2.240 | 14.402 / 29.690 / 90.602 | 39.828 / 114.855 / 345.590 | 14.102 / 41.705 / 50.618 |
-| IS4 (message content) | 0.022 / 0.030 / 0.042 | 0.890 / 1.725 / 2.378 | 4.168 / 5.927 / 9.163 | 1.031 / 1.358 / 1.391 |
-| IS5 (message creator) | 0.033 / 0.040 / 0.052 | 3.523 / 4.384 / 4.759 | 4.807 / 6.430 / 9.884 | 2.750 / 3.438 / 3.942 |
-| IS6 (root forum + moderator) | 0.071 / 0.120 / 0.125 | 4.555 / 8.862 / 9.550 | 5.766 / 6.643 / 13.169 | 3.926 / 9.374 / 10.476 |
-| IS7 (replies + knows check) | 0.061 / 0.747 / 0.899 | 5.218 / 10.013 / 11.935 | 7.425 / 32.357 / 86.011 | 6.972 / 10.366 / 11.291 |
+| IS1 (person profile) | 0.029 / 0.046 / 0.050 | 0.972 / 1.058 / 1.093 | 5.809 / 16.071 / 79.061 | 1.3 / 3.1 / 3.4 |
+| IS2 (friends' recent messages) | 180.118 / 572.669 / 730.910 | 2364.555 / 10213.892 / 13689.845 | 462.733 / 3517.198 / 6830.945 | 321.8 / 492.9 / 618.0 |
+| IS3 (friends with dates) | 0.364 / 1.184 / 2.175 | 6.724 / 10.931 / 42.728 | 39.847 / 125.169 / 352.234 | 16.5 / 48.6 / 67.3 |
+| IS4 (message content) | 0.023 / 0.032 / 0.039 | 0.938 / 1.778 / 1.882 | 3.489 / 6.268 / 6.337 | 1.1 / 1.2 / 1.3 |
+| IS5 (message creator) | 0.033 / 0.037 / 0.041 | 2.698 / 3.531 / 3.925 | 4.371 / 6.545 / 8.142 | 2.8 / 3.8 / 4.4 |
+| IS6 (root forum + moderator) | 0.070 / 0.116 / 0.132 | 4.087 / 6.257 / 6.300 | 4.662 / 6.687 / 11.886 | 4.1 / 8.9 / 10.6 |
+| IS7 (replies + knows check) | 0.067 / 0.744 / 0.966 | 4.581 / 9.229 / 11.303 | 6.812 / 30.694 / 86.789 | 8.6 / 13.9 / 14.4 |
+
+Attempt 8 numbers (query latency doesn't depend on the load-time fixes
+above, so this barely moved from attempt 5). Ladybugdb's per-query
+`cvPercent`/`noisy` figures were lost to a since-fixed SSM
+output-truncation bug in the collection tooling — only its p50/p95/p99
+survived from the console log, hence 1 fewer decimal of precision than
+the other three columns; not fabricated to fill the gap.
 
 At SF10, the earlier SF1-scale IS2 latency cliff (a covering-index gap in
 this benchmark's own schema, closed before this run — see the "IS2 SF10
-latency cliff" fix in git history) stays closed: SQLite's IS2 p50 (188ms)
+latency cliff" fix in git history) stays closed: SQLite's IS2 p50 (180ms)
 is proportionate to its SF1 number, not the 689x blowup that motivated that
-fix. Query latency ordering is otherwise consistent with SF1: SQLite fastest
-across the board (in-process, no network, no query-plan interpretation
-overhead), Postgres and LadybugDB next, Neo4j generally slowest at the
-tails (its p99s are consistently the noisiest — Cypher planner and JVM GC
-pauses are the likely contributors, not investigated further here).
+fix.
+
+The latency *ordering* across queries (IS1/IS4/IS5 fastest, IS3/IS6/IS7
+mid, IS2 far slower than everything else) is identical on all four
+engines because it's driven by query shape, not engine: IS1/IS4/IS5 are
+single-round-trip point lookups; IS3/IS6/IS7 chain up to 3 sequential
+round trips; IS2 (`typegraph-queries.ts`'s `IS2` function) is a friend
+list, two parallel top-10 queries, a merge, then — for each of the ~10
+resulting messages, one at a time — a recursive root-walk and an author
+lookup, up to ~21 sequential round trips for one logical "query." That's
+a deliberate readability-over-batching tradeoff, not an oversight (see
+the function's doc comment). It's why SQLite's IS1→IS2 ratio (~6,200x) is
+the *highest* of the four despite SQLite being fastest overall: its
+single-hop cost is closest to zero, so there's nothing to amortize IS2's
+~21 hops against. Postgres's *absolute* IS2 numbers are the worst in the
+table (p50 2.36s, p99 13.7s) because each of those ~21 hops pays a real
+Docker+TCP round trip, compounding serially — the concrete cost of the
+un-batched design on a networked backend.
+
+Beyond IS2: SQLite is fastest across the board by a wide margin
+(in-process, no network hop, no query-plan interpretation overhead at
+request time). LadybugDB is second-fastest and keeps tight p50→p99 ratios
+even on IS2 (322→618ms, ~1.9x) — also embedded, so no network cost, and
+none of Neo4j's tail blowups. Neo4j is slowest at the median and has the
+most extreme p99/p50 ratios of the four on almost *every* query, not just
+IS2 (IS1: 5.8→79ms, 13.6x; IS7: 6.8→86.8ms, 12.8x) — a different, more
+systemic failure mode than Postgres's IS2-specific problem, pointing at
+JVM GC pauses and/or Cypher planner variance, not investigated further
+this round. Almost every query on every engine is flagged noisy
+(CV > 25%) at 20 samples — expected, and the reason this whole doc leads
+with "not a publishable comparison yet." Row-count parity stays clean
+(7/7, all four engines) — the thing that makes any of this latency
+comparison meaningful in the first place.
 
 ## Query-latency experiment: concurrent per-message root walks (tried, reverted)
 
@@ -363,26 +492,38 @@ posts, 80 comments; 15 samples / 3 warmups per query).
 - [x] ~~Investigate why TypeGraph's SQLite backend is ~4.85x slower than
       Postgres at SF10 despite sharing the exact same `bulkInsert` loader
       code path and running in-process (no network round trip) — and why
-      that gap is worse-than-linear.~~ Root-caused: `wal_autocheckpoint` is
-      never tuned for bulk load, left at SQLite's size-driven default
-      (~4MB), so checkpoint I/O cost climbs as the database file grows over
-      the load. See [SQLite's load-time root cause](#sqlites-load-time-root-cause)
+      that gap is worse-than-linear.~~ Root-caused in two rounds: SQLite's
+      `wal_autocheckpoint` was never tuned for bulk load (round one), and
+      even after fixing that, the EC2 launcher's gp3 volume was never
+      provisioned above the account's default IOPS baseline, which capped
+      checkpoint I/O once the database had real size (round two). See
+      [round one](#sqlites-load-time-root-cause-round-one-wal_autocheckpoint)
+      and [round two](#sqlites-load-time-root-cause-round-two-the-ebs-iops-ceiling)
       above.
-- [x] ~~Implement and measure the proposed fix.~~ Done: a repro sweeping
-      `wal_autocheckpoint` at 100K/500K/2M scale (values 1,000/10,000/
-      50,000/100,000, then 0/250,000/500,000/1,000,000 to find the
-      plateau) found the win holds through 50,000-100,000 pages and
-      regresses again above that. `@nicia-ai/typegraph`'s
-      `createLocalSqliteBackend` now exposes `walAutocheckpointPages`
-      (`PRAGMA wal_autocheckpoint`, defaults to SQLite's own untouched
-      setting); this benchmark's SQLite driver sets it to 100,000 and runs
-      an explicit `wal_checkpoint(TRUNCATE)` right after load finishes, so
-      query latency never pays a WAL-scan cost for whatever didn't land on
-      a checkpoint boundary. Verified end to end via
-      `bench:snb:smoke --engines=typegraph-sqlite --check`; full-scale
-      improvement not yet re-measured against the real SF10 dataset — that
-      needs another EC2 run.
-- [ ] Re-run the full SF10 EC2 benchmark to confirm the `wal_autocheckpoint`
+- [x] ~~Implement and measure the proposed fix.~~ Done, in two parts: the
+      `wal_autocheckpoint` tuning (round one) and explicit gp3 IOPS/
+      throughput provisioning (round two) — see both sections above for
+      the local repro, the diagnostic validation, and the real numbers.
+- [x] ~~Re-run the full SF10 EC2 benchmark to confirm the `wal_autocheckpoint`
       fix's real-world load-time improvement and capture a second SF10
       data point (also moves toward the multi-run statistical-confidence
-      bar noted above).
+      bar noted above).~~ Done — attempt 8, 2026-07-12. SQLite load time:
+      8.96h → 3.10h (2.89x). See [SF10 load time](#sf10-load-time-65645-persons-595453-forums-7435696-posts-21865475-comments)
+      above. Still only one data point at SF10, though — the
+      multi-run-distribution bar below remains open.
+- [x] ~~Fix the EC2 collection tooling's SSM output-truncation bug~~ (found
+      when all four engines succeeded on the same run for the first time —
+      attempt 8 — and the combined size of results.json + summary.json +
+      new history.jsonl lines + a console-log tail finally exceeded SSM's
+      24,000-character `StandardOutputContent` cap, silently dropping
+      ladybugdb's history entry). `collect()` now fetches each artifact via
+      its own separate SSM command instead of one shared command's stdout.
+- [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
+      single sample, before making any comparative claim publicly. Now the
+      main open item gating a genuinely publishable comparison — everything
+      else in this doc is a single-run data point.
+- [ ] TypeGraph's `bulkInsert` has no equivalent of Neo4j's batched
+      `UNWIND ... IN TRANSACTIONS` or LadybugDB's `COPY FROM` — both
+      engines still load 15-60x faster than TypeGraph/SQLite even after
+      the fixes above. A larger, separate investigation if pursued
+      further (noted since the SF1 section; still true at SF10).
