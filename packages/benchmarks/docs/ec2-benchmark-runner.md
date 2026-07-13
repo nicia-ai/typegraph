@@ -82,7 +82,14 @@ to `reports/history.jsonl`, and terminates the instance when done. Pass
 `launch` (optional): `--aws-profile` (SSO/named profile; omit to use the
 instance-metadata credential chain or a role already assumed in the shell),
 `--instance-type` (default `c7i.4xlarge`), `--volume-size-gib` (default
-150), `--repo-url` (default `https://github.com/nicia-ai/typegraph.git` —
+150), `--volume-iops` (default 10000) and `--volume-throughput-mbps`
+(default 400) — gp3 decouples IOPS/throughput from volume size entirely, so
+an unprovisioned volume silently gets the account's gp3 *baseline* (3,000
+IOPS / 125 MB/s) regardless of `--volume-size-gib`; an EBS root-cause
+investigation confirmed that baseline genuinely bottlenecks SQLite's
+bulk-load checkpoint I/O once the database reaches a few GB (see
+reports/snb-lane1-results.md), `--repo-url` (default
+`https://github.com/nicia-ai/typegraph.git` —
 point this at your fork), `--ref` (default: your local `git rev-parse
 HEAD` — **must already be pushed** to `--repo-url`, since the instance does
 a fresh clone), `--profile` (`smoke`, `sf1`, or `sf10`; default `sf1`),

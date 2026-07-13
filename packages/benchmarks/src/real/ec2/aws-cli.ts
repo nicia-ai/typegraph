@@ -54,6 +54,24 @@ export type RunInstanceOptions = Readonly<{
   securityGroupId: string;
   iamInstanceProfile: string;
   volumeSizeGib: number;
+  /**
+   * gp3 decouples IOPS/throughput from volume size entirely — unlike gp2,
+   * a larger `volumeSizeGib` buys no extra IOPS. Leaving this unset gets
+   * the account's gp3 *baseline* default (3,000 IOPS), which an EC2 EBS
+   * root-cause investigation confirmed is a real bottleneck for SQLite's
+   * bulk-load checkpoint I/O once the database is a few GB (checkpoint
+   * flushes revert from large sequential writes to small ~4KB random
+   * writes that pin against the IOPS ceiling regardless of
+   * `wal_autocheckpoint` tuning — see reports/snb-lane1-results.md).
+   */
+  volumeIops: number;
+  /**
+   * gp3 baseline is 125 MB/s. Not the confirmed bottleneck (the observed
+   * ceiling was IOPS-bound at ~12.4 MB/s, far under baseline throughput),
+   * but raised alongside IOPS for headroom since gp3 requires an explicit
+   * value above baseline the same way IOPS does.
+   */
+  volumeThroughputMbps: number;
   userData: string;
   name: string;
   runId: string;
@@ -105,6 +123,8 @@ export async function runInstance(
         Ebs: {
           VolumeSize: input.volumeSizeGib,
           VolumeType: "gp3",
+          Iops: input.volumeIops,
+          Throughput: input.volumeThroughputMbps,
           DeleteOnTermination: true,
         },
       },

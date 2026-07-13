@@ -55,6 +55,17 @@ import {
 
 const DEFAULT_INSTANCE_TYPE = "c7i.4xlarge";
 const DEFAULT_VOLUME_SIZE_GIB = 150;
+// gp3 decouples IOPS/throughput from volume size — an unprovisioned volume
+// silently gets the account's gp3 *baseline* (3,000 IOPS / 125 MB/s)
+// regardless of size. An EBS root-cause investigation (see
+// reports/snb-lane1-results.md) confirmed that baseline is a genuine
+// bottleneck for SQLite's bulk-load checkpoint I/O once the database is a
+// few GB: checkpoint flushes revert from large sequential writes to small
+// ~4KB random writes that pin against the IOPS ceiling regardless of
+// wal_autocheckpoint tuning. These defaults provision well above baseline
+// with headroom, at negligible extra cost for a run lasting hours.
+const DEFAULT_VOLUME_IOPS = 10_000;
+const DEFAULT_VOLUME_THROUGHPUT_MBPS = 400;
 const DEFAULT_REPO_URL = "https://github.com/nicia-ai/typegraph.git";
 const DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 1800; // 30 min
 // 6h was the original guess and proved too tight in practice: a real SF1
@@ -229,6 +240,13 @@ async function launch(argv: readonly string[]): Promise<void> {
   const volumeSizeGib = Number(
     parseArgValue(argv, "volume-size-gib") ?? DEFAULT_VOLUME_SIZE_GIB,
   );
+  const volumeIops = Number(
+    parseArgValue(argv, "volume-iops") ?? DEFAULT_VOLUME_IOPS,
+  );
+  const volumeThroughputMbps = Number(
+    parseArgValue(argv, "volume-throughput-mbps") ??
+      DEFAULT_VOLUME_THROUGHPUT_MBPS,
+  );
   const repoUrl = parseArgValue(argv, "repo-url") ?? DEFAULT_REPO_URL;
   const ref = parseArgValue(argv, "ref") ?? resolveGitSha();
   const benchProfile = parseArgValue(argv, "profile") ?? "sf1";
@@ -291,6 +309,8 @@ async function launch(argv: readonly string[]): Promise<void> {
     securityGroupId,
     iamInstanceProfile,
     volumeSizeGib,
+    volumeIops,
+    volumeThroughputMbps,
     userData,
     name,
     runId,
