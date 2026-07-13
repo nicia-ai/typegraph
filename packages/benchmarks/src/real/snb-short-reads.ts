@@ -30,7 +30,7 @@ import {
   type SnbEngineName,
 } from "./harness/doctor";
 import { writeLaneHistoryEntry } from "./harness/history";
-import { evaluateParity, type EngineRowCounts } from "./harness/parity";
+import { evaluateParity, type EngineQueryOutcomes } from "./harness/parity";
 import { writeJsonFile } from "./harness/process";
 import { computeLatencyStats, type LatencyStats } from "./harness/stats";
 import { writeSummary, type EngineVersion } from "./harness/summary";
@@ -50,6 +50,7 @@ const ENGINE_FACTORIES: Readonly<Record<SnbEngineName, SnbEngineFactory>> = {
 type EngineQueryMeasurement = Readonly<{
   samplesMs: readonly number[];
   rowCounts: readonly number[];
+  digests: readonly string[];
 }>;
 
 type EngineRun = Readonly<{
@@ -71,13 +72,15 @@ async function measureQuery<Request>(
 
   const samplesMs: number[] = [];
   const rowCounts: number[] = [];
+  const digests: string[] = [];
   for (let index = warmupRequests; index < totalRequests; index += 1) {
     const started = nowMs();
     const result = await run(requests[index]!);
     samplesMs.push(nowMs() - started);
     rowCounts.push(result.rowCount);
+    digests.push(result.digest);
   }
-  return { samplesMs, rowCounts };
+  return { samplesMs, rowCounts, digests };
 }
 
 async function collectEngineVersions(
@@ -312,11 +315,12 @@ async function main(argv: readonly string[]): Promise<void> {
   >(runs.map((run) => [run.name, new Map()]));
 
   for (const queryId of IS_QUERY_IDS) {
-    const rowCountsByEngine: EngineRowCounts[] = runs.map((run) => ({
+    const outcomesByEngine: EngineQueryOutcomes[] = runs.map((run) => ({
       engine: run.name,
       rowCounts: run.queries[queryId].rowCounts,
+      digests: run.queries[queryId].digests,
     }));
-    const parity = evaluateParity(rowCountsByEngine);
+    const parity = evaluateParity(outcomesByEngine);
 
     for (const run of runs) {
       const stats = computeLatencyStats(run.queries[queryId].samplesMs);
