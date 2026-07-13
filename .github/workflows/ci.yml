@@ -209,6 +209,7 @@ jobs:
           --coverage.thresholds.lines=0
 
       - name: Upload coverage blob
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
