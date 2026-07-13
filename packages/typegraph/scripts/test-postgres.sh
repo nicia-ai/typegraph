@@ -32,11 +32,27 @@ fi
 # suite targets the same `typegraph_test` database, and several files'
 # `beforeAll` hooks run schema-destructive DDL (DROP TABLE). Running
 # files in parallel is a recipe for flaky mid-test table disappearance.
-# (Graph-merge fixtures isolate per-fixture schemas, but they share the
-# serialized lane for the same connection-budget reasons.)
+# (Graph-merge fixtures isolate per-fixture schemas, but each shard still keeps
+# its own database lane serialized for the same connection-budget reasons.)
 #
 # With POSTGRES_URL set, the graph-merge backendMatrix() gains its
 # server-Postgres entry, so those suites run on SQLite, PGlite, AND the
 # production pg driver in this lane.
 echo "Running PostgreSQL tests..."
-POSTGRES_URL="$POSTGRES_URL" vitest run --no-file-parallelism tests/backends/postgres/ tests/backends/integration/ tests/graph-merge/ tests/property/graph-merge/
+vitest_args=(
+  run
+  --no-file-parallelism
+)
+
+if [[ -n "${VITEST_SHARD:-}" ]]; then
+  vitest_args+=("--shard=$VITEST_SHARD")
+fi
+
+vitest_args+=(
+  tests/backends/postgres/
+  tests/backends/integration/
+  tests/graph-merge/
+  tests/property/graph-merge/
+)
+
+POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"

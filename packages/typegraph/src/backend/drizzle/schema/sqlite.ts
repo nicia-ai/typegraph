@@ -43,6 +43,7 @@ export type SqliteTableNames = Readonly<{
   recordedNodes: string;
   recordedEdges: string;
   recordedClock: string;
+  revisionOrigins: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -76,6 +77,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  revisionOrigins: "typegraph_revision_origins",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -305,6 +307,15 @@ export function createSqliteTables(
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
+  const revisionOrigins = sqliteTable(
+    n.revisionOrigins,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
   const uniques = sqliteTable(
     n.uniques,
     {
@@ -456,6 +467,7 @@ export function createSqliteTables(
     recordedNodes,
     recordedEdges,
     recordedClock,
+    revisionOrigins,
     uniques,
     schemaVersions,
     indexMaterializations,

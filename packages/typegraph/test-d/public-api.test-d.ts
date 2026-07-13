@@ -246,6 +246,9 @@ expectType<true>(historyStore.historyEnabled);
 expectType<true>(historyStore.recordedReadBound);
 expectAssignable<HistorySafeBackend>(historyStore.backend);
 
+const revisionStore = createStore(graph, backend, { revisionTracking: true });
+expectType<boolean>(revisionStore.revisionTrackingEnabled);
+
 // `history: true` means TypeGraph owns capture; external recorded bindings are
 // read-only sources and cannot be confused with built-in write capture.
 expectError(

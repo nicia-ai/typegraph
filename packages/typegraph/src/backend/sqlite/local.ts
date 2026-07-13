@@ -209,6 +209,8 @@ const LOCAL_SQLITE_SYNCHRONOUS_MODES: readonly LocalSqliteSynchronousMode[] = [
   "extra",
 ];
 
+const SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES = 2_147_483_647;
+
 function applyConnectionPragmas(
   sqlite: Database.Database,
   pragmas: LocalSqlitePragmaOptions | false | undefined,
@@ -273,12 +275,13 @@ function applyConnectionPragmas(
   if (
     resolved.walAutocheckpointPages !== undefined &&
     (!Number.isSafeInteger(resolved.walAutocheckpointPages) ||
-      resolved.walAutocheckpointPages < 0)
+      resolved.walAutocheckpointPages < 0 ||
+      resolved.walAutocheckpointPages > SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES)
   ) {
     throw new ConfigurationError(
       `Invalid walAutocheckpointPages pragma: ${String(resolved.walAutocheckpointPages)}. ` +
-        "Expected a non-negative safe integer number of WAL pages (0 disables " +
-        "automatic checkpointing entirely).",
+        `Expected an integer between 0 and ${SQLITE_MAX_WAL_AUTOCHECKPOINT_PAGES} ` +
+        "WAL pages (0 disables automatic checkpointing entirely).",
       { walAutocheckpointPages: resolved.walAutocheckpointPages },
     );
   }

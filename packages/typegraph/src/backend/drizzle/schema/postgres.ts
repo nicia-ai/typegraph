@@ -53,6 +53,7 @@ export type PostgresTableNames = Readonly<{
   recordedNodes: string;
   recordedEdges: string;
   recordedClock: string;
+  revisionOrigins: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -78,6 +79,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  revisionOrigins: "typegraph_revision_origins",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -307,6 +309,15 @@ export function createPostgresTables(
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
+  const revisionOrigins = pgTable(
+    n.revisionOrigins,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
   const uniques = pgTable(
     n.uniques,
     {
@@ -515,6 +526,7 @@ export function createPostgresTables(
     recordedNodes,
     recordedEdges,
     recordedClock,
+    revisionOrigins,
     uniques,
     schemaVersions,
     indexMaterializations,

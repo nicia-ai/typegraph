@@ -144,6 +144,15 @@ describe.each(backendMatrix())(
       return store;
     }
 
+    async function historyStore(): Promise<CareStore> {
+      const [store] = await createStoreWithSchema(
+        careGraph,
+        await makeBackend(),
+        { history: true },
+      );
+      return store;
+    }
+
     async function forkOf(
       forkPoint: CareStore,
     ): Promise<GraphBranch<CareGraph>> {
@@ -169,6 +178,32 @@ describe.each(backendMatrix())(
       ]);
       return edge!;
     }
+
+    it("commits an incremental merge into a history-backed target", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const provider = await forkOf(forkPoint);
+      await provider.store.nodes.Patient.bulkCreate([
+        {
+          id: "new-ana",
+          props: { name: "Ana Rivera", mrn: "MRN-1" },
+        },
+      ]);
+      const target = await historyStore();
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isOk(result)).toBe(true);
+      expect(await target.nodes.Patient.find()).toMatchObject([
+        { id: "new-ana", name: "Ana Rivera", mrn: "MRN-1" },
+      ]);
+      expect(await target.recordedNow()).toBeDefined();
+    });
 
     it("HAPPY PATH: resolves a branch addition onto an advanced target's base entity", async () => {
       cleanups = [];

@@ -3,14 +3,16 @@ import { resolve } from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 
 /**
- * Test globs for the graph-merge subsystem. These suites boot an in-process
- * PGlite (WASM Postgres) per fixture and run on BOTH backends, so they get their
- * own project with file serialization + generous timeouts. The rest of the
- * package keeps default parallelism and fast-fail timeouts.
+ * Test globs for the graph-merge subsystem. These suites exercise an in-process
+ * PGlite (WASM Postgres) backend and run on BOTH backends, so they get their own
+ * project with file serialization + generous timeouts. The rest of the package
+ * keeps default parallelism and fast-fail timeouts.
  */
+const UNIT_SCOPE = process.env.TYPEGRAPH_TEST_SCOPE === "unit";
+
 const GRAPH_MERGE_GLOBS = [
   "tests/graph-merge/**/*.test.ts",
-  "tests/property/graph-merge/**/*.test.ts",
+  ...(UNIT_SCOPE ? [] : ["tests/property/graph-merge/**/*.test.ts"]),
 ];
 
 const SHARED_EXCLUDE = [
@@ -22,6 +24,8 @@ const SHARED_EXCLUDE = [
   "**/.{idea,git,cache,output,temp}/**",
   "**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc}.config.*",
 ];
+
+const UNIT_PROPERTY_EXCLUDE = UNIT_SCOPE ? ["tests/property/**"] : [];
 
 export default defineConfig({
   resolve: {
@@ -79,7 +83,11 @@ export default defineConfig({
           name: "main",
           include: ["tests/**/*.test.ts"],
           // Graph-merge runs under its own (serialized) project below.
-          exclude: [...SHARED_EXCLUDE, ...GRAPH_MERGE_GLOBS],
+          exclude: [
+            ...SHARED_EXCLUDE,
+            ...GRAPH_MERGE_GLOBS,
+            ...UNIT_PROPERTY_EXCLUDE,
+          ],
         },
       },
       {

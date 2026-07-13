@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
+import { merge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import {
   enumerateAllEdges,
@@ -201,6 +202,50 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
       "Dave (A only)",
     ]);
     expect(await snapshotEdges(branchA.store)).toHaveLength(0);
+  });
+
+  it("uses a revision anchor through branch validation and merge commit", async () => {
+    const [baseStore] = await createStoreWithSchema(
+      graph,
+      await makeBackend(),
+      { revisionTracking: true },
+    );
+    const fork = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(fork)).toBe(true);
+    if (!isOk(fork)) throw fork.error;
+    const forkBranch = unwrap(fork);
+    expect(forkBranch.base).toContain("\0revision:");
+    expect(forkBranch.store.revisionTrackingEnabled).toBe(true);
+
+    await forkBranch.store.nodes.Person.create({ name: "From fork" });
+    const firstMerge = await merge(baseStore, [forkBranch], {});
+    expect(isOk(firstMerge)).toBe(true);
+    expect(
+      (await baseStore.nodes.Person.find()).map((node) => node.name),
+    ).toEqual(["From fork"]);
+
+    // The successful merge advanced the target's anchor, so a stale branch
+    // cannot be applied twice.
+    const secondMerge = await merge(baseStore, [forkBranch], {});
+    expect(isErr(secondMerge)).toBe(true);
+  });
+
+  it("uses the recorded-time clock as the revision anchor for history stores", async () => {
+    const [baseStore] = await createStoreWithSchema(
+      graph,
+      await makeBackend(),
+      { history: true },
+    );
+    const forkResult = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(forkResult)).toBe(true);
+    if (!isOk(forkResult)) throw forkResult.error;
+    const fork = unwrap(forkResult);
+    expect(fork.base).toContain("\0revision:");
+
+    await fork.store.nodes.Person.create({ name: "History fork" });
+    const result = await merge(baseStore, [fork], {});
+    expect(isOk(result)).toBe(true);
+    expect(await baseStore.recordedNow()).toBeDefined();
   });
 
   it("preserves the base's exact validFrom on the clone, even when it was never set explicitly", async () => {

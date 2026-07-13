@@ -21,7 +21,11 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import { lockRecordedGraphWrite } from "../recorded-capture";
+import { type SqlSchema } from "../../query/compiler/schema";
+import {
+  advanceRevisionClock,
+  lockRecordedGraphWrite,
+} from "../recorded-capture";
 import {
   type GraphWriteLock,
   uncapturedGraphWriteLock,
@@ -36,6 +40,8 @@ import { type OperationHookContext } from "../types";
 export type WriteTransactionContext = Readonly<{
   graphId: string;
   historyEnabled: boolean;
+  revisionTrackingEnabled: boolean;
+  revisionSchema: SqlSchema;
 }>;
 
 /**
@@ -61,12 +67,26 @@ export function runInWriteTransaction<T>(
     lock: GraphWriteLock,
   ) => Promise<T>,
 ): Promise<T> {
+  const ownsWriteLock =
+    "transaction" in backend && backend.capabilities.transactions;
   return runOptionallyInTransaction(backend, async (target) => {
     const lock =
-      ctx.historyEnabled ?
+      ctx.historyEnabled || ctx.revisionTrackingEnabled ?
         await lockRecordedGraphWrite(target, ctx.graphId)
       : uncapturedGraphWriteLock();
-    return fn(target, lock);
+    const result = await fn(target, lock);
+    // History capture advances the same clock when it flushes its recorded
+    // after-images. Live stores opt into revisions independently, so advance
+    // only there and only after every row/sidecar write succeeded.
+    if (ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+      await advanceRevisionClock(
+        target,
+        ctx.revisionSchema,
+        ctx.graphId,
+        ownsWriteLock,
+      );
+    }
+    return result;
   });
 }
 

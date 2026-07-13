@@ -39,6 +39,36 @@ function postgresLikeBackend(): GraphBackend {
   return { ...backendWithReturning(true), dialect: "postgres" };
 }
 
+function backendWithoutTransactions(): GraphBackend {
+  const base = createTestBackend();
+  return {
+    ...base,
+    capabilities: { ...base.capabilities, transactions: false },
+  };
+}
+
+function backendWithoutExecuteStatement(): GraphBackend {
+  const base = createTestBackend();
+  const { executeStatement: _executeStatement, ...withoutExecuteStatement } =
+    base;
+  return withoutExecuteStatement;
+}
+
+function backendWithoutTableNames(): GraphBackend {
+  const base = createTestBackend();
+  const { tableNames: _tableNames, ...withoutTableNames } = base;
+  return withoutTableNames;
+}
+
+function backendWithoutRevisionOriginsTableBootstrap(): GraphBackend {
+  const base = createTestBackend();
+  const {
+    ensureRevisionOriginsTable: _ensureRevisionOriginsTable,
+    ...withoutRevisionOriginsTableBootstrap
+  } = base;
+  return withoutRevisionOriginsTableBootstrap;
+}
+
 describe("recorded-time capture capability gate", () => {
   it("refuses { history: true } when the backend declares no RETURNING support", () => {
     expect(() =>
@@ -60,6 +90,82 @@ describe("recorded-time capture capability gate", () => {
 
   it("does not gate on RETURNING when history capture is disabled", () => {
     expect(() => createStore(graph, backendWithReturning(false))).not.toThrow();
+  });
+
+  it("refuses revision tracking without transactions", () => {
+    expect(() =>
+      createStore(graph, backendWithoutTransactions(), {
+        revisionTracking: true,
+      }),
+    ).toThrow("requires a backend with transaction support");
+  });
+
+  it("refuses revision tracking without executeStatement", () => {
+    expect(() =>
+      createStore(graph, backendWithoutExecuteStatement(), {
+        revisionTracking: true,
+      }),
+    ).toThrow("requires a backend that supports executeStatement");
+  });
+
+  it("refuses revision tracking without table names", () => {
+    expect(() =>
+      createStore(graph, backendWithoutTableNames(), {
+        revisionTracking: true,
+      }),
+    ).toThrow("requires a backend that exposes tableNames");
+  });
+
+  it("refuses revision tracking without revision-origin table bootstrap", () => {
+    expect(() =>
+      createStore(graph, backendWithoutRevisionOriginsTableBootstrap(), {
+        revisionTracking: true,
+      }),
+    ).toThrow("requires a backend that can bootstrap revision origins");
+  });
+
+  it("names the revision-anchor contract when it guards tx.sql", async () => {
+    const store = createStore(graph, createTestBackend(), {
+      revisionTracking: true,
+    });
+
+    await expect(
+      store.transaction((tx) => {
+        const sqlHandle = tx.sql as unknown as Readonly<{ insert: unknown }>;
+        void sqlHandle.insert;
+        return Promise.resolve();
+      }),
+    ).rejects.toThrow(
+      "tx.sql is not available when revision tracking is enabled",
+    );
+  });
+
+  it("retries revision-origin bootstrap after a transient failure", async () => {
+    const base = createTestBackend();
+    const ensureRevisionOriginsTable = base.ensureRevisionOriginsTable;
+    if (ensureRevisionOriginsTable === undefined) {
+      throw new Error("Test backend must bootstrap revision origins");
+    }
+    let bootstrapAttempts = 0;
+    const backend: GraphBackend = {
+      ...base,
+      async ensureRevisionOriginsTable(): Promise<void> {
+        bootstrapAttempts++;
+        if (bootstrapAttempts === 1) {
+          throw new Error("transient revision-origin DDL failure");
+        }
+        await ensureRevisionOriginsTable();
+      },
+    };
+    const store = createStore(graph, backend, { revisionTracking: true });
+
+    await expect(store.revisionOriginNow()).rejects.toThrow(
+      "transient revision-origin DDL failure",
+    );
+    await expect(store.revisionOriginNow()).resolves.toEqual(
+      expect.any(String),
+    );
+    expect(bootstrapAttempts).toBe(2);
   });
 
   it("refuses PostgreSQL snapshot isolation for history capture transactions", async () => {

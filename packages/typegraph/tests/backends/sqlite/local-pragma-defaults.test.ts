@@ -185,6 +185,15 @@ describe("createLocalSqliteBackend pragma defaults", () => {
     expect(readPragma(result, "wal_autocheckpoint")).toBe(0);
   });
 
+  it("accepts SQLite's signed 32-bit wal_autocheckpoint maximum", () => {
+    const result = openBackend({
+      path: createTemporaryDbPath(),
+      pragmas: { walAutocheckpointPages: 2_147_483_647 },
+    });
+
+    expect(readPragma(result, "wal_autocheckpoint")).toBe(2_147_483_647);
+  });
+
   it("leaves walAutocheckpointPages at SQLite's own default when unset", () => {
     const withDefaults = openBackend({ path: createTemporaryDbPath() });
     const withoutPragmas = openBackend({
@@ -197,12 +206,15 @@ describe("createLocalSqliteBackend pragma defaults", () => {
     );
   });
 
-  it("rejects a negative or non-integer walAutocheckpointPages", () => {
+  it("rejects an out-of-range or non-integer walAutocheckpointPages", () => {
     expect(() =>
       openBackend({ pragmas: { walAutocheckpointPages: -1 } }),
     ).toThrow(ConfigurationError);
     expect(() =>
       openBackend({ pragmas: { walAutocheckpointPages: 1.5 } }),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      openBackend({ pragmas: { walAutocheckpointPages: 2_147_483_648 } }),
     ).toThrow(ConfigurationError);
   });
 

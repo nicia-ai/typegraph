@@ -6,6 +6,7 @@
 .tanstack/
 .wrangler/
 coverage/
+.vitest-reports/
 drizzle/
 examples/
 pnpm-lock.yaml

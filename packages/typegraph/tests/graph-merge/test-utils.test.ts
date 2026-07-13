@@ -17,8 +17,16 @@ import {
 } from "../../src/graph-merge/errors";
 import type { Result } from "../../src/graph-merge/result";
 import { err, isErr, isOk, ok, unwrap } from "../../src/graph-merge/result";
-import type { BackendMatrixEntry, MergeBackendFixture } from "./test-utils";
-import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
+import type {
+  BackendMatrixEntry,
+  MergeBackendFixture,
+  SharedPgliteMergeEngine,
+} from "./test-utils";
+import {
+  backendMatrix,
+  createSqliteMergeBackend,
+  setupSharedPgliteMergeEngine,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -193,5 +201,34 @@ describe("createSqliteMergeBackend (direct)", () => {
     const [store] = await createStoreWithSchema(graph, fixture.backend);
     expect(store.graphId).toBe("merge-test-utils");
     await fixture.cleanup();
+  });
+});
+
+describe("setupSharedPgliteMergeEngine", () => {
+  let engine: SharedPgliteMergeEngine | undefined;
+
+  afterEach(async () => {
+    await engine?.dispose();
+  });
+
+  it("isolates simultaneously active stores on one PGlite engine", async () => {
+    engine = await setupSharedPgliteMergeEngine();
+    const first = await engine.makeFixture();
+    const second = await engine.makeFixture();
+    try {
+      const [firstStore] = await createStoreWithSchema(graph, first.backend);
+      const [secondStore] = await createStoreWithSchema(graph, second.backend);
+      const created = await firstStore.nodes.Person.create({ name: "Ada" });
+
+      await expect(
+        firstStore.nodes.Person.getById(created.id),
+      ).resolves.toEqual(created);
+      await expect(
+        secondStore.nodes.Person.getById(created.id),
+      ).resolves.toBeUndefined();
+    } finally {
+      await first.cleanup();
+      await second.cleanup();
+    }
   });
 });

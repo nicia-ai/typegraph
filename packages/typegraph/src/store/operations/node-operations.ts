@@ -47,6 +47,7 @@ import { type ValueType } from "../../query/ast";
 import {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
+  type SqlSchema,
 } from "../../query/compiler/schema";
 import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
@@ -102,6 +103,8 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
   historyEnabled: boolean;
+  revisionTrackingEnabled: boolean;
+  revisionSchema: SqlSchema;
   registry: KindRegistry;
   createOperationContext: (
     operation: "create" | "update" | "delete",

@@ -374,6 +374,7 @@ export function createPostgresBackend(
     recordedNodes: getTableName(tables.recordedNodes),
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
+    revisionOrigins: getTableName(tables.revisionOrigins),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -597,6 +598,12 @@ export function createPostgresBackend(
       for (const statement of statements) {
         await db.execute(sql.raw(statement));
       }
+    },
+
+    async ensureRevisionOriginsTable(): Promise<void> {
+      await db.execute(
+        sql.raw(generatePgCreateTableSQL(tables.revisionOrigins)),
+      );
     },
 
     // Every fulltext-touching method asserts the durable marker instead

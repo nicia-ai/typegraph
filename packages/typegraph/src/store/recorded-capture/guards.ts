@@ -47,10 +47,10 @@ export function requireRecordedSchema(
  * backend's transaction target can differ from it.
  */
 export function requireCaptureStatements(
-  target: TransactionBackend,
-): asserts target is TransactionBackend &
+  target: Pick<GraphBackend, "dialect" | "executeStatement">,
+): asserts target is Pick<GraphBackend, "dialect" | "executeStatement"> &
   Readonly<{
-    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    executeStatement: NonNullable<GraphBackend["executeStatement"]>;
   }> {
   if (target.executeStatement === undefined) {
     throw new ConfigurationError(
@@ -65,7 +65,7 @@ export function requireCaptureStatements(
 }
 
 export async function executeStatement(
-  target: TransactionBackend,
+  target: Pick<GraphBackend, "dialect" | "executeStatement">,
   query: SQL,
 ): Promise<void> {
   requireCaptureStatements(target);
@@ -163,8 +163,25 @@ function historyUnsafeRawWriteError(surface: string): ConfigurationError {
   );
 }
 
+function revisionTrackingUnsafeRawWriteError(
+  surface: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `${surface} is not available when revision tracking is enabled because raw SQL writes bypass the revision anchor.`,
+    { code: "REVISION_TRACKING_RAW_SQL_DISABLED" },
+    {
+      suggestion:
+        "Run graph writes through store.nodes/store.edges (or tx.nodes/tx.edges inside a transaction), so TypeGraph can advance the revision anchor.",
+    },
+  );
+}
+
 function failHistoryUnsafeSqlRef(): never {
   throw historyUnsafeRawWriteError("tx.sql");
+}
+
+function failRevisionTrackingUnsafeSqlRef(): never {
+  throw revisionTrackingUnsafeRawWriteError("tx.sql");
 }
 
 /**
@@ -175,40 +192,53 @@ function failHistoryUnsafeSqlRef(): never {
  * capture.
  */
 export function createHistoryUnsafeSqlRef(): AdoptedTransaction {
+  return createUnsafeSqlRef(failHistoryUnsafeSqlRef);
+}
+
+/**
+ * A fail-loud replacement for `tx.sql` on a revision-tracked live store. It
+ * deliberately names revision tracking rather than history capture so callers
+ * see the invariant their store actually enabled.
+ */
+export function createRevisionTrackingUnsafeSqlRef(): AdoptedTransaction {
+  return createUnsafeSqlRef(failRevisionTrackingUnsafeSqlRef);
+}
+
+function createUnsafeSqlRef(fail: () => never): AdoptedTransaction {
   return new Proxy(
-    function historyUnsafeSqlRef(): never {
-      return failHistoryUnsafeSqlRef();
+    function unsafeSqlRef(): never {
+      return fail();
     },
     {
       get(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       apply(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       set(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       defineProperty(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       deleteProperty(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       // Enumeration / inspection traps too, so spreading (`{...tx.sql}`),
       // `Object.keys`, `in`, and prototype reads also fail loudly rather than
       // silently yielding an empty object that reads as "no raw handle".
       has(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       ownKeys(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       getOwnPropertyDescriptor(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
       getPrototypeOf(): never {
-        return failHistoryUnsafeSqlRef();
+        return fail();
       },
     },
   ) as unknown as AdoptedTransaction;
@@ -287,6 +317,54 @@ export function assertCapturableBackend(backend: GraphBackend): void {
       {
         suggestion:
           "Use a built-in SQLite/PostgreSQL backend, or set tableNames on the custom backend so recorded-time capture can resolve the recorded relations instead of silently falling back to defaults.",
+      },
+    );
+  }
+}
+
+/**
+ * Verifies the narrower backend contract for live-store revision tracking.
+ * Unlike recorded-time history, a revision anchor does not capture after-images
+ * and therefore does not require `UPDATE … RETURNING`.
+ */
+export function assertRevisionTrackableBackend(backend: GraphBackend): void {
+  if (!backend.capabilities.transactions) {
+    throw new ConfigurationError(
+      "revisionTracking: true requires a backend with transaction support.",
+      { dialect: backend.dialect },
+      {
+        suggestion:
+          "Use a transactional SQLite/PostgreSQL backend or leave revision tracking disabled.",
+      },
+    );
+  }
+  if (backend.executeStatement === undefined) {
+    throw new ConfigurationError(
+      "revisionTracking: true requires a backend that supports executeStatement.",
+      { dialect: backend.dialect },
+      {
+        suggestion:
+          "Use a built-in SQLite/PostgreSQL backend, or implement executeStatement so TypeGraph can advance the revision clock.",
+      },
+    );
+  }
+  if (backend.tableNames === undefined) {
+    throw new ConfigurationError(
+      "revisionTracking: true requires a backend that exposes tableNames.",
+      { dialect: backend.dialect },
+      {
+        suggestion:
+          "Use a built-in SQLite/PostgreSQL backend, or set tableNames so TypeGraph can address the revision clock relation.",
+      },
+    );
+  }
+  if (backend.ensureRevisionOriginsTable === undefined) {
+    throw new ConfigurationError(
+      "revisionTracking: true requires a backend that can bootstrap revision origins.",
+      { dialect: backend.dialect },
+      {
+        suggestion:
+          "Use a built-in SQLite/PostgreSQL backend, or implement ensureRevisionOriginsTable so TypeGraph can durably namespace revision anchors.",
       },
     );
   }
