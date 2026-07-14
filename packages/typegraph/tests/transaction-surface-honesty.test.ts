@@ -15,21 +15,24 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type AdoptedTransaction,
   ConfigurationError,
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  type HistoryStore,
   isRecordedCaptureGuardError,
   RECORDED_CAPTURE_GUARD_CODES,
-  type AdoptedTransaction,
-  type GraphBackend,
-  type HistoryStore,
   type RecordedCaptureGuardCode,
   type SqlAvailability,
   type Store,
   type TransactionContext,
 } from "../src";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  disableTransactions,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -41,29 +44,26 @@ const graph = defineGraph({
   edges: {},
 });
 
-/**
- * Wraps a real backend so any unconditional `transaction(...)` rejects — the
- * shape of `drizzle-orm/neon-http` and Cloudflare D1. Mirrors the helper in
- * `no-transactions-fallthrough.test.ts`.
- */
-function disableTransactions(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
-    capabilities: { ...backend.capabilities, transactions: false },
-    transaction: () =>
-      Promise.reject(new Error("synthetic backend has transactions disabled")),
-  };
-}
-
 /** Reads `tx.sql.run` — the access the guard fail-louds on under capture. */
 function readSqlRunAccessor(tx: TransactionContext<typeof graph>): unknown {
   return (tx.sql as { run?: unknown }).run;
+}
+
+/** Returns whatever `fn` throws, or `undefined` if it does not throw. */
+function thrownBy(fn: () => unknown): unknown {
+  try {
+    fn();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
 }
 
 describe("#254 tx.sqlAvailability discriminant", () => {
   it("reports 'available' with a usable tx.sql on a plain transactional store", async () => {
     const store = await createInitializedStore(graph, createTestBackend());
     await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("available");
       expect(tx.sql).toBeDefined();
     });
@@ -75,6 +75,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
       disableTransactions(createTestBackend()),
     );
     await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("unavailable");
       expect(tx.sql).toBeUndefined();
     });
@@ -85,6 +86,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
       history: true,
     });
     await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("history");
       // Present-but-throwing: not undefined, and every access fails loud.
       expect(tx.sql).toBeDefined();
@@ -97,6 +99,7 @@ describe("#254 tx.sqlAvailability discriminant", () => {
       revisionTracking: true,
     });
     await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("revisionTracking");
       expect(tx.sql).toBeDefined();
       expect(() => readSqlRunAccessor(tx)).toThrow(ConfigurationError);
@@ -123,12 +126,7 @@ describe("#258 recorded-capture guard error codes", () => {
       (store as Store<typeof graph>).withTransaction({} as AdoptedTransaction);
     expect(call).toThrow(ConfigurationError);
 
-    let caught: unknown;
-    try {
-      call();
-    } catch (error) {
-      caught = error;
-    }
+    const caught = thrownBy(call);
     expect(
       isRecordedCaptureGuardError(
         caught,
@@ -146,14 +144,13 @@ describe("#258 recorded-capture guard error codes", () => {
       history: true,
     });
     await store.transaction(async (tx) => {
-      let caught: unknown;
-      try {
-        readSqlRunAccessor(tx);
-      } catch (error) {
-        caught = error;
-      }
+      await tx.nodes.Person.create({ name: "probe" });
+      const caught = thrownBy(() => readSqlRunAccessor(tx));
       expect(
-        isRecordedCaptureGuardError(caught, "RECORDED_CAPTURE_RAW_SQL_DISABLED"),
+        isRecordedCaptureGuardError(
+          caught,
+          "RECORDED_CAPTURE_RAW_SQL_DISABLED",
+        ),
       ).toBe(true);
     });
   });
@@ -163,14 +160,13 @@ describe("#258 recorded-capture guard error codes", () => {
       revisionTracking: true,
     });
     await store.transaction(async (tx) => {
-      let caught: unknown;
-      try {
-        readSqlRunAccessor(tx);
-      } catch (error) {
-        caught = error;
-      }
+      await tx.nodes.Person.create({ name: "probe" });
+      const caught = thrownBy(() => readSqlRunAccessor(tx));
       expect(
-        isRecordedCaptureGuardError(caught, "REVISION_TRACKING_RAW_SQL_DISABLED"),
+        isRecordedCaptureGuardError(
+          caught,
+          "REVISION_TRACKING_RAW_SQL_DISABLED",
+        ),
       ).toBe(true);
     });
   });
@@ -197,8 +193,7 @@ describe("#258 recorded-capture guard error codes", () => {
 // --- #253 type-level assertions (fail `pnpm typecheck` on regression) ---
 //
 // Never invoked: the assertions are checked by `tsc`, and the bodies must not
-// run (they reference a `declare`d value that is erased at runtime).
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+// run (they reference `declare`d values that are erased at runtime).
 function withTransactionTypeAssertions(
   externalTx: AdoptedTransaction,
   plain: Store<typeof graph>,
@@ -212,15 +207,15 @@ function withTransactionTypeAssertions(
   // @ts-expect-error withTransaction is a compile error on a HistoryStore<G>.
   history.withTransaction(externalTx);
 }
+void withTransactionTypeAssertions;
 
-describe("SqlAvailability values", () => {
-  it("covers exactly the four documented states", () => {
-    const states: readonly SqlAvailability[] = [
-      "available",
-      "history",
-      "revisionTracking",
-      "unavailable",
-    ];
-    expect(states).toHaveLength(4);
-  });
-});
+// Compile-time exhaustiveness pin: `satisfies Record<SqlAvailability, true>`
+// fails `pnpm typecheck` if the discriminant ever gains or loses a state (a
+// missing key errors, an extra key errors), which the runtime tests above —
+// each covering one state — cannot enforce on their own.
+({
+  available: true,
+  history: true,
+  revisionTracking: true,
+  unavailable: true,
+}) satisfies Record<SqlAvailability, true>;

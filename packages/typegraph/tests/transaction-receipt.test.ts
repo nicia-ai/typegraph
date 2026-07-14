@@ -7,7 +7,11 @@ import {
   type TransactionOptions,
 } from "../src/backend/types";
 import { createTransactionReceiptRecorder } from "../src/store/transaction-receipt";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  disableTransactions,
+} from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -50,15 +54,6 @@ const prototypeKindGraph = defineGraph({
   },
   edges: {},
 });
-
-function disableTransactions(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
-    capabilities: { ...backend.capabilities, transactions: false },
-    transaction: () =>
-      Promise.reject(new Error("synthetic backend has transactions disabled")),
-  };
-}
 
 function recordTransactionTargetCalls(
   target: TransactionBackend,

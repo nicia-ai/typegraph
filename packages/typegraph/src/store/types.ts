@@ -1406,10 +1406,7 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
  * See {@link TransactionContext.sqlAvailability} for the per-value semantics.
  */
 export type SqlAvailability =
-  | "available"
-  | "history"
-  | "revisionTracking"
-  | "unavailable";
+  "available" | "history" | "revisionTracking" | "unavailable";
 
 /**
  * A typed transaction context with collection API.

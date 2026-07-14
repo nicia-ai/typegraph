@@ -1965,29 +1965,22 @@ export class Store<G extends GraphDef> {
       : sql === undefined ? "unavailable"
       : "available";
 
-    if (sql === undefined) {
-      return {
-        nodes,
-        edges,
-        sqlAvailability,
-        backend: txBackend,
-        getNodeCollection,
-        runNodeOperationHooks,
-      };
-    }
-    const exposedSql =
-      this.#captureEnabled ? createHistoryUnsafeSqlRef()
-      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
-      : sql;
-    return {
+    const base: TransactionContext<G> = {
       nodes,
       edges,
-      sql: exposedSql,
       sqlAvailability,
       backend: txBackend,
       getNodeCollection,
       runNodeOperationHooks,
     };
+
+    if (sql === undefined) return base;
+
+    const exposedSql =
+      this.#captureEnabled ? createHistoryUnsafeSqlRef()
+      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
+      : sql;
+    return { ...base, sql: exposedSql };
   }
 
   // === Graph Lifecycle ===

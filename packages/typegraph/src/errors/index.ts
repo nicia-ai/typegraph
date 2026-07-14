@@ -953,7 +953,8 @@ export type RecordedCaptureGuardError = ConfigurationError &
 function isRecordedCaptureGuardCode(
   value: unknown,
 ): value is RecordedCaptureGuardCode {
-  return RECORDED_CAPTURE_GUARD_CODES.some((code) => code === value);
+  // Widen the readonly tuple so `includes` accepts an `unknown` needle.
+  return (RECORDED_CAPTURE_GUARD_CODES as readonly unknown[]).includes(value);
 }
 
 /**

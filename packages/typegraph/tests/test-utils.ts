@@ -65,6 +65,21 @@ export async function createInitializedStore<G extends GraphDef>(
   return store;
 }
 
+/**
+ * Wraps a real backend so any unconditional `transaction(...)` rejects and it
+ * reports `capabilities.transactions: false` — the shape of
+ * `drizzle-orm/neon-http` and Cloudflare D1. Use it to exercise the
+ * non-transactional sequential fall-through.
+ */
+export function disableTransactions(backend: GraphBackend): GraphBackend {
+  return {
+    ...backend,
+    capabilities: { ...backend.capabilities, transactions: false },
+    transaction: () =>
+      Promise.reject(new Error("synthetic backend has transactions disabled")),
+  };
+}
+
 export { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 
 /**
