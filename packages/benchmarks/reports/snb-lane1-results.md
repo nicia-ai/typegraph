@@ -88,9 +88,10 @@ index-maintenance cost it should have been exempt from) and Neo4j's
 `snb_post_id`/`snb_comment_id` constraint removal (dead weight once the
 offline `neo4j-admin` importer replaced the batched-Cypher loader those
 constraints existed for). Postgres and LadybugDB, whose load paths
-weren't touched by either fix, land close to their previous numbers
-(669.3s vs. 693.8s; 41.6s vs. 53.8s) — consistent with ordinary run-to-run
-variance, not a regression or improvement. TypeGraph's SQLite/Postgres
+weren't touched by either fix, measured 3.5% and 22.7% faster than the
+previous run, respectively (669.3s vs. 693.8s; 41.6s vs. 53.8s). These
+are cross-commit observations and cannot establish run-to-run variance
+or causality. TypeGraph's SQLite/Postgres
 backends are still slower to *load* at this scale than Neo4j or
 LadybugDB — both of the latter use engine-native bulk paths (Neo4j's
 offline `neo4j-admin database import full`; Ladybug's `COPY FROM`), while
