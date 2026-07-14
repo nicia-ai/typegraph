@@ -1,86 +1,49 @@
 # Lane 1 (LDBC SNB Interactive short reads) — results
 
-> **Every query-latency number below is invalidated, pending a fresh
-> run.** Several rounds of review found this benchmark's query
-> implementations diverged from the official LDBC queries in ways
-> row-count-only parity could never catch:
->
-> - **IS2 measured the wrong workload** in all three engine drivers —
->   traversing to the given person's *friends* and measuring messages
->   *they* authored, instead of official LDBC IS2's own definition ("recent
->   messages of a person": the given person's own messages, tie-broken
->   `messageId ASC`, not the `DESC` these drivers used).
-> - **IS2/IS3/IS6/IS7 silently omitted official output fields** in one or
->   more engines — message content, author/moderator names, forum
->   id/title — meaning several engines were doing measurably *less work*
->   than the official query requires.
-> - **Id tie-breaks were lexicographic, not numeric** (`"message:10"`
->   sorting before `"message:2"`), on every engine's native ordering. Fixed
->   at the root: `dataset/ldbc-csv.ts` zero-pads every id's numeric portion
->   to a fixed width, so a plain lexicographic `ORDER BY id ASC` (SQL or
->   Cypher alike) already agrees with numeric order.
-> - **IS2's own `LIMIT` was, in turn, briefly removed entirely** to work
->   around the tie-break bug above (a same-timestamp cluster larger than
->   any fixed candidate buffer could rank a genuinely-top-10 message past
->   the cutoff) — correct, but this diverged from the official query's own
->   engine-side `ORDER BY ... LIMIT 10` (applied before the root-post-author
->   walk), changing IS2's measured workload and disproportionately
->   penalizing networked engines with full-content transfer for every
->   message a person ever authored. Once ids were zero-padded (previous
->   bullet), native `ORDER BY ... LIMIT 10` was restored everywhere — this
->   schema's split Post/Comment node types mean TypeGraph/LadybugDB fetch
->   each type's own top 10 and merge (provably equal to the true top 10 of
->   the union, for any candidate-pool or tie-cluster size), while Neo4j's
->   unified `:Message` label needs only one query.
->
-> All fixed — see `typegraph-queries.ts`, `neo4j.ts`, `ladybug.ts`,
-> `dataset/ldbc-csv.ts` — and the parity gate itself was upgraded from
-> row-count-only to a value-level canonical digest per row
-> (`engines/types.ts`'s `canonicalDigest`/`compareIdsAscending`,
-> `harness/parity.ts`), specifically because row-count agreement had
-> already let the IS2 workload bug and the field-omission bugs both
-> through undetected. Verified end-to-end on the smoke fixture: all 7
-> queries now pass **value-level** parity (`comparable=yes`) across all
-> four engines, not just row-count parity.
->
-> **Every IS1-IS7 latency number in this doc reflects the old, wrong
-> queries** and needs a fresh SF1 + SF10 run before any of it (including
-> "SQLite fastest across the board," which was only ever true at SF10,
-> not SF1) can be trusted again. **Neo4j's load time is also invalidated**
-> — the `Post`/`Comment` constraint removal (see "Why attempts 6-8" below)
-> changes work done inside its timed `load()`, not just its query-time
-> fairness. SQLite/Postgres/LadybugDB's load times are unaffected — their
-> load paths weren't touched by any of this.
+**Status: real SF1- and SF10-scale numbers, single run each, on the
+fully-fixed commit — not a publishable comparison yet.** Five rounds of
+review (2026-07-13) found and fixed real defects in the query
+implementations and the harness itself: IS2 measured the wrong workload
+in all three engine drivers (friends' messages, not the given person's
+own); IS2/IS3/IS6/IS7 silently omitted official output fields in one or
+more engines; id tie-breaks were lexicographic instead of numeric; an
+interim IS2 fix traded correctness for an unfair, network-penalizing
+workload change; and the adversarial correctness test added to guard
+against a repeat of any of this didn't actually reproduce the bug it
+claimed to guard against. Every finding, fix, and how each was verified
+is logged in full in [Next steps](#next-steps) below — nothing here is
+hypothetical. The parity gate itself was upgraded from row-count-only to
+a value-level canonical digest per row (`engines/types.ts`'s
+`canonicalDigest`/`compareIdsAscending`, `harness/parity.ts`), and a
+dedicated `bench:snb:verify-is2-tie-break` oracle now checks IS2's
+top-10 selection against a known-correct answer, independent of
+cross-engine consensus.
 
-**Status: real SF1- and SF10-scale numbers, single run each — not a
-publishable comparison yet.** Per the program plan, SF1 is the minimum
-scale for any claim about relative engine performance, and this file has
-had that since 2026-07-07: a full run (~9.9k persons, ~1M posts, ~2.05M
-comments, official CsvBasic datagen export) completed cleanly across all
-four engines with 100% row-count parity on every query. SF10 (10x scale,
-~65.6k persons, ~7.4M posts, ~21.9M comments) was a stretch goal gated on
-SF1 being trusted — it's now done too, and took eight EC2 attempts total
-across two separate root-causing efforts: a genuine memory-exhaustion
-failure that looked like a networking problem (attempts 1-5, 2026-07-11)
-and, once that was fixed, an EBS volume's default IOPS ceiling that made a
-correctly-implemented, locally-validated SQLite load-time fix show zero
-real-world improvement (attempts 6-8, 2026-07-12) — see
-[SF10 results](#sf10-results) below for both. Treat all numbers below as a
-first real data point, not a final verdict — each is one run on one
-machine, not the multiple runs / statistical-confidence bar a published
-comparison would need. The smoke-scale table is kept below for
-harness-wiring reference.
+The SF1 and SF10 runs below are fresh, on commit `2bc7f74f` (every fix
+above in place): 0 engine failures, all 7 queries passing full
+**value-level** digest parity (not just row-count) across all four
+engines, at both scales. Per the program plan, SF1 is the minimum scale
+for any claim about relative engine performance; SF10 (10x scale) is a
+stretch goal gated on SF1 being trusted. Treat all numbers below as
+fresh, valid data points, not a final verdict — each scale has one run
+on one dedicated EC2 instance, not the multiple runs / statistical-
+confidence bar a published comparison would need (see
+[Next steps](#next-steps)). SF10's load times closely match attempt 8's
+below (the run that root-caused SQLite's load-time gap), reinforcing
+that those fixes are reproducible, not a one-off. The smoke-scale table
+is kept below for harness-wiring reference.
 
-Reaching a working SF1 run required finding and fixing three real scaling
-bugs (one in TypeGraph itself, two in this benchmark's own Neo4j/LadybugDB
-drivers), plus a follow-up TypeGraph load-time fix found afterward — see
+Reaching a working SF1 run originally required finding and fixing three
+real scaling bugs (one in TypeGraph itself, two in this benchmark's own
+Neo4j/LadybugDB drivers), plus a follow-up TypeGraph load-time fix found
+afterward — see
 [Fixes made to reach a working SF1 run](#fixes-made-to-reach-a-working-sf1-run).
 
 ## SF1 environment
 
 | | |
 | --- | --- |
-| Date | 2026-07-07 |
+| Date | 2026-07-13 |
 | Machine | AWS EC2 `c7i.4xlarge`, Ubuntu 24.04 LTS |
 | CPU / RAM | Intel(R) Xeon(R) Platinum 8488C, 16 vCPU, 30.8 GiB |
 | Node.js | v24.18.0 |
@@ -92,9 +55,10 @@ drivers), plus a follow-up TypeGraph load-time fix found afterward — see
 | Command | `tsx src/real/snb-short-reads.ts --profile=sf1 --check` |
 | Samples / warmups | 20 / 5 per query (sf1 profile defaults) |
 | Runner | `pnpm bench:snb:sf1:ec2` (docs/ec2-benchmark-runner.md) — dedicated ephemeral instance, no other workload sharing the box |
+| Ref | `2bc7f74f7cf37c3453bb2e666fe47b513c45c4b9` |
 
 Full machine-readable detail:
-`bench-results/current/snb-sf1-ec2-ec2-20260707T051024Z/{summary,results}.json`
+`bench-results/current/snb-sf1-ec2-ec2-20260713T193112Z/{summary,results}.json`
 (gitignored — regenerate with `pnpm bench:snb:sf1:ec2` then the printed
 `collect` command).
 
@@ -102,32 +66,62 @@ Full machine-readable detail:
 
 | Engine | Load time |
 | --- | --- |
-| ladybugdb | 53.8 s |
-| neo4j | 306.2 s (5.1 min) |
-| typegraph-postgres | 693.8 s (11.6 min) |
-| typegraph-sqlite | 2,408.2 s (40.1 min) |
+| ladybugdb | 41.6 s |
+| neo4j | 71.4 s (1.2 min) |
+| typegraph-postgres | 669.3 s (11.2 min) |
+| typegraph-sqlite | 587.1 s (9.8 min) |
 
-TypeGraph's SQLite/Postgres backends are still slower to *load* at this
-scale than Neo4j or LadybugDB — both of the latter use engine-native bulk
-paths (Neo4j's offline `neo4j-admin database import full`, which replaced
-an earlier batched-Cypher `UNWIND ... IN TRANSACTIONS` loader; Ladybug's
-`COPY FROM`), while TypeGraph's backends go through the general-purpose
-`bulkInsert` API — but both improved substantially since the first SF1 run
-(sqlite 74.2 min → 40.1 min, ~1.85x; postgres 80.9 min → 11.6 min, ~7x),
-after fixing a real N+1 endpoint-lookup pattern in edge creation (see
-[Fixes made](#fixes-made-to-reach-a-working-sf1-run)). Postgres's much
-larger relative gain makes sense: eliminating a redundant round trip
-matters far more over a network connection than for SQLite's in-process
-calls. Further load-time work remains a follow-up (see Next steps).
+SQLite and Neo4j both load dramatically faster than the previous SF1 run
+(2026-07-07) reported above the table this replaced: SQLite ~4.1x
+(2,408.2s → 587.1s), Neo4j ~4.3x (306.2s → 71.4s). Neither is a new
+optimization specific to this run — both are the SF10 investigation's
+fixes ([Fixes made to reach a working SF1 run](#fixes-made-to-reach-a-working-sf1-run)
+and [SF10 results](#sf10-results)) finally being reflected in an SF1
+number for the first time: the original SF1 run predates both the
+SNB covering index's deferred-materialization fix (it was being baked
+into the initial `CREATE TABLE` DDL instead of genuinely deferred past
+bulk load, so every SQLite insert during that original run paid live
+index-maintenance cost it should have been exempt from) and Neo4j's
+`snb_post_id`/`snb_comment_id` constraint removal (dead weight once the
+offline `neo4j-admin` importer replaced the batched-Cypher loader those
+constraints existed for). Postgres and LadybugDB, whose load paths
+weren't touched by either fix, land close to their previous numbers
+(669.3s vs. 693.8s; 41.6s vs. 53.8s) — consistent with ordinary run-to-run
+variance, not a regression or improvement. TypeGraph's SQLite/Postgres
+backends are still slower to *load* at this scale than Neo4j or
+LadybugDB — both of the latter use engine-native bulk paths (Neo4j's
+offline `neo4j-admin database import full`; Ladybug's `COPY FROM`), while
+TypeGraph's backends go through the general-purpose `bulkInsert` API (see
+[Next steps](#next-steps)).
 
-## SF1 query latency (p50 / p95 / p99, milliseconds) — pre-fix numbers, superseded
+## SF1 query latency (p50 / p95 / p99, milliseconds)
 
-**Every row below is invalidated — see the notice at the top of this
-file.** Same reasons as the SF10 table below: wrong IS2 workload, missing
-official fields on IS2/IS3/IS6/IS7, lexicographic id tie-breaks. Deleted
-here rather than kept as "mostly still right" — a fresh SF1 run with
-every fix in place (including the new value-level digest parity gate)
-replaces this table and the analysis that used to follow it.
+Fresh run, every correctness/fairness fix in place: 7/7 queries
+`comparable=yes` at full **value-level** digest parity (not row-count
+alone), 0 engine failures. `*` marks a noisy sample (CV > 25%, per-query
+warmup/sample counts above).
+
+| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
+| --- | --- | --- | --- | --- |
+| IS1 | 0.030 / 0.050 / 0.071ms* | 1.059 / 1.212 / 1.230ms | 4.709 / 5.333 / 12.316ms* | 1.094 / 2.283 / 3.155ms* |
+| IS2 | 1.584 / 2.635 / 4.086ms* | 16.214 / 19.370 / 26.280ms* | 76.782 / 152.578 / 197.477ms* | 67.390 / 85.680 / 97.857ms* |
+| IS3 | 0.217 / 0.875 / 0.952ms* | 1.433 / 2.865 / 3.620ms* | 26.235 / 126.930 / 150.785ms* | 4.855 / 13.658 / 21.248ms* |
+| IS4 | 0.021 / 0.027 / 0.035ms | 0.641 / 0.809 / 1.065ms* | 2.933 / 3.897 / 5.790ms | 0.395 / 0.522 / 0.646ms |
+| IS5 | 0.031 / 0.047 / 0.064ms | 0.731 / 0.817 / 0.934ms* | 4.490 / 5.190 / 8.225ms | 1.911 / 3.866 / 4.057ms* |
+| IS6 | 0.063 / 0.109 / 0.123ms* | 1.406 / 2.442 / 2.669ms* | 5.177 / 6.851 / 12.721ms* | 3.883 / 8.633 / 9.013ms* |
+| IS7 | 0.066 / 1.137 / 1.567ms* | 1.446 / 4.524 / 4.928ms* | 6.720 / 72.310 / 94.624ms* | 6.661 / 10.653 / 11.407ms |
+
+IS2 dominates every engine's latency, as expected: it's a top-10
+selection (now correctly engine-side `ORDER BY ... LIMIT 10`, see
+`typegraph-queries.ts`) followed by a per-message root-post-author walk —
+inherently more round-trip-heavy than a single-hop point lookup like
+IS1/IS4/IS5, and this shape is unchanged by any of this round's
+correctness fixes. TypeGraph/SQLite is fastest on every query at this
+scale (in-process, no network round trip); the relative ordering of the
+three networked/server engines varies by query rather than following one
+consistent ranking, which single-sample data at this scale can't
+distinguish from genuine query-shape differences — see
+[Next steps](#next-steps).
 
 ## Fixes made to reach a working SF1 run
 
@@ -207,12 +201,19 @@ above).
 
 ## SF10 results
 
-**Status: real SF10-scale numbers, single run — not a publishable
-comparison yet**, same caveat as SF1 above. Getting one clean, *fast* run
-took eight EC2 attempts across two root-causing efforts (below). The numbers
-in this section are from attempt 8, the first run with every fix — deferred
-covering index, tuned `wal_autocheckpoint`, and explicit gp3 IOPS/throughput
-provisioning — actually in place together.
+**Status: real SF10-scale numbers, two independent runs, on the
+fully-fixed commit — not a publishable comparison yet**, same caveat as
+SF1 above. Getting one clean, *fast* run took eight EC2 attempts across
+two root-causing efforts (below); the environment/load-time numbers
+through the root-cause sections below are from attempt 8, the first run
+with every load-time fix — deferred covering index, tuned
+`wal_autocheckpoint`, explicit gp3 IOPS/throughput provisioning —
+actually in place together. A second, independent run (2026-07-13,
+commit `2bc7f74f`, after the five rounds of query-correctness review) is
+what the [fresh SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds)
+numbers below come from; its load times reconfirm attempt 8's (see the
+callout after the load-time table), so this doc now has genuine
+load-time reproducibility evidence, not just a single sample.
 
 ### SF10 environment
 
@@ -313,10 +314,28 @@ attempt 5's 11h10m to ~5h22m. SQLite is still the slowest loader of the
 four — Neo4j and LadybugDB's engine-native bulk paths remain much faster
 still (see [Next steps](#next-steps)) — but the gap that looked
 structural turned out to be two fixable infrastructure problems, not an
-architectural ceiling. (SF1's own numbers predate both fixes, so the
-earlier SF1-vs-SF10 growth-rate comparison isn't re-derived here — it
-would need a fresh SF1 run under the same fixes to be a fair
-like-for-like.)
+architectural ceiling.
+
+**Reconfirmed by an independent second run** (2026-07-13, commit
+`2bc7f74f`, launched to capture the query-correctness fixes'
+[fresh SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds)
+numbers below): ladybugdb 354.0s, neo4j 404.2s, typegraph-postgres
+7,127.5s (1.98h), typegraph-sqlite 10,929.4s (3.04h) — all four within
+normal run-to-run variance of attempt 8's numbers above, confirming these
+load-time fixes are reproducible rather than a one-off. With a fresh SF1
+run now available under the identical fixes (see
+[SF1 load time](#sf1-load-time-9892-persons-90492-forums-1003605-posts-2052169-comments)),
+the SF1-to-SF10 growth rate is worth a fair like-for-like look for the
+first time: Postgres grows almost exactly linearly with the ~10.65x
+comment-count increase (669.3s → 7,127.5s, ~10.65x); SQLite grows
+noticeably faster than linear (587.1s → 10,929.4s, ~18.6x) — consistent
+with round one's own caveat below that `wal_autocheckpoint` tuning "holds
+through roughly 50,000-100,000 pages, then regresses again," so some
+residual super-linearity at SF10's database size is expected, not
+necessarily a new, distinct problem. Neo4j (71.4s → 404.2s, ~5.7x) and
+LadybugDB (41.6s → 354.0s, ~8.5x) both grow sub-linearly, plausible for
+bulk-optimized offline import paths. Worth a deeper look if pursued
+further (see [Next steps](#next-steps)), not investigated further here.
 
 #### SQLite's load-time root cause, round one: `wal_autocheckpoint`
 
@@ -416,28 +435,40 @@ complementary, not redundant, once the ceiling masking the second one is
 gone. Only then was attempt 8 launched, with the results in the tables
 above and below.
 
-### SF10 query latency (p50 / p95 / p99, milliseconds) — pre-fix numbers, superseded
+### SF10 query latency (p50 / p95 / p99, milliseconds)
 
-**Every row below is invalidated — see the notice at the top of this
-file.** IS2 measured the wrong workload (friends' messages, not the given
-person's own); IS3/IS6/IS7 were missing official output fields on one or
-more engines (message content, author/moderator names, forum id/title);
-id tie-breaks were lexicographic instead of numeric. The old table (and
-every paragraph of analysis that used to follow it) is deleted here
-rather than kept as "mostly still right" — Neo4j's IS6 and TypeGraph's/
-LadybugDB's IS7 in particular now do measurably *more* real work (fetching
-fields they previously skipped), so even queries whose *shape* didn't
-change (IS1, IS4, IS5) can't be assumed unaffected by association. A
-fresh SF10 run with every fix in place — including the new value-level
-digest parity gate, verified passing on the smoke fixture — replaces this
-whole subsection.
+Fresh run (2026-07-13, commit `2bc7f74f`, same environment as attempt 8
+above except a second, independently-launched `r7i.4xlarge` instance),
+every correctness/fairness fix in place: 7/7 queries `comparable=yes` at
+full **value-level** digest parity (not row-count alone), 0 engine
+failures. `*` marks a noisy sample (CV > 25%).
 
-The one thing worth keeping ahead of that re-run: the *structural* reason
-IS2 will likely still dominate every engine's latency is unchanged by any
-of these fixes — it's still a top-10 selection followed by a per-message
-root-walk (batched or not), inherently more round-trip-heavy than a
-single-hop point lookup like IS1/IS4/IS5. The specific numbers that
-reasoning used to cite are gone; the shape of the explanation isn't.
+| Query | typegraph-sqlite | typegraph-postgres | neo4j | ladybugdb |
+| --- | --- | --- | --- | --- |
+| IS1 | 0.031 / 0.048 / 0.056ms | 1.008 / 1.137 / 3.393ms* | 5.280 / 10.814 / 14.030ms* | 1.302 / 3.020 / 3.294ms* |
+| IS2 | 2.184 / 5.108 / 7.222ms* | 101.863 / 367.179 / 734.120ms* | 117.011 / 293.462 / 468.215ms* | 92.138 / 106.036 / 114.414ms |
+| IS3 | 0.385 / 1.319 / 2.564ms* | 14.542 / 39.595 / 98.654ms* | 47.812 / 138.379 / 406.953ms* | 15.445 / 51.175 / 55.405ms* |
+| IS4 | 0.025 / 0.170 / 13.879ms* | 1.647 / 2.408 / 2.493ms* | 3.982 / 5.829 / 10.813ms* | 0.403 / 0.602 / 2.586ms* |
+| IS5 | 0.041 / 0.054 / 0.066ms | 2.463 / 3.357 / 3.490ms | 5.397 / 7.295 / 11.474ms* | 2.791 / 3.505 / 4.100ms* |
+| IS6 | 0.081 / 0.131 / 0.202ms* | 4.510 / 7.760 / 8.050ms* | 7.294 / 8.892 / 15.291ms* | 4.010 / 12.078 / 13.778ms* |
+| IS7 | 0.084 / 1.279 / 29.912ms* | 4.321 / 10.906 / 11.252ms* | 8.814 / 40.845 / 109.439ms* | 8.555 / 12.128 / 14.152ms* |
+
+The *structural* reason IS2 dominates every engine's latency holds at
+this scale too — it's still a top-10 selection (correctly engine-side
+`ORDER BY ... LIMIT 10` now, see `typegraph-queries.ts`) followed by a
+per-message root-post-author walk, inherently more round-trip-heavy than
+a single-hop point lookup like IS1/IS4/IS5. IS2's absolute numbers grow
+substantially from SF1 to SF10 for the three networked/server engines
+(postgres 16.2ms → 101.9ms median; neo4j 76.8ms → 117.0ms; ladybugdb
+67.4ms → 92.1ms) while TypeGraph/SQLite barely moves (1.6ms → 2.2ms) —
+plausible given SQLite pays no network round trip regardless of scale,
+but single-sample data at each scale can't separate a genuine
+scale-dependent effect from noise (both IS2 and IS4's p99 columns show
+one-off spikes here — IS4 typegraph-sqlite's 13.879ms p99 against a
+0.025ms median is the clearest example — consistent with occasional
+system noise on a shared-tenancy cloud instance, not a query-shape
+regression). A multi-run distribution (see [Next steps](#next-steps))
+is what would tell those apart.
 
 ## Query-latency experiment: concurrent per-message root walks (tried, reverted)
 
@@ -493,8 +524,6 @@ this same fixture, not just row-count parity.
 - [x] ~~Re-run the full SF1 EC2 benchmark to capture clean, comparable
       numbers.~~ Done — see above (also used to test and correctly
       reject the concurrent-root-walk experiment).
-- [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
-      single sample, before making any comparative claim publicly.
 - [x] ~~SF10 remains a stretch goal per the plan, gated on SF1 numbers being
       trusted (multi-run, not single-sample).~~ Done — see
       [SF10 results](#sf10-results) above. Took five EC2 attempts to
@@ -603,15 +632,20 @@ this same fixture, not just row-count parity.
       temporarily reverted the padding fix, confirmed all 4 engines fail
       with exactly that wrong answer, then restored it and confirmed they
       pass again.
-- [ ] **Re-run SF1 and SF10 with every fix above in place** and replace
-      every invalidated number/paragraph flagged in this doc. This
-      supersedes the multi-run-distribution item below in urgency —
-      there's no valid single data point yet, for any query, to build a
-      distribution from.
+- [x] ~~**Re-run SF1 and SF10 with every fix above in place** and replace
+      every invalidated number/paragraph flagged in this doc.~~ Done —
+      2026-07-13, commit `2bc7f74f`: 0 engine failures, 7/7 queries at
+      full value-level parity, both scales — see
+      [SF1 query latency](#sf1-query-latency-p50--p95--p99-milliseconds)
+      and [SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds).
+      SF10's load times also reconfirmed attempt 8's, the first genuine
+      load-time reproducibility evidence in this doc.
 - [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
-      single sample, before making any comparative claim publicly. Main
-      open item gating a genuinely publishable comparison once the re-run
-      above lands.
+      single sample, before making any comparative claim publicly. Now the
+      main open item gating a genuinely publishable comparison — the
+      re-run above supplies the first valid query-latency data point at
+      each scale (SF10 has two load-time samples now, but still only one
+      query-latency sample), not yet a distribution.
 - [ ] TypeGraph's `bulkInsert` has no equivalent of Neo4j's offline
       `neo4j-admin database import` or LadybugDB's `COPY FROM` — both
       engines still load 15-60x faster than TypeGraph/SQLite even after
