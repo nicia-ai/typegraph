@@ -80,12 +80,10 @@ pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:smoke:check
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:verify-is2-tie-break
 
 # Real LDBC SF1 (~9.9k persons, ~361k knows (directed), ~1M posts, ~2.05M
-# comments). Takes under an hour on typical hardware (TypeGraph/SQLite
-# ~40 minutes, TypeGraph/Postgres ~12 minutes, Neo4j ~5 minutes, LadybugDB
-# under a minute, as of the most recent real run — see
-# reports/snb-lane1-results.md for the numbers and why the load times
-# differ this much across engines; that doc is the canonical source, this
-# README's numbers can drift).
+# comments). Takes under an hour on typical hardware — see
+# reports/snb-lane1-results.md for current load times and why they differ
+# this much across engines; that doc is the canonical, current source,
+# not duplicated here since these numbers drift with every run.
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:sf1
 
 # Or run it on a dedicated ephemeral EC2 instance instead of local

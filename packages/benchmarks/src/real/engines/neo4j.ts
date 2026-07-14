@@ -993,7 +993,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
       "bulk load stages the LDBC CSVs into neo4j-admin's own CSV header " +
       "conventions and runs `neo4j-admin database import full` OFFLINE " +
       "(one-off docker run against the same named volume, before the " +
-      "server starts) for both smoke and SF1 — Neo4j's own documented " +
+      "server starts) for every profile (smoke/SF1/SF10) — Neo4j's own documented " +
       "bulk-load path above roughly 10M records into an empty database, " +
       "replacing the batched online `UNWIND ... IN TRANSACTIONS` writes " +
       "this driver used previously; unique constraints on Person/Message/" +

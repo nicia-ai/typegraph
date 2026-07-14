@@ -28,10 +28,12 @@ stretch goal gated on SF1 being trusted. Treat all numbers below as
 fresh, valid data points, not a final verdict — each scale has one run
 on one dedicated EC2 instance, not the multiple runs / statistical-
 confidence bar a published comparison would need (see
-[Next steps](#next-steps)). SF10's load times closely match attempt 8's
-below (the run that root-caused SQLite's load-time gap), reinforcing
-that those fixes are reproducible, not a one-off. The smoke-scale table
-is kept below for harness-wiring reference.
+[Next steps](#next-steps)). SF10's load times are a consistent second
+data point against attempt 8's below (the run that root-caused SQLite's
+load-time gap, on a different, earlier commit — see
+[SF10 results](#sf10-results) for exactly which) — two runs, not yet a
+distribution, but the first genuine reproducibility evidence this doc
+has. The smoke-scale table is kept below for harness-wiring reference.
 
 Reaching a working SF1 run originally required finding and fixing three
 real scaling bugs (one in TypeGraph itself, two in this benchmark's own
@@ -201,19 +203,21 @@ above).
 
 ## SF10 results
 
-**Status: real SF10-scale numbers, two independent runs, on the
-fully-fixed commit — not a publishable comparison yet**, same caveat as
-SF1 above. Getting one clean, *fast* run took eight EC2 attempts across
-two root-causing efforts (below); the environment/load-time numbers
-through the root-cause sections below are from attempt 8, the first run
-with every load-time fix — deferred covering index, tuned
+**Status: real SF10-scale numbers, two independent runs on two different
+commits — not a publishable comparison yet**, same caveat as SF1 above.
+Getting one clean, *fast* run took eight EC2 attempts across two
+root-causing efforts (below); the environment/load-time numbers through
+the root-cause sections below are from attempt 8 (commit `a58ae38e`),
+the first run with every load-time fix — deferred covering index, tuned
 `wal_autocheckpoint`, explicit gp3 IOPS/throughput provisioning —
-actually in place together. A second, independent run (2026-07-13,
-commit `2bc7f74f`, after the five rounds of query-correctness review) is
-what the [fresh SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds)
-numbers below come from; its load times reconfirm attempt 8's (see the
-callout after the load-time table), so this doc now has genuine
-load-time reproducibility evidence, not just a single sample.
+actually in place together, but predating the five rounds of
+query-correctness review below. A second, independent run (2026-07-13,
+commit `2bc7f74f`, on top of all five of those rounds) is what the
+[fresh SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds)
+numbers below come from; its load times are a consistent second data
+point against attempt 8's (see the callout after the load-time table for
+the exact differences), giving this doc its first real load-time
+reproducibility evidence, not just a single sample.
 
 ### SF10 environment
 
@@ -316,13 +320,19 @@ still (see [Next steps](#next-steps)) — but the gap that looked
 structural turned out to be two fixable infrastructure problems, not an
 architectural ceiling.
 
-**Reconfirmed by an independent second run** (2026-07-13, commit
-`2bc7f74f`, launched to capture the query-correctness fixes'
+**A consistent second data point, from an independent run** (2026-07-13,
+commit `2bc7f74f` — attempt 8 above was commit `a58ae38e`, load-time
+fixes only, predating the query-correctness rounds — launched to capture
+the query-correctness fixes'
 [fresh SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds)
-numbers below): ladybugdb 354.0s, neo4j 404.2s, typegraph-postgres
-7,127.5s (1.98h), typegraph-sqlite 10,929.4s (3.04h) — all four within
-normal run-to-run variance of attempt 8's numbers above, confirming these
-load-time fixes are reproducible rather than a one-off. With a fresh SF1
+numbers below): ladybugdb 354.0s (+10.7% vs. attempt 8), neo4j 404.2s
+(+8.8%), typegraph-postgres 7,127.5s / 1.98h (+7.4%), typegraph-sqlite
+10,929.4s / 3.04h (-2.1%, i.e. faster) — a 2.1-10.7% spread in both
+directions, small enough to read as ordinary EC2/EBS run-to-run noise
+rather than a regression or a repeat improvement, but two data points
+don't establish a distribution; call this a consistent second load-time
+point, not proof the fixes are reproducible across arbitrary conditions.
+With a fresh SF1
 run now available under the identical fixes (see
 [SF1 load time](#sf1-load-time-9892-persons-90492-forums-1003605-posts-2052169-comments)),
 the SF1-to-SF10 growth rate is worth a fair like-for-like look for the
@@ -638,8 +648,10 @@ this same fixture, not just row-count parity.
       full value-level parity, both scales — see
       [SF1 query latency](#sf1-query-latency-p50--p95--p99-milliseconds)
       and [SF10 query latency](#sf10-query-latency-p50--p95--p99-milliseconds).
-      SF10's load times also reconfirmed attempt 8's, the first genuine
-      load-time reproducibility evidence in this doc.
+      SF10's load times also landed within 2.1-10.7% of attempt 8's (a
+      different, earlier commit — see [SF10 results](#sf10-results)) — a
+      consistent second data point, not yet a distribution, but the
+      first genuine load-time reproducibility evidence in this doc.
 - [ ] Run SF1 and SF10 multiple times each and report a distribution, not a
       single sample, before making any comparative claim publicly. Now the
       main open item gating a genuinely publishable comparison — the
