@@ -460,6 +460,7 @@ function createStore<G extends GraphDef>(
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
+| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` / `bulkUpsertById` item whose validated props already equal the existing live row (default: `false`). For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options) and [Materializing external event logs](/materializing-event-logs). |
 
 **Example:**
 
@@ -748,6 +749,22 @@ store.nodes.Person.upsertById(
 - Updates the existing node if one exists
 - Un-deletes soft-deleted nodes (clears `deletedAt`)
 
+**Coalescing unchanged upserts.** When the store is created with
+[`coalesceUnchangedUpserts: true`](#createstoregraph-backend-options), an upsert
+whose validated props are value-identical to the existing **live** row performs
+**no write at all** — no update, no recorded history row, no revision-anchor
+advance, and no `update` operation hooks — and resolves with the existing node
+(its original `validFrom` / `updatedAt` / `version`). Enable it for
+at-least-once / replay materializers, where a byte-identical re-delivery would
+otherwise rewrite every row and grow recorded history by one per delivery. A
+write still happens (never coalesced) when the row is soft-deleted (an upsert
+resurrects it), when an explicit `validFrom` / `validTo` is passed, or when any
+prop differs after Zod normalization. The default is off, because some
+consumers want an audit row per re-delivery as proof the event was reprocessed.
+In a receipt, a coalesced upsert still counts as one write intent
+(`writes.total`) but captures nothing (`recorded` stays `undefined`) — the same
+shape as a no-op delete.
+
 #### `upsertByIdFromRecord(id, data, options?)`
 
 Upserts a node from untyped data, relying on runtime Zod validation. Same behavior
@@ -820,6 +837,11 @@ store.nodes.Person.bulkUpsertById(
   }[]
 ): Promise<Node<Person>[]>;
 ```
+
+With [`coalesceUnchangedUpserts: true`](#createstoregraph-backend-options) the
+dirty-check is applied per item: value-identical items are skipped from the
+write batch but still appear in the returned array (the existing node, in input
+order). See [`upsertById`](#upsertbyidid-props-options).
 
 #### `bulkDelete(ids)`
 
