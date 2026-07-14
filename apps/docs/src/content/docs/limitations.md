@@ -327,7 +327,8 @@ Recorded-time capture (`createStore(graph, backend, { history: true })`) and
   on the `GraphBackend` interface, but required once `history: true` is set) or
   enabling capture throws a `ConfigurationError` at write time. Raw `tx.sql` is
   disabled under `history: true`; adopt external transactions with
-  `store.withRecordedTransaction(...)` instead of `store.withTransaction(...)`.
+  `store.withRecordedTransaction(...)` instead of `store.withTransaction(...)`
+  (which is a compile error on a history store).
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

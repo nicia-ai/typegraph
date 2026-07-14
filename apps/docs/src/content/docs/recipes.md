@@ -737,9 +737,40 @@ On **Postgres / libsql** this is mandatory for correctness — using the outer
 transaction. On **better-sqlite3** it is the single connection framed by
 TypeGraph's `BEGIN`/`COMMIT`/`ROLLBACK`; on **Durable Objects**
 (`do-sqlite`) it is the bound handle (the storage transaction is ambient).
-`tx.sql` is `undefined` only on the non-transactional fallback
-(`capabilities.transactions === false`), where `store.transaction` runs the
-callback with no atomicity and there is no transaction to join.
+To decide at runtime whether `tx.sql` is usable, branch on **`tx.sqlAvailability`**,
+not on `tx.sql`'s truthiness:
+
+```typescript
+await store.transaction(async (tx) => {
+  switch (tx.sqlAvailability) {
+    case "available": {
+      const sqlTx = tx.sql as NodePgDatabase; // usable raw handle
+      await sqlTx.insert(documentVersions).values(versionRow);
+      break;
+    }
+    case "unavailable":
+      // Non-transactional fallback: tx.sql === undefined, no atomicity.
+      await writeWithoutAtomicity();
+      break;
+    case "history":
+    case "revisionTracking":
+      // Raw SQL is disabled here (it would bypass recorded-time capture or the
+      // revision anchor). Use tx.nodes / tx.edges, or write your own tables
+      // through the external handle you pass to store.withRecordedTransaction.
+      break;
+  }
+});
+```
+
+`tx.sql` is `undefined` — and `tx.sqlAvailability` is `"unavailable"` — only on
+the non-transactional fallback (`capabilities.transactions === false`), where
+`store.transaction` runs the callback with no atomicity and there is no
+transaction to join. Under `history: true` or `revisionTracking: true`, `tx.sql`
+is **present but throwing** (`sqlAvailability` is `"history"` /
+`"revisionTracking"`); its static type is `sql?: never` so a mistaken
+`tx.sql.run(...)` fails to typecheck, and at runtime every access throws
+`ConfigurationError`. The thrown error carries a branchable `details.code` — see
+[Recorded-capture guard codes](/errors/#recorded-capture-guard-codes).
 
 ## Enforcing Unique Constraints
 

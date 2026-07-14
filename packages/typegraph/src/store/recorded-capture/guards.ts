@@ -6,7 +6,10 @@ import {
   type TransactionBackend,
   type TransactionOptions,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  type RecordedCaptureGuardCode,
+} from "../../errors";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
 import {
   asCompiledRowsSql,
@@ -132,14 +135,18 @@ export async function assertRecordedCaptureTransactionIsolation(
 /**
  * The single error raised when a caller tries to adopt a context-returning
  * external transaction while history capture is on — there is no flush point
- * before the caller commits. `details` carries the call-site-specific context.
+ * before the caller commits. The branchable `details.code` is set here so no
+ * call site can omit it; any extra `details` merge underneath it.
  */
 export function recordedCaptureRequiresCallbackTransactionError(
-  details: Record<string, unknown>,
+  details: Record<string, unknown> = {},
 ): ConfigurationError {
   return new ConfigurationError(
     "withTransaction() has no recorded-time capture flush point when history is enabled.",
-    details,
+    {
+      ...details,
+      code: "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION" satisfies RecordedCaptureGuardCode,
+    },
     {
       suggestion:
         "Use store.withRecordedTransaction(externalTx, async (tx) => ...) so TypeGraph can flush capture before the caller commits.",
@@ -155,7 +162,9 @@ export function recordedCaptureRequiresCallbackTransactionError(
 function historyUnsafeRawWriteError(surface: string): ConfigurationError {
   return new ConfigurationError(
     `${surface} is not available when history capture is enabled because raw SQL writes bypass recorded-time capture.`,
-    { code: "RECORDED_CAPTURE_RAW_SQL_DISABLED" },
+    {
+      code: "RECORDED_CAPTURE_RAW_SQL_DISABLED" satisfies RecordedCaptureGuardCode,
+    },
     {
       suggestion:
         "Run graph writes through store.nodes/store.edges (or tx.nodes/tx.edges inside a transaction), or perform raw relational writes outside a history-enabled TypeGraph store.",
@@ -168,7 +177,9 @@ function revisionTrackingUnsafeRawWriteError(
 ): ConfigurationError {
   return new ConfigurationError(
     `${surface} is not available when revision tracking is enabled because raw SQL writes bypass the revision anchor.`,
-    { code: "REVISION_TRACKING_RAW_SQL_DISABLED" },
+    {
+      code: "REVISION_TRACKING_RAW_SQL_DISABLED" satisfies RecordedCaptureGuardCode,
+    },
     {
       suggestion:
         "Run graph writes through store.nodes/store.edges (or tx.nodes/tx.edges inside a transaction), so TypeGraph can advance the revision anchor.",

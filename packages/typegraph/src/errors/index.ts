@@ -917,6 +917,83 @@ export class ConfigurationError extends TypeGraphError {
 }
 
 /**
+ * The stable `details.code` values raised by the recorded-capture guards on a
+ * history- or revision-tracked store. These are the sanctioned branch points
+ * for a portable caller that must pick a transaction strategy without
+ * substring-matching {@link ConfigurationError} messages.
+ *
+ * - `RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`: `store.withTransaction`
+ *   was called on a history-enabled store, which has no flush point before the
+ *   caller commits — use `store.withRecordedTransaction` instead.
+ * - `RECORDED_CAPTURE_RAW_SQL_DISABLED`: a raw SQL escape (`tx.sql`,
+ *   `backend.executeStatement`/`executeDdl`) was reached on a history-enabled
+ *   store, where it would bypass recorded-time capture.
+ * - `REVISION_TRACKING_RAW_SQL_DISABLED`: the same raw SQL escape on a
+ *   revision-tracked store, where it would bypass the revision anchor.
+ *
+ * @see isRecordedCaptureGuardError
+ */
+export const RECORDED_CAPTURE_GUARD_CODES = [
+  "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
+  "RECORDED_CAPTURE_RAW_SQL_DISABLED",
+  "REVISION_TRACKING_RAW_SQL_DISABLED",
+] as const;
+
+/** A stable, branchable code raised by a recorded-capture guard. */
+export type RecordedCaptureGuardCode =
+  (typeof RECORDED_CAPTURE_GUARD_CODES)[number];
+
+/**
+ * A {@link ConfigurationError} narrowed to carry a {@link RecordedCaptureGuardCode}
+ * in `details.code` — the shape {@link isRecordedCaptureGuardError} guarantees.
+ */
+export type RecordedCaptureGuardError = ConfigurationError &
+  Readonly<{ details: Readonly<{ code: RecordedCaptureGuardCode }> }>;
+
+function isRecordedCaptureGuardCode(
+  value: unknown,
+): value is RecordedCaptureGuardCode {
+  return RECORDED_CAPTURE_GUARD_CODES.some((code) => code === value);
+}
+
+/**
+ * Type guard for the recorded-capture guard errors, so a portable caller can
+ * branch on the invariant a store enforced instead of substring-matching the
+ * message. Pass `code` to narrow to a single guard; omit it to match any.
+ *
+ * Distinguishes "history capture forbids raw SQL here" from "this backend has
+ * no transactions" (the latter carries no guard code — see
+ * `TransactionContext.sqlAvailability` for the capability discriminant).
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await historyStore.withTransaction(externalTx);
+ * } catch (error) {
+ *   if (
+ *     isRecordedCaptureGuardError(
+ *       error,
+ *       "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
+ *     )
+ *   ) {
+ *     await historyStore.withRecordedTransaction(externalTx, run);
+ *   } else {
+ *     throw error;
+ *   }
+ * }
+ * ```
+ */
+export function isRecordedCaptureGuardError(
+  error: unknown,
+  code?: RecordedCaptureGuardCode,
+): error is RecordedCaptureGuardError {
+  if (!(error instanceof ConfigurationError)) return false;
+  const actual = error.details.code;
+  if (!isRecordedCaptureGuardCode(actual)) return false;
+  return code === undefined || actual === code;
+}
+
+/**
  * Why a store's strategy-owned storage is not usable on the current
  * connection. Drives the {@link StoreNotInitializedError} message and
  * is surfaced in `details.reason` for programmatic handling.

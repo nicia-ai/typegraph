@@ -318,6 +318,53 @@ try {
 }
 ```
 
+#### Recorded-capture guard codes
+
+`ConfigurationError` is intentionally open-shaped, but the guards that fire on a
+`history: true` / `revisionTracking: true` store carry a **stable, branchable
+`details.code`** so a portable caller does not have to substring-match the
+message. The three codes are exported as a set, `RECORDED_CAPTURE_GUARD_CODES`,
+and reachable through the `isRecordedCaptureGuardError` type guard:
+
+| `details.code` | Raised when |
+|----------------|-------------|
+| `RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION` | `store.withTransaction(externalTx)` on a history-enabled store — it has no flush point before the caller commits. Use `store.withRecordedTransaction(externalTx, fn)`. (Also a compile error on a `HistoryStore`.) |
+| `RECORDED_CAPTURE_RAW_SQL_DISABLED` | A raw SQL escape (`tx.sql`, `backend.executeStatement` / `executeDdl`) on a history-enabled store, where it would bypass recorded-time capture. |
+| `REVISION_TRACKING_RAW_SQL_DISABLED` | The same raw SQL escape on a revision-tracked store, where it would bypass the revision anchor. |
+
+```typescript
+import { isRecordedCaptureGuardError } from "@nicia-ai/typegraph";
+
+try {
+  await historyStore.withTransaction(externalTx);
+} catch (error) {
+  if (
+    isRecordedCaptureGuardError(
+      error,
+      "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
+    )
+  ) {
+    // Adopt the same external transaction the capture-aware way instead.
+    await historyStore.withRecordedTransaction(externalTx, run);
+  } else {
+    throw error;
+  }
+}
+```
+
+Pass a specific code to narrow to one guard, or omit it to match any. The guard
+narrows `error` to a `ConfigurationError` whose `details.code` is a
+`RecordedCaptureGuardCode`, so no untyped `details` spelunking is needed.
+
+This composes with
+[`tx.sqlAvailability`](/queries/temporal/#raw-sql-under-history-capture): the
+discriminant tells a caller *why* `tx.sql` is unusable ahead of time
+(`"history"` / `"revisionTracking"` vs. `"unavailable"` for a backend with no
+transactions), while the guard code identifies a guard that has already thrown.
+Between them, "history capture forbids raw SQL here" and "this backend has no
+transactions" (which carries **no** guard code) are cleanly distinguishable
+without catching-and-string-matching.
+
 ### `SchemaMismatchError`
 
 Thrown when the database schema doesn't match the expected graph definition.

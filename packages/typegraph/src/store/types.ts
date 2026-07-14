@@ -1399,6 +1399,19 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 // ============================================================
 
 /**
+ * Whether — and why — `tx.sql` can be used on a transaction context. A single
+ * required discriminant covering exactly the four states raw-SQL access can be
+ * in, so a portable caller branches on capability instead of truthiness-testing
+ * `tx.sql` (which is present-but-throwing under history / revision tracking).
+ * See {@link TransactionContext.sqlAvailability} for the per-value semantics.
+ */
+export type SqlAvailability =
+  | "available"
+  | "history"
+  | "revisionTracking"
+  | "unavailable";
+
+/**
  * A typed transaction context with collection API.
  *
  * Provides the same `tx.nodes.*` and `tx.edges.*` API as the Store,
@@ -1440,11 +1453,43 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
  * Drizzle database type at the call site.
  *
  * When the store was created with `{ history: true }` or
- * `{ revisionTracking: true }`, `tx.sql` is present but replaced by a fail-loud
- * guard because raw SQL would bypass recorded-time capture or the revision
- * anchor. Use the typed `tx.nodes` / `tx.edges` collections inside
- * `transaction()`, or use `store.withRecordedTransaction(externalTx, fn)` when
- * the relational layer owns the transaction boundary.
+ * `{ revisionTracking: true }`, `tx.sql` is **present but throwing**: every
+ * access raises {@link ConfigurationError} because raw SQL would bypass
+ * recorded-time capture or the revision anchor. The static type marks it
+ * `sql?: never` so a mistaken `tx.sql.run(...)` fails to typecheck; at runtime
+ * it is a fail-loud guard, not `undefined`. Use the typed `tx.nodes` /
+ * `tx.edges` collections inside `transaction()`, or
+ * `store.withRecordedTransaction(externalTx, fn)` when the relational layer
+ * owns the transaction boundary.
+ *
+ * **Feature detection — branch on {@link sqlAvailability}, not on `tx.sql`'s
+ * truthiness.** Because `tx.sql` is present-but-throwing under history or
+ * revision tracking, `if (tx.sql)` reads truthy and then throws. The honest
+ * discriminant is `tx.sqlAvailability`:
+ *
+ * ```typescript
+ * await store.transaction(async (tx) => {
+ *   switch (tx.sqlAvailability) {
+ *     case "available": {
+ *       const sqlTx = tx.sql as NodePgDatabase; // usable raw handle
+ *       await sqlTx.insert(rows).values(row);
+ *       break;
+ *     }
+ *     case "unavailable":
+ *       // non-transactional backend: tx.sql === undefined, no atomicity
+ *       await fallbackWithoutAtomicity();
+ *       break;
+ *     case "history":
+ *     case "revisionTracking":
+ *       // raw SQL disabled here — write your own tables through the external
+ *       // handle passed to store.withRecordedTransaction instead
+ *       break;
+ *   }
+ * });
+ * ```
+ *
+ * `tx.sql === undefined` still means exactly "non-transactional fallback"
+ * (`sqlAvailability === "unavailable"`).
  *
  * @example
  * ```typescript
@@ -1459,6 +1504,26 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
   sql?: AdoptedTransaction;
+  /**
+   * Honest capability discriminant for `tx.sql` on this transaction. Prefer
+   * this over truthiness-testing `tx.sql`, which is present-but-throwing under
+   * history capture or revision tracking.
+   *
+   * - `"available"` — `tx.sql` is the usable raw handle bound to this
+   *   transaction.
+   * - `"history"` — history capture is on; `tx.sql` is present but every access
+   *   throws {@link ConfigurationError} (`details.code`
+   *   `RECORDED_CAPTURE_RAW_SQL_DISABLED`). Use `tx.nodes` / `tx.edges`, or
+   *   `store.withRecordedTransaction` with your own external handle for
+   *   cross-store atomicity.
+   * - `"revisionTracking"` — same shape as `"history"` (`details.code`
+   *   `REVISION_TRACKING_RAW_SQL_DISABLED`).
+   * - `"unavailable"` — non-transactional fallback
+   *   (`backend.capabilities.transactions === false`, e.g. Cloudflare D1,
+   *   `drizzle-orm/neon-http`); `tx.sql` is `undefined` and there is no
+   *   atomicity.
+   */
+  sqlAvailability: SqlAvailability;
   /**
    * The transaction-scoped backend the collections are bound to, for advanced
    * raw reads that must observe the transaction's snapshot (e.g. graph-merge's
