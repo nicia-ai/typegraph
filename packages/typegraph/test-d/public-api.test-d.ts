@@ -33,6 +33,7 @@ import {
   recordedRelation,
   type RecordedReadStore,
   type ResolvedSqlTableNames,
+  type ScopedMeasure,
   createSqlSchema,
   type SqlSchema,
   type SqlTableNames,
@@ -302,17 +303,32 @@ void historyStore.transaction(async (tx) => {
   expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
 });
 
-void historyStore.withRecordedTransaction({} as never, async (tx) => {
-  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
-  expectAssignable<HistorySafeTransactionBackend>(tx.backend);
-  expectError(tx.sql?.select());
-  expectError(
-    tx.backend.executeStatement?.(
-      asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
-    ),
-  );
-  expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
-});
+// withRecordedTransaction (adopted-commit path) returns a TransactionOutcome
+// carrying the receipt, and hands a measurable history context.
+const recordedOutcome = historyStore.withRecordedTransaction(
+  {} as never,
+  async (tx) => {
+    expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
+    expectAssignable<HistorySafeTransactionBackend>(tx.backend);
+    expectType<ScopedMeasure>(tx.measure);
+    expectError(tx.sql?.select());
+    expectError(
+      tx.backend.executeStatement?.(
+        asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
+      ),
+    );
+    expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
+    return tx.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+  },
+);
+expectType<
+  Promise<
+    TransactionOutcome<Awaited<ReturnType<typeof store.nodes.Person.create>>>
+  >
+>(recordedOutcome);
 
 void store.transaction(async (tx) => {
   expectType<typeof tx.sql>(tx.sql);
@@ -336,10 +352,11 @@ void receiptOutcome.then(({ receipt }) => {
   expectType<TransactionReceipt>(receipt);
 });
 
-// The history-store overload narrows `tx` to HistoryTransactionContext, same
-// as transaction() does above.
+// The history-store overload narrows `tx` to a measurable HistoryTransactionContext,
+// same as transaction() does above (plus the scoped `measure`).
 void historyStore.transactionWithReceipt(async (tx) => {
   expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
+  expectType<ScopedMeasure>(tx.measure);
   expectError(tx.sql?.select());
 });
 

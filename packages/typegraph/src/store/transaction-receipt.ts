@@ -141,25 +141,28 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
   const openScopes = new Set<WriteCounters>();
 
   function record(
-    bucketOf: (counters: WriteCounters) => Record<string, number>,
+    bucket: "nodes" | "edges",
     kind: string,
     count: number,
   ): void {
-    increment(bucketOf(root), kind, count);
+    increment(root[bucket], kind, count);
     root.total += count;
-    for (const scope of openScopes) {
-      increment(bucketOf(scope), kind, count);
-      scope.total += count;
+    // The common path has no open `measure` scope; skip the iterator allocation.
+    if (openScopes.size > 0) {
+      for (const scope of openScopes) {
+        increment(scope[bucket], kind, count);
+        scope.total += count;
+      }
     }
   }
 
   return {
     recordNode(kind, count): void {
-      record((counters) => counters.nodes, kind, count);
+      record("nodes", kind, count);
     },
 
     recordEdge(kind, count): void {
-      record((counters) => counters.edges, kind, count);
+      record("edges", kind, count);
     },
 
     snapshot(recorded): TransactionReceipt {
