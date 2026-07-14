@@ -273,7 +273,6 @@ export function registerCoalesceUpsertIntegrationTests(
           props: { since: "2020" },
         },
       ]);
-      const before = await store.edges.knows.getById(knowsId("ec-edge"));
 
       await store.edges.knows.bulkUpsertById([
         {
@@ -285,8 +284,11 @@ export function registerCoalesceUpsertIntegrationTests(
       ]);
       const after = await store.edges.knows.getById(knowsId("ec-edge"));
 
+      // The persisted value is the proof the write happened: had this
+      // coalesced, `after` would be the untouched edge with since = "2020".
+      // (Edges carry no version, and updatedAt can collide within a
+      // millisecond, so the value change is the reliable signal.)
       expect((after as { since?: string }).since).toBe("2099");
-      expect(after?.meta.updatedAt).not.toBe(before?.meta.updatedAt);
     });
 
     describe("with history capture", () => {
