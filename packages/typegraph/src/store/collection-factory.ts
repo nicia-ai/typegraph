@@ -67,11 +67,9 @@ export type NodeOperations = Readonly<{
    * when the store was created with `coalesceUnchangedUpserts: true`; its
    * absence is the off switch. Returns whether upserting `props` onto the
    * given existing live row would leave the stored value unchanged (rule 4);
-   * the collection owns the other preconditions (not soft-deleted, no
-   * explicit temporal override).
+   * the collection owns the other preconditions via `shouldCoalesceUpsert`.
    */
   isUpsertUnchanged?: (
-    kind: string,
     existing: NodeRow,
     props: Record<string, unknown>,
   ) => boolean;
@@ -166,7 +164,8 @@ export type EdgeOperations = Readonly<{
    * created with `coalesceUnchangedUpserts: true`; its absence is the off
    * switch. Returns whether upserting `props` onto the given existing live
    * edge would leave the stored value unchanged (props only — endpoints are
-   * the edge's identity). The collection owns the other preconditions.
+   * the edge's identity). The collection owns the other preconditions via
+   * `shouldCoalesceUpsert`.
    */
   isUpsertUnchanged?: (
     existing: EdgeRow,

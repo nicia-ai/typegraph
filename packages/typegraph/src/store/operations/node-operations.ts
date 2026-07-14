@@ -54,6 +54,7 @@ import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import {
@@ -66,7 +67,6 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import { canonicalEqual } from "../../schema/canonical";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeRow, rowToNode } from "../row-mappers";
@@ -662,30 +662,26 @@ async function finalizeNodeCreate<G extends GraphDef>(
 /**
  * The exact props an update would persist: the live row's stored props with
  * the caller's partial input merged over them, run through the kind's Zod
- * schema (defaults applied, values normalized). Shared by
+ * schema (defaults applied, values normalized). Also returns the resolved
+ * registration so callers need not look it up again. Shared by
  * {@link performNodeUpdate} and {@link isNodeUpsertUnchanged} so the coalesce
  * dirty-check and the write it guards can never disagree on "what would be
- * written".
+ * written". Reads the kind/id off the row (a `getNode(kind, id)` result always
+ * carries the requested kind), matching {@link resolveEdgeUpdateProps}.
  */
 function resolveNodeUpdateProps<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  kind: string,
-  id: string,
-  existing: Pick<NodeRow, "props">,
+  existing: Pick<NodeRow, "kind" | "id" | "props">,
   inputProps: Partial<Record<string, unknown>>,
-): Readonly<{
-  existingProps: Record<string, unknown>;
-  validatedProps: Record<string, unknown>;
-}> {
-  const registration = getNodeRegistration(ctx.graph, kind);
+) {
+  const registration = getNodeRegistration(ctx.graph, existing.kind);
   const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...inputProps };
   const validatedProps = validateNodeProps(
     registration.type.schema,
-    mergedProps,
-    { kind, operation: "update", id },
+    { ...existingProps, ...inputProps },
+    { kind: existing.kind, operation: "update", id: existing.id },
   );
-  return { existingProps, validatedProps };
+  return { registration, existingProps, validatedProps };
 }
 
 /**
@@ -694,19 +690,20 @@ function resolveNodeUpdateProps<G extends GraphDef>(
  * storage-normalized representation (validated, key-order-independent), so it
  * answers exactly "would the persisted JSON differ?".
  *
- * Callers are responsible for the other coalescing preconditions (existing,
- * not soft-deleted, no explicit temporal override); this covers rule 4 only.
+ * Callers own the other coalescing preconditions (existing, not soft-deleted,
+ * no explicit temporal override); this covers rule 4 only. When it returns
+ * `false`, the write path re-reads and re-validates under its own transaction
+ * (concurrency-correct merge), so the resolved props are intentionally not
+ * threaded into the write — the extra validation falls only on a genuinely
+ * changed upsert, where the database write dominates its cost.
  */
 export function isNodeUpsertUnchanged<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  kind: string,
   existing: NodeRow,
   inputProps: Record<string, unknown>,
 ): boolean {
   const { existingProps, validatedProps } = resolveNodeUpdateProps(
     ctx,
-    kind,
-    existing.id,
     existing,
     inputProps,
   );
@@ -721,15 +718,12 @@ async function performNodeUpdate<G extends GraphDef>(
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   const { kind, id } = input;
-  const registration = getNodeRegistration(ctx.graph, kind);
 
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
-  const { validatedProps } = resolveNodeUpdateProps(
+  const { registration, validatedProps } = resolveNodeUpdateProps(
     ctx,
-    kind,
-    id,
     existing,
     input.props,
   );

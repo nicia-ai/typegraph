@@ -30,6 +30,7 @@ import {
 import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import {
@@ -42,7 +43,6 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import { canonicalEqual } from "../../schema/canonical";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -629,11 +629,6 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 }
 
 /**
- * Shared edge-update body: re-reads the edge inside the transaction, merges
- * and validates props, and writes. A plain update requires a live edge; a
- * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
- */
-/**
  * The exact props an edge update would persist: the live edge's stored props
  * with the caller's partial input merged over them, run through the edge
  * kind's Zod schema. Shared by {@link performEdgeUpdate} and
@@ -651,11 +646,15 @@ function resolveEdgeUpdateProps<G extends GraphDef>(
   const registration = getEdgeRegistration(ctx.graph, existing.kind);
   const existingProps = rowPropsToObject(existing.props);
   const mergedProps = { ...existingProps, ...inputProps };
-  const validatedProps = validateEdgeProps(registration.type.schema, mergedProps, {
-    kind: existing.kind,
-    operation: "update",
-    id: existing.id,
-  });
+  const validatedProps = validateEdgeProps(
+    registration.type.schema,
+    mergedProps,
+    {
+      kind: existing.kind,
+      operation: "update",
+      id: existing.id,
+    },
+  );
   return { existingProps, validatedProps };
 }
 
@@ -667,7 +666,9 @@ function resolveEdgeUpdateProps<G extends GraphDef>(
  * representation.
  *
  * Callers own the other coalescing preconditions (existing, not soft-deleted,
- * no explicit temporal override); this covers rule 4 only.
+ * no explicit temporal override); this covers rule 4 only. Mirrors
+ * {@link isNodeUpsertUnchanged}: the resolved props are not threaded into the
+ * write path, which re-reads and re-validates under its own transaction.
  */
 export function isEdgeUpsertUnchanged<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -682,6 +683,11 @@ export function isEdgeUpsertUnchanged<G extends GraphDef>(
   return canonicalEqual(validatedProps, existingProps);
 }
 
+/**
+ * Shared edge-update body: re-reads the edge inside the transaction, merges
+ * and validates props, and writes. A plain update requires a live edge; a
+ * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
+ */
 async function performEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: {

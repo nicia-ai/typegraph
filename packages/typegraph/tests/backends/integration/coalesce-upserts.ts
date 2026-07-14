@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   asCompiledRowsSql,
+  asEdgeId,
+  asNodeId,
   createStoreWithSchema,
   type EdgeId,
   type NodeId,
@@ -11,7 +13,9 @@ import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
-type CountRow = Readonly<{ cnt: number }>;
+// Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
+// value is genuinely not statically a number — Number(...) is a real coercion.
+type CountRow = Readonly<{ cnt: unknown }>;
 
 /**
  * Creates a fresh store on the shared backend with
@@ -29,12 +33,16 @@ async function createCoalesceStore(
   return store;
 }
 
-function personId(id: string): NodeId<typeof integrationTestGraph.nodes.Person.type> {
-  return id as NodeId<typeof integrationTestGraph.nodes.Person.type>;
+function personId(
+  id: string,
+): NodeId<typeof integrationTestGraph.nodes.Person.type> {
+  return asNodeId(id);
 }
 
-function knowsId(id: string): EdgeId<typeof integrationTestGraph.edges.knows.type> {
-  return id as EdgeId<typeof integrationTestGraph.edges.knows.type>;
+function knowsId(
+  id: string,
+): EdgeId<typeof integrationTestGraph.edges.knows.type> {
+  return asEdgeId(id);
 }
 
 /**
@@ -94,11 +102,14 @@ export function registerCoalesceUpsertIntegrationTests(
         email: "zoe@example.com",
       });
 
-      const replayed = await store.nodes.Person.upsertByIdFromRecord("p-order", {
-        email: "zoe@example.com",
-        age: 20,
-        name: "Zoe",
-      });
+      const replayed = await store.nodes.Person.upsertByIdFromRecord(
+        "p-order",
+        {
+          email: "zoe@example.com",
+          age: 20,
+          name: "Zoe",
+        },
+      );
 
       expect(replayed.meta.version).toBe(created.meta.version);
       expect(replayed.meta.updatedAt).toBe(created.meta.updatedAt);
@@ -214,12 +225,27 @@ export function registerCoalesceUpsertIntegrationTests(
       }
 
       await store.edges.knows.bulkUpsertById([
-        { id: knowsId("edge-1"), from: alice, to: bob, props: { since: "2020" } },
+        {
+          id: knowsId("edge-1"),
+          from: alice,
+          to: bob,
+          props: { since: "2020" },
+        },
       ]);
 
       const results = await store.edges.knows.bulkUpsertById([
-        { id: knowsId("edge-1"), from: alice, to: bob, props: { since: "2020" } }, // coalesced
-        { id: knowsId("edge-2"), from: bob, to: alice, props: { since: "2021" } }, // created
+        {
+          id: knowsId("edge-1"),
+          from: alice,
+          to: bob,
+          props: { since: "2020" },
+        }, // coalesced
+        {
+          id: knowsId("edge-2"),
+          from: bob,
+          to: alice,
+          props: { since: "2021" },
+        }, // created
       ]);
 
       const first = await store.edges.knows.getById(knowsId("edge-1"));
@@ -240,12 +266,22 @@ export function registerCoalesceUpsertIntegrationTests(
       }
 
       await store.edges.knows.bulkUpsertById([
-        { id: knowsId("ec-edge"), from: alice, to: bob, props: { since: "2020" } },
+        {
+          id: knowsId("ec-edge"),
+          from: alice,
+          to: bob,
+          props: { since: "2020" },
+        },
       ]);
       const before = await store.edges.knows.getById(knowsId("ec-edge"));
 
       await store.edges.knows.bulkUpsertById([
-        { id: knowsId("ec-edge"), from: alice, to: bob, props: { since: "2099" } },
+        {
+          id: knowsId("ec-edge"),
+          from: alice,
+          to: bob,
+          props: { since: "2099" },
+        },
       ]);
       const after = await store.edges.knows.getById(knowsId("ec-edge"));
 
@@ -259,7 +295,11 @@ export function registerCoalesceUpsertIntegrationTests(
 
         await store.nodes.Person.upsertById("h1", { name: "Faye", age: 60 });
         const afterFirst = await store.recordedNow();
-        const rowsAfterFirst = await countRecordedNodeRows(store, "Person", "h1");
+        const rowsAfterFirst = await countRecordedNodeRows(
+          store,
+          "Person",
+          "h1",
+        );
         expect(afterFirst).toBeDefined();
 
         await store.nodes.Person.upsertById("h1", { name: "Faye", age: 60 });
@@ -282,7 +322,9 @@ export function registerCoalesceUpsertIntegrationTests(
           "Person",
           "h1",
         );
-        expect(afterChange !== undefined && afterFirst !== undefined).toBe(true);
+        expect(afterChange !== undefined && afterFirst !== undefined).toBe(
+          true,
+        );
         expect(afterChange! > afterFirst!).toBe(true);
         expect(rowsAfterChange).toBeGreaterThan(rowsAfterReplay);
       });

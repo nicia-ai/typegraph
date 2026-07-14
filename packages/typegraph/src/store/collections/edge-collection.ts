@@ -29,6 +29,7 @@ import {
   type NodeRef,
   type QueryOptions,
 } from "../types";
+import { shouldCoalesceUpsert } from "./coalesce";
 import {
   resolveTemporalReadParams,
   type TemporalReadParams,
@@ -548,19 +549,17 @@ export function createEdgeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            const clearDeleted = existing.deleted_at !== undefined;
             if (
-              !clearDeleted &&
-              item.validFrom === undefined &&
-              item.validTo === undefined &&
-              config.isUpsertUnchanged?.(existing, item.props ?? {}) === true
+              shouldCoalesceUpsert(existing, item, () =>
+                config.isUpsertUnchanged?.(existing, item.props ?? {}),
+              )
             ) {
               results[itemIndex] = narrowEdge<E>(rowToEdge(existing));
             } else {
               toUpdate.push({
                 index: itemIndex,
                 input: buildUpdateEdgeInput(item.id, item.props ?? {}, item),
-                clearDeleted,
+                clearDeleted: existing.deleted_at !== undefined,
               });
             }
           } else {
@@ -577,7 +576,6 @@ export function createEdgeCollection<
           }
           itemIndex++;
         }
-
 
         if (toCreate.length > 0) {
           const createInputs = toCreate.map((entry) => entry.input);

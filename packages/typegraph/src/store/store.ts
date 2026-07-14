@@ -821,8 +821,8 @@ export class Store<G extends GraphDef> {
         ),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(this.#options?.coalesceUnchangedUpserts === true && {
-        isUpsertUnchanged: (kind, existing, props) =>
-          isNodeUpsertUnchanged(ctx, kind, existing, props),
+        isUpsertUnchanged: (existing, props) =>
+          isNodeUpsertUnchanged(ctx, existing, props),
       }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),

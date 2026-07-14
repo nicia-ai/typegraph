@@ -36,7 +36,9 @@ const coalesceGraph = defineGraph({
 });
 
 type ClockRow = Readonly<{ recorded_at: unknown }>;
-type CountRow = Readonly<{ cnt: number }>;
+// Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
+// value is genuinely not statically a number — Number(...) is a real coercion.
+type CountRow = Readonly<{ cnt: unknown }>;
 
 async function readRecordedClock(
   backend: GraphBackend,
@@ -78,25 +80,29 @@ const propsArb = fc.record(
 describe("coalesceUnchangedUpserts property", () => {
   it("re-upserting identical props is history-idempotent", async () => {
     await fc.assert(
-      fc.asyncProperty(propsArb, fc.string({ maxLength: 12 }), async (props, id) => {
-        const backend = createTestBackend();
-        const [store] = await createStoreWithSchema(coalesceGraph, backend, {
-          history: true,
-          coalesceUnchangedUpserts: true,
-        });
+      fc.asyncProperty(
+        propsArb,
+        fc.string({ maxLength: 12 }),
+        async (props, id) => {
+          const backend = createTestBackend();
+          const [store] = await createStoreWithSchema(coalesceGraph, backend, {
+            history: true,
+            coalesceUnchangedUpserts: true,
+          });
 
-        await store.nodes.Item.upsertById(id, props);
-        const clockAfterFirst = await readRecordedClock(backend);
-        const rowsAfterFirst = await countRecordedRows(backend);
-        expect(clockAfterFirst).toBeDefined();
+          await store.nodes.Item.upsertById(id, props);
+          const clockAfterFirst = await readRecordedClock(backend);
+          const rowsAfterFirst = await countRecordedRows(backend);
+          expect(clockAfterFirst).toBeDefined();
 
-        // Any number of byte-identical replays must not touch history.
-        await store.nodes.Item.upsertById(id, props);
-        await store.nodes.Item.upsertById(id, props);
+          // Any number of byte-identical replays must not touch history.
+          await store.nodes.Item.upsertById(id, props);
+          await store.nodes.Item.upsertById(id, props);
 
-        expect(await readRecordedClock(backend)).toBe(clockAfterFirst);
-        expect(await countRecordedRows(backend)).toBe(rowsAfterFirst);
-      }),
+          expect(await readRecordedClock(backend)).toBe(clockAfterFirst);
+          expect(await countRecordedRows(backend)).toBe(rowsAfterFirst);
+        },
+      ),
       { numRuns: 60 },
     );
   }, 60_000);

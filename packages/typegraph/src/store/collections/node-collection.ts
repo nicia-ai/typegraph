@@ -30,6 +30,7 @@ import {
   type QueryOptions,
   type UpdateNodeInput,
 } from "../types";
+import { shouldCoalesceUpsert } from "./coalesce";
 import {
   resolveTemporalReadParams,
   type TemporalReadParams,
@@ -86,7 +87,6 @@ export type NodeCollectionConfig = Readonly<{
   ) => Promise<Node>;
   /** See NodeOperations.isUpsertUnchanged. */
   isUpsertUnchanged?: (
-    kind: string,
     existing: NodeRow,
     props: Record<string, unknown>,
   ) => boolean;
@@ -363,24 +363,21 @@ export function createNodeCollection<
       const existing = await backend.getNode(graphId, kind, id);
 
       if (existing) {
-        const clearDeleted = existing.deleted_at !== undefined;
         // Coalesce a value-identical replay: skip the write entirely (no
         // updateNode, no recorded capture, no revision advance, no hooks) and
-        // resolve with the existing node. Only when the store enabled it, the
-        // row is live, no explicit temporal override was requested, and the
-        // validated props match. See BaseStoreOptions.coalesceUnchangedUpserts.
+        // resolve with the existing node. See
+        // BaseStoreOptions.coalesceUnchangedUpserts.
         if (
-          !clearDeleted &&
-          options?.validFrom === undefined &&
-          options?.validTo === undefined &&
-          config.isUpsertUnchanged?.(kind, existing, data) === true
+          shouldCoalesceUpsert(existing, options, () =>
+            config.isUpsertUnchanged?.(existing, data),
+          )
         ) {
           return narrowNode<N>(rowToNode(existing));
         }
         const result = await executeNodeUpdate(
           buildUpdateInput(kind, id, data, options),
           backend,
-          { clearDeleted },
+          { clearDeleted: existing.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
       }
@@ -464,19 +461,17 @@ export function createNodeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            const clearDeleted = existing.deleted_at !== undefined;
             if (
-              !clearDeleted &&
-              item.validFrom === undefined &&
-              item.validTo === undefined &&
-              config.isUpsertUnchanged?.(kind, existing, item.props) === true
+              shouldCoalesceUpsert(existing, item, () =>
+                config.isUpsertUnchanged?.(existing, item.props),
+              )
             ) {
               results[itemIndex] = narrowNode<N>(rowToNode(existing));
             } else {
               toUpdate.push({
                 index: itemIndex,
                 input: buildUpdateInput(kind, item.id, item.props, item),
-                clearDeleted,
+                clearDeleted: existing.deleted_at !== undefined,
               });
             }
           } else {
@@ -487,7 +482,6 @@ export function createNodeCollection<
           }
           itemIndex++;
         }
-
 
         if (toCreate.length > 0) {
           const createInputs = toCreate.map((entry) => entry.input);
