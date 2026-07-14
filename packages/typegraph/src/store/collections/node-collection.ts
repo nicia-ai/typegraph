@@ -84,6 +84,12 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
+  /** See NodeOperations.isUpsertUnchanged. */
+  isUpsertUnchanged?: (
+    kind: string,
+    existing: NodeRow,
+    props: Record<string, unknown>,
+  ) => boolean;
   executeDelete: (
     kind: string,
     id: string,
@@ -358,6 +364,19 @@ export function createNodeCollection<
 
       if (existing) {
         const clearDeleted = existing.deleted_at !== undefined;
+        // Coalesce a value-identical replay: skip the write entirely (no
+        // updateNode, no recorded capture, no revision advance, no hooks) and
+        // resolve with the existing node. Only when the store enabled it, the
+        // row is live, no explicit temporal override was requested, and the
+        // validated props match. See BaseStoreOptions.coalesceUnchangedUpserts.
+        if (
+          !clearDeleted &&
+          options?.validFrom === undefined &&
+          options?.validTo === undefined &&
+          config.isUpsertUnchanged?.(kind, existing, data) === true
+        ) {
+          return narrowNode<N>(rowToNode(existing));
+        }
         const result = await executeNodeUpdate(
           buildUpdateInput(kind, id, data, options),
           backend,
@@ -409,12 +428,9 @@ export function createNodeCollection<
         target: GraphBackend | TransactionBackend,
       ): Promise<Node<N>[]> => {
         const ids = items.map((item) => item.id);
-        const existingMap = new Map<
-          string,
-          {
-            deleted_at: string | undefined;
-          }
-        >();
+        // Full existing rows: the coalesce dirty-check needs their stored
+        // props, not just deleted_at.
+        const existingMap = new Map<string, NodeRow>();
 
         if (target.getNodes === undefined) {
           const rows = await Promise.all(
@@ -430,6 +446,11 @@ export function createNodeCollection<
           }
         }
 
+        // Coalesced items are written straight to results (the existing node)
+        // and skipped from the write batch; see the single-upsert path and
+        // BaseStoreOptions.coalesceUnchangedUpserts.
+        const results: Node<N>[] = Array.from({ length: items.length });
+
         // Bucket items into creates and updates
         const toCreate: { index: number; input: CreateNodeInput }[] = [];
         const toUpdate: {
@@ -443,11 +464,21 @@ export function createNodeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            toUpdate.push({
-              index: itemIndex,
-              input: buildUpdateInput(kind, item.id, item.props, item),
-              clearDeleted: existing.deleted_at !== undefined,
-            });
+            const clearDeleted = existing.deleted_at !== undefined;
+            if (
+              !clearDeleted &&
+              item.validFrom === undefined &&
+              item.validTo === undefined &&
+              config.isUpsertUnchanged?.(kind, existing, item.props) === true
+            ) {
+              results[itemIndex] = narrowNode<N>(rowToNode(existing));
+            } else {
+              toUpdate.push({
+                index: itemIndex,
+                input: buildUpdateInput(kind, item.id, item.props, item),
+                clearDeleted,
+              });
+            }
           } else {
             toCreate.push({
               index: itemIndex,
@@ -457,8 +488,6 @@ export function createNodeCollection<
           itemIndex++;
         }
 
-        // Hookless batch create
-        const results: Node<N>[] = Array.from({ length: items.length });
 
         if (toCreate.length > 0) {
           const createInputs = toCreate.map((entry) => entry.input);

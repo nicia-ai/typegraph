@@ -66,9 +66,10 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
+import { canonicalEqual } from "../../schema/canonical";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { rowToNode } from "../row-mappers";
+import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
@@ -658,6 +659,60 @@ async function finalizeNodeCreate<G extends GraphDef>(
 // getOrCreate resurrections.
 // ============================================================
 
+/**
+ * The exact props an update would persist: the live row's stored props with
+ * the caller's partial input merged over them, run through the kind's Zod
+ * schema (defaults applied, values normalized). Shared by
+ * {@link performNodeUpdate} and {@link isNodeUpsertUnchanged} so the coalesce
+ * dirty-check and the write it guards can never disagree on "what would be
+ * written".
+ */
+function resolveNodeUpdateProps<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  existing: Pick<NodeRow, "props">,
+  inputProps: Partial<Record<string, unknown>>,
+): Readonly<{
+  existingProps: Record<string, unknown>;
+  validatedProps: Record<string, unknown>;
+}> {
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const existingProps = rowPropsToObject(existing.props);
+  const mergedProps = { ...existingProps, ...inputProps };
+  const validatedProps = validateNodeProps(
+    registration.type.schema,
+    mergedProps,
+    { kind, operation: "update", id },
+  );
+  return { existingProps, validatedProps };
+}
+
+/**
+ * Whether an `upsertById` of `inputProps` onto the given live row would leave
+ * the stored value unchanged — the coalesce dirty-check. Compares on the
+ * storage-normalized representation (validated, key-order-independent), so it
+ * answers exactly "would the persisted JSON differ?".
+ *
+ * Callers are responsible for the other coalescing preconditions (existing,
+ * not soft-deleted, no explicit temporal override); this covers rule 4 only.
+ */
+export function isNodeUpsertUnchanged<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  existing: NodeRow,
+  inputProps: Record<string, unknown>,
+): boolean {
+  const { existingProps, validatedProps } = resolveNodeUpdateProps(
+    ctx,
+    kind,
+    existing.id,
+    existing,
+    inputProps,
+  );
+  return canonicalEqual(validatedProps, existingProps);
+}
+
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpdateNodeInput,
@@ -671,15 +726,14 @@ async function performNodeUpdate<G extends GraphDef>(
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
-  const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...input.props };
-
-  const nodeKind = registration.type;
-  const validatedProps = validateNodeProps(nodeKind.schema, mergedProps, {
+  const { validatedProps } = resolveNodeUpdateProps(
+    ctx,
     kind,
-    operation: "update",
     id,
-  });
+    existing,
+    input.props,
+  );
+  const nodeKind = registration.type;
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 

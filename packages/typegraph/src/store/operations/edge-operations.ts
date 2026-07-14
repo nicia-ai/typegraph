@@ -42,7 +42,8 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import { rowToEdge } from "../row-mappers";
+import { canonicalEqual } from "../../schema/canonical";
+import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
@@ -632,6 +633,55 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
  * and validates props, and writes. A plain update requires a live edge; a
  * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
  */
+/**
+ * The exact props an edge update would persist: the live edge's stored props
+ * with the caller's partial input merged over them, run through the edge
+ * kind's Zod schema. Shared by {@link performEdgeUpdate} and
+ * {@link isEdgeUpsertUnchanged} so the coalesce dirty-check and the write it
+ * guards can never disagree on "what would be written".
+ */
+function resolveEdgeUpdateProps<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  existing: Pick<EdgeRow, "kind" | "id" | "props">,
+  inputProps: Partial<Record<string, unknown>>,
+): Readonly<{
+  existingProps: Record<string, unknown>;
+  validatedProps: Record<string, unknown>;
+}> {
+  const registration = getEdgeRegistration(ctx.graph, existing.kind);
+  const existingProps = rowPropsToObject(existing.props);
+  const mergedProps = { ...existingProps, ...inputProps };
+  const validatedProps = validateEdgeProps(registration.type.schema, mergedProps, {
+    kind: existing.kind,
+    operation: "update",
+    id: existing.id,
+  });
+  return { existingProps, validatedProps };
+}
+
+/**
+ * Whether an upsert of `inputProps` onto the given live edge would leave the
+ * stored value unchanged — the edge coalesce dirty-check. Endpoints are the
+ * edge's identity and are not part of an upsert-by-id update, so only props
+ * are compared, on the storage-normalized (validated, key-order-independent)
+ * representation.
+ *
+ * Callers own the other coalescing preconditions (existing, not soft-deleted,
+ * no explicit temporal override); this covers rule 4 only.
+ */
+export function isEdgeUpsertUnchanged<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  existing: EdgeRow,
+  inputProps: Record<string, unknown>,
+): boolean {
+  const { existingProps, validatedProps } = resolveEdgeUpdateProps(
+    ctx,
+    existing,
+    inputProps,
+  );
+  return canonicalEqual(validatedProps, existingProps);
+}
+
 async function performEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: {
@@ -649,17 +699,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     throw new EdgeNotFoundError("unknown", id);
   }
 
-  const registration = getEdgeRegistration(ctx.graph, existing.kind);
-  const edgeKind = registration.type;
-
-  const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...input.props };
-
-  const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
-    kind: existing.kind,
-    operation: "update",
-    id,
-  });
+  const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 

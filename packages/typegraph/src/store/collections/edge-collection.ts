@@ -90,6 +90,11 @@ export type EdgeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
+  /** See EdgeOperations.isUpsertUnchanged. */
+  isUpsertUnchanged?: (
+    existing: EdgeRow,
+    props: Record<string, unknown>,
+  ) => boolean;
   executeDelete: (
     id: string,
     backend: GraphBackend | TransactionBackend,
@@ -525,6 +530,11 @@ export function createEdgeCollection<
         const ids = items.map((item) => item.id);
         const existingMap = await getEdgeRowsByIds(target, graphId, ids);
 
+        // Coalesced items are written straight to results (the existing edge)
+        // and skipped from the write batch; see the node collection and
+        // BaseStoreOptions.coalesceUnchangedUpserts.
+        const results: Edge<E>[] = Array.from({ length: items.length });
+
         // Bucket items into creates and updates
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];
         const toUpdate: {
@@ -538,11 +548,21 @@ export function createEdgeCollection<
           const existing = existingMap.get(item.id);
 
           if (existing) {
-            toUpdate.push({
-              index: itemIndex,
-              input: buildUpdateEdgeInput(item.id, item.props ?? {}, item),
-              clearDeleted: existing.deleted_at !== undefined,
-            });
+            const clearDeleted = existing.deleted_at !== undefined;
+            if (
+              !clearDeleted &&
+              item.validFrom === undefined &&
+              item.validTo === undefined &&
+              config.isUpsertUnchanged?.(existing, item.props ?? {}) === true
+            ) {
+              results[itemIndex] = narrowEdge<E>(rowToEdge(existing));
+            } else {
+              toUpdate.push({
+                index: itemIndex,
+                input: buildUpdateEdgeInput(item.id, item.props ?? {}, item),
+                clearDeleted,
+              });
+            }
           } else {
             toCreate.push({
               index: itemIndex,
@@ -558,8 +578,6 @@ export function createEdgeCollection<
           itemIndex++;
         }
 
-        // Hookless batch create
-        const results: Edge<E>[] = Array.from({ length: items.length });
 
         if (toCreate.length > 0) {
           const createInputs = toCreate.map((entry) => entry.input);

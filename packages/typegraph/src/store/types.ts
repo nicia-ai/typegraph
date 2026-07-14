@@ -349,6 +349,49 @@ type BaseStoreOptions = Readonly<{
    * manually after commit. `importGraph` handles its own refresh.
    */
   autoRefreshStatistics?: false | number;
+  /**
+   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
+   * validated props are value-identical to the existing live row. Default
+   * off.
+   *
+   * Enable this for at-least-once / replay materializers. An event log that
+   * re-delivers a byte-identical change, or a full replay that reprocesses an
+   * already-materialized log, would otherwise rewrite every row it touches:
+   * today an `upsertById` on an existing id calls `updateNode`
+   * unconditionally, allocating a fresh recorded instant and a new history row
+   * per re-delivery. A rebuild — the workload replay is recommended for — is
+   * the one that inflates recorded history most, with a dense band of
+   * "changes" that changed nothing.
+   *
+   * When enabled, an upsert that would not change the stored value performs
+   * **no write at all**: no `updateNode`, no recorded-time capture, no history
+   * row, no revision-anchor advance, and no `update` operation hooks (nothing
+   * happened, so nothing is reported). It resolves with the **existing** node,
+   * preserving its original `validFrom` / `updatedAt` / `version`.
+   *
+   * Receipt shape is unchanged and needs no new signal: a coalesced upsert
+   * still counts as one write intent (`writes.total` includes it), but
+   * captures nothing (`receipt.recorded` stays `undefined` when it is the only
+   * write) — the same shape a no-op delete already produces, so a consumer
+   * that carries the prior anchor forward on `recorded === undefined` handles
+   * it unchanged.
+   *
+   * A write is coalesced only when **all** of the following hold; otherwise the
+   * normal write happens:
+   *   1. An existing row is found for the id (else it is a create).
+   *   2. That row is not soft-deleted (a deleted row resurrects — a real
+   *      change — and is never coalesced).
+   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
+   *      temporal override is a deliberate request and is never coalesced;
+   *      applied per item in the bulk path).
+   *   4. The new props, merged over the stored props and run through the
+   *      kind's Zod schema (defaults applied, values normalized), are deeply
+   *      value-identical to the stored props (key order aside).
+   *
+   * Default-off because some consumers *want* an audit row per re-delivery as
+   * proof the event was reprocessed; coalescing removes that signal.
+   */
+  coalesceUnchangedUpserts?: boolean;
   /** SQL schema configuration from createSqlSchema(...) for custom table names */
   schema?: SqlSchema;
   /** Query default behaviors. */

@@ -1283,6 +1283,16 @@ async function applyMergePlan<G extends GraphDef>(
  * merged edges already carry the canonical endpoint) attaches to the surviving
  * row, never a duplicate insert. This is what lets a base member be the canonical
  * survivor once base sources land. Exported for isolated commit-path testing.
+ *
+ * COALESCE INTERACTION: when the target store was created with
+ * `coalesceUnchangedUpserts`, a canonical/inherited upsert whose props already
+ * equal the committed row is skipped (no write, no recorded row). This is sound
+ * for merge and needs no bypass: the base@V guard runs BEFORE any upsert
+ * (see {@link assertTargetUnchanged}), conflicts are resolved at plan time, and
+ * an upsert-by-id never rewrites endpoints — so coalescing only elides writes
+ * that would persist a byte-identical value, leaving the merged state
+ * identical. It merely declines to re-stamp recorded time on rows the merge did
+ * not actually change, which is exactly the option's intent.
  */
 export async function commitPlan<G extends GraphDef>(
   target: Store<G>,

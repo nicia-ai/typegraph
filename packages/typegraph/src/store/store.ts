@@ -150,6 +150,8 @@ import {
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
+  isEdgeUpsertUnchanged,
+  isNodeUpsertUnchanged,
   type NodeOperationContext,
 } from "./operations";
 import {
@@ -817,6 +819,11 @@ export class Store<G extends GraphDef> {
           backend,
           options,
         ),
+      // Present only when opted in; its absence is the coalesce off switch.
+      ...(this.#options?.coalesceUnchangedUpserts === true && {
+        isUpsertUnchanged: (kind, existing, props) =>
+          isNodeUpsertUnchanged(ctx, kind, existing, props),
+      }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
       executeHardDelete: (kind, id, backend) =>
@@ -896,6 +903,11 @@ export class Store<G extends GraphDef> {
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
       executeUpsertUpdate: (input, backend, options) =>
         executeEdgeUpsertUpdate(ctx, input, backend, options),
+      // Present only when opted in; its absence is the coalesce off switch.
+      ...(this.#options?.coalesceUnchangedUpserts === true && {
+        isUpsertUnchanged: (existing, props) =>
+          isEdgeUpsertUnchanged(ctx, existing, props),
+      }),
       executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
       executeHardDelete: (id, backend) =>
         executeEdgeHardDelete(ctx, id, backend),

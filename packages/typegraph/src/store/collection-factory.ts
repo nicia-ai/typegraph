@@ -62,6 +62,19 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
+  /**
+   * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only
+   * when the store was created with `coalesceUnchangedUpserts: true`; its
+   * absence is the off switch. Returns whether upserting `props` onto the
+   * given existing live row would leave the stored value unchanged (rule 4);
+   * the collection owns the other preconditions (not soft-deleted, no
+   * explicit temporal override).
+   */
+  isUpsertUnchanged?: (
+    kind: string,
+    existing: NodeRow,
+    props: Record<string, unknown>,
+  ) => boolean;
   executeDelete: (
     kind: string,
     id: string,
@@ -148,6 +161,17 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
+  /**
+   * Coalesce dirty-check for `bulkUpsertById`. Present only when the store was
+   * created with `coalesceUnchangedUpserts: true`; its absence is the off
+   * switch. Returns whether upserting `props` onto the given existing live
+   * edge would leave the stored value unchanged (props only — endpoints are
+   * the edge's identity). The collection owns the other preconditions.
+   */
+  isUpsertUnchanged?: (
+    existing: EdgeRow,
+    props: Record<string, unknown>,
+  ) => boolean;
   executeDelete: (
     id: string,
     backend: GraphBackend | TransactionBackend,
