@@ -1,5 +1,942 @@
 # @nicia-ai/typegraph
 
+## 0.35.0
+
+### Minor Changes
+
+- [#231](https://github.com/nicia-ai/typegraph/pull/231) [`839f536`](https://github.com/nicia-ai/typegraph/commit/839f53621998d41704537e45408872d49452cf1c) Thanks [@pdlug](https://github.com/pdlug)! - Aggregate queries now support `.orderBy()`. Previously `ExecutableAggregateQuery`
+  exposed `limit()` but no way to order results, so `.aggregate({...}).limit(n)`
+  returned an arbitrary `n` groups rather than the top `n` — the most common
+  aggregate shape ("top N groups by count/sum") required fetching every group
+  and sorting in JS.
+
+  `.orderBy(key, direction?)` takes any output name from `.aggregate({...})` —
+  either a grouped field or an aggregate alias — and can be chained for
+  multi-key sorts:
+
+  ```typescript
+  store
+    .query()
+    .from("Author", "a")
+    .traverse("wrote", "e")
+    .to("Book", "b")
+    .groupByNode("a")
+    .aggregate({ author: field("a", "name"), bookCount: count("b") })
+    .orderBy("bookCount", "desc")
+    .limit(2)
+    .execute();
+  ```
+
+  Ordering resolves against the projected SELECT-list output alias rather than
+  recompiling the underlying expression, so it works uniformly for grouped
+  fields and aggregates on both SQLite and PostgreSQL with no dialect-specific
+  handling.
+
+- [#212](https://github.com/nicia-ai/typegraph/pull/212) [`dcdd542`](https://github.com/nicia-ai/typegraph/commit/dcdd54246fef1e93839196d7029e4dbadbc72b42) Thanks [@pdlug](https://github.com/pdlug)! - Autocommit `bulkCreate` and `bulkInsert` calls (nodes and edges) now
+  refresh planner
+  statistics automatically when a single call writes 1,000 rows or more,
+  closing the stale-statistics window after bulk loads where the planner
+  keeps pre-load row estimates until ANALYZE runs (observed 25-200x
+  slowdowns on traversal and fulltext shapes). Tune the threshold or
+  disable with the new `autoRefreshStatistics` store option
+  (`createStore(graph, backend, { autoRefreshStatistics: 5000 })` or
+  `false`). Bulk writes inside a caller-provided transaction never
+  auto-refresh — statistics cannot see uncommitted rows — and a refresh
+  failure degrades to a warning without failing the committed write.
+  `importGraph()` keeps its existing built-in refresh.
+
+- [#195](https://github.com/nicia-ai/typegraph/pull/195) [`e48dfa2`](https://github.com/nicia-ai/typegraph/commit/e48dfa2531148892ca7f5432a3ced6068b464807) Thanks [@pdlug](https://github.com/pdlug)! - `bulkCreate` now batches its round trips end to end instead of degenerating
+  into per-row statements around one multi-row INSERT.
+
+  - Validation probes: per-row existence checks collapse into one `getNodes`
+    per kind, and per-row uniqueness pre-checks into one `checkUniqueBatch`
+    per (constraint, kind) — the batch validation caches are primed up front,
+    so the per-row checks run against memory. Validation now runs as a
+    synchronous first pass, so a later row's validation error can surface
+    before an earlier row's constraint error (both fail the whole batch).
+  - Side effects: uniqueness entries write through a new `insertUniqueBatch`
+    (multi-row conditional upsert with the same per-entry `UniquenessError`
+    semantics), fulltext sync goes through the existing `upsertFulltextBatch`,
+    and embedding sync through a new `upsertEmbeddingBatch` per
+    (kind, field) — implemented for pgvector, sqlite-vec, and libSQL native
+    vectors via an optional `VectorStrategy.buildUpsertBatch` seam with a
+    per-row fallback for custom strategies.
+
+  Measured on the write bench (in-memory SQLite, 100-row batches of nodes
+  with searchable + embedding fields): ~1,600 → ~4,100 rows/s (~2.6×). The
+  win compounds on per-statement-networked engines (Turso, D1, Neon), where
+  each eliminated statement is a network round trip.
+
+- [#194](https://github.com/nicia-ai/typegraph/pull/194) [`b3668c9`](https://github.com/nicia-ai/typegraph/commit/b3668c96db58127f983695fa6df8f39662ed761b) Thanks [@pdlug](https://github.com/pdlug)! - Default-path performance tuning for SQLite and bulk maintenance verbs.
+
+  - `createLocalSqliteBackend` now applies connection pragmas at open:
+    `journal_mode=WAL`, `synchronous=NORMAL`, and a 5s `busy_timeout`. On
+    file-backed databases this makes single-operation writes roughly 5×
+    faster than the better-sqlite3 driver defaults (rollback journal,
+    `synchronous=FULL`), because each write no longer pays a full-durability
+    fsync in journal mode. Override individual values via the new `pragmas`
+    option, or pass `pragmas: false` to keep driver defaults.
+  - The SQLite backend now detects the connection's real bound-parameter
+    budget instead of assuming the historic 999: better-sqlite3 compiles in
+    `SQLITE_MAX_VARIABLE_NUMBER=32766` (probed via `PRAGMA compile_options`,
+    with a `sqlite_version() >= 3.32` fallback), Cloudflare D1 is capped at
+    its documented 100, and undetectable async drivers keep the conservative
+    999 floor. Batch chunk math derives from the detected budget, so bulk
+    inserts on better-sqlite3 use ~33× fewer statements (111-row chunks →
+    3,640-row chunks), and batched writes on D1 no longer exceed its
+    per-statement limit. `capabilities.maxBindParameters` reports the
+    detected value and remains overridable.
+  - `importGraph()` now refreshes planner statistics (`ANALYZE`)
+    automatically after an import that created or updated rows, and
+    `store.materializeIndexes()` does the same on SQLite after creating
+    indexes. Stale statistics after bulk loads previously degraded
+    traversals ~10× on PostgreSQL and some FTS5 queries ~30× on SQLite until
+    the engine caught up on its own. Both verbs accept
+    `refreshStatistics: false` to opt out. On PostgreSQL,
+    `materializeIndexes()` builds with `CREATE INDEX CONCURRENTLY` and skips
+    the automatic refresh (concurrent same-index builds from two callers can
+    deadlock when a refresh shifts their timing) — call
+    `store.refreshStatistics()` after materializing.
+  - PostgreSQL `refreshStatistics()` now issues one `ANALYZE (SKIP_LOCKED)`
+    per table instead of a single multi-table `ANALYZE`. A multi-table
+    ANALYZE is one transaction acquiring several ShareUpdateExclusive locks
+    in sequence, and ANALYZE's lock class conflicts with in-flight
+    `CREATE INDEX CONCURRENTLY` builds — the old shape could deadlock
+    against concurrent index DDL; the new one can never join a lock-wait
+    cycle (a locked table is skipped and covered by the next refresh or
+    autovacuum).
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Declare, as a typed capability, whether a backend's filtered approximate vector
+  search can silently return a short page.
+
+  Every approximate (ANN) search TypeGraph issues carries at least one row filter —
+  the liveness predicate that hides soft-deleted and out-of-validity rows — and a
+  `.where(...)` predicate narrows it further. Where the engine applies that filter
+  relative to the index traversal decides whether the page fills:
+
+  - **`sqlite-vec`** pushes the filter into the `vec0` KNN candidate set. Exact —
+    the only engine here that guarantees a full page.
+  - **`pgvector` ≥ 0.8** re-enters the index for more candidates
+    (`hnsw.iterative_scan` / `ivfflat.iterative_scan`, applied automatically).
+    Much better recall than a post-filter, but **not** a guarantee: the iterative
+    scan stops at `hnsw.max_scan_tuples` / `ivfflat.max_probes`, and on
+    **pgvector < 0.8** there is no iterative scan at all — the backend detects
+    that at runtime, warns once, and the search stays `ef_search`-bounded.
+  - **`libsql-native`** cannot do either: DiskANN's `vector_top_k` is a table
+    function with no filter pushdown. TypeGraph over-fetches `4 × (limit + offset)`
+    neighbors and post-filters, so once more than that headroom is filtered out the
+    search returns **fewer than `limit` rows even though more matches exist**.
+    Heavy tombstone drift — routine in a temporal store — is what makes this real
+    rather than theoretical.
+
+  That asymmetry was previously only a code comment. `VectorCapabilities` now
+  carries a required `filteredApproximateSearch: { mode, guaranteesFullPage }`.
+  **Read `guaranteesFullPage`, not `mode`** — `mode`
+  (`"filter-pushdown" | "iterative-scan" | "post-filter"`) names the mechanism the
+  strategy asks for, but only `guaranteesFullPage` reflects the runtime-dependent,
+  scan-bounded reality (it is `true` for `sqlite-vec` alone). It is documented in
+  the backend parity matrix, and boundary tests execute the difference against real
+  libSQL, sqlite-vec, and pgvector: the same 200-vector fixture, the same filter,
+  the same `limit`.
+
+  **Breaking for custom vector strategies only.** `VectorCapabilities` gained a
+  required field, so a hand-written `VectorStrategy` must now declare both its mode
+  and whether it guarantees a full page. That is deliberate: an omitted declaration
+  would inherit an engine promise the strategy may not keep.
+
+- [#198](https://github.com/nicia-ai/typegraph/pull/198) [`a9477bb`](https://github.com/nicia-ai/typegraph/commit/a9477bb28ee887a1a93c103a64912e8563de9d76) Thanks [@pdlug](https://github.com/pdlug)! - Property filters that a btree can never serve now have a declarative index
+  story: `defineNodeIndex` / `defineEdgeIndex` accept
+  `method: "gin" | "trigram"` (default `"btree"`, unchanged).
+
+  - `method: "gin"` emits a PostgreSQL expression GIN (`jsonb_path_ops`) over
+    the field's jsonb extraction, serving the array containment predicates
+    (`contains` / `containsAll` / `containsAny` on array fields). Verified to
+    match TypeGraph's compiled `(props #> ARRAY[…]) @> $1` form under
+    parameterized prepared statements — note that a hand-written
+    whole-column `GIN (props)` never matches these expressions (the previous
+    docs guidance recommended one; corrected).
+  - `method: "trigram"` emits an expression GIN with `gin_trgm_ops` over the
+    field's text extraction, serving substring and case-insensitive matches
+    (`contains` / `startsWith` / `endsWith` / `like` / `ilike` on string
+    fields). `materializeIndexes()` installs `pg_trgm`
+    (`CREATE EXTENSION IF NOT EXISTS`) on first use.
+
+  Both are materialize-only (like vector ANN indexes) and PostgreSQL-only:
+  `materializeIndexes()` reports them as `skipped` on SQLite, whose
+  substring-search story is FTS5 fulltext. GIN-family declarations take
+  exactly one field and reject `unique`, `coveringFields`, and `where`;
+  `method: "btree"` is canonicalized by absence so existing stored schema
+  documents and materialization signatures are unchanged. `bulkFindByIndex`
+  rejects GIN-family indexes (it compiles equality probes, which only btree
+  declarations serve).
+
+- [#204](https://github.com/nicia-ai/typegraph/pull/204) [`94eea90`](https://github.com/nicia-ai/typegraph/commit/94eea90ead38c69c0ac5b55bad34036f45578b87) Thanks [@pdlug](https://github.com/pdlug)! - perf: `store.search.hybrid` now runs as a single SQL statement on the built-in backends — both sources, weighted RRF fusion, liveness, and node hydration composed into one round trip (previously two search statements plus an id-hydration fetch, with fusion in JS). Results are identical to the previous path; the saving scales with per-statement cost (serverless drivers, D1/Durable Objects, remote databases). `GraphBackend` gains an optional `hybridSearch` member; backends without it (custom backends, capability profiles without window functions) keep the multi-statement fallback.
+
+- [#223](https://github.com/nicia-ai/typegraph/pull/223) [`a161d70`](https://github.com/nicia-ai/typegraph/commit/a161d70895da5101706602ac13e4cca4b7fc6a62) Thanks [@pdlug](https://github.com/pdlug)! - Add `asNodeId` and `asEdgeId` constructors for branding persisted ids that
+  round-trip through untyped storage before being passed back to read, update, or
+  delete APIs.
+
+- [#241](https://github.com/nicia-ai/typegraph/pull/241) [`8f3e772`](https://github.com/nicia-ai/typegraph/commit/8f3e7727dde0d46415b90e715138c0a9766cd2b5) Thanks [@pdlug](https://github.com/pdlug)! - Fixes `implies(edgeA, edgeB)` silently accepting endpoint-incompatible edge
+  pairs. Previously an ontology declaration like `implies(about, writes)` — where
+  `about` connects `Paper -> Topic` and `writes` connects `Author -> Paper` —
+  was accepted without complaint, and `expand: "implying"` query traversal
+  would then silently fold `about` rows into a `writes` traversal even though
+  the two edges connect entirely different node kinds.
+
+  `implies()` relations are now validated wherever a query-capable
+  `KindRegistry` is built — `createStore()`/`createStoreWithSchema()` for a
+  live graph definition, and `deserializeSchema(...).buildRegistry()` for a
+  persisted schema — including relations authored through
+  `store.evolve({ ontology })`. A relation is accepted when every kind the
+  implying edge allows on a side (`from`/`to`) is assignable — equal, or a
+  `subClassOf` descendant — to at least one kind the implied edge allows on
+  that same side; otherwise construction throws a `ConfigurationError`
+  describing the incompatible kinds and how to fix the declaration.
+
+  **Breaking change — two things to know before upgrading.**
+
+  _It breaks the load path, not just graph definition._ `deserializeSchema(...)`
+  runs the same endpoint check inside `buildRegistry()`, so a schema **already
+  persisted** under 0.34 that carries a now-rejected `implies()` relation throws
+  at the first `buildRegistry()` after the upgrade — no code change of yours
+  required to trigger it. Audit persisted schemas before rolling out, not only
+  the graph definitions in source.
+
+  _It rejects superset domains, not only disjoint ones._ A relation is accepted
+  only when every kind the implying edge allows on a side is assignable to at
+  least one kind the implied edge allows on that side. So `implies(a, b)` where
+  `a` is declared `from: [Person]` and `b` is declared `from: [Employee]` (with
+  `Employee subClassOf Person`) is **rejected**, even though every `a` row on
+  disk might in fact start at an `Employee`: `Person` is not assignable to
+  `Employee`. The declaration, not the data, is what the traversal folds on, and
+  a `Person`-rooted `a` row folded into a `b` traversal would be unsound. The
+  same rule is what makes the previously-silent disjoint case (`Paper -> Topic`
+  implying `Author -> Paper`) an error.
+
+  Fix such relations by narrowing the implying edge's endpoints, adding a
+  `subClassOf` relation to bridge the mismatch, or removing the `implies()`
+  declaration.
+
+- [#195](https://github.com/nicia-ai/typegraph/pull/195) [`e48dfa2`](https://github.com/nicia-ai/typegraph/commit/e48dfa2531148892ca7f5432a3ced6068b464807) Thanks [@pdlug](https://github.com/pdlug)! - `importGraph` now processes each `batchSize` slice with batched round trips
+  instead of fully single-row statements. Nodes: one `getNodes` per kind for
+  existence, one `checkUniqueBatch` per (constraint, kind) for uniqueness
+  pre-checks, one multi-row insert, and one batched side-effect pass
+  (uniqueness entries, fulltext, embeddings) for the accepted creates.
+  Edges: one `getNodes` per endpoint kind for reference liveness, one
+  `getEdges` for existence, and one multi-row insert.
+
+  Per-row semantics are unchanged: conflicts route by `onConflict`, a
+  uniqueness conflict is recorded as a per-row error entry (the rest of the
+  import proceeds), reference validation still rejects missing or tombstoned
+  endpoints, and rows repeating an id within a slice fall back to the
+  per-row path so they observe the first occurrence's row exactly as before.
+
+  Measured on the write bench (in-memory SQLite, 500 nodes + 500 edges per
+  import): ~26k → ~96k entities/s (~4×). The win compounds on
+  per-statement-networked engines (Turso, D1, Neon), where the old path paid
+  one round trip per row and the new one pays a handful per slice.
+
+- [#236](https://github.com/nicia-ai/typegraph/pull/236) [`31aee82`](https://github.com/nicia-ai/typegraph/commit/31aee82608518411e4e9f905c96c52348f7cf08f) Thanks [@pdlug](https://github.com/pdlug)! - `defineNodeIndex` accepts a new `keySystemColumns` option: system columns
+  (e.g. `"id"`) to include in the index key, positioned after the `scope`
+  prefix and before `fields`/`coveringFields`. `fields` is now optional (was
+  a required non-empty tuple) — an index must declare at least one of
+  `fields`, `coveringFields`, or `keySystemColumns`.
+
+  This closes a real gap: a covering index can only serve a query's join
+  index-only (avoiding a heap fetch per candidate row) if the index's key
+  matches the join's actual predicate. Queries that join on a system column
+  directly (e.g. TypeGraph's compiled `n.id = e.from_id` for a reverse
+  traversal) had no way to declare a matching index, since `fields`/
+  `coveringFields` only ever accept the node's own schema properties.
+  `keySystemColumns: ["id"]` (plus `coveringFields` for whatever the query
+  also projects) now lets that same join be served index-only.
+
+  Rejects edge-only system columns (`from_kind`/`from_id`/`to_kind`/
+  `to_id`) on a node index, and rejects any column already implied by
+  `scope`. Not supported with `method: "gin" | "trigram"` (same restriction
+  as `coveringFields`). Also rejects `unique: true` combined with
+  `keySystemColumns: ["id"]` — every node's `id` is already unique per
+  row, so a unique index keyed on `id` plus other columns can never
+  enforce a meaningful constraint across those other columns. Canonicalized
+  by absence, like `method`: indexes that don't use it produce byte-identical
+  names/hashes to before this field existed, so existing stored schema
+  documents and materialization signatures are unaffected.
+
+- [#208](https://github.com/nicia-ai/typegraph/pull/208) [`586b2b0`](https://github.com/nicia-ai/typegraph/commit/586b2b05f3f501f3d53db1dbb2ec247e17a67294) Thanks [@pdlug](https://github.com/pdlug)! - fix: `materializeIndexes` serializes same-index builds across callers on PostgreSQL via a durable claim in the status table (two concurrent same-name expression-index `CREATE INDEX CONCURRENTLY` builds can deadlock — no safe-snapshot exemption). Losers wait and converge as `alreadyMaterialized`; a crashed builder's claim expires after a 15-minute lease and the takeover drops the INVALID index leftover before rebuilding (relational indexes now self-heal instead of requiring manual repair). With same-index builds serialized, the automatic post-create `ANALYZE` is re-enabled on PostgreSQL.
+
+- [#201](https://github.com/nicia-ai/typegraph/pull/201) [`b52ae3b`](https://github.com/nicia-ai/typegraph/commit/b52ae3b3358435de9774f348fc94ab7140bdc7eb) Thanks [@pdlug](https://github.com/pdlug)! - perf: eliminate the PostgreSQL JSONB parse→stringify→parse round trip per row.
+
+  **Public backend row contract change:** rows returned by `GraphBackend` read methods now carry `props` as `RowProps = string | Readonly<Record<string, unknown>>` — JSON text on SQLite, the driver-parsed object on PostgreSQL. Code that consumed backend rows directly with `JSON.parse(row.props)` must switch to the new `rowPropsToObject(row.props)` (or `rowPropsToJsonText` when text is required); both helpers and the `RowProps` type are exported from the package root. Store-level APIs (`store.nodes.*`, `store.query()`, search, export) are unaffected — they already return parsed objects.
+
+- [#249](https://github.com/nicia-ai/typegraph/pull/249) [`d2a6feb`](https://github.com/nicia-ai/typegraph/commit/d2a6feb8a99aaafa247c7bf97f9670c56608a870) Thanks [@pdlug](https://github.com/pdlug)! - Add revision-anchored graph branches and streaming interchange. Stores can opt
+  into `revisionTracking: true` (or use `history: true`) so branch and merge
+  validation read a durable per-graph origin and revision instead of
+  fingerprinting every live row or accepting a coincident revision from another
+  store. Physical branch clones now stream bounded interchange batches, enabling
+  large branch copies, exports, and imports without materializing the full graph
+  in memory. Direct backend writes remain outside the revision-tracking contract;
+  tracked stores fail loudly if `tx.sql` would bypass that contract.
+
+- [#203](https://github.com/nicia-ai/typegraph/pull/203) [`801768d`](https://github.com/nicia-ai/typegraph/commit/801768d2e1a63a0d3bda9d40a46a7f03deddffbd) Thanks [@pdlug](https://github.com/pdlug)! - feat: facade search scoping — `store.search.{vector,fulltext,hybrid}` accept `where` (a property predicate compiled by the shared query compiler into the search statement's candidate set), `offset` (rank-relative pagination pushed into the engine), and `includeSubClasses` (search `subClassOf` descendants and merge into one ranking). Filters compile into the search statement's candidate set — exact on pgvector, sqlite-vec, tsvector, and FTS5, where a filtered search returns `limit` hits whenever enough matches exist; libSQL DiskANN post-filters a 4× over-fetched ANN set, so its recall against the filter is bounded by that headroom. Search now applies full current-read semantics (validity windows, not just tombstones), matching `find()`.
+
+- [#205](https://github.com/nicia-ai/typegraph/pull/205) [`17bbe54`](https://github.com/nicia-ai/typegraph/commit/17bbe5419a246c95bbab9f6bc7da64f6691e159e) Thanks [@pdlug](https://github.com/pdlug)! - feat: `.similarTo(vector, k, { approximate: true })` — opt-in approximate retrieval for the inline vector predicate. Each declaring kind's relevance branch compiles to the engine's native ANN search form (vec0 `MATCH … k=`, libSQL `vector_top_k`, pgvector's index-eligible scan), scoped to the query's candidate nodes via the same pushdown the search facade uses, so composed predicates and traversals still constrain results. Never applied silently: the default remains the exact distance scan, and slots declared `indexType: "none"` keep it even with the opt-in.
+
+- [#245](https://github.com/nicia-ai/typegraph/pull/245) [`ef6def6`](https://github.com/nicia-ai/typegraph/commit/ef6def6b67e306a9cdb40e78723dad6d36f89647) Thanks [@pdlug](https://github.com/pdlug)! - `createLocalSqliteBackend`'s `pragmas` option accepts two new fields:
+  `cacheSizeKib` (`PRAGMA cache_size`) and `mmapSizeBytes` (`PRAGMA
+mmap_size`). Both default to `undefined`, leaving SQLite's own built-in
+  defaults (a 2MiB page cache, mmap disabled) untouched — existing callers
+  are unaffected.
+
+  SQLite's 2MiB default cache is fine for a small embedded database, but
+  once a database's working set exceeds it, every page a query touches past
+  that point pays a fresh disk read instead of a cache hit — including pages
+  an otherwise fully covering index would have served from cache alone. Set
+  `cacheSizeKib` (and optionally `mmapSizeBytes`) once a database's working
+  set is known to exceed the default, the same way you'd size a page cache
+  for any other embedded or server database engine.
+
+- [#197](https://github.com/nicia-ai/typegraph/pull/197) [`f420a92`](https://github.com/nicia-ai/typegraph/commit/f420a922a1f168891ee4de54e91cc9ca1638deed) Thanks [@pdlug](https://github.com/pdlug)! - SQLite CRUD statements now reuse the prepared-statement cache. The
+  operation backend's read/write helpers previously executed through
+  drizzle's `db.all()` / `db.run()`, which re-prepares every statement on
+  every call — only the query engine's `backend.execute` path used the
+  prepared-statement LRU. On synchronous drivers (better-sqlite3,
+  bun:sqlite) CRUD statements and the per-write transaction frames
+  (`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`) now route through the
+  execution adapter's compiled path, so a repeated operation shape re-binds
+  parameters against a cached prepared statement. A warmed CRUD cycle
+  re-prepares nothing. Async drivers (remote libsql/Turso, D1) have no
+  statement cache and keep the existing execution path.
+
+  Measured on the write bench (in-memory SQLite, order-controlled A/B):
+  single-op creates ~18.3k → ~28.8k ops/s (~1.6×), transaction-batched
+  creates ~23.9k → ~36k ops/s (~1.5×).
+
+- [#251](https://github.com/nicia-ai/typegraph/pull/251) [`f23f7a5`](https://github.com/nicia-ai/typegraph/commit/f23f7a5d15fd5fb59de3667c7d7b10e1975690d4) Thanks [@pdlug](https://github.com/pdlug)! - `createLocalSqliteBackend`'s `pragmas` option accepts a new field:
+  `walAutocheckpointPages` (`PRAGMA wal_autocheckpoint`). Defaults to
+  `undefined`, leaving SQLite's own built-in default (1,000 pages, ~4MiB)
+  untouched — existing callers are unaffected.
+
+  SQLite's default checkpoints WAL back into the main database file every
+  ~4MiB. That's fine for a normal read/write mix, but a large bulk load pays
+  increasingly expensive checkpoints as the database file grows over the
+  course of the load — each checkpoint has to flush WAL frames into a B-tree
+  that's larger, and less page-cache-resident, than the one before it. A
+  local repro (real `bulkInsert()` calls, 100K/500K/2M synthetic rows)
+  confirmed this: raising `walAutocheckpointPages` cut a 2M-row bulk load's
+  wall-clock time by over 50% at the largest scale tested, with the effect
+  growing at larger row counts. Set `walAutocheckpointPages` for a
+  bulk-insert-heavy workload; `0` disables automatic checkpointing entirely
+  for callers that would rather run one explicit `PRAGMA wal_checkpoint`
+  after the load finishes.
+
+- [#222](https://github.com/nicia-ai/typegraph/pull/222) [`7588634`](https://github.com/nicia-ai/typegraph/commit/758863402ec69b3724acb93f07a51eaf23132dc7) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.transactionWithReceipt()`, which runs a transaction and returns a
+  receipt summarizing completed collection write intents and, for
+  history-enabled stores, the recorded commit instant allocated by the
+  transaction.
+
+- [#233](https://github.com/nicia-ai/typegraph/pull/233) [`e0e6304`](https://github.com/nicia-ai/typegraph/commit/e0e6304bc17b6d9c004376fd77ddf8cc3b0cc252) Thanks [@pdlug](https://github.com/pdlug)! - Every `TypeGraphError` subclass with a fixed-shape `details` payload now
+  declares a narrowed `readonly details` type (e.g.
+  `RestrictedDeleteError.details` is `RestrictedDeleteErrorDetails`, not the
+  base class's `Readonly<Record<string, unknown>>`), so reading structured
+  fields like `error.details.edgeCount` no longer requires a cast. The new
+  `XxxErrorDetails` types (`NodeNotFoundErrorDetails`,
+  `EdgeNotFoundErrorDetails`, `KindNotFoundErrorDetails`,
+  `NodeConstraintNotFoundErrorDetails`, `NodeIndexNotFoundErrorDetails`,
+  `EndpointNotFoundErrorDetails`, `EndpointErrorDetails`,
+  `UniquenessErrorDetails`, `CardinalityErrorDetails`, `DisjointErrorDetails`,
+  `RestrictedDeleteErrorDetails`, `VersionConflictErrorDetails`,
+  `SchemaMismatchErrorDetails`, `MigrationErrorDetails`,
+  `EagerMaterializationErrorDetails`, `StaleVersionErrorDetails`,
+  `SchemaContentConflictErrorDetails`, `StoreNotInitializedErrorDetails`,
+  `DatabaseOperationErrorDetails`, `EmbeddingDimensionChangedErrorDetails`) are
+  exported from the package root alongside the existing
+  `ValidationErrorDetails`. Classes with intentionally open, per-call-site
+  details (`ConfigurationError`, `UnsupportedPredicateError`,
+  `CompilerInvariantError`, `BackendDisposedError`) are unchanged.
+
+- [#206](https://github.com/nicia-ai/typegraph/pull/206) [`995b964`](https://github.com/nicia-ai/typegraph/commit/995b9643927f498deabb157113bcb5ecb5883ca9) Thanks [@pdlug](https://github.com/pdlug)! - perf: cascade deletes batch their edge removals — new optional `GraphBackend.deleteEdgesBatch` / `hardDeleteEdgesBatch` members issue one statement per bind-budget chunk instead of one per connected edge (50-edge cascade on local PostgreSQL: 24.4ms → 3.6ms), with recorded-time capture preserved. `getOrCreate` variants no longer run the full Zod parse twice on the create leg.
+
+### Patch Changes
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Fix: the synthetic CTE column names that carry selectively-extracted `props`
+  fields are now bounded to PostgreSQL's identifier limit.
+
+  A selected top-level `props` field is extracted once inside the CTE that owns it,
+  under a generated column name encoding the query alias and the field name. The
+  encoding was unambiguous but unbounded, and PostgreSQL silently truncates
+  identifiers at 63 **bytes** — so two distinct `(alias, field)` pairs sharing a
+  long prefix could collapse onto one column name after truncation, yielding an
+  ambiguous-column error or the wrong value.
+
+  Long names are now truncated on a UTF-8 character boundary and disambiguated with
+  a hash of the full, untruncated pair — the same guard the sibling subgraph
+  projection path already used, now extracted into one shared helper. Names that
+  already fit are emitted unchanged, so compiled SQL for ordinary queries is
+  byte-for-byte what it was.
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Document a semantic consequence of batched writes: within **one backend batch
+  call**, every row whose timestamp TypeGraph generates shares a single instant,
+  sampled once for that call — not once per row, and not once per bind-budget
+  chunk. `bulkCreate()` and `bulkInsert()` issue one such call, so all of their
+  rows tie.
+
+  Creating the same rows one at a time through `create()` gives each its own
+  timestamp, so `ORDER BY created_at` was a total order there and is only a
+  partial one after a bulk write. Two things it is **not** safe to conclude:
+
+  - **`importGraph()` is not one instant.** It slices nodes and edges into
+    `batchSize` batches and drives one backend call per slice, so each slice
+    samples its own timestamp. Rows that carry an explicit `validFrom` in the
+    import payload keep it verbatim; only generated defaults are affected.
+  - **Ids are not a sequence.** The default generator is a random NanoID, and
+    callers may supply arbitrary ids, so `ORDER BY id` is not insertion order.
+    `(created_at, id)` is a _deterministic_ tiebreak, not a chronology. If input
+    order matters, persist an explicit sequence column.
+
+  One instant per batch call is the intended semantics — it is what makes a bulk
+  write a single point in valid time rather than a smear — and it is the same
+  choice `valid_from` already made. Nothing changes in behavior; this note exists
+  because the batching work that landed this release moved several paths onto it.
+
+- [#248](https://github.com/nicia-ai/typegraph/pull/248) [`c379045`](https://github.com/nicia-ai/typegraph/commit/c37904505ee0cf17a9a62f4f7e6769be61319670) Thanks [@pdlug](https://github.com/pdlug)! - Perf: cache compiled query SQL across executions again, without freezing the
+  read instant.
+
+  The read-freshness fix recompiled a query's full AST to SQL on every
+  `execute()` so a reused or prepared query would always see the latest rows.
+  That kept results fresh but made the recommended `.prepare()`-once-`.execute()`-
+  many pattern pay a full compile per call (a point lookup ~58µs, a three-hop
+  traversal ~450µs of pure JS compilation).
+
+  Only the bound "current" read instant varies between two compilations of the
+  same query; the SQL text is identical. So a query now compiles once into a
+  cached statement whose read instant is a reserved execution-time placeholder,
+  and each execution fills a fresh instant into it and runs the cached text
+  directly. Repeated point-query execution drops from ~47µs to ~2.4µs (near the
+  raw-execution floor) while staying just as fresh — a row created after
+  `prepare()` or the first `execute()` is still visible on the next call.
+
+  The cache applies to `ExecutableQuery`, prepared queries, aggregate queries,
+  and set operations, on backends that can compile and run raw SQL text
+  (synchronous SQLite and PostgreSQL backends); other backends — including async
+  SQLite profiles that do not expose `executeRaw` — fall back to per-call
+  recompilation unchanged. Statements whose execution depends on the compiled
+  SQL object — pgvector approximate-scan GUC tuning and parameter-blind-plan
+  avoidance — keep running through the standard execution path. `param()` now
+  rejects the reserved read-instant name, and aggregate queries (which have no
+  `.prepare()`) reject `param()` with clear guidance instead of a downstream
+  binding error.
+
+- [#244](https://github.com/nicia-ai/typegraph/pull/244) [`b38a537`](https://github.com/nicia-ai/typegraph/commit/b38a537d1f0abcb5925a94b7e0845fb1184509ff) Thanks [@pdlug](https://github.com/pdlug)! - Fix: "current" temporal reads now evaluate validity against the application
+  clock, not the database clock — repairing a read-after-write consistency
+  violation on Postgres.
+
+  `valid_from` is stamped from the application clock (`Date.toISOString()`) on
+  write, but a "current" read compiled its validity filter against the database
+  clock (`valid_from <= NOW()` on Postgres). On any deployment where the
+  application-server clock runs ahead of the database-server clock — i.e. the
+  app and database on separate hosts, which is the norm — a freshly-created node
+  or edge could be missing from the very "current" read that immediately
+  followed its creation, until the database clock caught up. SQLite (a single
+  in-process clock) was never exposed.
+
+  The "current" read now binds the application clock (`nowIso()`) as a
+  parameter — the same clock `valid_from`, the facade search-currency filter,
+  and the recorded/logical clock already use — across every current-read path
+  (standard and recursive queries, subgraph extraction, graph algorithms, and
+  recorded-time reads). The temporal-visibility clock is now a single source.
+  Because the current-read instant is no longer dialect-specific, the internal
+  `DialectAdapter.currentTimestamp()` seam has been removed.
+
+  **Know the consistency model this buys you.** Reads and writes now share one
+  clock — _the clock of the process that issued them_. Read-after-write
+  consistency therefore holds **per application process**: a node you just
+  created is visible to the very next current read from that same process,
+  which is the guarantee the bug broke. It does **not** extend across processes.
+  Two application servers with skewed clocks, writing to one PostgreSQL
+  database, can still miss each other's fresh rows: a row stamped
+  `valid_from = T` by the server that runs ahead stays invisible to a current
+  read from the server that runs behind until its own clock passes `T`. The
+  window equals the skew between the two application hosts, not between an
+  application host and the database. If you need cross-process read-after-write
+  consistency, keep application clocks disciplined (NTP), or read at an explicit
+  `asOf` coordinate rather than `current`.
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Fix: `store.algorithms.degree()` undercounted edges written before an endpoint
+  declaration changed.
+
+  To let the composite edge indexes seek — both lead with the endpoint kind
+  column, so a bare `from_id = ?` cannot — the direction filter supplied the
+  missing kind equality by enumerating the endpoint kinds the _graph declaration_
+  permits for the counted edge kinds. That enumeration is complete only for rows
+  written under the current declaration. Narrow `knows` from `from: [Person]` to
+  `from: [Employee]`, and every `Person`-rooted `knows` edge already on disk drops
+  out of the filter: `degree()` silently returns a number too small, with no error
+  and no warning.
+
+  The filter now derives the kind from the counted node itself, via an
+  uncorrelated scalar subquery. This is exact by construction: an edge row stores
+  the _actual_ kind of each endpoint node (the write path copies it off the
+  endpoint reference) and a node's kind is immutable for the life of its id, so
+  for any edge incident to a node, the endpoint kind on that node's side is that
+  node's kind and nothing else — however the declaration later evolves.
+
+  It is also a better filter. An equality on one kind replaces an `IN` list over
+  every declared endpoint and its `subClassOf` descendants, and both engines hoist
+  the uncorrelated subquery to a constant (a Postgres InitPlan, a SQLite one-shot
+  scalar subquery), so the seek is unchanged. `EXPLAIN QUERY PLAN` still shows
+  `typegraph_edges_from_idx` / `_to_idx` seeks with no partition scan.
+
+  `degree()` of an id that names no node is `0`, as before.
+
+- [#200](https://github.com/nicia-ai/typegraph/pull/200) [`472ac1c`](https://github.com/nicia-ai/typegraph/commit/472ac1c20a6751a52121da8732f6c562fe5124c8) Thanks [@pdlug](https://github.com/pdlug)! - `degree()` direction filters are now shaped for the default edge indexes.
+  The filters previously compiled to bare `from_id = ?` / `to_id = ?`, which
+  neither composite edge index can seek (both lead with the endpoint kind
+  column) — so degree counts relied on engine-specific rescue: SQLite
+  skip-scan (only with fresh statistics) or PostgreSQL 18's new btree skip
+  scan, and degenerated to partition scans everywhere else (PostgreSQL ≤ 17,
+  SQLite with stale statistics).
+
+  The filters now enumerate the endpoint kinds the graph declaration permits
+  for the counted edge kinds, expanded through the subClassOf closure — the
+  same set edge writes validate against — making `edges_from_idx` /
+  `edges_to_idx` structurally seekable on every engine and version.
+  Measured on PostgreSQL 18 (where the old form was already skip-scan
+  rescued): 0.30ms → 0.06ms per call; on older PostgreSQL the old form
+  could not use these indexes at all. An edge set that declares no endpoint
+  kinds on the required side now returns 0 without a round trip.
+
+  Behavior note: because the counted set is now restricted to edges whose
+  stored endpoint kind falls within the declaration's `subClassOf` closure,
+  `degree()` no longer counts an edge whose stored `from_kind` / `to_kind`
+  lies _outside_ that closure — e.g. a row written before the endpoint
+  declaration was narrowed, or written directly through the backend bypassing
+  endpoint validation. This matches how typed traversals already treat such
+  rows (invisible to a schema-consistent read), but it is a change from the
+  previous "count every edge touching this node regardless of stored kind"
+  behavior.
+
+- [#220](https://github.com/nicia-ai/typegraph/pull/220) [`7b48543`](https://github.com/nicia-ai/typegraph/commit/7b4854310fc042410e31f2e14abc19a9e61e44a2) Thanks [@pdlug](https://github.com/pdlug)! - Edge delete, edge hard delete, and node hard delete no longer re-read
+  the row inside the write transaction. The in-transaction preflight was
+  pure round-trip fat on these paths: nothing consumed the row, and the
+  writes are already concurrency-correct on their own — the tombstone
+  UPDATE is guarded by `deleted_at IS NULL` and the hard deletes are
+  id-keyed and idempotent, so a row deleted concurrently between the
+  outside gate and the write lock degrades to a 0-row no-op with
+  identical observable behavior (verified including recorded-time history
+  under a deliberately staled gate). One less statement per delete
+  (~20% of the per-op round trips on client/server engines). Node SOFT
+  delete keeps its preflight deliberately: its pipeline consumes the
+  pre-image for uniqueness-key cleanup, now documented in place.
+
+- [#227](https://github.com/nicia-ai/typegraph/pull/227) [`09754a6`](https://github.com/nicia-ai/typegraph/commit/09754a6e4435425e8a55e9a0b991fcbd66daccbf) Thanks [@pdlug](https://github.com/pdlug)! - Batches edge creation's endpoint-existence checks in `bulkCreate`/`bulkInsert`
+  into one `getNodes` call per distinct (kind) referenced across the whole
+  batch, instead of an individual `getNode` probe per edge (mirroring the
+  batched existence/uniqueness pre-check node creation already had via
+  `primeBatchValidationCaches`). Found while investigating why a real
+  LDBC SNB SF1 bulk load (millions of nodes and edges) was far slower than
+  expected: a controlled 1M-row reproduction showed `bulkInsert` edge-batch
+  time growing from ~90ms to ~630ms per 2,000-row batch as the graph grew,
+  while an equivalent node-only batch (no edges) stayed roughly flat. The
+  edge batch path validated each edge's `from`/`to` endpoints with a
+  `getNode` call per edge — for a batch with mostly-unique endpoints, that's
+  thousands of individual round trips per batch instead of one batched
+  fetch per distinct node kind. With the fix, the same 1M-edge reproduction's
+  per-batch time drops to roughly ~90-160ms and its growth curve flattens
+  substantially (the residual growth matches the same mild index-maintenance
+  cost already seen on plain node inserts). No behavior change: this is a
+  pure internal optimization to `executeEdgeCreateNoReturnBatch`/
+  `executeEdgeCreateBatch`; callers observe identical results, just fewer
+  round trips.
+
+- [#245](https://github.com/nicia-ai/typegraph/pull/245) [`ef6def6`](https://github.com/nicia-ai/typegraph/commit/ef6def6b67e306a9cdb40e78723dad6d36f89647) Thanks [@pdlug](https://github.com/pdlug)! - The default edge traversal indexes (`{table}_from_idx` / `{table}_to_idx`,
+  created for every graph on both SQLite and PostgreSQL) were missing two
+  things a traversal join needs to be served fully index-only:
+
+  - **`valid_from`** — one of the three system columns every compiled
+    query's soft-delete / temporal-validity predicate checks (`deleted_at`
+    and `valid_to` were already covered; `valid_from` wasn't).
+  - **The join's target-id column** — a compiled traversal reads `n.id =
+e.to_id` for an outgoing traversal, or `n.id = e.from_id` for an
+    incoming one (`standard-builders.ts`), but neither index carried the
+    _other_ endpoint's id column, so the join to the target node still
+    required a heap-row fetch even once the predicate columns above were
+    covered.
+
+  Both gaps produce the same symptom: SQLite's plan reads `USING INDEX`,
+  never `USING COVERING INDEX`, so every candidate edge pays a heap-row
+  fetch. That fetch is free while the table fits in the page cache. Once it
+  doesn't — a real LDBC SNB benchmark run measured this at 10x data volume,
+  where the nodes table outgrew available cache — every one of those
+  fetches becomes a genuine random disk read, and with thousands of
+  candidates per traversal that alone produced a multi-second/minute
+  latency cliff on an otherwise sub-millisecond query shape. Both indexes
+  now carry all five columns beyond their existing seek prefix
+  (`deleted_at`, `valid_from`, `valid_to`, plus the other endpoint's id),
+  confirmed via `EXPLAIN QUERY PLAN` against the actual SQL `execute()`
+  sends (not `toSQL()`'s wider, unoptimized output) to flip to `USING
+COVERING INDEX`.
+
+  **Existing databases get none of this until you rebuild the indexes.**
+  The widened indexes materialize on **fresh databases only**.
+  `generateSqliteMigrationSQL()` / `generatePostgresMigrationSQL()` emit
+  `CREATE INDEX IF NOT EXISTS` under the _same index name_, and that is a
+  no-op against an index that already exists — regardless of how the column
+  list changed. An upgraded deployment silently keeps its narrow index, and
+  keeps the latency cliff, until it runs the rebuild below. Upgrading the
+  package is not enough; there is no automatic migration.
+
+  ```sql
+  -- SQLite: no CONCURRENTLY equivalent; drop and let the next migration
+  -- run (generateSqliteMigrationSQL(), or a createStoreWithSchema boot,
+  -- which re-issues idempotent DDL) recreate them.
+  DROP INDEX IF EXISTS typegraph_edges_from_idx;
+  DROP INDEX IF EXISTS typegraph_edges_to_idx;
+
+  -- PostgreSQL: CREATE INDEX CONCURRENTLY does not block writes, but it
+  -- cannot run inside a transaction and needs its own connection. Rename
+  -- the old index out of the way first so the new one can use the
+  -- production name without a window where neither exists.
+  ALTER INDEX typegraph_edges_from_idx RENAME TO typegraph_edges_from_idx_old;
+  CREATE INDEX CONCURRENTLY "typegraph_edges_from_idx" ON "typegraph_edges"
+    ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_from", "valid_to", "to_id");
+  DROP INDEX CONCURRENTLY typegraph_edges_from_idx_old;
+
+  ALTER INDEX typegraph_edges_to_idx RENAME TO typegraph_edges_to_idx_old;
+  CREATE INDEX CONCURRENTLY "typegraph_edges_to_idx" ON "typegraph_edges"
+    ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_from", "valid_to", "from_id");
+  DROP INDEX CONCURRENTLY typegraph_edges_to_idx_old;
+  ```
+
+- [#217](https://github.com/nicia-ai/typegraph/pull/217) [`fce0a0f`](https://github.com/nicia-ai/typegraph/commit/fce0a0f18b90e7b6f5b5d395681231865b21fb52) Thanks [@pdlug](https://github.com/pdlug)! - Non-approximate `.similarTo()` is now genuinely exact when an ANN index
+  exists. pgvector serves any `ORDER BY embedding <=> q LIMIT k` from a
+  matching HNSW/IVFFlat index, so after `materializeIndexes()` the
+  default (non-approximate) inline vector predicate silently returned
+  approximate results — measured recall 0.980 unfiltered and 0.000 under
+  a selective filter at 50k docs, where the index frontier starves at the
+  default ef_search and returns entirely wrong rows. The exact branch now
+  orders by `(distance + 0.0)`, which the index opclass cannot match,
+  forcing the true flat scan on every engine (numerically identity;
+  inert on SQLite/libSQL whose ANN forms are opt-in constructs).
+
+  Behavior change: exact queries that were silently index-served get
+  correct results and flat-scan latency (50k x 384 dims: ~39ms instead of
+  ~23ms-but-wrong). The sanctioned fast path remains
+  `similarTo(..., { approximate: true })`, which is unchanged. The
+  `bench:vector` lane's `vector:exact-postindex-recall` and
+  `vector:exact-filtered-postindex-recall` rows now read 1.000.
+
+- [#210](https://github.com/nicia-ai/typegraph/pull/210) [`76422c6`](https://github.com/nicia-ai/typegraph/commit/76422c64189baa2c83287a99a1fea6a13bbfe976) Thanks [@pdlug](https://github.com/pdlug)! - perf: PostgreSQL fulltext queries are now parsed with the kind's DECLARED language as a plan-time constant (the same winning-language rule the write path applies to rows), instead of referencing the per-row `language` column. The per-row form made every tsquery non-constant, so the GIN index on `tsv` could never serve a match and every search re-parsed the query per row — measured 12.9ms → 2.3ms at 5,000 docs for the parse elimination alone, with GIN service now possible as corpora grow. Applies to the facade and the inline `$fulltext` predicate; mixed-language subclass aliases and explicit per-query overrides behave as before.
+
+- [#207](https://github.com/nicia-ai/typegraph/pull/207) [`5cbcb35`](https://github.com/nicia-ai/typegraph/commit/5cbcb35f9df972a6f36975b43adad2d7b110bfd1) Thanks [@pdlug](https://github.com/pdlug)! - perf: recorded-time capture acquires the PostgreSQL graph-write advisory lock once per transaction instead of once per captured write (`pg_advisory_xact_lock` is reentrant and held to transaction end, so the repeats were pure round trips). A 50-write recorded transaction drops from N+1 lock round trips to 1; measured 1.7× on the transaction shape.
+
+- [#215](https://github.com/nicia-ai/typegraph/pull/215) [`0eb2fd8`](https://github.com/nicia-ai/typegraph/commit/0eb2fd8ba778fb6e9cf6469481805a1c8cd86647) Thanks [@pdlug](https://github.com/pdlug)! - The single-statement hybrid search now emits the candidates set
+  (liveness/currency filter, or the compiled `where` predicate query)
+  once, as a CTE shared by the vector and fulltext legs, instead of
+  embedding — and re-executing — a private copy inside each leg. The
+  duplicate evaluation was most expensive with a `where` filter, whose
+  compiled candidates query ran twice per search: measured on PostgreSQL,
+  filtered hybrid drops 26.5ms → 17.1ms at 5k docs (bench shape
+  11.8ms → 8.6ms; unfiltered 6.1ms → 4.9ms). This also removes a subtle
+  inconsistency where each leg stamped its own currency instant. SQLite
+  is unchanged within noise (in-process re-execution was cheap).
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Fix: hybrid search's two execution paths agreed on scores but not on ties, and
+  neither was deterministic across PostgreSQL databases.
+
+  Relevance ranking breaks a score tie on `node_id`. Left bare, PostgreSQL sorts
+  that under the database's default text collation: an `en_US.UTF-8` database
+  orders `a, A, b, B` where byte order gives `A, B, a, b`. So the same query
+  returned different pages on two databases whose `datcollate` differed, and
+  disagreed with SQLite (whose `BINARY` collation is byte order) throughout.
+
+  Three seams had to move together, because a hybrid search's tiebreak decides the
+  page twice — once in the per-source ranks, and again in the fused ordering the
+  ranks produce:
+
+  - The single-statement hybrid search now renders `node_id COLLATE "C"` in both
+    per-source `ROW_NUMBER()` windows and in the final `ORDER BY`.
+  - The standalone fulltext search's `ORDER BY … , node_id` is C-collated too, so
+    the multi-statement fallback's fulltext ranks match.
+  - The fallback now re-ranks each leg's rows before assigning ranks, rather than
+    trusting the order the source SQL happened to return for a single kind. The
+    vector source breaks a distance tie arbitrarily — it carries no `node_id`
+    tiebreak, because a second sort key would cost pgvector its ordered index scan
+    — so its arrival order was never a sound basis for a rank. That re-rank sorts
+    with a new code-point comparator rather than JavaScript's UTF-16 code-unit
+    `<`, which disagrees with byte order for astral characters such as emoji.
+
+  All three orderings now coincide, and the single-statement and multi-statement
+  paths return identical hits, ranks, and scores even when every score ties.
+
+  Results only change where they were previously non-deterministic.
+
+- [#213](https://github.com/nicia-ai/typegraph/pull/213) [`a243f3b`](https://github.com/nicia-ai/typegraph/commit/a243f3bc323f8d7377454f06c2349fb87386963c) Thanks [@pdlug](https://github.com/pdlug)! - `importGraph`'s default `batchSize` is now 1,000 (was 100), and the
+  default now actually applies: options are parsed through
+  `ImportOptionsSchema` at the function boundary, so direct calls that
+  omit fields with schema defaults (e.g. `{ onConflict: "error" }`)
+  resolve them instead of reading `undefined`. `ImportOptions` is now the
+  schema's input type — fields with defaults are optional for callers.
+
+  Each import batch pays fixed per-round-trip costs (existence probe,
+  unique pre-check, one multi-row insert), so the old default dominated
+  import time on client/server engines: a 20k-node + 5k-edge import on
+  PostgreSQL drops from 1,515ms to 781ms (16.5k → 32k entities/s).
+  SQLite imports are insensitive to the value (in-process, no round
+  trips). Explicit `batchSize` values are unaffected.
+
+  Fulltext batch upserts and deletes are now split by the driver's
+  bind-parameter budget in the backend wrappers, like node/edge/unique
+  inserts already were. Previously a searchable import slice emitted ONE
+  FTS5 (or tsvector) statement over every row — 6 binds per row, so a
+  1,000-row slice overflowed SQLite's 999-bind fallback ceiling and D1's
+  ~100-bind cap, and 6,000-row slices overflowed even better-sqlite3's
+  32,766 budget ("too many SQL variables").
+
+- [#221](https://github.com/nicia-ai/typegraph/pull/221) [`9b61809`](https://github.com/nicia-ai/typegraph/commit/9b618098b6c6f4917f79a23f4b1f0477428de0b3) Thanks [@pdlug](https://github.com/pdlug)! - Inline `.similarTo(..., { approximate: true })` now actually uses the
+  ANN index on PostgreSQL. Two defects compounded: the candidates
+  membership subquery carried a `DISTINCT` that kept the planner off the
+  ordered index scan entirely (even `enable_seqscan = off` could not
+  rescue it — duplicates are irrelevant to `IN` membership, so the
+  DISTINCT bought nothing), and the inline path never applied the
+  pgvector GUCs the search facade uses, so even an index-served filtered
+  scan would have starved at the default ef_search frontier. The compiler
+  now emits duplicate-tolerant membership candidates for the engine-form
+  branch and brands ANN-bearing statements; the PostgreSQL backend wraps
+  branded statements with the facade's GUC overrides
+  (`hnsw.iterative_scan = strict_order` / `ivfflat.iterative_scan =
+relaxed_order` on transaction-capable drivers with pgvector >= 0.8;
+  the settings are transaction-scoped, so non-transactional backends
+  such as neon-http keep the plain bounded scan). Set operations merge
+  operand brands onto the combined statement, so a union with an
+  approximate operand is wrapped too. Measured at 50k x 384 dims:
+  unfiltered approximate 174ms -> 2.1ms (recall 0.995), filtered
+  approximate 3.8ms at recall 1.000 on filter-independent corpora. The
+  JOIN consumers of the scoped candidates (exact branch, fulltext CTE)
+  keep their DISTINCT — a join does multiply rows on duplicates — and the
+  non-approximate path's exactness guarantee is untouched.
+
+- [#224](https://github.com/nicia-ai/typegraph/pull/224) [`b5886cd`](https://github.com/nicia-ai/typegraph/commit/b5886cdad183dcba80586344935278a79f9ed795) Thanks [@pdlug](https://github.com/pdlug)! - Document external event-log materialization patterns and verify the
+  export/import bulk-copy path into graph-merge branches.
+
+- [#199](https://github.com/nicia-ai/typegraph/pull/199) [`d01d6c7`](https://github.com/nicia-ai/typegraph/commit/d01d6c76be56efb393a3cd5506e6a5690995c409) Thanks [@pdlug](https://github.com/pdlug)! - Subgraph extraction is ~4× faster on PostgreSQL. The final node/edge
+  fetches filtered ids with `IN (SELECT id FROM included_ids)`; PostgreSQL
+  pulls that form up into a join whose recursive-CTE row estimate (~10 rows
+  for a single-row seed) drives the planner into a nested-loop join filter —
+  measured at ~10 million discarded rows on the depth-3 benchmark shape.
+  PostgreSQL now evaluates membership against the materialized closure ids
+  with a parameterized `text[]` semi-join
+  (`EXISTS (SELECT 1 FROM unnest($ids) AS t(id) WHERE t.id = column)`) rather
+  than pulling the recursive CTE into that join; SQLite keeps `IN (subquery)`,
+  which it already evaluates optimally.
+
+  Measured (benchmark suite, 1,200 users / depth-3 stress shape): PostgreSQL
+  subgraph full hydration 322ms → 82ms, depth-2 11.5ms → 7.1ms; SQLite
+  unchanged.
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Fix: serialize the statements TypeGraph issues on a transaction's pinned
+  Postgres connection, so its own graph writes never present two queries to one
+  connection at once.
+
+  A transaction pins one connection, and the PostgreSQL wire protocol carries one
+  statement at a time. node-postgres hid that behind an internal queue, deprecated
+  it in `pg@8.22` ("Calling client.query() when the client is already executing a
+  query is deprecated and will be removed in pg@9.0. Use async/await or an
+  external async flow control mechanism instead"), and removes the queue in
+  `pg@9`. TypeGraph overlapped statements on a pinned connection in two ways:
+
+  - **Always on, no user concurrency required.** The node write pipeline issues
+    `Promise.all([syncEmbeddings, syncFulltext])` for any schema that has both a
+    `searchable()` field and an `embedding()` field, so every single `create()`,
+    `update()`, or resurrect on such a schema put two statements on the wire.
+  - **User-driven.** `store.transaction(async (tx) => { await Promise.all([...]) })`
+    is a documented, recommended pattern.
+
+  Transaction-scoped backends now run every statement they issue through a
+  per-connection queue. Concurrency at the API surface is unchanged — a
+  `Promise.all` of graph writes still works, and on a pooled (non-transactional)
+  backend the statements still run genuinely concurrently. The queue serializes
+  only what already had to be serial. A multi-statement `SET LOCAL`-scoped vector
+  search (snapshot / set / select / restore) runs as one exclusive group, so two
+  concurrent searches can no longer interleave and apply each other's `efSearch`.
+
+  The transaction boundary also **drains and closes** the queue before the driver
+  emits `COMMIT` / `ROLLBACK`. Those control statements do not travel through the
+  queue, so without the drain a rollback could overlap a live statement. And a
+  callback that rejects out of a `Promise.all` leaves its siblings running: their
+  statements would otherwise land on the connection _after_ the pool had reclaimed
+  it, executing inside an unrelated transaction. Such a statement is now refused
+  with a new `TransactionClosedError` (normally invisible — `Promise.all` has
+  already rejected with the original failure and discards this one).
+
+  **Scope: the queue mediates only TypeGraph's own statements.** The raw Drizzle
+  handle exposed as `tx.sql` (for writing your own relational tables in the same
+  atomic boundary) bypasses it. Running a raw statement concurrently with a graph
+  write — or with another raw statement — still races on the one pinned
+  connection, and `drainAndClose` cannot wait for a raw statement it never saw.
+  Await each `tx.sql` statement before the next write; this is inherent to a
+  single-connection transaction, not something TypeGraph can enforce over a handle
+  it doesn't mediate. `adoptTransaction()` likewise serializes the statements it
+  issues but never closes the queue — the caller owns that transaction's end.
+
+- [#219](https://github.com/nicia-ai/typegraph/pull/219) [`ee93b77`](https://github.com/nicia-ai/typegraph/commit/ee93b77581e6bcbddccf5256dbb2b321b827e361) Thanks [@pdlug](https://github.com/pdlug)! - Statements whose good plan depends on their parameter values (the
+  subgraph id-array fetches, marked internally with the custom-plan
+  brand) now opt out of statement preparation per call on the postgres-js
+  driver too, via `sql.unsafe(text, params, { prepare: false })`.
+  Previously postgres-js prepared them like everything else, so after
+  five executions PostgreSQL flipped them to a generic, parameter-blind
+  plan — the same cliff fixed for node-postgres in the subgraph
+  shared-traversal change (measured there: 21ms → 310ms on the edge
+  fetch). Scalar-parameter statements keep the driver's prepared default.
+
+- [#246](https://github.com/nicia-ai/typegraph/pull/246) [`d5aafe8`](https://github.com/nicia-ai/typegraph/commit/d5aafe845f95a503070ac485994afb46b3a82cac) Thanks [@pdlug](https://github.com/pdlug)! - **Critical fix**: `.prepare()`d queries, and any `ExecutableQuery`/`UnionableQuery`/`ExecutableAggregateQuery` instance whose `.execute()` was called more than once, could silently miss rows created after the query was first compiled.
+
+  A "current" (live) temporal-validity read binds its read instant (`currentReadInstant()`) at SQL compile time. All four query-builder classes cached their compiled SQL text across calls — `.prepare()` compiled once and every subsequent `execute({...})` reused that same SQL text, and a reused `ExecutableQuery`/`UnionableQuery`/`ExecutableAggregateQuery` instance cached its first `.execute()`'s compilation the same way. Both patterns froze "now" at the moment of first compilation: any row created afterward had a `valid_from` later than the frozen instant, so `valid_from <= now` silently evaluated to false for it, for the query's entire remaining lifetime.
+
+  This is a regression introduced by the `current-read-app-clock` fix (the [#242](https://github.com/nicia-ai/typegraph/issues/242) clock-skew correction): the prior behavior (`NOW()` / `strftime('now')`, evaluated fresh by the database on every execution) did not have this problem. It is more severe than [#242](https://github.com/nicia-ai/typegraph/issues/242) — that bug required app/DB clock skew across separate hosts; this one reproduces unconditionally, in a single process, on the very next insert after a query is prepared or first executed. `.prepare()`-once-`.execute()`-many is this library's own documented, recommended pattern, so this affected the common case, not an edge case.
+
+  **Fix**: none of the four classes cache compiled SQL text across calls anymore — each `execute()`/`compile()`/`toSQL()` call recompiles fresh, so `currentReadInstant()` is re-evaluated every time. `.prepare()` still builds and structurally validates the query AST once (so a malformed query still fails fast, before the first `execute()`); only the SQL-text compilation moved from prepare-time to each execute-time call. `param()`-bound values are unaffected — those were already correctly re-bound per call.
+
+- [#209](https://github.com/nicia-ai/typegraph/pull/209) [`5e24882`](https://github.com/nicia-ai/typegraph/commit/5e24882536a242d75a2ec9973bfb0301027da92c) Thanks [@pdlug](https://github.com/pdlug)! - perf: facade search candidate handling planned poorly at scale. The hybrid statement's fused CTE is now MATERIALIZED (PostgreSQL inlines single-use CTEs, re-executing the fusion subtree once per candidate node row under a nested-loop join), and unfiltered facade searches use a flat, parameter-bound current-read candidates subquery instead of a compiled builder query whose per-row SQL clock calls dominated on SQLite. Semantics are unchanged — validity windows and tombstones are still enforced, with the instant bound as a parameter. Only searches with a `where` predicate compile a builder query as candidates; `includeSubClasses` expands at the store level and each concrete kind uses the flat form.
+
+- [#202](https://github.com/nicia-ai/typegraph/pull/202) [`b45cfc3`](https://github.com/nicia-ai/typegraph/commit/b45cfc3e6d141a6f037544572f862f00c27d5571) Thanks [@pdlug](https://github.com/pdlug)! - fix: facade search (`store.search.vector` / `fulltext` / `hybrid`) now computes top-k over live nodes in SQL. Previously the search statement ranked side-table rows alone and hydration dropped tombstoned ids afterward, silently returning fewer than `limit` hits under index drift. Liveness is pushed into the KNN/MATCH SQL on every engine — exact on pgvector ≥0.8 (HNSW via `hnsw.iterative_scan = strict_order`; IVFFlat via `ivfflat.iterative_scan = relaxed_order` with an in-statement re-sort), sqlite-vec (vec0 primary-key `IN` pushdown), tsvector, and FTS5; libSQL DiskANN over-fetches 4× and post-filters (documented recall bound).
+
+- [#237](https://github.com/nicia-ai/typegraph/pull/237) [`48f324b`](https://github.com/nicia-ai/typegraph/commit/48f324b905c9d0e2aa52371780e3c443b596040a) Thanks [@pdlug](https://github.com/pdlug)! - Fixes `.select()` query projections losing the `NodeId<N>` brand on node `id`
+  fields. Previously `ctx.alias.id` in a `.select()` callback was typed as plain
+  `string`, so feeding a projected node id back into `getById`/`getByIds`
+  required an unsafe cast (`as never` or worse). `SelectableNode<N>.id` is now
+  typed `NodeId<N>`, matching what `getById`/`getByIds` already require — no
+  runtime change, no cast needed.
+
+  Edge ids from `.select()` stay plain `string` on purpose: `traverse()`
+  defaults to `expand: "inverse"`, which can back an edge alias with a row of
+  the registered _inverse_ edge kind, so the alias's static edge type doesn't
+  reliably describe the row. Use `asEdgeId` to re-brand a projected edge id
+  before a point read.
+
+- [#247](https://github.com/nicia-ai/typegraph/pull/247) [`191e877`](https://github.com/nicia-ai/typegraph/commit/191e877796fde30ad606993948decea7305fd367) Thanks [@pdlug](https://github.com/pdlug)! - Fix: a set operation now binds one "current" read instant across all of its
+  operands.
+
+  `UNION` / `INTERSECT` / `EXCEPT` compile each operand independently, and each
+  operand compiled its own temporal-validity filter from a fresh `nowIso()`
+  sample. A compound `SELECT` is evaluated against a single snapshot, so two
+  samples microseconds apart let the two halves of an `INTERSECT` or `EXCEPT`
+  disagree about whether a row created between them is current — a row could
+  satisfy the left operand's `valid_from <= now` and not the right's.
+
+  Compilation of a set operation (including nested ones) now runs under a single
+  pinned instant. Ordinary single-leaf queries were already consistent — they bind
+  one instant per compile — and are unaffected.
+
+- [#226](https://github.com/nicia-ai/typegraph/pull/226) [`4cd6b4c`](https://github.com/nicia-ai/typegraph/commit/4cd6b4ca8275c2dad53d85c085347814528b3074) Thanks [@pdlug](https://github.com/pdlug)! - Fixes a scaling bug in the SQLite backend's `refreshStatistics()` (the
+  planner-statistics refresh `bulkCreate`/`bulkInsert` trigger automatically
+  after a large autocommit write — see the `autoRefreshStatistics` store
+  option). It ran a bare, unscoped `ANALYZE`, which does two things wrong on
+  SQLite: it re-analyzes every table in the database file (not just
+  TypeGraph's own tables — already fixed on the Postgres backend), and it
+  does a full, unbounded table/index scan per call (Postgres's `ANALYZE`
+  samples a fixed-size set of rows regardless of table size; SQLite's does
+  not unless bounded). A caller streaming a bulk load through repeated
+  `bulkInsert()` calls — the only practical way to load a multi-million-row
+  dataset without holding it all in memory — re-triggers this once each
+  batch's row count crosses the threshold; with unbounded per-call cost
+  growing with total table size, total load time integrated to O(n²)
+  instead of O(n) (observed: a 2M-row bulk load that never finished after
+  4.5+ hours). `refreshStatistics()` on SQLite now scopes ANALYZE to
+  TypeGraph's own tables and sets `PRAGMA analysis_limit` first, bounding
+  each call's cost the way Postgres's already was. A 100k-row reproduction
+  of the original shape now completes in ~8s with load time growing
+  log-ishly with table size (2x from first batch to last), not
+  quadratically.
+
+- [#218](https://github.com/nicia-ai/typegraph/pull/218) [`b601484`](https://github.com/nicia-ai/typegraph/commit/b601484e95f11f61d4b086f493a95e2b0c4f9c18) Thanks [@pdlug](https://github.com/pdlug)! - Non-approximate `.similarTo()` on SQLite now routes through sqlite-vec's
+  vec0 KNN form. vec0's KNN is brute-force in C — exact by construction —
+  so the default path keeps identical results (pinned against
+  JS-computed ground truth) while dropping from the SQL distance scan to
+  engine speed: 489ms → 124ms for top-10 over 50k 384-dim embeddings.
+  Declared via a new `searchIsExact` flag on the vector-strategy
+  contract; pgvector and libSQL leave it unset (their engine forms are
+  approximate) and are unchanged. The metric gate still applies: an
+  explicit metric override that differs from the slot's declared metric
+  falls back to the SQL scan, which is correct for any metric.
+
+- [#211](https://github.com/nicia-ai/typegraph/pull/211) [`a216569`](https://github.com/nicia-ai/typegraph/commit/a21656906eec3cfc532200b1709d6356e6047d71) Thanks [@pdlug](https://github.com/pdlug)! - Subgraph extraction on PostgreSQL now runs the recursive traversal once
+  instead of twice. The node and edge fetches previously each embedded the
+  full recursive CTE; the closure ids are now fetched in one statement and
+  passed to both fetches as a single `text[]` parameter, filtered via an
+  `EXISTS` semi-join over `unnest`. Those id-filtered fetches execute as
+  unnamed statements so PostgreSQL plans them against the actual array on
+  every call — a named prepared statement flips to a generic plan after
+  five executions, which mis-plans array-cardinality-dependent filters
+  (measured 21ms → 310ms on the edge fetch). Depth-3 stress subgraph
+  (1,109 nodes / 4,513 edges, wide payloads): 82.9ms → 30.9ms full
+  hydration, 72.3ms → 15.6ms with SQL projection. SQLite keeps its
+  existing single-statement-per-fetch form, which is already optimal for
+  an in-process engine.
+
+- [#234](https://github.com/nicia-ai/typegraph/pull/234) [`d042a30`](https://github.com/nicia-ai/typegraph/commit/d042a304979ea32f5777480b2cd28a8a02b1f339) Thanks [@pdlug](https://github.com/pdlug)! - perf: push selected top-level `props` field extractions into the
+  start/traversal CTEs instead of carrying the whole raw `props` JSONB/JSON
+  column outward for later extraction at the final projection. Each
+  selected field is extracted once, inline, as its own typed CTE column
+  (named from a length-prefixed encoding of its alias and field, so
+  distinct alias/field pairs can never collide on the same column name);
+  the outer projection and any matching `ORDER BY` on the same field just
+  reference that column directly instead of re-extracting from a
+  carried-forward `<alias>_props` column.
+
+  Found while investigating why a covering index on a system column (see
+  `keySystemColumns`) still couldn't get Postgres to serve an indexed join
+  index-only: the compiled query was asking for the entire `props` column
+  in the join step even though the final `.select()` only needed one
+  extracted field, so the specific indexed expression was never actually
+  what got read from the table. No behavior change: compiled query results
+  are identical; this only changes which columns each CTE carries and
+  where field extraction happens.
+
+- [#242](https://github.com/nicia-ai/typegraph/pull/242) [`6b884b6`](https://github.com/nicia-ai/typegraph/commit/6b884b66b3f642bfc2a65064f51c63ce317c4cc9) Thanks [@pdlug](https://github.com/pdlug)! - Fix: creating a node or edge without an explicit `validFrom` now stamps the
+  operation's own creation timestamp instead of storing SQL `NULL`.
+
+  `NULL` is interpreted by temporal filters as open-left validity ("valid
+  since forever"), so a record created without `validFrom` was visible at
+  _any_ historical `asOf` instant — including ones before the record existed.
+  This contradicted the documented contract ("omitted `validFrom` defaults to
+  now") and is fixed at the insert layer for every write path: `create`,
+  `createFromRecord`, `upsertById`/`upsertByIdFromRecord` (create branch),
+  `bulkCreate`, `bulkInsert`, `bulkUpsertById`, and get-or-create, for both
+  nodes and edges.
+
+  `branch()`'s working-copy clone now also exports with `includeTemporal:
+true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
+  this, the clone would re-stamp any implicit `validFrom` to the fork's own
+  (later) creation time, narrowing the fork's valid-time window relative to
+  the base it was cloned from. This includes rows that still have a `NULL`
+  `valid_from` (predating this fix, or written directly via the backend):
+  `exportGraph`/`importGraph` now round-trip a confirmed open-left window as
+  an explicit `null` rather than silently dropping it, so a legacy row's
+  "valid since forever" semantics survive a clone unchanged instead of being
+  narrowed to the clone's own creation time.
+
+  `exportGraph`/`importGraph` round trips still default `includeTemporal` to
+  `false`; without it, imported records get a fresh `validFrom` at import
+  time rather than the source's original value (see the Interchange docs).
+
+  Custom `GraphBackend` implementations that build their own inserts (rather
+  than reusing the bundled Drizzle operation builders) should apply the same
+  rule: an omitted `validFrom` defaults to the row's creation instant, and an
+  explicit `null` is preserved as SQL `NULL` (open-left).
+
+- [#214](https://github.com/nicia-ai/typegraph/pull/214) [`583fbb3`](https://github.com/nicia-ai/typegraph/commit/583fbb3782d78b16e07f92082da37ab299c3d966) Thanks [@pdlug](https://github.com/pdlug)! - PostgreSQL ANN index builds (`materializeIndexes()` on pgvector
+  HNSW/IVFFlat) now retry serially when the parallel build exhausts
+  shared memory. Parallel builds stage the index graph in dynamic shared
+  memory, and resource-constrained hosts — e.g. containers with the 64MB
+  `/dev/shm` default — reject the allocation with SQLSTATE class 53
+  (observed: 53100 from `dsm_impl_posix` on a 50k x 384-dim HNSW build).
+  The retry drops the INVALID leftover from the failed CONCURRENTLY
+  build, pins the vector table to `parallel_workers = 0`, rebuilds in
+  local memory, and restores the setting. Non-resource failures still
+  surface as before. Serial builds are slower — raise `/dev/shm` and
+  `maintenance_work_mem` where you control the host — but a slow index
+  beats a silently missing one.
+
 ## 0.34.0
 
 ### Minor Changes
