@@ -276,8 +276,19 @@ nothing, `measure` attributes per change (and, if you keep an in-graph cursor,
 excludes its write from the count) — `receipt.recorded` as the per-offset replay
 anchor, and `writes.total === 0` on a non-delete change as the drop signal.
 
+`withRecordedTransaction` flushes recorded-time capture and resolves **before**
+the caller's commit, so `outcome.receipt.recorded` is already known inside the
+`db.transaction` callback. Write the cursor advance **and** its replay anchor
+through `dbTx` there, in the same commit as the graph writes. Persisting the
+anchor after the commit — as a separate step — would reopen the exactly-once gap
+the adopted transaction exists to close: a crash between the commit and the
+anchor write leaves the cursor advanced with no anchor, and that offset can never
+be replayed.
+
 ```typescript
-const receipt = await db.transaction(async (dbTx) => {
+let lastAnchor: RecordedInstant | undefined = await loadLastAnchor(); // on resume
+
+lastAnchor = await db.transaction(async (dbTx) => {
   const outcome = await store.withRecordedTransaction(dbTx, async (tx) => {
     for (const change of batch.changes) {
       const projected = await tx.measure(() => projectChange(tx, change));
@@ -292,6 +303,17 @@ const receipt = await db.transaction(async (dbTx) => {
     }
   });
 
+  // `recorded` is undefined when the batch captured nothing (all drops, no-op
+  // deletes, or coalesced upserts) — carry the prior anchor forward so replay
+  // by offset still resolves. Anchor comes from the receipt, never from a
+  // post-commit store.recordedNow() (see below).
+  const anchor = outcome.receipt.recorded ?? lastAnchor;
+
+  // Cursor and anchor commit atomically with the graph writes: no window where
+  // the cursor has advanced past an offset whose anchor was never persisted.
+  await dbTx
+    .insert(offsetAnchors)
+    .values({ sourceId: batch.sourceId, offset: batch.endOffset, recorded: anchor });
   await dbTx
     .insert(streamCursors)
     .values({ sourceId: batch.sourceId, offset: batch.endOffset })
@@ -300,15 +322,8 @@ const receipt = await db.transaction(async (dbTx) => {
       set: { offset: batch.endOffset },
     });
 
-  return outcome.receipt;
+  return anchor; // updates lastAnchor only once the transaction commits
 });
-
-// Anchor the offset from the receipt, never from a post-commit recordedNow().
-if (receipt.recorded !== undefined) {
-  await offsetAnchors.save(batch.endOffset, receipt.recorded);
-} else {
-  await offsetAnchors.carryForward(batch.endOffset); // nothing captured
-}
 ```
 
 **Take the replay anchor from `receipt.recorded`, never from a post-commit
@@ -355,18 +370,23 @@ surface.
 
 ### Refresh planner statistics after a large replay
 
-A replay or backfill runs its writes **inside caller-provided transactions** (the
-projector transaction, or interchange's own). Those never auto-refresh the query
-planner's table statistics — `ANALYZE` from another connection cannot see rows
-that are still uncommitted, so the store deliberately skips the automatic refresh
-it does after large autocommit bulk writes. Left alone, the planner keeps
-pre-load row estimates and can pick an order-of-magnitude-slower plan. After a
-large replay, refresh once:
+A **custom** replay or backfill loop — one built from the projector recipes above
+— runs its writes **inside a caller-provided transaction**, which never
+auto-refreshes the query planner's table statistics: `ANALYZE` from another
+connection cannot see rows that are still uncommitted, so the store deliberately
+skips the automatic refresh it does after large autocommit bulk writes. Left
+alone, the planner keeps pre-load row estimates and can pick an
+order-of-magnitude-slower plan. After a large custom replay, refresh once:
 
 ```typescript
 await replayEverything();
 await store.refreshStatistics(); // once, after the bulk replay commits
 ```
+
+The interchange path handles this for you: `importGraph` and `importGraphStream`
+call `refreshStatistics()` once after the import commits (see
+[Bulk Copy Between Stores](#bulk-copy-between-stores)), so a bulk copy needs no
+manual refresh.
 
 ## Bulk Copy Between Stores
 
@@ -400,8 +420,13 @@ if (!result.success) {
 Two option defaults are exactly right here and worth stating because they are not
 obvious:
 
-- **`includeDeleted` defaults to `false`.** A retracted fact must not resurface
-  in the copy — a soft-deleted row stays deleted on the target.
+- **`includeDeleted` defaults to `false`, and the copy clones live state — it
+  does not synchronize deletions.** The exporter simply omits soft-deleted rows;
+  it cannot round-trip `deletedAt` at all (the wire format carries no deletion
+  flag). So a fact deleted on the source is merely *absent* from the stream: on a
+  fresh target it never appears, but on a populated target an existing live row
+  **stays live** — the copy never deletes it. If the target must reflect
+  deletions, apply them through your projector, not the bulk copy.
 - **`includeTemporal` must be set to `true`** (it defaults to `false`). It is
   what carries each fact's original `validFrom` / `validTo` across the copy;
   without it the import re-stamps every fact with the *copy's* wall clock,
