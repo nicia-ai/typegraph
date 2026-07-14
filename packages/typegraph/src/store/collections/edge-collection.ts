@@ -527,7 +527,7 @@ export function createEdgeCollection<
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
-      ): Promise<Edge<E>[]> => {
+      ): Promise<{ results: Edge<E>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
         const existingMap = await getEdgeRowsByIds(target, graphId, ids);
 
@@ -544,12 +544,19 @@ export function createEdgeCollection<
           clearDeleted: boolean;
         }[] = [];
 
+        // Only the FIRST occurrence of an id may coalesce; a repeated id always
+        // writes so last-write-wins is preserved. See the node collection.
+        const seenIds = new Set<string>();
+
         let itemIndex = 0;
         for (const item of items) {
           const existing = existingMap.get(item.id);
+          const firstOccurrence = !seenIds.has(item.id);
+          seenIds.add(item.id);
 
           if (existing) {
             if (
+              firstOccurrence &&
               shouldCoalesceUpsert(existing, item, () =>
                 config.isUpsertUnchanged?.(existing, item.props ?? {}),
               )
@@ -593,17 +600,18 @@ export function createEdgeCollection<
           results[entry.index] = narrowEdge<E>(result);
         }
 
-        return results;
+        return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const results =
+      const { results, mutations } =
         backend.capabilities.transactions && "transaction" in backend ?
           await backend.transaction(async (txBackend) => upsertAll(txBackend))
         : await upsertAll(backend);
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
-      // autocommit bulk write. Threshold-gated, and a no-op inside a caller
+      // autocommit bulk write. Coalesced items wrote nothing, so only real
+      // mutations count toward the threshold. A no-op inside a caller
       // transaction (the hook is intentionally undefined there).
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      await config.maybeRefreshStatisticsAfterBulk?.(mutations);
       return results;
     },
 

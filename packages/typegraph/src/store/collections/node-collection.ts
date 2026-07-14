@@ -423,7 +423,7 @@ export function createNodeCollection<
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
-      ): Promise<Node<N>[]> => {
+      ): Promise<{ results: Node<N>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored
         // props, not just deleted_at.
@@ -456,12 +456,23 @@ export function createNodeCollection<
           clearDeleted: boolean;
         }[] = [];
 
+        // Only the FIRST occurrence of an id in this batch may coalesce: the
+        // dirty-check compares against the once-prefetched row, so a later
+        // same-id item would otherwise coalesce against stale state and drop
+        // an earlier queued write (breaking last-write-wins). A repeated id
+        // always writes; the sequential updates below re-read in order, so the
+        // last item's value wins as before coalescing existed.
+        const seenIds = new Set<string>();
+
         let itemIndex = 0;
         for (const item of items) {
           const existing = existingMap.get(item.id);
+          const firstOccurrence = !seenIds.has(item.id);
+          seenIds.add(item.id);
 
           if (existing) {
             if (
+              firstOccurrence &&
               shouldCoalesceUpsert(existing, item, () =>
                 config.isUpsertUnchanged?.(existing, item.props),
               )
@@ -499,17 +510,18 @@ export function createNodeCollection<
           results[entry.index] = narrowNode<N>(result);
         }
 
-        return results;
+        return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const results =
+      const { results, mutations } =
         backend.capabilities.transactions && "transaction" in backend ?
           await backend.transaction(async (txBackend) => upsertAll(txBackend))
         : await upsertAll(backend);
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
-      // autocommit bulk write. Threshold-gated, and a no-op inside a caller
+      // autocommit bulk write. Coalesced items wrote nothing, so only real
+      // mutations count toward the threshold. A no-op inside a caller
       // transaction (the hook is intentionally undefined there).
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      await config.maybeRefreshStatisticsAfterBulk?.(mutations);
       return results;
     },
 

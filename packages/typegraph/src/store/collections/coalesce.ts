@@ -19,16 +19,29 @@
  * `isUnchanged` returns `undefined` when the store did not enable coalescing
  * (the seam is absent), which fails the `=== true` check — so an unconfigured
  * store never coalesces.
+ *
+ * `isUnchanged` validates the input (rule 4 runs it through the kind's Zod
+ * schema) and so can throw a `ValidationError`. That throw is swallowed and
+ * treated as "do not coalesce": the write must not fail HERE, at the collection
+ * layer, ahead of the operation hooks — falling through to the normal write
+ * path re-runs the same validation inside the hooked pipeline, which raises the
+ * error with correct `onError` wiring (matching flag-off behavior).
  */
 export function shouldCoalesceUpsert(
   existing: Readonly<{ deleted_at: string | undefined }>,
   options: Readonly<{ validFrom?: string; validTo?: string }> | undefined,
   isUnchanged: () => boolean | undefined,
 ): boolean {
-  return (
-    existing.deleted_at === undefined &&
-    options?.validFrom === undefined &&
-    options?.validTo === undefined &&
-    isUnchanged() === true
-  );
+  if (
+    existing.deleted_at !== undefined ||
+    options?.validFrom !== undefined ||
+    options?.validTo !== undefined
+  ) {
+    return false;
+  }
+  try {
+    return isUnchanged() === true;
+  } catch {
+    return false;
+  }
 }

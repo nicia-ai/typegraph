@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   asCompiledRowsSql,
@@ -369,6 +369,134 @@ export function registerCoalesceUpsertIntegrationTests(
         // delete, which at-least-once consumers already handle.
         expect(replay.receipt.writes.total).toBe(1);
         expect(replay.receipt.recorded).toBeUndefined();
+      });
+    });
+
+    describe("post-review fixes (#262)", () => {
+      it("preserves last-write-wins for duplicate node ids in one batch", async () => {
+        const store = await createCoalesceStore(context);
+        await store.nodes.Person.upsertById("dup", { name: "A" });
+
+        // The second item's props equal the PREFETCHED row; without the
+        // first-occurrence guard it would coalesce against stale state and
+        // drop the first item's write, leaving "B". Last-write-wins is "A".
+        await store.nodes.Person.bulkUpsertById([
+          { id: "dup", props: { name: "B" } },
+          { id: "dup", props: { name: "A" } },
+        ]);
+
+        const final = await store.nodes.Person.getById(personId("dup"));
+        expect((final as { name?: string }).name).toBe("A");
+      });
+
+      it("coalesces the first duplicate occurrence but still writes the last (history)", async () => {
+        const store = await createCoalesceStore(context, { history: true });
+        await store.nodes.Person.upsertById("dup2", { name: "A" });
+        const rowsAfterSeed = await countRecordedNodeRows(
+          store,
+          "Person",
+          "dup2",
+        );
+
+        // [{A},{B}]: the first item equals the row and coalesces (no write);
+        // the second writes "B". Final "B", and exactly one new recorded row.
+        await store.nodes.Person.bulkUpsertById([
+          { id: "dup2", props: { name: "A" } },
+          { id: "dup2", props: { name: "B" } },
+        ]);
+
+        const final = await store.nodes.Person.getById(personId("dup2"));
+        expect((final as { name?: string }).name).toBe("B");
+        expect(await countRecordedNodeRows(store, "Person", "dup2")).toBe(
+          rowsAfterSeed + 1,
+        );
+      });
+
+      it("preserves last-write-wins for duplicate edge ids in one batch", async () => {
+        const store = await createCoalesceStore(context);
+        const [alice, bob] = await store.nodes.Person.bulkCreate([
+          { props: { name: "A" }, id: "dup-a" },
+          { props: { name: "B" }, id: "dup-b" },
+        ]);
+        if (alice === undefined || bob === undefined) {
+          throw new Error("expected both people");
+        }
+        await store.edges.knows.bulkUpsertById([
+          { id: knowsId("dup-e"), from: alice, to: bob, props: { since: "x" } },
+        ]);
+
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("dup-e"),
+            from: alice,
+            to: bob,
+            props: { since: "2050" },
+          },
+          {
+            id: knowsId("dup-e"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+          },
+        ]);
+
+        const final = await store.edges.knows.getById(knowsId("dup-e"));
+        expect((final as { since?: string }).since).toBe("2020");
+      });
+
+      it("routes a dirty-check validation error through onError (not the collection layer)", async () => {
+        const onError = vi.fn();
+        const [store] = await createStoreWithSchema(
+          integrationTestGraph,
+          context.getStore().backend,
+          { coalesceUnchangedUpserts: true, hooks: { onError } },
+        );
+        await store.nodes.Person.upsertById("bad", { name: "Valid" });
+
+        // `name: 42` fails the Zod schema. The dirty check validates first at
+        // the collection layer; the fix makes that throw fall through to the
+        // hooked write path so onError still fires, matching flag-off.
+        await expect(
+          store.nodes.Person.upsertByIdFromRecord("bad", { name: 42 }),
+        ).rejects.toThrow();
+        expect(onError).toHaveBeenCalledTimes(1);
+      });
+
+      it("counts only real mutations toward the statistics-refresh threshold", async () => {
+        const [store] = await createStoreWithSchema(
+          integrationTestGraph,
+          context.getStore().backend,
+          { coalesceUnchangedUpserts: true, autoRefreshStatistics: 2 },
+        );
+        await store.nodes.Person.bulkUpsertById([
+          { id: "s1", props: { name: "S1" } },
+          { id: "s2", props: { name: "S2" } },
+        ]);
+
+        // Count refreshStatistics() calls by overriding the instance method —
+        // #maybeRefreshStatisticsAfterBulk invokes it as this.refreshStatistics().
+        let refreshCalls = 0;
+        const runRefresh = store.refreshStatistics.bind(store);
+        (store as { refreshStatistics: () => Promise<void> }).refreshStatistics =
+          async () => {
+            refreshCalls += 1;
+            await runRefresh();
+          };
+
+        // All coalesced → zero mutations → below threshold → no refresh.
+        await store.nodes.Person.bulkUpsertById([
+          { id: "s1", props: { name: "S1" } },
+          { id: "s2", props: { name: "S2" } },
+        ]);
+        expect(refreshCalls).toBe(0);
+
+        // One coalesced + one update + one create = two real mutations → refresh.
+        await store.nodes.Person.bulkUpsertById([
+          { id: "s1", props: { name: "S1" } },
+          { id: "s2", props: { name: "S2-changed" } },
+          { id: "s3", props: { name: "S3" } },
+        ]);
+        expect(refreshCalls).toBe(1);
       });
     });
   });
