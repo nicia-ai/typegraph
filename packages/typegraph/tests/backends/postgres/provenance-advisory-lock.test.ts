@@ -339,7 +339,14 @@ describe("recorded graph-write advisory lock (Postgres)", () => {
     expect(callbackEntered).toBe(false);
 
     await clientA.query("COMMIT");
-    await expect(pendingTransaction).resolves.toBeUndefined();
+    // #255: the adopted path returns a TransactionOutcome. On Postgres the
+    // recorded anchor is allocated under the advisory lock this test exercises,
+    // so assert both the write count and a defined recorded instant here.
+    await expect(pendingTransaction).resolves.toMatchObject({
+      receipt: { writes: { nodes: { Source: 1 }, total: 1 } },
+    });
+    const { receipt } = await pendingTransaction;
+    expect(receipt.recorded).toBeDefined();
     await expect(store.nodes.Source.getById(source.id)).resolves.toMatchObject({
       label: "updated-inside-adopted-transaction",
     });

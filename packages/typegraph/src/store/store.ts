@@ -202,9 +202,11 @@ import {
   type HistoryStoreOptions,
   type HookContext,
   type LiveStoreOptions,
+  type MeasurableTransactionContext,
   type Node,
   type OperationHookContext,
   type QueryOptions,
+  type ScopedMeasure,
   type SqlAvailability,
   type StoreHooks,
   type StoreOptions,
@@ -350,6 +352,13 @@ type TransactionRunResult<T> = Readonly<{
   result: T;
   recordedByGraph: RecordedFlushInstants | undefined;
 }>;
+
+/**
+ * The flush result for a `withRecordedTransaction` on a store without history
+ * capture: no recorded rows were closed, so no graph maps to an instant. Shared
+ * (rather than allocated per call) — a `ReadonlyMap` is never mutated.
+ */
+const EMPTY_RECORDED_FLUSH_INSTANTS: RecordedFlushInstants = new Map();
 
 function transactionOutcome<T>(
   result: T,
@@ -1555,17 +1564,23 @@ export class Store<G extends GraphDef> {
    *
    * The receipt does not count writes that bypass the `tx.nodes.*` /
    * `tx.edges.*` collections, such as direct backend writes, raw SQL, or
-   * import helpers. Adopted transactions (`withTransaction` /
-   * `withRecordedTransaction`) do not produce receipts in this version
-   * because their commit belongs to the caller. On non-transactional
-   * backends, the receipt is still returned, but it describes operations
-   * that individually committed rather than one atomic commit; if the
+   * import helpers. The adopted-commit sibling
+   * {@link Store.withRecordedTransaction} also returns a
+   * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
+   * entirely to the caller with no flush point) produces no receipt. On
+   * non-transactional backends, the receipt is still returned, but it describes
+   * operations that individually committed rather than one atomic commit; if the
    * callback rejects on such a backend, no receipt is returned even though
    * earlier operations committed individually.
    *
    * For stores created with `{ history: true }`, `receipt.recorded` is the
    * recorded commit instant this transaction allocated for the store's
    * graph, or `undefined` when nothing was captured.
+   *
+   * The callback receives a {@link MeasurableTransactionContext}: call
+   * `tx.measure(fn)` to scope a sub-receipt to a region of the transaction (e.g.
+   * to attribute writes to user code the caller invokes, excluding its own
+   * bookkeeping writes). See {@link MeasurableTransactionContext} for semantics.
    *
    * @example
    * ```typescript
@@ -1579,19 +1594,19 @@ export class Store<G extends GraphDef> {
    */
   transactionWithReceipt<T>(
     this: HistoryStore<G>,
-    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+    fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   transactionWithReceipt<T>(
-    fn: (tx: TransactionContext<G>) => Promise<T>,
+    fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   async transactionWithReceipt<T>(
     fn:
-      | ((tx: TransactionContext<G>) => Promise<T>)
-      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
+      | ((tx: MeasurableTransactionContext<G>) => Promise<T>)
+      | ((tx: MeasurableHistoryTransactionContext<G>) => Promise<T>),
     options?: TransactionOptions,
   ): Promise<TransactionOutcome<T>> {
     const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
@@ -1634,6 +1649,12 @@ export class Store<G extends GraphDef> {
         // No real transaction: `tx.sql` is absent and there is no atomicity.
         sqlAvailability: "unavailable",
         backend: this.#backend,
+        // `measure` scopes writes on a receipt-enabled context; on this
+        // non-transactional fallback the counts it reports describe
+        // individually-committed operations, mirroring the receipt caveat.
+        ...(receiptRecorder === undefined ?
+          {}
+        : { measure: receiptRecorder.measure }),
         getNodeCollection: (kind) =>
           this.#resolveDynamicNodeCollection(nodes, kind),
         // No transaction, no deferral: operations apply as they happen, so
@@ -1813,7 +1834,29 @@ export class Store<G extends GraphDef> {
    * session, so a graph write made through the transaction context *after* `fn`
    * returns (e.g. retaining `tx` and writing once more before the caller's
    * COMMIT) throws rather than committing uncaptured — the post-flush write
-   * cannot silently diverge history from live state.
+   * cannot silently diverge history from live state. This sealing behavior is
+   * unchanged by the receipt return.
+   *
+   * Returns a {@link TransactionOutcome} — the adopted path is the only way to
+   * get exactly-once cursors and graph writes atomically on a history store, so
+   * it surfaces the same receipt `transactionWithReceipt` does: `receipt.writes`
+   * for drop detection (a non-delete change that wrote nothing) and
+   * `receipt.recorded` as the per-transaction replay anchor. Destructure
+   * `{ result, receipt }`:
+   *
+   * ```typescript
+   * const { result, receipt } = await store.withRecordedTransaction(
+   *   externalTx,
+   *   async (tx) => tx.nodes.Document.update(documentId, props),
+   * );
+   * ```
+   *
+   * `receipt.recorded` is the recorded commit instant this transaction allocated
+   * for the store's graph at the flush point (when `fn` resolved), and is
+   * `undefined` when nothing was captured — a read-only `fn`, or a non-history
+   * store (where the receipt still counts write intents but there is no recorded
+   * time). To attribute writes when `fn` invokes user code that also
+   * bookkeeps, use `tx.measure(fn)` (see {@link MeasurableTransactionContext}).
    *
    * Write your own relational tables through the **external transaction handle
    * you passed in** (`externalTx`) — it *is* the pinned connection. `tx.sql` is
@@ -1825,7 +1868,7 @@ export class Store<G extends GraphDef> {
    * ```typescript
    * // Async driver (Postgres / libsql):
    * await db.transaction(async (pgTx) => {
-   *   await store.withRecordedTransaction(pgTx, async (tx) => {
+   *   const { receipt } = await store.withRecordedTransaction(pgTx, async (tx) => {
    *     await tx.nodes.Document.update(documentId, props); // graph write
    *   });
    *   await pgTx.insert(streamCursors).values(cursorRow);  // your own table
@@ -1840,20 +1883,20 @@ export class Store<G extends GraphDef> {
   withRecordedTransaction<T>(
     this: HistoryStore<G>,
     externalTx: AdoptedTransaction,
-    fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
-  ): Promise<T>;
+    fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
+  ): Promise<TransactionOutcome<T>>;
 
   withRecordedTransaction<T>(
     externalTx: AdoptedTransaction,
-    fn: (tx: TransactionContext<G>) => Promise<T>,
-  ): Promise<T>;
+    fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
+  ): Promise<TransactionOutcome<T>>;
 
   async withRecordedTransaction<T>(
     externalTx: AdoptedTransaction,
     fn:
-      | ((tx: TransactionContext<G>) => Promise<T>)
-      | ((tx: HistoryTransactionContext<G>) => Promise<T>),
-  ): Promise<T> {
+      | ((tx: MeasurableTransactionContext<G>) => Promise<T>)
+      | ((tx: MeasurableHistoryTransactionContext<G>) => Promise<T>),
+  ): Promise<TransactionOutcome<T>> {
     const adopt = this.#baseBackend.adoptTransaction;
     if (!adopt) {
       throw new ConfigurationError(
@@ -1869,22 +1912,40 @@ export class Store<G extends GraphDef> {
     if (this.#captureEnabled) {
       await assertRecordedCaptureTransactionIsolation(txBackend);
     }
+    // A uniform `flush → RecordedFlushInstants` shape on both branches keeps the
+    // outcome-building path identical; the non-history branch has no recorded
+    // rows to close, so it flushes to an empty instant map.
     const scope =
       this.#captureEnabled ?
         createRecordedTransactionScope(txBackend, this.#sqlSchema())
       : {
           backend: txBackend,
-          flush: () => Promise.resolve(),
+          flush: (): Promise<RecordedFlushInstants> =>
+            Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
         };
     if (this.#captureEnabled) {
       await lockRecordedGraphWrite(scope.backend, this.graphId);
     }
+    const receiptRecorder = createTransactionReceiptRecorder();
     const invoke = fn as (tx: TransactionContext<G>) => Promise<T>;
     const result = await invoke(
-      this.#buildTransactionContext(scope.backend, externalTx),
+      this.#buildTransactionContext(
+        scope.backend,
+        externalTx,
+        undefined,
+        receiptRecorder,
+      ),
     );
-    await scope.flush();
-    return result;
+    // Flush allocates the recorded commit instant for this transaction's graph;
+    // `transactionOutcome` reads this store's instant out of the returned map
+    // (undefined when nothing was captured) into `receipt.recorded`.
+    const recordedByGraph = await scope.flush();
+    return transactionOutcome(
+      result,
+      receiptRecorder,
+      recordedByGraph,
+      this.graphId,
+    );
   }
 
   /**
@@ -1972,6 +2033,12 @@ export class Store<G extends GraphDef> {
       backend: txBackend,
       getNodeCollection,
       runNodeOperationHooks,
+      // Scoped write measurement is only meaningful with a recorder to scope;
+      // omitting it on the plain path keeps `transaction()` contexts free of a
+      // `measure` the caller has no receiver for.
+      ...(receiptRecorder === undefined ?
+        {}
+      : { measure: receiptRecorder.measure }),
     };
 
     if (sql === undefined) return base;
@@ -3111,6 +3178,15 @@ export type HistoryTransactionContext<G extends GraphDef> = Omit<
     backend: HistorySafeTransactionBackend;
     sql?: never;
   }>;
+
+/**
+ * The {@link HistoryTransactionContext} handed to a `withRecordedTransaction`
+ * callback, extended with {@link ScopedMeasure}. Assignable to
+ * {@link MeasurableTransactionContext} (and hence to {@link TransactionContext}),
+ * so a projector helper typed against either still accepts it.
+ */
+export type MeasurableHistoryTransactionContext<G extends GraphDef> =
+  HistoryTransactionContext<G> & Readonly<{ measure: ScopedMeasure }>;
 
 export type RecordedReadStore<G extends GraphDef> = Store<G> &
   Readonly<{

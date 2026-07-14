@@ -287,12 +287,20 @@ tables through **that** handle (not `tx.sql`):
 
 ```typescript
 await db.transaction(async (pgTx) => {
-  await store.withRecordedTransaction(pgTx, async (tx) => {
+  const { receipt } = await store.withRecordedTransaction(pgTx, async (tx) => {
     await tx.nodes.Document.update(documentId, props); // graph write
   });
   await pgTx.insert(streamCursors).values(cursorRow);   // your own table
 }); // one COMMIT / ROLLBACK across both layers
 ```
+
+`withRecordedTransaction` returns a
+[`TransactionOutcome<T>`](/schemas-stores/#transaction-receipts): destructure
+`{ result, receipt }`. `receipt.writes` counts the graph writes (drop
+detection) and `receipt.recorded` is this transaction's recorded commit instant
+— the per-transaction replay anchor. When the callback runs user code that also
+bookkeeps, scope a sub-receipt with `tx.measure(fn)` so the bookkeeping writes
+don't contaminate the projector's count.
 
 This is separate from `recordedRead`: a store created with a `recordedRead`
 binding can reconstruct from a relation populated by another system, but

@@ -1379,12 +1379,42 @@ captured writes, `receipt.recorded` is the recorded commit instant allocated for
 this store's graph by this transaction. It is `undefined` when history capture is
 off, the transaction is read-only, or no captured writes were flushed. Writes
 that bypass the transaction collection surface — direct backend writes, raw SQL,
-and import helpers — are not counted. Adopted transactions
-(`withTransaction` / `withRecordedTransaction`) do not produce receipts in this
-version because their commit belongs to the caller. On non-transactional
-backends a receipt describes operations that individually committed; if the
-callback rejects there, no receipt is returned even though earlier operations
-committed.
+and import helpers — are not counted. `store.withRecordedTransaction()` — the
+adopted-commit path for history stores — returns the same `TransactionOutcome`,
+so the exactly-once cursor pattern gets a receipt too (see
+[Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only
+`withTransaction`, whose commit belongs entirely to the caller with no flush
+point, produces no receipt. On non-transactional backends a receipt describes
+operations that individually committed; if the callback rejects there, no
+receipt is returned even though earlier operations committed.
+
+##### Scoped receipts: `tx.measure()`
+
+The context handed to `transactionWithReceipt` and `withRecordedTransaction`
+also exposes `tx.measure(fn)`, which runs `fn` and returns a
+`TransactionOutcome` whose receipt counts only the writes that resolved on
+`tx.nodes` / `tx.edges` while `fn` ran — the surrounding transaction's own
+bookkeeping writes are excluded. This lets a framework attribute writes to user
+code it invoked (for example, an event-log materializer measuring
+`project(tx, change)` to detect a change that wrote nothing):
+
+```typescript
+await store.transactionWithReceipt(async (tx) => {
+  const projected = await tx.measure(() => project(tx, change));
+  if (projected.receipt.writes.total === 0 && change.operation !== "delete") {
+    throw new DroppedChangeError(change); // the projector dropped the change
+  }
+  await tx.nodes.Cursor.upsertById("s1", { offset: change.offset }); // not counted in `projected`
+});
+```
+
+A write counts in a scope iff its collection method **resolves** while the scope
+is open, so `await` your writes inside the callback; nested and overlapping
+`measure` calls each count independently. Measured writes still count in the
+outer receipt (they happened in the transaction). A scoped receipt's `recorded`
+is **always `undefined`** — the recorded instant is a per-transaction flush
+concern, unknowable mid-transaction. Plain `store.transaction()` contexts have
+no `measure` (no receipt is being produced).
 
 #### Rollback and error propagation
 

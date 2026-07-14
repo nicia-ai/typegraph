@@ -7,6 +7,7 @@ import type {
   GraphEdgeCollections,
   GraphNodeCollections,
   NodeWrites,
+  TransactionOutcome,
   TransactionReceipt,
 } from "./types";
 
@@ -28,6 +29,16 @@ export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
+  /**
+   * Runs `fn` while accumulating the writes that resolve during it into a
+   * fresh sub-receipt, without affecting the outer receipt (those writes still
+   * count there too — they happened in the transaction). A write counts in the
+   * scope iff its collection method *resolves* while the scope is open, so
+   * overlapping and nested `measure` calls each count independently. The
+   * returned receipt's `recorded` is always `undefined`: the recorded commit
+   * instant is a per-transaction flush concern, unknowable mid-transaction.
+   */
+  measure: <T>(fn: () => Promise<T>) => Promise<TransactionOutcome<T>>;
 }>;
 
 type WrappedMethod = (...args: unknown[]) => Promise<unknown>;
@@ -95,33 +106,75 @@ function increment(
   counts[kind] = (counts[kind] ?? 0) + count;
 }
 
+/** One accumulator: the root receipt, or a `measure` sub-scope. */
+interface WriteCounters {
+  readonly nodes: Record<string, number>;
+  readonly edges: Record<string, number>;
+  total: number;
+}
+
+function createCounters(): WriteCounters {
+  return { nodes: createCountBucket(), edges: createCountBucket(), total: 0 };
+}
+
+function snapshotCounters(
+  counters: WriteCounters,
+  recorded?: TransactionReceipt["recorded"],
+): TransactionReceipt {
+  // Object.assign onto a fresh null-prototype bucket (rather than spread)
+  // keeps prototype-colliding kind names readable on the returned receipt.
+  return Object.freeze({
+    writes: Object.freeze({
+      nodes: Object.freeze(Object.assign(createCountBucket(), counters.nodes)),
+      edges: Object.freeze(Object.assign(createCountBucket(), counters.edges)),
+      total: counters.total,
+    }),
+    ...(recorded === undefined ? {} : { recorded }),
+  });
+}
+
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
-  const nodes = createCountBucket();
-  const edges = createCountBucket();
-  let total = 0;
+  const root = createCounters();
+  // Sub-scopes opened by `measure`. A write records into the root and every
+  // scope open at the moment it resolves, so overlapping/nested measures each
+  // count the writes that resolve while they are open.
+  const openScopes = new Set<WriteCounters>();
+
+  function record(
+    bucketOf: (counters: WriteCounters) => Record<string, number>,
+    kind: string,
+    count: number,
+  ): void {
+    increment(bucketOf(root), kind, count);
+    root.total += count;
+    for (const scope of openScopes) {
+      increment(bucketOf(scope), kind, count);
+      scope.total += count;
+    }
+  }
 
   return {
     recordNode(kind, count): void {
-      increment(nodes, kind, count);
-      total += count;
+      record((counters) => counters.nodes, kind, count);
     },
 
     recordEdge(kind, count): void {
-      increment(edges, kind, count);
-      total += count;
+      record((counters) => counters.edges, kind, count);
     },
 
     snapshot(recorded): TransactionReceipt {
-      // Object.assign onto a fresh null-prototype bucket (rather than spread)
-      // keeps prototype-colliding kind names readable on the returned receipt.
-      return Object.freeze({
-        writes: Object.freeze({
-          nodes: Object.freeze(Object.assign(createCountBucket(), nodes)),
-          edges: Object.freeze(Object.assign(createCountBucket(), edges)),
-          total,
-        }),
-        ...(recorded === undefined ? {} : { recorded }),
-      });
+      return snapshotCounters(root, recorded);
+    },
+
+    async measure(fn) {
+      const scope = createCounters();
+      openScopes.add(scope);
+      try {
+        const result = await fn();
+        return { result, receipt: snapshotCounters(scope) };
+      } finally {
+        openScopes.delete(scope);
+      }
     },
   };
 }

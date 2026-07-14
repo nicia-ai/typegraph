@@ -10,14 +10,29 @@ import {
   type BetterSQLite3Database,
   drizzle,
 } from "drizzle-orm/better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+} from "vitest";
 import { z } from "zod";
 
 import {
+  type AdoptedTransaction,
   createStore,
   defineGraph,
   defineNode,
+  type HistoryStore,
+  type MeasurableHistoryTransactionContext,
+  type MeasurableTransactionContext,
   type RecordedInstant,
+  type ScopedMeasure,
+  type Store,
+  type TransactionContext,
+  type TransactionOutcome,
 } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
@@ -32,6 +47,31 @@ const graph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
 });
+
+// Composition graph for the #255 + #257 scenario: a projected `Item` and an
+// in-graph `Cursor` written in the same adopted transaction. The projector's
+// writes are measured; the cursor's bookkeeping write is not.
+const Item = defineNode("Item", {
+  schema: z.object({ label: z.string() }),
+});
+
+const Cursor = defineNode("Cursor", {
+  schema: z.object({ offset: z.string() }),
+});
+
+const composedGraph = defineGraph({
+  id: "recorded_with_transaction_composed",
+  nodes: { Item: { type: Item }, Cursor: { type: Cursor } },
+  edges: {},
+});
+
+function createHistoryStore(db: BetterSQLite3Database) {
+  const backend = createSqliteBackend(db, {
+    executionProfile: { isSync: true },
+    tables: defaultTables,
+  });
+  return createStore(graph, backend, { history: true });
+}
 
 function requireRecordedInstant(
   instant: RecordedInstant | undefined,
@@ -79,7 +119,9 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
 
     // The caller owns BEGIN / COMMIT; TypeGraph flushes capture before COMMIT.
     sqlite.exec("BEGIN");
-    const [alice, bob] = await store.withRecordedTransaction(db, async (tx) => {
+    const {
+      result: [alice, bob],
+    } = await store.withRecordedTransaction(db, async (tx) => {
       const a = await tx.nodes.Person.create({ name: "Alice" });
       const b = await tx.nodes.Person.create({ name: "Bob" });
       return [a, b] as const;
@@ -110,7 +152,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
     // sealed when the callback resolved, so a further write through this context
     // — which would otherwise commit uncaptured and diverge history from live
     // state — must fail loud rather than silently escape capture.
-    const escaped = await store.withRecordedTransaction(db, (tx) =>
+    const { result: escaped } = await store.withRecordedTransaction(db, (tx) =>
       Promise.resolve(tx),
     );
     await expect(
@@ -176,4 +218,196 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
     expect(live?.name).toBe("Committed Anyway");
     expect(await store.recordedNow()).toBeUndefined();
   });
+
+  it("returns a receipt with the recorded anchor on the history adopted path (#255)", async () => {
+    const store = createHistoryStore(db);
+
+    sqlite.exec("BEGIN");
+    const { result, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => {
+        const a = await tx.nodes.Person.create({ name: "Alice" });
+        await tx.nodes.Person.create({ name: "Bob" });
+        return a.id;
+      },
+    );
+    sqlite.exec("COMMIT");
+
+    expect(receipt.writes.nodes).toEqual({ Person: 2 });
+    expect(receipt.writes.total).toBe(2);
+    const recorded = requireRecordedInstant(
+      receipt.recorded,
+      "expected the adopted path to surface a recorded anchor",
+    );
+    // The receipt's anchor reconstructs the belief this transaction produced —
+    // the value #255 needs for per-offset replay.
+    const reconstructed = store.asOfRecorded(recorded);
+    const alice = await reconstructed.nodes.Person.getById(result);
+    expect(alice?.name).toBe("Alice");
+  });
+
+  it("returns recorded undefined for a read-only callback on the adopted path", async () => {
+    const store = createHistoryStore(db);
+
+    sqlite.exec("BEGIN");
+    const { result, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => tx.nodes.Person.count(),
+    );
+    sqlite.exec("COMMIT");
+
+    expect(result).toBe(0);
+    expect(receipt.writes.total).toBe(0);
+    expect(receipt.recorded).toBeUndefined();
+  });
+
+  it("counts write intents but leaves recorded undefined on a non-history store", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(graph, backend);
+
+    sqlite.exec("BEGIN");
+    const { result, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => {
+        const alice = await tx.nodes.Person.create({ name: "Alice" });
+        return alice.id;
+      },
+    );
+    sqlite.exec("COMMIT");
+
+    expect(receipt.writes.nodes).toEqual({ Person: 1 });
+    expect(receipt.writes.total).toBe(1);
+    // No history capture: the write intent is still counted, but there is no
+    // recorded time to anchor.
+    expect(receipt.recorded).toBeUndefined();
+    const alice = await store.nodes.Person.getById(result);
+    expect(alice?.name).toBe("Alice");
+  });
+
+  it("composes an exactly-once in-graph cursor with an attributable projector receipt (#255 + #257)", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(composedGraph, backend, { history: true });
+
+    sqlite.exec("BEGIN");
+    const { result: projected, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => {
+        // The projector's writes are measured; the cursor bookkeeping below is
+        // not, so `projected` attributes only what the projector wrote.
+        const scoped = await tx.measure(async () => {
+          await tx.nodes.Item.upsertById("item-1", { label: "v1" });
+        });
+        await tx.nodes.Cursor.upsertById("stream-1", { offset: "001" });
+        return scoped;
+      },
+    );
+    sqlite.exec("COMMIT");
+
+    // Scoped receipt: the projector wrote exactly one Item, and a measured scope
+    // never carries the recorded instant.
+    expect(projected.receipt.writes.nodes).toEqual({ Item: 1 });
+    expect(projected.receipt.writes.total).toBe(1);
+    expect(projected.receipt.recorded).toBeUndefined();
+
+    // Outer receipt: the whole transaction wrote the Item and the Cursor, and
+    // carries the per-transaction replay anchor.
+    expect(receipt.writes.nodes).toEqual({ Item: 1, Cursor: 1 });
+    expect(receipt.writes.total).toBe(2);
+    expect(receipt.recorded).toBeDefined();
+  });
+
+  it("detects a dropped change while the cursor still advances (#257)", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(composedGraph, backend, { history: true });
+
+    sqlite.exec("BEGIN");
+    const { result: projected, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => {
+        // A projector that drops the change: it writes nothing.
+        const scoped = await tx.measure(() => Promise.resolve());
+        // The consumer's own bookkeeping still advances the cursor.
+        await tx.nodes.Cursor.upsertById("stream-1", { offset: "002" });
+        return scoped;
+      },
+    );
+    sqlite.exec("COMMIT");
+
+    // The dropped change is detectable: the projector's scoped total is 0 even
+    // though the cursor bookkeeping made the outer total non-zero.
+    expect(projected.receipt.writes.total).toBe(0);
+    expect(receipt.writes.nodes).toEqual({ Cursor: 1 });
+    expect(receipt.writes.total).toBe(1);
+  });
+
+  it("does not expose measure on a plain transaction() context", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(graph, backend);
+
+    await store.transaction((tx) => {
+      // Plain transactions run no recorder, so there is nothing to scope.
+      expect("measure" in tx).toBe(false);
+      return Promise.resolve();
+    });
+  });
 });
+
+// --- #255 / #257 type-level assertions (fail `pnpm typecheck` on regression) ---
+//
+// Never invoked: the assertions are checked by `tsc`, and the bodies reference
+// `declare`d values that are erased at runtime.
+function measureTypeAssertions(
+  history: HistoryStore<typeof graph>,
+  plain: Store<typeof graph>,
+  externalTx: AdoptedTransaction,
+): void {
+  // Receipt-enabled contexts expose `measure`; a plain context does not.
+  expectTypeOf<MeasurableTransactionContext<typeof graph>>().toHaveProperty(
+    "measure",
+  );
+  expectTypeOf<
+    MeasurableHistoryTransactionContext<typeof graph>
+  >().toHaveProperty("measure");
+  expectTypeOf<TransactionContext<typeof graph>>().not.toHaveProperty(
+    "measure",
+  );
+
+  // Assignability chain: history-measurable ⊑ measurable ⊑ TransactionContext,
+  // so a projector helper typed against any of the three accepts the context
+  // `withRecordedTransaction` hands it.
+  expectTypeOf<MeasurableHistoryTransactionContext<typeof graph>>().toExtend<
+    MeasurableTransactionContext<typeof graph>
+  >();
+  expectTypeOf<MeasurableTransactionContext<typeof graph>>().toExtend<
+    TransactionContext<typeof graph>
+  >();
+
+  // Both adopted overloads now return a TransactionOutcome, and hand a
+  // measurable context.
+  expectTypeOf(
+    history.withRecordedTransaction(externalTx, async (tx) => {
+      expectTypeOf(tx.measure).toEqualTypeOf<ScopedMeasure>();
+      return tx.nodes.Person.count();
+    }),
+  ).toEqualTypeOf<Promise<TransactionOutcome<number>>>();
+
+  expectTypeOf(
+    plain.withRecordedTransaction(externalTx, async (tx) => {
+      expectTypeOf(tx.measure).toEqualTypeOf<ScopedMeasure>();
+      return tx.nodes.Person.count();
+    }),
+  ).toEqualTypeOf<Promise<TransactionOutcome<number>>>();
+}
+void measureTypeAssertions;
