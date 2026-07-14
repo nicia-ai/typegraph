@@ -946,9 +946,12 @@ export type RecordedCaptureGuardCode =
 /**
  * A {@link ConfigurationError} narrowed to carry a {@link RecordedCaptureGuardCode}
  * in `details.code` — the shape {@link isRecordedCaptureGuardError} guarantees.
+ * `C` narrows `details.code` to a single code when the guard was called with a
+ * specific one; it defaults to the full union.
  */
-export type RecordedCaptureGuardError = ConfigurationError &
-  Readonly<{ details: Readonly<{ code: RecordedCaptureGuardCode }> }>;
+export type RecordedCaptureGuardError<
+  C extends RecordedCaptureGuardCode = RecordedCaptureGuardCode,
+> = ConfigurationError & Readonly<{ details: Readonly<{ code: C }> }>;
 
 function isRecordedCaptureGuardCode(
   value: unknown,
@@ -966,10 +969,16 @@ function isRecordedCaptureGuardCode(
  * no transactions" (the latter carries no guard code — see
  * `TransactionContext.sqlAvailability` for the capability discriminant).
  *
+ * Passing `code` also narrows `details.code` to that literal on the guarded
+ * branch, so a caller can read the payload without re-checking.
+ *
  * @example
  * ```typescript
+ * // `withTransaction` is a compile error on a history-enabled store, so widen
+ * // to the base Store surface to reach the runtime guard this branches on.
+ * const store: Store<typeof graph> = historyStore;
  * try {
- *   await historyStore.withTransaction(externalTx);
+ *   store.withTransaction(externalTx);
  * } catch (error) {
  *   if (
  *     isRecordedCaptureGuardError(
@@ -977,6 +986,7 @@ function isRecordedCaptureGuardCode(
  *       "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
  *     )
  *   ) {
+ *     // error.details.code is now the literal, not the union.
  *     await historyStore.withRecordedTransaction(externalTx, run);
  *   } else {
  *     throw error;
@@ -984,6 +994,13 @@ function isRecordedCaptureGuardCode(
  * }
  * ```
  */
+export function isRecordedCaptureGuardError<C extends RecordedCaptureGuardCode>(
+  error: unknown,
+  code: C,
+): error is RecordedCaptureGuardError<C>;
+export function isRecordedCaptureGuardError(
+  error: unknown,
+): error is RecordedCaptureGuardError;
 export function isRecordedCaptureGuardError(
   error: unknown,
   code?: RecordedCaptureGuardCode,

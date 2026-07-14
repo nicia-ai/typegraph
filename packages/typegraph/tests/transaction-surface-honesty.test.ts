@@ -178,7 +178,7 @@ describe("#258 recorded-capture guard error codes", () => {
     expect(isRecordedCaptureGuardError(undefined)).toBe(false);
   });
 
-  it("narrows details.code to RecordedCaptureGuardCode after the guard", () => {
+  it("narrows details.code to the full union when called without a code", () => {
     const error: unknown = new ConfigurationError("guarded", {
       code: "RECORDED_CAPTURE_RAW_SQL_DISABLED",
     });
@@ -186,6 +186,22 @@ describe("#258 recorded-capture guard error codes", () => {
       throw new Error("expected the guard to narrow");
     }
     expectTypeOf(error.details.code).toEqualTypeOf<RecordedCaptureGuardCode>();
+    expect(error.details.code).toBe("RECORDED_CAPTURE_RAW_SQL_DISABLED");
+  });
+
+  it("narrows details.code to the passed literal when a code is given", () => {
+    const error: unknown = new ConfigurationError("guarded", {
+      code: "RECORDED_CAPTURE_RAW_SQL_DISABLED",
+    });
+    if (
+      !isRecordedCaptureGuardError(error, "RECORDED_CAPTURE_RAW_SQL_DISABLED")
+    ) {
+      throw new Error("expected the guard to narrow");
+    }
+    // The code-specific overload narrows to the literal, not the union.
+    expectTypeOf(
+      error.details.code,
+    ).toEqualTypeOf<"RECORDED_CAPTURE_RAW_SQL_DISABLED">();
     expect(error.details.code).toBe("RECORDED_CAPTURE_RAW_SQL_DISABLED");
   });
 });

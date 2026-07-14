@@ -333,10 +333,15 @@ and reachable through the `isRecordedCaptureGuardError` type guard:
 | `REVISION_TRACKING_RAW_SQL_DISABLED` | The same raw SQL escape on a revision-tracked store, where it would bypass the revision anchor. |
 
 ```typescript
-import { isRecordedCaptureGuardError } from "@nicia-ai/typegraph";
+import { isRecordedCaptureGuardError, type Store } from "@nicia-ai/typegraph";
+
+// `withTransaction` is a compile error on a history-enabled store (that is the
+// point — see below). Widen to the base `Store` surface to reach the runtime
+// guard this branch handles.
+const store: Store<typeof graph> = historyStore;
 
 try {
-  await historyStore.withTransaction(externalTx);
+  store.withTransaction(externalTx);
 } catch (error) {
   if (
     isRecordedCaptureGuardError(
@@ -344,7 +349,7 @@ try {
       "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
     )
   ) {
-    // Adopt the same external transaction the capture-aware way instead.
+    // error.details.code is narrowed to the passed literal here.
     await historyStore.withRecordedTransaction(externalTx, run);
   } else {
     throw error;
@@ -353,8 +358,9 @@ try {
 ```
 
 Pass a specific code to narrow to one guard, or omit it to match any. The guard
-narrows `error` to a `ConfigurationError` whose `details.code` is a
-`RecordedCaptureGuardCode`, so no untyped `details` spelunking is needed.
+narrows `error` to a `ConfigurationError` whose `details.code` is the passed
+`RecordedCaptureGuardCode` (or the full union when no code is given), so no
+untyped `details` spelunking is needed.
 
 This composes with
 [`tx.sqlAvailability`](/queries/temporal/#raw-sql-under-history-capture): the
