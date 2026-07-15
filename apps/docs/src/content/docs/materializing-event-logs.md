@@ -218,11 +218,14 @@ Two ways out:
 
 - **Scope the projector with `tx.measure`.** On a receipt-enabled context
   (`transactionWithReceipt` or `withRecordedTransaction`),
-  [`tx.measure(fn)`](/schemas-stores/#scoped-receipts-txmeasure) returns a
-  sub-receipt counting only the writes that resolved while `fn` ran, so the
-  cursor's write — made outside the measured region — is excluded. This is what
-  makes an in-graph cursor and drop-detection composable; see the full loop
-  below.
+  [`tx.measure((scopedTx) => …)`](/schemas-stores/#scoped-receipts-txmeasure)
+  hands your callback a **scoped context** and returns a sub-receipt that counts
+  exactly the writes made **through that scoped context** (`scopedTx.nodes` /
+  `scopedTx.edges`). Run the projector through `scopedTx`; write the cursor
+  through the outer `tx` (or your own table). Attribution is by which context you
+  write through, not by timing, so the cursor's write counts only in the outer
+  receipt and the scope reflects the projector alone. This is what makes an
+  in-graph cursor and drop-detection composable; see the full loop below.
 - **Keep the cursor in your own relational table.** The
   [exactly-once recipe](#exactly-once-with-an-adopted-transaction) makes that
   atomic anyway, and it keeps the belief graph pristine: an in-graph cursor node
@@ -272,9 +275,11 @@ before you read `writes.total` as "the projector did work":
 Putting the pieces together: an adopted transaction for exactly-once cursors, a
 `tx.measure`-scoped projector so a single dropped change is caught within a
 multi-change batch — the outer receipt only tells you the whole batch wrote
-nothing, `measure` attributes per change (and, if you keep an in-graph cursor,
-excludes its write from the count) — `receipt.recorded` as the per-offset replay
-anchor, and `writes.total === 0` on a non-delete change as the drop signal.
+nothing, whereas a `measure` scope attributes writes per change by having the
+projector write through the scoped context it receives (any cursor written
+through the outer `tx` stays out of that count) — `receipt.recorded` as the
+per-offset replay anchor, and `writes.total === 0` on a non-delete change as the
+drop signal.
 
 `withRecordedTransaction` flushes recorded-time capture and resolves **before**
 the caller's commit, so `outcome.receipt.recorded` is already known inside the
@@ -291,7 +296,11 @@ let lastAnchor: RecordedInstant | undefined = await loadLastAnchor(); // on resu
 lastAnchor = await db.transaction(async (dbTx) => {
   const outcome = await store.withRecordedTransaction(dbTx, async (tx) => {
     for (const change of batch.changes) {
-      const projected = await tx.measure(() => projectChange(tx, change));
+      // The projector writes through the scoped context, so `projected`
+      // counts its writes alone — nothing else in the transaction.
+      const projected = await tx.measure((scopedTx) =>
+        projectChange(scopedTx, change),
+      );
 
       // A non-delete change that wrote nothing was silently dropped.
       if (
