@@ -35,3 +35,9 @@ creating the table.
 once under the schema-owner role. It creates the per-field vector tables +
 markers; least-privilege runtimes then assert markers (SELECT) and run vector
 DML with zero DDL — no `GRANT CREATE` required.
+
+Consumers that boot manually (raw DDL + the sync `createStore` attach +
+`backend.ensureRuntimeContributions`) provision vectors the same way: the new
+`resolveGraphVectorSlots(graph)` export enumerates every embedding
+`(kind, field)` slot, and `backend.ensureVectorSlotContribution(slot)`
+materializes each — the exact step `createStoreWithSchema` performs.
