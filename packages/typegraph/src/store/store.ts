@@ -3412,8 +3412,9 @@ async function materializeRuntimeContributions(
  * privileged role inside `createStoreWithSchema` so a least-privilege runtime
  * can assert the markers (a cached SELECT) and write embeddings without
  * holding `CREATE` on the schema. No-op on backends without vector support
- * (`ensureVectorSlotContribution` absent, or `capabilities.vector` unsupported)
- * and for graphs that declare no embedding fields.
+ * (both vector contribution methods absent, or `capabilities.vector`
+ * unsupported) and for graphs that declare no embedding fields. Built-in
+ * backends use the batch method; the singular loop is the compatibility path.
  *
  * `onDrift: "skip"`: a slot already provisioned at a DIFFERENT shape (the
  * declared dimension changed since the table was created) is warned about
@@ -3426,14 +3427,16 @@ async function materializeVectorContributions(
   backend: GraphBackend,
   graph: GraphDef,
 ): Promise<void> {
-  const ensureVectorSlotContribution = backend.ensureVectorSlotContribution;
-  if (
-    ensureVectorSlotContribution === undefined ||
-    backend.capabilities.vector?.supported !== true
-  ) {
+  if (backend.capabilities.vector?.supported !== true) return;
+  const slots = resolveGraphVectorSlots(graph);
+  const ensureVectorSlotContributions = backend.ensureVectorSlotContributions;
+  if (ensureVectorSlotContributions !== undefined) {
+    await ensureVectorSlotContributions(slots, { onDrift: "skip" });
     return;
   }
-  for (const slot of resolveGraphVectorSlots(graph)) {
+  const ensureVectorSlotContribution = backend.ensureVectorSlotContribution;
+  if (ensureVectorSlotContribution === undefined) return;
+  for (const slot of slots) {
     await ensureVectorSlotContribution(slot, { onDrift: "skip" });
   }
 }

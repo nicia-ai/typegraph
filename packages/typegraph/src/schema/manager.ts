@@ -495,14 +495,16 @@ async function assertVectorContributionsInitialized(
   backend: GraphBackend,
   graph: GraphDef,
 ): Promise<void> {
-  const assertVectorSlotInitialized = backend.assertVectorSlotInitialized;
-  if (
-    assertVectorSlotInitialized === undefined ||
-    backend.capabilities.vector?.supported !== true
-  ) {
+  if (backend.capabilities.vector?.supported !== true) return;
+  const slots = resolveGraphVectorSlots(graph);
+  const assertVectorSlotsInitialized = backend.assertVectorSlotsInitialized;
+  if (assertVectorSlotsInitialized !== undefined) {
+    await assertVectorSlotsInitialized(slots);
     return;
   }
-  for (const slot of resolveGraphVectorSlots(graph)) {
+  const assertVectorSlotInitialized = backend.assertVectorSlotInitialized;
+  if (assertVectorSlotInitialized === undefined) return;
+  for (const slot of slots) {
     await assertVectorSlotInitialized(slot);
   }
 }

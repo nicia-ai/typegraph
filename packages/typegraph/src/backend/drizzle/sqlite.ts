@@ -1030,6 +1030,21 @@ export function createSqliteBackend(
     );
   }
 
+  async function getContributionMaterializationRows(
+    graphId: string,
+  ): Promise<readonly ContributionMaterializationRow[]> {
+    const rows = await db
+      .select()
+      .from(matTable)
+      .where(eq(matTable.graphId, graphId));
+    return rows.map((row) =>
+      mapContributionMaterializationRow(
+        row,
+        SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+      ),
+    );
+  }
+
   async function recordContributionMaterializationRow(
     params: RecordContributionMaterializationParams,
   ): Promise<void> {
@@ -1079,7 +1094,7 @@ export function createSqliteBackend(
       await db.run(sql.raw(statement));
     },
     ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarker: getContributionMaterializationRow,
+    getMarkers: getContributionMaterializationRows,
     recordMarker: recordContributionMaterializationRow,
     deleteMarker: deleteContributionMaterializationRow,
   });
@@ -1437,8 +1452,21 @@ export function createSqliteBackend(
           await contributionMaterializer.ensureVectorSlot(slot, options_);
         },
 
+        async ensureVectorSlotContributions(
+          slots: readonly VectorSlot[],
+          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+        ): Promise<void> {
+          await contributionMaterializer.ensureVectorSlots(slots, options_);
+        },
+
         async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
           await contributionMaterializer.assertVectorSlot(slot);
+        },
+
+        async assertVectorSlotsInitialized(
+          slots: readonly VectorSlot[],
+        ): Promise<void> {
+          await contributionMaterializer.assertVectorSlots(slots);
         },
 
         async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {

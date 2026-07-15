@@ -1427,7 +1427,7 @@ export type GraphBackend = Readonly<{
    * records its durable marker, idempotently. The vector counterpart of
    * `ensureRuntimeContributions` — vectors are per-`(kind, field)` and
    * graph-derived, so the store enumerates slots (via
-   * `resolveEmbeddingFields`) and calls this once per slot at boot under
+   * `resolveEmbeddingFields`) and uses the batch counterpart at boot under
    * the privileged role. Pass `{ force: true }` to overwrite the marker
    * at the current signature, bypassing the drift-guard — the sanctioned
    * path `store.reembedVectorField()` uses after recreating storage at a
@@ -1444,6 +1444,16 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
 
   /**
+   * Batch form of `ensureVectorSlotContribution`, used by privileged boot to
+   * resolve every slot's durable markers with one graph-scoped query. The
+   * singular method remains available for re-embedding and compatibility.
+   */
+  ensureVectorSlotContributions?: (
+    slots: readonly VectorSlot[],
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ) => Promise<void>;
+
+  /**
    * SELECT-only gate for one embedding `(kind, field)` slot: asserts the
    * durable marker(s) for the slot's `ownedTables` contribution(s),
    * cached per backend instance. Throws `StoreNotInitializedError` when
@@ -1454,6 +1464,14 @@ export type GraphBackend = Readonly<{
    * backends wired with a vector strategy.
    */
   assertVectorSlotInitialized?: (slot: VectorSlot) => Promise<void>;
+
+  /**
+   * Batch form of `assertVectorSlotInitialized`, used by verified attach to
+   * resolve every slot's durable markers with one graph-scoped query.
+   */
+  assertVectorSlotsInitialized?: (
+    slots: readonly VectorSlot[],
+  ) => Promise<void>;
 
   /**
    * Forget one embedding `(kind, field)` slot's durable contribution
