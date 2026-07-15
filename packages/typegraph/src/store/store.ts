@@ -1578,9 +1578,10 @@ export class Store<G extends GraphDef> {
    * graph, or `undefined` when nothing was captured.
    *
    * The callback receives a {@link MeasurableTransactionContext}: call
-   * `tx.measure(fn)` to scope a sub-receipt to a region of the transaction (e.g.
-   * to attribute writes to user code the caller invokes, excluding its own
-   * bookkeeping writes). See {@link MeasurableTransactionContext} for semantics.
+   * `tx.measure((scoped) => ...)` to scope a sub-receipt to the writes made
+   * through the `scoped` context (e.g. to attribute writes to user code the
+   * caller invokes, excluding its own bookkeeping written through `tx`). See
+   * {@link MeasurableTransactionContext} for semantics.
    *
    * @example
    * ```typescript
@@ -1643,18 +1644,12 @@ export class Store<G extends GraphDef> {
           receiptRecorder,
         ));
       }
-      const result = await invoke({
+      const fallbackContext: TransactionContext<G> = {
         nodes,
         edges,
         // No real transaction: `tx.sql` is absent and there is no atomicity.
         sqlAvailability: "unavailable",
         backend: this.#backend,
-        // `measure` scopes writes on a receipt-enabled context; on this
-        // non-transactional fallback the counts it reports describe
-        // individually-committed operations, mirroring the receipt caveat.
-        ...(receiptRecorder === undefined ?
-          {}
-        : { measure: receiptRecorder.measure }),
         getNodeCollection: (kind) =>
           this.#resolveDynamicNodeCollection(nodes, kind),
         // No transaction, no deferral: operations apply as they happen, so
@@ -1664,7 +1659,15 @@ export class Store<G extends GraphDef> {
             this.#createOperationContext(operation, "node", kind, id),
             hookedFunction,
           ),
-      });
+      };
+      // `measure` on this non-transactional fallback scopes writes that
+      // individually committed rather than one atomic commit, mirroring the
+      // receipt caveat.
+      const result = await invoke(
+        receiptRecorder === undefined ? fallbackContext : (
+          this.#attachMeasure(fallbackContext)
+        ),
+      );
       return { result, recordedByGraph: undefined };
     }
 
@@ -1856,7 +1859,8 @@ export class Store<G extends GraphDef> {
    * `undefined` when nothing was captured — a read-only `fn`, or a non-history
    * store (where the receipt still counts write intents but there is no recorded
    * time). To attribute writes when `fn` invokes user code that also
-   * bookkeeps, use `tx.measure(fn)` (see {@link MeasurableTransactionContext}).
+   * bookkeeps, use `tx.measure((scoped) => ...)` and have that code write
+   * through the `scoped` context (see {@link MeasurableTransactionContext}).
    *
    * Write your own relational tables through the **external transaction handle
    * you passed in** (`externalTx`) — it *is* the pinned connection. `tx.sql` is
@@ -1940,12 +1944,57 @@ export class Store<G extends GraphDef> {
     // `transactionOutcome` reads this store's instant out of the returned map
     // (undefined when nothing was captured) into `receipt.recorded`.
     const recordedByGraph = await scope.flush();
+    // Seal the context so a write through a retained `tx` after this returns
+    // fails loud instead of persisting a row the snapshotted receipt can't
+    // count. Under history capture the capture session already sealed on flush
+    // (its guard throws before the live write); this covers the non-history
+    // path, which has no capture session.
+    if (!this.#captureEnabled) receiptRecorder.seal();
     return transactionOutcome(
       result,
       receiptRecorder,
       recordedByGraph,
       this.graphId,
     );
+  }
+
+  /**
+   * Decorates a receipt-enabled transaction `context` with `measure`.
+   * Attribution is structural: `measure` wraps the context's *own* (already
+   * outer-recording) collections a second time with a fresh scope recorder, so a
+   * write through the scoped context counts in the scope and — via the inner
+   * wrapper it delegates to — the outer receipt, while a write through the outer
+   * `context` never reaches the scope recorder. This makes overlapping/concurrent
+   * measures safe by construction (each holds its own scope recorder) and lets
+   * scopes nest: the scoped context is itself decorated, so `scoped.measure(...)`
+   * chains one more wrapper. The scoped context's `getNodeCollection` resolves
+   * against the scope-wrapped map too, so dynamic-kind writes are attributed like
+   * `scoped.nodes.<Kind>`. The scope receipt's `recorded` is always undefined —
+   * the recorded instant is a whole-transaction flush concern.
+   */
+  #attachMeasure(
+    context: TransactionContext<G>,
+  ): MeasurableTransactionContext<G> {
+    const measure: ScopedMeasure<MeasurableTransactionContext<G>> = async (
+      fn,
+    ) => {
+      const scopeRecorder = createTransactionReceiptRecorder();
+      const { nodes, edges } = wrapTransactionCollections(
+        context.nodes,
+        context.edges,
+        scopeRecorder,
+      );
+      const scoped = this.#attachMeasure({
+        ...context,
+        nodes,
+        edges,
+        getNodeCollection: (kind) =>
+          this.#resolveDynamicNodeCollection(nodes, kind),
+      });
+      const result = await fn(scoped);
+      return { result, receipt: scopeRecorder.snapshot() };
+    };
+    return { ...context, measure };
   }
 
   /**
@@ -2033,21 +2082,26 @@ export class Store<G extends GraphDef> {
       backend: txBackend,
       getNodeCollection,
       runNodeOperationHooks,
-      // Scoped write measurement is only meaningful with a recorder to scope;
-      // omitting it on the plain path keeps `transaction()` contexts free of a
-      // `measure` the caller has no receiver for.
-      ...(receiptRecorder === undefined ?
-        {}
-      : { measure: receiptRecorder.measure }),
     };
 
-    if (sql === undefined) return base;
+    const withSql: TransactionContext<G> =
+      sql === undefined ? base : (
+        {
+          ...base,
+          sql:
+            this.#captureEnabled ? createHistoryUnsafeSqlRef()
+            : this.#revisionTrackingEnabled ?
+              createRevisionTrackingUnsafeSqlRef()
+            : sql,
+        }
+      );
 
-    const exposedSql =
-      this.#captureEnabled ? createHistoryUnsafeSqlRef()
-      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
-      : sql;
-    return { ...base, sql: exposedSql };
+    // Scoped write measurement (`tx.measure`) is only meaningful with a recorder
+    // to scope; the plain `transaction()` path stays free of a `measure` the
+    // caller has no receiver for.
+    return receiptRecorder === undefined ? withSql : (
+        this.#attachMeasure(withSql)
+      );
   }
 
   // === Graph Lifecycle ===
@@ -3181,12 +3235,17 @@ export type HistoryTransactionContext<G extends GraphDef> = Omit<
 
 /**
  * The {@link HistoryTransactionContext} handed to a `withRecordedTransaction`
- * callback, extended with {@link ScopedMeasure}. Assignable to
+ * callback, extended with {@link ScopedMeasure}. Its `measure` scopes to a child
+ * {@link MeasurableHistoryTransactionContext} (so nested scopes keep the
+ * history-safe `sql?: never` / backend typing). Assignable to
  * {@link MeasurableTransactionContext} (and hence to {@link TransactionContext}),
  * so a projector helper typed against either still accepts it.
  */
 export type MeasurableHistoryTransactionContext<G extends GraphDef> =
-  HistoryTransactionContext<G> & Readonly<{ measure: ScopedMeasure }>;
+  HistoryTransactionContext<G> &
+    Readonly<{
+      measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
+    }>;
 
 export type RecordedReadStore<G extends GraphDef> = Store<G> &
   Readonly<{

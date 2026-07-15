@@ -298,10 +298,11 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
     const { result: projected, receipt } = await store.withRecordedTransaction(
       db,
       async (tx) => {
-        // The projector's writes are measured; the cursor bookkeeping below is
-        // not, so `projected` attributes only what the projector wrote.
-        const scoped = await tx.measure(async () => {
-          await tx.nodes.Item.upsertById("item-1", { label: "v1" });
+        // The projector writes through its scoped context; the cursor
+        // bookkeeping goes through the outer `tx`, so `projected` attributes
+        // only what the projector wrote.
+        const scoped = await tx.measure(async (projector) => {
+          await projector.nodes.Item.upsertById("item-1", { label: "v1" });
         });
         await tx.nodes.Cursor.upsertById("stream-1", { offset: "001" });
         return scoped;
@@ -347,6 +348,85 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
     expect(projected.receipt.writes.total).toBe(0);
     expect(receipt.writes.nodes).toEqual({ Cursor: 1 });
     expect(receipt.writes.total).toBe(1);
+  });
+
+  it("does not cross-count two concurrent sibling measures (#257)", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(composedGraph, backend, { history: true });
+
+    sqlite.exec("BEGIN");
+    const { result, receipt } = await store.withRecordedTransaction(
+      db,
+      async (tx) => {
+        // Two sibling scopes whose lifetimes overlap under Promise.all, each
+        // writing through its OWN scoped context. A resolution-time model
+        // cross-counted — one scope's write leaked into the other's total.
+        const [a, b] = await Promise.all([
+          tx.measure(async (projector) => {
+            await projector.nodes.Item.upsertById("a", { label: "a" });
+          }),
+          tx.measure(async (projector) => {
+            await projector.nodes.Item.upsertById("b", { label: "b" });
+          }),
+        ]);
+        return { a, b };
+      },
+    );
+    sqlite.exec("COMMIT");
+
+    // Each scope counts exactly its own write, and the outer receipt counts
+    // both exactly once.
+    expect(result.a.receipt.writes.total).toBe(1);
+    expect(result.b.receipt.writes.total).toBe(1);
+    expect(receipt.writes.nodes).toEqual({ Item: 2 });
+    expect(receipt.writes.total).toBe(2);
+  });
+
+  it("does not persist an escaped write's live row even if the caller commits (history)", async () => {
+    const store = createHistoryStore(db);
+
+    sqlite.exec("BEGIN");
+    // Smuggle the context out; capture sealed when the callback resolved.
+    const { result: escaped } = await store.withRecordedTransaction(db, (tx) =>
+      Promise.resolve(tx),
+    );
+    // The seal guard must reject BEFORE the live insert runs, so a caller who
+    // swallows the error and commits cannot leave an uncaptured row behind.
+    await expect(
+      escaped.nodes.Person.create({ name: "Escaped" }),
+    ).rejects.toThrow(/capture session is sealed/i);
+    sqlite.exec("COMMIT");
+
+    // The live write never happened — neither the row nor a recorded instant.
+    expect(await store.nodes.Person.find()).toEqual([]);
+    expect(await store.recordedNow()).toBeUndefined();
+  });
+
+  it("seals the receipt-tracked context on the non-history adopted path too", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const store = createStore(graph, backend);
+
+    sqlite.exec("BEGIN");
+    const { result: escaped, receipt } = await store.withRecordedTransaction(
+      db,
+      (tx) => Promise.resolve(tx),
+    );
+    // The receipt is already snapshotted; a write through the retained context
+    // must fail loud (before the live insert) rather than persist a row the
+    // receipt can never count.
+    await expect(
+      escaped.nodes.Person.create({ name: "Escaped" }),
+    ).rejects.toThrow(/sealed/i);
+    sqlite.exec("COMMIT");
+
+    expect(receipt.writes.total).toBe(0);
+    expect(await store.nodes.Person.find()).toEqual([]);
   });
 
   it("does not expose measure on a plain transaction() context", async () => {
@@ -395,17 +475,21 @@ function measureTypeAssertions(
   >();
 
   // Both adopted overloads now return a TransactionOutcome, and hand a
-  // measurable context.
+  // measurable context whose `measure` scopes to a same-kind child context.
   expectTypeOf(
     history.withRecordedTransaction(externalTx, async (tx) => {
-      expectTypeOf(tx.measure).toEqualTypeOf<ScopedMeasure>();
+      expectTypeOf(tx.measure).toEqualTypeOf<
+        ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>
+      >();
       return tx.nodes.Person.count();
     }),
   ).toEqualTypeOf<Promise<TransactionOutcome<number>>>();
 
   expectTypeOf(
     plain.withRecordedTransaction(externalTx, async (tx) => {
-      expectTypeOf(tx.measure).toEqualTypeOf<ScopedMeasure>();
+      expectTypeOf(tx.measure).toEqualTypeOf<
+        ScopedMeasure<MeasurableTransactionContext<typeof graph>>
+      >();
       return tx.nodes.Person.count();
     }),
   ).toEqualTypeOf<Promise<TransactionOutcome<number>>>();

@@ -23,16 +23,27 @@ measurement with `tx.measure`.
   const { result: x } = await store.withRecordedTransaction(externalTx, fn);
   ```
 
-- **Scoped receipts — `tx.measure(fn)`.** On the receipt-enabled contexts
-  (`transactionWithReceipt`, `withRecordedTransaction`), `tx.measure(fn)` runs
-  `fn` and returns a `TransactionOutcome` whose receipt counts only the writes
-  that resolved on `tx.nodes` / `tx.edges` while `fn` ran — so a framework can
-  attribute writes to user code it invoked (e.g. a materializer measuring
-  `project(tx, change)` to detect a dropped change) without its own bookkeeping
-  writes contaminating the count. A write counts in a scope iff its collection
-  method resolves while the scope is open; nested and overlapping measures each
-  count independently; measured writes still count in the outer receipt; a
-  scoped receipt's `recorded` is always `undefined`. Plain `store.transaction()`
-  contexts have no `measure` (that path runs no recorder and stays
-  zero-overhead). New exported types: `MeasurableTransactionContext`,
-  `MeasurableHistoryTransactionContext`, `ScopedMeasure`.
+- **Scoped receipts — `tx.measure((scoped) => ...)`.** On the receipt-enabled
+  contexts (`transactionWithReceipt`, `withRecordedTransaction`), `tx.measure`
+  runs its callback with a **scoped context** — a second view over the same
+  transaction — and returns a `TransactionOutcome` whose receipt counts exactly
+  the writes made **through that scoped context** (`scoped.nodes` /
+  `scoped.edges`). So a framework can attribute writes to user code it invoked
+  (e.g. a materializer measuring `project(scoped, change)` to detect a dropped
+  change) while its own bookkeeping — written through the outer `tx` — stays out
+  of the count. Attribution is by which context you write through, not by
+  timing, which makes overlapping and concurrent measures safe by construction
+  (two scopes racing under `Promise.all` never cross-count). Nesting composes;
+  measured writes still count in the outer receipt; a scoped receipt's
+  `recorded` is always `undefined`. Plain `store.transaction()` contexts have no
+  `measure` (that path runs no recorder and stays zero-overhead). New exported
+  types: `MeasurableTransactionContext`, `MeasurableHistoryTransactionContext`,
+  `ScopedMeasure<Ctx>`.
+
+- **Adopted contexts seal on return.** A transaction context retained and
+  written through *after* its `withRecordedTransaction` callback resolves now
+  fails loud on both paths — the history path's capture guard is checked
+  *before* the live write (so a swallowed error can no longer commit an
+  uncaptured row), and the non-history path seals its receipt-tracked
+  collections (so a post-return write can't persist a row the already-returned
+  receipt never counted).

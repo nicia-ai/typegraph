@@ -90,6 +90,18 @@ function requireRecordedInstant(
   return instant;
 }
 
+/** A promise plus its resolver, for holding a `measure` scope open. */
+function createDeferred(): Readonly<{
+  promise: Promise<void>;
+  resolve: () => void;
+}> {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolveFunction) => {
+    resolve = resolveFunction;
+  });
+  return { promise, resolve };
+}
+
 async function createHistoryStore(
   context: IntegrationTestContext,
 ): Promise<IntegrationStore> {
@@ -568,14 +580,15 @@ export function registerTransactionReceiptIntegrationTests(
     });
 
     describe("scoped measurement (tx.measure)", () => {
-      it("scopes writes to the measured callback while still counting them outside", async () => {
+      it("attributes writes by scoped context, counting them in the scope and the outer receipt", async () => {
         const store = context.getStore();
 
         const outcome = await store.transactionWithReceipt(async (tx) => {
-          const projected = await tx.measure(async () => {
-            await tx.nodes.Person.create({ name: "Projected" });
+          const projected = await tx.measure(async (scoped) => {
+            await scoped.nodes.Person.create({ name: "Projected" });
           });
-          // The surrounding bookkeeping write is not attributed to the scope.
+          // The surrounding bookkeeping write goes through the OUTER tx, so it
+          // is not attributed to the scope.
           await tx.nodes.Company.create({ name: "Bookkeeping" });
 
           expect(projected.receipt.writes.nodes).toEqual({ Person: 1 });
@@ -585,8 +598,8 @@ export function registerTransactionReceiptIntegrationTests(
           return projected;
         });
 
-        // The measured write still counts in the outer receipt — it happened in
-        // the transaction.
+        // The scoped write still counts in the outer receipt — it happened in
+        // the transaction — alongside the bookkeeping write.
         expect(outcome.receipt.writes.nodes).toEqual({
           Person: 1,
           Company: 1,
@@ -595,76 +608,127 @@ export function registerTransactionReceiptIntegrationTests(
         expect(outcome.result.receipt.writes.total).toBe(1);
       });
 
-      it("does not count writes that resolve after the scope closes", async () => {
+      it("counts a write through the outer tx during a scope in the outer receipt only", async () => {
         const store = context.getStore();
 
-        let scoped: TransactionReceipt | undefined;
         const outcome = await store.transactionWithReceipt(async (tx) => {
-          const measured = await tx.measure(async () => {
-            await tx.nodes.Person.create({ name: "Inside" });
+          const measured = await tx.measure(async (scoped) => {
+            await scoped.nodes.Person.create({ name: "Scoped" });
+            // Written through the OUTER tx while the scope is open: attribution
+            // is by context, not by timing, so this must not enter the scope.
+            await tx.nodes.Person.create({ name: "OuterDuringScope" });
           });
-          scoped = measured.receipt;
-          await tx.nodes.Person.create({ name: "After" });
+          expect(measured.receipt.writes.total).toBe(1);
+          return measured;
         });
 
-        expect(scoped?.writes.total).toBe(1);
         expect(outcome.receipt.writes.total).toBe(2);
       });
 
-      it("counts nested and overlapping scopes independently", async () => {
+      it("does not leak a concurrent write into an overlapping empty scope", async () => {
+        const store = context.getStore();
+
+        // An empty scope held open (awaiting a barrier) while a *sibling* scope
+        // writes. A resolution-time model would leak the sibling's write into
+        // this open scope; context attribution keeps it at zero. Only one scope
+        // writes, so there is no concurrent write on the shared connection.
+        const released = createDeferred();
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          const emptyScope = tx.measure(async () => {
+            await released.promise;
+          });
+          const writer = await tx.measure(async (scoped) => {
+            await scoped.nodes.Person.create({ name: "Writer" });
+          });
+          released.resolve();
+          const empty = await emptyScope;
+
+          expect(writer.receipt.writes.total).toBe(1);
+          expect(empty.receipt.writes.total).toBe(0);
+          return { writer, empty };
+        });
+
+        expect(outcome.receipt.writes.total).toBe(1);
+      });
+
+      it("chains a nested scope through its ancestor and the outer receipt", async () => {
         const store = context.getStore();
 
         let inner: TransactionReceipt | undefined;
         const outcome = await store.transactionWithReceipt(async (tx) => {
-          return tx.measure(async () => {
-            await tx.nodes.Person.create({ name: "Outer-A" });
-            const innerMeasured = await tx.measure(async () => {
-              await tx.nodes.Person.create({ name: "Inner-B" });
-            });
+          return tx.measure(async (outerScope) => {
+            await outerScope.nodes.Person.create({ name: "Outer-A" });
+            const innerMeasured = await outerScope.measure(
+              async (innerScope) => {
+                await innerScope.nodes.Person.create({ name: "Inner-B" });
+              },
+            );
             inner = innerMeasured.receipt;
-            await tx.nodes.Person.create({ name: "Outer-C" });
+            await outerScope.nodes.Person.create({ name: "Outer-C" });
           });
         });
 
         // Inner scope counts only its own write; the enclosing scope counts all
-        // three writes that resolved while it was open.
+        // three (the nested write chains up through its ancestor).
         expect(inner?.writes.total).toBe(1);
         expect(outcome.result.receipt.writes.total).toBe(3);
         expect(outcome.receipt.writes.total).toBe(3);
       });
 
-      it("propagates a rejected measured callback while the outer receipt still counts resolved writes", async () => {
+      it("propagates a rejected measured callback while the outer receipt still counts its writes", async () => {
         const store = context.getStore();
 
         const outcome = await store.transactionWithReceipt(async (tx) => {
           await tx.nodes.Person.create({ name: "Before" });
           await expect(
-            tx.measure(async () => {
-              // This write resolves inside the scope, then the scope throws.
-              await tx.nodes.Person.create({ name: "Measured" });
+            tx.measure(async (scoped) => {
+              // Resolves through the scoped context (so it counts in the outer
+              // receipt), then the scope throws.
+              await scoped.nodes.Person.create({ name: "Measured" });
               throw new Error("projector failed");
             }),
           ).rejects.toThrow("projector failed");
           await tx.nodes.Person.create({ name: "After" });
         });
 
-        // All three writes resolved in the transaction, so all three count in
+        // All three writes committed in the transaction, so all three count in
         // the outer receipt even though the measured scope rejected.
         expect(outcome.receipt.writes.nodes).toEqual({ Person: 3 });
         expect(outcome.receipt.writes.total).toBe(3);
+      });
+
+      it("attributes writes made through the scoped getNodeCollection", async () => {
+        const store = context.getStore();
+
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          const measured = await tx.measure(async (scoped) => {
+            // Dynamic-kind access must resolve against the scope-wrapped map, so
+            // the write is attributed like `scoped.nodes.Person`.
+            const people = scoped.getNodeCollection("Person");
+            if (people === undefined) {
+              throw new Error("Person collection missing from scoped context");
+            }
+            await people.createFromRecord({ name: "Dynamic" });
+          });
+          expect(measured.receipt.writes.nodes).toEqual({ Person: 1 });
+          expect(measured.receipt.writes.total).toBe(1);
+          return measured;
+        });
+
+        expect(outcome.receipt.writes.total).toBe(1);
       });
 
       it("counts bulk methods inside a scope by input length", async () => {
         const store = context.getStore();
 
         const outcome = await store.transactionWithReceipt(async (tx) =>
-          tx.measure(async () => {
-            await tx.nodes.Person.bulkCreate([
+          tx.measure(async (scoped) => {
+            await scoped.nodes.Person.bulkCreate([
               { props: { name: "a" } },
               { props: { name: "b" } },
               { props: { name: "c" } },
             ]);
-            await tx.nodes.Person.bulkCreate([]);
+            await scoped.nodes.Person.bulkCreate([]);
           }),
         );
 
@@ -676,8 +740,8 @@ export function registerTransactionReceiptIntegrationTests(
         const store = await createHistoryStore(context);
 
         const outcome = await store.transactionWithReceipt(async (tx) => {
-          const projected = await tx.measure(async () =>
-            tx.nodes.Person.create({ name: "Measured" }),
+          const projected = await tx.measure(async (scoped) =>
+            scoped.nodes.Person.create({ name: "Measured" }),
           );
           expect(projected.receipt.recorded).toBeUndefined();
           return projected;

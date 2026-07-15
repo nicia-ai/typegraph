@@ -299,8 +299,9 @@ await db.transaction(async (pgTx) => {
 `{ result, receipt }`. `receipt.writes` counts the graph writes (drop
 detection) and `receipt.recorded` is this transaction's recorded commit instant
 — the per-transaction replay anchor. When the callback runs user code that also
-bookkeeps, scope a sub-receipt with `tx.measure(fn)` so the bookkeeping writes
-don't contaminate the projector's count.
+bookkeeps, scope a sub-receipt with `tx.measure((scoped) => ...)`: writes through
+the `scoped` context are attributed to the sub-receipt, while the surrounding
+bookkeeping written through `tx` is not.
 
 This is separate from `recordedRead`: a store created with a `recordedRead`
 binding can reconstruct from a relation populated by another system, but

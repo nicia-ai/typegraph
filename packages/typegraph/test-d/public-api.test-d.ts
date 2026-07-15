@@ -24,6 +24,7 @@ import {
   type HistorySafeTransactionBackend,
   type HistoryStore,
   type HistoryTransactionContext,
+  type MeasurableHistoryTransactionContext,
   createQueryBuilder,
   getEdgeKinds,
   getNodeKinds,
@@ -310,7 +311,9 @@ const recordedOutcome = historyStore.withRecordedTransaction(
   async (tx) => {
     expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
     expectAssignable<HistorySafeTransactionBackend>(tx.backend);
-    expectType<ScopedMeasure>(tx.measure);
+    expectType<
+      ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>
+    >(tx.measure);
     expectError(tx.sql?.select());
     expectError(
       tx.backend.executeStatement?.(
@@ -356,7 +359,9 @@ void receiptOutcome.then(({ receipt }) => {
 // same as transaction() does above (plus the scoped `measure`).
 void historyStore.transactionWithReceipt(async (tx) => {
   expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
-  expectType<ScopedMeasure>(tx.measure);
+  expectType<ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>>(
+    tx.measure,
+  );
   expectError(tx.sql?.select());
 });
 

@@ -1391,30 +1391,34 @@ receipt is returned even though earlier operations committed.
 ##### Scoped receipts: `tx.measure()`
 
 The context handed to `transactionWithReceipt` and `withRecordedTransaction`
-also exposes `tx.measure(fn)`, which runs `fn` and returns a
-`TransactionOutcome` whose receipt counts only the writes that resolved on
-`tx.nodes` / `tx.edges` while `fn` ran — the surrounding transaction's own
-bookkeeping writes are excluded. This lets a framework attribute writes to user
+also exposes `tx.measure(fn)`. It runs `fn` with a **scoped context** — a second
+view over the same transaction — and returns a `TransactionOutcome` whose receipt
+counts exactly the writes made **through that scoped context**
+(`scoped.nodes` / `scoped.edges`). This lets a framework attribute writes to user
 code it invoked (for example, an event-log materializer measuring
-`project(tx, change)` to detect a change that wrote nothing):
+`project(scoped, change)` to detect a change that wrote nothing) while its own
+bookkeeping — written through the outer `tx` — stays out of that count:
 
 ```typescript
 await store.transactionWithReceipt(async (tx) => {
-  const projected = await tx.measure(() => project(tx, change));
+  const projected = await tx.measure((scoped) => project(scoped, change));
   if (projected.receipt.writes.total === 0 && change.operation !== "delete") {
     throw new DroppedChangeError(change); // the projector dropped the change
   }
-  await tx.nodes.Cursor.upsertById("s1", { offset: change.offset }); // not counted in `projected`
+  await tx.nodes.Cursor.upsertById("s1", { offset: change.offset }); // outer tx — not in `projected`
 });
 ```
 
-A write counts in a scope iff its collection method **resolves** while the scope
-is open, so `await` your writes inside the callback; nested and overlapping
-`measure` calls each count independently. Measured writes still count in the
-outer receipt (they happened in the transaction). A scoped receipt's `recorded`
-is **always `undefined`** — the recorded instant is a per-transaction flush
-concern, unknowable mid-transaction. Plain `store.transaction()` contexts have
-no `measure` (no receipt is being produced).
+Attribution is by **which context you write through**, not by timing. A write
+through the scoped context counts in both the scope and the outer receipt (it
+happened in the transaction); a write through the outer `tx` during the scope
+counts only in the outer receipt. This makes overlapping and concurrent measures
+safe by construction — two scopes racing under `Promise.all`, each writing
+through its own scoped context, never cross-count. Nesting composes:
+`scoped.measure(...)` opens a child scope that chains up through its ancestors.
+A scoped receipt's `recorded` is **always `undefined`** — the recorded instant is
+a per-transaction flush concern, unknowable mid-transaction. Plain
+`store.transaction()` contexts have no `measure` (no receipt is being produced).
 
 #### Rollback and error propagation
 

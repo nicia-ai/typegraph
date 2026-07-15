@@ -1557,25 +1557,27 @@ export type TransactionContext<G extends GraphDef> = Readonly<{
 
 /**
  * Scoped write measurement, available only on the receipt-enabled transaction
- * contexts (`transactionWithReceipt`, `withRecordedTransaction`). Runs `fn` and
+ * contexts (`transactionWithReceipt`, `withRecordedTransaction`). Runs `fn`,
+ * passing it a **scoped context** — a second view over the same transaction — and
  * returns a {@link TransactionOutcome} whose receipt counts exactly the writes
- * that *resolved* on `tx.nodes` / `tx.edges` while `fn` ran — the surrounding
- * transaction's own bookkeeping writes are excluded, so a framework can attribute
- * writes to user code it invoked (e.g. an event-log materializer measuring
- * `project(tx, change)` to detect a dropped change).
+ * made *through that scoped context* (`scoped.nodes` / `scoped.edges`).
  *
- * Semantics inherit {@link TransactionReceipt}: a write counts iff its collection
- * method resolves while the scope is open (await your writes inside the callback;
- * a write started before `measure()` but resolving inside it is attributed by
- * resolution time), bulk methods count by input length, and a rejected write
- * counts 0. Measured writes still count in the outer receipt too — they happened
- * in the transaction. Nested and overlapping `measure` calls each count
- * independently. The returned receipt's `recorded` is **always `undefined`**: the
- * recorded commit instant is a per-transaction flush concern, unknowable
- * mid-transaction.
+ * Attribution is by **which context you write through**, not by timing. A write
+ * through the scoped context counts in both the scope and the outer receipt (it
+ * happened in the transaction); a write through the outer `tx` during the scope
+ * counts only in the outer receipt. This makes overlapping and concurrent
+ * measures safe by construction — two scopes running under `Promise.all`, each
+ * writing through its own scoped context, never cross-count. Nesting composes:
+ * `scoped.measure(...)` opens a child scope that counts in itself, every
+ * ancestor scope, and the outer receipt.
+ *
+ * Counts otherwise inherit {@link TransactionReceipt} (bulk by input length, a
+ * rejected write counts 0). The returned receipt's `recorded` is **always
+ * `undefined`**: the recorded commit instant is a per-transaction flush concern,
+ * unknowable mid-transaction.
  */
-export type ScopedMeasure = <T>(
-  fn: () => Promise<T>,
+export type ScopedMeasure<Context> = <T>(
+  fn: (scoped: Context) => Promise<T>,
 ) => Promise<TransactionOutcome<T>>;
 
 /**
@@ -1584,10 +1586,12 @@ export type ScopedMeasure = <T>(
  * `withRecordedTransaction`) hand a callback this type; plain `transaction()`
  * contexts have no recorder and therefore no `measure`, keeping that path
  * zero-overhead. Assignable to {@link TransactionContext}, so a projector helper
- * typed `(tx: TransactionContext<G>) => ...` accepts a measurable context.
+ * typed `(tx: TransactionContext<G>) => ...` accepts a measurable context. The
+ * scoped context handed to `measure` is itself measurable, so scopes nest.
  */
 export type MeasurableTransactionContext<G extends GraphDef> =
-  TransactionContext<G> & Readonly<{ measure: ScopedMeasure }>;
+  TransactionContext<G> &
+    Readonly<{ measure: ScopedMeasure<MeasurableTransactionContext<G>> }>;
 
 // ============================================================
 // Dynamic Collection Types (widened for runtime dispatch)
