@@ -202,6 +202,20 @@ and resolves with the existing node. See
 [Transaction Receipts](#transaction-receipts) for how a coalesced upsert reads on
 a receipt.
 
+**Coalescing eliminates *re-delivery* churn, not replay cost.** The win is
+scoped to re-delivery of the current value — the realistic at-least-once case,
+where a change that was already applied arrives again (a crash-window replay, a
+duplicate) and is value-identical to the live row. A full **replay-from-zero**
+over the current state is different: if the stream contains in-place updates,
+replaying `insert a=1 … update a=2` re-applies `a=1` over the live `a=2` — a
+genuine backward change that writes — and then `a=2` restores it. Both writes
+are correct (the replay faithfully re-walks each historical state), but
+"coalescing makes replay free" holds only for streams whose rows never
+supersede each other. It also leaves a spurious `a=2 → a=1 → a=2` band in the
+live store's recorded history, stamped at replay time. To rebuild without
+either cost, replay into a **fresh store** and publish it, rather than
+re-applying the log over the current state.
+
 ### In-graph cursors and the receipt
 
 A cursor can also live inside the graph as an ordinary node — convenient, and it
