@@ -1,5 +1,118 @@
 # @nicia-ai/typegraph
 
+## 0.36.0
+
+### Minor Changes
+
+- [#261](https://github.com/nicia-ai/typegraph/pull/261) [`5bc7b53`](https://github.com/nicia-ai/typegraph/commit/5bc7b5333d30392c31605161436441b3e8602447) Thanks [@pdlug](https://github.com/pdlug)! - Return a receipt from `store.withRecordedTransaction`, and add scoped write
+  measurement with `tx.measure`.
+
+  - **`store.withRecordedTransaction(externalTx, fn)` now returns
+    `Promise<TransactionOutcome<T>>`** instead of `Promise<T>`. The adopted path
+    is the only way to get exactly-once cursors and graph writes atomically on a
+    history store, and it now surfaces the same receipt `transactionWithReceipt`
+    does: `receipt.writes` for dropped-change detection and `receipt.recorded` as
+    the per-transaction replay anchor (`undefined` for a read-only callback or a
+    non-history store).
+
+    **BREAKING:** the adopted path now returns the result under `.result`. Migrate
+    by destructuring:
+
+    ```typescript
+    // Before
+    const x = await store.withRecordedTransaction(externalTx, fn);
+    // After
+    const { result: x } = await store.withRecordedTransaction(externalTx, fn);
+    ```
+
+  - **Scoped receipts — `tx.measure((scoped) => ...)`.** On the receipt-enabled
+    contexts (`transactionWithReceipt`, `withRecordedTransaction`), `tx.measure`
+    runs its callback with a **scoped context** — a second view over the same
+    transaction — and returns a `TransactionOutcome` whose receipt counts exactly
+    the writes made **through that scoped context** (`scoped.nodes` /
+    `scoped.edges`). So a framework can attribute writes to user code it invoked
+    (e.g. a materializer measuring `project(scoped, change)` to detect a dropped
+    change) while its own bookkeeping — written through the outer `tx` — stays out
+    of the count. Attribution is by which context you write through, not by
+    timing, which makes overlapping and concurrent measures safe by construction
+    (two scopes racing under `Promise.all` never cross-count). Nesting composes;
+    measured writes still count in the outer receipt; a scoped receipt's
+    `recorded` is always `undefined`. Plain `store.transaction()` contexts have no
+    `measure` (that path runs no recorder and stays zero-overhead). New exported
+    types: `MeasurableTransactionContext`, `MeasurableHistoryTransactionContext`,
+    `ScopedMeasure<Ctx>`.
+
+  - **Adopted contexts seal on return.** A transaction context retained and
+    written through _after_ its `withRecordedTransaction` callback resolves now
+    fails loud on both paths — the history path's capture guard is checked
+    _before_ the live write (so a swallowed error can no longer commit an
+    uncaptured row), and the non-history path seals its receipt-tracked
+    collections (so a post-return write can't persist a row the already-returned
+    receipt never counted).
+
+- [#262](https://github.com/nicia-ai/typegraph/pull/262) [`34468a0`](https://github.com/nicia-ai/typegraph/commit/34468a04f9cb6abff34177282d31f1240f1254d1) Thanks [@pdlug](https://github.com/pdlug)! - Add an opt-in `coalesceUnchangedUpserts` store option for at-least-once /
+  replay materializers.
+
+  Idempotent event-log projectors converge live state correctly, but every
+  re-delivery of a byte-identical value still performed a real write:
+  `upsertById` on an existing id called `updateNode` unconditionally, allocating
+  a fresh recorded instant and a new history row. A full replay of an N-event log
+  therefore rewrote every row and grew recorded history by N — the recovery /
+  rebuild workload inflates history the most.
+
+  With `createStore(graph, backend, { coalesceUnchangedUpserts: true })`, an
+  `upsertById` (or `bulkUpsertById` item) whose validated props are
+  value-identical to the existing **live** row performs **no write at all**: no
+  `updateNode`, no recorded-time capture, no history row, no revision-anchor
+  advance, and no `update` operation hooks. It resolves with the existing node.
+  The dirty-check compares the storage-normalized representation (props run
+  through the kind's Zod schema, key-order-independent), so it answers exactly
+  "would the persisted value differ?".
+
+  A write still happens (never coalesced) when the row is soft-deleted (an upsert
+  resurrects it), when an explicit `validFrom` / `validTo` is passed, or when any
+  prop differs. Default off, because some consumers want an audit row per
+  re-delivery. Covered symmetrically for edge `bulkUpsertById` (props only —
+  endpoints are the edge's identity).
+
+  Receipt semantics are unchanged and need no new signal: a coalesced upsert
+  still counts as one write intent (`writes.total`) but captures nothing
+  (`recorded` stays `undefined`) — the same two-signal shape as a no-op delete,
+  which at-least-once consumers already handle by carrying the prior anchor
+  forward.
+
+- [#260](https://github.com/nicia-ai/typegraph/pull/260) [`35d03ae`](https://github.com/nicia-ai/typegraph/commit/35d03ae0fd4647286927d617210f20a7e47df4b6) Thanks [@pdlug](https://github.com/pdlug)! - Make the store transaction surface tell the truth about raw SQL and history
+  capture.
+
+  - **New `tx.sqlAvailability` discriminant.** Every transaction context now
+    carries a required `sqlAvailability: "available" | "history" |
+"revisionTracking" | "unavailable"` field. Branch on it instead of
+    truthiness-testing `tx.sql`: under `history: true` / `revisionTracking: true`
+    the raw handle is present-but-throwing (so `if (tx.sql)` read truthy and then
+    threw), and it is `undefined` only on the non-transactional fallback. `"available"`
+    means `tx.sql` is a usable raw handle; `"history"` / `"revisionTracking"` mean
+    raw SQL is disabled here; `"unavailable"` means the backend has no transactions
+    (`tx.sql === undefined`, no atomicity).
+
+  - **`store.withTransaction()` on a history-enabled store is now a compile error.**
+    It always threw at runtime; the call site now rejects the argument with a
+    message pointing at `store.withRecordedTransaction()`. The runtime guard is
+    unchanged for suppressed calls.
+
+  - **Branchable recorded-capture guard codes.** The `ConfigurationError`s these
+    guards throw carry a stable `details.code`
+    (`RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`,
+    `RECORDED_CAPTURE_RAW_SQL_DISABLED`, `REVISION_TRACKING_RAW_SQL_DISABLED`), now
+    exported as `RECORDED_CAPTURE_GUARD_CODES` with a `RecordedCaptureGuardCode`
+    type and an `isRecordedCaptureGuardError(error, code?)` type guard — so a
+    portable caller can distinguish "history forbids raw SQL here" from "this
+    backend has no transactions" without substring-matching the message.
+
+  - **Fixed `withRecordedTransaction`'s JSDoc**, which incorrectly promised
+    `tx.sql`; on the adopted path you already hold the pinned connection, so write
+    your own relational tables through the external transaction handle you passed
+    in.
+
 ## 0.35.0
 
 ### Minor Changes
