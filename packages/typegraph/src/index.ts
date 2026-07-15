@@ -91,6 +91,9 @@ export {
   metaEdge,
   type NodeKinds,
   type RecordedInstant,
+  // Vector-slot enumeration for manual provisioning (the boot step
+  // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
+  resolveGraphVectorSlots,
   // Searchable type for fulltext search
   searchable,
   type SearchableMetadata,
