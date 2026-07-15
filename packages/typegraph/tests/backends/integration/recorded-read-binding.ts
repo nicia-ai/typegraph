@@ -170,6 +170,32 @@ export function registerRecordedReadBindingIntegrationTests(
       expect(recordedAfterUncapturedWrite?.since).toBe("2021");
     });
 
+    it("binds externally populated recorded identity assertions", async () => {
+      const backend = context.getStore().backend;
+      const historyStore = await createHistoryStore(context);
+      const person = await historyStore.nodes.Person.create({ name: "Alice" });
+      const company = await historyStore.nodes.Company.create({ name: "Acme" });
+      const assertion = await historyStore.identity.assertSame(person, company);
+      const assertedAt = requireRecordedInstant(
+        await historyStore.recordedNow(),
+        "expected recorded instant after identity assertion",
+      );
+      await historyStore.identity.retractAssertion(assertion.id);
+
+      const readStore = createStore(integrationTestGraph, backend, {
+        recordedRead: recordedRelation({
+          schema: createSqlSchema(backend.tableNames),
+        }),
+      });
+
+      expect(
+        await readStore
+          .asOfRecorded(assertedAt)
+          .identity.areSame(person, company),
+      ).toBe(true);
+      expect(await readStore.identity.areSame(person, company)).toBe(false);
+    });
+
     it("recordedNow() refuses on a store without history capture", async () => {
       await expect(context.getStore().recordedNow()).rejects.toThrow(
         "recordedNow() requires a store created with { history: true }",

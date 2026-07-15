@@ -612,6 +612,8 @@ export type QueryBuilderConfig = Readonly<{
   schemaIntrospector: SchemaIntrospector;
   /** Default traversal ontology expansion mode. */
   defaultTraversalExpansion: TraversalExpansion;
+  /** Whether this builder's graph enables Operational Identity. */
+  identityEnabled: boolean;
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration from createSqlSchema(...) for custom table names. */
@@ -663,4 +665,6 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /** Required for compile-only identity-aware traversal builders. */
+  identityEnabled?: boolean;
 }>;

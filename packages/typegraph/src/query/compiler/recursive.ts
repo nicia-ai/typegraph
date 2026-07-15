@@ -15,6 +15,7 @@ import {
 } from "../dialect";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitRecursiveQuerySql } from "./emitter";
+import { compileIdentitySourcePredicate } from "./identity-traversal";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -309,7 +310,10 @@ function compileRecursiveCte(
   const shouldEnforceCycleCheck = vl.cyclePolicy !== "allow";
   const shouldTrackPath = shouldEnforceCycleCheck || vl.pathAlias !== undefined;
   const recursiveJoinRequiredColumns = new Set<string>(["id"]);
-  if (previousNodeKinds.length > 1) {
+  if (
+    previousNodeKinds.length > 1 ||
+    traversal.includeIdentityMembers === true
+  ) {
     recursiveJoinRequiredColumns.add("kind");
   }
   const requiredStartColumns =
@@ -426,9 +430,13 @@ function compileRecursiveCte(
     const recursiveFilterClauses = [
       ...recursiveBaseWhereClauses,
       compileKindFilter(branch.edgeKinds, "e.kind"),
-      compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
       compileKindFilter(nodeKinds, `e.${branch.targetKindField}`),
     ];
+    if (traversal.includeIdentityMembers !== true) {
+      recursiveFilterClauses.push(
+        compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
+      );
+    }
 
     if (branch.duplicateGuard !== undefined) {
       recursiveFilterClauses.push(branch.duplicateGuard);
@@ -442,10 +450,25 @@ function compileRecursiveCte(
     if (pathExtension !== undefined) {
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
-    const recursiveJoinClauses: SqlFragment[] = [
-      sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`,
-    ];
-    if (previousNodeKinds.length > 1) {
+    const recursiveJoinClauses: SqlFragment[] =
+      traversal.includeIdentityMembers === true ?
+        [
+          compileIdentitySourcePredicate({
+            ast,
+            ctx,
+            edgeId: sql`e.${sql.raw(branch.joinField)}`,
+            edgeKind: sql`e.${sql.raw(branch.joinKindField)}`,
+            graphId,
+            previousId: sql`r.${sql.raw(nodeAlias)}_id`,
+            previousKind: sql`r.${sql.raw(nodeAlias)}_kind`,
+            temporalFilterPass,
+          }),
+        ]
+      : [sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`];
+    if (
+      traversal.includeIdentityMembers !== true &&
+      previousNodeKinds.length > 1
+    ) {
       recursiveJoinClauses.push(
         sql`e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind`,
       );

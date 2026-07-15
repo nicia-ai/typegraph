@@ -27,8 +27,14 @@
 import { neon } from "@neondatabase/serverless";
 import { drizzle as drizzleNeonHttp } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ConfigurationError } from "../../../src";
+import {
+  ConfigurationError,
+  createStore,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { SerializedSchema } from "../../../src/schema/types";
 
@@ -59,6 +65,14 @@ const STUB_SCHEMA_DOC: SerializedSchema = {
   defaults: { onNodeDelete: "restrict", temporalMode: "current" },
 };
 
+const Entity = defineNode("Entity", { schema: z.object({ name: z.string() }) });
+const identityGraph = defineGraph({
+  id: "neon_http_identity_refusal",
+  nodes: { Entity: { type: Entity } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
   it("auto-disables transactions when neon-http is detected", () => {
     // `neon()` doesn't validate the URL until the first request, so we
@@ -80,6 +94,22 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
     // Other capabilities are unchanged.
     expect(backend.capabilities.windowFunctions).toBe(true);
     expect(backend.capabilities.vector?.supported).toBe(true);
+  });
+
+  it("refuses Operational Identity with the stable driver capability code", () => {
+    const sql = neon("postgresql://test:test@invalid.neon.tech/test");
+    const db = drizzleNeonHttp({ client: sql });
+    const backend = createPostgresBackend(db);
+
+    expect(() => createStore(identityGraph, backend)).toThrow(
+      expect.objectContaining({
+        name: "ConfigurationError",
+        details: expect.objectContaining({
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          transactions: false,
+        }),
+      }),
+    );
   });
 
   it("does not expose the executeRaw fast path for neon-http", () => {

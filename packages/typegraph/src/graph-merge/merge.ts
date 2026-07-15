@@ -70,7 +70,11 @@ import {
 } from "./delete-modify";
 import type { MergedEdge, StagedEdge } from "./edge-repoint";
 import { buildCanonicalMap, repointEdges } from "./edge-repoint";
-import { BaseVersionMismatchError, MergeError } from "./errors";
+import {
+  BaseVersionMismatchError,
+  IdentityMergeConflictError,
+  MergeError,
+} from "./errors";
 import {
   compareMergeKeys,
   compareStrings,
@@ -116,6 +120,7 @@ import type {
   Edge,
   EdgeId,
   GraphDef,
+  IdentityTransferAssertion,
   JsonValue,
   Node,
   NodeId,
@@ -126,6 +131,7 @@ import type {
   UniqueIntrospection,
 } from "./typegraph-internal";
 import {
+  compareCodePoints,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
@@ -709,7 +715,106 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   baseAmbiguities: readonly BaseAmbiguity[];
   provenanceRecords: readonly ProvenanceRecord[];
   warnings: readonly string[];
+  identityAssertions: readonly IdentityTransferAssertion[];
+  identityRetractions: readonly string[];
 }>;
+
+function identityEndpointKey(assertion: IdentityTransferAssertion): string {
+  return JSON.stringify([
+    assertion.a.kind,
+    assertion.a.id,
+    assertion.b.kind,
+    assertion.b.id,
+  ]);
+}
+
+function identitySemanticKey(assertion: IdentityTransferAssertion): string {
+  return JSON.stringify([
+    assertion.relation,
+    assertion.a.kind,
+    assertion.a.id,
+    assertion.b.kind,
+    assertion.b.id,
+  ]);
+}
+
+function compareIdentitySurvivors(
+  left: IdentityTransferAssertion,
+  right: IdentityTransferAssertion,
+): number {
+  const byValidity = compareCodePoints(left.validFrom, right.validFrom);
+  return byValidity === 0 ? compareCodePoints(left.id, right.id) : byValidity;
+}
+
+/** @internal Exported for deterministic phase-level verification. */
+export function planIdentityChanges(staging: StagingSet): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  retractions: readonly string[];
+}> {
+  const newByEndpoint = new Map<string, IdentityTransferAssertion[]>();
+  for (const staged of staging.newIdentityAssertions) {
+    const key = identityEndpointKey(staged.assertion);
+    const assertions = newByEndpoint.get(key) ?? [];
+    assertions.push(staged.assertion);
+    newByEndpoint.set(key, assertions);
+  }
+  for (const [endpoint, assertions] of newByEndpoint) {
+    if (new Set(assertions.map((assertion) => assertion.relation)).size > 1) {
+      throw new IdentityMergeConflictError(
+        "Branches asserted opposing identity relations for one endpoint pair.",
+        { details: { endpoint, assertions } },
+      );
+    }
+  }
+
+  const retractedBySemantic = new Map<string, IdentityTransferAssertion>();
+  for (const staged of staging.retractedIdentityAssertions) {
+    retractedBySemantic.set(
+      identitySemanticKey(staged.assertion),
+      staged.assertion,
+    );
+  }
+  for (const staged of staging.newIdentityAssertions) {
+    const retracted = retractedBySemantic.get(
+      identitySemanticKey(staged.assertion),
+    );
+    if (retracted !== undefined && retracted.id !== staged.assertion.id) {
+      throw new IdentityMergeConflictError(
+        "Branches contain a retract/reassert race for one identity pair.",
+        {
+          details: {
+            retractedAssertion: retracted,
+            reassertedAssertion: staged.assertion,
+          },
+        },
+      );
+    }
+  }
+
+  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  for (const staged of staging.newIdentityAssertions) {
+    const key = identitySemanticKey(staged.assertion);
+    const previous = survivorBySemantic.get(key);
+    if (
+      previous === undefined ||
+      compareIdentitySurvivors(staged.assertion, previous) < 0
+    ) {
+      survivorBySemantic.set(key, staged.assertion);
+    }
+  }
+  return {
+    assertions: [...survivorBySemantic.values()].toSorted((left, right) =>
+      compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+    ),
+    retractions: [
+      ...new Set(
+        staging.retractedIdentityAssertions.map(
+          (staged) => staged.assertion.id,
+        ),
+      ),
+    ].toSorted((left, right) => compareCodePoints(left, right)),
+  };
+}
 
 /**
  * Resolves the entire merge into a {@link MergePlan} WITHOUT touching the target.
@@ -726,6 +831,7 @@ function planMerge<G extends GraphDef>(
   subClassClosure: ReturnType<typeof buildSubClassClosure>,
   preferredBranchId?: BranchId,
 ): MergePlan<G> {
+  const identity = planIdentityChanges(staging);
   const provenanceRecords: ProvenanceRecord[] = [];
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
@@ -1085,6 +1191,8 @@ function planMerge<G extends GraphDef>(
     ),
     provenanceRecords,
     warnings: candidateWarnings,
+    identityAssertions: identity.assertions,
+    identityRetractions: identity.retractions,
   };
 }
 
@@ -1150,6 +1258,8 @@ async function applyMergePlan<G extends GraphDef>(
   plan: MergePlan<G>,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
+  target: Store<G>,
+  txBackend: TransactionBackend,
 ): Promise<Readonly<{ nodes: number; edges: number }>> {
   // Counted by composite `(kind, id)` identity, so two different-kind nodes that
   // share an id string each count once (and never collide in the dedupe set).
@@ -1275,6 +1385,12 @@ async function applyMergePlan<G extends GraphDef>(
     committedEdges += items.length;
   }
 
+  await target.applyIdentityMergeAtTarget(
+    txBackend,
+    plan.identityRetractions,
+    plan.identityAssertions,
+  );
+
   return { nodes: committedNodeIds.size, edges: committedEdges };
 }
 
@@ -1332,6 +1448,8 @@ export async function commitPlan<G extends GraphDef>(
         plan,
         tx.nodes as unknown as TxNodes,
         tx.edges as unknown as TxEdges,
+        target,
+        tx.backend,
       );
     }, mergeCommitTransactionOptions(target)),
   );
@@ -1414,6 +1532,7 @@ async function assertTargetUnchanged<G extends GraphDef>(
     txBackend,
     target.graphId,
     target.graph,
+    await target.identityAssertionsAtTarget(txBackend, "state"),
   );
   const expectedContent = contentComponentOf(expectedBaseVersion);
   if (liveContent !== expectedContent) {
@@ -2697,7 +2816,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
       await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
       await validateIncrementalNodeWrites(target, nodesApi, plan);
       await validateIncrementalEdgeWrites(target, edgesApi, plan);
-      return applyMergePlan(plan, nodesApi, edgesApi);
+      return applyMergePlan(plan, nodesApi, edgesApi, target, tx.backend);
     }, mergeCommitTransactionOptions(target)),
   );
 }

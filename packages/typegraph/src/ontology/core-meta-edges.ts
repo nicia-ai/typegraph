@@ -187,19 +187,20 @@ export function equivalentTo(
   };
 }
 
-/**
- * Instance identity relationship.
- * A sameAs B means they refer to the same individual.
- */
+/** Type-level compatibility alias retained for migration only. */
 const sameAsMetaEdge = createMetaEdge(META_EDGE_SAME_AS, {
   symmetric: true,
   transitive: true,
   inference: "substitution",
-  description: "Same individual (for deduplication)",
+  description: "Deprecated type-level equivalence alias",
 });
 
 /**
- * Creates a sameAs ontology relation.
+ * Creates the deprecated type-level `sameAs` alias of `equivalentTo`.
+ *
+ * @deprecated Enable `identity: { sameIdAcrossKinds: "fold" }` and use the
+ * TypeGraph Identity Profile's runtime `store.identity` ledger. The ledger
+ * does not perform OWL property substitution or automatic query expansion.
  */
 export function sameAs(
   kindA: NodeType,
@@ -212,18 +213,19 @@ export function sameAs(
   };
 }
 
-/**
- * Explicit non-identity relationship.
- * A differentFrom B means they are definitely different individuals.
- */
+/** Deprecated decorative type-level non-identity relation. */
 const differentFromMetaEdge = createMetaEdge(META_EDGE_DIFFERENT_FROM, {
   symmetric: true,
   inference: "constraint",
-  description: "Explicitly different individuals",
+  description: "Deprecated decorative type-level non-identity relation",
 });
 
 /**
- * Creates a differentFrom ontology relation.
+ * Creates the deprecated decorative type-level `differentFrom` relation.
+ *
+ * @deprecated Enable `identity: { sameIdAcrossKinds: "fold" }` and use the
+ * TypeGraph Identity Profile's runtime `store.identity` ledger. The ledger
+ * does not perform OWL property substitution or automatic query expansion.
  */
 export function differentFrom(
   kindA: NodeType,
@@ -385,7 +387,9 @@ export const core = {
   narrower,
   relatedTo,
   equivalentTo,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility member until the next major
   sameAs,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility member until the next major
   differentFrom,
   disjointWith,
   partOf,

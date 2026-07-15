@@ -144,11 +144,10 @@ import {
 } from "./kind-removals";
 import {
   assertAdoptedDialect,
-  type CommonOperationBackend,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { mapHybridSearchRow } from "./operations/hybrid";
+import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
 import {
@@ -1022,6 +1021,9 @@ export function createSqliteBackend(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    identityAssertions: getTableName(tables.identityAssertions),
+    recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
+    identityClosure: getTableName(tables.identityClosure),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -1035,11 +1037,14 @@ export function createSqliteBackend(
     tableNames.edges,
     tableNames.uniques,
     tableNames.fulltext,
+    tableNames.identityAssertions,
+    tableNames.identityClosure,
   ];
   const recordedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
     tableNames.recordedClock,
+    tableNames.recordedIdentityAssertions,
   ] as const;
   const operationStrategy = createSqliteOperationStrategy(
     tables,
@@ -1231,7 +1236,7 @@ export function createSqliteBackend(
    * cannot be eliminated without atomicity.
    */
   function runSchemaWriteTransaction<T>(
-    fn: (tx: CommonOperationBackend) => Promise<T>,
+    fn: (tx: InternalOperationBackend) => Promise<T>,
   ): Promise<T> {
     if (transactionMode === "none") {
       throwSqliteTransactionsDisabled(
@@ -1641,6 +1646,16 @@ export function createSqliteBackend(
       return runSchemaWriteTransaction((target) =>
         target.commitSchemaVersion(params),
       );
+    },
+
+    async commitSchemaVersionWithPreflight(
+      params: CommitSchemaVersionParams,
+      preflight: (target: TransactionBackend) => Promise<void>,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransaction(async (target) => {
+        await preflight(target);
+        return target.commitSchemaVersion(params);
+      });
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {

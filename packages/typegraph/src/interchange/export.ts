@@ -22,6 +22,7 @@ import {
   type GraphDataHeader,
   type GraphInterchangeChunk,
   type InterchangeEdge,
+  type InterchangeIdentityAssertion,
   type InterchangeNode,
 } from "./types";
 
@@ -53,6 +54,7 @@ export async function exportGraph<G extends GraphDef>(
 ): Promise<GraphData> {
   const nodes: InterchangeNode[] = [];
   const edges: InterchangeEdge[] = [];
+  const identityAssertions: InterchangeIdentityAssertion[] = [];
   let header: GraphDataHeader | undefined;
   for await (const chunk of exportGraphStream(store, options)) {
     switch (chunk.type) {
@@ -68,12 +70,26 @@ export async function exportGraph<G extends GraphDef>(
         edges.push(...chunk.edges);
         break;
       }
+      case "identity": {
+        identityAssertions.push(...chunk.assertions);
+        break;
+      }
     }
   }
   if (header === undefined) {
     throw new Error("Graph export stream ended before emitting its header.");
   }
-  return { ...header, nodes, edges };
+  const { identity, ...headerWithoutIdentity } = header;
+  return {
+    ...headerWithoutIdentity,
+    nodes,
+    edges,
+    ...(identity === undefined ?
+      {}
+    : {
+        identity: { ...identity, assertions: identityAssertions },
+      }),
+  };
 }
 
 /**
@@ -103,6 +119,14 @@ export async function* exportGraphStream<G extends GraphDef>(
         graphId,
         schemaVersion: schemaVersion?.version ?? 1,
       },
+      ...(store.graph.identity === undefined ?
+        {}
+      : {
+          identity: {
+            profile: "typegraph-identity-v1" as const,
+            mode: resolved.identityMode,
+          },
+        }),
     },
   };
 
@@ -111,6 +135,21 @@ export async function* exportGraphStream<G extends GraphDef>(
   }
   for (const kind of edgeKinds) {
     yield* exportEdgeChunks(backend, graphId, kind, resolved);
+  }
+  if (store.graph.identity !== undefined) {
+    const assertions = await store.identityAssertionsForInterchange(
+      resolved.identityMode,
+    );
+    for (
+      let index = 0;
+      index < assertions.length;
+      index += resolved.batchSize
+    ) {
+      yield {
+        type: "identity",
+        assertions: assertions.slice(index, index + resolved.batchSize),
+      };
+    }
   }
 }
 
@@ -122,6 +161,7 @@ type ExportOptions_ = Readonly<{
   includeTemporal: boolean;
   includeMeta: boolean;
   includeDeleted: boolean;
+  identityMode: "state" | "archival";
 }>;
 
 async function* exportNodeChunks(

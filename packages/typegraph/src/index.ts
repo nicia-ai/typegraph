@@ -81,6 +81,7 @@ export {
   type GetNodeType,
   getSearchableMetadata,
   type GraphDef,
+  type GraphIdentityConfig,
   // Type guards
   isEdgeType,
   isEdgeTypeWithEndpoints,
@@ -103,6 +104,24 @@ export {
   type SearchableOptions,
   type SearchableSchema,
 } from "./core";
+
+// ============================================================
+// Operational Identity
+// ============================================================
+
+export {
+  type GraphNodeRef,
+  type IdentityAssertion,
+  type IdentityAssertionId,
+  type IdentityFacade,
+  type IdentityFacadeFor,
+  type IdentityPair,
+  type IdentityReadFacade,
+  type IdentityReadFacadeFor,
+  type IdentityRelation,
+  type IdentityWriteSummary,
+  rebuildIdentityClosure,
+} from "./identity";
 
 // ============================================================
 // Backend Types
@@ -250,6 +269,7 @@ export {
   computeTransitiveClosure,
   // Core ontology module
   core,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   differentFrom,
   disjointWith,
   equivalentTo,
@@ -263,6 +283,7 @@ export {
   narrower,
   partOf,
   relatedTo,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   sameAs,
   subClassOf,
 } from "./ontology";
@@ -283,6 +304,7 @@ export type {
   ErrorCategory,
   InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
+  IdentityContradictionErrorDetails,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
   NodeConstraintNotFoundErrorDetails,
@@ -320,6 +342,7 @@ export {
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
   InvalidEdgeWeightError,
+  IdentityContradictionError,
   isConstraintError,
   isRecordedCaptureGuardError,
   isSystemError,
@@ -715,6 +738,7 @@ export {
   defineGraphExtension,
   GraphExtensionError,
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   IncompatibleChangeError,

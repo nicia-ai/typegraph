@@ -234,7 +234,7 @@ describe("interchange round-trip laws", () => {
         async (rows) => {
           // Hand-authored documents whose properties carry unknown keys.
           const document: GraphData = {
-            formatVersion: "1.0",
+            formatVersion: "2.0",
             exportedAt: "2024-01-01T00:00:00.000Z",
             source: { type: "external" },
             nodes: rows.map((row, index) => ({

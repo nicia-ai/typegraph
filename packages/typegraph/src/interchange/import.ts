@@ -46,6 +46,7 @@ import {
   ImportOptionsSchema,
   type ImportResult,
   type InterchangeEdge,
+  type InterchangeIdentityAssertion,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -105,6 +106,7 @@ export async function importGraph<G extends GraphDef>(
   // runInWriteTransaction for the shared lock-before-rows contract every
   // writer follows.
   await runInWriteTransaction(store, backend, async (target, lock) => {
+    await store.lockIdentityImportTarget(target);
     await processNodes(
       target,
       graphId,
@@ -116,6 +118,12 @@ export async function importGraph<G extends GraphDef>(
       errors,
       importedNodeIds,
       lock,
+    );
+    await store.foldImportedIdentityNodes(
+      target,
+      data.nodes
+        .filter((node) => importedNodeIds.has(makeNodeKey(node.kind, node.id)))
+        .map((node) => ({ kind: node.kind, id: node.id })),
     );
     await processEdges(
       target,
@@ -129,6 +137,15 @@ export async function importGraph<G extends GraphDef>(
       errors,
       importedNodeIds,
     );
+    if (data.identity !== undefined) {
+      const identity = await store.importIdentityAssertionsAtTarget(
+        target,
+        data.identity.assertions,
+        data.identity.mode,
+      );
+      result.identity.created += identity.created;
+      result.identity.skipped += identity.skipped;
+    }
   });
 
   // A bulk load runs against stale planner statistics until ANALYZE runs
@@ -170,6 +187,7 @@ export async function importGraphStream<G extends GraphDef>(
   const result = emptyImportResult();
   let header: GraphDataHeader | undefined;
   let receivedEdges = false;
+  let receivedIdentity = false;
 
   for await (const chunk of chunks) {
     switch (chunk.type) {
@@ -186,7 +204,7 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
-        if (receivedEdges) {
+        if (receivedEdges || receivedIdentity) {
           throw new Error(
             "Graph interchange stream cannot emit nodes after edges.",
           );
@@ -194,10 +212,14 @@ export async function importGraphStream<G extends GraphDef>(
         if (chunk.nodes.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, chunk.nodes, []), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, chunk.nodes, [], []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -206,14 +228,45 @@ export async function importGraphStream<G extends GraphDef>(
         if (header === undefined) {
           throw new Error("Graph interchange stream must start with a header.");
         }
+        if (receivedIdentity) {
+          throw new Error(
+            "Graph interchange stream cannot emit edges after identity assertions.",
+          );
+        }
         receivedEdges = true;
         if (chunk.edges.length === 0) break;
         mergeImportResult(
           result,
-          await importGraph(store, graphDataForChunk(header, [], chunk.edges), {
-            ...options,
-            refreshStatistics: false,
-          }),
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], chunk.edges, []),
+            {
+              ...options,
+              refreshStatistics: false,
+            },
+          ),
+        );
+        throwIfStreamChunkFailed(result, options);
+        break;
+      }
+      case "identity": {
+        if (header === undefined) {
+          throw new Error("Graph interchange stream must start with a header.");
+        }
+        if (header.identity === undefined) {
+          throw new Error(
+            "Graph interchange stream emitted identity rows without an identity header.",
+          );
+        }
+        receivedIdentity = true;
+        if (chunk.assertions.length === 0) break;
+        mergeImportResult(
+          result,
+          await importGraph(
+            store,
+            graphDataForChunk(header, [], [], chunk.assertions),
+            { ...options, refreshStatistics: false },
+          ),
         );
         throwIfStreamChunkFailed(result, options);
         break;
@@ -251,6 +304,7 @@ function emptyImportResult(): ImportResult {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
     edges: { created: 0, updated: 0, skipped: 0 },
+    identity: { created: 0, skipped: 0 },
     errors: [],
   };
 }
@@ -259,8 +313,19 @@ function graphDataForChunk(
   header: GraphDataHeader,
   nodes: GraphData["nodes"],
   edges: GraphData["edges"],
+  assertions: readonly InterchangeIdentityAssertion[],
 ): GraphData {
-  return { ...header, nodes, edges };
+  const { identity, ...headerWithoutIdentity } = header;
+  return {
+    ...headerWithoutIdentity,
+    nodes,
+    edges,
+    ...(identity === undefined ?
+      {}
+    : {
+        identity: { ...identity, assertions: [...assertions] },
+      }),
+  };
 }
 function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.nodes.created += source.nodes.created;
@@ -269,6 +334,8 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.edges.created += source.edges.created;
   target.edges.updated += source.edges.updated;
   target.edges.skipped += source.edges.skipped;
+  target.identity.created += source.identity.created;
+  target.identity.skipped += source.identity.skipped;
   target.errors.push(...source.errors);
 }
 
@@ -282,7 +349,8 @@ async function refreshStatisticsAfterImport<G extends GraphDef>(
     result.nodes.created +
     result.nodes.updated +
     result.edges.created +
-    result.edges.updated;
+    result.edges.updated +
+    result.identity.created;
   if ((options.refreshStatistics ?? true) && mutationCount > 0) {
     try {
       await store.refreshStatistics();

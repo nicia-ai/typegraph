@@ -12,15 +12,12 @@ import {
   type NodeRegistration,
   type NodeType,
 } from "../core/types";
-import {
-  computeClosuresFromOntology,
-  createEmptyClosures,
-  KindRegistry,
-} from "./kind-registry";
-import {
-  type EdgeEndpointKinds,
-  validateImpliesEndpointCompatibility,
-} from "./validate-implies";
+import { type NamedOntologyRelation } from "../ontology/validation";
+import { buildValidatedKindRegistry } from "./build-validated";
+import type { KindRegistry } from "./kind-registry";
+import { type EdgeEndpointKinds } from "./validate-implies";
+
+const EMPTY_NAMED_ONTOLOGY: readonly NamedOntologyRelation[] = [];
 
 // ============================================================
 // Build Registry from GraphDef
@@ -51,19 +48,22 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
   // Extract edge types
   const edgeTypes = extractEdgeTypes(graph);
 
-  // Compute closures from ontology
-  const closures =
-    graph.ontology.length > 0 ?
-      computeClosuresFromOntology(graph.ontology)
-    : createEmptyClosures();
-
-  const registry = new KindRegistry(nodeTypes, edgeTypes, closures);
-  validateImpliesEndpointCompatibility(
-    buildEdgeEndpointKinds(graph.edges),
-    registry,
-  );
-
-  return registry;
+  return buildValidatedKindRegistry({
+    nodeKinds: nodeTypes,
+    edgeKinds: edgeTypes,
+    ontology:
+      graph.ontology.length === 0 ?
+        EMPTY_NAMED_ONTOLOGY
+      : graph.ontology.map((relation): NamedOntologyRelation => ({
+          metaEdge: relation.metaEdge.name,
+          from:
+            typeof relation.from === "string" ?
+              relation.from
+            : relation.from.kind,
+          to: typeof relation.to === "string" ? relation.to : relation.to.kind,
+        })),
+    edgeEndpoints: buildEdgeEndpointKinds(graph.edges),
+  });
 }
 
 /**

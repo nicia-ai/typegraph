@@ -83,6 +83,7 @@ export function serializeSchema<G extends GraphDef>(
       onNodeDelete: graph.defaults.onNodeDelete,
       temporalMode: graph.defaults.temporalMode,
     },
+    ...(graph.identity === undefined ? {} : { identity: graph.identity }),
     // `serializeIndexes` collapses both absent and empty inputs to
     // `undefined` (see the helper's docstring); omit the field entirely
     // in that case so legacy graphs hash byte-identically to the
@@ -708,6 +709,7 @@ export async function computeSchemaHash(
     edges: schema.edges,
     ontology: schema.ontology,
     defaults: schema.defaults,
+    ...(schema.identity === undefined ? {} : { identity: schema.identity }),
     ...(schema.indexes === undefined ? {} : { indexes: schema.indexes }),
     ...(schema.extension === undefined ? {} : { extension: schema.extension }),
     ...(schema.deprecatedKinds === undefined ?

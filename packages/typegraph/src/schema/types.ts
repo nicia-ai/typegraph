@@ -9,6 +9,7 @@
  */
 import { z } from "zod";
 
+import { type GraphIdentityConfig } from "../core/define-graph";
 import {
   type Cardinality,
   type Collation,
@@ -620,6 +621,10 @@ export const serializedSchemaZod = z.object({
       temporalMode: temporalModeZod,
     })
     .loose(),
+  identity: z
+    .object({ sameIdAcrossKinds: z.literal("fold") })
+    .readonly()
+    .optional(),
   /**
    * Index declarations attached to the graph.
    *
@@ -670,6 +675,8 @@ export type SerializedSchema = Readonly<{
     onNodeDelete: DeleteBehavior;
     temporalMode: TemporalMode;
   }>;
+  /** Durable opt-in to the TypeGraph Identity Profile. */
+  identity?: GraphIdentityConfig;
   /**
    * Index declarations attached to the graph.
    *

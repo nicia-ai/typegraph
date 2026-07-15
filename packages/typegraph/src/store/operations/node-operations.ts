@@ -118,6 +118,18 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     ctx: OperationHookContext,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  identity?: Readonly<{
+    lock: (target: GraphBackend | TransactionBackend) => Promise<void>;
+    foldCreated: (
+      target: GraphBackend | TransactionBackend,
+      references: readonly Readonly<{ kind: string; id: string }>[],
+    ) => Promise<void>;
+    detachDeleted: (
+      target: GraphBackend | TransactionBackend,
+      ref: Readonly<{ kind: string; id: string }>,
+      mode: "soft" | "hard",
+    ) => Promise<void>;
+  }>;
 }>;
 
 type NodeCreatePrepared = Readonly<{
@@ -937,6 +949,61 @@ async function prepareBatchCreates<G extends GraphDef>(
   return { preparedCreates, batchInsertParams };
 }
 
+type IdentityCreatePartition = Readonly<{
+  inserts: readonly NodeCreatePrepared[];
+  resurrections: readonly Readonly<{
+    prepared: NodeCreatePrepared;
+    existing: BackendNodeRow;
+  }>[];
+}>;
+
+async function partitionIdentityCreates(
+  graphId: string,
+  preparedCreates: readonly NodeCreatePrepared[],
+  target: GraphBackend | TransactionBackend,
+): Promise<IdentityCreatePartition> {
+  const inserts: NodeCreatePrepared[] = [];
+  const resurrections: {
+    prepared: NodeCreatePrepared;
+    existing: BackendNodeRow;
+  }[] = [];
+  for (const prepared of preparedCreates) {
+    const existing = await target.getNode(graphId, prepared.kind, prepared.id);
+    if (existing?.deleted_at === undefined) {
+      inserts.push(prepared);
+    } else {
+      resurrections.push({ prepared, existing });
+    }
+  }
+  return { inserts, resurrections };
+}
+
+function resurrectPreparedNode<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  target: GraphBackend | TransactionBackend,
+  lock: GraphWriteLock,
+  prepared: NodeCreatePrepared,
+  existing: BackendNodeRow,
+): Promise<BackendNodeRow> {
+  return applyNodeUpdate(
+    createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+    {
+      existing,
+      clearDeleted: true,
+      schema: prepared.nodeKind.schema,
+      validatedProps: prepared.validatedProps,
+      uniqueConstraints: prepared.uniqueConstraints,
+      ...(prepared.insertParams.validFrom === undefined ?
+        {}
+      : { validFrom: prepared.insertParams.validFrom }),
+      ...(prepared.insertParams.validTo === undefined ?
+        {}
+      : { validTo: prepared.insertParams.validTo }),
+    },
+    target,
+  );
+}
+
 // ============================================================
 // Shared Constraint Lookup
 //
@@ -1038,6 +1105,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
         input,
@@ -1045,6 +1114,33 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         target,
         options,
       );
+
+      if (identity !== undefined) {
+        const existing = await target.getNode(ctx.graphId, kind, id);
+        if (existing?.deleted_at !== undefined) {
+          const resurrected = await applyNodeUpdate(
+            createNodeWriteContext(ctx.graphId, ctx.registry, lock),
+            {
+              existing,
+              clearDeleted: true,
+              schema: prepared.nodeKind.schema,
+              validatedProps: prepared.validatedProps,
+              uniqueConstraints: prepared.uniqueConstraints,
+              ...(prepared.insertParams.validFrom === undefined ?
+                {}
+              : { validFrom: prepared.insertParams.validFrom }),
+              ...(prepared.insertParams.validTo === undefined ?
+                {}
+              : { validTo: prepared.insertParams.validTo }),
+            },
+            target,
+          );
+          await identity.foldCreated(target, [
+            { kind: prepared.kind, id: prepared.id },
+          ]);
+          return shouldReturnRow ? rowToNode(resurrected) : undefined;
+        }
+      }
 
       let row: BackendNodeRow | undefined;
       if (shouldReturnRow) {
@@ -1057,6 +1153,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       }
 
       await finalizeNodeCreate(ctx, prepared, target, lock);
+      if (identity !== undefined) {
+        await identity.foldCreated(target, [
+          { kind: prepared.kind, id: prepared.id },
+        ]);
+      }
 
       if (row === undefined) return;
       return rowToNode(row);
@@ -1105,15 +1206,41 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) return;
 
   await runInWriteTransaction(ctx, backend, async (target, lock) => {
+    const identity = ctx.identity;
+    if (identity !== undefined) await identity.lock(target);
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
       target,
     );
 
-    await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
-
-    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    if (identity === undefined) {
+      await runInsertBatch(nodeInsertDispatch(target), batchInsertParams);
+      await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    } else {
+      const partition = await partitionIdentityCreates(
+        ctx.graphId,
+        preparedCreates,
+        target,
+      );
+      await runInsertBatch(
+        nodeInsertDispatch(target),
+        partition.inserts.map((prepared) => prepared.insertParams),
+      );
+      for (const { prepared, existing } of partition.resurrections) {
+        await resurrectPreparedNode(ctx, target, lock, prepared, existing);
+      }
+      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+    }
+    if (identity !== undefined) {
+      await identity.foldCreated(
+        target,
+        preparedCreates.map((prepared) => ({
+          kind: prepared.kind,
+          id: prepared.id,
+        })),
+      );
+    }
   });
 }
 
@@ -1135,6 +1262,8 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) return [];
 
   return runInWriteTransaction(ctx, backend, async (target, lock) => {
+    const identity = ctx.identity;
+    if (identity !== undefined) await identity.lock(target);
     const { preparedCreates, batchInsertParams } = await prepareBatchCreates(
       ctx,
       inputs,
@@ -1142,12 +1271,49 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       options,
     );
 
-    const rows = await runInsertBatchReturning(
-      nodeInsertDispatch(target),
-      batchInsertParams,
-    );
-
-    await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    let rows: readonly BackendNodeRow[];
+    if (identity === undefined) {
+      rows = await runInsertBatchReturning(
+        nodeInsertDispatch(target),
+        batchInsertParams,
+      );
+      await finalizeNodeCreateBatch(ctx, preparedCreates, target, lock);
+    } else {
+      const partition = await partitionIdentityCreates(
+        ctx.graphId,
+        preparedCreates,
+        target,
+      );
+      const inserted = await runInsertBatchReturning(
+        nodeInsertDispatch(target),
+        partition.inserts.map((prepared) => prepared.insertParams),
+      );
+      const resurrected: BackendNodeRow[] = [];
+      for (const { prepared, existing } of partition.resurrections) {
+        resurrected.push(
+          await resurrectPreparedNode(ctx, target, lock, prepared, existing),
+        );
+      }
+      await finalizeNodeCreateBatch(ctx, partition.inserts, target, lock);
+      const byReference = new Map(
+        [...inserted, ...resurrected].map((row) => [
+          JSON.stringify([row.kind, row.id]),
+          row,
+        ]),
+      );
+      rows = preparedCreates.map((prepared) =>
+        byReference.get(JSON.stringify([prepared.kind, prepared.id]))!,
+      );
+    }
+    if (identity !== undefined) {
+      await identity.foldCreated(
+        target,
+        preparedCreates.map((prepared) => ({
+          kind: prepared.kind,
+          id: prepared.id,
+        })),
+      );
+    }
 
     return rows.map((row) => rowToNode(row));
   });
@@ -1169,8 +1335,23 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.kind,
     input.id,
   );
-  return runHookedWriteOperation(ctx, opContext, backend, (target, lock) =>
-    performNodeUpdate(ctx, input, target, lock, options),
+  return runHookedWriteOperation(
+    ctx,
+    opContext,
+    backend,
+    async (target, lock) => {
+      const identity = ctx.identity;
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.lock(target);
+      }
+      const node = await performNodeUpdate(ctx, input, target, lock, options);
+      if (options?.clearDeleted && identity !== undefined) {
+        await identity.foldCreated(target, [
+          { kind: input.kind, id: input.id },
+        ]);
+      }
+      return node;
+    },
   );
 }
 
@@ -1184,9 +1365,17 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
-  return runInWriteTransaction(ctx, backend, (target, lock) =>
-    performNodeUpdate(ctx, input, target, lock, options),
-  );
+  return runInWriteTransaction(ctx, backend, async (target, lock) => {
+    const identity = ctx.identity;
+    if (options?.clearDeleted && identity !== undefined) {
+      await identity.lock(target);
+    }
+    const node = await performNodeUpdate(ctx, input, target, lock, options);
+    if (options?.clearDeleted && identity !== undefined) {
+      await identity.foldCreated(target, [{ kind: input.kind, id: input.id }]);
+    }
+    return node;
+  });
 }
 
 // ============================================================
@@ -1214,6 +1403,8 @@ export async function executeNodeDelete<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
@@ -1236,6 +1427,9 @@ export async function executeNodeDelete<G extends GraphDef>(
         },
         target,
       );
+      if (identity !== undefined) {
+        await identity.detachDeleted(target, { kind, id }, "soft");
+      }
     },
   );
 }
@@ -1265,6 +1459,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     opContext,
     backend,
     async (target, lock) => {
+      const identity = ctx.identity;
+      if (identity !== undefined) await identity.lock(target);
       const registration = getNodeRegistration(ctx.graph, kind);
       // No in-transaction preflight (unlike soft delete, whose pipeline
       // consumes the pre-image for uniqueness-key cleanup): every hard
@@ -1288,6 +1484,9 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         },
         target,
       );
+      if (identity !== undefined) {
+        await identity.detachDeleted(target, { kind, id }, "hard");
+      }
     },
   );
 }

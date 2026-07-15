@@ -10,6 +10,7 @@ const LLMS_SMALL_PAGES = new Set([
   "overview",
   "getting-started",
   "core-concepts",
+  "identity",
   "backend-setup",
   "schema-management",
   "schema-evolution",
@@ -45,6 +46,7 @@ const sidebar = [
     items: [
       { label: "Schemas & Types", slug: "core-concepts" },
       { label: "Ontology & Reasoning", slug: "ontology" },
+      { label: "Operational Identity", slug: "identity" },
       { label: "Semantic Search", slug: "semantic-search" },
       { label: "Fulltext Search", slug: "fulltext-search" },
       { label: "Graph Algorithms", slug: "graph-algorithms" },

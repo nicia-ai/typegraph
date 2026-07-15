@@ -35,6 +35,7 @@ import type {
   EdgeId,
   GraphBackend,
   GraphDef,
+  IdentityTransferAssertion,
   NodeId,
   NodeType,
   Store,
@@ -157,6 +158,10 @@ export type StateDiff = Readonly<{
     new: readonly ChangedEdge[];
     modified: readonly ModifiedEdge[];
     deleted: readonly DeletedEdge[];
+  }>;
+  identity: Readonly<{
+    new: readonly IdentityTransferAssertion[];
+    retracted: readonly IdentityTransferAssertion[];
   }>;
   /**
    * `(kind, id) -> version` for every fork-store node observed during this diff
@@ -423,6 +428,16 @@ export async function diffAgainstBase<G extends GraphDef>(
   const graph = baseStore.graph;
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
+  const [baseIdentity, forkIdentity] = await Promise.all([
+    baseStore.identityAssertionsForInterchange("state"),
+    forkStore.identityAssertionsForInterchange("state"),
+  ]);
+  const baseIdentityById = new Map(
+    baseIdentity.map((assertion) => [assertion.id, assertion]),
+  );
+  const forkIdentityById = new Map(
+    forkIdentity.map((assertion) => [assertion.id, assertion]),
+  );
 
   const newNodes: ChangedNode[] = [];
   const modifiedNodes: ModifiedNode[] = [];
@@ -515,6 +530,14 @@ export async function diffAgainstBase<G extends GraphDef>(
       new: newEdges.sort((left, right) => byId(left, right)),
       modified: modifiedEdges.sort((left, right) => byId(left, right)),
       deleted: deletedEdges.sort((left, right) => byId(left, right)),
+    },
+    identity: {
+      new: forkIdentity
+        .filter((assertion) => !baseIdentityById.has(assertion.id))
+        .toSorted((left, right) => compareStrings(left.id, right.id)),
+      retracted: baseIdentity
+        .filter((assertion) => !forkIdentityById.has(assertion.id))
+        .toSorted((left, right) => compareStrings(left.id, right.id)),
     },
     forkNodeVersions,
     forkEdgeSignatures,

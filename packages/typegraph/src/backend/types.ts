@@ -391,6 +391,8 @@ export type UpdateNodeParams = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
+  /** Applied when resurrecting a tombstone; omitted means the resurrection instant. */
+  validFrom?: string | null;
   validTo?: string;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
@@ -1262,6 +1264,18 @@ export type GraphBackend = Readonly<{
   commitSchemaVersion: (
     this: void,
     params: CommitSchemaVersionParams,
+  ) => Promise<SchemaVersionRow>;
+  /**
+   * Internal schema-lifecycle seam for features whose data preflight must
+   * commit atomically with the schema CAS. The callback runs in the same
+   * write transaction before the schema lock and version write; it receives
+   * only the ordinary transaction backend, so callers cannot bypass the CAS.
+   *
+   * @internal
+   */
+  commitSchemaVersionWithPreflight?: (
+    params: CommitSchemaVersionParams,
+    preflight: (target: TransactionBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   /**
    * Atomically flips the active schema pointer to an existing version,

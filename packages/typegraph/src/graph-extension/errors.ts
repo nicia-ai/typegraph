@@ -84,6 +84,7 @@ export const GRAPH_EXTENSION_ISSUE_CODES = [
   "ONTOLOGY_CYCLE",
   "ONTOLOGY_SELF_LOOP",
   "ONTOLOGY_DISJOINT_CONFLICT",
+  "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
   "DUPLICATE_ONTOLOGY_RELATION",
   "INVALID_DOCUMENT_SHAPE",
   "UNKNOWN_DOCUMENT_KEY",
@@ -318,6 +319,32 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
     });
     this.edgeKind = edgeKind;
     this.side = side;
+    this.endpoint = endpoint;
+  }
+}
+
+/**
+ * Thrown when `inverseOf` or `implies` uses an unresolved bare edge-kind
+ * name. Absolute HTTP(S) IRIs remain deliberate inert external references.
+ */
+export class GraphExtensionUnresolvedOntologyEndpointError extends GraphExtensionError {
+  readonly code = "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT" as const;
+  readonly metaEdge: "inverseOf" | "implies";
+  readonly endpoint: string;
+
+  constructor(
+    metaEdge: "inverseOf" | "implies",
+    endpoint: string,
+    graphId: string,
+  ) {
+    super({
+      message: `Graph-extension ${metaEdge} endpoint "${endpoint}" does not resolve to a registered edge kind on graph "${graphId}".`,
+      code: "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT",
+      details: { metaEdge, endpoint, graphId },
+      suggestion:
+        "Correct the local edge-kind name, register that edge, or use an absolute http:// or https:// IRI for a deliberate inert external reference.",
+    });
+    this.metaEdge = metaEdge;
     this.endpoint = endpoint;
   }
 }

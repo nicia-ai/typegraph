@@ -51,6 +51,7 @@ export {
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   INCOMPATIBLE_CHANGE_TYPES,

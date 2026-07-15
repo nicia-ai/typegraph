@@ -5,11 +5,13 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
+import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
+import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -42,7 +44,15 @@ export type TouchedEdge = Readonly<{
   afterImage?: EdgeRow | undefined;
 }>;
 
-export type TouchedEntity = TouchedNode | TouchedEdge;
+export type TouchedIdentityAssertion = Readonly<{
+  entity: "identity";
+  graphId: string;
+  id: string;
+  afterImage?: IdentityAssertionStorageRow | undefined;
+}>;
+
+export type TouchedEntity =
+  TouchedNode | TouchedEdge | TouchedIdentityAssertion;
 
 type IdRow = Readonly<{ id: string }>;
 type ClosedRow = Readonly<{ id: string; deleted_at: unknown }>;
@@ -54,6 +64,9 @@ export function entityKey(entity: TouchedEntity): string {
     }
     case "edge": {
       return `edge\u0000${entity.graphId}\u0000${entity.id}`;
+    }
+    case "identity": {
+      return `identity\u0000${entity.graphId}\u0000${entity.id}`;
     }
   }
 }
@@ -195,6 +208,70 @@ export async function flushEdges(
       schema.recordedEdgesTable,
       recordedInsertsFor(afterById, closed),
       recordedRevision,
+    );
+  }
+}
+
+async function getIdentityAssertionRowsByIds(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, IdentityAssertionStorageRow>> {
+  if (ids.length === 0) return new Map();
+  const rows = await target.execute<IdentityAssertionStorageRow>(
+    asCompiledRowsSql(sql`
+      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+             valid_from, valid_to, created_at, updated_at, deleted_at
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${graphId}
+        AND id IN (${sqlValueList(ids)})
+    `),
+  );
+  return new Map(rows.map((row) => [row.id, row] as const));
+}
+
+export async function flushIdentityAssertions(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  entities: readonly TouchedIdentityAssertion[],
+  recordedRevision: number,
+): Promise<void> {
+  if (entities.length === 0) return;
+  const ids = entities.map((entity) => entity.id);
+  const closed = await closeOpenReturning(
+    target,
+    schema.recordedIdentityAssertionsTable,
+    graphId,
+    ids,
+    recordedRevision,
+  );
+  const afterById = await resolveAfterImages(entities, (missing) =>
+    getIdentityAssertionRowsByIds(target, schema, graphId, missing),
+  );
+  for (const row of afterById.values()) {
+    const operation = recordedOp(
+      closed.has(row.id),
+      closed.get(row.id) ?? false,
+      row,
+    );
+    await executeStatement(
+      target,
+      sql`
+        INSERT INTO ${schema.recordedIdentityAssertionsTable} (
+          history_id, graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+          valid_from, valid_to, created_at, updated_at, deleted_at,
+          recorded_from, recorded_to, op
+        ) VALUES (
+          ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
+          ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
+          ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
+          ${row.created_at}, ${row.updated_at},
+          ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
+          ${RECORDED_MAX_REVISION}, ${operation}
+        )
+      `,
     );
   }
 }

@@ -11,6 +11,7 @@ import {
   type TransactionBackend,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
+import { type IdentityAssertionStorageRow } from "../identity/storage-types";
 import { type SqlSchema } from "../query/compiler/schema";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
@@ -30,10 +31,12 @@ import {
 import {
   entityKey,
   flushEdges,
+  flushIdentityAssertions,
   flushNodes,
   queryConnectedEdgeIds,
   type TouchedEdge,
   type TouchedEntity,
+  type TouchedIdentityAssertion,
   type TouchedNode,
 } from "./recorded-capture/flush";
 import {
@@ -90,6 +93,11 @@ type RecordedCaptureSession = Readonly<{
     afterImage?: NodeRow,
   ) => void;
   touchEdge: (graphId: string, id: string, afterImage?: EdgeRow) => void;
+  touchIdentityAssertion: (
+    graphId: string,
+    id: string,
+    afterImage?: IdentityAssertionStorageRow,
+  ) => void;
   flush: (
     target: TransactionBackend,
     schema: SqlSchema,
@@ -234,6 +242,14 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       touch({ entity: "edge", graphId, id, afterImage });
     },
 
+    touchIdentityAssertion(
+      graphId: string,
+      id: string,
+      afterImage?: IdentityAssertionStorageRow,
+    ): void {
+      touch({ entity: "identity", graphId, id, afterImage });
+    },
+
     async flush(
       target: TransactionBackend,
       schema: SqlSchema,
@@ -271,6 +287,10 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         const edges = entities.filter(
           (entity): entity is TouchedEdge => entity.entity === "edge",
         );
+        const identityAssertions = entities.filter(
+          (entity): entity is TouchedIdentityAssertion =>
+            entity.entity === "identity",
+        );
         await flushNodes(
           target,
           schema,
@@ -285,11 +305,50 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
           edges,
           recordedCommit.revision,
         );
+        await flushIdentityAssertions(
+          target,
+          schema,
+          graphId,
+          identityAssertions,
+          recordedCommit.revision,
+        );
       }
       touched.clear();
       return recordedByGraph;
     },
   };
+}
+
+type RecordedIdentityBinding = Readonly<{
+  target: TransactionBackend;
+  session: RecordedCaptureSession;
+}>;
+
+const recordedIdentityBindings = new WeakMap<object, RecordedIdentityBinding>();
+
+function ignoreIdentityTouch(): void {
+  return;
+}
+
+export async function withRecordedIdentityMutationTarget<T>(
+  target: GraphBackend | TransactionBackend,
+  fn: (
+    rawTarget: GraphBackend | TransactionBackend,
+    touch: (
+      graphId: string,
+      id: string,
+      afterImage?: IdentityAssertionStorageRow,
+    ) => void,
+  ) => Promise<T>,
+): Promise<T> {
+  const binding = recordedIdentityBindings.get(target);
+  if (binding === undefined) {
+    return fn(target, ignoreIdentityTouch);
+  }
+  binding.session.assertOpen();
+  return fn(binding.target, (graphId, id, afterImage) => {
+    binding.session.touchIdentityAssertion(graphId, id, afterImage);
+  });
 }
 
 function createRecordedTransactionBackend(
@@ -525,6 +584,7 @@ function createRecordedTransactionBackend(
       }),
   });
   registerRecordedGraphLockMemo(overlay, graphLocks);
+  recordedIdentityBindings.set(overlay, { target, session });
   return overlay;
 }
 

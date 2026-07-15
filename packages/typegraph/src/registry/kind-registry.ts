@@ -16,8 +16,10 @@ import {
   META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
 } from "../ontology/constants";
+import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { requireDefined } from "../utils/presence";
+import { type NamedOntologyRelation } from "../ontology/validation";
 
 /**
  * KindRegistry holds precomputed closures for ontological reasoning.
@@ -42,6 +44,7 @@ export class KindRegistry {
   // === Equivalence ===
   readonly equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
   readonly iriToKind: ReadonlyMap<string, string>;
+  readonly relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
 
   // === Constraints ===
   readonly disjointPairs: ReadonlySet<string>; // Normalized pairs: "Organization|Person"
@@ -65,6 +68,7 @@ export class KindRegistry {
       narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
       equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
       iriToKind: ReadonlyMap<string, string>;
+      relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
       disjointPairs: ReadonlySet<string>;
       partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
       hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -81,6 +85,7 @@ export class KindRegistry {
     this.narrowerClosure = closures.narrowerClosure;
     this.equivalenceSets = closures.equivalenceSets;
     this.iriToKind = closures.iriToKind;
+    this.relatedKinds = closures.relatedKinds;
     this.disjointPairs = closures.disjointPairs;
     this.partOfClosure = closures.partOfClosure;
     this.hasPartClosure = closures.hasPartClosure;
@@ -176,6 +181,12 @@ export class KindRegistry {
    */
   resolveIri(iri: string): string | undefined {
     return this.iriToKind.get(iri);
+  }
+
+  /** Gets directly associated kinds declared through symmetric `relatedTo`. */
+  getRelatedKinds(kind: string): readonly string[] {
+    const related = this.relatedKinds.get(kind);
+    return related === undefined ? [] : [...related];
   }
 
   // === Constraint Methods ===
@@ -331,6 +342,7 @@ export function createEmptyClosures(): {
   narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
   equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
   iriToKind: ReadonlyMap<string, string>;
+  relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
   disjointPairs: ReadonlySet<string>;
   partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
   hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -345,6 +357,7 @@ export function createEmptyClosures(): {
     narrowerClosure: new Map(),
     equivalenceSets: new Map(),
     iriToKind: new Map(),
+    relatedKinds: new Map(),
     disjointPairs: new Set(),
     partOfClosure: new Map(),
     hasPartClosure: new Map(),
@@ -359,6 +372,19 @@ export function createEmptyClosures(): {
  */
 export function computeClosuresFromOntology(
   ontology: readonly OntologyRelation[],
+): ReturnType<typeof computeClosuresFromNamedOntology> {
+  return computeClosuresFromNamedOntology(
+    ontology.map((relation) => ({
+      metaEdge: relation.metaEdge.name,
+      from: getKindName(relation.from),
+      to: getKindName(relation.to),
+    })),
+  );
+}
+
+/** Computes all registry closures from already-normalized relation names. */
+export function computeClosuresFromNamedOntology(
+  ontology: readonly NamedOntologyRelation[],
 ): {
   subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
   subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
@@ -366,6 +392,7 @@ export function computeClosuresFromOntology(
   narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
   equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
   iriToKind: ReadonlyMap<string, string>;
+  relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
   disjointPairs: ReadonlySet<string>;
   partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
   hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
@@ -377,16 +404,17 @@ export function computeClosuresFromOntology(
   const subClassRelations: [string, string][] = [];
   const broaderRelations: [string, string][] = [];
   const equivalentRelations: [string, string][] = [];
+  const relatedRelations: [string, string][] = [];
   const disjointRelations: [string, string][] = [];
   const partOfRelations: [string, string][] = [];
   const inverseOfRelations: [string, string][] = [];
   const impliesRelations: [string, string][] = [];
 
   for (const relation of ontology) {
-    const fromName = getKindName(relation.from);
-    const toName = getKindName(relation.to);
+    const fromName = relation.from;
+    const toName = relation.to;
 
-    switch (relation.metaEdge.name) {
+    switch (relation.metaEdge) {
       case META_EDGE_SUB_CLASS_OF: {
         subClassRelations.push([fromName, toName]);
         break;
@@ -403,6 +431,10 @@ export function computeClosuresFromOntology(
       case META_EDGE_EQUIVALENT_TO:
       case META_EDGE_SAME_AS: {
         equivalentRelations.push([fromName, toName]);
+        break;
+      }
+      case "relatedTo": {
+        relatedRelations.push([fromName, toName]);
         break;
       }
       case META_EDGE_DISJOINT_WITH: {
@@ -441,9 +473,13 @@ export function computeClosuresFromOntology(
   // Compute equivalence sets and IRI mappings
   const equivalenceSets = computeEquivalenceSets(equivalentRelations);
   const iriToKind = computeIriMapping(equivalentRelations);
+  const relatedKinds = computeSymmetricRelations(relatedRelations);
 
   // Compute disjoint pairs (normalize for symmetric lookup)
-  const disjointPairs = computeDisjointPairs(disjointRelations);
+  const disjointPairs = computeDisjointPairs(
+    disjointRelations,
+    subClassDescendants,
+  );
 
   // Compute partOf closures
   const partOfClosure = computeTransitiveClosure(partOfRelations);
@@ -465,6 +501,7 @@ export function computeClosuresFromOntology(
     narrowerClosure,
     equivalenceSets,
     iriToKind,
+    relatedKinds,
     disjointPairs,
     partOfClosure,
     hasPartClosure,
@@ -482,13 +519,6 @@ function getKindName(kindOrIri: NodeType | AnyEdgeType | string): string {
     return kindOrIri;
   }
   return kindOrIri.kind;
-}
-
-/**
- * Checks if a string is an external IRI (not a local kind name).
- */
-function isExternalIri(value: string): boolean {
-  return value.startsWith("http://") || value.startsWith("https://");
 }
 
 /**
@@ -574,15 +604,37 @@ function computeIriMapping(
  */
 function computeDisjointPairs(
   relations: readonly (readonly [string, string])[],
+  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>,
 ): ReadonlySet<string> {
   const result = new Set<string>();
 
   for (const [a, b] of relations) {
-    // Normalize pair for consistent lookup
-    const normalized = a < b ? `${a}|${b}` : `${b}|${a}`;
-    result.add(normalized);
+    const leftKinds = [a, ...(subClassDescendants.get(a) ?? [])];
+    const rightKinds = [b, ...(subClassDescendants.get(b) ?? [])];
+    for (const left of leftKinds) {
+      for (const right of rightKinds) {
+        const normalized =
+          left < right ? `${left}|${right}` : `${right}|${left}`;
+        result.add(normalized);
+      }
+    }
   }
 
+  return result;
+}
+
+function computeSymmetricRelations(
+  relations: readonly (readonly [string, string])[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const result = new Map<string, Set<string>>();
+  for (const [a, b] of relations) {
+    const relatedToA = result.get(a) ?? new Set<string>();
+    relatedToA.add(b);
+    result.set(a, relatedToA);
+    const relatedToB = result.get(b) ?? new Set<string>();
+    relatedToB.add(a);
+    result.set(b, relatedToB);
+  }
   return result;
 }
 

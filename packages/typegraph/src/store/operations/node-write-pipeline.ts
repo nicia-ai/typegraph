@@ -289,6 +289,7 @@ export async function applyNodeUpdate(
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
+    validFrom?: string | null;
     validTo?: string;
   }> &
     NodeUpdateTarget,
@@ -332,6 +333,7 @@ export async function applyNodeUpdate(
     kind: string;
     id: string;
     props: Record<string, unknown>;
+    validFrom?: string | null;
     validTo?: string;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
@@ -342,6 +344,7 @@ export async function applyNodeUpdate(
     props: args.validatedProps,
     incrementVersion: true,
   };
+  if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
   if (args.validTo !== undefined) updateParams.validTo = args.validTo;
   if (args.clearDeleted) updateParams.clearDeleted = true;
 

@@ -1078,6 +1078,27 @@ describe("computeSchemaDiff", () => {
     });
   });
 
+  describe("Operational Identity capability", () => {
+    it("classifies enablement as safe and removal as breaking", () => {
+      const disabled = createSchema({ version: 1 });
+      const enabled = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      expect(computeSchemaDiff(disabled, enabled).identity).toEqual({
+        type: "added",
+        severity: "safe",
+        details: "Operational Identity enabled",
+      });
+      expect(computeSchemaDiff(enabled, disabled).identity).toEqual({
+        type: "removed",
+        severity: "breaking",
+        details: "Operational Identity disabled",
+      });
+    });
+  });
+
   // ============================================================
   // Summary Generation
   // ============================================================

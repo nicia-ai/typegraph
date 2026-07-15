@@ -5,11 +5,11 @@
  * Note: Zod schemas cannot be fully reconstructed from JSON Schema,
  * so this provides access to the serialized data for introspection.
  */
-import { KindRegistry } from "../registry/kind-registry";
-import {
-  type EdgeEndpointKinds,
-  validateImpliesEndpointCompatibility,
-} from "../registry/validate-implies";
+import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type NamedOntologyRelation } from "../ontology/validation";
+import { buildValidatedKindRegistry } from "../registry/build-validated";
+import type { KindRegistry } from "../registry/kind-registry";
+import { type EdgeEndpointKinds } from "../registry/validate-implies";
 import {
   type SerializedClosures,
   type SerializedEdgeDef,
@@ -62,10 +62,13 @@ export type DeserializedSchema = Readonly<{
   /** Get graph defaults */
   getDefaults: () => SerializedSchema["defaults"];
 
+  /** Get the durable TypeGraph Identity Profile configuration. */
+  getIdentity: () => SerializedSchema["identity"];
+
   /** Get the raw serialized schema */
   getRaw: () => SerializedSchema;
 
-  /** Build a KindRegistry from the closures */
+  /** Build a validated KindRegistry by recomputing closures from relations */
   buildRegistry: () => KindRegistry;
 }>;
 
@@ -104,6 +107,7 @@ export function deserializeSchema(
     getClosures: () => schema.ontology.closures,
 
     getDefaults: () => schema.defaults,
+    getIdentity: () => schema.identity,
     getRaw: () => schema,
 
     buildRegistry: () => buildRegistryFromClosures(schema),
@@ -115,52 +119,27 @@ export function deserializeSchema(
 // ============================================================
 
 /**
- * Builds a KindRegistry from serialized closures.
+ * Builds a KindRegistry from serialized relations.
  *
- * This allows query execution without recomputing closures.
+ * Persisted closures are a legacy inspection artifact. Relations are validated
+ * and closures are recomputed so old schemas gain current hardening rules.
  */
 function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
-  const { closures } = schema.ontology;
-
-  // Convert Record<string, string[]> back to Map<string, Set<string>>
-  const subClassAncestors = recordToMap(closures.subClassAncestors);
-  const subClassDescendants = recordToMap(closures.subClassDescendants);
-  const broaderClosure = recordToMap(closures.broaderClosure);
-  const narrowerClosure = recordToMap(closures.narrowerClosure);
-  const equivalenceSets = recordToMap(closures.equivalenceSets);
-  const partOfClosure = recordToMap(closures.partOfClosure);
-  const hasPartClosure = recordToMap(closures.hasPartClosure);
-  const iriToKind = simpleRecordToMap(closures.iriToKind);
-  const disjointPairs = new Set(closures.disjointPairs);
-  const edgeInverses = simpleRecordToMap(closures.edgeInverses);
-  const edgeImplicationsClosure = recordToMap(closures.edgeImplicationsClosure);
-  const edgeImplyingClosure = recordToMap(closures.edgeImplyingClosure);
-
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
-  const nodeKinds = new Map();
-  const edgeKinds = new Map();
-
-  const registry = new KindRegistry(nodeKinds, edgeKinds, {
-    subClassAncestors,
-    subClassDescendants,
-    broaderClosure,
-    narrowerClosure,
-    equivalenceSets,
-    iriToKind,
-    disjointPairs,
-    partOfClosure,
-    hasPartClosure,
-    edgeInverses,
-    edgeImplicationsClosure,
-    edgeImplyingClosure,
+  const nodeKinds = new Map<string, NodeType>();
+  const edgeKinds = new Map<string, AnyEdgeType>();
+  return buildValidatedKindRegistry({
+    nodeKinds,
+    edgeKinds,
+    ontology: schema.ontology.relations.map(
+      (relation): NamedOntologyRelation => ({
+        metaEdge: relation.metaEdge,
+        from: relation.from,
+        to: relation.to,
+      }),
+    ),
+    edgeEndpoints: buildEdgeEndpointKinds(schema.edges),
   });
-
-  validateImpliesEndpointCompatibility(
-    buildEdgeEndpointKinds(schema.edges),
-    registry,
-  );
-
-  return registry;
 }
 
 /**
@@ -178,26 +157,4 @@ function buildEdgeEndpointKinds(
     result.set(kind, { from: def.fromKinds, to: def.toKinds });
   }
   return result;
-}
-
-/**
- * Converts Record<string, string[]> to Map<string, Set<string>>.
- */
-function recordToMap(
-  record: Record<string, readonly string[]>,
-): ReadonlyMap<string, ReadonlySet<string>> {
-  const result = new Map<string, Set<string>>();
-  for (const [key, values] of Object.entries(record)) {
-    result.set(key, new Set(values));
-  }
-  return result;
-}
-
-/**
- * Converts Record<string, string> to Map<string, string>.
- */
-function simpleRecordToMap(
-  record: Record<string, string>,
-): ReadonlyMap<string, string> {
-  return new Map(Object.entries(record));
 }

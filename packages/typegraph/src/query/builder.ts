@@ -168,6 +168,7 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
+    identityEnabled: options?.identityEnabled ?? false,
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),

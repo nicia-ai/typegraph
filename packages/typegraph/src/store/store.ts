@@ -73,6 +73,28 @@ import { IncompatibleChangeError } from "../graph-extension/errors";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
+import {
+  applyIdentityChangesForContext,
+  createIdentityFacade,
+  createIdentityReadFacade,
+  detachIdentityForNode,
+  foldIdentityForCreatedNodes,
+  type IdentityImportSummary,
+  type IdentityServiceContext,
+  type IdentityTransferAssertion,
+  importIdentityAssertionsIntoTarget,
+  lockIdentityEnablementNodes,
+  lockIdentityGraph,
+  readIdentityAssertionsForInterchange,
+  rebuildIdentityClosureForContext,
+  removeIdentityKindsForContext,
+  validateIdentityForContext,
+} from "../identity/service";
+import type {
+  IdentityFacade,
+  IdentityFacadeFor,
+  IdentityReadFacadeFor,
+} from "../identity/types";
 import { type VectorIndexDeclaration } from "../indexes/types";
 import type { TraversalExpansion } from "../query/ast";
 import {
@@ -97,6 +119,7 @@ import { buildKindRegistry, type KindRegistry } from "../registry";
 import {
   applyDeprecatedKinds,
   commitNewSchemaVersion,
+  commitNewSchemaVersionWithPreflight,
   ensureSchema as ensureSchemaImpl,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
@@ -170,6 +193,7 @@ import {
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
 } from "./operations";
+import { withWriteTransactionSession } from "./operations/write-transaction";
 import {
   advanceRevisionClock,
   assertCurrentRecordedSchema,
@@ -211,6 +235,7 @@ import {
   createTransactionReceiptRecorder,
   type TransactionReceiptRecorder,
   wrapTransactionCollections,
+  wrapTransactionIdentity,
 } from "./transaction-receipt";
 import {
   type AdapterTransactionContext,
@@ -430,6 +455,42 @@ type StoreCore<G extends GraphDef> = Readonly<{
   graphId: string;
   capabilities: BackendCapabilities;
   registry: KindRegistry;
+  identity: IdentityFacadeFor<G>;
+  identityAtCoordinate: (
+    coordinate: ReadCoordinate,
+  ) => IdentityReadFacadeFor<G>;
+  rebuildIdentityClosure: () => Promise<void>;
+  identitySchemaPreflight: (target: TransactionBackend) => Promise<void>;
+  identityEnablementPreflight: (target: TransactionBackend) => Promise<void>;
+  validateIdentity: () => Promise<void>;
+  removeIdentityKindsInSchemaPreflight: (
+    target: TransactionBackend,
+    kinds: readonly string[],
+  ) => Promise<void>;
+  identityAssertionsForInterchange: (
+    mode: "state" | "archival",
+  ) => Promise<readonly IdentityTransferAssertion[]>;
+  identityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    mode?: "state" | "archival",
+  ) => Promise<readonly IdentityTransferAssertion[]>;
+  lockIdentityImportTarget: (
+    target: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  foldImportedIdentityNodes: (
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ) => Promise<void>;
+  importIdentityAssertionsAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    assertions: readonly IdentityTransferAssertion[],
+    mode: "state" | "archival",
+  ) => Promise<IdentityImportSummary>;
+  applyIdentityMergeAtTarget: (
+    target: GraphBackend | TransactionBackend,
+    retractionIds: readonly string[],
+    assertions: readonly IdentityTransferAssertion[],
+  ) => Promise<void>;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
@@ -589,6 +650,8 @@ type AdapterStoreTransactions<
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
+const IDENTITY_FACADES = new WeakMap<object, unknown>();
+
 class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly [STORE_RUNTIME]: StoreRuntime<G>;
   readonly #graph: G;
@@ -618,7 +681,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #edgeCollections: GraphEdgeCollections<G> | undefined;
   #algorithms: GraphAlgorithms<G> | undefined;
   #search: StoreSearch<G> | undefined;
-
   constructor(
     graph: G,
     backend: GraphBackend,
@@ -627,6 +689,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     adapterBackend?: AdapterBackend<TNativeTransaction>,
   ) {
     this.#graph = graph;
+    if (
+      graph.identity !== undefined &&
+      (!backend.capabilities.transactions ||
+        backend.executeStatement === undefined)
+    ) {
+      throw new ConfigurationError(
+        "Operational Identity requires an atomic transactional backend with statement execution support.",
+        {
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          transactions: backend.capabilities.transactions,
+          statementExecution: backend.executeStatement !== undefined,
+        },
+        {
+          suggestion:
+            "Use a transactional SQLite or PostgreSQL driver; Cloudflare D1 and neon-http cannot host identity closure maintenance.",
+        },
+      );
+    }
     this.#baseBackend = asRawBackend(backend);
     this.#adapterBackend = adapterBackend;
     this.#captureEnabled = options?.history === true;
@@ -729,6 +809,190 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
+  }
+
+  /** The TypeGraph Identity Profile facade for identity-enabled graphs. */
+  get identity(): IdentityFacadeFor<G> {
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Identity is not enabled for this graph.",
+        { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
+        {
+          suggestion:
+            'Add identity: { sameIdAcrossKinds: "fold" } to defineGraph(...).',
+        },
+      );
+    }
+    const existing = IDENTITY_FACADES.get(this);
+    if (existing !== undefined) return existing as IdentityFacadeFor<G>;
+    const facade = createIdentityFacade(this.#identityContext(this.#backend));
+    IDENTITY_FACADES.set(this, facade);
+    return facade as IdentityFacadeFor<G>;
+  }
+
+  /** @internal Builds the identity read facade for a pinned StoreView. */
+  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacadeFor<G> {
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError("Identity is not enabled for this graph.", {
+        code: "IDENTITY_NOT_ENABLED",
+        graphId: this.graphId,
+      });
+    }
+    return createIdentityReadFacade({
+      ...this.#identityContext(this.#backend),
+      coordinate,
+    }) as IdentityReadFacadeFor<G>;
+  }
+
+  /** Rebuilds derived current identity closure without advancing revision. */
+  async rebuildIdentityClosure(): Promise<void> {
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError("Identity is not enabled for this graph.", {
+        code: "IDENTITY_NOT_ENABLED",
+        graphId: this.graphId,
+      });
+    }
+    await rebuildIdentityClosureForContext(
+      this.#identityContext(this.#baseBackend),
+    );
+  }
+
+  /** @internal Validates/rebuilds identity under schema-transition locks. */
+  async identitySchemaPreflight(target: TransactionBackend): Promise<void> {
+    await lockRecordedGraphWrite(target, this.graphId);
+    await lockIdentityGraph(target, this.graphId);
+    await rebuildIdentityClosureForContext(this.#identityContext(target));
+  }
+
+  /** @internal First enablement additionally excludes legacy node writers. */
+  async identityEnablementPreflight(target: TransactionBackend): Promise<void> {
+    await lockRecordedGraphWrite(target, this.graphId);
+    await lockIdentityGraph(target, this.graphId);
+    await lockIdentityEnablementNodes(target, this.#sqlSchema());
+    await rebuildIdentityClosureForContext(this.#identityContext(target));
+  }
+
+  /** @internal Read-only startup integrity verification. */
+  async validateIdentity(): Promise<void> {
+    if (this.#graph.identity === undefined) return;
+    await validateIdentityForContext(this.#identityContext(this.#baseBackend));
+  }
+
+  /** @internal Cascades removed kinds in the schema-commit transaction. */
+  async removeIdentityKindsInSchemaPreflight(
+    target: TransactionBackend,
+    kinds: readonly string[],
+  ): Promise<void> {
+    if (!this.#captureEnabled) {
+      await removeIdentityKindsForContext(this.#identityContext(target), kinds);
+      return;
+    }
+    const scope = createRecordedTransactionScope(
+      target,
+      this.#sqlSchema(),
+      target.dialect === "sqlite",
+    );
+    await removeIdentityKindsForContext(
+      this.#identityContext(scope.backend),
+      kinds,
+    );
+    await scope.flush();
+  }
+
+  /** @internal Interchange export seam that honors this store's SQL binding. */
+  identityAssertionsForInterchange(
+    mode: "state" | "archival",
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined) return Promise.resolve([]);
+    return readIdentityAssertionsForInterchange(
+      this.#identityContext(this.#baseBackend),
+      mode,
+    );
+  }
+
+  /** @internal Reads identity truth through an already-bound transaction. */
+  identityAssertionsAtTarget(
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival" = "state",
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined) return Promise.resolve([]);
+    return readIdentityAssertionsForInterchange(
+      this.#identityContext(target),
+      mode,
+    );
+  }
+
+  /** @internal Acquires the enabled graph's identity lock for an import. */
+  lockIdentityImportTarget(
+    target: GraphBackend | TransactionBackend,
+  ): Promise<void> {
+    return this.#graph.identity === undefined ?
+        Promise.resolve()
+      : lockIdentityGraph(target, this.graphId);
+  }
+
+  /** @internal Restores same-id folding after the ops-layer import bypass. */
+  foldImportedIdentityNodes(
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ): Promise<void> {
+    if (this.#graph.identity === undefined || references.length === 0) {
+      return Promise.resolve();
+    }
+    return foldIdentityForCreatedNodes(
+      {
+        graphId: this.graphId,
+        registry: this.#registry,
+        schema: this.#sqlSchema(),
+      },
+      target,
+      references,
+    );
+  }
+
+  /** @internal Applies identity interchange rows inside an import transaction. */
+  importIdentityAssertionsAtTarget(
+    target: GraphBackend | TransactionBackend,
+    assertions: readonly IdentityTransferAssertion[],
+    mode: "state" | "archival",
+  ): Promise<IdentityImportSummary> {
+    if (assertions.length === 0) {
+      return Promise.resolve({ created: 0, skipped: 0 });
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot import identity assertions into an identity-disabled graph.",
+        { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: this.graphId },
+      );
+    }
+    return importIdentityAssertionsIntoTarget(
+      this.#identityContext(target),
+      target,
+      assertions,
+      mode,
+    );
+  }
+
+  /** @internal Mechanical graph-merge apply through the mutation coordinator. */
+  applyIdentityMergeAtTarget(
+    target: GraphBackend | TransactionBackend,
+    retractionIds: readonly string[],
+    assertions: readonly IdentityTransferAssertion[],
+  ): Promise<void> {
+    if (retractionIds.length === 0 && assertions.length === 0) {
+      return Promise.resolve();
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot apply identity merge changes to an identity-disabled graph.",
+        { code: "IDENTITY_MERGE_REQUIRES_PROFILE", graphId: this.graphId },
+      );
+    }
+    return applyIdentityChangesForContext(
+      this.#identityContext(target),
+      retractionIds,
+      assertions,
+    );
   }
 
   /**
@@ -1937,10 +2201,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           receiptRecorder,
         ));
       }
+      const identity =
+        this.#graph.identity === undefined ?
+          undefined
+        : createIdentityFacade(this.#identityContext(this.#backend));
+      const receiptIdentity =
+        identity === undefined || receiptRecorder === undefined ?
+          identity
+        : wrapTransactionIdentity(identity, receiptRecorder);
       const fallbackContext: AdapterTransactionContext<G, TNativeTransaction> =
         {
           nodes,
           edges,
+          ...(receiptIdentity === undefined ?
+            {}
+          : { identity: receiptIdentity }),
           // No real transaction: `tx.sql` is absent and there is no atomicity.
           sqlAvailability: "unavailable",
           backend: createTransactionReadBackend(this.#backend),
@@ -2001,15 +2276,30 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const run = async (
         txBackend: TransactionBackend,
         nativeTransaction: TNativeTransaction | undefined,
-      ): Promise<T> =>
-        invoke(
-          this.#buildTransactionContext(
-            txBackend,
-            nativeTransaction,
-            runHooks,
-            receiptRecorder,
-          ),
+      ): Promise<T> => {
+        const invokeTransaction = (): Promise<T> =>
+          invoke(
+            this.#buildTransactionContext(
+              txBackend,
+              nativeTransaction,
+              runHooks,
+              receiptRecorder,
+            ),
+          );
+        if (!this.#captureEnabled && !this.#revisionTrackingEnabled) {
+          return invokeTransaction();
+        }
+        return withWriteTransactionSession(
+          txBackend,
+          {
+            graphId: this.graphId,
+            historyEnabled: this.#captureEnabled,
+            revisionTrackingEnabled: this.#revisionTrackingEnabled,
+            revisionSchema: this.#sqlSchema(),
+          },
+          invokeTransaction,
         );
+      };
       const result =
         this.#captureEnabled || this.#adapterBackend === undefined ?
           await this.#backend.transaction(
@@ -2299,10 +2589,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         context.edges,
         scopeRecorder,
       );
+      const identity =
+        this.#graph.identity === undefined ?
+          undefined
+        : wrapTransactionIdentity(
+            (context as TransactionContext<G> & {
+              identity: IdentityFacade<G>;
+            }).identity,
+            scopeRecorder,
+          );
       const scoped = this.#attachMeasure(
         overlayPropertyDescriptors(context, {
           nodes,
           edges,
+          ...(identity === undefined ? {} : { identity }),
           getNodeCollection: (kind: string) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         }),
@@ -2375,6 +2675,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ));
     }
 
+    const identity =
+      this.#graph.identity === undefined ?
+        undefined
+      : createIdentityFacade(this.#identityContext(txBackend));
+    const receiptIdentity =
+      identity === undefined || receiptRecorder === undefined ?
+        identity
+      : wrapTransactionIdentity(identity, receiptRecorder);
+
     const getNodeCollection = (
       kind: string,
     ): DynamicNodeCollection | undefined =>
@@ -2388,6 +2697,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const base = {
       nodes,
       edges,
+      ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
       [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
       getNodeCollection,
@@ -2427,6 +2737,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
   }
 
+  #identityContext(
+    backend: GraphBackend | TransactionBackend,
+  ): IdentityServiceContext<G> {
+    return {
+      graph: this.#graph,
+      graphId: this.graphId,
+      registry: this.#registry,
+      backend,
+      schema: this.#sqlSchema(),
+      historyEnabled: this.#captureEnabled,
+      revisionTrackingEnabled: this.#revisionTrackingEnabled,
+    };
+  }
+
   // === Graph Lifecycle ===
 
   /**
@@ -2444,6 +2768,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ): Promise<void> => {
       if (this.#revisionTrackingEnabled) {
         await lockRecordedGraphWrite(target, this.graphId);
+      }
+      if (this.#graph.identity !== undefined) {
+        await lockIdentityGraph(target, this.graphId);
       }
       const previousRevision =
         this.#revisionTrackingEnabled && !this.#captureEnabled ?
@@ -2696,17 +3023,26 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (error !== undefined) throw error;
     }
 
+    const identityCandidate =
+      merged.identity === undefined ?
+        undefined
+      : this.#cloneWithGraph(merged, undefined);
+
     // Commit via `commitNewSchemaVersion` directly (the row-returning
     // sibling of `migrateSchema`). The classification step above is the
     // authoritative compatibility gate — `ensureSchema`'s
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
-    const committed = await commitNewSchemaVersion(
-      this.#backend,
-      merged,
-      activeRow.version,
-    );
+    const committed =
+      identityCandidate === undefined ?
+        await commitNewSchemaVersion(this.#backend, merged, activeRow.version)
+      : await commitNewSchemaVersionWithPreflight(
+          this.#backend,
+          merged,
+          activeRow.version,
+          async (target) => identityCandidate.identitySchemaPreflight(target),
+        );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
     // existed). `evolve()` is a privileged migrator path — it commits schema
@@ -3130,11 +3466,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // destructive by design; that's why removeKinds is a separate
     // verb. Concurrent commits surface as `StaleVersionError` from
     // `commitSchemaVersion` (CAS check).
-    const committedRow = await commitNewSchemaVersion(
-      this.#backend,
-      finalGraph,
-      activeRow.version,
-    );
+    const identityCandidate =
+      finalGraph.identity === undefined || plan.removedNodeKinds.length === 0 ?
+        undefined
+      : this.#cloneWithGraph(finalGraph, undefined);
+    const committedRow =
+      identityCandidate === undefined ?
+        await commitNewSchemaVersion(
+          this.#backend,
+          finalGraph,
+          activeRow.version,
+        )
+      : await commitNewSchemaVersionWithPreflight(
+          this.#backend,
+          finalGraph,
+          activeRow.version,
+          async (target) =>
+            identityCandidate.removeIdentityKindsInSchemaPreflight(
+              target,
+              plan.removedNodeKinds,
+            ),
+        );
 
     // Queue per-deployment data-cleanup status — one row per removed
     // kind. The status table is best-effort: if recordKindRemoval
@@ -3417,6 +3769,38 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
+      ...(this.#graph.identity === undefined ?
+        {}
+      : {
+          identity: {
+            lock: (target: GraphBackend | TransactionBackend) =>
+              lockIdentityGraph(target, this.graphId),
+            foldCreated: (
+              target: GraphBackend | TransactionBackend,
+              references: readonly Readonly<{ kind: string; id: string }>[],
+            ) =>
+              foldIdentityForCreatedNodes(
+                {
+                  graphId: this.graphId,
+                  registry: this.#registry,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                references,
+              ),
+            detachDeleted: (
+              target: GraphBackend | TransactionBackend,
+              ref: Readonly<{ kind: string; id: string }>,
+              mode: "soft" | "hard",
+            ) =>
+              detachIdentityForNode(
+                { graphId: this.graphId, schema: this.#sqlSchema() },
+                target,
+                ref,
+                mode,
+              ),
+          },
+        }),
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
@@ -3566,6 +3950,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: backend as GraphBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        identityEnabled: this.#graph.identity !== undefined,
         ...(this.#schema !== undefined && { schema: this.#schema }),
         ...(this.#recordedReadBinding !== undefined && {
           recordedReadBinding: this.#recordedReadBinding,
@@ -4152,9 +4537,24 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     storedSchema,
   } = await loadAndMergeGraphExtensionDocument(backend, graph);
 
+  const identityEnablementCandidate =
+    (
+      activeRow !== undefined &&
+      storedSchema?.identity === undefined &&
+      merged.identity !== undefined
+    ) ?
+      new StoreImplementation(merged, backend, options)
+    : undefined;
+
   const result = await ensureSchemaImpl(backend, merged, {
     ...options,
     preloaded: { activeRow, storedSchema },
+    ...(identityEnablementCandidate === undefined ?
+      {}
+    : {
+        schemaCommitPreflight: async (target: TransactionBackend) =>
+          identityEnablementCandidate.identityEnablementPreflight(target),
+      }),
   });
 
   await assertHistorySchemaOnOpen(backend, options);
@@ -4405,13 +4805,15 @@ export async function createVerifiedStore<G extends GraphDef>(
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
   const prepared = await prepareVerifiedStore(graph, backend, options);
+  const store = new StoreImplementation(
+    prepared.graph,
+    backend,
+    options,
+    prepared.schemaMetadata,
+  );
+  await store.validateIdentity();
   return [
-    new StoreImplementation(
-      prepared.graph,
-      backend,
-      options,
-      prepared.schemaMetadata,
-    ),
+    store,
     prepared.result,
   ];
 }
@@ -4513,15 +4915,15 @@ export async function createVerifiedAdapterStore<
   ]
 > {
   const prepared = await prepareVerifiedStore(graph, backend, options);
+  const store = new AdapterStoreImplementation(
+    prepared.graph,
+    backend,
+    options,
+    prepared.schemaMetadata,
+  );
+  await store.validateIdentity();
   return [
-    asAdapterStoreSurface(
-      new AdapterStoreImplementation(
-        prepared.graph,
-        backend,
-        options,
-        prepared.schemaMetadata,
-      ),
-    ),
+    asAdapterStoreSurface(store),
     prepared.result,
   ];
 }

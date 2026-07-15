@@ -2953,7 +2953,7 @@ export function registerRecordedTimeIntegrationTests(
     it("captures recorded history for a bulk importGraph at one shared instant", async () => {
       const store = await createHistoryStore(context);
       const data: GraphData = {
-        formatVersion: "1.0",
+        formatVersion: "2.0",
         exportedAt: "2026-01-01T00:00:00.000Z",
         source: { type: "external", description: "import-capture test" },
         nodes: [

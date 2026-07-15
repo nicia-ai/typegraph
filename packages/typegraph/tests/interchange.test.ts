@@ -126,7 +126,7 @@ describe("Interchange Round-Trip", () => {
 
     expect(exported.nodes).toHaveLength(0);
     expect(exported.edges).toHaveLength(0);
-    expect(exported.formatVersion).toBe("1.0");
+    expect(exported.formatVersion).toBe("2.0");
     expect(exported.source.type).toBe("typegraph-export");
 
     const targetBackend = createTestBackend();
@@ -1280,7 +1280,7 @@ describe("Interchange import property fidelity", () => {
   it("preserves properties verbatim under onUnknownProperty: allow", async () => {
     const store = createStore(transformGraph, createTestBackend());
     const data: GraphData = {
-      formatVersion: "1.0",
+      formatVersion: "2.0",
       exportedAt: "2024-01-01T00:00:00.000Z",
       source: { type: "external" },
       nodes: [

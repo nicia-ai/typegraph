@@ -58,6 +58,7 @@ export {
   getNodeKinds,
   type GetNodeType,
   type GraphDef,
+  type GraphIdentityConfig,
   isGraphDef,
   type NodeKinds,
 } from "./define-graph";

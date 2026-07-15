@@ -11,7 +11,7 @@ level. You need ontology when:
 - **Type hierarchies**: "A Podcast is a type of Media" (query for Media, get Podcasts too)
 - **Concept relationships**: "Machine Learning is narrower than AI" (topic navigation)
 - **Constraints**: "A Person cannot also be an Organization" (prevent invalid data)
-- **Edge implications**: "If Alice is married to Bob, she also knows Bob" (inferred relationships)
+- **Edge implications**: Query `knows` through more-specific `marriedTo` rows when explicitly requested
 - **Bidirectional queries**: "manages and managedBy are inverses" (traverse in either direction)
 
 Without ontology, you'd implement these manually—if statements scattered throughout your code, hand-rolled
@@ -34,8 +34,27 @@ subClassOf(Employee, Person);
 When you define an ontology, TypeGraph:
 
 1. **Precomputes closures** at store initialization (not query time)
-2. **Expands queries** automatically based on relationships
-3. **Enforces constraints** when creating nodes and edges
+2. **Expands only the query operations that explicitly opt in** (except inverse
+   traversal, whose store default is `"inverse"` and can be changed)
+3. **Enforces the documented constraints** when building a registry or writing data
+
+It does not run a general reasoner, materialize implied edges, substitute
+properties between types, or automatically expand every query.
+
+## Verified Support Matrix
+
+| Relation / feature | Runtime contract |
+| --- | --- |
+| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and opt-in node-query expansion with `includeSubClasses` |
+| `disjointWith` | Same-ID collision enforcement, propagated through the `subClassOf` closure |
+| `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
+| `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
+| `equivalentTo` | Registry lookups and graph-merge type reconciliation; no automatic query or property behavior |
+| `broader` / `narrower` | Transitive registry introspection only |
+| `partOf` / `hasPart` | Transitive registry introspection only |
+| `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
+| Type-level `sameAs` / `differentFrom` | Deprecated; migrate to the graph-level TypeGraph Identity Profile |
+| Custom `metaEdge()` properties | Serialized introspection metadata only; custom transitivity, symmetry, inverse, and inference settings are not executed |
 
 ## Core Meta-Edges
 
@@ -107,9 +126,11 @@ equivalentTo(Person, "https://schema.org/Person");
 equivalentTo(Organization, "https://schema.org/Organization");
 ```
 
-**`sameAs`**: Declares identity between individuals (for deduplication).
-
-**`differentFrom`**: Explicitly asserts non-identity.
+**`sameAs`** and **`differentFrom`** are deprecated type-level factories.
+`sameAs` is currently a type-equivalence alias; `differentFrom` is decorative.
+For durable individual identity, enable the graph-level TypeGraph Identity
+Profile and use `store.identity`. That ledger deliberately does not provide OWL
+property substitution or automatic graph-wide query expansion.
 
 ### Constraints
 
@@ -119,6 +140,10 @@ equivalentTo(Organization, "https://schema.org/Organization");
 disjointWith(Person, Organization);
 disjointWith(Podcast, Article);
 ```
+
+Disjointness is inherited by subclasses. If `Company subClassOf Organization`,
+then `disjointWith(Person, Organization)` also makes `Person` and `Company`
+disjoint.
 
 **Effect**: Attempting to create a node that violates disjointness throws `DisjointError`:
 
@@ -175,8 +200,12 @@ const relationships = await store
 For symmetric relationships, declare an edge as its own inverse:
 
 ```typescript
-inverseOf(sameAs, sameAs);
+inverseOf(collaboratesWith, collaboratesWith);
 ```
+
+An edge may have only one distinct inverse partner. Both endpoint declarations
+must be compatible in reverse (`A.from` with `B.to`, `A.to` with `B.from`, in
+both traversal directions). Self-inverse edges remain valid.
 
 **`implies`**: Declares that one edge kind implies another exists.
 
@@ -266,11 +295,12 @@ registry.getDisjointKinds("Person"); // ["Organization", "Media", ...]
 registry.getInverseEdge("cites"); // "citedBy"
 registry.getImpliedEdges("marriedTo"); // ["knows"]
 registry.getImplyingEdges("knows"); // ["marriedTo", "bestFriends", "friends"]
+registry.getRelatedKinds("MachineLearning"); // ["DataScience", ...]
 ```
 
 ## Custom Meta-Edges
 
-Define domain-specific meta-edges:
+Define domain-specific meta-edges for serialized introspection metadata:
 
 ```typescript
 import { metaEdge } from "@nicia-ai/typegraph";
@@ -292,7 +322,10 @@ const supersedes = metaEdge("supersedes", {
 
 ### Meta-Edge Properties
 
-Each meta-edge can be configured with these properties to control how TypeGraph computes closures and expands queries:
+Each custom meta-edge can carry these properties as metadata. In the current
+release they do **not** make the registry compute a custom closure or make the
+query builder execute custom inference. Only the built-in relations in the
+support matrix have runtime behavior.
 
 | Property     | Type            | Description               |
 | ------------ | --------------- | ------------------------- |
@@ -304,7 +337,7 @@ Each meta-edge can be configured with these properties to control how TypeGraph 
 
 ### Inference Types
 
-The `inference` property determines how the meta-edge affects query behavior:
+For custom meta-edges, `inference` is descriptive metadata for consumers:
 
 | Type             | Description                                  |
 | ---------------- | -------------------------------------------- |
@@ -338,7 +371,7 @@ This makes queries efficient—expansion happens at query compilation time, not 
 
 These have different semantics:
 
-- `subClassOf`: Instance identity (a Podcast **is** a Media)
+- `subClassOf`: Type membership (a Podcast instance is also a Media instance)
 - `broader`: Conceptual relation (ML **relates to** AI, but ML instance ≠ AI instance)
 
 ```typescript
@@ -425,7 +458,8 @@ function equivalentTo(
 
 #### `sameAs(a, b)`
 
-Declares identity between individuals.
+Deprecated type-level alias of `equivalentTo`. Migrate to the graph-level
+TypeGraph Identity Profile for individual identity.
 
 ```typescript
 function sameAs(a: NodeType, b: NodeType): OntologyRelation;
@@ -433,7 +467,8 @@ function sameAs(a: NodeType, b: NodeType): OntologyRelation;
 
 #### `differentFrom(a, b)`
 
-Declares non-identity.
+Deprecated decorative type-level relation. Migrate to the graph-level TypeGraph
+Identity Profile for individual identity.
 
 ```typescript
 function differentFrom(a: NodeType, b: NodeType): OntologyRelation;
@@ -465,7 +500,8 @@ function hasPart(whole: NodeType, part: NodeType): OntologyRelation;
 
 #### `relatedTo(a, b)`
 
-Declares association between types.
+Declares a symmetric association available through
+`registry.getRelatedKinds(kind)`. It has no query behavior.
 
 ```typescript
 function relatedTo(a: NodeType, b: NodeType): OntologyRelation;

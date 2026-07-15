@@ -9,6 +9,8 @@
     "typegraph-spec.md",
     ".changeset/**",
     ".pnpm-store/**",
+    // Local Claude worktrees are independent checkouts, not this tree's docs.
+    ".claude/worktrees/**",
     "**/node_modules/**",
     // Git-ignored local scratch space (see .gitignore).
     "packages/*/tmp/**",

@@ -1,6 +1,7 @@
 import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
+import { type IdentityFacade } from "../identity/types";
 import { type Assert, type Equal } from "../utils/type-assert";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
@@ -28,6 +29,10 @@ type _receiptEdgeSurfaceIsComplete = Assert<
 export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
+  recordIdentity: (
+    kind: "sameAssertions" | "differentAssertions" | "retractions",
+    count: number,
+  ) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -120,6 +125,12 @@ function increment(
 interface WriteCounters {
   readonly nodes: Record<string, number>;
   readonly edges: Record<string, number>;
+  readonly identity: {
+    sameAssertions: number;
+    differentAssertions: number;
+    retractions: number;
+    total: number;
+  };
   total: number;
 }
 
@@ -127,6 +138,12 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
   const counters: WriteCounters = {
     nodes: createCountBucket(),
     edges: createCountBucket(),
+    identity: {
+      sameAssertions: 0,
+      differentAssertions: 0,
+      retractions: 0,
+      total: 0,
+    },
     total: 0,
   };
   let sealed = false;
@@ -142,6 +159,12 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       counters.total += count;
     },
 
+    recordIdentity(kind, count): void {
+      counters.identity[kind] += count;
+      counters.identity.total += count;
+      counters.total += count;
+    },
+
     snapshot(recorded): TransactionReceipt {
       // Object.assign onto a fresh null-prototype bucket (rather than spread)
       // keeps prototype-colliding kind names readable on the returned receipt.
@@ -153,6 +176,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
           edges: Object.freeze(
             Object.assign(createCountBucket(), counters.edges),
           ),
+          identity: Object.freeze({ ...counters.identity }),
           total: counters.total,
         }),
         ...(recorded === undefined ? {} : { recorded }),
@@ -174,6 +198,63 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
           },
         );
       }
+    },
+  };
+}
+
+export function wrapTransactionIdentity<G extends GraphDef>(
+  identity: IdentityFacade<G>,
+  recorder: TransactionReceiptRecorder,
+): IdentityFacade<G> {
+  return {
+    representativeOf: (ref) => identity.representativeOf(ref),
+    membersOf: (ref) => identity.membersOf(ref),
+    areSame: (a, b) => identity.areSame(a, b),
+    areDifferent: (a, b) => identity.areDifferent(a, b),
+    assertionsOf: (ref) => identity.assertionsOf(ref),
+    async assertSame(a, b) {
+      recorder.assertWritable();
+      const result = await identity.assertSame(a, b);
+      recorder.recordIdentity("sameAssertions", 1);
+      return result;
+    },
+    async assertDifferent(a, b) {
+      recorder.assertWritable();
+      const result = await identity.assertDifferent(a, b);
+      recorder.recordIdentity("differentAssertions", 1);
+      return result;
+    },
+    async bulkAssertSame(pairs) {
+      recorder.assertWritable();
+      const result = await identity.bulkAssertSame(pairs);
+      recorder.recordIdentity("sameAssertions", pairs.length);
+      return result;
+    },
+    async bulkAssertDifferent(pairs) {
+      recorder.assertWritable();
+      const result = await identity.bulkAssertDifferent(pairs);
+      recorder.recordIdentity("differentAssertions", pairs.length);
+      return result;
+    },
+    async retractAssertion(id) {
+      recorder.assertWritable();
+      await identity.retractAssertion(id);
+      recorder.recordIdentity("retractions", 1);
+    },
+    async retractSameAssertion(a, b) {
+      recorder.assertWritable();
+      await identity.retractSameAssertion(a, b);
+      recorder.recordIdentity("retractions", 1);
+    },
+    async retractDifferentAssertion(a, b) {
+      recorder.assertWritable();
+      await identity.retractDifferentAssertion(a, b);
+      recorder.recordIdentity("retractions", 1);
+    },
+    async bulkRetractAssertions(ids) {
+      recorder.assertWritable();
+      await identity.bulkRetractAssertions(ids);
+      recorder.recordIdentity("retractions", ids.length);
     },
   };
 }

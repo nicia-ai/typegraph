@@ -46,6 +46,9 @@ export type SqliteTableNames = Readonly<{
   recordedEdges: string;
   recordedClock: string;
   revisionOrigins: string;
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
   uniques: string;
   schemaVersions: string;
   fulltext: string;
@@ -80,6 +83,9 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
   revisionOrigins: "typegraph_revision_origins",
+  identityAssertions: "typegraph_identity_assertions",
+  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
+  identityClosure: "typegraph_identity_closure",
   uniques: "typegraph_node_uniques",
   schemaVersions: "typegraph_schema_versions",
   fulltext: "typegraph_node_fulltext",
@@ -222,6 +228,109 @@ export function createSqliteTables(
       origin: text("origin").notNull(),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const identityAssertions = sqliteTable(
+    n.identityAssertions,
+    {
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: text("valid_from").notNull(),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.id] }),
+      index(`${n.identityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.validTo,
+      ),
+      index(`${n.identityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.validTo,
+      ),
+      uniqueIndex(`${n.identityAssertions}_current_pair_idx`)
+        .on(t.graphId, t.relation, t.aKind, t.aId, t.bKind, t.bId)
+        .where(sql`${t.validTo} IS NULL`),
+    ],
+  );
+
+  const recordedIdentityAssertions = sqliteTable(
+    n.recordedIdentityAssertions,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: text("valid_from").notNull(),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+      recordedFrom: text("recorded_from").notNull(),
+      recordedTo: text("recorded_to").notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: text("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedIdentityAssertions}_entity_idx`).on(
+        t.graphId,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+    ],
+  );
+
+  const identityClosure = sqliteTable(
+    n.identityClosure,
+    {
+      graphId: text("graph_id").notNull(),
+      memberKind: text("member_kind").notNull(),
+      memberId: text("member_id").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.memberKind, t.memberId] }),
+      index(`${n.identityClosure}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+      ),
+    ],
   );
 
   const uniques = sqliteTable(
@@ -376,6 +485,9 @@ export function createSqliteTables(
     recordedEdges,
     recordedClock,
     revisionOrigins,
+    identityAssertions,
+    recordedIdentityAssertions,
+    identityClosure,
     uniques,
     schemaVersions,
     indexMaterializations,

@@ -19,7 +19,7 @@ import { isCanonicalIsoDate } from "../utils/date";
  * Current interchange format version.
  * Increment for breaking changes to the format.
  */
-export const FORMAT_VERSION = "1.0" as const;
+export const FORMAT_VERSION = "2.0" as const;
 
 /**
  * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
@@ -105,6 +105,38 @@ export const InterchangeEdgeSchema = z.object({
 });
 
 export type InterchangeEdge = z.infer<typeof InterchangeEdgeSchema>;
+
+// ============================================================
+// Operational Identity Interchange
+// ============================================================
+
+export const IdentityInterchangeModeSchema = z.enum(["state", "archival"]);
+export type IdentityInterchangeMode = z.infer<
+  typeof IdentityInterchangeModeSchema
+>;
+
+export const InterchangeIdentityAssertionSchema = z.object({
+  id: z.string().min(1),
+  relation: z.enum(["same", "different"]),
+  a: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
+  b: z.object({ kind: z.string().min(1), id: z.string().min(1) }),
+  validFrom: ValidityTimestampSchema,
+  validTo: ValidityTimestampSchema.optional(),
+});
+export type InterchangeIdentityAssertion = z.infer<
+  typeof InterchangeIdentityAssertionSchema
+>;
+
+export const InterchangeIdentitySchema = z.object({
+  profile: z.literal("typegraph-identity-v1"),
+  mode: IdentityInterchangeModeSchema,
+  assertions: z.array(InterchangeIdentityAssertionSchema),
+});
+export type InterchangeIdentity = z.infer<typeof InterchangeIdentitySchema>;
+
+const InterchangeIdentityHeaderSchema = InterchangeIdentitySchema.omit({
+  assertions: true,
+});
 
 // ============================================================
 // Import Configuration
@@ -224,6 +256,7 @@ export const GraphDataSchema = z.object({
   source: GraphDataSourceSchema,
   nodes: z.array(InterchangeNodeSchema),
   edges: z.array(InterchangeEdgeSchema),
+  identity: InterchangeIdentitySchema.optional(),
 });
 
 export type GraphData = z.infer<typeof GraphDataSchema>;
@@ -232,6 +265,9 @@ export type GraphData = z.infer<typeof GraphDataSchema>;
 export const GraphDataHeaderSchema = GraphDataSchema.omit({
   nodes: true,
   edges: true,
+  identity: true,
+}).extend({
+  identity: InterchangeIdentityHeaderSchema.optional(),
 });
 
 export type GraphDataHeader = z.infer<typeof GraphDataHeaderSchema>;
@@ -245,6 +281,10 @@ export const GraphInterchangeChunkSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("header"), header: GraphDataHeaderSchema }),
   z.object({ type: z.literal("nodes"), nodes: z.array(InterchangeNodeSchema) }),
   z.object({ type: z.literal("edges"), edges: z.array(InterchangeEdgeSchema) }),
+  z.object({
+    type: z.literal("identity"),
+    assertions: z.array(InterchangeIdentityAssertionSchema),
+  }),
 ]);
 
 export type GraphInterchangeChunk = z.infer<typeof GraphInterchangeChunkSchema>;
@@ -282,6 +322,10 @@ export const ImportResultSchema = z.object({
     updated: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
   }),
+  identity: z.object({
+    created: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+  }),
   errors: z.array(ImportErrorSchema),
 });
 
@@ -305,6 +349,8 @@ export const ExportOptionsSchema = z.object({
   includeMeta: z.boolean().default(false),
   /** Include soft-deleted records */
   includeDeleted: z.boolean().default(false),
+  /** Operational Identity export mode. Defaults to current state only. */
+  identityMode: IdentityInterchangeModeSchema.default("state"),
 });
 
 /** Export options with defaults applied (output type) */

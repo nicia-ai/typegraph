@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "1.0";
+  formatVersion: "2.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -79,6 +79,18 @@ interface GraphData {
       updatedAt?: string;
     };
   }>;
+  identity?: {
+    profile: "typegraph-identity-v1";
+    mode: "state" | "archival";
+    assertions: Array<{
+      id: string;
+      relation: "same" | "different";
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      validFrom: string;
+      validTo?: string;
+    }>;
+  };
 }
 ```
 
@@ -123,6 +135,12 @@ const withTemporal = await exportGraph(store, {
 const withDeleted = await exportGraph(store, {
   includeDeleted: true,
 });
+
+// Identity-enabled graphs export current assertions by default.
+// Include ended assertion history explicitly:
+const archival = await exportGraph(store, {
+  identityMode: "archival",
+});
 ```
 
 ### Export Options
@@ -134,6 +152,7 @@ const withDeleted = await exportGraph(store, {
 | `includeMeta` | `boolean` | `false` | Include version and timestamps |
 | `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
+| `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
@@ -385,7 +404,7 @@ function transformExternalData(externalRecords: ExternalRecord[]): GraphData {
   const validatedNodes = nodes.map((node) => InterchangeNodeSchema.parse(node));
 
   return {
-    formatVersion: "1.0",
+    formatVersion: "2.0",
     exportedAt: new Date().toISOString(),
     source: {
       type: "external",

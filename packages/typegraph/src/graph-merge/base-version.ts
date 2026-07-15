@@ -147,6 +147,7 @@ export async function computeContentComponent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   graph: G,
+  identityAssertions: readonly unknown[] = [],
 ): Promise<string> {
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -207,6 +208,7 @@ export async function computeContentComponent<G extends GraphDef>(
     canonicalizeProps({
       nodes: nodeDigest.sort((left, right) => byDigestEntry(left, right)),
       edges: edgeDigest.sort((left, right) => byDigestEntry(left, right)),
+      identity: identityAssertions,
     }),
     CONTENT_FINGERPRINT_BYTES,
   );
@@ -234,10 +236,16 @@ export async function computeBaseVersion<G extends GraphDef>(
       `${schemaComponent}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
-  const [schemaComponent, contentComponent] = await Promise.all([
+  const [schemaComponent, identityAssertions] = await Promise.all([
     computeSchemaComponent(store),
-    computeContentComponent(storeBackend(store), store.graphId, store.graph),
+    store.identityAssertionsForInterchange("state"),
   ]);
+  const contentComponent = await computeContentComponent(
+    storeBackend(store),
+    store.graphId,
+    store.graph,
+    identityAssertions,
+  );
   return asBaseVersion(
     `${schemaComponent}${TOKEN_SEPARATOR}${contentComponent}`,
   );

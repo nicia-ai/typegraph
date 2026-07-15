@@ -580,6 +580,13 @@ function compileCountAggregateFastPath(
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
 ): SqlFragment | undefined {
+  if (
+    ast.traversals.some(
+      (traversal) => traversal.includeIdentityMembers === true,
+    )
+  ) {
+    return undefined;
+  }
   const plan = resolveCountAggregateFastPath(ast);
   if (!plan) {
     return undefined;

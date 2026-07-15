@@ -170,6 +170,7 @@ export class TraversalBuilder<
   readonly #direction: Dir;
   readonly #fromAlias: string;
   readonly #optional: Optional;
+  readonly #includeIdentityMembers: boolean;
   readonly #variableLength: VariableLengthState;
   readonly #pendingEdgePredicates: readonly NodePredicate[];
 
@@ -182,6 +183,7 @@ export class TraversalBuilder<
     fromAlias: string,
     inverseEdgeKinds: readonly string[] = [],
     optional: Optional = false as Optional,
+    includeIdentityMembers = false,
     variableLength: VariableLengthState = DEFAULT_VARIABLE_LENGTH_STATE,
     pendingEdgePredicates: readonly NodePredicate[] = [],
   ) {
@@ -193,6 +195,7 @@ export class TraversalBuilder<
     this.#direction = direction;
     this.#fromAlias = fromAlias;
     this.#optional = optional;
+    this.#includeIdentityMembers = includeIdentityMembers;
     this.#variableLength = variableLength;
     this.#pendingEdgePredicates = pendingEdgePredicates;
   }
@@ -255,6 +258,7 @@ export class TraversalBuilder<
       this.#fromAlias,
       this.#inverseEdgeKinds,
       this.#optional,
+      this.#includeIdentityMembers,
       {
         ...this.#variableLength,
         enabled: true,
@@ -328,6 +332,7 @@ export class TraversalBuilder<
       this.#fromAlias,
       this.#inverseEdgeKinds,
       this.#optional,
+      this.#includeIdentityMembers,
       this.#variableLength,
       [...this.#pendingEdgePredicates, newPredicate],
     );
@@ -563,6 +568,7 @@ export class TraversalBuilder<
       joinFromAlias: this.#fromAlias,
       joinEdgeField: this.#direction === "out" ? "from_id" : "to_id",
       optional: this.#optional,
+      ...(this.#includeIdentityMembers ? { includeIdentityMembers: true } : {}),
     };
 
     const baseTraversal: Traversal =

@@ -160,7 +160,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import { mapHybridSearchRow } from "./operations/hybrid";
+import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
@@ -397,6 +397,9 @@ export function createPostgresBackend(
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    identityAssertions: getTableName(tables.identityAssertions),
+    recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
+    identityClosure: getTableName(tables.identityClosure),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
   };
@@ -422,6 +425,8 @@ export function createPostgresBackend(
     tableNames.edges,
     getTableName(tables.uniques),
     tableNames.fulltext,
+    tableNames.identityAssertions,
+    tableNames.identityClosure,
   ].map((name) =>
     toDrizzleSql(
       portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(name)}`,
@@ -432,6 +437,7 @@ export function createPostgresBackend(
     tableNames.recordedNodes,
     tableNames.recordedEdges,
     tableNames.recordedClock,
+    tableNames.recordedIdentityAssertions,
   ] as const;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
@@ -626,6 +632,49 @@ export function createPostgresBackend(
     });
   }
 
+  function runSchemaWriteTransactionWithPreflight(
+    params: CommitSchemaVersionParams,
+    preflight: (target: TransactionBackend) => Promise<void>,
+  ): Promise<SchemaVersionRow> {
+    if (!capabilities.transactions) {
+      throw new ConfigurationError(
+        "commitSchemaVersion requires atomic transactions, but this Postgres " +
+          "backend does not provide them. Use drizzle-orm/neon-serverless " +
+          "(websocket) instead of drizzle-orm/neon-http.",
+        {
+          backend: "postgres",
+          capability: "transactions",
+          supportsTransactions: false,
+        },
+      );
+    }
+
+    return db.transaction(async (tx) => {
+      const { backend: txBackend, drainAndClose } = createTransactionBackend({
+        db: tx,
+        adapterOptions,
+        operationStrategy,
+        tableNames,
+        capabilities,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer,
+        iterativeScanProbe,
+      });
+      try {
+        // Identity preflights acquire capture and identity locks first. The
+        // schema lock follows, preserving one global lock order while keeping
+        // the validation/data rewrite and schema CAS in this transaction.
+        await preflight(txBackend);
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${params.graphId}))`,
+        );
+        return await txBackend.commitSchemaVersion(params);
+      } finally {
+        await drainAndClose();
+      }
+    });
+  }
   // Shared by `transaction()` (TypeGraph opens the tx) and
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
@@ -1023,6 +1072,13 @@ export function createPostgresBackend(
       return runSchemaWriteTransaction(params.graphId, (target) =>
         target.commitSchemaVersion(params),
       );
+    },
+
+    async commitSchemaVersionWithPreflight(
+      params: CommitSchemaVersionParams,
+      preflight: (target: TransactionBackend) => Promise<void>,
+    ): Promise<SchemaVersionRow> {
+      return runSchemaWriteTransactionWithPreflight(params, preflight);
     },
 
     async setActiveVersion(params: SetActiveVersionParams): Promise<void> {

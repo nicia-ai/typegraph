@@ -18,6 +18,7 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { compileIdentitySourcePredicate } from "../identity-traversal";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -394,22 +395,43 @@ export function buildStandardTraversalCte(
     const whereClauses = [
       ...baseWhereClauses,
       compileKindFilter(sql.raw("e.kind"), branch.edgeKinds),
-      compileKindFilter(
-        sql.raw(`e.${branch.joinKindField}`),
-        previousNodeKinds,
-      ),
       compileKindFilter(sql.raw(`e.${branch.targetKindField}`), nodeKinds),
     ];
+
+    if (traversal.includeIdentityMembers !== true) {
+      whereClauses.push(
+        compileKindFilter(
+          sql.raw(`e.${branch.joinKindField}`),
+          previousNodeKinds,
+        ),
+      );
+    }
 
     if (branch.duplicateGuard !== undefined) {
       whereClauses.push(branch.duplicateGuard);
     }
 
+    const sourceJoin =
+      traversal.includeIdentityMembers === true ?
+        compileIdentitySourcePredicate({
+          ast,
+          ctx,
+          edgeId: sql`e.${sql.raw(branch.joinField)}`,
+          edgeKind: sql`e.${sql.raw(branch.joinKindField)}`,
+          graphId,
+          previousId: sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`,
+          previousKind: sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`,
+          temporalFilterPass,
+        })
+      : sql`
+        cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)} = e.${sql.raw(branch.joinField)}
+        AND cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)} = e.${sql.raw(branch.joinKindField)}
+      `;
+
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
       FROM cte_${sql.raw(previousAlias)}
-      JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind = e.${sql.raw(branch.joinKindField)}
+      JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}

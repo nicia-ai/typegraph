@@ -32,6 +32,7 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerIdentityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerOrderingIntegrationTests,
@@ -169,6 +170,7 @@ export function createIntegrationTestSuite<TNativeTransaction>(
     registerAlgorithmIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
+    registerIdentityIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerTrustedImportIntegrationTests(context);
