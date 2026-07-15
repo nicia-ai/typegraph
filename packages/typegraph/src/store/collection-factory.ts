@@ -11,6 +11,7 @@ import { KindNotFoundError } from "../errors";
 import { type QueryBuilder } from "../query/builder";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
+import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
@@ -62,6 +63,14 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
+  /**
+   * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
+   * the store was created with `coalesceUnchangedUpserts: true`; its absence is
+   * the off switch. Given the current (parsed) props, returns the props the
+   * upsert would persist and whether they are unchanged; the collection owns
+   * the other preconditions.
+   */
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     kind: string,
     id: string,
@@ -148,6 +157,12 @@ export type EdgeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
+  /**
+   * Coalesce dirty-check for `bulkUpsertById` (props only — endpoints are the
+   * edge's identity). Present only when the store was created with
+   * `coalesceUnchangedUpserts: true`; its absence is the off switch.
+   */
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     id: string,
     backend: GraphBackend | TransactionBackend,

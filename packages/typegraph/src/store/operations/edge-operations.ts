@@ -30,8 +30,10 @@ import {
 import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkCardinalityConstraint,
   type ConstraintContext,
@@ -42,7 +44,7 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import { rowToEdge } from "../row-mappers";
+import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
@@ -628,6 +630,76 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 }
 
 /**
+ * The exact props an edge update would persist: the caller's partial input
+ * merged over the current props and run through the edge kind's Zod schema.
+ * Operates on PARSED props so the write path and the coalesce dirty-check
+ * (which may compare against a batch-local running value, never a row) share
+ * one validation. Endpoints are the edge's identity and are not part of an
+ * upsert-by-id update, so only props are involved.
+ */
+function computeEdgeUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Partial<Record<string, unknown>>,
+): Record<string, unknown> {
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  return validateEdgeProps(
+    registration.type.schema,
+    { ...existingProps, ...inputProps },
+    { kind, operation: "update", id },
+  );
+}
+
+/**
+ * Row-based wrapper over {@link computeEdgeUpdate} for the write path.
+ */
+function resolveEdgeUpdateProps<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  existing: Pick<EdgeRow, "kind" | "id" | "props">,
+  inputProps: Partial<Record<string, unknown>>,
+): Readonly<{
+  existingProps: Record<string, unknown>;
+  validatedProps: Record<string, unknown>;
+}> {
+  const existingProps = rowPropsToObject(existing.props);
+  const validatedProps = computeEdgeUpdate(
+    ctx,
+    existing.kind,
+    existing.id,
+    existingProps,
+    inputProps,
+  );
+  return { existingProps, validatedProps };
+}
+
+/**
+ * The edge coalesce dirty-check: returns the props an upsert would persist and
+ * whether they equal `existingProps`. `existingProps` is the PARSED current
+ * props — the edge's, or the batch-local running value for a repeated id.
+ */
+export function edgeUpsertDirtyCheck<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Record<string, unknown>,
+): UpsertDirtyCheck {
+  const validatedProps = computeEdgeUpdate(
+    ctx,
+    kind,
+    id,
+    existingProps,
+    inputProps,
+  );
+  return {
+    validatedProps,
+    unchanged: canonicalEqual(validatedProps, existingProps),
+  };
+}
+
+/**
  * Shared edge-update body: re-reads the edge inside the transaction, merges
  * and validates props, and writes. A plain update requires a live edge; a
  * resurrecting upsert (`clearDeleted`) may target a tombstoned one.
@@ -649,17 +721,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     throw new EdgeNotFoundError("unknown", id);
   }
 
-  const registration = getEdgeRegistration(ctx.graph, existing.kind);
-  const edgeKind = registration.type;
-
-  const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...input.props };
-
-  const validatedProps = validateEdgeProps(edgeKind.schema, mergedProps, {
-    kind: existing.kind,
-    operation: "update",
-    id,
-  });
+  const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 

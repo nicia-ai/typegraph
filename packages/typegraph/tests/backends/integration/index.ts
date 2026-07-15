@@ -1,6 +1,7 @@
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
+export { registerCoalesceUpsertIntegrationTests } from "./coalesce-upserts";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";

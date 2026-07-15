@@ -6,6 +6,7 @@
 
 export {
   type EdgeOperationContext,
+  edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
@@ -33,4 +34,5 @@ export {
   executeNodeUpdate,
   executeNodeUpsertUpdate,
   type NodeOperationContext,
+  nodeUpsertDirtyCheck,
 } from "./node-operations";

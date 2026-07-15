@@ -54,8 +54,10 @@ import { type DialectAdapter } from "../../query/dialect/types";
 import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
@@ -68,7 +70,7 @@ import {
 } from "../insert-dispatch";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { rowToNode } from "../row-mappers";
+import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
@@ -658,6 +660,79 @@ async function finalizeNodeCreate<G extends GraphDef>(
 // getOrCreate resurrections.
 // ============================================================
 
+/**
+ * The exact props an update would persist: the caller's partial input merged
+ * over the current props and run through the kind's Zod schema (defaults
+ * applied, values normalized). Also returns the resolved registration so
+ * callers need not look it up again. Operates on PARSED props so both the write
+ * path (which parses the row) and the coalesce dirty-check (which may compare
+ * against a batch-local running value, never a row) share one validation.
+ */
+function computeNodeUpdate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Partial<Record<string, unknown>>,
+) {
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const validatedProps = validateNodeProps(
+    registration.type.schema,
+    { ...existingProps, ...inputProps },
+    { kind, operation: "update", id },
+  );
+  return { registration, validatedProps };
+}
+
+/**
+ * Row-based wrapper over {@link computeNodeUpdate} for the write path. Reads the
+ * kind/id off the row (a `getNode(kind, id)` result always carries the
+ * requested kind), matching {@link resolveEdgeUpdateProps}.
+ */
+function resolveNodeUpdateProps<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  existing: Pick<NodeRow, "kind" | "id" | "props">,
+  inputProps: Partial<Record<string, unknown>>,
+) {
+  const existingProps = rowPropsToObject(existing.props);
+  const { registration, validatedProps } = computeNodeUpdate(
+    ctx,
+    existing.kind,
+    existing.id,
+    existingProps,
+    inputProps,
+  );
+  return { registration, existingProps, validatedProps };
+}
+
+/**
+ * The coalesce dirty-check: returns the props an `upsertById` would persist and
+ * whether they equal `existingProps` (so the write can be skipped). Compares on
+ * the storage-normalized representation (validated, key-order-independent), so
+ * it answers exactly "would the persisted JSON differ?". `existingProps` is the
+ * PARSED current props — the row's, or the batch-local running value for a
+ * repeated id in `bulkUpsertById`.
+ */
+export function nodeUpsertDirtyCheck<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Record<string, unknown>,
+): UpsertDirtyCheck {
+  const { validatedProps } = computeNodeUpdate(
+    ctx,
+    kind,
+    id,
+    existingProps,
+    inputProps,
+  );
+  return {
+    validatedProps,
+    unchanged: canonicalEqual(validatedProps, existingProps),
+  };
+}
+
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpdateNodeInput,
@@ -666,20 +741,16 @@ async function performNodeUpdate<G extends GraphDef>(
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   const { kind, id } = input;
-  const registration = getNodeRegistration(ctx.graph, kind);
 
   const existing = await backend.getNode(ctx.graphId, kind, id);
   if (!existing) throw new NodeNotFoundError(kind, id);
 
-  const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...input.props };
-
+  const { registration, validatedProps } = resolveNodeUpdateProps(
+    ctx,
+    existing,
+    input.props,
+  );
   const nodeKind = registration.type;
-  const validatedProps = validateNodeProps(nodeKind.schema, mergedProps, {
-    kind,
-    operation: "update",
-    id,
-  });
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
 

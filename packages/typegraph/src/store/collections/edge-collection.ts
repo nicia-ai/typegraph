@@ -8,6 +8,7 @@ import { type z } from "zod";
 import {
   type FindEdgesByKindParams,
   type GraphBackend,
+  rowPropsToObject,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -29,6 +30,10 @@ import {
   type NodeRef,
   type QueryOptions,
 } from "../types";
+import {
+  type UpsertDirtyCheck,
+  type UpsertDirtyCheckFunction,
+} from "./coalesce";
 import {
   resolveTemporalReadParams,
   type TemporalReadParams,
@@ -90,6 +95,8 @@ export type EdgeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
+  /** See EdgeOperations.upsertDirtyCheck. */
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     id: string,
     backend: GraphBackend | TransactionBackend,
@@ -521,9 +528,14 @@ export function createEdgeCollection<
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
-      ): Promise<Edge<E>[]> => {
+      ): Promise<{ results: Edge<E>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
         const existingMap = await getEdgeRowsByIds(target, graphId, ids);
+
+        // Coalesced items are written straight to results (the existing or
+        // last-written edge) and skipped from the write batch; see the node
+        // collection and BaseStoreOptions.coalesceUnchangedUpserts.
+        const results: Edge<E>[] = Array.from({ length: items.length });
 
         // Bucket items into creates and updates
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];
@@ -533,33 +545,87 @@ export function createEdgeCollection<
           clearDeleted: boolean;
         }[] = [];
 
+        // Batch-local running state per id so a repeated id coalesces against
+        // the value earlier items in this batch would write, preserving
+        // last-write-wins. See the node collection for the full rationale.
+        const pending = new Map<
+          string,
+          { props: Record<string, unknown>; sourceIndex: number }
+        >();
+        const deferred: { index: number; sourceIndex: number }[] = [];
+
         let itemIndex = 0;
         for (const item of items) {
-          const existing = existingMap.get(item.id);
+          const pendingEntry = pending.get(item.id);
+          const original = existingMap.get(item.id);
+          const inputProps = item.props ?? {};
 
-          if (existing) {
-            toUpdate.push({
-              index: itemIndex,
-              input: buildUpdateEdgeInput(item.id, item.props ?? {}, item),
-              clearDeleted: existing.deleted_at !== undefined,
-            });
-          } else {
+          if (pendingEntry === undefined && original === undefined) {
             toCreate.push({
               index: itemIndex,
               input: buildCreateEdgeInput(
                 kind,
                 item.from,
                 item.to,
-                item.props ?? {},
+                inputProps,
                 item,
               ),
             });
+            itemIndex++;
+            continue;
+          }
+
+          const deletedAt =
+            pendingEntry === undefined ? original!.deleted_at : undefined;
+
+          let dirty: UpsertDirtyCheck | undefined;
+          if (config.upsertDirtyCheck !== undefined) {
+            const currentProps =
+              pendingEntry?.props ?? rowPropsToObject(original!.props);
+            try {
+              // The fetched edge carries the authoritative kind (an id may
+              // resolve to a different edge kind than this collection).
+              dirty = config.upsertDirtyCheck(
+                original?.kind ?? kind,
+                item.id,
+                currentProps,
+                inputProps,
+              );
+            } catch {
+              dirty = undefined;
+            }
+          }
+
+          const coalesce =
+            dirty?.unchanged === true &&
+            deletedAt === undefined &&
+            item.validFrom === undefined &&
+            item.validTo === undefined;
+
+          if (coalesce) {
+            if (pendingEntry === undefined) {
+              results[itemIndex] = narrowEdge<E>(rowToEdge(original!));
+            } else {
+              deferred.push({
+                index: itemIndex,
+                sourceIndex: pendingEntry.sourceIndex,
+              });
+            }
+          } else {
+            toUpdate.push({
+              index: itemIndex,
+              input: buildUpdateEdgeInput(item.id, inputProps, item),
+              clearDeleted: deletedAt !== undefined,
+            });
+            if (dirty !== undefined) {
+              pending.set(item.id, {
+                props: dirty.validatedProps,
+                sourceIndex: itemIndex,
+              });
+            }
           }
           itemIndex++;
         }
-
-        // Hookless batch create
-        const results: Edge<E>[] = Array.from({ length: items.length });
 
         if (toCreate.length > 0) {
           const createInputs = toCreate.map((entry) => entry.input);
@@ -577,17 +643,24 @@ export function createEdgeCollection<
           results[entry.index] = narrowEdge<E>(result);
         }
 
-        return results;
+        // Items that coalesced against an in-batch write take that write's
+        // result (now filled). Its sourceIndex is always a write slot.
+        for (const { index, sourceIndex } of deferred) {
+          results[index] = results[sourceIndex]!;
+        }
+
+        return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const results =
+      const { results, mutations } =
         backend.capabilities.transactions && "transaction" in backend ?
           await backend.transaction(async (txBackend) => upsertAll(txBackend))
         : await upsertAll(backend);
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
-      // autocommit bulk write. Threshold-gated, and a no-op inside a caller
+      // autocommit bulk write. Coalesced items wrote nothing, so only real
+      // mutations count toward the threshold. A no-op inside a caller
       // transaction (the hook is intentionally undefined there).
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      await config.maybeRefreshStatisticsAfterBulk?.(mutations);
       return results;
     },
 

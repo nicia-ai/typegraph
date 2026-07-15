@@ -26,6 +26,7 @@ import {
   registerAggregateIntegrationTests,
   registerAlgorithmIntegrationTests,
   registerBulkFindByIndexIntegrationTests,
+  registerCoalesceUpsertIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -120,6 +121,7 @@ export function createIntegrationTestSuite(
 
     registerAggregateIntegrationTests(context);
     registerBulkFindByIndexIntegrationTests(context);
+    registerCoalesceUpsertIntegrationTests(context);
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
     registerOrderingIntegrationTests(context);
