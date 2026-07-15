@@ -1076,21 +1076,63 @@ export class StoreNotInitializedError extends TypeGraphError {
     super(
       `${storageLabelFromLogicalName(options?.details?.logicalName)} for ` +
         `graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
-        `Run createStoreWithSchema(graph, backend) during application boot, ` +
-        `outside request handlers and adopted transactions, before using createStore().`,
+        storeNotInitializedAction(reason, options?.details?.logicalName),
       "STORE_NOT_INITIALIZED",
       {
         details: { ...options?.details, graphId, reason },
         category: "user",
         suggestion:
-          "Call createStoreWithSchema(graph, backend) once at application " +
-          "startup. createStore() attaches to an already-initialized " +
-          "database and does not materialize storage itself.",
+          isStaleVectorSlot(reason, options?.details?.logicalName) ?
+            "The field's declared shape (e.g. its dimension) changed after " +
+            "its storage was provisioned. Run store.reembedVectorField(" +
+            "kind, fieldPath) to recreate the storage at the new shape and " +
+            "re-embed."
+          : "Call createStoreWithSchema(graph, backend) once at application " +
+            "startup. createStore() attaches to an already-initialized " +
+            "database and does not materialize storage itself.",
         cause: options?.cause,
       },
     );
     this.name = "StoreNotInitializedError";
   }
+}
+
+const VECTOR_LOGICAL_NAME_PREFIX = "vector:";
+
+/**
+ * A stale VECTOR slot is its own failure mode: the storage exists but was
+ * provisioned at a different shape (the declared dimension changed), and
+ * the fix is `store.reembedVectorField`, not a re-run of
+ * `createStoreWithSchema` (whose boot pass deliberately skips drifted
+ * slots). Drives the action sentence and the suggestion.
+ */
+function isStaleVectorSlot(
+  reason: StoreNotInitializedReason,
+  logicalName: unknown,
+): boolean {
+  return (
+    reason === "stale" &&
+    typeof logicalName === "string" &&
+    logicalName.startsWith(VECTOR_LOGICAL_NAME_PREFIX)
+  );
+}
+
+/** The actionable trailing sentence of the error message, per failure mode. */
+function storeNotInitializedAction(
+  reason: StoreNotInitializedReason,
+  logicalName: unknown,
+): string {
+  if (isStaleVectorSlot(reason, logicalName)) {
+    return (
+      `The declared shape changed after provisioning — run ` +
+      `store.reembedVectorField(kind, fieldPath) to recreate the storage ` +
+      `at the new shape.`
+    );
+  }
+  return (
+    `Run createStoreWithSchema(graph, backend) during application boot, ` +
+    `outside request handlers and adopted transactions, before using createStore().`
+  );
 }
 
 /**
@@ -1102,9 +1144,8 @@ export class StoreNotInitializedError extends TypeGraphError {
  */
 function storageLabelFromLogicalName(logicalName: unknown): string {
   if (typeof logicalName !== "string") return "runtime storage";
-  const VECTOR_PREFIX = "vector:";
-  if (logicalName.startsWith(VECTOR_PREFIX)) {
-    return `vector storage "${logicalName.slice(VECTOR_PREFIX.length)}"`;
+  if (logicalName.startsWith(VECTOR_LOGICAL_NAME_PREFIX)) {
+    return `vector storage "${logicalName.slice(VECTOR_LOGICAL_NAME_PREFIX.length)}"`;
   }
   if (logicalName === "fulltext") return "fulltext storage";
   return `"${logicalName}" storage`;

@@ -413,8 +413,8 @@ describe("vector slot contributions ride the same durable-marker machinery", () 
     ).materializer.ensureVectorSlot(VECTOR_SLOT);
 
     // A dimension change keeps the same (kind, field) table identity but
-    // changes the createDdl signature — drift. A fresh instance (no cache)
-    // must refuse it loudly rather than silently bless a stale table.
+    // changes the createDdl signature — drift. A fresh instance must refuse
+    // it loudly rather than silently bless a stale table.
     const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
     await expect(
       createMockMaterializer(
@@ -437,6 +437,136 @@ describe("vector slot contributions ride the same durable-marker machinery", () 
     await expect(
       warm.materializer.assertVectorSlot(changed),
     ).resolves.toBeUndefined();
+  });
+
+  it("the SAME instance's warm cache does not skip the drift-guard on a dimension change", async () => {
+    // The positive cache is keyed by contribution identity AND signature: a
+    // shape change on the very instance that just ensured the slot must
+    // miss the cache and reach the drift-guard, not be silently accepted.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    await expect(
+      materializer.ensureVectorSlot({ ...VECTOR_SLOT, dimensions: 16 }),
+    ).rejects.toThrow(/different signature/);
+
+    // The guard is SIGNATURE-based, not parameter-based: a pgvector metric
+    // change leaves the table DDL (and so the physical shape) identical —
+    // metric only affects the search operator and the ANN index — so it is
+    // correctly treated as already materialized rather than as drift.
+    await expect(
+      materializer.ensureVectorSlot({ ...VECTOR_SLOT, metric: "l2" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("the SAME instance's warm assert sees a shape change as stale, not initialized", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+    // Warm the assert cache at the original shape.
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+
+    // The changed shape must not ride the warm cache: it reads the marker,
+    // sees signature drift, and refuses as stale — still with zero DDL.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    await expect(materializer.assertVectorSlot(changed)).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+    expect(spies.execDdl).toHaveBeenCalledTimes(
+      pgvectorStrategy
+        .ownedTables(VECTOR_SLOT)
+        .flatMap((contribution) => contribution.createDdl).length,
+    ); // only the original ensure's DDL — the assert path added none
+
+    // The original shape stays cached and keeps passing.
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+  });
+
+  it("a { force: true } re-stamp on the SAME instance invalidates the old shape's cache entry", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+    await materializer.assertVectorSlot(VECTOR_SLOT); // warm at dim 8
+
+    // reembedVectorField's path: recreate at dim 16 and force-restamp.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    await materializer.ensureVectorSlot(changed, { force: true });
+
+    // The new shape asserts clean; the OLD shape must now read as stale on
+    // this same instance — its cache entry was overwritten by the restamp.
+    await expect(
+      materializer.assertVectorSlot(changed),
+    ).resolves.toBeUndefined();
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+  });
+
+  it("ensureVectorSlot({ onDrift: 'skip' }) leaves a drifted slot untouched instead of refusing", async () => {
+    // The boot/evolve path: the declared dimension moved ahead of the
+    // provisioned table. Boot must complete (warn, no throw), the marker
+    // must stay EXACTLY as it was (old shape still reads initialized; new
+    // shape reads stale until reembedVectorField force-restamps), and no
+    // DDL may run against the stale table.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      // Silence the drift warning in test output; the spy asserts it fired.
+    });
+    try {
+      const markers = new Map<string, ContributionMaterializationRow>();
+      const { materializer, spies } = createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      );
+      await materializer.ensureVectorSlot(VECTOR_SLOT);
+      const markerBefore = [...markers.values()];
+      spies.execDdl.mockClear();
+      spies.recordMarker.mockClear();
+
+      const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+      await expect(
+        materializer.ensureVectorSlot(changed, { onDrift: "skip" }),
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(spies.execDdl).not.toHaveBeenCalled();
+      expect(spies.recordMarker).not.toHaveBeenCalled();
+      expect([...markers.values()]).toEqual(markerBefore);
+
+      // Nothing was blessed: the drifted shape still asserts stale on this
+      // same instance, and the provisioned shape keeps passing.
+      await expect(
+        materializer.assertVectorSlot(changed),
+      ).rejects.toMatchObject({
+        name: "StoreNotInitializedError",
+        details: { reason: "stale" },
+      });
+      await expect(
+        materializer.assertVectorSlot(VECTOR_SLOT),
+      ).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("dropVectorSlot forgets the marker so a later ensure re-creates the table", async () => {

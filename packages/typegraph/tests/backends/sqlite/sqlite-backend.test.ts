@@ -787,12 +787,19 @@ describe("SQLite backend.vectorSearch", () => {
         indexType: "none" as const,
       };
       return (async () => {
+        // Provision at the DECLARED shape (cosine — matching the upsert
+        // wrapper), never at the search's runtime metric: a metric override
+        // is a query-time preference over the same physical table, exactly
+        // how the store facade behaves (writes/provisioning use the schema-
+        // declared metric; searches may override). Ensuring at the query's
+        // metric would read as signature drift on sqlite-vec, which bakes
+        // the metric into the vtable DDL.
         await backend.ensureVectorSlotContribution?.({
           graphId: full.graphId,
           nodeKind: full.nodeKind,
           fieldPath: full.fieldPath,
           dimensions: full.dimensions,
-          metric: full.metric,
+          metric: "cosine",
           indexType: full.indexType,
         });
         return rawVectorSearch(full);

@@ -239,9 +239,12 @@ Each embedding field is stored in its own typed, graph-scoped table named
 migrator (`createStoreWithSchema`, and `evolve()` for runtime-added fields)
 provisions each table plus a durable contribution marker at boot; the runtime
 hot path then asserts the marker (a cached SELECT) and never issues DDL, so a
-least-privilege, DML-only role can read and write embeddings. A vector op
-against an un-provisioned slot throws `StoreNotInitializedError` rather than
-lazily creating the table — see [Database roles & least
+least-privilege, DML-only role can read and write embeddings. An embedding
+write against an un-provisioned slot throws `StoreNotInitializedError` rather
+than lazily creating the table; vector reads (`store.search.vector`,
+`store.search.hybrid`, and query-builder `.similarTo()` predicates) compile
+straight to SQL, so they surface the engine's missing-relation error instead —
+use `createVerifiedStore` to catch both at attach. See [Database roles & least
 privilege](/backend-setup#database-roles--least-privilege). Graph-scoping means
 several graphs in one database can declare the same `kind`+`field` at different
 dimensions without collision. This is transparent to queries — `.similarTo()`,
@@ -277,6 +280,15 @@ await store.reembedVectorField("Document", "embedding", {
 });
 // → { recreated: true, reembedded: <count> }
 ```
+
+Between the declaration change and the `reembedVectorField()` call, the slot
+is in a deliberate limbo: boot (`createStoreWithSchema` / `evolve()`) detects
+that the provisioned storage no longer matches the declared shape, warns, and
+leaves it untouched — it never recreates the table implicitly, because that
+would silently drop every stored vector. Embedding writes to the field fail
+with a `StoreNotInitializedError` whose reason is `stale` (its message points
+here) until `reembedVectorField()` recreates the storage and re-stamps its
+durable marker.
 
 Without an `embed` callback the storage is recreated empty and you re-embed via
 normal `update()` writes.

@@ -1431,11 +1431,16 @@ export type GraphBackend = Readonly<{
    * the privileged role. Pass `{ force: true }` to overwrite the marker
    * at the current signature, bypassing the drift-guard — the sanctioned
    * path `store.reembedVectorField()` uses after recreating storage at a
-   * new dimension. Present only on backends wired with a vector strategy.
+   * new dimension. Pass `{ onDrift: "skip" }` to leave an
+   * already-provisioned slot whose shape has since changed untouched
+   * (warn + no-op) instead of refusing — the boot/evolve path, so a
+   * declared dimension change never blocks startup before the operator
+   * can run `reembedVectorField`. Present only on backends wired with a
+   * vector strategy.
    */
   ensureVectorSlotContribution?: (
     slot: VectorSlot,
-    options?: Readonly<{ force?: boolean }>,
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
   ) => Promise<void>;
 
   /**

@@ -230,14 +230,16 @@ export async function migrateLegacyEmbeddings(
   const skippedDimensionMismatch: Record<string, number> = {};
   const skippedDecodeError: Record<string, number> = {};
   // (kind, field) slots whose per-field table + durable marker this run has
-  // already provisioned. `upsertEmbedding` asserts the marker (#135) and no
-  // longer self-creates the table, so this offline migration (privileged)
-  // provisions each slot once — at the first row's dimension, which fixes the
-  // typed table just as the original lazy write did. Differently-sized later
-  // rows for the same slot are skipped by the dimension-mismatch path below,
-  // so the ensure is deliberately NOT re-run per row (that would trip the
-  // marker drift-guard).
-  const ensuredSlots = new Set<string>();
+  // already provisioned, mapped to the dimension the table was fixed at.
+  // `upsertEmbedding` asserts the marker (#135) and no longer self-creates
+  // the table, so this offline migration (privileged) provisions each slot
+  // once — at the first row's dimension, which fixes the typed table just as
+  // the original lazy write did. Differently-sized later rows for the same
+  // slot are detected against this map and skipped BEFORE the upsert: the
+  // marker assert would otherwise read the differently-dimensioned slot as
+  // stale and abort the whole migration, and the ensure is deliberately not
+  // re-run per row (that would trip the marker drift-guard).
+  const ensuredSlots = new Map<string, number>();
   let migrated = 0;
 
   let cursor: LegacyRowCursor | undefined;
@@ -306,7 +308,22 @@ export async function migrateLegacyEmbeddings(
         !ensuredSlots.has(ensuredKey)
       ) {
         await ensureVectorSlotContribution(slot);
-        ensuredSlots.add(ensuredKey);
+        ensuredSlots.set(ensuredKey, slot.dimensions);
+      }
+
+      // The legacy shared column allowed mixed dimensions for one
+      // (nodeKind, fieldPath); the per-field table is fixed at the first
+      // migrated row's dimension. Skip a differently-sized row up front —
+      // its slot would fail the marker assert as stale (different
+      // signature), aborting the migration instead of skipping the row.
+      const provisionedDimensions = ensuredSlots.get(ensuredKey);
+      if (
+        provisionedDimensions !== undefined &&
+        provisionedDimensions !== embedding.length
+      ) {
+        skippedDimensionMismatch[slotKey] =
+          (skippedDimensionMismatch[slotKey] ?? 0) + 1;
+        continue;
       }
 
       try {

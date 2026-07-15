@@ -18,10 +18,22 @@ What changed:
 
 - **Boot (privileged):** `createStoreWithSchema` provisions every embedding
   `(kind, field)` table + a durable contribution marker, enumerated from the
-  graph. `evolve()` provisions any embedding fields it introduces.
-- **Runtime (DML-only):** the hot path asserts the durable marker with a cached
-  SELECT and runs DML — never DDL. `createVerifiedStore` verifies vector markers
+  graph. `evolve()` provisions any embedding fields it introduces. A slot
+  already provisioned at a *different* shape (the declared dimension changed)
+  is warned about and left untouched — boot stays reachable so
+  `store.reembedVectorField()` can recreate it; until then, writes to that
+  field fail with a `stale` `StoreNotInitializedError` that points at
+  `reembedVectorField`.
+- **Runtime writes (DML-only):** `upsertEmbedding` (single and batch) and
+  `deleteEmbedding` assert the durable marker with a cached, signature-checked
+  SELECT and run DML — never DDL. `createVerifiedStore` verifies vector markers
   at attach, alongside fulltext.
+- **Vector reads are not marker-gated:** `store.search.vector`,
+  `store.search.hybrid`, and query-builder `.similarTo()` predicates compile to
+  SQL against the per-field table directly (searches may override the metric at
+  query time, so their slot legitimately differs from the provisioned shape);
+  against an un-provisioned database they surface the engine's missing-relation
+  error, which `createVerifiedStore` catches at attach.
 - `reembedVectorField` re-stamps the marker after recreating storage at a new
   dimension; vector-field reclaim (`materializeRemovals`) clears the marker when
   it drops a table.

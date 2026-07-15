@@ -905,12 +905,19 @@ least-privilege, DML-only database role.
   It does not create tables, repair DDL, or record that runtime storage
   is materialized — it issues **no DDL ever**. Use it only to attach to a
   database a prior `createStoreWithSchema` boot already initialized. A
-  fulltext or **embedding** read/write against a database that was never
-  initialized — a `create({ embedding })` write or a `store.search.vector`
-  / `.similarTo()` query — throws `StoreNotInitializedError` rather than
-  silently emitting `CREATE TABLE` on the hot path. This is what lets a
-  least-privilege role run vector ops: the table already exists. Graphs
-  with no `searchable()` or `embedding()` fields are unaffected.
+  fulltext operation or an **embedding write** against a database that was
+  never initialized — a `create({ embedding })` or embedding update/delete
+  — throws `StoreNotInitializedError` rather than silently emitting
+  `CREATE TABLE` on the hot path. (Vector *reads* are not marker-gated:
+  `store.search.vector`, `store.search.hybrid`, and a query-builder
+  `.similarTo()` predicate compile to SQL against the per-field table
+  directly, so on an un-provisioned database they surface the engine's own
+  missing-relation error instead — `no such table: tg_vec_…` on SQLite,
+  `relation … does not exist` on Postgres. Same cause, same fix; use
+  `createVerifiedStore` to catch it at attach rather than at first query.)
+  This is what lets a least-privilege role run vector ops: the table
+  already exists. Graphs with no `searchable()` or `embedding()` fields
+  are unaffected.
 
 - **`createVerifiedStore(graph, backend)` is the same zero-DDL attach
   with a verification gate.** It reads the active schema row, folds the

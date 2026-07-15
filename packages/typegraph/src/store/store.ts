@@ -3414,6 +3414,13 @@ async function materializeRuntimeContributions(
  * holding `CREATE` on the schema. No-op on backends without vector support
  * (`ensureVectorSlotContribution` absent, or `capabilities.vector` unsupported)
  * and for graphs that declare no embedding fields.
+ *
+ * `onDrift: "skip"`: a slot already provisioned at a DIFFERENT shape (the
+ * declared dimension changed since the table was created) is warned about
+ * and left untouched rather than refused — boot must stay reachable so the
+ * operator can run `store.reembedVectorField(kind, fieldPath)`, the
+ * sanctioned recreate-and-restamp path. Until then, writes to that slot
+ * fail with a typed `stale` StoreNotInitializedError.
  */
 async function materializeVectorContributions(
   backend: GraphBackend,
@@ -3427,7 +3434,7 @@ async function materializeVectorContributions(
     return;
   }
   for (const slot of resolveGraphVectorSlots(graph)) {
-    await ensureVectorSlotContribution(slot);
+    await ensureVectorSlotContribution(slot, { onDrift: "skip" });
   }
 }
 

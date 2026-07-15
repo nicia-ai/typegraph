@@ -690,8 +690,15 @@ function createSqliteOperationBackend(
           params: VectorSearchParams,
         ): Promise<readonly VectorSearchResult[]> {
           assertVectorSearchLimit(params.limit);
+          // Deliberately NOT marker-gated: search is read-only (no DDL
+          // hazard to gate), and its params carry the caller's runtime
+          // metric override, which legitimately diverges from the
+          // provisioned shape on strategies that bake the metric into the
+          // DDL (sqlite-vec). An unprovisioned slot surfaces the engine's
+          // missing-relation error — the same contract as a query-builder
+          // `similarTo()` predicate; `createVerifiedStore` catches both at
+          // attach.
           const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
           const query = vectorStrategy.buildSearch(
             slot,
             params,
@@ -738,7 +745,7 @@ function createSqliteOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              await contributionMaterializer.assertVectorSlot(slot);
+              // Read-only, not marker-gated — see vectorSearch above.
               const candidates =
                 params.candidates ??
                 operationStrategy.buildLiveNodeIds(
@@ -1425,7 +1432,7 @@ export function createSqliteBackend(
     : {
         async ensureVectorSlotContribution(
           slot: VectorSlot,
-          options_?: Readonly<{ force?: boolean }>,
+          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
         ): Promise<void> {
           await contributionMaterializer.ensureVectorSlot(slot, options_);
         },

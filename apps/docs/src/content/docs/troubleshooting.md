@@ -369,12 +369,24 @@ markers. See
 that never materializes runtime storage) against a database that no
 `createStoreWithSchema()` boot has initialized — commonly the runtime
 started before the privileged migration step ran, or the wrong role/
-database is configured. This covers both fulltext and **embedding**
-operations: a `store.nodes.*.create({ embedding })` write or a
-`store.search.vector` / `.similarTo()` query against an un-provisioned
-per-`(kind, field)` table throws here rather than lazily issuing
-`CREATE TABLE` on the hot path. `createVerifiedStore()` catches this
-case at boot rather than at the first hot-path operation.
+database is configured. This covers fulltext operations and **embedding
+writes**: a `store.nodes.*.create({ embedding })` (or embedding
+update/delete) against an un-provisioned per-`(kind, field)` table throws
+here rather than lazily issuing `CREATE TABLE` on the hot path. Vector
+*reads* — `store.search.vector`, `store.search.hybrid`, and a
+query-builder `.similarTo()` predicate — compile straight to SQL against
+the per-field table, so they surface the engine's own missing-relation
+error instead (`no such table: tg_vec_…` on SQLite, `relation … does not
+exist` on Postgres) — same cause, same solution.
+`createVerifiedStore()` catches every one of these cases at boot rather
+than at the first hot-path operation.
+
+A **`stale`** variant of this error on a vector field means something
+different: the storage exists but was provisioned at a different shape —
+typically the field's declared dimension changed after the table was
+created. Boot deliberately leaves such a slot untouched (with a console
+warning); run `store.reembedVectorField(kind, fieldPath)` to recreate the
+storage at the new shape and re-embed.
 
 **Solution:** Run `createStoreWithSchema(graph, adminBackend)` once
 under the privileged role before the runtime attaches (it writes the
