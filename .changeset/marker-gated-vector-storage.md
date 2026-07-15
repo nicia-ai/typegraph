@@ -52,4 +52,8 @@ Consumers that boot manually (raw DDL + the sync `createStore` attach +
 `backend.ensureRuntimeContributions`) provision vectors the same way: the new
 `resolveGraphVectorSlots(graph)` export enumerates every embedding
 `(kind, field)` slot, and `backend.ensureVectorSlotContribution(slot)`
-materializes each — the exact step `createStoreWithSchema` performs.
+materializes each — the exact step `createStoreWithSchema` performs. Batch
+counterparts (`backend.ensureVectorSlotContributions(slots)` /
+`backend.assertVectorSlotsInitialized(slots)`) resolve every slot's markers
+with one graph-scoped query — what boot and verified attach use, and the
+right choice for many embedding fields over a remote connection.
