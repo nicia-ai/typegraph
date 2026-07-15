@@ -57,6 +57,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
@@ -660,54 +661,76 @@ async function finalizeNodeCreate<G extends GraphDef>(
 // ============================================================
 
 /**
- * The exact props an update would persist: the live row's stored props with
- * the caller's partial input merged over them, run through the kind's Zod
- * schema (defaults applied, values normalized). Also returns the resolved
- * registration so callers need not look it up again. Shared by
- * {@link performNodeUpdate} and {@link isNodeUpsertUnchanged} so the coalesce
- * dirty-check and the write it guards can never disagree on "what would be
- * written". Reads the kind/id off the row (a `getNode(kind, id)` result always
- * carries the requested kind), matching {@link resolveEdgeUpdateProps}.
+ * The exact props an update would persist: the caller's partial input merged
+ * over the current props and run through the kind's Zod schema (defaults
+ * applied, values normalized). Also returns the resolved registration so
+ * callers need not look it up again. Operates on PARSED props so both the write
+ * path (which parses the row) and the coalesce dirty-check (which may compare
+ * against a batch-local running value, never a row) share one validation.
+ */
+function computeNodeUpdate<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Partial<Record<string, unknown>>,
+) {
+  const registration = getNodeRegistration(ctx.graph, kind);
+  const validatedProps = validateNodeProps(
+    registration.type.schema,
+    { ...existingProps, ...inputProps },
+    { kind, operation: "update", id },
+  );
+  return { registration, validatedProps };
+}
+
+/**
+ * Row-based wrapper over {@link computeNodeUpdate} for the write path. Reads the
+ * kind/id off the row (a `getNode(kind, id)` result always carries the
+ * requested kind), matching {@link resolveEdgeUpdateProps}.
  */
 function resolveNodeUpdateProps<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   existing: Pick<NodeRow, "kind" | "id" | "props">,
   inputProps: Partial<Record<string, unknown>>,
 ) {
-  const registration = getNodeRegistration(ctx.graph, existing.kind);
   const existingProps = rowPropsToObject(existing.props);
-  const validatedProps = validateNodeProps(
-    registration.type.schema,
-    { ...existingProps, ...inputProps },
-    { kind: existing.kind, operation: "update", id: existing.id },
+  const { registration, validatedProps } = computeNodeUpdate(
+    ctx,
+    existing.kind,
+    existing.id,
+    existingProps,
+    inputProps,
   );
   return { registration, existingProps, validatedProps };
 }
 
 /**
- * Whether an `upsertById` of `inputProps` onto the given live row would leave
- * the stored value unchanged — the coalesce dirty-check. Compares on the
- * storage-normalized representation (validated, key-order-independent), so it
- * answers exactly "would the persisted JSON differ?".
- *
- * Callers own the other coalescing preconditions (existing, not soft-deleted,
- * no explicit temporal override); this covers rule 4 only. When it returns
- * `false`, the write path re-reads and re-validates under its own transaction
- * (concurrency-correct merge), so the resolved props are intentionally not
- * threaded into the write — the extra validation falls only on a genuinely
- * changed upsert, where the database write dominates its cost.
+ * The coalesce dirty-check: returns the props an `upsertById` would persist and
+ * whether they equal `existingProps` (so the write can be skipped). Compares on
+ * the storage-normalized representation (validated, key-order-independent), so
+ * it answers exactly "would the persisted JSON differ?". `existingProps` is the
+ * PARSED current props — the row's, or the batch-local running value for a
+ * repeated id in `bulkUpsertById`.
  */
-export function isNodeUpsertUnchanged<G extends GraphDef>(
+export function nodeUpsertDirtyCheck<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  existing: NodeRow,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
   inputProps: Record<string, unknown>,
-): boolean {
-  const { existingProps, validatedProps } = resolveNodeUpdateProps(
+): UpsertDirtyCheck {
+  const { validatedProps } = computeNodeUpdate(
     ctx,
-    existing,
+    kind,
+    id,
+    existingProps,
     inputProps,
   );
-  return canonicalEqual(validatedProps, existingProps);
+  return {
+    validatedProps,
+    unchanged: canonicalEqual(validatedProps, existingProps),
+  };
 }
 
 async function performNodeUpdate<G extends GraphDef>(

@@ -6,6 +6,7 @@
 
 export {
   type EdgeOperationContext,
+  edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
@@ -17,7 +18,6 @@ export {
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
-  isEdgeUpsertUnchanged,
 } from "./edge-operations";
 export {
   executeNodeBulkFindByConstraint,
@@ -33,6 +33,6 @@ export {
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
-  isNodeUpsertUnchanged,
   type NodeOperationContext,
+  nodeUpsertDirtyCheck,
 } from "./node-operations";

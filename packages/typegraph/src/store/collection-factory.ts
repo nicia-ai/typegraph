@@ -11,6 +11,7 @@ import { KindNotFoundError } from "../errors";
 import { type QueryBuilder } from "../query/builder";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
+import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
@@ -63,16 +64,13 @@ export type NodeOperations = Readonly<{
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   /**
-   * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only
-   * when the store was created with `coalesceUnchangedUpserts: true`; its
-   * absence is the off switch. Returns whether upserting `props` onto the
-   * given existing live row would leave the stored value unchanged (rule 4);
-   * the collection owns the other preconditions via `shouldCoalesceUpsert`.
+   * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
+   * the store was created with `coalesceUnchangedUpserts: true`; its absence is
+   * the off switch. Given the current (parsed) props, returns the props the
+   * upsert would persist and whether they are unchanged; the collection owns
+   * the other preconditions.
    */
-  isUpsertUnchanged?: (
-    existing: NodeRow,
-    props: Record<string, unknown>,
-  ) => boolean;
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     kind: string,
     id: string,
@@ -160,17 +158,11 @@ export type EdgeOperations = Readonly<{
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Edge>;
   /**
-   * Coalesce dirty-check for `bulkUpsertById`. Present only when the store was
-   * created with `coalesceUnchangedUpserts: true`; its absence is the off
-   * switch. Returns whether upserting `props` onto the given existing live
-   * edge would leave the stored value unchanged (props only — endpoints are
-   * the edge's identity). The collection owns the other preconditions via
-   * `shouldCoalesceUpsert`.
+   * Coalesce dirty-check for `bulkUpsertById` (props only — endpoints are the
+   * edge's identity). Present only when the store was created with
+   * `coalesceUnchangedUpserts: true`; its absence is the off switch.
    */
-  isUpsertUnchanged?: (
-    existing: EdgeRow,
-    props: Record<string, unknown>,
-  ) => boolean;
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     id: string,
     backend: GraphBackend | TransactionBackend,

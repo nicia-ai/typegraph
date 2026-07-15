@@ -128,6 +128,7 @@ import {
 } from "./materialize-removals";
 import {
   type EdgeOperationContext,
+  edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
   executeEdgeCreate,
   executeEdgeCreateBatch,
@@ -150,9 +151,8 @@ import {
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpsertUpdate,
-  isEdgeUpsertUnchanged,
-  isNodeUpsertUnchanged,
   type NodeOperationContext,
+  nodeUpsertDirtyCheck,
 } from "./operations";
 import {
   advanceRevisionClock,
@@ -821,8 +821,8 @@ export class Store<G extends GraphDef> {
         ),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(this.#options?.coalesceUnchangedUpserts === true && {
-        isUpsertUnchanged: (existing, props) =>
-          isNodeUpsertUnchanged(ctx, existing, props),
+        upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
+          nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
       executeDelete: (kind, id, backend) =>
         executeNodeDelete(ctx, kind, id, backend),
@@ -905,8 +905,8 @@ export class Store<G extends GraphDef> {
         executeEdgeUpsertUpdate(ctx, input, backend, options),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(this.#options?.coalesceUnchangedUpserts === true && {
-        isUpsertUnchanged: (existing, props) =>
-          isEdgeUpsertUnchanged(ctx, existing, props),
+        upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
+          edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
       executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
       executeHardDelete: (id, backend) =>

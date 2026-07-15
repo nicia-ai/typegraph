@@ -33,6 +33,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkCardinalityConstraint,
   type ConstraintContext,
@@ -629,11 +630,30 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
 }
 
 /**
- * The exact props an edge update would persist: the live edge's stored props
- * with the caller's partial input merged over them, run through the edge
- * kind's Zod schema. Shared by {@link performEdgeUpdate} and
- * {@link isEdgeUpsertUnchanged} so the coalesce dirty-check and the write it
- * guards can never disagree on "what would be written".
+ * The exact props an edge update would persist: the caller's partial input
+ * merged over the current props and run through the edge kind's Zod schema.
+ * Operates on PARSED props so the write path and the coalesce dirty-check
+ * (which may compare against a batch-local running value, never a row) share
+ * one validation. Endpoints are the edge's identity and are not part of an
+ * upsert-by-id update, so only props are involved.
+ */
+function computeEdgeUpdate<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
+  inputProps: Partial<Record<string, unknown>>,
+): Record<string, unknown> {
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  return validateEdgeProps(
+    registration.type.schema,
+    { ...existingProps, ...inputProps },
+    { kind, operation: "update", id },
+  );
+}
+
+/**
+ * Row-based wrapper over {@link computeEdgeUpdate} for the write path.
  */
 function resolveEdgeUpdateProps<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -643,44 +663,40 @@ function resolveEdgeUpdateProps<G extends GraphDef>(
   existingProps: Record<string, unknown>;
   validatedProps: Record<string, unknown>;
 }> {
-  const registration = getEdgeRegistration(ctx.graph, existing.kind);
   const existingProps = rowPropsToObject(existing.props);
-  const mergedProps = { ...existingProps, ...inputProps };
-  const validatedProps = validateEdgeProps(
-    registration.type.schema,
-    mergedProps,
-    {
-      kind: existing.kind,
-      operation: "update",
-      id: existing.id,
-    },
+  const validatedProps = computeEdgeUpdate(
+    ctx,
+    existing.kind,
+    existing.id,
+    existingProps,
+    inputProps,
   );
   return { existingProps, validatedProps };
 }
 
 /**
- * Whether an upsert of `inputProps` onto the given live edge would leave the
- * stored value unchanged — the edge coalesce dirty-check. Endpoints are the
- * edge's identity and are not part of an upsert-by-id update, so only props
- * are compared, on the storage-normalized (validated, key-order-independent)
- * representation.
- *
- * Callers own the other coalescing preconditions (existing, not soft-deleted,
- * no explicit temporal override); this covers rule 4 only. Mirrors
- * {@link isNodeUpsertUnchanged}: the resolved props are not threaded into the
- * write path, which re-reads and re-validates under its own transaction.
+ * The edge coalesce dirty-check: returns the props an upsert would persist and
+ * whether they equal `existingProps`. `existingProps` is the PARSED current
+ * props — the edge's, or the batch-local running value for a repeated id.
  */
-export function isEdgeUpsertUnchanged<G extends GraphDef>(
+export function edgeUpsertDirtyCheck<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  existing: EdgeRow,
+  kind: string,
+  id: string,
+  existingProps: Record<string, unknown>,
   inputProps: Record<string, unknown>,
-): boolean {
-  const { existingProps, validatedProps } = resolveEdgeUpdateProps(
+): UpsertDirtyCheck {
+  const validatedProps = computeEdgeUpdate(
     ctx,
-    existing,
+    kind,
+    id,
+    existingProps,
     inputProps,
   );
-  return canonicalEqual(validatedProps, existingProps);
+  return {
+    validatedProps,
+    unchanged: canonicalEqual(validatedProps, existingProps),
+  };
 }
 
 /**

@@ -377,9 +377,9 @@ export function registerCoalesceUpsertIntegrationTests(
         const store = await createCoalesceStore(context);
         await store.nodes.Person.upsertById("dup", { name: "A" });
 
-        // The second item's props equal the PREFETCHED row; without the
-        // first-occurrence guard it would coalesce against stale state and
-        // drop the first item's write, leaving "B". Last-write-wins is "A".
+        // The second item's props equal the once-PREFETCHED row; without
+        // batch-local pending state it would coalesce against that stale value
+        // and drop the first item's write, leaving "B". Last-write-wins is "A".
         await store.nodes.Person.bulkUpsertById([
           { id: "dup", props: { name: "B" } },
           { id: "dup", props: { name: "A" } },
@@ -389,27 +389,38 @@ export function registerCoalesceUpsertIntegrationTests(
         expect((final as { name?: string }).name).toBe("A");
       });
 
-      it("coalesces the first duplicate occurrence but still writes the last (history)", async () => {
-        const store = await createCoalesceStore(context, { history: true });
-        await store.nodes.Person.upsertById("dup2", { name: "A" });
-        const rowsAfterSeed = await countRecordedNodeRows(
-          store,
-          "Person",
-          "dup2",
-        );
+      it("coalesces a duplicate against the batch-local pending value", async () => {
+        // Each shape is applied to its own id, seeded to version 1 holding "A".
+        // A write bumps the node version; a coalesced item does not — so the
+        // final version minus the seed's 1 is exactly the number of writes.
+        const store = await createCoalesceStore(context);
+        const shapes = [
+          { id: "p-aa", inputs: ["A", "A"], writes: 0, final: "A" }, // both coalesce
+          { id: "p-ba", inputs: ["B", "A"], writes: 2, final: "A" }, // write B, write A
+          { id: "p-bb", inputs: ["B", "B"], writes: 1, final: "B" }, // write B, coalesce
+          { id: "p-ab", inputs: ["A", "B"], writes: 1, final: "B" }, // coalesce A, write B
+        ] as const;
 
-        // [{A},{B}]: the first item equals the row and coalesces (no write);
-        // the second writes "B". Final "B", and exactly one new recorded row.
-        await store.nodes.Person.bulkUpsertById([
-          { id: "dup2", props: { name: "A" } },
-          { id: "dup2", props: { name: "B" } },
-        ]);
+        for (const shape of shapes) {
+          const seed = await store.nodes.Person.upsertById(shape.id, {
+            name: "A",
+          });
+          expect(seed.meta.version).toBe(1);
 
-        const final = await store.nodes.Person.getById(personId("dup2"));
-        expect((final as { name?: string }).name).toBe("B");
-        expect(await countRecordedNodeRows(store, "Person", "dup2")).toBe(
-          rowsAfterSeed + 1,
-        );
+          const results = await store.nodes.Person.bulkUpsertById(
+            shape.inputs.map((name) => ({ id: shape.id, props: { name } })),
+          );
+
+          const final = await store.nodes.Person.getById(personId(shape.id));
+          expect(final?.meta.version).toBe(1 + shape.writes);
+          expect((final as { name?: string }).name).toBe(shape.final);
+          // Each position returns the row as of its own item — for a coalesced
+          // item that is its (matching) input value, so results mirror inputs.
+          expect(results).toHaveLength(shape.inputs.length);
+          for (const [index, node] of results.entries()) {
+            expect((node as { name?: string }).name).toBe(shape.inputs[index]);
+          }
+        }
       });
 
       it("preserves last-write-wins for duplicate edge ids in one batch", async () => {
@@ -442,6 +453,46 @@ export function registerCoalesceUpsertIntegrationTests(
 
         const final = await store.edges.knows.getById(knowsId("dup-e"));
         expect((final as { since?: string }).since).toBe("2020");
+      });
+
+      it("coalesces a value-identical duplicate edge in one batch", async () => {
+        const store = await createCoalesceStore(context);
+        const [alice, bob] = await store.nodes.Person.bulkCreate([
+          { props: { name: "A" }, id: "dupc-a" },
+          { props: { name: "B" }, id: "dupc-b" },
+        ]);
+        if (alice === undefined || bob === undefined) {
+          throw new Error("expected both people");
+        }
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("dupc-e"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+          },
+        ]);
+        const seeded = await store.edges.knows.getById(knowsId("dupc-e"));
+
+        // Both items equal the row; both coalesce, so nothing is written and
+        // the edge's updatedAt is unchanged (edges carry no version counter).
+        await store.edges.knows.bulkUpsertById([
+          {
+            id: knowsId("dupc-e"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+          },
+          {
+            id: knowsId("dupc-e"),
+            from: alice,
+            to: bob,
+            props: { since: "2020" },
+          },
+        ]);
+
+        const after = await store.edges.knows.getById(knowsId("dupc-e"));
+        expect(after?.meta.updatedAt).toBe(seeded?.meta.updatedAt);
       });
 
       it("routes a dirty-check validation error through onError (not the collection layer)", async () => {
@@ -477,11 +528,12 @@ export function registerCoalesceUpsertIntegrationTests(
         // #maybeRefreshStatisticsAfterBulk invokes it as this.refreshStatistics().
         let refreshCalls = 0;
         const runRefresh = store.refreshStatistics.bind(store);
-        (store as { refreshStatistics: () => Promise<void> }).refreshStatistics =
-          async () => {
-            refreshCalls += 1;
-            await runRefresh();
-          };
+        (
+          store as { refreshStatistics: () => Promise<void> }
+        ).refreshStatistics = async () => {
+          refreshCalls += 1;
+          await runRefresh();
+        };
 
         // All coalesced → zero mutations → below threshold → no refresh.
         await store.nodes.Person.bulkUpsertById([

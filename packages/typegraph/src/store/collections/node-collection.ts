@@ -7,6 +7,7 @@ import { type z } from "zod";
 
 import {
   type GraphBackend,
+  rowPropsToObject,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -30,7 +31,11 @@ import {
   type QueryOptions,
   type UpdateNodeInput,
 } from "../types";
-import { shouldCoalesceUpsert } from "./coalesce";
+import {
+  shouldCoalesceUpsert,
+  type UpsertDirtyCheck,
+  type UpsertDirtyCheckFunction,
+} from "./coalesce";
 import {
   resolveTemporalReadParams,
   type TemporalReadParams,
@@ -85,11 +90,8 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
-  /** See NodeOperations.isUpsertUnchanged. */
-  isUpsertUnchanged?: (
-    existing: NodeRow,
-    props: Record<string, unknown>,
-  ) => boolean;
+  /** See NodeOperations.upsertDirtyCheck. */
+  upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
     kind: string,
     id: string,
@@ -367,11 +369,16 @@ export function createNodeCollection<
         // updateNode, no recorded capture, no revision advance, no hooks) and
         // resolve with the existing node. See
         // BaseStoreOptions.coalesceUnchangedUpserts.
-        if (
-          shouldCoalesceUpsert(existing, options, () =>
-            config.isUpsertUnchanged?.(existing, data),
-          )
-        ) {
+        const runDirtyCheck =
+          config.upsertDirtyCheck &&
+          (() =>
+            config.upsertDirtyCheck!(
+              kind,
+              id,
+              rowPropsToObject(existing.props),
+              data,
+            ));
+        if (shouldCoalesceUpsert(existing, options, runDirtyCheck)) {
           return narrowNode<N>(rowToNode(existing));
         }
         const result = await executeNodeUpdate(
@@ -443,9 +450,9 @@ export function createNodeCollection<
           }
         }
 
-        // Coalesced items are written straight to results (the existing node)
-        // and skipped from the write batch; see the single-upsert path and
-        // BaseStoreOptions.coalesceUnchangedUpserts.
+        // Coalesced items are written straight to results (the existing or
+        // last-written node) and skipped from the write batch; see the
+        // single-upsert path and BaseStoreOptions.coalesceUnchangedUpserts.
         const results: Node<N>[] = Array.from({ length: items.length });
 
         // Bucket items into creates and updates
@@ -456,40 +463,84 @@ export function createNodeCollection<
           clearDeleted: boolean;
         }[] = [];
 
-        // Only the FIRST occurrence of an id in this batch may coalesce: the
-        // dirty-check compares against the once-prefetched row, so a later
-        // same-id item would otherwise coalesce against stale state and drop
-        // an earlier queued write (breaking last-write-wins). A repeated id
-        // always writes; the sequential updates below re-read in order, so the
-        // last item's value wins as before coalescing existed.
-        const seenIds = new Set<string>();
+        // Batch-local running state per id: the props the row would hold after
+        // the writes queued so far, and the item index that queued that write.
+        // A later same-id item coalesces against this running value, not the
+        // once-prefetched row — otherwise [{x:B},{x:A}] on a row holding A would
+        // coalesce the second item against the stale prefetched A and drop the
+        // first item's write, breaking last-write-wins.
+        const pending = new Map<
+          string,
+          { props: Record<string, unknown>; sourceIndex: number }
+        >();
+        // A coalesced item that matched an in-batch write resolves to that
+        // write's result (filled once the writes run), not a fabricated row.
+        const deferred: { index: number; sourceIndex: number }[] = [];
 
         let itemIndex = 0;
         for (const item of items) {
-          const existing = existingMap.get(item.id);
-          const firstOccurrence = !seenIds.has(item.id);
-          seenIds.add(item.id);
+          const pendingEntry = pending.get(item.id);
+          const original = existingMap.get(item.id);
 
-          if (existing) {
-            if (
-              firstOccurrence &&
-              shouldCoalesceUpsert(existing, item, () =>
-                config.isUpsertUnchanged?.(existing, item.props),
-              )
-            ) {
-              results[itemIndex] = narrowNode<N>(rowToNode(existing));
-            } else {
-              toUpdate.push({
-                index: itemIndex,
-                input: buildUpdateInput(kind, item.id, item.props, item),
-                clearDeleted: existing.deleted_at !== undefined,
-              });
-            }
-          } else {
+          if (pendingEntry === undefined && original === undefined) {
             toCreate.push({
               index: itemIndex,
               input: buildCreateInput(kind, item.props, item),
             });
+            itemIndex++;
+            continue;
+          }
+
+          // A prior in-batch write left the row live; only the prefetched row
+          // (no prior write) can be soft-deleted and trigger a resurrection.
+          const deletedAt =
+            pendingEntry === undefined ? original!.deleted_at : undefined;
+
+          let dirty: UpsertDirtyCheck | undefined;
+          if (config.upsertDirtyCheck !== undefined) {
+            const currentProps =
+              pendingEntry?.props ?? rowPropsToObject(original!.props);
+            try {
+              dirty = config.upsertDirtyCheck(
+                kind,
+                item.id,
+                currentProps,
+                item.props,
+              );
+            } catch {
+              // Validation error → fall through to the write path, which
+              // re-validates and rejects the batch (matching flag-off).
+              dirty = undefined;
+            }
+          }
+
+          const coalesce =
+            dirty?.unchanged === true &&
+            deletedAt === undefined &&
+            item.validFrom === undefined &&
+            item.validTo === undefined;
+
+          if (coalesce) {
+            if (pendingEntry === undefined) {
+              results[itemIndex] = narrowNode<N>(rowToNode(original!));
+            } else {
+              deferred.push({
+                index: itemIndex,
+                sourceIndex: pendingEntry.sourceIndex,
+              });
+            }
+          } else {
+            toUpdate.push({
+              index: itemIndex,
+              input: buildUpdateInput(kind, item.id, item.props, item),
+              clearDeleted: deletedAt !== undefined,
+            });
+            if (dirty !== undefined) {
+              pending.set(item.id, {
+                props: dirty.validatedProps,
+                sourceIndex: itemIndex,
+              });
+            }
           }
           itemIndex++;
         }
@@ -508,6 +559,12 @@ export function createNodeCollection<
             clearDeleted: entry.clearDeleted,
           });
           results[entry.index] = narrowNode<N>(result);
+        }
+
+        // Items that coalesced against an in-batch write take that write's
+        // result (now filled). Its sourceIndex is always a write slot.
+        for (const { index, sourceIndex } of deferred) {
+          results[index] = results[sourceIndex]!;
         }
 
         return { results, mutations: toCreate.length + toUpdate.length };
