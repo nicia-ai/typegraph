@@ -74,8 +74,19 @@ type PostgresJsClient = ((...args: readonly unknown[]) => unknown) &
     ) => PromiseLike<readonly unknown[]>;
   }>;
 
+type PgSessionCarrier = Readonly<{
+  client?: unknown;
+  constructor?: Readonly<{ name?: string }>;
+}>;
+
 type PgClientCarrier = Readonly<{
   $client?: unknown;
+  /** Drizzle's transaction handle keeps the pinned driver here. */
+  session?: PgSessionCarrier;
+  /** Defensive fallback for Drizzle builds exposing only the internal bag. */
+  _?: Readonly<{
+    session?: PgSessionCarrier;
+  }>;
 }>;
 
 export type AnyPgDatabase = PgDatabase<PgQueryResultHKT, Record<string, unknown>>;
@@ -118,16 +129,29 @@ function isPgliteClient(candidate: unknown): candidate is NodePgClient {
   );
 }
 
+function transactionSession(
+  carrier: PgClientCarrier,
+): PgSessionCarrier | undefined {
+  return carrier.session ?? carrier._?.session;
+}
+
+function hasPgliteSession(carrier: PgClientCarrier): boolean {
+  return transactionSession(carrier)?.constructor?.name === "PgliteSession";
+}
+
 function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
   // postgres-js's tagged-template Sql is callable, has `.unsafe` (raw
-  // parameterized executor), and has `.begin` (transaction starter).
+  // parameterized executor), and has `.begin` (transaction starter). The
+  // transaction-scoped `TransactionSql` replaces `.begin` with `.savepoint`;
+  // accept either so a Drizzle transaction keeps the fast path pinned.
   // Neon HTTP is also callable + has `.unsafe`, but that `.unsafe` is a
   // fragment builder rather than a query executor, so we discriminate
-  // on `.begin` (postgres-js only).
+  // on `.begin` / `.savepoint` (postgres-js only).
   return (
     typeof candidate === "function" &&
     hasFunctionProperty(candidate, "unsafe") &&
-    hasFunctionProperty(candidate, "begin")
+    (hasFunctionProperty(candidate, "begin") ||
+      hasFunctionProperty(candidate, "savepoint"))
   );
 }
 
@@ -368,6 +392,7 @@ function resolvePgClient(
   db: AnyPgDatabase,
   prepareStatements: boolean,
   cacheMax: number,
+  useTransactionClient: boolean,
 ): PgQueryClient | undefined {
   // Order matters: neon-http and postgres-js are both callable + have
   // `.unsafe`, but neon-http's `.unsafe` is a fragment builder (not a
@@ -377,11 +402,23 @@ function resolvePgClient(
   if (isNeonHttpClient(db)) {
     return undefined;
   }
-  const client = (db as PgClientCarrier).$client;
+  const carrier = db as PgClientCarrier;
+  // Top-level Drizzle databases expose `$client`. Transaction objects do not;
+  // they retain the exact pinned pool/client transaction on `session.client`.
+  // Reading that structural internal is what keeps trusted import on the same
+  // connection that will COMMIT/ROLLBACK, instead of accidentally using the
+  // outer pool while a transaction is open.
+  const client =
+    carrier.$client ??
+    (useTransactionClient ? transactionSession(carrier)?.client : undefined);
   // Must precede `isPgNativeClient`: PGlite matches it too (object with
   // `.query`), but only the unnamed wrapper is safe for it (see
   // `isPgliteClient`).
-  if (isPgliteClient(client)) {
+  if (
+    isPgliteClient(client) ||
+    (useTransactionClient && hasPgliteSession(carrier))
+  ) {
+    if (!isPgNativeClient(client)) return undefined;
     return wrapNodePgClientUnnamed(client);
   }
   if (isPgNativeClient(client)) {
@@ -466,6 +503,12 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    * (256). Ignored when `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
+  /**
+   * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
+   * this on its private adapter; ordinary transaction backends deliberately do
+   * not expose a new raw-execution surface that would change routing behavior.
+   */
+  useTransactionClient?: boolean;
 }>;
 
 export function createPostgresExecutionAdapter(
@@ -475,7 +518,12 @@ export function createPostgresExecutionAdapter(
   const prepareStatements = options.prepareStatements ?? true;
   const cacheMax =
     options.preparedStatementCacheMax ?? DEFAULT_POSTGRES_STATEMENT_CACHE_MAX;
-  const pgClient = resolvePgClient(db, prepareStatements, cacheMax);
+  const pgClient = resolvePgClient(
+    db,
+    prepareStatements,
+    cacheMax,
+    options.useTransactionClient ?? false,
+  );
 
   function compile(query: SQL): CompiledSqlQuery {
     return compileQueryWithDialect(db, query, "PostgreSQL");

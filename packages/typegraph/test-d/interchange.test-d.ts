@@ -7,6 +7,8 @@ import {
   type GraphInterchangeChunk,
   importGraphStream,
   type ImportResult,
+  trustedImportGraphStream,
+  type TrustedImportResult,
 } from "../dist/interchange";
 
 const Person = defineNode("Person", {
@@ -27,4 +29,7 @@ expectError(exportGraphStream(store, { batchSize: "100" }));
 
 expectType<Promise<ImportResult>>(
   importGraphStream(store, stream, { onConflict: "error" }),
+);
+expectType<Promise<TrustedImportResult>>(
+  trustedImportGraphStream(store, stream),
 );

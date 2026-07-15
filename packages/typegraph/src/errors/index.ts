@@ -916,6 +916,37 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/** Stable reasons an intentionally trusted initial import can be rejected. */
+export type TrustedImportErrorReason =
+  | "backend_unsupported"
+  | "database_not_empty"
+  | "fulltext_unsupported"
+  | "history_unsupported"
+  | "invalid_stream"
+  | "revision_tracking_unsupported"
+  | "uniqueness_unsupported"
+  | "vector_unsupported";
+
+/** Thrown when the trusted initial-import contract is unavailable or violated. */
+export class TrustedImportError extends TypeGraphError {
+  constructor(
+    message: string,
+    reason: TrustedImportErrorReason,
+    details: Readonly<Record<string, unknown>> = {},
+    options?: Readonly<{ cause?: unknown; suggestion?: string }>,
+  ) {
+    super(message, "TRUSTED_IMPORT_ERROR", {
+      details: { ...details, reason },
+      category: "user",
+      suggestion:
+        options?.suggestion ??
+        "Use the validating bulk or interchange import APIs unless every trusted-import precondition is satisfied.",
+      cause: options?.cause,
+    });
+    this.name = "TrustedImportError";
+  }
+}
+
 /**
  * The stable `details.code` values raised by the recorded-capture guards on a
  * history- or revision-tracked store. These are the sanctioned branch points

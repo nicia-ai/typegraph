@@ -113,6 +113,11 @@ export type SqliteExecutionAdapter = Readonly<
      * `db.run()` when absent.
      */
     executeCompiledRun?: (compiledQuery: CompiledSqlQuery) => Promise<void>;
+    /** Rebinds one cached non-reader statement for every parameter row. */
+    executePreparedRunBatch?: (
+      sqlText: string,
+      params: readonly (readonly unknown[])[],
+    ) => Promise<void>;
   }
 >;
 
@@ -382,6 +387,27 @@ export function createSqliteExecutionAdapter(
       return Promise.resolve();
     }
 
+    function executePreparedRunBatch(
+      sqlText: string,
+      parameterRows: readonly (readonly unknown[])[],
+    ): Promise<void> {
+      const preparedStatement = getOrCreatePreparedStatement(
+        statementCache,
+        client,
+        sqlText,
+        statementCacheMax,
+      );
+      if (preparedStatement.run === undefined) {
+        throw new Error(
+          "Trusted SQLite import requires a prepared statement run() method.",
+        );
+      }
+      for (const params of parameterRows) {
+        preparedStatement.run(...params);
+      }
+      return Promise.resolve();
+    }
+
     return {
       clearStatementCache() {
         statementCache.clear();
@@ -393,6 +419,7 @@ export function createSqliteExecutionAdapter(
       },
       executeCompiled,
       executeCompiledRun,
+      executePreparedRunBatch,
       prepare(sqlText: string): PreparedSqlStatement {
         return createPreparedStatementExecutor(
           client,

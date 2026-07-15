@@ -67,3 +67,8 @@ export {
 
 export { exportGraph, exportGraphStream } from "./export";
 export { importGraph, importGraphStream } from "./import";
+export {
+  trustedImportGraph,
+  trustedImportGraphStream,
+  type TrustedImportResult,
+} from "./trusted-import";

@@ -396,6 +396,19 @@ export type InsertEdgeParams = Readonly<{
 }>;
 
 /**
+ * Write-only session exposed inside {@link GraphBackend.trustedImport}.
+ *
+ * The caller has accepted the trusted-import contract: properties, endpoint
+ * references, uniqueness, and cardinality are not validated. Backends may
+ * therefore use engine-native ingestion primitives that bypass the normal
+ * store write pipeline.
+ */
+export type TrustedImportSession = Readonly<{
+  insertNodes: (params: readonly InsertNodeParams[]) => Promise<void>;
+  insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
+}>;
+
+/**
  * Parameters for updating an edge.
  */
 export type UpdateEdgeParams = Readonly<{
@@ -1548,6 +1561,23 @@ export type GraphBackend = Readonly<{
    * sizes this library is designed for.
    */
   refreshStatistics: () => Promise<void>;
+
+  /**
+   * Runs an intentionally trusted, all-or-nothing initial import.
+   *
+   * Optional because only backends that can pin one transaction and use a
+   * native high-throughput write path expose it. Implementations must reject
+   * a database whose TypeGraph node or edge tables already contain rows. They
+   * may temporarily remove rebuildable secondary indexes, but must restore
+   * them before committing. Any callback, insert, or rebuild failure rolls the
+   * entire operation back.
+   *
+   * This is a top-level-only lifecycle operation and is deliberately absent
+   * from {@link TransactionBackend}.
+   */
+  trustedImport?: <T>(
+    fn: (session: TrustedImportSession) => Promise<T>,
+  ) => Promise<T>;
 
   // === Query Execution ===
   execute: <T>(query: CompiledRowsSql) => Promise<readonly T[]>;

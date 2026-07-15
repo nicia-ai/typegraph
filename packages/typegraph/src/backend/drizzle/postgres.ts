@@ -71,6 +71,7 @@ import {
   type CommitSchemaVersionParams,
   type ContributionMaterializationIdentity,
   type ContributionMaterializationRow,
+  createBackendOverlay,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
   type DeleteFulltextBatchParams,
@@ -93,6 +94,7 @@ import {
   type SetActiveVersionParams,
   type TransactionBackend,
   type TransactionOptions,
+  type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
@@ -158,6 +160,14 @@ import {
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
+import {
+  analyzeImportedTables,
+  assertTrustedImportDatabaseEmpty,
+  createPostgresTrustedImportSession,
+  lockPostgresTrustedImportTables,
+  restoreSecondaryIndexes,
+  suspendPostgresSecondaryIndexes,
+} from "./trusted-import";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -623,6 +633,49 @@ export function createPostgresBackend(
 
   const backend: GraphBackend = {
     ...operations,
+
+    ...(capabilities.transactions &&
+    executionAdapter.executeCompiled !== undefined ?
+      {
+        async trustedImport<T>(
+          fn: (session: TrustedImportSession) => Promise<T>,
+        ): Promise<T> {
+          return backend.transaction(async (tx, rawSql) => {
+            const trustedExecutionAdapter = createPostgresExecutionAdapter(
+              rawSql as AnyPgDatabase,
+              { ...adapterOptions, useTransactionClient: true },
+            );
+            const executeCompiled = trustedExecutionAdapter.executeCompiled;
+            if (executeCompiled === undefined) {
+              throw new ConfigurationError(
+                "Trusted import could not bind raw execution to the PostgreSQL transaction.",
+                { capability: "trustedImport", dialect: "postgres" },
+              );
+            }
+            const trustedTx = createBackendOverlay(tx, {
+              executeRaw<T>(
+                sqlText: string,
+                params: readonly unknown[],
+              ): Promise<readonly T[]> {
+                return executeCompiled<T>({ params, sql: sqlText });
+              },
+            });
+            await lockPostgresTrustedImportTables(trustedTx, tableNames);
+            await assertTrustedImportDatabaseEmpty(trustedTx, tableNames);
+            const indexDefinitions = await suspendPostgresSecondaryIndexes(
+              trustedTx,
+              tableNames,
+            );
+            const result = await fn(
+              createPostgresTrustedImportSession(trustedTx, tableNames),
+            );
+            await restoreSecondaryIndexes(trustedTx, indexDefinitions);
+            await analyzeImportedTables(trustedTx, tableNames);
+            return result;
+          });
+        },
+      }
+    : {}),
 
     async bootstrapTables(): Promise<void> {
       const statements = generatePostgresDDL(tables, fulltextStrategy);

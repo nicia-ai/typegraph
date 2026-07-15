@@ -1,7 +1,7 @@
 /**
  * TypeGraph/SQLite (better-sqlite3) engine driver — the embedded pairing
- * against LadybugDB. Loads via `bulkInsert`, checkpoints the WAL, then runs
- * the documented production path (`refreshStatistics` +
+ * against LadybugDB. Loads through the trusted initial-import path,
+ * checkpoints the WAL, then runs the documented production path (`refreshStatistics` +
  * `materializeIndexes`) before any query is measured
  * (docs/design/benchmark-program-plan.md).
  */
@@ -87,11 +87,8 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
     // createStoreWithSchema (not the sync createStore) is the documented
     // production boot path: it runs DDL/bootstrap and durably materializes
     // runtime contributions, which materializeIndexes() below requires.
-    // Auto-refresh-after-bulk would otherwise re-run refreshStatistics()
-    // on every large bulkInsert() call during the load below (each of our
-    // batches already exceeds the default row threshold on its own) — pure
-    // redundant work, since load() already calls refreshStatistics() itself
-    // exactly once after the whole dataset is in.
+    // Keep automatic refresh disabled: the trusted import and the explicit
+    // post-load call below each own their statistics boundary.
     const [store] = await createStoreWithSchema(snbGraph, backend, {
       queryDefaults: { traversalExpansion: "none" },
       autoRefreshStatistics: false,
@@ -113,7 +110,8 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
         "folds the WAL fully back into the main file before any query is " +
         "measured, so query latency never pays a WAL-scan cost the other " +
         "engines don't); indexes materialized and statistics refreshed " +
-        "after bulk load, matching the documented production path.",
+        "after an atomic trusted initial import, matching the documented " +
+        "fresh-database path.",
       async load() {
         const pools = await loadSnbDataset(
           store,
