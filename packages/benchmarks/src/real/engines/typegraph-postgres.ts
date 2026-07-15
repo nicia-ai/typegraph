@@ -47,11 +47,8 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
     const tables = createPostgresTables({});
     await pool.query(generatePostgresMigrationSQL(tables));
     const backend = createPostgresBackend(drizzleDb, { tables });
-    // Auto-refresh-after-bulk would otherwise re-run refreshStatistics()
-    // on every large bulkInsert() call during the load below (each of our
-    // batches already exceeds the default row threshold on its own) — pure
-    // redundant work, since load() already calls refreshStatistics() itself
-    // exactly once after the whole dataset is in.
+    // Keep automatic refresh disabled: the trusted import and the explicit
+    // post-load call below each own their statistics boundary.
     const [store] = await createStoreWithSchema(snbGraph, backend, {
       queryDefaults: { traversalExpansion: "none" },
       autoRefreshStatistics: false,
@@ -62,7 +59,8 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
       fairness:
         `imperative docker Postgres container (${container.durabilityLabel}), ` +
         "node-postgres over localhost TCP; indexes materialized and statistics " +
-        "refreshed after bulk load, matching the documented production path. " +
+        "refreshed after an atomic trusted initial import, matching the " +
+        "documented fresh-database path. " +
         "VACUUM ANALYZE runs after load — without it, Postgres cannot serve " +
         "an index-only scan at all regardless of index shape, since a bulk " +
         "load never populates the visibility map on its own.",
