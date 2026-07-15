@@ -355,13 +355,19 @@ type BaseStoreOptions = Readonly<{
    * off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
-   * re-delivers a byte-identical change, or a full replay that reprocesses an
-   * already-materialized log, would otherwise rewrite every row it touches:
+   * re-delivers a byte-identical change would otherwise rewrite the row anyway:
    * today an `upsertById` on an existing id calls `updateNode`
    * unconditionally, allocating a fresh recorded instant and a new history row
-   * per re-delivery. A rebuild — the workload replay is recommended for — is
-   * the one that inflates recorded history most, with a dense band of
-   * "changes" that changed nothing.
+   * per re-delivery.
+   *
+   * The win is scoped to re-delivery of the **current** value. A full
+   * replay-from-zero over the current state still writes wherever the stream
+   * superseded a value in place: re-applying an older value over the live row
+   * is a genuine change (and restoring the current value afterwards is
+   * another), so only streams whose rows never supersede each other replay
+   * without churn. A rebuild that should avoid that re-walk belongs in a fresh
+   * store — replay into it and publish it, rather than re-applying the log
+   * over current state.
    *
    * When enabled, an upsert that would not change the stored value performs
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
