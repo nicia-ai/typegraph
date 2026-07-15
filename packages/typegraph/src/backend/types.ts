@@ -13,7 +13,10 @@ import {
 } from "../core/types";
 import { type SqlTableNames } from "../query/compiler/schema";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
-import { type VectorStrategy } from "../query/dialect/vector-strategy";
+import {
+  type VectorSlot,
+  type VectorStrategy,
+} from "../query/dialect/vector-strategy";
 import {
   type CompiledRowsSql,
   type CompiledStatementSql,
@@ -1417,6 +1420,45 @@ export type GraphBackend = Readonly<{
    * records the marker (success or failure) keyed by `graphId`.
    */
   ensureRuntimeContributions?: (graphId: string) => Promise<void>;
+
+  /**
+   * Privileged materializer for one embedding `(kind, field)` slot's
+   * `ownedTables` contribution(s): creates the per-field vector table and
+   * records its durable marker, idempotently. The vector counterpart of
+   * `ensureRuntimeContributions` — vectors are per-`(kind, field)` and
+   * graph-derived, so the store enumerates slots (via
+   * `resolveEmbeddingFields`) and calls this once per slot at boot under
+   * the privileged role. Pass `{ force: true }` to overwrite the marker
+   * at the current signature, bypassing the drift-guard — the sanctioned
+   * path `store.reembedVectorField()` uses after recreating storage at a
+   * new dimension. Present only on backends wired with a vector strategy.
+   */
+  ensureVectorSlotContribution?: (
+    slot: VectorSlot,
+    options?: Readonly<{ force?: boolean }>,
+  ) => Promise<void>;
+
+  /**
+   * SELECT-only gate for one embedding `(kind, field)` slot: asserts the
+   * durable marker(s) for the slot's `ownedTables` contribution(s),
+   * cached per backend instance. Throws `StoreNotInitializedError` when
+   * the slot is missing, stale (signature drift), or recorded a failed
+   * last attempt. The vector counterpart of
+   * `assertRuntimeContributionsInitialized`, consulted by the verified
+   * runtime attach. Performs ZERO DDL and ZERO writes. Present only on
+   * backends wired with a vector strategy.
+   */
+  assertVectorSlotInitialized?: (slot: VectorSlot) => Promise<void>;
+
+  /**
+   * Forget one embedding `(kind, field)` slot's durable contribution
+   * marker(s). Called after the slot's per-field table is dropped
+   * (vector-field reclaim) so a later `ensureVectorSlotContribution`
+   * re-creates the table instead of trusting an orphaned "initialized"
+   * marker. Does NOT drop the table itself (the caller already did).
+   * Present only on backends wired with a vector strategy.
+   */
+  deleteVectorSlotContribution?: (slot: VectorSlot) => Promise<void>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`

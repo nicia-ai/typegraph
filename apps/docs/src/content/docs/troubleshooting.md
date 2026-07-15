@@ -369,8 +369,12 @@ markers. See
 that never materializes runtime storage) against a database that no
 `createStoreWithSchema()` boot has initialized — commonly the runtime
 started before the privileged migration step ran, or the wrong role/
-database is configured. `createVerifiedStore()` catches this case at
-boot rather than at first hot-path operation.
+database is configured. This covers both fulltext and **embedding**
+operations: a `store.nodes.*.create({ embedding })` write or a
+`store.search.vector` / `.similarTo()` query against an un-provisioned
+per-`(kind, field)` table throws here rather than lazily issuing
+`CREATE TABLE` on the hot path. `createVerifiedStore()` catches this
+case at boot rather than at the first hot-path operation.
 
 **Solution:** Run `createStoreWithSchema(graph, adminBackend)` once
 under the privileged role before the runtime attaches (it writes the

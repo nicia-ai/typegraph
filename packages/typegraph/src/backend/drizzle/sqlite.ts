@@ -87,18 +87,17 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import {
-  createVectorSlotLatch,
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
   vectorSlotFromCreateIndexParams,
   vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
-  type VectorSlotLatch,
 } from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
+  type ContributionMaterializer,
   createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
@@ -485,12 +484,13 @@ type CreateSqliteOperationBackendOptions = Readonly<{
    */
   vectorStrategy?: VectorStrategy | undefined;
   /**
-   * Per-`(kind, field)` storage-ensure latch shared across the outer
-   * backend and every transaction-scoped backend (see
-   * {@link createVectorSlotLatch}). Required whenever `vectorStrategy` is
-   * set so writes never hit a missing per-field table.
+   * Shared durable-marker materializer. The vector methods assert a
+   * slot's marker (SELECT, never DDL) on the hot path and `createVectorIndex`
+   * ensures it (privileged) — replacing the old in-process ensure-latch.
+   * Shared across the outer backend and every transaction-scoped backend
+   * so a slot's marker is resolved at most once per process.
    */
-  vectorSlotLatch?: VectorSlotLatch | undefined;
+  contributionMaterializer: ContributionMaterializer;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -503,8 +503,8 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreateSqliteOperationBackendOptions}. */
   vectorStrategy?: VectorStrategy | undefined;
-  /** Shared storage-ensure latch. See {@link CreateSqliteOperationBackendOptions}. */
-  vectorSlotLatch?: VectorSlotLatch | undefined;
+  /** Shared durable-marker materializer. See {@link CreateSqliteOperationBackendOptions}. */
+  contributionMaterializer: ContributionMaterializer;
 }>;
 
 function createSqliteOperationBackend(
@@ -519,7 +519,7 @@ function createSqliteOperationBackend(
     tableNames,
     fulltextStrategy,
     vectorStrategy,
-    vectorSlotLatch,
+    contributionMaterializer,
   } = options;
 
   // CRUD statements route through the execution adapter's compiled path on
@@ -602,23 +602,16 @@ function createSqliteOperationBackend(
         },
       };
 
-  // The latch runs per-field DDL on the same connection a write/search
-  // executes on, so a transaction-scoped write materializes its slot inside
-  // the caller's transaction.
-  async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
-    if (vectorStrategy === undefined || vectorSlotLatch === undefined) return;
-    await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
-      await execRun(sql.raw(statement));
-    });
-  }
-
   const vectorEmbeddingMethods =
     vectorStrategy === undefined ?
       {}
     : {
         async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Assert the slot's durable marker (SELECT, cached) — never DDL.
+          // The per-field table is provisioned by the privileged migrator
+          // (`createStoreWithSchema` → `materializeVectorContributions`).
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
           try {
             for (const statement of statements) {
@@ -633,7 +626,8 @@ function createSqliteOperationBackend(
         ): Promise<void> {
           if (params.rows.length === 0) return;
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Same SELECT-only marker assert as the single-row path — never DDL.
+          await contributionMaterializer.assertVectorSlot(slot);
           // Last-write-wins dedupe: a multi-row upsert cannot affect one
           // row twice.
           const rowsById = new Map(
@@ -678,15 +672,15 @@ function createSqliteOperationBackend(
           }
         },
         async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Ensure the per-field table exists before deleting. A delete
-          // can run before any embedding was ever written for the field
-          // (e.g. a node hard-deleted having never carried one); the
-          // idempotent ensure makes the DELETE a clean no-op against an
-          // existing (possibly empty) table, matching the Postgres path
-          // (where a DELETE on a missing relation would abort an
-          // enclosing transaction).
+          // Assert the slot's durable marker before deleting. A delete can
+          // run before any embedding was ever written for the field (e.g. a
+          // node hard-deleted having never carried one); the per-field table
+          // was provisioned at boot, so the DELETE is a clean no-op against
+          // an existing (possibly empty) table, matching the Postgres path
+          // (where a DELETE on a missing relation would abort an enclosing
+          // transaction). SELECT-only assert, never DDL.
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildDelete(slot, params);
           for (const statement of statements) {
             await execRun(statement);
@@ -697,7 +691,7 @@ function createSqliteOperationBackend(
         ): Promise<readonly VectorSearchResult[]> {
           assertVectorSearchLimit(params.limit);
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          await contributionMaterializer.assertVectorSlot(slot);
           const query = vectorStrategy.buildSearch(
             slot,
             params,
@@ -744,7 +738,7 @@ function createSqliteOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              await ensureVectorSlotStorage(slot);
+              await contributionMaterializer.assertVectorSlot(slot);
               const candidates =
                 params.candidates ??
                 operationStrategy.buildLiveNodeIds(
@@ -802,11 +796,12 @@ function createSqliteOperationBackend(
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       if (vectorStrategy === undefined) return;
       const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table exists first (idempotent), then create
-      // its ANN index. `ownedTables` already folds the index DDL in, so the
-      // explicit `buildCreateIndex` step is belt-and-suspenders for slots
-      // whose index intent changed after the table was first materialized.
-      await ensureVectorSlotStorage(slot);
+      // Ensure the per-field table + its durable marker first (privileged,
+      // idempotent), then create its ANN index. `ownedTables` already folds
+      // the index DDL in, so the explicit `buildCreateIndex` step is
+      // belt-and-suspenders for slots whose index intent changed after the
+      // table was first materialized.
+      await contributionMaterializer.ensureVectorSlot(slot);
       const indexStatement = vectorStrategy.buildCreateIndex?.(slot);
       if (indexStatement !== undefined) {
         await execRun(indexStatement);
@@ -938,10 +933,6 @@ export function createSqliteBackend(
   // (`createLibsqlBackend` always; `createLocalSqliteBackend` when the
   // extension loads); absent for plain SQLite drivers with no extension.
   const vectorStrategy = options.vector;
-  // One latch per backend instance, shared with every transaction-scoped
-  // backend so a slot's per-field table is created at most once per process.
-  const vectorSlotLatch =
-    vectorStrategy === undefined ? undefined : createVectorSlotLatch();
   const capabilities: BackendCapabilities = {
     ...buildSqliteCapabilities({
       fulltextStrategy,
@@ -996,6 +987,96 @@ export function createSqliteBackend(
   // stay unqueued.
   const serializedQueue =
     transactionMode === "none" ? undefined : createSerializedExecutionQueue();
+
+  // Durable fulltext + vector materialization (#135): the dialect-specific
+  // marker-table primitives. Orchestration (materialize / assert /
+  // per-instance cache) lives once in `createContributionMaterializer`,
+  // shared by the outer backend and every transaction-scoped backend so a
+  // slot's marker is resolved at most once per process. Built before
+  // `operations` so the operation backend's vector methods can assert/
+  // ensure through it instead of issuing DDL on the hot path.
+  const matTable = tables.contributionMaterializations;
+
+  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
+    await db.run(sql.raw(generateSqliteCreateTableSQL(matTable)));
+  }
+
+  async function getContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<ContributionMaterializationRow | undefined> {
+    const rows = await db
+      .select()
+      .from(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return mapContributionMaterializationRow(
+      row,
+      SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+    );
+  }
+
+  async function recordContributionMaterializationRow(
+    params: RecordContributionMaterializationParams,
+  ): Promise<void> {
+    await db
+      .insert(matTable)
+      .values(
+        buildContributionInsertValues(
+          params,
+          SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+        ),
+      )
+      .onConflictDoUpdate({
+        target: [
+          matTable.graphId,
+          matTable.logicalName,
+          matTable.owner,
+          matTable.tableName,
+        ],
+        set: buildContributionOnConflictSet(
+          matTable.materializedAt,
+          params.materializedAt,
+        ),
+      });
+  }
+
+  async function deleteContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<void> {
+    await db
+      .delete(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+  }
+
+  const contributionMaterializer = createContributionMaterializer({
+    dialect: "sqlite",
+    fulltextStrategy,
+    fulltextTableName: tables.fulltextTableName,
+    vectorStrategy,
+    execDdl: async (statement) => {
+      await db.run(sql.raw(statement));
+    },
+    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
+    getMarker: getContributionMaterializationRow,
+    recordMarker: recordContributionMaterializationRow,
+    deleteMarker: deleteContributionMaterializationRow,
+  });
+
   const operations = createSqliteOperationBackend({
     capabilities,
     db,
@@ -1004,7 +1085,7 @@ export function createSqliteBackend(
     tableNames,
     fulltextStrategy,
     vectorStrategy,
-    vectorSlotLatch,
+    contributionMaterializer,
     ...(serializedQueue === undefined ? {} : { serializedQueue }),
   });
 
@@ -1089,7 +1170,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           vectorStrategy,
-          vectorSlotLatch,
+          contributionMaterializer,
         });
         await runFrameStatement(sql`BEGIN IMMEDIATE`);
         try {
@@ -1120,7 +1201,7 @@ export function createSqliteBackend(
           tableNames,
           fulltextStrategy,
           vectorStrategy,
-          vectorSlotLatch,
+          contributionMaterializer,
         });
         return fn(txBackend);
       });
@@ -1143,7 +1224,7 @@ export function createSqliteBackend(
               tableNames,
               fulltextStrategy,
               vectorStrategy,
-              vectorSlotLatch,
+              contributionMaterializer,
             });
             return fn(txBackend);
           },
@@ -1151,74 +1232,6 @@ export function createSqliteBackend(
         ) as Promise<T>,
     );
   }
-
-  // Durable fulltext materialization (#135): the dialect-specific
-  // marker-table primitives. Orchestration (materialize / assert /
-  // per-instance cache) lives once in `createContributionMaterializer`.
-  const matTable = tables.contributionMaterializations;
-
-  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await db.run(sql.raw(generateSqliteCreateTableSQL(matTable)));
-  }
-
-  async function getContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<ContributionMaterializationRow | undefined> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return mapContributionMaterializationRow(
-      row,
-      SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-    );
-  }
-
-  async function recordContributionMaterializationRow(
-    params: RecordContributionMaterializationParams,
-  ): Promise<void> {
-    await db
-      .insert(matTable)
-      .values(
-        buildContributionInsertValues(
-          params,
-          SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-        ),
-      )
-      .onConflictDoUpdate({
-        target: [
-          matTable.graphId,
-          matTable.logicalName,
-          matTable.owner,
-          matTable.tableName,
-        ],
-        set: buildContributionOnConflictSet(
-          matTable.materializedAt,
-          params.materializedAt,
-        ),
-      });
-  }
-
-  const contributionMaterializer = createContributionMaterializer({
-    dialect: "sqlite",
-    fulltextStrategy,
-    fulltextTableName: tables.fulltextTableName,
-    execDdl: async (statement) => {
-      await db.run(sql.raw(statement));
-    },
-    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarker: getContributionMaterializationRow,
-    recordMarker: recordContributionMaterializationRow,
-  });
 
   // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
   // the tx) and `adoptTransaction()` (#134 — the caller already opened
@@ -1233,7 +1246,7 @@ export function createSqliteBackend(
       tableNames,
       fulltextStrategy,
       vectorStrategy,
-      vectorSlotLatch,
+      contributionMaterializer,
     });
     return gateFulltext(txBackend, contributionMaterializer.assertInitialized);
   }
@@ -1403,6 +1416,29 @@ export function createSqliteBackend(
       await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
+    // Vector counterparts of the runtime-contribution methods. Present
+    // only when a vector strategy is wired (omitted on a plain SQLite
+    // connection with no vector extension), mirroring the embedding/
+    // search methods.
+    ...(vectorStrategy === undefined ?
+      {}
+    : {
+        async ensureVectorSlotContribution(
+          slot: VectorSlot,
+          options_?: Readonly<{ force?: boolean }>,
+        ): Promise<void> {
+          await contributionMaterializer.ensureVectorSlot(slot, options_);
+        },
+
+        async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.assertVectorSlot(slot);
+        },
+
+        async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.dropVectorSlot(slot);
+        },
+      }),
+
     async getReconciliationMarker(
       graphId: string,
     ): Promise<number | undefined> {
@@ -1509,7 +1545,7 @@ export function createSqliteBackend(
             tableNames,
             fulltextStrategy,
             vectorStrategy,
-            vectorSlotLatch,
+            contributionMaterializer,
           });
           // BEGIN IMMEDIATE, matching runSchemaWriteTransaction and the
           // "drizzle" branch below: take the reserved write lock at the start of
@@ -1603,12 +1639,12 @@ function createTransactionBackend(
       profileHints: options.profileHints,
     });
 
-  // A transaction-scoped backend gets its OWN per-field ensure-latch, never
-  // the outer process-global one. A `CREATE TABLE/INDEX` that runs inside the
-  // caller's transaction and then rolls back must not leave the shared latch
-  // marking the slot "ensured" — that would skip the re-CREATE and make every
-  // later write fail with "no such table". The fresh latch is discarded with
-  // the transaction, so the next write re-ensures idempotently.
+  // The transaction-scoped backend shares the outer backend's
+  // contribution materializer: the per-field vector table is provisioned
+  // (DDL) only by the privileged outer backend, so a tx-scoped vector op
+  // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
+  // anything on rollback. The shared per-instance cache means a slot
+  // confirmed once stays a pure `Set.has` inside every later transaction.
   return createSqliteOperationBackend({
     capabilities: options.capabilities,
     db: options.db,
@@ -1617,9 +1653,7 @@ function createTransactionBackend(
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    ...(options.vectorStrategy === undefined ?
-      {}
-    : { vectorSlotLatch: createVectorSlotLatch() }),
+    contributionMaterializer: options.contributionMaterializer,
   });
 }
 

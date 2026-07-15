@@ -30,7 +30,7 @@ import {
   createPostgresTables,
 } from "../../../src/backend/postgres";
 import { rowPropsToObject } from "../../../src/backend/types";
-import { createStore } from "../../../src/store";
+import { createStore, createStoreWithSchema } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
@@ -168,6 +168,12 @@ async function clearTestData(): Promise<void> {
   // can outrank fresh ones and cause missing hits). The materialization
   // status tables also carry graph-id scoped completion markers, so stale
   // rows there can make a fresh graph cleanup look already completed.
+  //
+  // The durable contribution markers (#135) are cleared alongside the data so
+  // each test starts genuinely un-provisioned and the integration suite's
+  // per-test createStoreWithSchema re-materializes every per-field vector
+  // table + marker in lockstep. Otherwise a marker could outlive a dropped
+  // table on this shared database and a later boot would skip the CREATE.
   await sharedPool.query(
     `TRUNCATE typegraph_index_materializations,
               typegraph_contribution_materializations,
@@ -181,12 +187,13 @@ async function clearTestData(): Promise<void> {
               typegraph_nodes,
               typegraph_edges,
               typegraph_node_uniques,
+              typegraph_contribution_materializations,
               typegraph_schema_versions CASCADE`,
   );
 
-  // Per-(kind, field) vector tables are created lazily by the strategy,
-  // so enumerate and truncate any that exist to keep embedding rows from
-  // leaking across tests that reuse graph ids.
+  // Per-(kind, field) vector tables are materialized per field, so enumerate
+  // and truncate any that exist to keep embedding rows from leaking across
+  // tests that reuse graph ids; createStoreWithSchema re-creates any missing.
   await truncatePerFieldVectorTables(sharedPool);
 }
 
@@ -1845,7 +1852,7 @@ describe("Vector Search End-to-End (Query Builder)", () => {
     const { db } = requirePostgres(ctx);
 
     const backend = createPostgresBackend(db);
-    const store = createStore(vectorTestGraph, backend);
+    const [store] = await createStoreWithSchema(vectorTestGraph, backend);
 
     // Create documents with embeddings. The store's embedding-sync path
     // persists each through the pgvector strategy's per-field table —
@@ -1899,7 +1906,7 @@ describe("Vector Search End-to-End (Query Builder)", () => {
     const { db } = requirePostgres(ctx);
 
     const backend = createPostgresBackend(db);
-    const store = createStore(vectorTestGraph, backend);
+    const [store] = await createStoreWithSchema(vectorTestGraph, backend);
 
     // Create documents — embeddings persist through the strategy's
     // per-field table via the store's embedding-sync path.

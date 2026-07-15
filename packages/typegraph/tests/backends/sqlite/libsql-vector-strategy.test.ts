@@ -220,14 +220,15 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
     expect(ids).not.toContain("d2"); // orthogonal vector excluded from top-2
   });
 
-  it("backend ensure reruns DiskANN DDL when indexType changes at the same dimension", async () => {
+  it("provisioning a DiskANN (hnsw) slot materializes its index for vector_top_k via the backend methods", async () => {
     const { backend } = await createLibsqlBackend(client);
-    const base = {
+    const slot = {
       graphId: GRAPH,
       nodeKind: "Document",
       fieldPath: "embedding",
       dimensions: 3,
       metric: "cosine" as const,
+      indexType: "hnsw" as const,
     };
 
     // vectorSearch computes top-k over LIVE nodes only, so the embedding
@@ -238,20 +239,22 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
       id: "d1",
       props: {},
     });
-    // First write ensures only brute-force storage. A later schema change can
-    // keep the same dimension while switching the slot to ANN-backed `hnsw`;
-    // the backend must run the hnsw ensure path so `vector_top_k` has an index.
+    // The privileged migrator provisions the per-field table + DiskANN index
+    // (libsql folds the index DDL into `ownedTables` for ANN slots) and the
+    // durable marker. The runtime backend methods then assert the marker
+    // (never DDL) and `vector_top_k` has its index. A later none→hnsw change
+    // at the same dimension is a deliberate shape change handled by
+    // `store.reembedVectorField`, not a lazy re-ensure on the hot path.
+    await backend.ensureVectorSlotContribution!(slot);
     await backend.upsertEmbedding!({
-      ...base,
+      ...slot,
       nodeId: "d1",
       embedding: [1, 0, 0],
-      indexType: "none",
     });
 
     const result = await backend.vectorSearch!({
-      ...base,
+      ...slot,
       queryEmbedding: [1, 0, 0],
-      indexType: "hnsw",
       limit: 1,
     });
 

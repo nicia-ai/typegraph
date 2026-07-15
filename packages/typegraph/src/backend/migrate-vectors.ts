@@ -224,10 +224,20 @@ export async function migrateLegacyEmbeddings(
     );
   }
   const upsertEmbedding = backend.upsertEmbedding;
+  const ensureVectorSlotContribution = backend.ensureVectorSlotContribution;
 
   const perField: Record<string, number> = {};
   const skippedDimensionMismatch: Record<string, number> = {};
   const skippedDecodeError: Record<string, number> = {};
+  // (kind, field) slots whose per-field table + durable marker this run has
+  // already provisioned. `upsertEmbedding` asserts the marker (#135) and no
+  // longer self-creates the table, so this offline migration (privileged)
+  // provisions each slot once — at the first row's dimension, which fixes the
+  // typed table just as the original lazy write did. Differently-sized later
+  // rows for the same slot are skipped by the dimension-mismatch path below,
+  // so the ensure is deliberately NOT re-run per row (that would trip the
+  // marker drift-guard).
+  const ensuredSlots = new Set<string>();
   let migrated = 0;
 
   let cursor: LegacyRowCursor | undefined;
@@ -271,20 +281,36 @@ export async function migrateLegacyEmbeddings(
         continue;
       }
       const config = resolveSlotConfig?.(row.node_kind, row.field_path);
+      // The decoded length is the authoritative fixed dimension — the
+      // strategy provisions its column type (e.g. `F32_BLOB(N)`) from it.
+      const slot = {
+        graphId: row.graph_id,
+        nodeKind: row.node_kind,
+        fieldPath: row.field_path,
+        dimensions: embedding.length,
+        metric: config?.metric ?? DEFAULT_SLOT_METRIC,
+        indexType: config?.indexType ?? DEFAULT_SLOT_INDEX_TYPE,
+      };
+
+      // Provision the per-field table + durable marker before the first
+      // write into this slot. Once per (graph, kind, field): the first row's
+      // dimension fixes the table. Keyed by graph id too — the legacy table
+      // is graph-scoped, so the same `kind.field` can recur across graphs.
+      const ensuredKey = JSON.stringify([
+        row.graph_id,
+        row.node_kind,
+        row.field_path,
+      ]);
+      if (
+        ensureVectorSlotContribution !== undefined &&
+        !ensuredSlots.has(ensuredKey)
+      ) {
+        await ensureVectorSlotContribution(slot);
+        ensuredSlots.add(ensuredKey);
+      }
 
       try {
-        await upsertEmbedding({
-          graphId: row.graph_id,
-          nodeKind: row.node_kind,
-          nodeId: row.node_id,
-          fieldPath: row.field_path,
-          embedding,
-          // The decoded length is the authoritative fixed dimension — the
-          // strategy provisions its column type (e.g. `F32_BLOB(N)`) from it.
-          dimensions: embedding.length,
-          metric: config?.metric ?? DEFAULT_SLOT_METRIC,
-          indexType: config?.indexType ?? DEFAULT_SLOT_INDEX_TYPE,
-        });
+        await upsertEmbedding({ ...slot, nodeId: row.node_id, embedding });
       } catch (error) {
         // The legacy shared column allowed mixed dimensions for one
         // (nodeKind, fieldPath); the per-field table is fixed at the first

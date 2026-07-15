@@ -177,10 +177,11 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
     );
   });
 
-  it("write-time: a wrong-dimension upsert surfaces EmbeddingDimensionChangedError", async () => {
+  it("write-time: a length-mismatched upsert surfaces EmbeddingDimensionChangedError", async () => {
     if (
       backend.vectorStrategy === undefined ||
-      backend.upsertEmbedding === undefined
+      backend.upsertEmbedding === undefined ||
+      backend.ensureVectorSlotContribution === undefined
     ) {
       return;
     }
@@ -191,21 +192,25 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
       metric: "cosine" as const,
       indexType: "none" as const,
     };
-    // First write fixes the per-field table at dimension 3.
+    // Provision + fix the per-field table at dimension 3 (the privileged step
+    // the migrator does; this test drives the backend directly).
+    await backend.ensureVectorSlotContribution({ ...base, dimensions: 3 });
     await backend.upsertEmbedding({
       ...base,
       nodeId: "n1",
       embedding: [1, 0, 0],
       dimensions: 3,
     });
-    // A later 4-dim write (the field's dimension changed) must surface the
-    // typed error, not the raw engine "expected N dimensions" message.
+    // A vector whose length doesn't match the column's fixed dimension must
+    // surface the typed error (via mapVectorWriteError), not the raw engine
+    // "expected N dimensions" message. The marker assert passes (dimensions
+    // still 3); the engine rejects the 4-length vector.
     await expect(
       backend.upsertEmbedding({
         ...base,
         nodeId: "n2",
         embedding: [1, 0, 0, 0],
-        dimensions: 4,
+        dimensions: 3,
       }),
     ).rejects.toBeInstanceOf(EmbeddingDimensionChangedError);
   });
@@ -296,9 +301,23 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
   });
 
   it("backend.vectorSearch rejects a non-finite minScore (#6)", async () => {
-    if (backend.vectorSearch === undefined) return;
-    // Direct backend call bypasses the facade — buildSearch must still reject a
-    // non-finite minScore instead of compiling `distance <= (1 - NaN)`.
+    if (
+      backend.vectorSearch === undefined ||
+      backend.ensureVectorSlotContribution === undefined
+    ) {
+      return;
+    }
+    // Provision the slot so the marker assert passes and execution reaches
+    // buildSearch — which must still reject a non-finite minScore instead of
+    // compiling `distance <= (1 - NaN)`.
+    await backend.ensureVectorSlotContribution({
+      graphId: "g",
+      nodeKind: "Doc",
+      fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine",
+      indexType: "none",
+    });
     await expect(
       backend.vectorSearch({
         graphId: "g",

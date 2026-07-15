@@ -46,11 +46,12 @@ createLocalSqliteBackend({ path: "./app.db", pragmas: { busyTimeoutMs: 10_000 } 
 createLocalSqliteBackend({ path: "./app.db", pragmas: false });
 ```
 
-:::caution[Fulltext requires `createStoreWithSchema`]
-`createLocalSqliteBackend` creates the tables but does not durably
-materialize fulltext storage. If your graph has `searchable()` fields,
-boot with `const [store] = await createStoreWithSchema(graph, backend);`
-instead of bare `createStore()` — otherwise the first fulltext operation
+:::caution[Fulltext and embeddings require `createStoreWithSchema`]
+`createLocalSqliteBackend` creates the base tables but does not durably
+materialize strategy-owned storage. If your graph has `searchable()` or
+`embedding()` fields, boot with
+`const [store] = await createStoreWithSchema(graph, backend);` instead of
+bare `createStore()` — otherwise the first fulltext or embedding operation
 throws `StoreNotInitializedError`.
 :::
 
@@ -113,7 +114,9 @@ const backend = createSqliteBackend(db, { vector: sqliteVecStrategy });
 ```
 
 sqlite-vec stores embeddings in `vec0` virtual tables and supports the `cosine` and `l2` metrics. Per-field
-vector tables are created lazily on first write — no embedding-table DDL is part of the migration.
+vector tables are provisioned by `createStoreWithSchema` at boot (not by the generated migration SQL), and the
+runtime asserts a durable marker rather than issuing DDL on first write — see
+[Database roles & least privilege](#database-roles--least-privilege).
 
 See [Semantic Search](/semantic-search) for query examples.
 
@@ -453,9 +456,9 @@ const db = drizzle(pool);
 const backend = createPostgresBackend(db);
 ```
 
-pgvector stores embeddings in per-field typed `vector(N)` tables (created lazily on first write — the migration
-creates no embedding table) with HNSW or IVFFlat indexes, and supports the `cosine`, `l2`, and `inner_product`
-metrics.
+pgvector stores embeddings in per-field typed `vector(N)` tables (provisioned by `createStoreWithSchema` at boot
+— the generated migration SQL creates no embedding table) with HNSW or IVFFlat indexes, and supports the
+`cosine`, `l2`, and `inner_product` metrics.
 
 See [Semantic Search](/semantic-search) for query examples.
 
@@ -889,19 +892,25 @@ least-privilege, DML-only database role.
 
 - **`createStoreWithSchema(graph, backend)` runs DDL.** It bootstraps the
   base tables on a fresh database, applies safe auto-migrations, and
-  durably materializes strategy-owned runtime storage (e.g. fulltext). It
-  re-issues idempotent DDL on every cold boot — at minimum a
-  `CREATE TABLE IF NOT EXISTS` for the contribution-marker table — so the
-  role it runs under **must hold `CREATE` / DDL privileges**. Run it once
-  at startup, outside request handlers and transactions.
+  durably materializes strategy-owned runtime storage — both fulltext and
+  each `embedding()` field's per-`(kind, field)` vector table, plus a
+  durable marker for each. It re-issues idempotent DDL on every cold boot
+  — at minimum a `CREATE TABLE IF NOT EXISTS` for the contribution-marker
+  table — so the role it runs under **must hold `CREATE` / DDL
+  privileges**. Run it once at startup, outside request handlers and
+  transactions. (`store.evolve()` likewise provisions any embedding field
+  it introduces, so it too needs DDL privileges.)
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage
   is materialized — it issues **no DDL ever**. Use it only to attach to a
   database a prior `createStoreWithSchema` boot already initialized. A
-  fulltext read or write against a database that was never initialized
-  throws `StoreNotInitializedError` rather than silently emitting DDL on
-  the hot path. Graphs with no `searchable()` fields are unaffected.
+  fulltext or **embedding** read/write against a database that was never
+  initialized — a `create({ embedding })` write or a `store.search.vector`
+  / `.similarTo()` query — throws `StoreNotInitializedError` rather than
+  silently emitting `CREATE TABLE` on the hot path. This is what lets a
+  least-privilege role run vector ops: the table already exists. Graphs
+  with no `searchable()` or `embedding()` fields are unaffected.
 
 - **`createVerifiedStore(graph, backend)` is the same zero-DDL attach
   with a verification gate.** It reads the active schema row, folds the

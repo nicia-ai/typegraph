@@ -11,7 +11,7 @@
  *   npx tsx examples/12-knowledge-graph-rag.ts
  */
 import {
-  createStore,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -94,7 +94,10 @@ export async function main() {
   console.log("=== Knowledge Graph for RAG ===\n");
 
   const backend = createExampleBackend();
-  const store = createStore(graph, backend);
+  // createStoreWithSchema provisions each embedding field's per-(kind, field)
+  // vector table + durable marker under the (privileged) migrator role, so
+  // runtime embedding writes/searches never issue DDL. Run it once at boot.
+  const [store] = await createStoreWithSchema(graph, backend);
 
   try {
     // ----------------------------------------------------------
