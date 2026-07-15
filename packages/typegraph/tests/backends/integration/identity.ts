@@ -1,14 +1,77 @@
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   asCompiledStatementSql,
   createStoreWithSchema,
+  defineEdge,
+  defineGraph,
   defineGraphExtension,
+  defineNode,
   rebuildIdentityClosure,
 } from "../../../src";
+import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { type IntegrationTestContext } from "./test-context";
+
+/**
+ * Dedicated graph for identity-EXPANDED traversal parity tests. It is
+ * provisioned on the same per-test backend as the shared fixture (they coexist
+ * by graph_id) so these cases run on every backend via `createIntegrationTestSuite`.
+ *
+ * `link`/`bridge` accept both kinds on both endpoints so a genuine edge can
+ * connect two folded peers that share an id. `bridge` is declared its own
+ * inverse so `expand: "all"` follows it in both directions — the shape that
+ * exercises the folded-peer self-loop dedup guard.
+ */
+const IdentityTravPerson = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const IdentityTravCompany = defineNode("Company", {
+  schema: z.object({ name: z.string() }),
+});
+const identityTravLink = defineEdge("link", { schema: z.object({}) });
+const identityTravBridge = defineEdge("bridge", { schema: z.object({}) });
+
+const identityTraversalGraph = defineGraph({
+  id: "identity_traversal_parity",
+  nodes: {
+    Person: { type: IdentityTravPerson },
+    Company: { type: IdentityTravCompany },
+  },
+  edges: {
+    link: {
+      type: identityTravLink,
+      from: [IdentityTravPerson, IdentityTravCompany],
+      to: [IdentityTravPerson, IdentityTravCompany],
+    },
+    bridge: {
+      type: identityTravBridge,
+      from: [IdentityTravPerson, IdentityTravCompany],
+      to: [IdentityTravPerson, IdentityTravCompany],
+    },
+  },
+  ontology: [inverseOf(identityTravBridge, identityTravBridge)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+/**
+ * Provisions {@link identityTraversalGraph} on the same per-test backend as the
+ * shared fixture. `history: true` yields a store that supports `asOfRecorded`.
+ */
+async function provisionIdentityTraversalStore(
+  context: IntegrationTestContext,
+  history: boolean,
+) {
+  const backend = context.getStore().backend;
+  const [store] = await createStoreWithSchema(
+    identityTraversalGraph,
+    backend,
+    history ? { history: true } : {},
+  );
+  return store;
+}
 
 export function registerIdentityIntegrationTests(
   context: IntegrationTestContext,
@@ -477,6 +540,279 @@ export function registerIdentityIntegrationTests(
 
       expect(await store.identity.areSame(person, company)).toBe(true);
       expect(await store.identity.assertionsOf(person)).toEqual([assertion]);
+    });
+
+    describe("identity-expanded traversal", () => {
+      it("expands a single hop through an asserted-same member", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const alias = await store.nodes.Person.create(
+          { name: "Alias" },
+          { id: "alias" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        await store.identity.assertSame(alice, alias);
+        await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
+
+        const ordinary = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", { expand: "none" })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        const expanded = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+
+        expect(ordinary).toEqual([]);
+        expect(expanded).toEqual([bob.id]);
+
+        // asOf valid-time at "now" agrees with the current expansion.
+        const asOfExpanded = await store
+          .asOf(new Date().toISOString())
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        expect(asOfExpanded).toEqual([bob.id]);
+      });
+
+      it("expands identity membership across recursive hops", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const alias = await store.nodes.Person.create(
+          { name: "Alias" },
+          { id: "alias" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        const carol = await store.nodes.Person.create(
+          { name: "Carol" },
+          { id: "carol" },
+        );
+        await store.identity.assertSame(alice, alias);
+        await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
+        await store.edges.link.create(bob, carol, {}, { id: "bob-carol" });
+
+        const results = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive()
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+
+        expect([...results].toSorted()).toEqual([bob.id, carol.id]);
+      });
+
+      it("crosses a real edge between folded peers in both directions", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const person = await store.nodes.Person.create(
+          { name: "Peer person" },
+          { id: "peer" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Peer company" },
+          { id: "peer" },
+        );
+        // A genuine two-node edge whose endpoints share an id (from_id = to_id)
+        // but differ in kind. `expand: "all"` follows the self-inverse `bridge`
+        // in both directions; the dedup guard must not mistake this for a
+        // true self-loop and suppress one direction.
+        await store.edges.bridge.create(
+          person,
+          company,
+          {},
+          { id: "peer-peer" },
+        );
+
+        const fromPerson = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Peer person"))
+          .traverse("bridge", "edge", { expand: "all" })
+          .to("Company", "company")
+          .select((queryContext) => queryContext.company.id)
+          .execute();
+        const fromCompany = await store
+          .query()
+          .from("Company", "company")
+          .whereNode("company", (node) => node.name.eq("Peer company"))
+          .traverse("bridge", "edge", { expand: "all" })
+          .to("Person", "person")
+          .select((queryContext) => queryContext.person.id)
+          .execute();
+
+        expect(fromPerson).toEqual(["peer"]);
+        expect(fromCompany).toEqual(["peer"]);
+      });
+
+      it("does not prune a folded peer sharing a visited id on a recursive path", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const start = await store.nodes.Person.create(
+          { name: "Start" },
+          { id: "shared" },
+        );
+        await store.nodes.Company.create({ name: "Mid" }, { id: "mid" });
+        // Folded peer of `start`: same id, different kind. A bare-id cycle token
+        // would treat landing on it as a revisit of the start and prune it.
+        await store.nodes.Company.create({ name: "Peer" }, { id: "shared" });
+        await store.edges.link.create(
+          start,
+          { kind: "Company", id: "mid" },
+          {},
+          { id: "start-mid" },
+        );
+        await store.edges.link.create(
+          { kind: "Company", id: "mid" },
+          { kind: "Company", id: "shared" },
+          {},
+          { id: "mid-peer" },
+        );
+
+        const results = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Start"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .recursive()
+          .to("Company", "company")
+          .select((queryContext) => queryContext.company.id)
+          .execute();
+
+        expect([...results].toSorted()).toEqual(["mid", "shared"]);
+      });
+
+      it("does not route a view(includeEnded) traversal through a retracted assertion", async () => {
+        const store = await provisionIdentityTraversalStore(context, false);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const alias = await store.nodes.Person.create(
+          { name: "Alias" },
+          { id: "alias" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        const assertion = await store.identity.assertSame(alice, alias);
+        await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
+        await store.identity.retractAssertion(assertion.id);
+
+        const current = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        // includeEnded widens NODE visibility to ended rows, but a retracted
+        // (ended) assertion must still stop conducting identity.
+        const ended = await store
+          .view({ mode: "includeEnded" })
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+
+        expect(current).toEqual([]);
+        expect(ended).toEqual([]);
+      });
+
+      it("expands at a recorded instant before a later retraction", async () => {
+        const store = await provisionIdentityTraversalStore(context, true);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "alice" },
+        );
+        const alias = await store.nodes.Person.create(
+          { name: "Alias" },
+          { id: "alias" },
+        );
+        const bob = await store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "bob" },
+        );
+        const assertion = await store.identity.assertSame(alice, alias);
+        await store.edges.link.create(alias, bob, {}, { id: "alias-bob" });
+        const beforeRetraction = await store.recordedNow();
+        expect(beforeRetraction).toBeDefined();
+        await store.identity.retractAssertion(assertion.id);
+
+        const current = await store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+        const recorded = await store
+          .asOfRecorded(beforeRetraction!)
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id)
+          .execute();
+
+        expect(current).toEqual([]);
+        expect(recorded).toEqual([bob.id]);
+      });
     });
   });
 }

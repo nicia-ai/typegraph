@@ -23,8 +23,12 @@ const graph = defineGraph({
 
 The option is serialized with the schema. Enabled graph types expose
 `store.identity`, `tx.identity`, read-only `StoreView.identity`, and the
-identity traversal option. Disabled graph types expose none of those callable
-surfaces and execute no identity locks, probes, closure work, or identity SQL.
+identity traversal option, and disabled graphs run no identity locks, probes,
+closure work, or identity SQL. The surfaces are guarded at two levels: on a
+disabled graph type `tx.identity` is absent at compile time, while the
+`store.identity` and `StoreView.identity` getters are guarded at runtime and
+throw `ConfigurationError` with details code `IDENTITY_NOT_ENABLED` if reached
+(for example through a widened or `any`-typed store handle).
 
 `sameIdAcrossKinds: "fold"` preserves TypeGraph's structural ID rule: live
 nodes of different kinds with the same ID belong to one identity class. No
@@ -67,6 +71,9 @@ Bulk methods are eager, preserve input order, and run under one graph identity
 lock. Reasserting a current semantic pair is idempotent. Self-assertions are
 rejected. Assertion IDs use the exported private-symbol-branded
 `IdentityAssertionId` type so unrelated strings cannot be passed accidentally.
+When you hold a plain assertion-ID string that came from persistence or an
+interchange document, re-enter the branded type with the `asIdentityAssertionId(value)`
+caster rather than a `as` assertion.
 
 Reads return typed `{ kind, id }` node references. A missing, deleted, or
 coordinate-invisible input returns `undefined`, `[]`, or `false` according to
@@ -84,10 +91,13 @@ one class. These checks, folding, node deletion, import, and schema validation
 share one per-graph lock and one mutation coordinator.
 
 Soft-deleting a node ends its current assertions. Hard-deleting it removes its
-assertions permanently. Recreating the same `(kind, id)` does not revive ended
-assertions, but folding runs again. Kind removal cascades assertion and closure
-rows for the removed kinds. Tightening ontology disjointness is rejected when
-it would make a persisted class contradictory.
+assertions permanently. On an identity-enabled graph a `create()` or `upsert`
+for a soft-deleted same-`(kind, id)` row **resurrects** that row rather than
+erroring: its properties are replaced and its validity window is reset, so
+`validFrom` becomes the resurrection instant. Resurrection does not revive ended
+assertions, but folding runs again over the resurrected node. Kind removal
+cascades assertion and closure rows for the removed kinds. Tightening ontology
+disjointness is rejected when it would make a persisted class contradictory.
 
 `rebuildIdentityClosure(store)` repairs the derived current closure from live
 nodes and current assertions. It validates integrity and never advances the
@@ -143,18 +153,40 @@ preserves source IDs and `validFrom` exactly.
 
 ```typescript
 const state = await exportGraph(store, { includeTemporal: true });
-const archive = await exportGraph(store, { identityMode: "archival" });
+const archive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
 ```
 
 Archival mode also includes ended assertions. Those rows are restored after
-shape validation and do not affect current closure. Recorded side tables are
-not part of interchange.
+shape validation and do not affect current closure. Ended assertions can
+reference soft-deleted nodes, so pair `identityMode: "archival"` with
+`includeDeleted: true` to keep the archive self-contained — otherwise the
+export can carry assertions whose endpoints are absent from the same document.
+Recorded side tables are not part of interchange.
 
 Graph merge includes identity truth in staleness fingerprints and diffs.
 Duplicate current assertions use the earliest `validFrom`, then the
 code-point-smallest assertion ID. Opposing relations and retract/reassert races
 are typed `IdentityMergeConflictError`s. This is mechanical truth propagation,
 not semantic entity reconciliation.
+
+## Operational notes
+
+On PostgreSQL, every identity-affecting node write on an identity-enabled graph
+serializes on a per-graph advisory transaction lock: at most one writer per
+graph proceeds at a time. This is a correctness guarantee for the assertion
+ledger and closure, and it is also a throughput ceiling — concurrent writers to
+the same graph queue behind the lock. Writes to other graphs, and all reads,
+are unaffected.
+
+First-time enablement is heavier than steady state. It takes a `SHARE` lock on
+the shared nodes table, which briefly blocks writes for **every** graph in that
+database, and it loads the whole graph to build the initial identity closure.
+Plan enablement for a quiet window on large databases. `evolve()` on an
+identity-enabled graph re-runs the same closure rebuild, so schema evolution
+carries a comparable one-time cost proportional to graph size.
 
 ## Migrating from type-level factories
 

@@ -45,6 +45,7 @@ import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
 import type {
   GraphBackend,
   GraphDef,
+  IdentityTransferAssertion,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
@@ -147,7 +148,7 @@ export async function computeContentComponent<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   graphId: string,
   graph: G,
-  identityAssertions: readonly unknown[] = [],
+  identityAssertions: readonly IdentityTransferAssertion[] = [],
 ): Promise<string> {
   const nodeKinds = getNodeKinds(graph);
   const edgeKinds = getEdgeKinds(graph);
@@ -204,11 +205,18 @@ export async function computeContentComponent<G extends GraphDef>(
     }
   }
 
+  // Omit the `identity` key entirely when the assertion list is empty, mirroring
+  // the serializer's omit-when-empty convention (schema/serializer.ts). This keeps
+  // the content token byte-identical to the pre-identity shape for identity-disabled
+  // graphs and stores that carry identity config but zero live assertions — so a
+  // pre-upgrade branch does not spuriously fail the base@V precondition.
   return sha256Hex(
     canonicalizeProps({
       nodes: nodeDigest.sort((left, right) => byDigestEntry(left, right)),
       edges: edgeDigest.sort((left, right) => byDigestEntry(left, right)),
-      identity: identityAssertions,
+      ...(identityAssertions.length === 0 ?
+        {}
+      : { identity: identityAssertions }),
     }),
     CONTENT_FINGERPRINT_BYTES,
   );

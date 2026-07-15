@@ -8,11 +8,17 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
-import { UniquenessError } from "../src/errors";
+import {
+  ConfigurationError,
+  UniquenessError,
+  ValidationError,
+} from "../src/errors";
 import {
   exportGraph,
   exportGraphStream,
   type GraphData,
+  type GraphDataHeader,
+  GraphDataSchema,
   type GraphInterchangeChunk,
   importGraph,
   importGraphStream,
@@ -22,7 +28,7 @@ import {
 } from "../src/interchange";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createInitializedStore, createTestBackend } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -79,6 +85,58 @@ const testGraph = defineGraph({
 });
 
 type TestStore = ReturnType<typeof createStore<typeof testGraph>>;
+
+// Same shape as testGraph, but with Operational Identity enabled — the target
+// for identity interchange tests. `createInitializedStore` boots it because an
+// identity-enabled graph needs the async schema-materialization path.
+const identityGraph = defineGraph({
+  id: "interchange_identity_test",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const CANONICAL_TIMESTAMP = "2024-01-01T00:00:00.000Z";
+
+/** A header carrying an identity section, for hand-built stream chunks. */
+const identityStreamHeader: GraphDataHeader = {
+  formatVersion: "2.0",
+  exportedAt: CANONICAL_TIMESTAMP,
+  source: { type: "external" },
+  identity: { profile: "typegraph-identity-v1", mode: "state" },
+};
+
+function sampleIdentityAssertion(): GraphData["identity"] {
+  return {
+    profile: "typegraph-identity-v1",
+    mode: "state",
+    assertions: [
+      {
+        id: "assertion-1",
+        relation: "same",
+        a: { kind: "Person", id: "person-1" },
+        b: { kind: "Person", id: "person-2" },
+        validFrom: CANONICAL_TIMESTAMP,
+      },
+    ],
+  };
+}
 
 /**
  * Helper to create import options with defaults applied.
@@ -1311,5 +1369,374 @@ describe("Interchange import property fidelity", () => {
     expect(document?.title).toBe("  hello  ");
     expect((document as unknown as { status?: string }).status).toBeUndefined();
     expect((document as unknown as { extra?: string }).extra).toBe("keepme");
+  });
+});
+
+// ============================================================
+// Read-side format-version compatibility (1.0 accepted, exports write 2.0)
+// ============================================================
+
+describe("Interchange format version compatibility", () => {
+  it("exports always carry formatVersion 2.0", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+
+    const exported = await exportGraph(store);
+    expect(exported.formatVersion).toBe("2.0");
+
+    const [headerChunk] = await collectChunks(exportGraphStream(store));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    expect(headerChunk.header.formatVersion).toBe("2.0");
+  });
+
+  it("accepts a 1.0 document (no identity section) via schema and import", async () => {
+    // A pre-existing 1.0 export is structurally a valid 2.0 document; the
+    // documented GraphDataSchema.parse path must keep accepting it.
+    const document = {
+      formatVersion: "1.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+    };
+
+    const parsed = GraphDataSchema.parse(document);
+    expect(parsed.formatVersion).toBe("1.0");
+
+    const store = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      store,
+      parsed,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
+    expect(await store.nodes.Person.getById("p1" as never)).toMatchObject({
+      name: "Alice",
+    });
+  });
+
+  it("accepts a 1.0 document that already carries an identity section (schema-wise)", () => {
+    const document = {
+      formatVersion: "1.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [],
+      edges: [],
+      identity: sampleIdentityAssertion(),
+    };
+
+    expect(GraphDataSchema.safeParse(document).success).toBe(true);
+  });
+});
+
+// ============================================================
+// Identity interchange compatibility, validation, and streaming
+// ============================================================
+
+describe("Identity interchange import guards", () => {
+  it("rejects an empty identity envelope aimed at an identity-disabled graph before any write", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    const data: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [],
+      },
+    };
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+    // The guard runs before processNodes, so nothing was written.
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("rejects a non-empty identity envelope aimed at an identity-disabled graph before any write", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    const data: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+      identity: sampleIdentityAssertion(),
+    };
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ConfigurationError);
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("rejects a streamed identity header aimed at an identity-disabled graph at the header, before nodes", async () => {
+    const store = createStore(testGraph, createTestBackend());
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          {
+            type: "nodes",
+            nodes: [
+              { kind: "Person", id: "p1", properties: { name: "Alice" } },
+            ],
+          },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("runtime-validates a streamed identity header even when no assertions follow", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const invalidHeader = {
+      ...identityStreamHeader,
+      identity: { profile: "not-the-typegraph-profile", mode: "state" },
+    } as unknown as GraphDataHeader;
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header: invalidHeader },
+          { type: "identity", assertions: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects an out-of-domain identity relation before any write (schema bypassed)", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    // A JS caller casting past the GraphData type can smuggle a bad relation;
+    // importGraph must runtime-validate the identity section and reject it
+    // rather than pass "banana" straight to SQL.
+    const data = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "assertion-1",
+            relation: "banana",
+            a: { kind: "Person", id: "person-1" },
+            b: { kind: "Person", id: "person-2" },
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    } as unknown as GraphData;
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects a non-canonical identity validFrom before any write (schema bypassed)", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const data = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "assertion-1",
+            relation: "same",
+            a: { kind: "Person", id: "person-1" },
+            b: { kind: "Person", id: "person-2" },
+            // Missing milliseconds — parses under lenient z.iso.datetime() but
+            // is not canonical fixed-width UTC.
+            validFrom: "2024-01-15T10:30:00Z",
+          },
+        ],
+      },
+    } as unknown as GraphData;
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("Identity interchange streaming", () => {
+  it("round-trips header, nodes, edges, and identity through the stream", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const acme = await source.nodes.Company.create(
+      { name: "Acme" },
+      { id: "acme" },
+    );
+    await source.edges.worksAt.create(alice, acme, { role: "Engineer" });
+    await source.identity.assertSame(alice, bob);
+
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source, { includeTemporal: true, batchSize: 1 }),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(3);
+    expect(result.edges.created).toBe(1);
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+
+    expect(await target.identity.areSame(alice, bob)).toBe(true);
+    expect(await target.identity.membersOf(alice)).toEqual(
+      expect.arrayContaining([
+        { kind: "Person", id: "alice" },
+        { kind: "Person", id: "bob" },
+      ]),
+    );
+  });
+
+  it("rejects nodes emitted after identity assertions", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          { type: "identity", assertions: [] },
+          { type: "nodes", nodes: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("cannot emit nodes after edges");
+  });
+
+  it("rejects edges emitted after identity assertions", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          { type: "identity", assertions: [] },
+          { type: "edges", edges: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("cannot emit edges after identity assertions");
+  });
+
+  it("rejects identity rows that arrive without an identity header", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const plainHeader: GraphDataHeader = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+    };
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: plainHeader },
+          {
+            type: "identity",
+            assertions: [
+              {
+                id: "assertion-1",
+                relation: "same",
+                a: { kind: "Person", id: "person-1" },
+                b: { kind: "Person", id: "person-2" },
+                validFrom: CANONICAL_TIMESTAMP,
+              },
+            ],
+          },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("identity rows without an identity header");
+  });
+
+  it("runtime-validates streamed identity assertions (bad relation rejected)", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const badIdentityChunk = {
+      type: "identity",
+      assertions: [
+        {
+          id: "assertion-1",
+          relation: "banana",
+          a: { kind: "Person", id: "person-1" },
+          b: { kind: "Person", id: "person-2" },
+          validFrom: CANONICAL_TIMESTAMP,
+        },
+      ],
+    } as unknown as GraphInterchangeChunk;
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          badIdentityChunk,
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow(ValidationError);
   });
 });

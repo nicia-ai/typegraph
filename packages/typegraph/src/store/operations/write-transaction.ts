@@ -100,6 +100,15 @@ export function runInWriteTransaction<T>(
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
   ) => Promise<T>,
+  options?: Readonly<{
+    /**
+     * Gate consulted AFTER `fn` resolves (autocommit path only): return false to
+     * skip advancing the durable revision clock. Defaults to advancing
+     * unconditionally. Identity mutations use this so a successful no-op
+     * (retracting an unknown id, an idempotent reassert) does not tick the clock.
+     */
+    shouldAdvanceRevision?: () => boolean;
+  }>,
 ): Promise<T> {
   const ownsWriteLock =
     "transaction" in backend && backend.capabilities.transactions;
@@ -122,7 +131,11 @@ export function runInWriteTransaction<T>(
     // History capture advances the same clock when it flushes its recorded
     // after-images. Live stores opt into revisions independently, so advance
     // only there and only after every row/sidecar write succeeded.
-    if (ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
+    if (
+      ctx.revisionTrackingEnabled &&
+      !ctx.historyEnabled &&
+      (options?.shouldAdvanceRevision?.() ?? true)
+    ) {
       await advanceRevisionClock(
         target,
         ctx.revisionSchema,

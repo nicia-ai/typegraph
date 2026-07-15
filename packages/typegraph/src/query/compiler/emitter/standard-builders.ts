@@ -485,9 +485,14 @@ export function buildStandardTraversalCte(
     directEdgeKinds.includes(kind),
   );
 
+  // Exclude a TRUE self-loop (an edge whose two endpoints are the same node)
+  // from the inverse branch so it is traversed once, not twice. Identity of a
+  // node is (kind, id), not id alone: under sameIdAcrossKinds folding a genuine
+  // two-node edge between folded peers (e.g. (Person, x) -> (Author, x)) has
+  // from_id = to_id while from_kind <> to_kind, and must NOT be suppressed.
   const duplicateGuard =
     overlappingKinds.length > 0 ?
-      sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(
+      sql`NOT (e.from_id = e.to_id AND e.from_kind = e.to_kind AND ${compileKindFilter(
         sql.raw("e.kind"),
         overlappingKinds,
       )})`

@@ -110,7 +110,7 @@ export function deserializeSchema(
     getIdentity: () => schema.identity,
     getRaw: () => schema,
 
-    buildRegistry: () => buildRegistryFromClosures(schema),
+    buildRegistry: () => buildRegistryFromRelations(schema),
   };
 }
 
@@ -124,7 +124,7 @@ export function deserializeSchema(
  * Persisted closures are a legacy inspection artifact. Relations are validated
  * and closures are recomputed so old schemas gain current hardening rules.
  */
-function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
+function buildRegistryFromRelations(schema: SerializedSchema): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
   const edgeKinds = new Map<string, AnyEdgeType>();

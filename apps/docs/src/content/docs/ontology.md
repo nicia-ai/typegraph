@@ -155,6 +155,20 @@ await store.nodes.Person.create({ name: "Alice" }, { id: "entity-1" });
 await store.nodes.Organization.create({ name: "Acme" }, { id: "entity-1" });
 ```
 
+**Coherence rules**: `disjointWith` cannot contradict the rest of the ontology.
+A kind disjoint with itself, a kind disjoint with one of its own subclass
+ancestors, a common subclass of two disjoint parents, and a kind declared both
+`equivalentTo` and `disjointWith` another are all rejected. These checks run
+both when you construct a graph and when a persisted schema is reloaded, so a
+document written by an older, more permissive version can fail validation on
+load with a `ConfigurationError` whose details code is
+`ONTOLOGY_DISJOINT_CONFLICT`. To recover, fix the graph definition and, for a
+persisted schema, correct the stored document before upgrading (or rewrite it
+through the previous minor version, which still accepts it). The same
+construction-and-reload rule applies to the other ontology coherence checks
+(duplicate relations, hierarchical self-loops and cycles, and inverse-partner
+uniqueness).
+
 ### Composition
 
 **`partOf`** and **`hasPart`**: Define compositional relationships.

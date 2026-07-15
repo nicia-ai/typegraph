@@ -39,6 +39,7 @@ type IdentityTouch = (
 
 const REFERENCE_CHUNK_SIZE = 200;
 const CLOSURE_INSERT_CHUNK_SIZE = 100;
+const ASSERTION_INSERT_CHUNK_SIZE = 50;
 
 export type IdentityServiceContext<G extends GraphDef> = Readonly<{
   graph: G;
@@ -117,7 +118,6 @@ type NodeSnapshot = Readonly<{
 type IdentitySnapshot = Readonly<{
   nodes: readonly NodeSnapshot[];
   structuralNodes: readonly PlainNodeRef[];
-  visibleNodeKeys: ReadonlySet<string>;
   assertions: readonly IdentityAssertionStorageRow[];
   components: ReadonlyMap<string, readonly PlainNodeRef[]>;
 }>;
@@ -142,6 +142,14 @@ function normalizePair(
   return compareReferences(first, second) <= 0 ?
       [first, second]
     : [second, first];
+}
+
+// A retraction ends an assertion at "now", but a backward clock skew can make
+// now < the row's valid_from — minting an empty (valid_to < valid_from) window
+// that validateTransferShape rejects on archival re-import. Clamp the end to
+// valid_from so the closed window is at worst zero-width, never negative.
+function clampValidTo(timestamp: string, validFrom: string): string {
+  return compareCodePoints(timestamp, validFrom) < 0 ? validFrom : timestamp;
 }
 
 function optionalTimestamp(value: unknown): string | undefined {
@@ -232,48 +240,14 @@ export async function lockIdentityEnablementNodes(
   );
 }
 
-function nodeVisibility(
-  node: NodeSnapshot,
-  coordinate: ReadCoordinate | undefined,
-  currentInstant: string,
-): boolean {
-  const mode = coordinate?.valid.mode ?? "current";
-  if (mode === "includeTombstones") return true;
-  if (node.deletedAt !== undefined) return false;
-  if (mode === "includeEnded") return true;
-  const instant =
-    mode === "asOf" ?
-      (coordinate?.valid.asOf ?? currentInstant)
-    : currentInstant;
-  return (
-    (node.validFrom === undefined || node.validFrom <= instant) &&
-    (node.validTo === undefined || node.validTo > instant)
-  );
-}
-
 async function loadNodeSnapshot(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
   coordinate: ReadCoordinate | undefined,
 ): Promise<readonly NodeSnapshot[]> {
-  const recordedAsOf = coordinate?.recorded?.asOf;
-  const source =
-    recordedAsOf === undefined ?
-      sql`
-        SELECT kind, id, valid_from, valid_to, created_at, deleted_at
-        FROM ${schema.nodesTable}
-        WHERE graph_id = ${graphId}
-      `
-    : sql`
-      SELECT kind, id, valid_from, valid_to, created_at, deleted_at
-      FROM ${schema.recordedNodesTable}
-      WHERE graph_id = ${graphId}
-        AND recorded_from <= ${recordedAsOf}
-        AND recorded_to > ${recordedAsOf}
-    `;
   const rows = await target.execute<RawNodeSnapshotRow>(
-    asCompiledRowsSql(source),
+    asCompiledRowsSql(nodeSnapshotSource(schema, graphId, coordinate)),
   );
   return rows.map((row) => ({
     ref: { kind: row.kind, id: row.id },
@@ -284,18 +258,19 @@ async function loadNodeSnapshot(
   }));
 }
 
-function assertionValidityFilter(
+// Assertions are class structure, not tombstonable nodes: an ended assertion
+// no longer defines class membership at the read instant even when the read
+// mode widens *node* visibility (includeEnded / includeTombstones). So the
+// validity window is applied unconditionally — only the instant it is measured
+// against tracks the read coordinate.
+function assertionValidityInstant(
   coordinate: ReadCoordinate | undefined,
   currentInstant: string,
-): Readonly<{ instant: string; includeEnded: boolean }> {
+): string {
   const mode = coordinate?.valid.mode ?? "current";
-  return {
-    instant:
-      mode === "asOf" ?
-        (coordinate?.valid.asOf ?? currentInstant)
-      : (coordinate?.recorded?.asOf ?? currentInstant),
-    includeEnded: mode === "includeEnded" || mode === "includeTombstones",
-  };
+  return mode === "asOf" ?
+      (coordinate?.valid.asOf ?? currentInstant)
+    : (coordinate?.recorded?.asOf ?? currentInstant);
 }
 
 function nodeSnapshotSource(
@@ -327,14 +302,8 @@ function assertionSnapshotSource(
   relation: IdentityRelation | undefined,
 ): SQL {
   const recordedAsOf = coordinate?.recorded?.asOf;
-  const { instant, includeEnded } = assertionValidityFilter(
-    coordinate,
-    currentInstant,
-  );
-  const validity =
-    includeEnded ?
-      sql``
-    : sql`AND valid_from <= ${instant} AND (valid_to IS NULL OR valid_to > ${instant})`;
+  const instant = assertionValidityInstant(coordinate, currentInstant);
+  const validity = sql`AND valid_from <= ${instant} AND (valid_to IS NULL OR valid_to > ${instant})`;
   const relationFilter =
     relation === undefined ? sql`` : sql`AND rel = ${relation}`;
   return recordedAsOf === undefined ?
@@ -769,39 +738,64 @@ async function loadSpanningDifferentAssertion(
   return spanningDifferentAssertion(assertions, firstClass, secondClass);
 }
 
-class UnionFind {
+/** @internal Exported for the stack-safety / union-by-size regression test. */
+export class UnionFind {
   readonly #parents = new Map<string, string>();
+  readonly #sizes = new Map<string, number>();
   readonly #refs = new Map<string, PlainNodeRef>();
 
   add(ref: PlainNodeRef): void {
     const key = refKey(ref);
     if (this.#parents.has(key)) return;
     this.#parents.set(key, key);
+    this.#sizes.set(key, 1);
     this.#refs.set(key, ref);
   }
 
+  // Iterative walk-then-compress: an adversarially ordered chain of unions can
+  // build O(N) depth, which a recursive find would blow the stack on.
   #find(key: string): string {
-    const parent = this.#parents.get(key);
-    if (parent === undefined) throw new Error(`Unknown identity member ${key}`);
-    if (parent === key) return key;
-    const root = this.#find(parent);
-    this.#parents.set(key, root);
+    let root = key;
+    for (;;) {
+      const parent = this.#parents.get(root);
+      if (parent === undefined) {
+        throw new Error(`Unknown identity member ${root}`);
+      }
+      if (parent === root) break;
+      root = parent;
+    }
+    let cursor = key;
+    while (cursor !== root) {
+      const next = this.#parents.get(cursor)!;
+      this.#parents.set(cursor, root);
+      cursor = next;
+    }
     return root;
   }
 
+  // Union by size keeps trees shallow. Canonical member selection is
+  // independent of root identity — components() sorts each group and takes the
+  // code-point-least member — so linking by size never changes the closure.
   union(first: PlainNodeRef, second: PlainNodeRef): void {
     this.add(first);
     this.add(second);
     const firstRoot = this.#find(refKey(first));
     const secondRoot = this.#find(refKey(second));
     if (firstRoot === secondRoot) return;
-    const firstRef = this.#refs.get(firstRoot)!;
-    const secondRef = this.#refs.get(secondRoot)!;
-    if (compareReferences(firstRef, secondRef) <= 0) {
-      this.#parents.set(secondRoot, firstRoot);
-    } else {
-      this.#parents.set(firstRoot, secondRoot);
-    }
+    const firstSize = this.#sizes.get(firstRoot)!;
+    const secondSize = this.#sizes.get(secondRoot)!;
+    const [root, child] =
+      firstSize >= secondSize ?
+        [firstRoot, secondRoot]
+      : [secondRoot, firstRoot];
+    this.#parents.set(child, root);
+    this.#sizes.set(root, firstSize + secondSize);
+  }
+
+  // Public root accessor for callers that maintain their own member index
+  // incrementally (bulkAssertPairs) rather than re-deriving components().
+  root(ref: PlainNodeRef): string {
+    return this.#find(refKey(ref));
   }
 
   components(): ReadonlyMap<string, readonly PlainNodeRef[]> {
@@ -877,15 +871,9 @@ async function loadSnapshot(
   const structuralNodes = scopedNodes
     .filter((node) => node.deletedAt === undefined)
     .map((node) => node.ref);
-  const visibleNodeKeys = new Set(
-    scopedNodes
-      .filter((node) => nodeVisibility(node, coordinate, currentInstant))
-      .map((node) => refKey(node.ref)),
-  );
   return {
     nodes: scopedNodes,
     structuralNodes,
-    visibleNodeKeys,
     assertions: scopedAssertions,
     components: buildComponents(structuralNodes, scopedAssertions),
   };
@@ -938,52 +926,6 @@ function spanningDifferentAssertion(
       (firstKeys.has(a) && secondKeys.has(b)) ||
       (firstKeys.has(b) && secondKeys.has(a))
     );
-  });
-}
-
-function validateRelationAgainstSnapshot(
-  snapshot: IdentitySnapshot,
-  registry: KindRegistry,
-  relation: IdentityRelation,
-  operation: IdentityContradictionErrorDetails["operation"],
-  a: PlainNodeRef,
-  b: PlainNodeRef,
-): void {
-  const aClass = componentFor(snapshot, a);
-  const bClass = componentFor(snapshot, b);
-  if (relation === "different") {
-    if (!sameComponent(snapshot, a, b)) return;
-    throw new IdentityContradictionError({
-      operation,
-      a,
-      b,
-      reason: "same-class",
-    });
-  }
-
-  const different = spanningDifferentAssertion(
-    snapshot.assertions,
-    aClass,
-    bClass,
-  );
-  if (different !== undefined) {
-    throw new IdentityContradictionError({
-      operation,
-      a,
-      b,
-      reason: "different-assertion",
-      conflictingAssertionId: different.id,
-    });
-  }
-
-  const disjointKinds = classHasDisjointKinds(registry, aClass, bClass);
-  if (disjointKinds === undefined) return;
-  throw new IdentityContradictionError({
-    operation,
-    a,
-    b,
-    reason: "disjoint-kinds",
-    conflictingKinds: disjointKinds,
   });
 }
 
@@ -1048,6 +990,87 @@ function validateSnapshotIntegrity(
         );
       }
     }
+  }
+}
+
+type RawClosureRow = RawClosureClassRow &
+  Readonly<{ class_kind: string; class_id: string }>;
+
+function closureMismatchError(
+  graphId: string,
+  detail: Record<string, unknown>,
+): ConfigurationError {
+  return new ConfigurationError(
+    "Operational Identity materialized closure does not match computed identity components.",
+    { code: "IDENTITY_SCHEMA_CONTRADICTION", graphId, ...detail },
+    {
+      suggestion:
+        "Run rebuildIdentityClosure(store) to rebuild the materialized identity closure.",
+    },
+  );
+}
+
+/**
+ * Asserts the persisted `identityClosureTable` matches the closure the engine
+ * derives from the current snapshot, so a stale or corrupted materialized
+ * closure — which every current read trusts — cannot pass verification
+ * silently. The expected rows are emitted by the same rule as
+ * {@link insertClosureComponents}: only components with two or more members
+ * carry rows, each member labeled with the component's code-point-least member;
+ * singletons carry none.
+ */
+async function assertClosureMatchesComponents(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  components: ReadonlyMap<string, readonly PlainNodeRef[]>,
+): Promise<void> {
+  const expected = new Map<
+    string,
+    Readonly<{ member: PlainNodeRef; classRef: PlainNodeRef }>
+  >();
+  const emitted = new Set<string>();
+  for (const [memberKey, component] of components) {
+    if (emitted.has(memberKey) || component.length < 2) continue;
+    const canonical = component[0]!;
+    for (const member of component) {
+      const key = refKey(member);
+      emitted.add(key);
+      expected.set(key, { member, classRef: canonical });
+    }
+  }
+
+  const rows = await target.execute<RawClosureRow>(
+    asCompiledRowsSql(sql`
+      SELECT member_kind, member_id, class_kind, class_id
+      FROM ${schema.identityClosureTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const member = { kind: row.member_kind, id: row.member_id };
+    const memberKey = refKey(member);
+    const match = expected.get(memberKey);
+    if (
+      match?.classRef.kind !== row.class_kind ||
+      match.classRef.id !== row.class_id
+    ) {
+      throw closureMismatchError(graphId, {
+        member,
+        class: { kind: row.class_kind, id: row.class_id },
+        expectedClass: match?.classRef,
+      });
+    }
+    seen.add(memberKey);
+  }
+  for (const [memberKey, { member, classRef }] of expected) {
+    if (seen.has(memberKey)) continue;
+    throw closureMismatchError(graphId, {
+      member,
+      expectedClass: classRef,
+      reason: "missing-closure-row",
+    });
   }
 }
 
@@ -1258,21 +1281,26 @@ async function insertAssertionRows(
   schema: SqlSchema,
   rows: readonly IdentityAssertionStorageRow[],
 ): Promise<void> {
-  const chunkSize = 50;
-  for (let offset = 0; offset < rows.length; offset += chunkSize) {
-    const values = rows.slice(offset, offset + chunkSize).map((row) => {
-      const validTo =
-        row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
-      const deletedAt =
-        row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
-      return sql`
-        (
-                ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
-                ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
-                ${row.created_at}, ${row.updated_at}, ${deletedAt}
-              )
-      `;
-    });
+  for (
+    let offset = 0;
+    offset < rows.length;
+    offset += ASSERTION_INSERT_CHUNK_SIZE
+  ) {
+    const values = rows
+      .slice(offset, offset + ASSERTION_INSERT_CHUNK_SIZE)
+      .map((row) => {
+        const validTo =
+          row.valid_to === undefined ? sql`NULL` : sql`${row.valid_to}`;
+        const deletedAt =
+          row.deleted_at === undefined ? sql`NULL` : sql`${row.deleted_at}`;
+        return sql`
+          (
+                  ${row.graph_id}, ${row.id}, ${row.rel}, ${row.a_kind}, ${row.a_id},
+                  ${row.b_kind}, ${row.b_id}, ${row.valid_from}, ${validTo},
+                  ${row.created_at}, ${row.updated_at}, ${deletedAt}
+                )
+        `;
+      });
     await executeStatement(
       target,
       sql`
@@ -1285,22 +1313,37 @@ async function insertAssertionRows(
   }
 }
 
-async function assertionById(
+async function loadAssertionsByIds(
   target: Backend,
   schema: SqlSchema,
   graphId: string,
-  id: string,
-): Promise<IdentityAssertionStorageRow | undefined> {
-  const rows = await target.execute<RawIdentityAssertionRow>(
-    asCompiledRowsSql(sql`
-      SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-             valid_from, valid_to, created_at, updated_at, deleted_at
-      FROM ${schema.identityAssertionsTable}
-      WHERE graph_id = ${graphId} AND id = ${id}
-      LIMIT 1
-    `),
-  );
-  return rows[0] === undefined ? undefined : normalizeAssertionRow(rows[0]);
+  ids: readonly string[],
+): Promise<Map<string, IdentityAssertionStorageRow>> {
+  const uniqueIds = [...new Set(ids)];
+  const byId = new Map<string, IdentityAssertionStorageRow>();
+  for (
+    let offset = 0;
+    offset < uniqueIds.length;
+    offset += REFERENCE_CHUNK_SIZE
+  ) {
+    const idChunk = uniqueIds.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+    const idList = sql.join(
+      idChunk.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawIdentityAssertionRow>(
+      asCompiledRowsSql(sql`
+        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+               valid_from, valid_to, created_at, updated_at, deleted_at
+        FROM ${schema.identityAssertionsTable}
+        WHERE graph_id = ${graphId} AND id IN (${idList})
+      `),
+    );
+    for (const row of rows) {
+      byId.set(row.id, normalizeAssertionRow(row));
+    }
+  }
+  return byId;
 }
 
 async function replaceClosure(
@@ -1576,9 +1619,8 @@ async function bulkAssertPairs<G extends GraphDef>(
     structuralNodes,
     undefined,
   );
-  const assertions = [...persistedAssertions];
   const bySemanticKey = new Map(
-    assertions.map((assertion) => [
+    persistedAssertions.map((assertion) => [
       assertionSemanticKey(
         assertion.rel,
         { kind: assertion.a_kind, id: assertion.a_id },
@@ -1587,10 +1629,55 @@ async function bulkAssertPairs<G extends GraphDef>(
       assertion,
     ]),
   );
+
+  // Build the union-find ONCE (structural nodes + same-id groups + persisted
+  // same-assertions), then union each accepted same pair into it — instead of
+  // rebuilding the whole partition per pair (the old O(P²)). Different
+  // assertions live in their own list so the spanning-conflict check scans
+  // only them, and a per-root member index keeps class lookups O(1).
+  const unionFind = new UnionFind();
+  const differentAssertions: IdentityAssertionStorageRow[] = [];
+  const allReferences = new Map<string, PlainNodeRef>();
+  const byId = new Map<string, PlainNodeRef[]>();
+  for (const ref of structuralNodes) {
+    unionFind.add(ref);
+    allReferences.set(refKey(ref), ref);
+    const group = byId.get(ref.id) ?? [];
+    group.push(ref);
+    byId.set(ref.id, group);
+  }
+  for (const group of byId.values()) {
+    const first = group[0];
+    if (first === undefined) continue;
+    for (const member of group.slice(1)) unionFind.union(first, member);
+  }
+  for (const assertion of persistedAssertions) {
+    const endpointA = { kind: assertion.a_kind, id: assertion.a_id };
+    const endpointB = { kind: assertion.b_kind, id: assertion.b_id };
+    if (assertion.rel === "same") {
+      unionFind.union(endpointA, endpointB);
+    } else {
+      unionFind.add(endpointA);
+      unionFind.add(endpointB);
+      differentAssertions.push(assertion);
+    }
+    allReferences.set(refKey(endpointA), endpointA);
+    allReferences.set(refKey(endpointB), endpointB);
+  }
+  const membersByRoot = new Map<string, PlainNodeRef[]>();
+  for (const ref of allReferences.values()) {
+    const root = unionFind.root(ref);
+    const group = membersByRoot.get(root) ?? [];
+    group.push(ref);
+    membersByRoot.set(root, group);
+  }
+
   const createdRows: IdentityAssertionStorageRow[] = [];
   const results: IdentityAssertion<G>[] = [];
   const closureReferences: PlainNodeRef[] = [];
   const timestamp = nowIso();
+  const operation: IdentityContradictionErrorDetails["operation"] =
+    relation === "same" ? "assertSame" : "assertDifferent";
 
   for (const [a, b] of normalizedPairs) {
     const semanticKey = assertionSemanticKey(relation, a, b);
@@ -1599,27 +1686,74 @@ async function bulkAssertPairs<G extends GraphDef>(
       results.push(publicAssertion(existing));
       continue;
     }
-    const snapshot: IdentitySnapshot = {
-      nodes: [],
-      structuralNodes,
-      visibleNodeKeys: new Set(structuralNodes.map((ref) => refKey(ref))),
-      assertions,
-      components: buildComponents(structuralNodes, assertions),
-    };
-    validateRelationAgainstSnapshot(
-      snapshot,
-      ctx.registry,
-      relation,
-      relation === "same" ? "assertSame" : "assertDifferent",
-      a,
-      b,
-    );
+    const rootA = unionFind.root(a);
+    const rootB = unionFind.root(b);
+    if (relation === "different") {
+      if (rootA === rootB) {
+        throw new IdentityContradictionError({
+          operation,
+          a,
+          b,
+          reason: "same-class",
+        });
+      }
+    } else {
+      const spanning = differentAssertions.find((assertion) => {
+        const spanA = unionFind.root({
+          kind: assertion.a_kind,
+          id: assertion.a_id,
+        });
+        const spanB = unionFind.root({
+          kind: assertion.b_kind,
+          id: assertion.b_id,
+        });
+        return (
+          (spanA === rootA && spanB === rootB) ||
+          (spanA === rootB && spanB === rootA)
+        );
+      });
+      if (spanning !== undefined) {
+        throw new IdentityContradictionError({
+          operation,
+          a,
+          b,
+          reason: "different-assertion",
+          conflictingAssertionId: spanning.id,
+        });
+      }
+      const disjointKinds = classHasDisjointKinds(
+        ctx.registry,
+        membersByRoot.get(rootA) ?? [a],
+        membersByRoot.get(rootB) ?? [b],
+      );
+      if (disjointKinds !== undefined) {
+        throw new IdentityContradictionError({
+          operation,
+          a,
+          b,
+          reason: "disjoint-kinds",
+          conflictingKinds: disjointKinds,
+        });
+      }
+    }
     const row = buildAssertionRow(ctx.graphId, relation, a, b, timestamp);
-    assertions.push(row);
     createdRows.push(row);
     bySemanticKey.set(semanticKey, row);
     results.push(publicAssertion(row));
-    if (relation === "same") closureReferences.push(a, b);
+    if (relation === "same") {
+      closureReferences.push(a, b);
+      if (rootA !== rootB) {
+        unionFind.union(a, b);
+        const mergedRoot = unionFind.root(a);
+        const merged = [
+          ...(membersByRoot.get(rootA) ?? [a]),
+          ...(membersByRoot.get(rootB) ?? [b]),
+        ];
+        membersByRoot.delete(rootA);
+        membersByRoot.delete(rootB);
+        membersByRoot.set(mergedRoot, merged);
+      }
+    }
   }
 
   await insertAssertionRows(target, ctx.schema, createdRows);
@@ -1656,6 +1790,11 @@ async function findCurrentAssertionById(
   return rows[0] === undefined ? undefined : normalizeAssertionRow(rows[0]);
 }
 
+/**
+ * Ends the currently-open assertion with the given id, returning the ended
+ * pre-image (so callers reuse its endpoints for closure repair instead of
+ * re-reading the same row) or `undefined` when no open row matched.
+ */
 async function retractById(
   ctx: IdentityServiceContext<GraphDef>,
   target: Backend,
@@ -1665,28 +1804,29 @@ async function retractById(
     assertionId: string,
     afterImage?: IdentityAssertionStorageRow,
   ) => void,
-): Promise<boolean> {
+): Promise<IdentityAssertionStorageRow | undefined> {
   const existing = await findCurrentAssertionById(
     target,
     ctx.schema,
     ctx.graphId,
     id,
   );
-  if (existing === undefined) return false;
-  const timestamp = nowIso();
-  const ended = { ...existing, valid_to: timestamp, updated_at: timestamp };
+  if (existing === undefined) return undefined;
+  const now = nowIso();
+  const validTo = clampValidTo(now, existing.valid_from);
+  const ended = { ...existing, valid_to: validTo, updated_at: now };
   await executeStatement(
     target,
     sql`
       UPDATE ${ctx.schema.identityAssertionsTable}
-      SET valid_to = ${timestamp}, updated_at = ${timestamp}
+      SET valid_to = ${validTo}, updated_at = ${now}
       WHERE graph_id = ${ctx.graphId}
         AND id = ${id}
         AND valid_to IS NULL
     `,
   );
   touch(ctx.graphId, id, ended);
-  return existing.rel === "same";
+  return ended;
 }
 
 async function retractByIds(
@@ -1722,33 +1862,43 @@ async function retractByIds(
     current.push(...rows.map((row) => normalizeAssertionRow(row)));
   }
   if (current.length === 0) return [];
-  const timestamp = nowIso();
-  for (
-    let offset = 0;
-    offset < current.length;
-    offset += REFERENCE_CHUNK_SIZE
-  ) {
-    const chunk = current.slice(offset, offset + REFERENCE_CHUNK_SIZE);
-    const placeholders = sql.join(
-      chunk.map((row) => sql`${row.id}`),
-      sql`, `,
-    );
-    await executeStatement(
-      target,
-      sql`
-        UPDATE ${ctx.schema.identityAssertionsTable}
-        SET valid_to = ${timestamp}, updated_at = ${timestamp}
-        WHERE graph_id = ${ctx.graphId}
-          AND id IN (${placeholders})
-          AND valid_to IS NULL
-      `,
-    );
+  const now = nowIso();
+  // A single UPDATE cannot clamp per-row against each row's own valid_from, so
+  // group ids by the clamped valid_to they need. Rows without skew share the
+  // common `now` window; only skewed rows split into their own clamped update.
+  const byValidTo = new Map<string, string[]>();
+  const endedById = new Map<string, string>();
+  for (const row of current) {
+    const validTo = clampValidTo(now, row.valid_from);
+    endedById.set(row.id, validTo);
+    const group = byValidTo.get(validTo) ?? [];
+    group.push(row.id);
+    byValidTo.set(validTo, group);
+  }
+  for (const [validTo, ids] of byValidTo) {
+    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
+      const chunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+      const placeholders = sql.join(
+        chunk.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await executeStatement(
+        target,
+        sql`
+          UPDATE ${ctx.schema.identityAssertionsTable}
+          SET valid_to = ${validTo}, updated_at = ${now}
+          WHERE graph_id = ${ctx.graphId}
+            AND id IN (${placeholders})
+            AND valid_to IS NULL
+        `,
+      );
+    }
   }
   for (const row of current) {
     touch(ctx.graphId, row.id, {
       ...row,
-      valid_to: timestamp,
-      updated_at: timestamp,
+      valid_to: endedById.get(row.id)!,
+      updated_at: now,
     });
   }
   return current;
@@ -1765,6 +1915,10 @@ async function runIdentityMutation<G extends GraphDef, T>(
     ) => void,
   ) => Promise<T>,
 ): Promise<T> {
+  // Track whether the mutation actually touched a row: a successful no-op
+  // (retracting an unknown id, an idempotent reassert) must not advance the
+  // durable revision clock on revision-tracking stores.
+  let touched = false;
   return runInWriteTransaction(
     {
       graphId: ctx.graphId,
@@ -1775,8 +1929,14 @@ async function runIdentityMutation<G extends GraphDef, T>(
     ctx.backend,
     async (target) => {
       await lockIdentityGraph(target, ctx.graphId);
-      return withRecordedIdentityMutationTarget(target, fn);
+      return withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
+        fn(rawTarget, (graphId, id, afterImage) => {
+          touched = true;
+          touch(graphId, id, afterImage);
+        }),
+      );
     },
+    { shouldAdvanceRevision: () => touched },
   );
 }
 
@@ -1925,17 +2085,11 @@ export function createIdentityFacade<G extends GraphDef>(
 
     retractAssertion(id) {
       return runIdentityMutation(ctx, async (target, touch) => {
-        const existing = await findCurrentAssertionById(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          id,
-        );
-        const rebuild = await retractById(ctx, target, id, touch);
-        if (rebuild && existing !== undefined) {
+        const ended = await retractById(ctx, target, id, touch);
+        if (ended?.rel === "same") {
           await replaceAffectedClosure(target, ctx.schema, ctx.graphId, [
-            { kind: existing.a_kind, id: existing.a_id },
-            { kind: existing.b_kind, id: existing.b_id },
+            { kind: ended.a_kind, id: ended.a_id },
+            { kind: ended.b_kind, id: ended.b_id },
           ]);
         }
       });
@@ -2045,6 +2199,12 @@ export async function validateIdentityForContext<G extends GraphDef>(
     await lockIdentityGraph(target, ctx.graphId);
     const snapshot = await loadSnapshot(target, ctx.schema, ctx.graphId);
     validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
+    await assertClosureMatchesComponents(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      snapshot.components,
+    );
   }
 
   if ("transaction" in ctx.backend) {
@@ -2059,28 +2219,51 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
   kinds: readonly string[],
 ): Promise<void> {
   if (kinds.length === 0) return;
-  const removed = new Set(kinds);
+  const removedKinds = [...new Set(kinds)];
   await runIdentityMutation(ctx, async (target, touch) => {
-    const rows = await target.execute<RawIdentityAssertionRow>(
-      asCompiledRowsSql(sql`
-        SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
-               valid_from, valid_to, created_at, updated_at, deleted_at
-        FROM ${ctx.schema.identityAssertionsTable}
-        WHERE graph_id = ${ctx.graphId}
-      `),
-    );
-    for (const rawRow of rows) {
-      const row = normalizeAssertionRow(rawRow);
-      if (!removed.has(row.a_kind) && !removed.has(row.b_kind)) continue;
+    const matched = new Map<string, IdentityAssertionStorageRow>();
+    for (
+      let offset = 0;
+      offset < removedKinds.length;
+      offset += REFERENCE_CHUNK_SIZE
+    ) {
+      const kindChunk = removedKinds.slice(
+        offset,
+        offset + REFERENCE_CHUNK_SIZE,
+      );
+      const kindList = sql.join(
+        kindChunk.map((kind) => sql`${kind}`),
+        sql`, `,
+      );
+      const rows = await target.execute<RawIdentityAssertionRow>(
+        asCompiledRowsSql(sql`
+          SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+                 valid_from, valid_to, created_at, updated_at, deleted_at
+          FROM ${ctx.schema.identityAssertionsTable}
+          WHERE graph_id = ${ctx.graphId}
+            AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
+        `),
+      );
+      for (const rawRow of rows) {
+        matched.set(rawRow.id, normalizeAssertionRow(rawRow));
+      }
+    }
+    const ids = [...matched.keys()];
+    for (let offset = 0; offset < ids.length; offset += REFERENCE_CHUNK_SIZE) {
+      const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+      const idList = sql.join(
+        idChunk.map((id) => sql`${id}`),
+        sql`, `,
+      );
       await executeStatement(
         target,
         sql`
           DELETE FROM ${ctx.schema.identityAssertionsTable}
-          WHERE graph_id = ${ctx.graphId} AND id = ${row.id}
+          WHERE graph_id = ${ctx.graphId} AND id IN (${idList})
         `,
       );
-      touch(ctx.graphId, row.id);
     }
+    for (const row of matched.values()) touch(ctx.graphId, row.id);
     await replaceClosure(
       target,
       ctx.schema,
@@ -2101,15 +2284,44 @@ export async function foldIdentityForCreatedNodes(
   if (references.length === 0) return;
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    const ids = [...new Set(references.map((ref) => ref.id))];
+    // Deliberately per-kind (no global id index): one chunked SELECT per node
+    // kind over ALL created ids, rather than getNode per (ref, kind) pair.
+    const liveIdsByKind = new Map<string, Set<string>>();
+    for (const kind of ctx.registry.nodeKinds.keys()) {
+      const liveIds = new Set<string>();
+      for (
+        let offset = 0;
+        offset < ids.length;
+        offset += REFERENCE_CHUNK_SIZE
+      ) {
+        const idChunk = ids.slice(offset, offset + REFERENCE_CHUNK_SIZE);
+        const idList = sql.join(
+          idChunk.map((id) => sql`${id}`),
+          sql`, `,
+        );
+        const rows = await rawTarget.execute<
+          Readonly<{ kind: string; id: string }>
+        >(
+          asCompiledRowsSql(sql`
+            SELECT kind, id
+            FROM ${ctx.schema.nodesTable}
+            WHERE graph_id = ${ctx.graphId}
+              AND kind = ${kind}
+              AND id IN (${idList})
+              AND deleted_at IS NULL
+          `),
+        );
+        for (const row of rows) liveIds.add(row.id);
+      }
+      if (liveIds.size > 0) liveIdsByKind.set(kind, liveIds);
+    }
     const closureReferences: PlainNodeRef[] = [];
     for (const ref of references) {
       const peers: PlainNodeRef[] = [];
-      for (const kind of ctx.registry.nodeKinds.keys()) {
+      for (const [kind, liveIds] of liveIdsByKind) {
         if (kind === ref.kind) continue;
-        const row = await rawTarget.getNode(ctx.graphId, kind, ref.id);
-        if (row !== undefined && row.deleted_at === undefined) {
-          peers.push({ kind, id: ref.id });
-        }
+        if (liveIds.has(ref.id)) peers.push({ kind, id: ref.id });
       }
       if (peers.length === 0) continue;
       for (const peer of peers) {
@@ -2141,20 +2353,32 @@ export async function detachIdentityForNode(
 ): Promise<void> {
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(target, async (rawTarget, touch) => {
+    const touchesNode = sql`
+      (
+            (a_kind = ${ref.kind} AND a_id = ${ref.id})
+            OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+          )
+    `;
+    // Hard delete physically removes the node, so EVERY assertion touching it —
+    // including already-ended and previously soft-deleted rows — must be
+    // removed, or a node soft-deleted before its hard delete would leave
+    // archival assertions referencing a row that no longer exists. Soft delete
+    // only ends the currently-open rows.
+    const scope =
+      mode === "hard" ?
+        sql``
+      : sql`AND valid_to IS NULL AND deleted_at IS NULL`;
     const rows = await rawTarget.execute<RawIdentityAssertionRow>(
       asCompiledRowsSql(sql`
         SELECT graph_id, id, rel, a_kind, a_id, b_kind, b_id,
                valid_from, valid_to, created_at, updated_at, deleted_at
         FROM ${ctx.schema.identityAssertionsTable}
         WHERE graph_id = ${ctx.graphId}
-          AND valid_to IS NULL
-          AND deleted_at IS NULL
-          AND (
-            (a_kind = ${ref.kind} AND a_id = ${ref.id})
-            OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
-          )
+          ${scope}
+          AND ${touchesNode}
       `),
     );
+    const now = nowIso();
     for (const rawRow of rows) {
       const row = normalizeAssertionRow(rawRow);
       if (mode === "hard") {
@@ -2167,13 +2391,13 @@ export async function detachIdentityForNode(
         );
         touch(ctx.graphId, row.id);
       } else {
-        const timestamp = nowIso();
-        const ended = { ...row, valid_to: timestamp, updated_at: timestamp };
+        const validTo = clampValidTo(now, row.valid_from);
+        const ended = { ...row, valid_to: validTo, updated_at: now };
         await executeStatement(
           rawTarget,
           sql`
             UPDATE ${ctx.schema.identityAssertionsTable}
-            SET valid_to = ${timestamp}, updated_at = ${timestamp}
+            SET valid_to = ${validTo}, updated_at = ${now}
             WHERE graph_id = ${ctx.graphId} AND id = ${row.id}
           `,
         );
@@ -2269,6 +2493,33 @@ function validateTransferShape<G extends GraphDef>(
       },
     );
   }
+  // A state row is asserted as current-truth "now"; a future validFrom would
+  // insert a row the closure filter (valid_from <= now) excludes yet
+  // currentAssertionForPair (valid_to IS NULL only) treats as current —
+  // two conflicting definitions of "current". Archival rows carry their own
+  // historical validFrom and are not subject to this.
+  if (
+    mode === "state" &&
+    compareCodePoints(assertion.validFrom, nowIso()) > 0
+  ) {
+    throw new ValidationError(
+      "State identity import cannot contain future-dated assertions.",
+      {
+        issues: [
+          {
+            path: "identity.assertions",
+            message: `Assertion ${assertion.id} validFrom is in the future`,
+            code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+          },
+        ],
+      },
+    );
+  }
+  // Reject a NEGATIVE window (validTo strictly before validFrom). A zero-width
+  // window (validTo === validFrom) is intentionally allowed: it is what a
+  // same-instant retraction legitimately produces (nowIso is millisecond
+  // precision) and what the clock-skew clamp in retractById emits, so rejecting
+  // it here would break archival round-tripping of the store's own output.
   if (
     assertion.validTo !== undefined &&
     compareCodePoints(assertion.validTo, assertion.validFrom) < 0
@@ -2277,7 +2528,7 @@ function validateTransferShape<G extends GraphDef>(
       issues: [
         {
           path: "identity.assertions",
-          message: `Assertion ${assertion.id} validTo must be after validFrom`,
+          message: `Assertion ${assertion.id} validTo must not precede validFrom`,
           code: "IDENTITY_IMPORT_INVALID_WINDOW",
         },
       ],
@@ -2299,17 +2550,35 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
 ): Promise<IdentityImportSummary> {
   let created = 0;
   let skipped = 0;
-  let rebuild = false;
-  const closureReferences: PlainNodeRef[] = [];
   await withRecordedIdentityMutationTarget(target, async (rawTarget, touch) => {
-    for (const assertion of assertions) {
-      const [a, b] = validateTransferShape(ctx, assertion, mode);
-      const sameId = await assertionById(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        assertion.id,
-      );
+    // Pre-pass: validate every shape in input order and normalize endpoints,
+    // then batch the two reads the loop would otherwise issue per item — the
+    // existing-row-by-id lookup and the current-endpoint liveness check.
+    const normalizedPairs = assertions.map((assertion) =>
+      validateTransferShape(ctx, assertion, mode),
+    );
+    const existingById = await loadAssertionsByIds(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      assertions.map((assertion) => assertion.id),
+    );
+    const currentEndpoints: PlainNodeRef[] = [];
+    for (const [index, assertion] of assertions.entries()) {
+      if (assertion.validTo !== undefined) continue;
+      const [a, b] = normalizedPairs[index]!;
+      currentEndpoints.push(a, b);
+    }
+    await requireLiveEndpoints(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      currentEndpoints,
+    );
+
+    for (const [index, assertion] of assertions.entries()) {
+      const [a, b] = normalizedPairs[index]!;
+      const sameId = existingById.get(assertion.id);
       if (sameId !== undefined) {
         const exact =
           sameId.rel === assertion.relation &&
@@ -2363,11 +2632,11 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
           `,
         );
         touch(ctx.graphId, row.id, row);
+        existingById.set(row.id, row);
         created += 1;
         continue;
       }
 
-      await requireLiveEndpoints(rawTarget, ctx.schema, ctx.graphId, [a, b]);
       const existing = await currentAssertionForPair(
         rawTarget,
         ctx.schema,
@@ -2388,7 +2657,7 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
         a,
         b,
       );
-      await insertAssertion(
+      const inserted = await insertAssertion(
         rawTarget,
         ctx.schema,
         ctx.graphId,
@@ -2399,17 +2668,14 @@ export async function importIdentityAssertionsIntoTarget<G extends GraphDef>(
         touch,
         { id: assertion.id, validFrom: assertion.validFrom },
       );
+      existingById.set(inserted.id, inserted);
       created += 1;
-      rebuild = rebuild || assertion.relation === "same";
-      if (assertion.relation === "same") closureReferences.push(a, b);
-    }
-    if (rebuild) {
-      await replaceAffectedClosure(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        closureReferences,
-      );
+      // Repair the closure incrementally, exactly as single assertPair does, so
+      // a later validation in this same batch (e.g. a following different(a,b))
+      // sees the merge instead of validating against a stale materialized class.
+      if (assertion.relation === "same") {
+        await mergeCurrentClasses(rawTarget, ctx.schema, ctx.graphId, a, b);
+      }
     }
   });
   return { created, skipped };
@@ -2422,26 +2688,21 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
 ): Promise<void> {
   if (retractionIds.length === 0 && assertions.length === 0) return;
   await runIdentityMutation(ctx, async (target, touch) => {
-    let rebuildAfterRetraction = false;
     const closureReferences: PlainNodeRef[] = [];
     for (const id of retractionIds) {
-      const existing = await findCurrentAssertionById(
-        target,
-        ctx.schema,
-        ctx.graphId,
-        id,
-      );
-      rebuildAfterRetraction =
-        (await retractById(ctx, target, id, touch)) || rebuildAfterRetraction;
-      if (existing?.rel === "same") {
+      const ended = await retractById(ctx, target, id, touch);
+      if (ended?.rel === "same") {
         closureReferences.push(
-          { kind: existing.a_kind, id: existing.a_id },
-          { kind: existing.b_kind, id: existing.b_id },
+          { kind: ended.a_kind, id: ended.a_id },
+          { kind: ended.b_kind, id: ended.b_id },
         );
       }
     }
-    await importIdentityAssertionsIntoTarget(ctx, target, assertions, "state");
-    if (rebuildAfterRetraction) {
+    // Repair the closure from the retractions BEFORE importing: a batch that
+    // retracts same(a,b) and then asserts different(a,b) must validate the new
+    // assertion against a closure that already reflects the split, not the
+    // stale merged class the import validation would otherwise reject against.
+    if (closureReferences.length > 0) {
       await replaceAffectedClosure(
         target,
         ctx.schema,
@@ -2449,7 +2710,6 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         closureReferences,
       );
     }
+    await importIdentityAssertionsIntoTarget(ctx, target, assertions, "state");
   });
 }
-
-export type { PlainNodeRef };

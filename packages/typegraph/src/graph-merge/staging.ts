@@ -80,7 +80,7 @@ type StagedDeletedEdge = Readonly<{
   edge: DeletedEdge;
 }>;
 
-type StagedIdentityAssertion = Readonly<{
+export type StagedIdentityAssertion = Readonly<{
   branchId: BranchId;
   assertion: IdentityTransferAssertion;
 }>;

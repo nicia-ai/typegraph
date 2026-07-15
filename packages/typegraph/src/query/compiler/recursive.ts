@@ -69,6 +69,33 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
 
+/**
+ * Separator woven into composite (kind, id) path tokens for identity-expanded
+ * traversals. U+001F (unit separator) is a control character that does not
+ * occur in node kinds (identifier-like) and is vanishingly unlikely in ids, so
+ * `kind || SEP || id` cannot collide across distinct (kind, id) pairs the way a
+ * printable delimiter could. Bound as a parameter (not `sql.raw`) so it needs
+ * no dialect-specific `char()`/`chr()` builtin — both dialects concatenate
+ * bound text with `||`.
+ */
+const IDENTITY_PATH_TOKEN_SEPARATOR = "\u001F";
+
+/**
+ * The per-step cycle/path token for a node table alias. For identity-expanded
+ * traversals it is the composite `kind || SEP || id` so folded peers (same id,
+ * different kind) are distinct tokens; otherwise it is the bare id, preserving
+ * the exact pre-identity token and public path output.
+ */
+function compilePathToken(tableAlias: string, composite: boolean): SQL {
+  if (!composite) {
+    return sql.raw(`${tableAlias}.id`);
+  }
+  // Parenthesized so dialect path builders that splice this fragment into a
+  // larger `||` chain keep it one text operand — PostgreSQL's `text[] || x`
+  // would otherwise re-associate and coerce the separator as an array literal.
+  return sql`(${sql.raw(`${tableAlias}.kind`)} || ${IDENTITY_PATH_TOKEN_SEPARATOR} || ${sql.raw(`${tableAlias}.id`)})`;
+}
+
 type RecursiveQueryPassState = Readonly<{
   ast: QueryAst;
   ctx: PredicateCompilerContext;
@@ -386,15 +413,29 @@ function compileRecursiveCte(
   const effectiveMaxDepth = vl.maxDepth > 0 ? vl.maxDepth : MAX_RECURSIVE_DEPTH;
   const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
 
+  // Under identity folding two folded peers share an id but differ in kind, so
+  // a bare-id path token treats a traversal that legitimately passes through
+  // both peers as a revisit — a spurious cycle. Scope the fix to identity
+  // traversals: their cycle-detection and path tokens become the composite
+  // (kind, id), leaving every other traversal's token (and public path output)
+  // byte-identical. See TraversalOptions.includeIdentityMembers JSDoc.
+  const baseToken = compilePathToken(
+    "n0",
+    traversal.includeIdentityMembers === true,
+  );
+  const stepToken = compilePathToken(
+    "n",
+    traversal.includeIdentityMembers === true,
+  );
   const cycleCheck =
     shouldEnforceCycleCheck ?
-      dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
+      dialect.cycleCheck(stepToken, sql.raw("r.path"))
     : undefined;
   const initialPath =
-    shouldTrackPath ? dialect.initializePath(sql.raw("n0.id")) : undefined;
+    shouldTrackPath ? dialect.initializePath(baseToken) : undefined;
   const pathExtension =
     shouldTrackPath ?
-      dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
+      dialect.extendPath(sql.raw("r.path"), stepToken)
     : undefined;
 
   // Base case WHERE clauses
@@ -525,9 +566,14 @@ function compileRecursiveCte(
       directEdgeKinds.includes(kind),
     );
 
+    // Exclude a TRUE self-loop (both endpoints the same node) from the inverse
+    // branch so it is traversed once, not twice. Node identity is (kind, id),
+    // not id alone: under sameIdAcrossKinds folding a real edge between folded
+    // peers has from_id = to_id with from_kind <> to_kind, and must NOT be
+    // suppressed or a direction:"both" traversal would never cross it.
     const duplicateGuard =
       overlappingKinds.length > 0 ?
-        sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(overlappingKinds, "e.kind")})`
+        sql`NOT (e.from_id = e.to_id AND e.from_kind = e.to_kind AND ${compileKindFilter(overlappingKinds, "e.kind")})`
       : undefined;
 
     const inverseBranch = compileRecursiveBranch({

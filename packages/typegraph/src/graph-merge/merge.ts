@@ -106,6 +106,7 @@ import {
   ontologyRetypeEdges,
 } from "./sources";
 import type {
+  StagedIdentityAssertion,
   StagedModifiedEdge,
   StagedModifiedNode,
   StagedNewEdge,
@@ -767,23 +768,35 @@ export function planIdentityChanges(staging: StagingSet): Readonly<{
     }
   }
 
-  const retractedBySemantic = new Map<string, IdentityTransferAssertion>();
+  // A retract/reassert race is only a conflict ACROSS branches: one branch
+  // retracts an assertion for a semantic pair while a DIFFERENT branch re-asserts
+  // it under a new id. A single fork that retracts then re-asserts the same pair
+  // (a normal linear edit) is not a race — its final state is simply "old id
+  // retracted, new id asserted" — so the retraction and the reassertion sharing a
+  // branch must NOT conflict. Grouping by semantic key alone drops the branch
+  // provenance that distinguishes the two, so we keep the staged (branch-tagged)
+  // retractions and consult their branchId here.
+  const retractedBySemantic = new Map<string, StagedIdentityAssertion[]>();
   for (const staged of staging.retractedIdentityAssertions) {
-    retractedBySemantic.set(
-      identitySemanticKey(staged.assertion),
-      staged.assertion,
-    );
+    const key = identitySemanticKey(staged.assertion);
+    const retractions = retractedBySemantic.get(key) ?? [];
+    retractions.push(staged);
+    retractedBySemantic.set(key, retractions);
   }
   for (const staged of staging.newIdentityAssertions) {
-    const retracted = retractedBySemantic.get(
-      identitySemanticKey(staged.assertion),
+    const retractions =
+      retractedBySemantic.get(identitySemanticKey(staged.assertion)) ?? [];
+    const crossBranchRetraction = retractions.find(
+      (retraction) =>
+        retraction.assertion.id !== staged.assertion.id &&
+        retraction.branchId !== staged.branchId,
     );
-    if (retracted !== undefined && retracted.id !== staged.assertion.id) {
+    if (crossBranchRetraction !== undefined) {
       throw new IdentityMergeConflictError(
         "Branches contain a retract/reassert race for one identity pair.",
         {
           details: {
-            retractedAssertion: retracted,
+            retractedAssertion: crossBranchRetraction.assertion,
             reassertedAssertion: staged.assertion,
           },
         },
@@ -814,6 +827,77 @@ export function planIdentityChanges(staging: StagingSet): Readonly<{
       ),
     ].toSorted((left, right) => compareCodePoints(left, right)),
   };
+}
+
+/** A plain `(kind, id)` node reference — an identity assertion endpoint. */
+type IdentityEndpoint = Readonly<{ kind: string; id: string }>;
+
+/**
+ * Code-point order over `(kind, id)` endpoints, matching the identity service's
+ * pair normalization (kind first, id as the tie-break). A stored identity pair MUST
+ * satisfy `a <= b` under this order or the import path the merge commit reuses
+ * rejects it as non-normalized.
+ */
+function compareIdentityEndpoints(
+  left: IdentityEndpoint,
+  right: IdentityEndpoint,
+): number {
+  const byKind = compareCodePoints(left.kind, right.kind);
+  return byKind === 0 ? compareCodePoints(left.id, right.id) : byKind;
+}
+
+/** Maps an endpoint through the cluster canonical map, defaulting to itself. */
+function canonicalEndpoint(
+  endpoint: IdentityEndpoint,
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+): IdentityEndpoint {
+  const key = mergeKeyOf(endpoint);
+  const canonical = canonicalOf.get(key) ?? key;
+  return { kind: kindOf(canonical), id: idOf(canonical) };
+}
+
+/**
+ * Repoints every planned identity assertion's endpoints onto their cluster
+ * canonical survivors — the SAME `(kind, id) -> survivor` map edge repoint uses —
+ * so an assertion naming a branch node that similarity reconciliation folded away
+ * references the surviving node instead of a dangling id (which the commit-time
+ * `requireLiveEndpoints` guard would reject with a NodeNotFoundError, rolling back
+ * the whole merge). After remapping it re-establishes the identity-pair invariants:
+ * an assertion whose endpoints collapse onto the same survivor is a self-pair and
+ * dropped; the surviving endpoints are re-normalized into code-point order (the
+ * import path rejects a non-normalized pair); and assertions that now share a
+ * semantic key are re-deduped by the same survivor rule
+ * ({@link compareIdentitySurvivors}) that {@link planIdentityChanges} applied
+ * before the remap.
+ */
+function remapIdentityAssertionEndpoints(
+  assertions: readonly IdentityTransferAssertion[],
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+): readonly IdentityTransferAssertion[] {
+  const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  for (const assertion of assertions) {
+    const remappedA = canonicalEndpoint(assertion.a, canonicalOf);
+    const remappedB = canonicalEndpoint(assertion.b, canonicalOf);
+    if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
+      continue;
+    }
+    const [a, b] =
+      compareIdentityEndpoints(remappedA, remappedB) <= 0 ?
+        [remappedA, remappedB]
+      : [remappedB, remappedA];
+    const remapped: IdentityTransferAssertion = { ...assertion, a, b };
+    const key = identitySemanticKey(remapped);
+    const previous = survivorBySemantic.get(key);
+    if (
+      previous === undefined ||
+      compareIdentitySurvivors(remapped, previous) < 0
+    ) {
+      survivorBySemantic.set(key, remapped);
+    }
+  }
+  return [...survivorBySemantic.values()].toSorted((left, right) =>
+    compareCodePoints(identitySemanticKey(left), identitySemanticKey(right)),
+  );
 }
 
 /**
@@ -1087,6 +1171,13 @@ function planMerge<G extends GraphDef>(
   const canonicalOf = buildCanonicalMap(clusters, (cluster) =>
     pickClusterCanonical(cluster, entityByIdentity),
   );
+  // Repoint identity-assertion endpoints through the same canonical map the edges
+  // use, so an assertion naming a folded branch node references its survivor
+  // instead of a dangling id the commit-time endpoint guard would reject.
+  const identityAssertions = remapIdentityAssertionEndpoints(
+    identity.assertions,
+    canonicalOf,
+  );
   const stagedEdges = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
@@ -1191,7 +1282,7 @@ function planMerge<G extends GraphDef>(
     ),
     provenanceRecords,
     warnings: candidateWarnings,
-    identityAssertions: identity.assertions,
+    identityAssertions,
     identityRetractions: identity.retractions,
   };
 }

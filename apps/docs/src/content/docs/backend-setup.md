@@ -903,7 +903,7 @@ Identity support also has a **driver** dimension inside each dialect:
 | Driver                                                       | Atomic identity support | Behavior                                                                                                            |
 | ------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Managed SQLite, libSQL, Durable Objects                      | ✓                       | Full profile                                                                                                        |
-| PostgreSQL `node-postgres`, `postgres-js`, neon-serverless, PGlite | ✓                  | Full profile; writes serialize with a per-graph advisory transaction lock                                           |
+| PostgreSQL `node-postgres`, `postgres-js`, neon-serverless, PGlite | ✓                  | Full profile; identity-affecting writes serialize per graph, limiting each graph to one identity writer at a time   |
 | Cloudflare D1                                                | ✗                       | Enabled graphs fail at store construction with `ConfigurationError` details code `IDENTITY_REQUIRES_ATOMIC_BACKEND` |
 | `drizzle-orm/neon-http`                                      | ✗                       | Same fail-fast error; identity-disabled graphs retain the ordinary single-statement path                            |
 

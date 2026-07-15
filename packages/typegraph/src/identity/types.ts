@@ -3,6 +3,7 @@ import {
   type GraphDef,
   type GraphIdentityConfig,
 } from "../core/define-graph";
+import { ValidationError } from "../errors";
 import { type NodeRef } from "../store/types";
 
 export type GraphNodeRef<G extends GraphDef> = NodeRef<AllNodeTypes<G>>;
@@ -11,6 +12,36 @@ declare const __identityAssertionId: unique symbol;
 
 export type IdentityAssertionId = string &
   Readonly<{ [__identityAssertionId]: true }>;
+
+/**
+ * Brands a non-empty string as an {@link IdentityAssertionId}.
+ *
+ * Use this when a persisted identity assertion id has round-tripped through
+ * untyped storage or an external boundary and must be passed back to a
+ * retraction surface such as `retractAssertion` or `bulkRetractAssertions`.
+ * Mirrors the `asNodeId` / `asEdgeId` precedent.
+ *
+ * @throws {ValidationError} when `value` is empty.
+ */
+export function asIdentityAssertionId(value: string): IdentityAssertionId {
+  if (value.length === 0) {
+    throw new ValidationError(
+      "asIdentityAssertionId must be a non-empty string.",
+      {
+        issues: [
+          {
+            path: "asIdentityAssertionId",
+            message: "Expected a non-empty string.",
+          },
+        ],
+      },
+      {
+        suggestion: "Use a persisted identity assertion id value.",
+      },
+    );
+  }
+  return value as IdentityAssertionId;
+}
 
 export type IdentityRelation = "same" | "different";
 

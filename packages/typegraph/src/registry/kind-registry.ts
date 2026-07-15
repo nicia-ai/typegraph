@@ -13,6 +13,7 @@ import {
   META_EDGE_INVERSE_OF,
   META_EDGE_NARROWER,
   META_EDGE_PART_OF,
+  META_EDGE_RELATED_TO,
   META_EDGE_SAME_AS,
   META_EDGE_SUB_CLASS_OF,
 } from "../ontology/constants";
@@ -433,7 +434,7 @@ export function computeClosuresFromNamedOntology(
         equivalentRelations.push([fromName, toName]);
         break;
       }
-      case "relatedTo": {
+      case META_EDGE_RELATED_TO: {
         relatedRelations.push([fromName, toName]);
         break;
       }
@@ -479,6 +480,7 @@ export function computeClosuresFromNamedOntology(
   const disjointPairs = computeDisjointPairs(
     disjointRelations,
     subClassDescendants,
+    equivalenceSets,
   );
 
   // Compute partOf closures
@@ -601,18 +603,40 @@ function computeIriMapping(
 
 /**
  * Computes normalized disjoint pairs.
+ *
+ * Disjointness lifts onto both subclass descendants and equivalence-set
+ * members: if `A disjointWith B` and `A' equivalentTo A`, then `A'` is
+ * disjoint with `B` too (a kind is disjoint with whatever its equivalent
+ * is disjoint with). Equivalence sets can carry external IRIs, which are
+ * inert references rather than local kinds — those are dropped so only
+ * real kind names enter the pair set.
+ *
+ * The `left === right` guard is defense-in-depth: a coherent ontology
+ * (one that passed `validateOntologyRelations`) never expands two disjoint
+ * sides to a shared kind, but skipping self-pairs guarantees the load-
+ * bearing `areDisjoint(kind, kind) === false` invariant regardless.
  */
 function computeDisjointPairs(
   relations: readonly (readonly [string, string])[],
   subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>,
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
 ): ReadonlySet<string> {
   const result = new Set<string>();
 
   for (const [a, b] of relations) {
-    const leftKinds = [a, ...(subClassDescendants.get(a) ?? [])];
-    const rightKinds = [b, ...(subClassDescendants.get(b) ?? [])];
+    const leftKinds = expandDisjointSide(
+      a,
+      subClassDescendants,
+      equivalenceSets,
+    );
+    const rightKinds = expandDisjointSide(
+      b,
+      subClassDescendants,
+      equivalenceSets,
+    );
     for (const left of leftKinds) {
       for (const right of rightKinds) {
+        if (left === right) continue;
         const normalized =
           left < right ? `${left}|${right}` : `${right}|${left}`;
         result.add(normalized);
@@ -621,6 +645,28 @@ function computeDisjointPairs(
   }
 
   return result;
+}
+
+/**
+ * Expands one side of a disjoint pair to every kind that inherits its
+ * disjointness: the kind itself, its subclass descendants, and its
+ * equivalence-set members. External IRIs are excluded — they are inert
+ * references, not local kinds that participate in identity folding.
+ */
+function expandDisjointSide(
+  kind: string,
+  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>,
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>,
+): readonly string[] {
+  const expanded = new Set<string>([kind]);
+  for (const descendant of subClassDescendants.get(kind) ?? []) {
+    expanded.add(descendant);
+  }
+  for (const equivalent of equivalenceSets.get(kind) ?? []) {
+    if (isExternalIri(equivalent)) continue;
+    expanded.add(equivalent);
+  }
+  return [...expanded].filter((name) => !isExternalIri(name));
 }
 
 function computeSymmetricRelations(

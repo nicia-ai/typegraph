@@ -7,12 +7,14 @@ import {
   defineGraphExtension,
   defineNode,
   disjointWith,
+  equivalentTo,
   inverseOf,
   relatedTo,
   subClassOf,
 } from "../src";
 import { GraphExtensionUnresolvedOntologyEndpointError } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
+import { validateOntologyRelations } from "../src/ontology/validation";
 import { buildKindRegistry } from "../src/registry";
 import {
   deserializeSchema,
@@ -78,6 +80,146 @@ describe("ontology truth and hardening", () => {
         }),
       }),
     );
+  });
+
+  it("rejects a disjointWith self-loop", () => {
+    const graph = defineGraph({
+      id: "disjoint-self-loop",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      ontology: [disjointWith(Person, Person)],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        details: expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a common subclass of two disjoint parents", () => {
+    const graph = defineGraph({
+      id: "common-subclass-of-disjoint-parents",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [
+        disjointWith(Person, Organization),
+        subClassOf(Company, Person),
+        subClassOf(Company, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+          issues: expect.arrayContaining([
+            expect.objectContaining({
+              code: "ONTOLOGY_DISJOINT_CONFLICT",
+              details: expect.objectContaining({ kind: "Company" }),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it("rejects a kind declared both equivalentTo and disjointWith another", () => {
+    const graph = defineGraph({
+      id: "equivalent-and-disjoint",
+      nodes: { Person: { type: Person }, Organization: { type: Organization } },
+      edges: {},
+      ontology: [
+        equivalentTo(Person, Organization),
+        disjointWith(Person, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects equivalentTo/disjointWith conflict via equivalence transitivity", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const Supplier = defineNode("Supplier", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "transitive-equivalent-and-disjoint",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Supplier: { type: Supplier },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        equivalentTo(Customer, Supplier),
+        disjointWith(Client, Supplier),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("validates a long equivalence chain without overflowing the stack", () => {
+    const chainLength = 20_000;
+    const ontology = Array.from({ length: chainLength }, (_, index) => ({
+      metaEdge: "equivalentTo",
+      from: `Kind${index}`,
+      to: `Kind${index + 1}`,
+    }));
+    ontology.push({
+      metaEdge: "disjointWith",
+      from: "Kind0",
+      to: `Kind${chainLength}`,
+    });
+
+    expect(validateOntologyRelations(ontology)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "ONTOLOGY_DISJOINT_CONFLICT" }),
+      ]),
+    );
+  });
+
+  it("lifts disjointness onto equivalence-set members", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "disjoint-across-equivalence",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Organization: { type: Organization },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        disjointWith(Client, Organization),
+      ],
+    });
+
+    const registry = buildKindRegistry(graph);
+    expect(registry.areDisjoint("Customer", "Organization")).toBe(true);
+    expect(registry.areDisjoint("Client", "Customer")).toBe(false);
+    expect(registry.areDisjoint("Customer", "Customer")).toBe(false);
   });
 
   it("recomputes serialized closures instead of trusting stale persisted data", () => {

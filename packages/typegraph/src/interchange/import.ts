@@ -19,7 +19,11 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import { type EdgeRegistration, type NodeRegistration } from "../core/types";
-import { UniquenessError } from "../errors";
+import {
+  ConfigurationError,
+  UniquenessError,
+  ValidationError,
+} from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
   createNodeBatchValidationBackend,
@@ -40,6 +44,7 @@ import { validateOptionalCanonicalIsoDate } from "../utils/date";
 import {
   type GraphData,
   type GraphDataHeader,
+  GraphDataHeaderSchema,
   type GraphInterchangeChunk,
   type ImportError,
   type ImportOptions,
@@ -47,6 +52,7 @@ import {
   type ImportResult,
   type InterchangeEdge,
   type InterchangeIdentityAssertion,
+  InterchangeIdentitySchema,
   type InterchangeNode,
   type ResolvedImportOptions,
   type UnknownPropertyStrategy,
@@ -86,6 +92,13 @@ export async function importGraph<G extends GraphDef>(
   // only exist after parsing, and every internal stage reads them
   // directly.
   const options = ImportOptionsSchema.parse(rawOptions);
+
+  // Reject an identity payload aimed at an identity-disabled graph, and
+  // runtime-validate the (bounded) identity section, BEFORE any entity write —
+  // see assertIdentityImportSupported / validateIdentitySection.
+  assertIdentityImportSupported(store, data.identity !== undefined);
+  validateIdentitySection(data.identity);
+
   const result = emptyImportResult();
 
   const errors: ImportError[] = [];
@@ -197,6 +210,16 @@ export async function importGraphStream<G extends GraphDef>(
             "Graph interchange stream emitted more than one header.",
           );
         }
+        // The header is bounded, so validate it at the runtime stream boundary.
+        // In particular, an invalid identity profile/mode must not slip through
+        // merely because the stream's identity assertion chunk is empty.
+        validateStreamHeader(chunk.header);
+        // Reject an identity-bearing header aimed at an identity-disabled graph
+        // before any chunk is processed, matching importGraph's guard.
+        assertIdentityImportSupported(
+          store,
+          chunk.header.identity !== undefined,
+        );
         header = chunk.header;
         break;
       }
@@ -296,6 +319,69 @@ function throwIfStreamChunkFailed(
   throw new Error(
     "Graph interchange stream aborted after a chunk reported import errors. " +
       'Earlier chunks remain committed; use onStreamChunkError: "continue" for best-effort ingestion.',
+  );
+}
+
+/**
+ * Rejects an identity payload aimed at an identity-disabled graph BEFORE any
+ * entity write. {@link Store.importIdentityAssertionsAtTarget} raises the same
+ * typed `ConfigurationError` (code `IDENTITY_IMPORT_REQUIRES_PROFILE`), but only
+ * after `processNodes`/`processEdges` have run — a partial write on a
+ * non-transactional backend — and only for a NON-empty assertions array (an
+ * empty envelope short-circuits and silently succeeds there). This guard fires
+ * first and regardless of assertion count.
+ */
+function assertIdentityImportSupported<G extends GraphDef>(
+  store: Store<G>,
+  hasIdentitySection: boolean,
+): void {
+  if (hasIdentitySection && store.graph.identity === undefined) {
+    throw new ConfigurationError(
+      "Cannot import identity assertions into an identity-disabled graph.",
+      { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: store.graphId },
+    );
+  }
+}
+
+/**
+ * Runtime-validates just the identity section of an otherwise pre-typed
+ * `GraphData`. {@link importGraph} deliberately trusts the type for the
+ * (potentially graph-sized) node and edge arrays to preserve its per-row
+ * performance, but a JS caller can still smuggle an out-of-domain `relation` or
+ * a non-canonical timestamp straight into SQL — which SQLite accepts and
+ * PostgreSQL rejects, a backend-parity divergence. The identity section is
+ * bounded, so parsing only it closes that gap without the whole-envelope cost.
+ */
+function validateIdentitySection(identity: GraphData["identity"]): void {
+  if (identity === undefined) return;
+  const parsed = InterchangeIdentitySchema.safeParse(identity);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid identity interchange section: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
+  );
+}
+
+function validateStreamHeader(header: GraphDataHeader): void {
+  const parsed = GraphDataHeaderSchema.safeParse(header);
+  if (parsed.success) return;
+  throw new ValidationError(
+    `Invalid graph interchange stream header: ${parsed.error.message}`,
+    {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+        code: issue.code,
+      })),
+    },
+    { cause: parsed.error },
   );
 }
 

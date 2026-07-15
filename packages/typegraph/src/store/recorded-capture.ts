@@ -584,7 +584,13 @@ function createRecordedTransactionBackend(
       }),
   });
   registerRecordedGraphLockMemo(overlay, graphLocks);
+  // Bind BOTH the overlay and the raw target to this capture session. Identity
+  // mutations first resolve the overlay to its raw target (runIdentityMutation),
+  // then a nested coordinator (importIdentityAssertionsIntoTarget) re-wraps that
+  // RAW target — without a raw-target binding the second lookup would miss and
+  // silently drop every touch, losing the merge-created assertions from history.
   recordedIdentityBindings.set(overlay, { target, session });
+  recordedIdentityBindings.set(target, { target, session });
   return overlay;
 }
 

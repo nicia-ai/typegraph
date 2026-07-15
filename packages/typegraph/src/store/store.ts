@@ -108,6 +108,7 @@ import {
   createRecordedReadBinding,
   createSqlSchema,
   type RecordedReadBinding,
+  recordedReadSchemaFor,
   requireExternalRecordedReadSource,
   requireSqlSchema,
   type SqlSchema,
@@ -838,8 +839,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         graphId: this.graphId,
       });
     }
+    // A recorded-time identity read must reconstruct from the SAME recorded
+    // relation the coordinate's node/edge reads use — binding-aware, so an
+    // externally bound recorded relation with divergent table names resolves
+    // its recorded identity assertions instead of TypeGraph's default-named
+    // (empty) tables. Mirror the node recorded-read routing: the
+    // relations-precondition backend overlay plus the recorded schema view.
+    const recordedAsOf = coordinate.recorded?.asOf;
+    const backend =
+      recordedAsOf === undefined ?
+        this.#backend
+      : this.#recordedReads.backendForCoordinate(
+          coordinate,
+          "recorded-identity",
+        );
+    const schema = recordedReadSchemaFor(
+      this.#sqlSchema(),
+      recordedAsOf,
+      this.#recordedReadBinding,
+      "recorded-identity",
+    );
     return createIdentityReadFacade({
-      ...this.#identityContext(this.#backend),
+      ...this.#identityContext(backend),
+      schema,
       coordinate,
     }) as IdentityReadFacadeFor<G>;
   }
@@ -875,6 +897,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** @internal Read-only startup integrity verification. */
   async validateIdentity(): Promise<void> {
     if (this.#graph.identity === undefined) return;
+    // Assertion/disjointness integrity AND closure-vs-components agreement are
+    // both enforced here: validateIdentityForContext now also asserts the
+    // materialized closure matches the computed components (throws
+    // IDENTITY_SCHEMA_CONTRADICTION with a rebuildIdentityClosure suggestion).
     await validateIdentityForContext(this.#identityContext(this.#baseBackend));
   }
 
@@ -3034,6 +3060,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
+    // Ensure the identity relations exist on the top-level backend BEFORE
+    // the schema-commit transaction — the preflight runs inside that
+    // transaction and reads/writes them, and issuing DDL there would
+    // re-enter the per-graph write lock the commit holds. Idempotent, so a
+    // no-op when identity is already enabled (the common evolve case).
+    if (identityCandidate !== undefined) {
+      await this.#baseBackend.ensureIdentityTables?.();
+    }
     const committed =
       identityCandidate === undefined ?
         await commitNewSchemaVersion(this.#backend, merged, activeRow.version)
@@ -4546,6 +4580,19 @@ async function prepareStoreWithSchema<G extends GraphDef>(
       new StoreImplementation(merged, backend, options)
     : undefined;
 
+  // First enablement over an existing populated database: createStore /
+  // createSqliteBackend / createPostgresBackend ran no DDL, so the identity
+  // relations the enablement preflight reads/writes may not exist yet.
+  // Ensure them on the top-level backend BEFORE the schema-commit
+  // transaction — running the DDL inside the preflight would re-enter the
+  // backend's per-graph write lock the commit already holds. Idempotent
+  // (CREATE TABLE / CREATE INDEX IF NOT EXISTS), so it is a harmless no-op
+  // when the schema turns out to be pending (finding: enablement requires an
+  // applied migration) or the tables already exist.
+  if (identityEnablementCandidate !== undefined) {
+    await backend.ensureIdentityTables?.();
+  }
+
   const result = await ensureSchemaImpl(backend, merged, {
     ...options,
     preloaded: { activeRow, storedSchema },
@@ -4556,6 +4603,31 @@ async function prepareStoreWithSchema<G extends GraphDef>(
           identityEnablementCandidate.identityEnablementPreflight(target),
       }),
   });
+
+  // Enabling identity requires the enablement preflight (closure
+  // materialization + same-id fold) to have COMMITTED with the schema
+  // version. With autoMigrate disabled, ensureSchema returns "pending"
+  // WITHOUT running the preflight, so returning a store here would expose
+  // store.identity over an empty/unmaterialized closure — silently wrong
+  // reads. Refuse instead: the caller must apply the migration.
+  if (
+    identityEnablementCandidate !== undefined &&
+    result.status === "pending"
+  ) {
+    throw new ConfigurationError(
+      "Enabling Operational Identity requires the schema migration to commit, " +
+        "but autoMigrate is disabled and the change is pending.",
+      {
+        code: "IDENTITY_ENABLEMENT_PENDING",
+        graphId: merged.id,
+        pendingVersion: result.version,
+      },
+      {
+        suggestion:
+          "Enable autoMigrate, or apply the pending migration explicitly, so the identity closure is materialized before opening the store.",
+      },
+    );
+  }
 
   await assertHistorySchemaOnOpen(backend, options);
 

@@ -8,6 +8,7 @@
  * - Error reporting for breaking changes
  */
 import {
+  type CommitSchemaVersionParams,
   type GraphBackend,
   type SchemaVersionRow,
   type TransactionBackend,
@@ -702,6 +703,22 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   graph: G,
   currentVersion: number,
 ): Promise<SchemaVersionRow> {
+  return backend.commitSchemaVersion(
+    await prepareSchemaCommitParams(graph, currentVersion),
+  );
+}
+
+/**
+ * Shared prepare step for committing a new schema version: validate the
+ * graph, serialize it at `currentVersion + 1`, hash it, and assemble the
+ * compare-and-swap commit params. `commitNewSchemaVersion` and its preflight
+ * sibling both consume this so the version bump, hash, and CAS derivation
+ * cannot drift between the plain and preflight commit paths.
+ */
+async function prepareSchemaCommitParams<G extends GraphDef>(
+  graph: G,
+  currentVersion: number,
+): Promise<CommitSchemaVersionParams> {
   // See initializeSchema: reject structurally invalid graphs (e.g.
   // endpoint-incompatible implies() relations) before committing, not
   // only when a Store is later built against the committed version.
@@ -710,14 +727,13 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   const newVersion = currentVersion + 1;
   const schema = serializeSchema(graph, newVersion);
   const hash = await computeSchemaHash(schema);
-
-  return backend.commitSchemaVersion({
+  return {
     graphId: graph.id,
     expected: { kind: "active", version: currentVersion },
     version: newVersion,
     schemaHash: hash,
     schemaDoc: schema,
-  });
+  };
 }
 
 /** @internal Commits a data preflight and schema CAS in one transaction. */
@@ -727,9 +743,11 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   currentVersion: number,
   preflight: (target: TransactionBackend) => Promise<void>,
 ): Promise<SchemaVersionRow> {
-  buildKindRegistry(graph);
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
+    // Match the graph-validation ordering of the plain path: reject a
+    // structurally invalid graph before probing backend capability.
+    buildKindRegistry(graph);
     throw new ConfigurationError(
       "This backend cannot atomically commit identity data with a schema transition.",
       {
@@ -738,18 +756,8 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
       },
     );
   }
-
-  const newVersion = currentVersion + 1;
-  const schema = serializeSchema(graph, newVersion);
-  const hash = await computeSchemaHash(schema);
   return commitWithPreflight(
-    {
-      graphId: graph.id,
-      expected: { kind: "active", version: currentVersion },
-      version: newVersion,
-      schemaHash: hash,
-      schemaDoc: schema,
-    },
+    await prepareSchemaCommitParams(graph, currentVersion),
     preflight,
   );
 }

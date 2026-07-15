@@ -250,11 +250,20 @@ export async function flushIdentityAssertions(
   const afterById = await resolveAfterImages(entities, (missing) =>
     getIdentityAssertionRowsByIds(target, schema, graphId, missing),
   );
-  for (const row of afterById.values()) {
-    const operation = recordedOp(
-      closed.has(row.id),
-      closed.get(row.id) ?? false,
-      row,
+  const inserts = recordedInsertsFor(afterById, closed);
+  // The identity recorded row has one fewer column than a recorded node, so the
+  // node chunk size is a safe (slightly conservative) rows-per-INSERT bound.
+  const chunkSize = recordedNodeChunkSize(target);
+  for (const insertChunk of chunk(inserts, chunkSize)) {
+    const values = insertChunk.map(
+      ({ row, operation }) => sql`(
+        ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
+        ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
+        ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
+        ${row.created_at}, ${row.updated_at},
+        ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
+        ${RECORDED_MAX_REVISION}, ${operation}
+      )`,
     );
     await executeStatement(
       target,
@@ -263,14 +272,7 @@ export async function flushIdentityAssertions(
           history_id, graph_id, id, rel, a_kind, a_id, b_kind, b_id,
           valid_from, valid_to, created_at, updated_at, deleted_at,
           recorded_from, recorded_to, op
-        ) VALUES (
-          ${generateId()}, ${row.graph_id}, ${row.id}, ${row.rel},
-          ${row.a_kind}, ${row.a_id}, ${row.b_kind}, ${row.b_id},
-          ${row.valid_from}, ${row.valid_to ?? sql.raw("NULL")},
-          ${row.created_at}, ${row.updated_at},
-          ${row.deleted_at ?? sql.raw("NULL")}, ${recordedRevision},
-          ${RECORDED_MAX_REVISION}, ${operation}
-        )
+        ) VALUES ${sql.join(values, sql`, `)}
       `,
     );
   }

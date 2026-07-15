@@ -226,14 +226,18 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     },
     async bulkAssertSame(pairs) {
       recorder.assertWritable();
+      // Pin the intent count before awaiting: the caller may mutate the input
+      // array while the write is in flight (matches the node/edge wrappers).
+      const count = pairs.length;
       const result = await identity.bulkAssertSame(pairs);
-      recorder.recordIdentity("sameAssertions", pairs.length);
+      recorder.recordIdentity("sameAssertions", count);
       return result;
     },
     async bulkAssertDifferent(pairs) {
       recorder.assertWritable();
+      const count = pairs.length;
       const result = await identity.bulkAssertDifferent(pairs);
-      recorder.recordIdentity("differentAssertions", pairs.length);
+      recorder.recordIdentity("differentAssertions", count);
       return result;
     },
     async retractAssertion(id) {
@@ -253,8 +257,9 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     },
     async bulkRetractAssertions(ids) {
       recorder.assertWritable();
+      const count = ids.length;
       await identity.bulkRetractAssertions(ids);
-      recorder.recordIdentity("retractions", ids.length);
+      recorder.recordIdentity("retractions", count);
     },
   };
 }

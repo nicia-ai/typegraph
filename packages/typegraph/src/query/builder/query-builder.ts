@@ -523,12 +523,7 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    if (options?.includeIdentityMembers && !this.#config.identityEnabled) {
-      throw new ConfigurationError(
-        "includeIdentityMembers requires an identity-enabled graph.",
-        { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
-      );
-    }
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -679,12 +674,7 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
-    if (options?.includeIdentityMembers && !this.#config.identityEnabled) {
-      throw new ConfigurationError(
-        "includeIdentityMembers requires an identity-enabled graph.",
-        { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
-      );
-    }
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -795,12 +785,7 @@ export class QueryBuilder<
     }
 
     const direction = options?.direction ?? "out";
-    if (options?.includeIdentityMembers && !this.#config.identityEnabled) {
-      throw new ConfigurationError(
-        "includeIdentityMembers requires an identity-enabled graph.",
-        { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
-      );
-    }
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
@@ -1293,6 +1278,28 @@ export class QueryBuilder<
   #hasSearchableField(kindNames: readonly string[] | undefined): boolean {
     if (!kindNames) return false;
     return this.#config.schemaIntrospector.hasSearchableField(kindNames);
+  }
+
+  /**
+   * Guards `includeIdentityMembers` against a non-identity-enabled builder.
+   * A compile-only builder (no backend) cannot infer identity from a store, so
+   * its message points at the missing `identityEnabled: true` option rather
+   * than at the graph — the graph may well be identity-enabled.
+   */
+  #assertIdentityTraversalAllowed(
+    options: Readonly<{ includeIdentityMembers?: boolean }> | undefined,
+  ): void {
+    if (!options?.includeIdentityMembers || this.#config.identityEnabled) {
+      return;
+    }
+    const detail =
+      this.#config.backend === undefined ?
+        " A compile-only query builder does not infer identity from a store: pass `identityEnabled: true` in CreateQueryBuilderOptions."
+      : "";
+    throw new ConfigurationError(
+      `includeIdentityMembers requires an identity-enabled graph.${detail}`,
+      { code: "IDENTITY_TRAVERSAL_REQUIRES_PROFILE" },
+    );
   }
 
   #expandTraversalEdgeKinds(

@@ -63,7 +63,16 @@ export function compileIdentitySourcePredicate(
     ast.recordedAsOf === undefined ?
       ctx.schema.identityAssertionsTable
     : ctx.schema.recordedIdentityAssertionsTable;
-  const assertionVisibility = temporalFilterPass.forAlias("ia");
+  // Assertion validity is a point-in-time window that must NOT widen with the
+  // node-visibility mode: under view({mode:"includeEnded"}) node visibility
+  // relaxes to `deleted_at IS NULL`, but a RETRACTED (ended) same-assertion
+  // must still stop conducting identity at the read instant. forAlias("ia")
+  // would compile to just `deleted_at IS NULL` here and route through it.
+  // Mirrors src/identity/service.ts assertionSnapshotSource.
+  const assertionVisibility = compileAssertionValidityFilter(
+    ast,
+    temporalFilterPass,
+  );
   const recordedStructuralFilter =
     ast.recordedAsOf === undefined ?
       sql``
@@ -120,4 +129,46 @@ export function compileIdentitySourcePredicate(
         AND ${memberVisibility}
     )
   `;
+}
+
+/**
+ * The instant an identity assertion's valid-time window is measured against.
+ *
+ * Mirrors the node-visibility read coordinate exactly (see
+ * src/identity/service.ts `assertionValidityInstant`): a valid-time `asOf`
+ * pins to that instant; otherwise a recorded `asOf` pins there; otherwise the
+ * pass's bound current read instant. Unlike node visibility, the widening
+ * modes (`includeEnded`/`includeTombstones`) never relax this window — they
+ * fall through to the current instant so a retracted assertion stops
+ * conducting identity even while ended nodes remain visible.
+ */
+function resolveAssertionValidityInstant(
+  ast: QueryAst,
+  temporalFilterPass: TemporalFilterPass,
+): SQL {
+  if (ast.temporalMode.mode === "asOf" && ast.temporalMode.asOf !== undefined) {
+    return sql`${ast.temporalMode.asOf}`;
+  }
+  if (ast.recordedAsOf !== undefined) {
+    return sql`${ast.recordedAsOf}`;
+  }
+  return temporalFilterPass.currentInstant;
+}
+
+/**
+ * Point-in-time validity predicate for the `ia` assertion alias: not deleted,
+ * and valid at the read instant. When a recorded instant is pinned it is also
+ * scoped to the recorded system-time window, matching the recorded assertions
+ * table's `recorded_from`/`recorded_to` columns.
+ */
+function compileAssertionValidityFilter(
+  ast: QueryAst,
+  temporalFilterPass: TemporalFilterPass,
+): SQL {
+  const instant = resolveAssertionValidityInstant(ast, temporalFilterPass);
+  const validity = sql`ia.deleted_at IS NULL AND ia.valid_from <= ${instant} AND (ia.valid_to IS NULL OR ia.valid_to > ${instant})`;
+  if (ast.recordedAsOf === undefined) {
+    return validity;
+  }
+  return sql`${validity} AND ia.recorded_from <= ${ast.recordedAsOf} AND ia.recorded_to > ${ast.recordedAsOf}`;
 }

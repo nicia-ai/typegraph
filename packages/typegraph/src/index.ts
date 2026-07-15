@@ -110,6 +110,7 @@ export {
 // ============================================================
 
 export {
+  asIdentityAssertionId,
   type GraphNodeRef,
   type IdentityAssertion,
   type IdentityAssertionId,

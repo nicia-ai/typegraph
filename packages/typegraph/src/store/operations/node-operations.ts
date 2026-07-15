@@ -967,8 +967,44 @@ async function partitionIdentityCreates(
     prepared: NodeCreatePrepared;
     existing: BackendNodeRow;
   }[] = [];
+
+  // Batch the existence probe: one getNodes per kind over all prepared ids of
+  // that kind (getNodes returns rows regardless of deletion status), instead of
+  // one getNode per prepared row. Non-batch backends keep the per-row fallback.
+  const existingByKey = new Map<string, BackendNodeRow>();
+  if (target.getNodes === undefined) {
+    for (const prepared of preparedCreates) {
+      const existing = await target.getNode(
+        graphId,
+        prepared.kind,
+        prepared.id,
+      );
+      if (existing !== undefined) {
+        existingByKey.set(
+          buildNodeCacheKey(graphId, prepared.kind, prepared.id),
+          existing,
+        );
+      }
+    }
+  } else {
+    const idsByKind = new Map<string, string[]>();
+    for (const prepared of preparedCreates) {
+      const ids = idsByKind.get(prepared.kind) ?? [];
+      ids.push(prepared.id);
+      idsByKind.set(prepared.kind, ids);
+    }
+    for (const [kind, ids] of idsByKind) {
+      const rows = await target.getNodes(graphId, kind, ids);
+      for (const row of rows) {
+        existingByKey.set(buildNodeCacheKey(graphId, kind, row.id), row);
+      }
+    }
+  }
+
   for (const prepared of preparedCreates) {
-    const existing = await target.getNode(graphId, prepared.kind, prepared.id);
+    const existing = existingByKey.get(
+      buildNodeCacheKey(graphId, prepared.kind, prepared.id),
+    );
     if (existing?.deleted_at === undefined) {
       inserts.push(prepared);
     } else {

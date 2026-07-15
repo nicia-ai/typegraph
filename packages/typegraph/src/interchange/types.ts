@@ -16,10 +16,25 @@ import { isCanonicalIsoDate } from "../utils/date";
 // ============================================================
 
 /**
- * Current interchange format version.
- * Increment for breaking changes to the format.
+ * Current interchange format version — the value every export writes.
+ *
+ * Read-side compatibility policy: the format is versioned separately from what
+ * it *accepts*. A 1.0 document is a structurally valid 2.0 document — the only
+ * 2.0 addition is the optional `identity` section — so import and
+ * {@link GraphDataSchema} accept both `"1.0"` and `"2.0"` (see
+ * {@link AcceptedFormatVersionSchema}), while exports keep writing this
+ * constant. Bump this only when exports must emit a new version; add the old
+ * value to the accepted set rather than dropping read compatibility.
  */
 export const FORMAT_VERSION = "2.0" as const;
+
+/**
+ * Format versions accepted on the read side (import + `GraphDataSchema.parse`).
+ * A pre-existing 1.0 export is a valid 2.0 document (the 2.0 change is the
+ * additive optional `identity` section), so both validate; exports always write
+ * {@link FORMAT_VERSION}.
+ */
+const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0"]);
 
 /**
  * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
@@ -251,7 +266,7 @@ export type GraphDataSource = z.infer<typeof GraphDataSourceSchema>;
  * plus arrays of nodes and edges to import.
  */
 export const GraphDataSchema = z.object({
-  formatVersion: z.literal(FORMAT_VERSION),
+  formatVersion: AcceptedFormatVersionSchema,
   exportedAt: z.iso.datetime(),
   source: GraphDataSourceSchema,
   nodes: z.array(InterchangeNodeSchema),

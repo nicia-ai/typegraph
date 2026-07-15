@@ -584,7 +584,7 @@ export class DisjointError extends TypeGraphError {
 }
 
 export type IdentityContradictionErrorDetails = Readonly<{
-  operation: "assertSame" | "assertDifferent" | "fold" | "evolve" | "import";
+  operation: "assertSame" | "assertDifferent" | "fold" | "import";
   a: Readonly<{ kind: string; id: string }>;
   b: Readonly<{ kind: string; id: string }>;
   reason: "different-assertion" | "same-class" | "disjoint-kinds";

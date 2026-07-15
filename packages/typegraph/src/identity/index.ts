@@ -11,3 +11,4 @@ export type {
   IdentityRelation,
   IdentityWriteSummary,
 } from "./types";
+export { asIdentityAssertionId } from "./types";

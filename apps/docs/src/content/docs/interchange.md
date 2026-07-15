@@ -101,6 +101,15 @@ row is confirmed to have no lower bound (open-left validity) — import
 preserves that instead of re-stamping it. A **string** is an explicit
 value, carried through unchanged.
 
+### Format Version Compatibility
+
+Exports always write `formatVersion: "2.0"`. The read side — both
+`importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
+accepts `"1.0"`. A 1.0 document is structurally a valid 2.0 document: the only
+2.0 change is the additive optional `identity` section, so pre-existing 1.0
+exports validate and import unchanged. You never need to rewrite the version
+field of an older backup; validation and import handle both.
+
 ## Exporting Data
 
 Use `exportGraph` to serialize your graph data:
@@ -141,7 +150,21 @@ const withDeleted = await exportGraph(store, {
 const archival = await exportGraph(store, {
   identityMode: "archival",
 });
+
+// A self-contained archive pairs archival identity with includeDeleted:
+const selfContainedArchive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
 ```
+
+**Archival identity and soft-deleted endpoints:** `identityMode: "archival"`
+also exports *ended* assertions, and an ended assertion can reference an
+endpoint that was later soft-deleted. A default export omits soft-deleted rows,
+so such an archive is not self-contained on its own — import tolerates the
+missing endpoints for ended rows, but the archived nodes are gone. When the
+archive must stand alone (backup, cold storage), pair it with
+`includeDeleted: true` so those endpoints travel with it.
 
 ### Export Options
 

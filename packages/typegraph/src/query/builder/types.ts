@@ -665,6 +665,16 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
-  /** Required for compile-only identity-aware traversal builders. */
+  /**
+   * Opts a compile-only query builder into identity-aware traversals
+   * (`traverse(..., { includeIdentityMembers: true })`).
+   *
+   * Store-backed builders inherit this from the graph's identity config, but a
+   * compile-only builder has no store to infer it from — so it must be set
+   * explicitly here even when the graph itself is identity-enabled. Leaving it
+   * `false` (the default) makes `includeIdentityMembers` throw a
+   * `ConfigurationError`. Setting it `true` on a graph WITHOUT an identity
+   * config produces SQL that references identity tables that do not exist.
+   */
   identityEnabled?: boolean;
 }>;

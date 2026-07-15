@@ -1407,6 +1407,25 @@ export type GraphBackend = Readonly<{
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
 
   /**
+   * Idempotently ensure ONLY the three Operational Identity relations exist —
+   * the current-assertions table, the recorded-time assertions table, and the
+   * derived closure table — with their indexes (CREATE TABLE / CREATE INDEX IF
+   * NOT EXISTS).
+   *
+   * First enablement of identity on an existing populated deployment attaches
+   * via `createStore` / `createSqliteBackend` / `createPostgresBackend`, none
+   * of which run DDL, so the enablement preflight would otherwise
+   * SELECT/DELETE/INSERT tables that do not exist yet. The store calls this
+   * before the enablement locks and closure rebuild. Focused rather than
+   * `bootstrapTables` for the same concurrency rationale as
+   * {@link ensureRevisionOriginsTable}. Postgres callers run it inside the
+   * schema-commit transaction — Postgres DDL is transactional.
+   *
+   * @internal
+   */
+  ensureIdentityTables?: () => Promise<void>;
+
+  /**
    * Look up a recorded materialization for a declared index by its
    * physical SQL index name. Returns `undefined` if no row exists.
    */
