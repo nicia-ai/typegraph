@@ -73,6 +73,7 @@ import {
   SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
   type TransactionOptions,
+  type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type UpsertFulltextBatchParams,
@@ -138,6 +139,13 @@ import {
   SQLITE_ROW_MAPPER_CONFIG,
 } from "./row-mappers";
 import { type SqliteTables, tables as defaultTables } from "./schema/sqlite";
+import {
+  analyzeImportedTables,
+  assertTrustedImportDatabaseEmpty,
+  createSqliteTrustedImportSession,
+  restoreSecondaryIndexes,
+  suspendSqliteSecondaryIndexes,
+} from "./trusted-import";
 
 // ============================================================
 // Types
@@ -1275,6 +1283,30 @@ export function createSqliteBackend(
 
   const backend: GraphBackend = {
     ...operations,
+
+    ...(isSync &&
+    transactionMode === "sql" &&
+    executionAdapter.executePreparedRunBatch !== undefined ?
+      {
+        async trustedImport<T>(
+          fn: (session: TrustedImportSession) => Promise<T>,
+        ): Promise<T> {
+          return backend.transaction(async (tx) => {
+            await assertTrustedImportDatabaseEmpty(tx, tableNames);
+            const indexDefinitions = await suspendSqliteSecondaryIndexes(
+              tx,
+              tableNames,
+            );
+            const result = await fn(
+              createSqliteTrustedImportSession(executionAdapter, tableNames),
+            );
+            await restoreSecondaryIndexes(tx, indexDefinitions);
+            await analyzeImportedTables(tx, tableNames);
+            return result;
+          });
+        },
+      }
+    : {}),
 
     async bootstrapTables(): Promise<void> {
       const statements = generateSqliteDDL(tables, fulltextStrategy);

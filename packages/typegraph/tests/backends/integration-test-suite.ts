@@ -46,6 +46,7 @@ import {
   registerTemporalIntegrationTests,
   registerTransactionReceiptIntegrationTests,
   registerTraversalIntegrationTests,
+  registerTrustedImportIntegrationTests,
 } from "./integration";
 
 /**
@@ -143,5 +144,6 @@ export function createIntegrationTestSuite(
     registerImportUniquenessIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
+    registerTrustedImportIntegrationTests(context);
   });
 }

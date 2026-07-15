@@ -91,6 +91,15 @@ internally.
 | `bulkInsert(items)` | No | Maximum throughput ingestion |
 | `bulkUpsertById(items)` | Yes | Idempotent import (create or update by ID) |
 | `bulkDelete(ids)` | No | Mass soft-delete |
+| `trustedImportGraphStream(store, chunks)` | No | Fastest initial load into a fresh dedicated database |
+
+The collection APIs remain the default: they validate data and maintain every
+configured constraint and sidecar. For a one-time initial load whose producer
+already guarantees those invariants, the distinct
+[`trustedImportGraphStream`](/interchange#trusted-initial-import) surface uses a
+single transaction, engine-native inserts, and deferred secondary-index builds.
+It intentionally rejects non-empty databases and graph features it cannot yet
+maintain.
 
 ### PostgreSQL parameter limits
 
@@ -136,6 +145,9 @@ await store.nodes.Person.bulkInsert(people);
 
 // Idempotent import: bulkUpsertById (creates or updates by ID)
 await store.nodes.Person.bulkUpsertById(itemsWithIds);
+
+// Fresh dedicated database + already-validated producer:
+await trustedImportGraphStream(store, interchangeChunks);
 ```
 
 ### Batch sizing for large multi-call imports

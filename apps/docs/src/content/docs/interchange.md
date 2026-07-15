@@ -176,6 +176,60 @@ if (result.success) {
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
 | `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. |
 
+### Trusted initial import
+
+`trustedImportGraph` and `trustedImportGraphStream` are a separate,
+intentionally trusted path for loading a fresh dedicated database. They do not
+turn off validation on `importGraph`; they bypass the normal store write
+pipeline entirely.
+
+```typescript
+import {
+  trustedImportGraphStream,
+  type GraphInterchangeChunk,
+} from "@nicia-ai/typegraph/interchange";
+
+async function* chunks(): AsyncIterable<GraphInterchangeChunk> {
+  yield { type: "header", header };
+  for await (const nodes of readNodeBatches()) {
+    yield { type: "nodes", nodes };
+  }
+  for await (const edges of readEdgeBatches()) {
+    yield { type: "edges", edges };
+  }
+}
+
+const result = await trustedImportGraphStream(store, chunks());
+console.log(result); // { nodes: 1000000, edges: 5000000 }
+```
+
+The contract is deliberately narrow:
+
+- The TypeGraph node and edge tables must be globally empty. A different graph
+  in the same database also makes the database non-empty.
+- The caller guarantees property shapes, endpoint existence, edge endpoint
+  types, cardinality, and duplicate-free IDs. Only stream ordering and known
+  kind names are checked.
+- Recorded-time history, revision tracking, node uniqueness constraints,
+  `searchable()` fields, and `embedding()` fields are rejected in this first
+  version because their sidecar writes would otherwise be skipped.
+- Nodes must precede edges. The `meta` timestamps and node version in an
+  interchange row are not restored; the import creates new storage metadata.
+- The complete stream is one transaction. Data insertion, temporary secondary
+  index removal, index rebuilding, and planner statistics either all commit or
+  all roll back.
+
+Supported native paths are synchronous prepared-statement SQLite
+(`better-sqlite3` and Bun SQLite) and transaction-capable PostgreSQL adapters
+with raw execution support (including node-postgres, postgres.js, and PGlite).
+Remote libSQL/Turso, D1, and HTTP-only PostgreSQL adapters reject the call with
+`TrustedImportError` and `details.reason === "backend_unsupported"`.
+
+Use `importGraph`/`importGraphStream` for external or uncertain data, conflict
+handling, incremental loads, and any graph with the unsupported features above.
+Use collection `bulkInsert` when the data is trusted but the database is not a
+fresh dedicated target.
+
 ### Conflict Strategies
 
 **`skip`** - Keep existing data, ignore incoming:
