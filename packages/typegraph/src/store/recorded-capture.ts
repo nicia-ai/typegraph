@@ -75,6 +75,14 @@ export {
 } from "./recorded-capture/write-surface";
 
 type RecordedCaptureSession = Readonly<{
+  /**
+   * Throws if the session is sealed. Called at the TOP of every overlay write
+   * method, *before* the live write runs, so a write through a context retained
+   * past its `withRecordedTransaction` callback fails loud instead of committing
+   * an uncaptured live row. (`touch*` also re-checks after the write; this is
+   * the pre-write guard that actually prevents the live mutation.)
+   */
+  assertOpen: () => void;
   touchNode: (
     graphId: string,
     kind: string,
@@ -175,6 +183,19 @@ function edgeRowIdentityKey(row: EdgeIdentityRow): EdgeIdentityKey {
   return edgeIdentityKey(row.graph_id, row.id);
 }
 
+function recordedCaptureSealedError(
+  details: Record<string, unknown>,
+): ConfigurationError {
+  return new ConfigurationError(
+    "Recorded-time capture session is sealed: a graph write happened after the transaction's capture was flushed.",
+    details,
+    {
+      suggestion:
+        "Perform all writes inside the withRecordedTransaction callback; do not reuse the transaction context after it returns.",
+    },
+  );
+}
+
 function createRecordedCaptureSession(): RecordedCaptureSession {
   const touched = new Map<string, TouchedEntity>();
   // Sealed by flush(): a scope flushes exactly once, at its terminal point, so
@@ -186,19 +207,20 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
 
   function touch(entity: TouchedEntity): void {
     if (sealed) {
-      throw new ConfigurationError(
-        "Recorded-time capture session is sealed: a graph write happened after the transaction's capture was flushed.",
-        { entity: entity.entity, graphId: entity.graphId, id: entity.id },
-        {
-          suggestion:
-            "Perform all writes inside the withRecordedTransaction callback; do not reuse the transaction context after it returns.",
-        },
-      );
+      throw recordedCaptureSealedError({
+        entity: entity.entity,
+        graphId: entity.graphId,
+        id: entity.id,
+      });
     }
     touched.set(entityKey(entity), entity);
   }
 
   return {
+    assertOpen(): void {
+      if (sealed) throw recordedCaptureSealedError({});
+    },
+
     touchNode(
       graphId: string,
       kind: string,
@@ -296,6 +318,7 @@ function createRecordedTransactionBackend(
     ...rawWriteGuards(target, "tx.backend"),
 
     async insertNode(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       const row = await target.insertNode(params);
       session.touchNode(params.graphId, params.kind, params.id, row);
@@ -306,6 +329,7 @@ function createRecordedTransactionBackend(
       {}
     : {
         async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
+          session.assertOpen();
           await lockGraph(params.graphId);
           await runInsertNoReturn(nodeDispatch, params);
           session.touchNode(params.graphId, params.kind, params.id);
@@ -318,6 +342,7 @@ function createRecordedTransactionBackend(
         async insertNodesBatch(
           params: readonly InsertNodeParams[],
         ): Promise<void> {
+          session.assertOpen();
           await lockGraphs(params);
           await runInsertBatch(nodeDispatch, params);
           for (const node of params) {
@@ -332,6 +357,7 @@ function createRecordedTransactionBackend(
         async insertNodesBatchReturning(
           params: readonly InsertNodeParams[],
         ): Promise<readonly NodeRow[]> {
+          session.assertOpen();
           await lockGraphs(params);
           const rows = await runInsertBatchReturning(nodeDispatch, params);
           const rowsByIdentity = new Map(
@@ -350,6 +376,7 @@ function createRecordedTransactionBackend(
       }),
 
     async updateNode(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       const row = await target.updateNode(params);
       session.touchNode(params.graphId, params.kind, params.id, row);
@@ -357,12 +384,14 @@ function createRecordedTransactionBackend(
     },
 
     async deleteNode(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       await target.deleteNode(params);
       session.touchNode(params.graphId, params.kind, params.id);
     },
 
     async hardDeleteNode(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       const connectedEdgeIds = await queryConnectedEdgeIds(
         target,
@@ -377,6 +406,7 @@ function createRecordedTransactionBackend(
     },
 
     async insertEdge(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       const row = await target.insertEdge(params);
       session.touchEdge(params.graphId, params.id, row);
@@ -387,6 +417,7 @@ function createRecordedTransactionBackend(
       {}
     : {
         async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
+          session.assertOpen();
           await lockGraph(params.graphId);
           await runInsertNoReturn(edgeDispatch, params);
           session.touchEdge(params.graphId, params.id);
@@ -399,6 +430,7 @@ function createRecordedTransactionBackend(
         async insertEdgesBatch(
           params: readonly InsertEdgeParams[],
         ): Promise<void> {
+          session.assertOpen();
           await lockGraphs(params);
           await runInsertBatch(edgeDispatch, params);
           for (const edge of params) {
@@ -413,6 +445,7 @@ function createRecordedTransactionBackend(
         async insertEdgesBatchReturning(
           params: readonly InsertEdgeParams[],
         ): Promise<readonly EdgeRow[]> {
+          session.assertOpen();
           await lockGraphs(params);
           const rows = await runInsertBatchReturning(edgeDispatch, params);
           const rowsByIdentity = new Map(
@@ -430,6 +463,7 @@ function createRecordedTransactionBackend(
       }),
 
     async updateEdge(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       const row = await target.updateEdge(params);
       session.touchEdge(params.graphId, params.id, row);
@@ -437,12 +471,14 @@ function createRecordedTransactionBackend(
     },
 
     async deleteEdge(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       await target.deleteEdge(params);
       session.touchEdge(params.graphId, params.id);
     },
 
     async hardDeleteEdge(params) {
+      session.assertOpen();
       await lockGraph(params.graphId);
       await target.hardDeleteEdge(params);
       session.touchEdge(params.graphId, params.id);
@@ -452,6 +488,7 @@ function createRecordedTransactionBackend(
       {}
     : {
         async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
+          session.assertOpen();
           await lockGraph(params.graphId);
           await target.deleteEdgesBatch!(params);
           for (const id of params.ids) {
@@ -466,6 +503,7 @@ function createRecordedTransactionBackend(
         async hardDeleteEdgesBatch(
           params: DeleteEdgesBatchParams,
         ): Promise<void> {
+          session.assertOpen();
           await lockGraph(params.graphId);
           await target.hardDeleteEdgesBatch!(params);
           for (const id of params.ids) {

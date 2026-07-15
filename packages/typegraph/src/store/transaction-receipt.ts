@@ -1,5 +1,6 @@
 import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { ConfigurationError } from "../errors";
 import { type Assert, type Equal } from "../utils/type-assert";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
@@ -28,6 +29,20 @@ export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
+  /**
+   * Seals the recorder: every subsequent write through a collection wrapped with
+   * it (see {@link wrapTransactionCollections}) throws. Used to fail loud when a
+   * transaction context is retained and written through *after* its callback
+   * returned — where the receipt is already snapshotted and the write would
+   * otherwise persist uncounted.
+   */
+  seal: () => void;
+  /**
+   * Throws {@link ConfigurationError} once {@link seal} has been called. Invoked
+   * at the top of every wrapped write method, before the live write runs, so a
+   * post-seal write never reaches the backend.
+   */
+  assertWritable: () => void;
 }>;
 
 type WrappedMethod = (...args: unknown[]) => Promise<unknown>;
@@ -95,20 +110,36 @@ function increment(
   counts[kind] = (counts[kind] ?? 0) + count;
 }
 
+/**
+ * One receipt's running counts. Each recorder owns exactly one: the outer
+ * transaction's receipt, or the sub-receipt of one `tx.measure` scope. Scope
+ * attribution is structural — a scope is a *second* recorder wrapping the outer
+ * collections again (see `attachMeasure` in store.ts) — so no recorder ever
+ * needs to know about another's scopes.
+ */
+interface WriteCounters {
+  readonly nodes: Record<string, number>;
+  readonly edges: Record<string, number>;
+  total: number;
+}
+
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
-  const nodes = createCountBucket();
-  const edges = createCountBucket();
-  let total = 0;
+  const counters: WriteCounters = {
+    nodes: createCountBucket(),
+    edges: createCountBucket(),
+    total: 0,
+  };
+  let sealed = false;
 
   return {
     recordNode(kind, count): void {
-      increment(nodes, kind, count);
-      total += count;
+      increment(counters.nodes, kind, count);
+      counters.total += count;
     },
 
     recordEdge(kind, count): void {
-      increment(edges, kind, count);
-      total += count;
+      increment(counters.edges, kind, count);
+      counters.total += count;
     },
 
     snapshot(recorded): TransactionReceipt {
@@ -116,12 +147,33 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       // keeps prototype-colliding kind names readable on the returned receipt.
       return Object.freeze({
         writes: Object.freeze({
-          nodes: Object.freeze(Object.assign(createCountBucket(), nodes)),
-          edges: Object.freeze(Object.assign(createCountBucket(), edges)),
-          total,
+          nodes: Object.freeze(
+            Object.assign(createCountBucket(), counters.nodes),
+          ),
+          edges: Object.freeze(
+            Object.assign(createCountBucket(), counters.edges),
+          ),
+          total: counters.total,
         }),
         ...(recorded === undefined ? {} : { recorded }),
       });
+    },
+
+    seal(): void {
+      sealed = true;
+    },
+
+    assertWritable(): void {
+      if (sealed) {
+        throw new ConfigurationError(
+          "Transaction context is sealed: a write happened through the receipt-tracked collections after the transaction callback returned.",
+          {},
+          {
+            suggestion:
+              "Perform all writes inside the transactionWithReceipt / withRecordedTransaction callback; do not reuse the transaction context after it returns.",
+          },
+        );
+      }
     },
   };
 }
@@ -192,14 +244,15 @@ function memoizedProxyGet<T extends object>(
 
 /**
  * Wraps one node/edge collection so every write method on it (per
- * `surface.methodNames`) counts its intent through `record` before
- * resolving.
+ * `surface.methodNames`) fails loud once the recorder is sealed, then counts
+ * its intent through `record` on resolution.
  */
 function wrapWriteCollection<T extends object, M extends string>(
   collection: T,
   kind: string,
   surface: WriteIntentSurface<M>,
   record: (kind: string, count: number) => void,
+  assertWritable: () => void,
 ): T {
   return memoizedProxyGet(
     collection,
@@ -209,6 +262,9 @@ function wrapWriteCollection<T extends object, M extends string>(
 
       const method = property as M;
       const wrapped: WrappedMethod = async (...args) => {
+        // Reject before the live write: a context retained past its callback
+        // must not persist a row the already-snapshotted receipt cannot count.
+        assertWritable();
         // Pin the intent count at call time: a caller may mutate a bulk input
         // array while the write is in flight, and the backend has already
         // snapshotted the items. Recording still waits for resolution so a
@@ -255,6 +311,7 @@ export function wrapTransactionCollections<G extends GraphDef>(
         kind,
         NODE_WRITE_SURFACE,
         recorder.recordNode,
+        recorder.assertWritable,
       ),
     ),
     edges: wrapCollections(edges, (collection, kind) =>
@@ -263,6 +320,7 @@ export function wrapTransactionCollections<G extends GraphDef>(
         kind,
         EDGE_WRITE_SURFACE,
         recorder.recordEdge,
+        recorder.assertWritable,
       ),
     ),
   };
