@@ -13,7 +13,11 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { fts5Strategy, StoreNotInitializedError } from "../src";
+import {
+  fts5Strategy,
+  pgvectorStrategy,
+  StoreNotInitializedError,
+} from "../src";
 import {
   type ContributionMaterializerDeps,
   createContributionMaterializer,
@@ -23,6 +27,7 @@ import type {
   ContributionMaterializationRow,
   RecordContributionMaterializationParams,
 } from "../src/backend/types";
+import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
 
 const GRAPH_ID = "contrib-mat-unit";
 const FULLTEXT_TABLE = "typegraph_node_fulltext";
@@ -34,7 +39,7 @@ const MISSING_MARKER_TABLE_ERROR = new Error(
 );
 
 // Postgres' missing-relation failure as it actually reaches the gate:
-// drizzle-orm wraps the query-builder `getMarker` SELECT in a
+// drizzle-orm wraps the query-builder marker SELECT in a
 // `DrizzleQueryError` whose `.message` is the SQL text, with the real pg
 // error (`relation ... does not exist` / SQLSTATE 42P01) on `.cause`.
 // This is the #152 regression shape — the pre-check must still recognize
@@ -87,25 +92,26 @@ function recordMarkerInto(
 
 /**
  * A materializer wired to an in-memory marker store with spied DDL seams.
- * `getMarker` defaults to a map lookup; pass an override to simulate a
- * missing marker table or a hard read fault.
+ * `getMarkers` defaults to a graph-scoped map lookup; pass an override to
+ * simulate a missing marker table or a hard read fault.
  */
 function createMockMaterializer(
   markers: Map<string, ContributionMaterializationRow>,
-  getMarkerOverride?: (
-    identity: ContributionMaterializationIdentity,
-  ) => Promise<ContributionMaterializationRow | undefined>,
+  getMarkersOverride?: (
+    graphId: string,
+  ) => Promise<readonly ContributionMaterializationRow[]>,
+  vectorStrategy?: VectorStrategy,
 ) {
   const ensureMarkerTable = vi.fn((): Promise<void> => Promise.resolve());
   const execDdl = vi.fn((_statement: string): Promise<void> =>
     Promise.resolve(),
   );
-  const getMarker = vi.fn(
-    getMarkerOverride ??
-      ((
-        identity: ContributionMaterializationIdentity,
-      ): Promise<ContributionMaterializationRow | undefined> =>
-        Promise.resolve(markers.get(markerKey(identity)))),
+  const getMarkers = vi.fn(
+    getMarkersOverride ??
+      ((graphId: string): Promise<readonly ContributionMaterializationRow[]> =>
+        Promise.resolve(
+          [...markers.values()].filter((row) => row.graphId === graphId),
+        )),
   );
   const recordMarker = vi.fn(
     (params: RecordContributionMaterializationParams): Promise<void> => {
@@ -113,22 +119,52 @@ function createMockMaterializer(
       return Promise.resolve();
     },
   );
+  const deleteMarker = vi.fn(
+    (identity: ContributionMaterializationIdentity): Promise<void> => {
+      markers.delete(markerKey(identity));
+      return Promise.resolve();
+    },
+  );
 
   const deps = {
-    dialect: "sqlite",
+    dialect: vectorStrategy === undefined ? "sqlite" : "postgres",
     fulltextStrategy: fts5Strategy,
     fulltextTableName: FULLTEXT_TABLE,
+    vectorStrategy,
     execDdl,
     ensureMarkerTable,
-    getMarker,
+    getMarkers,
     recordMarker,
+    deleteMarker,
   } satisfies ContributionMaterializerDeps;
 
   return {
     materializer: createContributionMaterializer(deps),
-    spies: { ensureMarkerTable, execDdl, getMarker, recordMarker },
+    spies: {
+      ensureMarkerTable,
+      execDdl,
+      getMarkers,
+      recordMarker,
+      deleteMarker,
+    },
   };
 }
+
+// A representative embedding slot for the vector-contribution tests. Its
+// physical table + marker identity derive from `pgvectorStrategy.ownedTables`.
+const VECTOR_SLOT = {
+  graphId: GRAPH_ID,
+  nodeKind: "Document",
+  fieldPath: "embedding",
+  dimensions: 8,
+  metric: "cosine",
+  indexType: "hnsw",
+} as const;
+
+const SECOND_VECTOR_SLOT = {
+  ...VECTOR_SLOT,
+  fieldPath: "summaryEmbedding",
+} as const;
 
 describe("#149 ensureRuntimeContributions is read-only when already materialized", () => {
   it("a fresh materializer over an already-materialized graph runs zero DDL", async () => {
@@ -152,7 +188,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     expect(warm.spies.execDdl).not.toHaveBeenCalled();
     expect(warm.spies.recordMarker).not.toHaveBeenCalled();
     // It did consult the durable marker — a SELECT-only pre-check.
-    expect(warm.spies.getMarker).toHaveBeenCalled();
+    expect(warm.spies.getMarkers).toHaveBeenCalled();
   });
 
   it("the per-materializer cache makes a redundant warm call a true no-op", async () => {
@@ -163,11 +199,11 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
 
     const warm = createMockMaterializer(markers);
     await warm.materializer.ensureRuntimeContributions(GRAPH_ID);
-    warm.spies.getMarker.mockClear();
+    warm.spies.getMarkers.mockClear();
 
     // Second call on the same instance hits the cache before any read.
     await warm.materializer.ensureRuntimeContributions(GRAPH_ID);
-    expect(warm.spies.getMarker).not.toHaveBeenCalled();
+    expect(warm.spies.getMarkers).not.toHaveBeenCalled();
   });
 
   it("still materializes (with DDL) when the marker table is missing", async () => {
@@ -182,12 +218,12 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     );
     // Faithful to the real backend: the marker SELECT throws until
     // `ensureMarkerTable` has created the table.
-    const getMarker = vi.fn(
-      (
-        identity: ContributionMaterializationIdentity,
-      ): Promise<ContributionMaterializationRow | undefined> => {
+    const getMarkers = vi.fn(
+      (graphId: string): Promise<readonly ContributionMaterializationRow[]> => {
         if (!tableExists) return Promise.reject(MISSING_MARKER_TABLE_ERROR);
-        return Promise.resolve(markers.get(markerKey(identity)));
+        return Promise.resolve(
+          [...markers.values()].filter((row) => row.graphId === graphId),
+        );
       },
     );
     const recordMarker = vi.fn(
@@ -200,10 +236,12 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       dialect: "sqlite",
       fulltextStrategy: fts5Strategy,
       fulltextTableName: FULLTEXT_TABLE,
+      vectorStrategy: undefined,
       execDdl,
       ensureMarkerTable,
-      getMarker,
+      getMarkers,
       recordMarker,
+      deleteMarker: vi.fn((): Promise<void> => Promise.resolve()),
     } satisfies ContributionMaterializerDeps;
 
     await createContributionMaterializer(deps).ensureRuntimeContributions(
@@ -220,7 +258,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
   });
 
   it("falls through to DDL when the marker table is missing behind a DrizzleQueryError (Postgres)", async () => {
-    // The #152 regression: on Postgres the pre-check `getMarker` SELECT
+    // The #152 regression: on Postgres the pre-check marker SELECT
     // fails wrapped, so the missing-table signal lives on `.cause`. Before
     // the cause-walking fix this rethrew and broke first boot.
     let tableExists = false;
@@ -232,12 +270,12 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       Promise.resolve(),
     );
     const markers = new Map<string, ContributionMaterializationRow>();
-    const getMarker = vi.fn(
-      (
-        identity: ContributionMaterializationIdentity,
-      ): Promise<ContributionMaterializationRow | undefined> =>
+    const getMarkers = vi.fn(
+      (graphId: string): Promise<readonly ContributionMaterializationRow[]> =>
         tableExists ?
-          Promise.resolve(markers.get(markerKey(identity)))
+          Promise.resolve(
+            [...markers.values()].filter((row) => row.graphId === graphId),
+          )
         : Promise.reject(POSTGRES_MISSING_MARKER_TABLE_ERROR),
     );
     const recordMarker = vi.fn(
@@ -250,10 +288,12 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       dialect: "postgres",
       fulltextStrategy: fts5Strategy,
       fulltextTableName: FULLTEXT_TABLE,
+      vectorStrategy: undefined,
       execDdl,
       ensureMarkerTable,
-      getMarker,
+      getMarkers,
       recordMarker,
+      deleteMarker: vi.fn((): Promise<void> => Promise.resolve()),
     } satisfies ContributionMaterializerDeps;
 
     await expect(
@@ -319,5 +359,323 @@ describe("assertInitialized verdicts after the readContributionState refactor", 
       .catch((error: unknown) => error);
     expect(rejection).toBe(fault);
     expect(rejection).not.toBeInstanceOf(StoreNotInitializedError);
+  });
+});
+
+describe("vector slot contributions ride the same durable-marker machinery", () => {
+  it("batches marker reads across vector slots at boot and verified attach", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const cold = createMockMaterializer(markers, undefined, pgvectorStrategy);
+
+    await cold.materializer.ensureVectorSlots([
+      VECTOR_SLOT,
+      SECOND_VECTOR_SLOT,
+    ]);
+
+    expect(cold.spies.ensureMarkerTable).toHaveBeenCalledTimes(1);
+    // One read-only pre-check plus one post-bootstrap race check, independent
+    // of the number of slots.
+    expect(cold.spies.getMarkers).toHaveBeenCalledTimes(2);
+    expect(markers.size).toBe(2);
+
+    const verified = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await verified.materializer.assertVectorSlots([
+      VECTOR_SLOT,
+      SECOND_VECTOR_SLOT,
+    ]);
+    expect(verified.spies.getMarkers).toHaveBeenCalledTimes(1);
+
+    verified.spies.getMarkers.mockClear();
+    await verified.materializer.assertVectorSlots([
+      VECTOR_SLOT,
+      SECOND_VECTOR_SLOT,
+    ]);
+    expect(verified.spies.getMarkers).not.toHaveBeenCalled();
+  });
+
+  it("ensureVectorSlot materializes the per-field table + marker on cold boot", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const cold = createMockMaterializer(markers, undefined, pgvectorStrategy);
+
+    await cold.materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    expect(cold.spies.ensureMarkerTable).toHaveBeenCalledTimes(1);
+    expect(cold.spies.execDdl).toHaveBeenCalled();
+    expect(markers.size).toBe(1);
+  });
+
+  it("assertVectorSlot throws StoreNotInitializedError before provisioning — never DDL", async () => {
+    const { materializer, spies } = createMockMaterializer(
+      new Map(),
+      () => Promise.reject(MISSING_MARKER_TABLE_ERROR),
+      pgvectorStrategy,
+    );
+
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "missing" },
+    });
+    // The hot-path gate never tries to create anything on a USAGE-only role.
+    expect(spies.execDdl).not.toHaveBeenCalled();
+    expect(spies.ensureMarkerTable).not.toHaveBeenCalled();
+  });
+
+  it("assertVectorSlot resolves with zero DDL once a fresh instance reopens a provisioned slot", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    ).materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    const warm = createMockMaterializer(markers, undefined, pgvectorStrategy);
+    await expect(
+      warm.materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+    expect(warm.spies.execDdl).not.toHaveBeenCalled();
+    expect(warm.spies.ensureMarkerTable).not.toHaveBeenCalled();
+    expect(warm.spies.getMarkers).toHaveBeenCalled();
+  });
+
+  it("ensureVectorSlot refuses a dimension change as drift, but { force: true } re-stamps it", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    ).materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    // A dimension change keeps the same (kind, field) table identity but
+    // changes the createDdl signature — drift. A fresh instance must refuse
+    // it loudly rather than silently bless a stale table.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    await expect(
+      createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      ).materializer.ensureVectorSlot(changed),
+    ).rejects.toThrow(/different signature/);
+
+    // `reembedVectorField`'s path: force past the drift-guard after the
+    // table was recreated at the new dimension.
+    await createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    ).materializer.ensureVectorSlot(changed, { force: true });
+
+    // The marker now reads back as initialized at the new shape.
+    const warm = createMockMaterializer(markers, undefined, pgvectorStrategy);
+    await expect(
+      warm.materializer.assertVectorSlot(changed),
+    ).resolves.toBeUndefined();
+  });
+
+  it("the SAME instance's warm cache does not skip the drift-guard on a dimension change", async () => {
+    // The positive cache is keyed by contribution identity AND signature: a
+    // shape change on the very instance that just ensured the slot must
+    // miss the cache and reach the drift-guard, not be silently accepted.
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+
+    await expect(
+      materializer.ensureVectorSlot({ ...VECTOR_SLOT, dimensions: 16 }),
+    ).rejects.toThrow(/different signature/);
+
+    // The guard is SIGNATURE-based, not parameter-based: a pgvector metric
+    // change leaves the table DDL (and so the physical shape) identical —
+    // metric only affects the search operator and the ANN index — so it is
+    // correctly treated as already materialized rather than as drift.
+    await expect(
+      materializer.ensureVectorSlot({ ...VECTOR_SLOT, metric: "l2" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("memoizes WebCrypto signatures until the canonical DDL input changes", async () => {
+    const digest = vi.spyOn(globalThis.crypto.subtle, "digest");
+    try {
+      const markers = new Map<string, ContributionMaterializationRow>();
+      const { materializer } = createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      );
+      await materializer.ensureVectorSlot(VECTOR_SLOT);
+      const digestCallsAfterProvisioning = digest.mock.calls.length;
+
+      await materializer.assertVectorSlot(VECTOR_SLOT);
+      await materializer.assertVectorSlot(VECTOR_SLOT);
+      await materializer.ensureVectorSlot(VECTOR_SLOT);
+      expect(digest).toHaveBeenCalledTimes(digestCallsAfterProvisioning);
+
+      await expect(
+        materializer.assertVectorSlot({ ...VECTOR_SLOT, dimensions: 16 }),
+      ).rejects.toMatchObject({
+        name: "StoreNotInitializedError",
+        details: { reason: "stale" },
+      });
+      expect(digest).toHaveBeenCalledTimes(digestCallsAfterProvisioning + 1);
+    } finally {
+      digest.mockRestore();
+    }
+  });
+
+  it("the SAME instance's warm assert sees a shape change as stale, not initialized", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+    // Warm the assert cache at the original shape.
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+
+    // The changed shape must not ride the warm cache: it reads the marker,
+    // sees signature drift, and refuses as stale — still with zero DDL.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    await expect(materializer.assertVectorSlot(changed)).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+    expect(spies.execDdl).toHaveBeenCalledTimes(
+      pgvectorStrategy
+        .ownedTables(VECTOR_SLOT)
+        .flatMap((contribution) => contribution.createDdl).length,
+    ); // only the original ensure's DDL — the assert path added none
+
+    // The original shape stays cached and keeps passing.
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+  });
+
+  it("a { force: true } re-stamp on the SAME instance invalidates the old shape's cache entry", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const { materializer } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await materializer.ensureVectorSlot(VECTOR_SLOT);
+    await materializer.assertVectorSlot(VECTOR_SLOT); // warm at dim 8
+
+    // reembedVectorField's path: recreate at dim 16 and force-restamp.
+    const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+    await materializer.ensureVectorSlot(changed, { force: true });
+
+    // The new shape asserts clean; the OLD shape must now read as stale on
+    // this same instance — its cache entry was overwritten by the restamp.
+    await expect(
+      materializer.assertVectorSlot(changed),
+    ).resolves.toBeUndefined();
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+  });
+
+  it("ensureVectorSlot({ onDrift: 'skip' }) leaves a drifted slot untouched instead of refusing", async () => {
+    // The boot/evolve path: the declared dimension moved ahead of the
+    // provisioned table. Boot must complete (warn, no throw), the marker
+    // must stay EXACTLY as it was (old shape still reads initialized; new
+    // shape reads stale until reembedVectorField force-restamps), and no
+    // DDL may run against the stale table.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      // Silence the drift warning in test output; the spy asserts it fired.
+    });
+    try {
+      const markers = new Map<string, ContributionMaterializationRow>();
+      const { materializer, spies } = createMockMaterializer(
+        markers,
+        undefined,
+        pgvectorStrategy,
+      );
+      await materializer.ensureVectorSlot(VECTOR_SLOT);
+      const markerBefore = [...markers.values()];
+      spies.execDdl.mockClear();
+      spies.recordMarker.mockClear();
+
+      const changed = { ...VECTOR_SLOT, dimensions: 16 } as const;
+      await expect(
+        materializer.ensureVectorSlot(changed, { onDrift: "skip" }),
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(spies.execDdl).not.toHaveBeenCalled();
+      expect(spies.recordMarker).not.toHaveBeenCalled();
+      expect([...markers.values()]).toEqual(markerBefore);
+
+      // Nothing was blessed: the drifted shape still asserts stale on this
+      // same instance, and the provisioned shape keeps passing.
+      await expect(
+        materializer.assertVectorSlot(changed),
+      ).rejects.toMatchObject({
+        name: "StoreNotInitializedError",
+        details: { reason: "stale" },
+      });
+      await expect(
+        materializer.assertVectorSlot(VECTOR_SLOT),
+      ).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("dropVectorSlot forgets the marker so a later ensure re-creates the table", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    const first = createMockMaterializer(markers, undefined, pgvectorStrategy);
+    await first.materializer.ensureVectorSlot(VECTOR_SLOT);
+    expect(markers.size).toBe(1);
+
+    // Reclaim drops the physical table; dropVectorSlot must delete the marker
+    // so a stale "initialized" row can't outlive it.
+    await first.materializer.dropVectorSlot(VECTOR_SLOT);
+    expect(markers.size).toBe(0);
+
+    // A fresh instance (cold cache) now sees "missing" and the assert refuses.
+    const warm = createMockMaterializer(markers, undefined, pgvectorStrategy);
+    await expect(
+      warm.materializer.assertVectorSlot(VECTOR_SLOT),
+    ).rejects.toBeInstanceOf(StoreNotInitializedError);
+
+    // ...and a re-provision runs the CREATE again rather than trusting a marker.
+    const reprovision = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    await reprovision.materializer.ensureVectorSlot(VECTOR_SLOT);
+    expect(reprovision.spies.execDdl).toHaveBeenCalled();
+    expect(markers.size).toBe(1);
+  });
+
+  it("ensureVectorSlot/assertVectorSlot are no-ops when vector support is disabled", async () => {
+    // No vectorStrategy → the materializer can't address any slot; both
+    // methods resolve without touching the marker store.
+    const { materializer, spies } = createMockMaterializer(new Map());
+    await expect(
+      materializer.ensureVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+    await expect(
+      materializer.assertVectorSlot(VECTOR_SLOT),
+    ).resolves.toBeUndefined();
+    expect(spies.getMarkers).not.toHaveBeenCalled();
+    expect(spies.execDdl).not.toHaveBeenCalled();
   });
 });

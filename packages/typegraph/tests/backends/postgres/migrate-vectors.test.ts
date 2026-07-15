@@ -64,6 +64,15 @@ beforeEach(async () => {
   for (const { tablename } of tables.rows) {
     await sharedPool.query(`DROP TABLE IF EXISTS "${tablename}" CASCADE`);
   }
+  // Drop the durable contribution markers (#135) in lockstep with the per-
+  // field tables above: `migrateLegacyEmbeddings` now provisions each slot via
+  // `ensureVectorSlotContribution`, which trusts the marker and skips the
+  // CREATE when one already exists. On this shared, long-lived database a
+  // marker left over from a prior run would outlive the dropped table and the
+  // migration's first write would hit a missing relation.
+  await sharedPool.query(
+    `DROP TABLE IF EXISTS "typegraph_contribution_materializations" CASCADE`,
+  );
 });
 
 type LegacySeed = Readonly<{

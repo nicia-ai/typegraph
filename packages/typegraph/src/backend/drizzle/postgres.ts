@@ -103,6 +103,7 @@ import {
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
+  type ContributionMaterializer,
   createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
@@ -158,13 +159,11 @@ import {
   tables as defaultTables,
 } from "./schema/postgres";
 import {
-  createVectorSlotLatch,
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
   vectorSlotFromCreateIndexParams,
   vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
-  type VectorSlotLatch,
 } from "./vector-runtime";
 
 // ============================================================
@@ -335,11 +334,6 @@ export function createPostgresBackend(
   // default strategy's `vector(N)` DDL would hard-fail.
   const vectorStrategy =
     options.vector === false ? undefined : (options.vector ?? pgvectorStrategy);
-  // One latch per backend instance, shared with every transaction-scoped
-  // backend so a slot's per-field table is created at most once per process.
-  // Absent when vector support is disabled.
-  const vectorSlotLatch =
-    vectorStrategy === undefined ? undefined : createVectorSlotLatch();
   // One probe per backend instance, shared with every transaction-scoped
   // backend so the pgvector version check runs — and its pre-0.8 warning
   // fires — at most once per backend, not once per `store.transaction()`.
@@ -410,18 +404,6 @@ export function createPostgresBackend(
     tables,
     fulltextStrategy,
   );
-  const operations = createPostgresOperationBackend({
-    db,
-    executionAdapter,
-    adapterOptions,
-    operationStrategy,
-    tableNames,
-    capabilities,
-    fulltextStrategy,
-    vectorStrategy,
-    vectorSlotLatch,
-    iterativeScanProbe,
-  });
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
   // uses — so refreshStatistics() never ANALYZEs a recorded relation that a
@@ -437,6 +419,123 @@ export function createPostgresBackend(
     },
     { cacheExisting: false },
   );
+
+  // Durable fulltext + vector materialization (#135): the dialect-specific
+  // marker-table primitives. Orchestration (materialize / assert /
+  // per-instance cache) lives once in `createContributionMaterializer`,
+  // shared by the outer backend and every transaction-scoped backend so a
+  // slot's marker is resolved at most once per process. Built before
+  // `operations` so the operation backend's vector methods can assert/
+  // ensure through it instead of issuing DDL on the hot path.
+  const matTable = tables.contributionMaterializations;
+
+  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
+    await db.execute(sql.raw(generatePgCreateTableSQL(matTable)));
+  }
+
+  async function getContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<ContributionMaterializationRow | undefined> {
+    const rows = await db
+      .select()
+      .from(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return mapContributionMaterializationRow(
+      row,
+      POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+    );
+  }
+
+  async function getContributionMaterializationRows(
+    graphId: string,
+  ): Promise<readonly ContributionMaterializationRow[]> {
+    const rows = await db
+      .select()
+      .from(matTable)
+      .where(eq(matTable.graphId, graphId));
+    return rows.map((row) =>
+      mapContributionMaterializationRow(
+        row,
+        POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+      ),
+    );
+  }
+
+  async function recordContributionMaterializationRow(
+    params: RecordContributionMaterializationParams,
+  ): Promise<void> {
+    await db
+      .insert(matTable)
+      .values(
+        buildContributionInsertValues(
+          params,
+          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+        ),
+      )
+      .onConflictDoUpdate({
+        target: [
+          matTable.graphId,
+          matTable.logicalName,
+          matTable.owner,
+          matTable.tableName,
+        ],
+        set: buildContributionOnConflictSet(
+          matTable.materializedAt,
+          params.materializedAt,
+        ),
+      });
+  }
+
+  async function deleteContributionMaterializationRow(
+    identity: ContributionMaterializationIdentity,
+  ): Promise<void> {
+    await db
+      .delete(matTable)
+      .where(
+        and(
+          eq(matTable.graphId, identity.graphId),
+          eq(matTable.logicalName, identity.logicalName),
+          eq(matTable.owner, identity.owner),
+          eq(matTable.tableName, identity.tableName),
+        ),
+      );
+  }
+
+  const contributionMaterializer = createContributionMaterializer({
+    dialect: "postgres",
+    fulltextStrategy,
+    fulltextTableName: tables.fulltextTableName,
+    vectorStrategy,
+    execDdl: async (statement) => {
+      await db.execute(sql.raw(statement));
+    },
+    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
+    getMarkers: getContributionMaterializationRows,
+    recordMarker: recordContributionMaterializationRow,
+    deleteMarker: deleteContributionMaterializationRow,
+  });
+
+  const operations = createPostgresOperationBackend({
+    db,
+    executionAdapter,
+    adapterOptions,
+    operationStrategy,
+    tableNames,
+    capabilities,
+    fulltextStrategy,
+    vectorStrategy,
+    contributionMaterializer,
+    iterativeScanProbe,
+  });
 
   /**
    * Runs `fn` inside a Postgres transaction, holding an
@@ -483,7 +582,7 @@ export function createPostgresBackend(
         capabilities,
         fulltextStrategy,
         vectorStrategy,
-        vectorSlotLatch,
+        contributionMaterializer,
         iterativeScanProbe,
       });
       try {
@@ -493,74 +592,6 @@ export function createPostgresBackend(
       }
     });
   }
-
-  // Durable fulltext materialization (#135): the dialect-specific
-  // marker-table primitives. Orchestration (materialize / assert /
-  // per-instance cache) lives once in `createContributionMaterializer`.
-  const matTable = tables.contributionMaterializations;
-
-  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await db.execute(sql.raw(generatePgCreateTableSQL(matTable)));
-  }
-
-  async function getContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<ContributionMaterializationRow | undefined> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return mapContributionMaterializationRow(
-      row,
-      POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-    );
-  }
-
-  async function recordContributionMaterializationRow(
-    params: RecordContributionMaterializationParams,
-  ): Promise<void> {
-    await db
-      .insert(matTable)
-      .values(
-        buildContributionInsertValues(
-          params,
-          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-        ),
-      )
-      .onConflictDoUpdate({
-        target: [
-          matTable.graphId,
-          matTable.logicalName,
-          matTable.owner,
-          matTable.tableName,
-        ],
-        set: buildContributionOnConflictSet(
-          matTable.materializedAt,
-          params.materializedAt,
-        ),
-      });
-  }
-
-  const contributionMaterializer = createContributionMaterializer({
-    dialect: "postgres",
-    fulltextStrategy,
-    fulltextTableName: tables.fulltextTableName,
-    execDdl: async (statement) => {
-      await db.execute(sql.raw(statement));
-    },
-    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarker: getContributionMaterializationRow,
-    recordMarker: recordContributionMaterializationRow,
-  });
 
   // Shared by `transaction()` (TypeGraph opens the tx) and
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
@@ -578,7 +609,7 @@ export function createPostgresBackend(
       capabilities,
       fulltextStrategy,
       vectorStrategy,
-      vectorSlotLatch,
+      contributionMaterializer,
       iterativeScanProbe,
     });
     return {
@@ -820,6 +851,42 @@ export function createPostgresBackend(
       await contributionMaterializer.ensureRuntimeContributions(graphId);
     },
 
+    // Vector counterparts of the runtime-contribution methods. Present
+    // only when a vector strategy is wired (omitted under `vector: false`,
+    // mirroring the embedding/search methods), so a no-vector backend
+    // doesn't advertise vector materialization it can't perform.
+    ...(vectorStrategy === undefined ?
+      {}
+    : {
+        async ensureVectorSlotContribution(
+          slot: VectorSlot,
+          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+        ): Promise<void> {
+          await contributionMaterializer.ensureVectorSlot(slot, options_);
+        },
+
+        async ensureVectorSlotContributions(
+          slots: readonly VectorSlot[],
+          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+        ): Promise<void> {
+          await contributionMaterializer.ensureVectorSlots(slots, options_);
+        },
+
+        async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.assertVectorSlot(slot);
+        },
+
+        async assertVectorSlotsInitialized(
+          slots: readonly VectorSlot[],
+        ): Promise<void> {
+          await contributionMaterializer.assertVectorSlots(slots);
+        },
+
+        async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
+          await contributionMaterializer.dropVectorSlot(slot);
+        },
+      }),
+
     async getReconciliationMarker(
       graphId: string,
     ): Promise<number | undefined> {
@@ -1050,10 +1117,13 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    */
   vectorStrategy: VectorStrategy | undefined;
   /**
-   * Shared per-`(kind, field)` storage-ensure latch. Paired with
-   * `vectorStrategy`: both present, or both `undefined`.
+   * Shared durable-marker materializer. The vector methods assert a
+   * slot's marker (SELECT, never DDL) on the hot path and `createVectorIndex`
+   * ensures it (privileged) — replacing the old in-process ensure-latch.
+   * Shared across the outer backend and every transaction-scoped backend
+   * so a slot's marker is resolved at most once per process.
    */
-  vectorSlotLatch: VectorSlotLatch | undefined;
+  contributionMaterializer: ContributionMaterializer;
   /**
    * Shared pgvector iterative-scan probe (memoized version check + one-shot
    * pre-0.8 warning). Owned by the top-level backend and reused by every
@@ -1071,8 +1141,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   fulltextStrategy: FulltextStrategy;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
   vectorStrategy: VectorStrategy | undefined;
-  /** Shared storage-ensure latch. See {@link CreatePostgresOperationBackendOptions}. */
-  vectorSlotLatch: VectorSlotLatch | undefined;
+  /** Shared durable-marker materializer. See {@link CreatePostgresOperationBackendOptions}. */
+  contributionMaterializer: ContributionMaterializer;
   /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
   iterativeScanProbe: IterativeScanProbe;
 }>;
@@ -1089,7 +1159,7 @@ function createPostgresOperationBackend(
     capabilities,
     fulltextStrategy,
     vectorStrategy,
-    vectorSlotLatch,
+    contributionMaterializer,
     iterativeScanProbe,
   } = options;
 
@@ -1291,16 +1361,6 @@ function createPostgresOperationBackend(
     });
   }
 
-  // Runs the strategy's per-field DDL on this backend's connection (the tx
-  // client for a transaction-scoped backend) so a slot's table exists
-  // before the first write/search hits it.
-  async function ensureVectorSlotStorage(slot: VectorSlot): Promise<void> {
-    if (vectorStrategy === undefined || vectorSlotLatch === undefined) return;
-    await vectorSlotLatch.ensure(vectorStrategy, slot, async (statement) => {
-      await execRun(sql.raw(statement));
-    });
-  }
-
   const batchConfig = {
     checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
     edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
@@ -1319,6 +1379,7 @@ function createPostgresOperationBackend(
     nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
     uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
   };
+
   const commonBackend = createCommonOperationBackend({
     batchConfig,
     execution: {
@@ -1360,7 +1421,11 @@ function createPostgresOperationBackend(
     : {
         async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Assert the slot's durable marker (SELECT, cached) — never DDL.
+          // The per-field table is provisioned by the privileged migrator
+          // (`createStoreWithSchema` → `materializeVectorContributions`), so
+          // a least-privilege runtime role writes embeddings without CREATE.
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
           try {
             for (const statement of statements) {
@@ -1376,7 +1441,8 @@ function createPostgresOperationBackend(
         ): Promise<void> {
           if (params.rows.length === 0) return;
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Same SELECT-only marker assert as the single-row path — never DDL.
+          await contributionMaterializer.assertVectorSlot(slot);
           // Last-write-wins dedupe: a multi-row upsert cannot affect one
           // row twice.
           const rowsById = new Map(
@@ -1422,15 +1488,15 @@ function createPostgresOperationBackend(
         },
 
         async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Ensure the per-field table exists before deleting. A delete can
+          // Assert the slot's durable marker before deleting. A delete can
           // run before any embedding was ever written for the field (e.g. a
-          // node hard-deleted having never carried one), and on Postgres a
-          // DELETE against a missing relation INSIDE a transaction aborts the
-          // whole transaction — swallowing the JS error can't un-abort it.
-          // The idempotent ensure makes the DELETE target an existing
-          // (possibly empty) table, so it's always a clean no-op.
+          // node hard-deleted having never carried one); the per-field table
+          // was provisioned at boot, so the DELETE targets an existing
+          // (possibly empty) table and is a clean no-op — never a DELETE
+          // against a missing relation, which would abort an enclosing
+          // Postgres transaction. SELECT-only assert, never DDL.
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          await contributionMaterializer.assertVectorSlot(slot);
           const statements = vectorStrategy.buildDelete(slot, params);
           for (const statement of statements) {
             await execRun(statement);
@@ -1445,7 +1511,15 @@ function createPostgresOperationBackend(
           // before `runVectorSearch` applies it via `set_config`.
           assertPgvectorEfSearch(params.efSearch);
           const slot = vectorSlotFromParams(params);
-          await ensureVectorSlotStorage(slot);
+          // Deliberately NOT marker-gated: search is read-only (no DDL
+          // hazard to gate), and its params carry the caller's runtime
+          // metric override, which legitimately diverges from the
+          // provisioned shape on strategies that bake the metric into the
+          // DDL (sqlite-vec; pgvector's table DDL is metric-free but the
+          // contract is kept identical across dialects). An unprovisioned
+          // slot surfaces the engine's missing-relation error — the same
+          // contract as a query-builder `similarTo()` predicate;
+          // `createVerifiedStore` catches both at attach.
           const query = vectorStrategy.buildSearch(
             slot,
             params,
@@ -1493,7 +1567,7 @@ function createPostgresOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              await ensureVectorSlotStorage(slot);
+              // Read-only, not marker-gated — see vectorSearch above.
               const candidates =
                 params.candidates ??
                 operationStrategy.buildLiveNodeIds(
@@ -1562,12 +1636,12 @@ function createPostgresOperationBackend(
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       if (vectorStrategy === undefined) return;
       const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table exists first (idempotent), then create its
-      // ANN index. pgvector's `ownedTables` builds the table only — the HNSW/
-      // IVFFlat index is created here (and only here) so it picks up the
-      // declared `m`/`ef_construction`/`lists` from `slot.indexParams` rather
-      // than defaults.
-      await ensureVectorSlotStorage(slot);
+      // Ensure the per-field table + its durable marker first (privileged,
+      // idempotent), then create its ANN index. pgvector's `ownedTables`
+      // builds the table only — the HNSW/IVFFlat index is created here (and
+      // only here) so it picks up the declared `m`/`ef_construction`/`lists`
+      // from `slot.indexParams` rather than defaults.
+      await contributionMaterializer.ensureVectorSlot(slot);
       // Honor the `concurrent` flag materializeIndexes passes on Postgres so the
       // ANN build doesn't take a write-blocking lock on a live table. execRun is
       // autocommit, which CONCURRENTLY requires.
@@ -1762,13 +1836,12 @@ function createTransactionBackend(
     createPostgresExecutionAdapter(options.db, options.adapterOptions),
   );
 
-  // A transaction-scoped backend gets its OWN per-field ensure-latch, never
-  // the outer process-global one: a `CREATE TABLE/INDEX` that runs inside the
-  // caller's transaction and then rolls back must not leave the shared latch
-  // marking the slot "ensured" (which would skip the re-CREATE and make every
-  // later write fail with "relation does not exist"). The fresh latch is
-  // discarded with the transaction, so the next write re-ensures idempotently.
-  // No latch when vector support is disabled (`vector: false`).
+  // The transaction-scoped backend shares the outer backend's
+  // contribution materializer: the per-field vector table is provisioned
+  // (DDL) only by the privileged outer backend, so a tx-scoped vector op
+  // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
+  // anything on rollback. The shared per-instance cache means a slot
+  // confirmed once stays a pure `Set.has` inside every later transaction.
   const backend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -1778,10 +1851,9 @@ function createTransactionBackend(
     capabilities: options.capabilities,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    vectorSlotLatch:
-      options.vectorStrategy === undefined ? undefined : createVectorSlotLatch(),
-    // The probe is process-wide truth, so — unlike the slot latch — the outer
-    // instance's is reused rather than a fresh one per transaction.
+    contributionMaterializer: options.contributionMaterializer,
+    // The probe is process-wide truth, so the outer instance's is reused
+    // rather than a fresh one per transaction.
     iterativeScanProbe: options.iterativeScanProbe,
   });
 

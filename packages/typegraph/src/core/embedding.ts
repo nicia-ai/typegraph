@@ -6,6 +6,9 @@
  */
 import { z } from "zod";
 
+import type { VectorSlot } from "../query/dialect/vector-strategy";
+import type { GraphDef } from "./define-graph";
+
 // ============================================================
 // Embedding Brand Symbol
 // ============================================================
@@ -329,6 +332,35 @@ export function resolveEmbeddingFields(
     });
   }
   return fields;
+}
+
+/**
+ * Enumerates every embedding `(kind, field)` slot a graph declares, as a
+ * fully-resolved {@link VectorSlot}. The single source of truth for "what
+ * vector slots does this graph have?", shared by the privileged boot
+ * materializer (`materializeVectorContributions`) and the verified-attach
+ * gate (`assertVectorContributionsInitialized`) so the two can never
+ * provision and assert different sets. Walks `graph.nodes` and reuses
+ * {@link resolveEmbeddingFields} per node schema.
+ */
+export function resolveGraphVectorSlots(
+  graph: GraphDef,
+): readonly VectorSlot[] {
+  const slots: VectorSlot[] = [];
+  for (const registration of Object.values(graph.nodes)) {
+    const node = registration.type;
+    for (const field of resolveEmbeddingFields(node.schema)) {
+      slots.push({
+        graphId: graph.id,
+        nodeKind: node.kind,
+        fieldPath: field.fieldPath,
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
+      });
+    }
+  }
+  return slots;
 }
 
 function resolveEmbeddingDimensions(schema: z.ZodType): number | undefined {

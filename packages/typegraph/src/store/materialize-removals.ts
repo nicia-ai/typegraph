@@ -511,7 +511,7 @@ function buildEmbeddingTableCleanup(
     const slots = await resolveRemovedKindEmbeddingSlots(ctx.backend, row);
     await Promise.all(
       slots.map((slot) =>
-        dropVectorSlotStorage(vectorStrategy, executeDdl, slot),
+        dropVectorSlotStorage(ctx.backend, vectorStrategy, executeDdl, slot),
       ),
     );
   })();
@@ -527,6 +527,7 @@ function buildEmbeddingTableCleanup(
  * removed-field reclamation so both reclaim storage the same way.
  */
 async function dropVectorSlotStorage(
+  backend: GraphBackend,
   strategy: VectorStrategy,
   executeDdl: (statement: string) => Promise<void>,
   slot: VectorSlot,
@@ -538,6 +539,12 @@ async function dropVectorSlotStorage(
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
   }
+  // Forget the slot's durable contribution marker(s) in lockstep with the
+  // table drop (#135), so a later re-add of the same `(kind, field)` field
+  // re-creates the table instead of trusting an orphaned "initialized"
+  // marker. Runs even when the table was already absent — the marker can
+  // outlive the table. No-op on backends without the vector marker method.
+  await backend.deleteVectorSlotContribution?.(slot);
 }
 
 /**
@@ -686,7 +693,12 @@ async function reclaimRemovedVectorFieldTables(
     // materialized field has nothing to reclaim), so reaching the catch means
     // a genuine failure.
     try {
-      await dropVectorSlotStorage(vectorStrategy, executeDdl, field.slot);
+      await dropVectorSlotStorage(
+        backend,
+        vectorStrategy,
+        executeDdl,
+        field.slot,
+      );
       results.push({
         kind: field.kind,
         fieldPath: field.fieldPath,

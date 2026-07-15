@@ -9,6 +9,7 @@
  */
 import { type GraphBackend, type SchemaVersionRow } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
+import { resolveGraphVectorSlots } from "../core/embedding";
 import {
   ConfigurationError,
   DatabaseOperationError,
@@ -472,11 +473,40 @@ export async function loadAndVerifyGraph<G extends GraphDef>(
   }
 
   await backend.assertRuntimeContributionsInitialized?.(merged.id);
+  await assertVectorContributionsInitialized(backend, merged);
   return {
     graph: merged,
     activeRow,
     result: { status: "unchanged", version: activeRow.version },
   };
+}
+
+/**
+ * SELECT-only verification that every embedding `(kind, field)` slot's
+ * durable contribution marker is initialized — the vector counterpart of
+ * `backend.assertRuntimeContributionsInitialized` (which covers fulltext).
+ * Keeps `createVerifiedStore`'s "throws when runtime-contribution markers
+ * are missing/stale" guarantee honest for vectors: without it the verified
+ * attach would pass but the first vector op would then throw. Enumerated
+ * from the merged graph (same idiom as the privileged boot materializer);
+ * a no-op on backends without vector support or graphs with no embeddings.
+ */
+async function assertVectorContributionsInitialized(
+  backend: GraphBackend,
+  graph: GraphDef,
+): Promise<void> {
+  if (backend.capabilities.vector?.supported !== true) return;
+  const slots = resolveGraphVectorSlots(graph);
+  const assertVectorSlotsInitialized = backend.assertVectorSlotsInitialized;
+  if (assertVectorSlotsInitialized !== undefined) {
+    await assertVectorSlotsInitialized(slots);
+    return;
+  }
+  const assertVectorSlotInitialized = backend.assertVectorSlotInitialized;
+  if (assertVectorSlotInitialized === undefined) return;
+  for (const slot of slots) {
+    await assertVectorSlotInitialized(slot);
+  }
 }
 
 function schemaBehindError(

@@ -6,7 +6,11 @@ import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
 import { Pool } from "pg";
 import postgres, { type Sql } from "postgres";
-import { createStore, type GraphBackend } from "@nicia-ai/typegraph";
+import {
+  createStore,
+  type GraphBackend,
+  resolveGraphVectorSlots,
+} from "@nicia-ai/typegraph";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -43,9 +47,12 @@ type BackendResources = Readonly<{
   hasHybridFacade: boolean;
 }>;
 
-// Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`), created
-// lazily on first write, so a clean reset drops whatever this graph
-// materialized in a prior run — there is no single shared embeddings table.
+// Embeddings live in per-`(graphId, kind, field)` tables (`tg_vec_*`),
+// provisioned by the privileged boot step, so a clean reset drops whatever
+// this graph materialized in a prior run — there is no single shared
+// embeddings table. The durable contribution markers are dropped in lockstep:
+// a marker that outlived its dropped `tg_vec_*` table would make the next
+// provisioning pass trust it and skip the CREATE.
 const POSTGRES_RESET_DDL = `
   DO $$
   DECLARE tbl text;
@@ -63,7 +70,24 @@ const POSTGRES_RESET_DDL = `
   DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
   DROP TABLE IF EXISTS typegraph_node_fulltext CASCADE;
   DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
+  DROP TABLE IF EXISTS typegraph_contribution_materializations CASCADE;
 `;
+
+/**
+ * The vector counterpart of `ensureRuntimeContributions`: provision every
+ * embedding `(kind, field)` slot's per-field table + durable marker — the
+ * boot step `createStoreWithSchema` performs, done manually here because the
+ * harness deliberately uses the sync `createStore` attach. A no-op per slot
+ * on backends without vector support (`ensureVectorSlotContribution` absent,
+ * e.g. SQLite without sqlite-vec).
+ */
+async function materializePerfVectorSlots(
+  backend: GraphBackend,
+): Promise<void> {
+  for (const slot of resolveGraphVectorSlots(perfGraph)) {
+    await backend.ensureVectorSlotContribution?.(slot);
+  }
+}
 
 async function resetPostgresTablesViaPool(pool: Pool): Promise<void> {
   await pool.query(POSTGRES_RESET_DDL);
@@ -100,6 +124,7 @@ export async function createBackendResources(
     // createStore, so it writes the durable fulltext-materialization
     // marker itself — the boot step createStoreWithSchema performs.
     await sqliteBackend.ensureRuntimeContributions?.(perfGraph.id);
+    await materializePerfVectorSlots(sqliteBackend);
     return {
       store: createStore(perfGraph, sqliteBackend, {
         queryDefaults: { traversalExpansion: "none" },
@@ -138,6 +163,7 @@ export async function createBackendResources(
     const tables = createPostgresTables({}, { indexes: perfIndexes });
     const postgresBackend = createPostgresBackend(drizzleDb, { tables });
     await postgresBackend.ensureRuntimeContributions?.(perfGraph.id);
+    await materializePerfVectorSlots(postgresBackend);
     return {
       store: createStore(perfGraph, postgresBackend, {
         queryDefaults: { traversalExpansion: "none" },
@@ -180,6 +206,7 @@ export async function createBackendResources(
   const tables = createPostgresTables({}, { indexes: perfIndexes });
   const postgresBackend = createPostgresBackend(drizzleDb, { tables });
   await postgresBackend.ensureRuntimeContributions?.(perfGraph.id);
+  await materializePerfVectorSlots(postgresBackend);
   return {
     store: createStore(perfGraph, postgresBackend, {
       queryDefaults: { traversalExpansion: "none" },

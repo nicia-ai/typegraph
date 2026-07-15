@@ -582,7 +582,8 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
       return;
     }
 
-    const { embedding, defineNode, defineGraph } = await import("../../../src");
+    const { embedding, defineNode, defineGraph, createStoreWithSchema } =
+      await import("../../../src");
     const Document = defineNode("Doc", {
       schema: z.object({
         title: z.string(),
@@ -606,7 +607,9 @@ describe("SQLite embedding persistence via createSqliteBackend", () => {
     });
     expect(backend.upsertEmbedding).toBeDefined();
 
-    const store = createStore(graph, backend);
+    // createStoreWithSchema provisions the per-field vector table + marker
+    // (privileged), so the embedding write below asserts cleanly.
+    const [store] = await createStoreWithSchema(graph, backend);
     await store.nodes.Doc.create({
       title: "Similar",
       embedding: [1, 0, 0, 0],
@@ -749,25 +752,58 @@ describe("SQLite backend.vectorSearch", () => {
     // Inject the store-resolved slot fields the backend now requires.
     // sqlite-vec storage is metric-agnostic and brute-force here, so the
     // defaults (`cosine` / `none` / dimension from the vector length)
-    // preserve every existing call site's intended behavior.
+    // preserve every existing call site's intended behavior. Each wrapper
+    // first provisions the per-field table + durable marker (#135) — the
+    // privileged step the store's `createStoreWithSchema` would normally do;
+    // these backend-facade tests drive the backend directly, so they stand
+    // in for the migrator. Idempotent and cached after the first call.
     function upsertEmbedding(
       params: Omit<UpsertEmbeddingParams, "metric" | "indexType">,
     ): Promise<void> {
-      return rawUpsertEmbedding({
+      const full = {
         ...params,
-        metric: "cosine",
-        indexType: "none",
-      });
+        metric: "cosine" as const,
+        indexType: "none" as const,
+      };
+      return (async () => {
+        await backend.ensureVectorSlotContribution?.({
+          graphId: full.graphId,
+          nodeKind: full.nodeKind,
+          fieldPath: full.fieldPath,
+          dimensions: full.dimensions,
+          metric: full.metric,
+          indexType: full.indexType,
+        });
+        await rawUpsertEmbedding(full);
+      })();
     }
 
     function vectorSearch(
       params: Omit<VectorSearchParams, "dimensions" | "indexType">,
     ): Promise<readonly VectorSearchResult[]> {
-      return rawVectorSearch({
+      const full = {
         ...params,
         dimensions: params.queryEmbedding.length,
-        indexType: "none",
-      });
+        indexType: "none" as const,
+      };
+      return (async () => {
+        // Provision at the DECLARED shape (cosine — matching the upsert
+        // wrapper), never at the search's runtime metric: a metric override
+        // is a query-time preference over the same physical table, exactly
+        // how the store facade behaves (writes/provisioning use the schema-
+        // declared metric; searches may override). Ensuring at the query's
+        // metric would read as signature drift on sqlite-vec, which bakes
+        // the metric into the vtable DDL.
+        await backend.ensureVectorSlotContribution?.({
+          graphId: full.graphId,
+          nodeKind: full.nodeKind,
+          fieldPath: full.fieldPath,
+          dimensions: full.dimensions,
+          metric: "cosine",
+          indexType: full.indexType,
+        });
+        return rawVectorSearch(full);
+      })();
     }
 
     async function seed(

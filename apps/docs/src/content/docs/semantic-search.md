@@ -149,8 +149,8 @@ import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
 
 // Generates DDL including `CREATE EXTENSION IF NOT EXISTS vector;`.
 // It does NOT create a single embeddings table — each embedding field gets
-// its own typed `vector(N)` table, created lazily on first write (see
-// Storage Layout below).
+// its own typed `vector(N)` table, provisioned by `createStoreWithSchema`
+// (the privileged migrator) at boot (see Storage Layout below).
 const migrationSQL = generatePostgresMigrationSQL();
 ```
 
@@ -235,12 +235,20 @@ do not share this bound.
 
 Each embedding field is stored in its own typed, graph-scoped table named
 `tg_vec_<graphId>_<kind>_<field>`, carrying that field's fixed dimension
-(pgvector `vector(N)`, libSQL `F32_BLOB(N)`, sqlite-vec `vec0`). Tables are
-created lazily on the first write, so no migration step provisions them.
-Graph-scoping means several graphs in one database can declare the same
-`kind`+`field` at different dimensions without collision. This is transparent
-to queries — `.similarTo()`, `store.search.vector`, and `store.search.hybrid`
-read it for you.
+(pgvector `vector(N)`, libSQL `F32_BLOB(N)`, sqlite-vec `vec0`). The privileged
+migrator (`createStoreWithSchema`, and `evolve()` for runtime-added fields)
+provisions each table plus a durable contribution marker at boot; the runtime
+hot path then asserts the marker (a cached SELECT) and never issues DDL, so a
+least-privilege, DML-only role can read and write embeddings. An embedding
+write against an un-provisioned slot throws `StoreNotInitializedError` rather
+than lazily creating the table; vector reads (`store.search.vector`,
+`store.search.hybrid`, and query-builder `.similarTo()` predicates) compile
+straight to SQL, so they surface the engine's missing-relation error instead —
+use `createVerifiedStore` to catch both at attach. See [Database roles & least
+privilege](/backend-setup#database-roles--least-privilege). Graph-scoping means
+several graphs in one database can declare the same `kind`+`field` at different
+dimensions without collision. This is transparent to queries — `.similarTo()`,
+`store.search.vector`, and `store.search.hybrid` read it for you.
 
 ### Deleted nodes never rank
 
@@ -272,6 +280,15 @@ await store.reembedVectorField("Document", "embedding", {
 });
 // → { recreated: true, reembedded: <count> }
 ```
+
+Between the declaration change and the `reembedVectorField()` call, the slot
+is in a deliberate limbo: boot (`createStoreWithSchema` / `evolve()`) detects
+that the provisioned storage no longer matches the declared shape, warns, and
+leaves it untouched — it never recreates the table implicitly, because that
+would silently drop every stored vector. Embedding writes to the field fail
+with a `StoreNotInitializedError` whose reason is `stale` (its message points
+here) until `reembedVectorField()` recreates the storage and re-stamps its
+durable marker.
 
 Without an `embed` callback the storage is recreated empty and you re-embed via
 normal `update()` writes.

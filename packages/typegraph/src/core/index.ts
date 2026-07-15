@@ -14,6 +14,7 @@ export {
   type EmbeddingValue,
   getEmbeddingDimensions,
   isEmbeddingSchema,
+  resolveGraphVectorSlots,
 } from "./embedding";
 
 // Searchable type for fulltext search

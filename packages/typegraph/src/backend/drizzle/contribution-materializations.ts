@@ -22,6 +22,10 @@ import {
 } from "../../errors";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { type SqlDialect } from "../../query/dialect/types";
+import {
+  type VectorSlot,
+  type VectorStrategy,
+} from "../../query/dialect/vector-strategy";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { isMissingTableError } from "../../utils/sql-errors";
@@ -172,7 +176,7 @@ export function buildContributionOnConflictSet(
  * logical slot changes the signature → detectable drift. 32 hex chars
  * because it is compared against an externally-stored signature.
  */
-async function computeContributionSignature(
+function contributionSignatureInput(
   dialect: SqlDialect,
   identity: Readonly<{
     owner: string;
@@ -180,7 +184,7 @@ async function computeContributionSignature(
     tableName: string;
   }>,
   createDdl: readonly string[],
-): Promise<string> {
+): string {
   const hashable = {
     dialect,
     owner: identity.owner,
@@ -188,7 +192,7 @@ async function computeContributionSignature(
     tableName: identity.tableName,
     createDdl,
   };
-  return sha256Hex(JSON.stringify(hashable, sortedReplacer), 16);
+  return JSON.stringify(hashable, sortedReplacer);
 }
 
 /**
@@ -349,15 +353,33 @@ export type ContributionMaterializerDeps = Readonly<{
   dialect: SqlDialect;
   fulltextStrategy: FulltextStrategy;
   fulltextTableName: string;
+  /**
+   * Active vector strategy, or `undefined` when vector support is
+   * disabled. When present, its per-`(kind, field)` `ownedTables(slot)`
+   * contributions ride this same durable-marker machinery — boot
+   * materializes them under the privileged role, the runtime hot path
+   * asserts them with a SELECT (never DDL), exactly like fulltext.
+   */
+  vectorStrategy: VectorStrategy | undefined;
   /** Run one raw DDL statement (dialect's `execute`/`run` of `sql.raw`). */
   execDdl: (statement: string) => Promise<void>;
   /** Idempotently create the `contribution_materializations` table. */
   ensureMarkerTable: () => Promise<void>;
-  getMarker: (
-    identity: ContributionMaterializationIdentity,
-  ) => Promise<ContributionMaterializationRow | undefined>;
+  /** Read every contribution marker for one graph in a single query. */
+  getMarkers: (
+    graphId: string,
+  ) => Promise<readonly ContributionMaterializationRow[]>;
   recordMarker: (
     params: RecordContributionMaterializationParams,
+  ) => Promise<void>;
+  /**
+   * Delete a marker row by identity. Used when a contribution's physical
+   * table is torn down out-of-band (vector-field reclaim) so a later
+   * re-provision sees "missing" and re-creates the table rather than
+   * trusting an orphaned "initialized" marker.
+   */
+  deleteMarker: (
+    identity: ContributionMaterializationIdentity,
   ) => Promise<void>;
 }>;
 
@@ -370,18 +392,133 @@ export type ContributionMaterializer = Readonly<{
    * the first missing/stale/failed contribution. Zero DDL, zero writes.
    */
   assertInitialized: (graphId: string) => Promise<void>;
+  /**
+   * Privileged materializer for one vector slot's `ownedTables`
+   * contribution(s): creates the per-`(kind, field)` table and records
+   * its durable marker, idempotently. Pass `{ force: true }` to bypass
+   * the drift-guard and overwrite the marker at the current signature —
+   * the sanctioned path for `reembedVectorField`'s deliberate
+   * dimension change. Pass `{ onDrift: "skip" }` to leave a drifted slot
+   * untouched (warn, no marker write, no throw) instead of refusing —
+   * the boot/evolve path, where the declared shape may have moved ahead
+   * of a `reembedVectorField` the operator has not run yet. No-op when
+   * vector support is disabled.
+   */
+  ensureVectorSlot: (
+    slot: VectorSlot,
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ) => Promise<void>;
+  /** Batch form used by boot to share marker reads across every vector slot. */
+  ensureVectorSlots: (
+    slots: readonly VectorSlot[],
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ) => Promise<void>;
+  /**
+   * Hot-path gate for one vector slot: SELECT-only marker assert over
+   * the slot's `ownedTables` contribution(s), cached per backend
+   * instance. Throws `StoreNotInitializedError` when the slot is
+   * missing/stale/failed. No-op when vector support is disabled.
+   */
+  assertVectorSlot: (slot: VectorSlot) => Promise<void>;
+  /** Batch form used by verified attach to perform one marker read. */
+  assertVectorSlots: (slots: readonly VectorSlot[]) => Promise<void>;
+  /**
+   * Forget a vector slot: delete its `ownedTables` contribution
+   * marker(s) and evict the per-instance cache. Called after the slot's
+   * physical table is dropped (vector-field reclaim) so a future
+   * `ensureVectorSlot` re-creates the table instead of trusting an
+   * orphaned marker. No-op when vector support is disabled.
+   */
+  dropVectorSlot: (slot: VectorSlot) => Promise<void>;
 }>;
+
+// NUL separator for the per-instance contribution cache key: collision-safe
+// across arbitrary graph ids / names (a printable delimiter could appear in a
+// caller-supplied graph id).
+const CONTRIBUTION_KEY_SEPARATOR = String.fromCodePoint(0);
+
+function contributionKey(
+  graphId: string,
+  contribution: Readonly<{
+    owner: string;
+    logicalName: string;
+    tableName: string;
+  }>,
+): string {
+  return [
+    graphId,
+    contribution.owner,
+    contribution.logicalName,
+    contribution.tableName,
+  ].join(CONTRIBUTION_KEY_SEPARATOR);
+}
 
 export function createContributionMaterializer(
   deps: ContributionMaterializerDeps,
 ): ContributionMaterializer {
   const { dialect, fulltextStrategy, fulltextTableName } = deps;
 
-  // Positive-only cache: a graph id lands here once every runtime
-  // contribution's durable marker has been observed materialized for
-  // it. Missing/stale/failed verdicts are never cached, so a concurrent
-  // boot that fixes the state is picked up on the next call.
-  const initializedGraphIds = new Set<string>();
+  // Positive-only cache keyed per contribution identity
+  // (`graphId | owner | logicalName | tableName`), holding the SIGNATURE the
+  // marker was last observed materialized at on this connection. A cache hit
+  // requires the freshly-computed signature to match the cached one, so a
+  // changed shape (dimension, metric, storage DDL) on the same instance
+  // misses the cache and falls through to the drift-guard / stale verdict —
+  // the warm cache can never bless a contribution whose shape moved.
+  // Per-contribution (not per-graph) so each per-`(kind, field)` vector slot
+  // caches independently and the hot-path assert stays a small DDL-string
+  // comparison plus `Map.get` after the first SELECT. Missing/stale/failed
+  // verdicts are never cached, so a concurrent boot that fixes the state is
+  // picked up on the next call.
+  const initializedSignatures = new Map<string, string>();
+  // Computing the durable signature requires WebCrypto. Keep the canonical
+  // DDL beside its digest so the hot path only compares the current DDL
+  // strings. A same-instance shape change produces a mismatch and therefore
+  // a fresh canonical input + digest; unchanged contributions reuse the
+  // settled promise without serialization or new crypto work. The cache key
+  // already covers every non-DDL signature field (owner/logical/table), while
+  // dialect is fixed for the lifetime of this materializer.
+  const computedSignatures = new Map<
+    string,
+    Readonly<{ createDdl: readonly string[]; signature: Promise<string> }>
+  >();
+
+  async function resolveContributionSignature(
+    key: string,
+    contribution: StrategyTableContribution,
+  ): Promise<string> {
+    const cached = computedSignatures.get(key);
+    const cachedCreateDdl = cached?.createDdl;
+    const cachedSignature = cached?.signature;
+    if (
+      cachedCreateDdl?.length === contribution.createDdl.length &&
+      cachedSignature !== undefined &&
+      contribution.createDdl.every(
+        (statement, index) => cachedCreateDdl[index] === statement,
+      )
+    ) {
+      return cachedSignature;
+    }
+
+    const input = contributionSignatureInput(
+      dialect,
+      contribution,
+      contribution.createDdl,
+    );
+    const entry = {
+      createDdl: [...contribution.createDdl],
+      signature: sha256Hex(input, 16),
+    } as const;
+    computedSignatures.set(key, entry);
+    try {
+      return await entry.signature;
+    } catch (error) {
+      if (computedSignatures.get(key) === entry) {
+        computedSignatures.delete(key);
+      }
+      throw error;
+    }
+  }
 
   function runtimeContributions(): readonly StrategyTableContribution[] {
     return runtimeStrategyContributions(fulltextStrategy, fulltextTableName);
@@ -390,18 +527,21 @@ export function createContributionMaterializer(
   async function materializeOne(
     graphId: string,
     contribution: StrategyTableContribution,
-  ): Promise<void> {
-    const signature = await computeContributionSignature(
-      dialect,
-      contribution,
-      contribution.createDdl,
-    );
+    signature: string,
+    existing: ContributionMaterializationRow | undefined,
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ): Promise<"materialized" | "drift-skipped"> {
+    const force = options?.force === true;
     const identity = identityOf(graphId, contribution);
-    const existing = await deps.getMarker(identity);
 
-    // Already materialized at this exact shape — nothing to do.
-    if (evaluateContributionState(existing, signature) === "initialized") {
-      return;
+    // Already materialized at this exact shape — nothing to do. `force`
+    // re-runs the DDL and re-stamps the marker even on a match: the path
+    // `reembedVectorField` relies on after it has recreated the table.
+    if (
+      !force &&
+      evaluateContributionState(existing, signature) === "initialized"
+    ) {
+      return "materialized";
     }
     const priorSuccess = existing?.materializedAt !== undefined;
 
@@ -411,7 +551,23 @@ export function createContributionMaterializer(
     // table. Refuse loudly instead — mirrors the index materializer's
     // signature-drift handling. (A row with no prior success, or one
     // whose last attempt errored, falls through and re-runs the DDL.)
-    if (priorSuccess && existing.signature !== signature) {
+    // `force` deliberately bypasses this — the caller has already dropped
+    // and recreated the table at the new shape (`reembedVectorField`).
+    if (!force && priorSuccess && existing.signature !== signature) {
+      // `onDrift: "skip"` (boot/evolve): leave the slot exactly as it is —
+      // marker untouched (so old-shape reads keep their verdict), nothing
+      // cached, no throw. Writes to the new shape fail as `stale` until
+      // `store.reembedVectorField` recreates storage and force-restamps.
+      if (options?.onDrift === "skip") {
+        console.warn(
+          `[typegraph] contribution "${contribution.logicalName}" (table ` +
+            `"${contribution.tableName}") is provisioned at a different ` +
+            `shape than the current declaration — left untouched. Writes ` +
+            `to it will fail until store.reembedVectorField(kind, ` +
+            `fieldPath) recreates the storage at the new shape.`,
+        );
+        return "drift-skipped";
+      }
       const error = new Error(
         `Contribution "${contribution.logicalName}" (owner ` +
           `"${contribution.owner}", table "${contribution.tableName}") was ` +
@@ -452,36 +608,36 @@ export function createContributionMaterializer(
       materializedAt: attemptedAt,
       error: undefined,
     });
+    return "materialized";
+  }
+
+  function indexMarkerRows(
+    graphId: string,
+    rows: readonly ContributionMaterializationRow[],
+  ): ReadonlyMap<string, ContributionMaterializationRow> {
+    return new Map(
+      rows.map((row) => [contributionKey(graphId, row), row] as const),
+    );
   }
 
   /**
-   * Durable state of a single contribution on the current connection:
-   * its freshly-computed signature read back against the marker row. A
-   * missing marker *table* (never bootstrapped) is reported as its own
-   * variant so each caller decides what it means — `assertInitialized`
-   * treats it as "not initialized" and throws; `ensureRuntimeContributions`
-   * treats it as "needs first materialization" and falls through to DDL.
-   * Any non-missing-table read fault (connection/permission/driver) is a
-   * real system error and propagates as-is rather than being masked.
+   * Read every marker for a graph in one round trip. A missing marker table
+   * is its own verdict so boot can create it while hot-path asserts translate
+   * it to `StoreNotInitializedError`. All other database faults propagate.
    */
-  async function readContributionState(
+  async function readMarkerRows(
     graphId: string,
-    contribution: StrategyTableContribution,
   ): Promise<
-    | Readonly<{ kind: "state"; state: ContributionMaterializationState }>
+    | Readonly<{
+        kind: "rows";
+        rows: ReadonlyMap<string, ContributionMaterializationRow>;
+      }>
     | Readonly<{ kind: "missing-table"; error: unknown }>
   > {
-    const signature = await computeContributionSignature(
-      dialect,
-      contribution,
-      contribution.createDdl,
-    );
-    const identity = identityOf(graphId, contribution);
     try {
-      const existing = await deps.getMarker(identity);
       return {
-        kind: "state",
-        state: evaluateContributionState(existing, signature),
+        kind: "rows",
+        rows: indexMarkerRows(graphId, await deps.getMarkers(graphId)),
       };
     } catch (error) {
       if (!isMissingTableError(error)) throw error;
@@ -490,73 +646,209 @@ export function createContributionMaterializer(
   }
 
   /**
-   * SELECT-only verdict over every runtime contribution: `true` only when
-   * each one is already materialized at its current signature. Short-
-   * circuits on the first non-initialized read — a missing marker table
-   * or any missing/stale/failed contribution. Never runs DDL.
+   * Privileged materialize over an arbitrary contribution set. Per
+   * contribution: skip if cached at the current signature; else (unless
+   * `force`) a read-only
+   * pre-check short-circuits the whole pending set when every marker is
+   * already initialized at its current signature, so a warm graph stays
+   * DDL-free — the marker `CREATE TABLE IF NOT EXISTS` itself would fail
+   * on a connection that can't run DDL (#149). Otherwise ensure the
+   * marker table and `materializeOne` each pending contribution. `force`
+   * re-runs the DDL and re-stamps the marker unconditionally (drift-guard
+   * bypassed) — the `reembedVectorField` recreate path.
    */
-  async function allContributionsInitialized(
+  async function ensureContributions(
     graphId: string,
     contributions: readonly StrategyTableContribution[],
-  ): Promise<boolean> {
-    for (const contribution of contributions) {
-      const read = await readContributionState(graphId, contribution);
-      if (read.kind !== "state" || read.state !== "initialized") return false;
-    }
-    return true;
-  }
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ): Promise<void> {
+    const force = options?.force === true;
+    const entries = await Promise.all(
+      contributions.map(async (contribution) => {
+        const key = contributionKey(graphId, contribution);
+        return {
+          contribution,
+          key,
+          signature: await resolveContributionSignature(key, contribution),
+        };
+      }),
+    );
+    // A cache hit requires the signature to match — a contribution whose
+    // shape changed on this instance falls through to the drift-guard.
+    const pending =
+      force ? entries : (
+        entries.filter(
+          (entry) => initializedSignatures.get(entry.key) !== entry.signature,
+        )
+      );
+    if (pending.length === 0) return;
 
-  async function ensureRuntimeContributions(graphId: string): Promise<void> {
-    // Cache guard so a redundant boot call (the warm path materializes
-    // via loadActiveSchemaWithBootstrap, then createStoreWithSchema
-    // calls again) is a true O(1) no-op rather than a re-SELECT.
-    if (initializedGraphIds.has(graphId)) return;
-    const contributions = runtimeContributions();
-
-    // Read-only pre-check mirroring `assertInitialized` (#149): when every
-    // contribution is already materialized at its current signature, this
-    // open needs no DDL — skip `ensureMarkerTable()` / `materializeOne`
-    // entirely. A consumer that builds a fresh backend per request (empty
-    // per-instance cache) therefore stays DDL-free on a warm graph instead
-    // of re-running the marker `CREATE TABLE IF NOT EXISTS` on every open,
-    // which fails on connections that can't run it. A missing marker table
-    // or any missing/stale/failed contribution falls through to the
-    // privileged first-materialization path below, unchanged.
-    if (await allContributionsInitialized(graphId, contributions)) {
-      initializedGraphIds.add(graphId);
+    const initialRead = force ? undefined : await readMarkerRows(graphId);
+    if (
+      !force &&
+      initialRead?.kind === "rows" &&
+      pending.every(
+        (entry) =>
+          evaluateContributionState(
+            initialRead.rows.get(entry.key),
+            entry.signature,
+          ) === "initialized",
+      )
+    ) {
+      for (const entry of pending) {
+        initializedSignatures.set(entry.key, entry.signature);
+      }
       return;
     }
 
     await deps.ensureMarkerTable();
-    for (const contribution of contributions) {
-      await materializeOne(graphId, contribution);
+    // Preserve the original race check after marker-table bootstrap, but
+    // refresh every pending contribution in one query rather than one query
+    // per slot.
+    const existingRows = indexMarkerRows(
+      graphId,
+      await deps.getMarkers(graphId),
+    );
+    for (const entry of pending) {
+      const outcome = await materializeOne(
+        graphId,
+        entry.contribution,
+        entry.signature,
+        existingRows.get(entry.key),
+        {
+          force,
+          ...(options?.onDrift === undefined ?
+            {}
+          : { onDrift: options.onDrift }),
+        },
+      );
+      // A drift-skipped contribution is deliberately NOT cached: nothing
+      // was materialized at this signature, and asserts must keep reading
+      // it as stale until reembedVectorField restamps it.
+      if (outcome === "materialized") {
+        initializedSignatures.set(entry.key, entry.signature);
+      }
     }
-    initializedGraphIds.add(graphId);
+  }
+
+  /**
+   * SELECT-only gate over an arbitrary contribution set: throws
+   * `StoreNotInitializedError` on the first missing/stale/failed
+   * contribution (or a never-bootstrapped marker table). Caches each
+   * confirmed-initialized contribution BY SIGNATURE so the steady state is a
+   * crypto-free DDL-string comparison + `Map.get`. A shape change on the same
+   * instance computes a fresh signature, misses the initialized cache, and
+   * surfaces as `stale`. Never runs DDL or writes.
+   */
+  async function assertContributions(
+    graphId: string,
+    contributions: readonly StrategyTableContribution[],
+  ): Promise<void> {
+    const entries = await Promise.all(
+      contributions.map(async (contribution) => {
+        const key = contributionKey(graphId, contribution);
+        return {
+          contribution,
+          key,
+          signature: await resolveContributionSignature(key, contribution),
+        };
+      }),
+    );
+    const pending = entries.filter(
+      (entry) => initializedSignatures.get(entry.key) !== entry.signature,
+    );
+    if (pending.length === 0) return;
+
+    const read = await readMarkerRows(graphId);
+    if (read.kind === "missing-table") {
+      const first = pending[0];
+      if (first === undefined) return;
+      throw new StoreNotInitializedError(graphId, "missing", {
+        cause: read.error,
+        details: { logicalName: first.contribution.logicalName },
+      });
+    }
+
+    for (const entry of pending) {
+      const { contribution, key, signature } = entry;
+      const state = evaluateContributionState(read.rows.get(key), signature);
+      if (state !== "initialized") {
+        throw new StoreNotInitializedError(graphId, state, {
+          details: { logicalName: contribution.logicalName },
+        });
+      }
+      initializedSignatures.set(key, signature);
+    }
+  }
+
+  async function ensureRuntimeContributions(graphId: string): Promise<void> {
+    await ensureContributions(graphId, runtimeContributions());
   }
 
   async function assertInitialized(graphId: string): Promise<void> {
-    if (initializedGraphIds.has(graphId)) return;
-    for (const contribution of runtimeContributions()) {
-      const read = await readContributionState(graphId, contribution);
-      // A never-bootstrapped database has no marker table — that is
-      // precisely "not initialized". `readContributionState` has already
-      // rethrown any non-missing-table fault (connection, permission,
-      // driver), so a real system error never surfaces here masked as a
-      // user init error.
-      if (read.kind === "missing-table") {
-        throw new StoreNotInitializedError(graphId, "missing", {
-          cause: read.error,
-          details: { logicalName: contribution.logicalName },
-        });
-      }
-      if (read.state !== "initialized") {
-        throw new StoreNotInitializedError(graphId, read.state, {
-          details: { logicalName: contribution.logicalName },
-        });
-      }
-    }
-    initializedGraphIds.add(graphId);
+    await assertContributions(graphId, runtimeContributions());
   }
 
-  return { ensureRuntimeContributions, assertInitialized };
+  async function ensureVectorSlot(
+    slot: VectorSlot,
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ): Promise<void> {
+    await ensureVectorSlots([slot], options);
+  }
+
+  async function assertVectorSlot(slot: VectorSlot): Promise<void> {
+    await assertVectorSlots([slot]);
+  }
+
+  function groupVectorContributions(
+    slots: readonly VectorSlot[],
+  ): ReadonlyMap<string, readonly StrategyTableContribution[]> {
+    const grouped = new Map<
+      string,
+      readonly StrategyTableContribution[]
+    >();
+    if (deps.vectorStrategy === undefined) return grouped;
+    for (const slot of slots) {
+      grouped.set(slot.graphId, [
+        ...(grouped.get(slot.graphId) ?? []),
+        ...deps.vectorStrategy.ownedTables(slot),
+      ]);
+    }
+    return grouped;
+  }
+
+  async function ensureVectorSlots(
+    slots: readonly VectorSlot[],
+    options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
+  ): Promise<void> {
+    for (const [graphId, contributions] of groupVectorContributions(slots)) {
+      await ensureContributions(graphId, contributions, options);
+    }
+  }
+
+  async function assertVectorSlots(slots: readonly VectorSlot[]): Promise<void> {
+    for (const [graphId, contributions] of groupVectorContributions(slots)) {
+      await assertContributions(graphId, contributions);
+    }
+  }
+
+  async function dropVectorSlot(slot: VectorSlot): Promise<void> {
+    if (deps.vectorStrategy === undefined) return;
+    for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
+      await deps.deleteMarker(identityOf(slot.graphId, contribution));
+      const key = contributionKey(slot.graphId, contribution);
+      initializedSignatures.delete(key);
+      computedSignatures.delete(key);
+    }
+  }
+
+  return {
+    ensureRuntimeContributions,
+    assertInitialized,
+    ensureVectorSlot,
+    ensureVectorSlots,
+    assertVectorSlot,
+    assertVectorSlots,
+    dropVectorSlot,
+  };
 }

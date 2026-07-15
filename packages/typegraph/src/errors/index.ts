@@ -1046,14 +1046,14 @@ export type StoreNotInitializedErrorDetails = Readonly<{
   Readonly<Record<string, unknown>>;
 
 /**
- * Thrown when a fulltext-dependent operation runs against a connection
- * whose strategy-owned storage has not been durably materialized.
+ * Thrown when a fulltext- or vector-dependent operation runs against a
+ * connection whose strategy-owned storage has not been durably materialized.
  *
  * `createStore()` is a synchronous, zero-I/O attach: it never creates
  * tables, repairs DDL, or writes materialization markers. The durable
  * marker is written exclusively by the async boot path
- * (`createStoreWithSchema`). When a fulltext read/write — or an
- * adopted/business transaction — observes no valid marker, it refuses
+ * (`createStoreWithSchema`). When a fulltext or embedding read/write — or
+ * an adopted/business transaction — observes no valid marker, it refuses
  * loudly here instead of lazily emitting DDL on the hot path.
  */
 export class StoreNotInitializedError extends TypeGraphError {
@@ -1074,22 +1074,81 @@ export class StoreNotInitializedError extends TypeGraphError {
     },
   ) {
     super(
-      `fulltext storage for graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
-        `Run createStoreWithSchema(graph, backend) during application boot, ` +
-        `outside request handlers and adopted transactions, before using createStore().`,
+      `${storageLabelFromLogicalName(options?.details?.logicalName)} for ` +
+        `graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
+        storeNotInitializedAction(reason, options?.details?.logicalName),
       "STORE_NOT_INITIALIZED",
       {
         details: { ...options?.details, graphId, reason },
         category: "user",
         suggestion:
-          "Call createStoreWithSchema(graph, backend) once at application " +
-          "startup. createStore() attaches to an already-initialized " +
-          "database and does not materialize storage itself.",
+          isStaleVectorSlot(reason, options?.details?.logicalName) ?
+            "The field's declared shape (e.g. its dimension) changed after " +
+            "its storage was provisioned. Run store.reembedVectorField(" +
+            "kind, fieldPath) to recreate the storage at the new shape and " +
+            "re-embed."
+          : "Call createStoreWithSchema(graph, backend) once at application " +
+            "startup. createStore() attaches to an already-initialized " +
+            "database and does not materialize storage itself.",
         cause: options?.cause,
       },
     );
     this.name = "StoreNotInitializedError";
   }
+}
+
+const VECTOR_LOGICAL_NAME_PREFIX = "vector:";
+
+/**
+ * A stale VECTOR slot is its own failure mode: the storage exists but was
+ * provisioned at a different shape (the declared dimension changed), and
+ * the fix is `store.reembedVectorField`, not a re-run of
+ * `createStoreWithSchema` (whose boot pass deliberately skips drifted
+ * slots). Drives the action sentence and the suggestion.
+ */
+function isStaleVectorSlot(
+  reason: StoreNotInitializedReason,
+  logicalName: unknown,
+): boolean {
+  return (
+    reason === "stale" &&
+    typeof logicalName === "string" &&
+    logicalName.startsWith(VECTOR_LOGICAL_NAME_PREFIX)
+  );
+}
+
+/** The actionable trailing sentence of the error message, per failure mode. */
+function storeNotInitializedAction(
+  reason: StoreNotInitializedReason,
+  logicalName: unknown,
+): string {
+  if (isStaleVectorSlot(reason, logicalName)) {
+    return (
+      `The declared shape changed after provisioning — run ` +
+      `store.reembedVectorField(kind, fieldPath) to recreate the storage ` +
+      `at the new shape.`
+    );
+  }
+  return (
+    `Run createStoreWithSchema(graph, backend) during application boot, ` +
+    `outside request handlers and adopted transactions, before using createStore().`
+  );
+}
+
+/**
+ * Human label for the un-materialized storage, derived from the
+ * contribution `logicalName`: fulltext keeps "fulltext storage"; a vector
+ * slot ("vector:&lt;kind&gt;.&lt;field&gt;") reads as `vector storage
+ * "&lt;kind&gt;.&lt;field&gt;"` so the message names the exact embedding
+ * field. Falls back to a neutral phrase when no logical name is supplied.
+ */
+function storageLabelFromLogicalName(logicalName: unknown): string {
+  if (typeof logicalName !== "string") return "runtime storage";
+  if (logicalName.startsWith(VECTOR_LOGICAL_NAME_PREFIX)) {
+    return `vector storage "${logicalName.slice(VECTOR_LOGICAL_NAME_PREFIX.length)}"`;
+  }
+  if (logicalName === "fulltext") return "fulltext storage";
+  return `"${logicalName}" storage`;
 }
 
 // ============================================================
