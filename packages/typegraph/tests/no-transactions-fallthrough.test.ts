@@ -26,24 +26,16 @@ import {
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
-import { createInitializedStore, createTestBackend } from "./test-utils";
+import {
+  createInitializedStore,
+  createTestBackend,
+  disableTransactions,
+} from "./test-utils";
 
+// The message the shared `disableTransactions` helper rejects with; asserted by
+// the precondition ("sanity") test below.
 const TRANSACTIONS_DISABLED_MESSAGE =
   "synthetic backend has transactions disabled";
-
-/**
- * Wraps a real backend so any unconditional `transaction(...)` call
- * throws — every other operation works normally. Mirrors the shape of
- * `drizzle-orm/neon-http`'s session, which throws "No transactions
- * support in neon-http driver" on `db.transaction(...)`.
- */
-function disableTransactions(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
-    capabilities: { ...backend.capabilities, transactions: false },
-    transaction: () => Promise.reject(new Error(TRANSACTIONS_DISABLED_MESSAGE)),
-  };
-}
 
 const Person = defineNode("Person", {
   schema: z.object({

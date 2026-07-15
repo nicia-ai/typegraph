@@ -205,6 +205,7 @@ import {
   type Node,
   type OperationHookContext,
   type QueryOptions,
+  type SqlAvailability,
   type StoreHooks,
   type StoreOptions,
   type StoreRef,
@@ -1453,13 +1454,16 @@ export class Store<G extends GraphDef> {
    *   transaction**, for writing the caller's own relational tables in
    *   the same atomic boundary (the graph-owned counterpart of
    *   {@link Store.withTransaction}). See {@link TransactionContext}
-   *   for per-backend semantics; it is `undefined` only on the
-   *   non-transactional fallback.
-   *   When the store was created with `{ history: true }` or
-   *   `{ revisionTracking: true }`, `tx.sql` is replaced by a fail-loud guard
-   *   because raw SQL would bypass recorded-time capture or revision tracking;
-   *   use the typed collections inside
-   *   `transaction()` or {@link Store.withRecordedTransaction}.
+   *   for per-backend semantics. To decide at runtime whether `tx.sql` is
+   *   usable, branch on `tx.sqlAvailability` rather than truthiness-testing
+   *   `tx.sql` — under history capture or revision tracking `tx.sql` is
+   *   present-but-throwing (`sqlAvailability` is `"history"` /
+   *   `"revisionTracking"`), and it is `undefined` only on the non-transactional
+   *   fallback (`sqlAvailability === "unavailable"`). When it reports
+   *   `"history"` / `"revisionTracking"`, raw SQL is disabled because it would
+   *   bypass recorded-time capture or the revision anchor; use the typed
+   *   collections inside `transaction()` or
+   *   {@link Store.withRecordedTransaction}.
    *
    * @example
    * ```typescript
@@ -1627,6 +1631,8 @@ export class Store<G extends GraphDef> {
       const result = await invoke({
         nodes,
         edges,
+        // No real transaction: `tx.sql` is absent and there is no atomicity.
+        sqlAvailability: "unavailable",
         backend: this.#backend,
         getNodeCollection: (kind) =>
           this.#resolveDynamicNodeCollection(nodes, kind),
@@ -1747,11 +1753,14 @@ export class Store<G extends GraphDef> {
    *
    * Not available when the store was created with `{ history: true }`: a
    * caller-owned transaction context would let writes happen after capture has
-   * lost its flush point, so this throws `ConfigurationError`
-   * (`RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`). Use
-   * {@link Store.withRecordedTransaction} on a history-enabled store, which
-   * adopts the same external transaction but flushes recorded-time capture
-   * before the caller commits.
+   * lost its flush point. On a {@link HistoryStore} this is a **compile error**
+   * at the call site (the `externalTx` argument is rejected against a message
+   * type naming {@link Store.withRecordedTransaction}); the runtime guard still
+   * throws `ConfigurationError`
+   * (`RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION`) if the check is
+   * suppressed. Use {@link Store.withRecordedTransaction} on a history-enabled
+   * store, which adopts the same external transaction but flushes recorded-time
+   * capture before the caller commits.
    *
    * @throws {ConfigurationError} when the store has history capture enabled
    *   (use {@link Store.withRecordedTransaction} instead), or when the backend
@@ -1767,11 +1776,15 @@ export class Store<G extends GraphDef> {
    *   `createStoreWithSchema`). Rolls back the caller's transaction
    *   without emitting any DDL.
    */
+  withTransaction<This extends Store<G>>(
+    this: This,
+    externalTx: This extends HistoryStore<G> ? HistoryWithTransactionUnavailable
+    : AdoptedTransaction,
+  ): This extends HistoryStore<G> ? never : TransactionContext<G>;
+
   withTransaction(externalTx: AdoptedTransaction): TransactionContext<G> {
     if (this.#captureEnabled) {
-      throw recordedCaptureRequiresCallbackTransactionError({
-        code: "RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION",
-      });
+      throw recordedCaptureRequiresCallbackTransactionError();
     }
     const adopt = this.#backend.adoptTransaction;
     if (!adopt) {
@@ -1802,11 +1815,27 @@ export class Store<G extends GraphDef> {
    * COMMIT) throws rather than committing uncaptured — the post-flush write
    * cannot silently diverge history from live state.
    *
-   * Like {@link Store.withTransaction}, the graph writes and any raw `tx.sql`
-   * statements share the caller's one pinned connection. TypeGraph serializes
-   * the statements its collections issue; sequence your own raw statements (and
-   * don't `Promise.all` them with graph writes) so two queries never race on
-   * that connection.
+   * Write your own relational tables through the **external transaction handle
+   * you passed in** (`externalTx`) — it *is* the pinned connection. `tx.sql` is
+   * unavailable here (it is a fail-loud guard under history capture, since raw
+   * SQL bypasses recorded-time capture, and `HistoryTransactionContext` types it
+   * `sql?: never`). Writing through `externalTx` is the sanctioned way to get
+   * cross-store atomicity on a history-enabled store:
+   *
+   * ```typescript
+   * // Async driver (Postgres / libsql):
+   * await db.transaction(async (pgTx) => {
+   *   await store.withRecordedTransaction(pgTx, async (tx) => {
+   *     await tx.nodes.Document.update(documentId, props); // graph write
+   *   });
+   *   await pgTx.insert(streamCursors).values(cursorRow);  // your own table
+   * }); // one COMMIT / ROLLBACK across both layers
+   * ```
+   *
+   * The graph writes and your `externalTx` statements share the caller's one
+   * pinned connection. TypeGraph serializes the statements its collections
+   * issue; sequence your own raw statements (and don't `Promise.all` them with
+   * graph writes) so two queries never race on that connection.
    */
   withRecordedTransaction<T>(
     this: HistoryStore<G>,
@@ -1925,27 +1954,33 @@ export class Store<G extends GraphDef> {
     ): DynamicNodeCollection | undefined =>
       this.#resolveDynamicNodeCollection(nodes, kind);
 
-    if (sql === undefined) {
-      return {
-        nodes,
-        edges,
-        backend: txBackend,
-        getNodeCollection,
-        runNodeOperationHooks,
-      };
-    }
-    const exposedSql =
-      this.#captureEnabled ? createHistoryUnsafeSqlRef()
-      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
-      : sql;
-    return {
+    // Honest capability discriminant for `tx.sql`. Capture/revision tracking
+    // take precedence because they replace `tx.sql` with a fail-loud guard even
+    // though the transaction itself is real; only a genuinely absent handle is
+    // "unavailable" (this method runs on transactional backends — the
+    // non-transactional fallback context is built in #runTransaction).
+    const sqlAvailability: SqlAvailability =
+      this.#captureEnabled ? "history"
+      : this.#revisionTrackingEnabled ? "revisionTracking"
+      : sql === undefined ? "unavailable"
+      : "available";
+
+    const base: TransactionContext<G> = {
       nodes,
       edges,
-      sql: exposedSql,
+      sqlAvailability,
       backend: txBackend,
       getNodeCollection,
       runNodeOperationHooks,
     };
+
+    if (sql === undefined) return base;
+
+    const exposedSql =
+      this.#captureEnabled ? createHistoryUnsafeSqlRef()
+      : this.#revisionTrackingEnabled ? createRevisionTrackingUnsafeSqlRef()
+      : sql;
+    return { ...base, sql: exposedSql };
   }
 
   // === Graph Lifecycle ===
@@ -3088,6 +3123,17 @@ export type HistoryStore<G extends GraphDef> = Store<G> &
     historyEnabled: true;
     recordedReadBound: true;
   }>;
+
+/**
+ * The `externalTx` parameter type {@link Store.withTransaction} resolves to when
+ * called on a {@link HistoryStore}. A real {@link AdoptedTransaction} is not
+ * assignable to this string literal, so the call is a compile error whose
+ * message names the working alternative. `HistoryStore` cannot be excluded from
+ * the general signature by a `this` constraint alone — it is a subtype of
+ * `Store<G>` — so the block is expressed on the argument instead.
+ */
+export type HistoryWithTransactionUnavailable =
+  "withTransaction() is unavailable on a history-enabled store — use store.withRecordedTransaction() so recorded-time capture can flush before the caller commits";
 
 type ExplicitRecordedReadLiveOptions = LiveStoreOptions &
   Readonly<{ recordedRead: NonNullable<LiveStoreOptions["recordedRead"]> }>;
