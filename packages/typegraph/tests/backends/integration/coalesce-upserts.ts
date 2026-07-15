@@ -7,8 +7,14 @@ import {
   asNodeId,
   createStoreWithSchema,
   type EdgeId,
+  type GraphBackend,
   type NodeId,
 } from "../../../src";
+import {
+  type AdoptedTransaction,
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../../../src/backend/types";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -66,6 +72,46 @@ async function countRecordedNodeRows(
     `),
   );
   return Number(rows[0]?.cnt ?? 0);
+}
+
+type EdgeWriteCounter = Readonly<{
+  backend: GraphBackend;
+  updates: () => number;
+}>;
+
+/**
+ * Wraps a backend — and every transaction-scoped backend it hands out — so
+ * each `updateEdge` call is counted. Edges carry no version counter, so the
+ * duplicate-id probe matrix needs an exact write count that survives the
+ * transaction the bulk-upsert path opens.
+ */
+function withEdgeUpdateCounting(base: GraphBackend): EdgeWriteCounter {
+  let updates = 0;
+  function countingUpdateEdge(
+    target: Pick<GraphBackend, "updateEdge">,
+  ): GraphBackend["updateEdge"] {
+    return (params) => {
+      updates += 1;
+      return target.updateEdge(params);
+    };
+  }
+  const backend: GraphBackend = {
+    ...base,
+    updateEdge: countingUpdateEdge(base),
+    transaction: <T>(
+      fn: (tx: TransactionBackend, sqlHandle: AdoptedTransaction) => Promise<T>,
+      options?: TransactionOptions,
+    ) =>
+      base.transaction<T>(
+        (txBackend, sqlHandle) =>
+          fn(
+            { ...txBackend, updateEdge: countingUpdateEdge(txBackend) },
+            sqlHandle,
+          ),
+        options,
+      ),
+  };
+  return { backend, updates: () => updates };
 }
 
 export function registerCoalesceUpsertIntegrationTests(
@@ -493,6 +539,68 @@ export function registerCoalesceUpsertIntegrationTests(
 
         const after = await store.edges.knows.getById(knowsId("dupc-e"));
         expect(after?.meta.updatedAt).toBe(seeded?.meta.updatedAt);
+      });
+
+      it("applies the duplicate-id probe matrix to edges: write counts and per-position results", async () => {
+        // Mirrors the node matrix above. Nodes pin write counts via
+        // `meta.version`; edges have no version counter, so the count comes
+        // from an updateEdge-counting backend wrapper instead.
+        const counter = withEdgeUpdateCounting(context.getStore().backend);
+        const [store] = await createStoreWithSchema(
+          integrationTestGraph,
+          counter.backend,
+          { coalesceUnchangedUpserts: true },
+        );
+
+        const [alice, bob] = await store.nodes.Person.bulkCreate([
+          { props: { name: "A" }, id: "matrix-a" },
+          { props: { name: "B" }, id: "matrix-b" },
+        ]);
+        if (alice === undefined || bob === undefined) {
+          throw new Error("expected both people");
+        }
+
+        const shapes = [
+          { id: "e-aa", inputs: ["A", "A"], writes: 0, final: "A" }, // both coalesce
+          { id: "e-ba", inputs: ["B", "A"], writes: 2, final: "A" }, // write B, write A
+          { id: "e-bb", inputs: ["B", "B"], writes: 1, final: "B" }, // write B, coalesce
+          { id: "e-ab", inputs: ["A", "B"], writes: 1, final: "B" }, // coalesce A, write B
+        ] as const;
+
+        for (const shape of shapes) {
+          // Seed each shape's edge holding "A" (a create, not counted).
+          await store.edges.knows.bulkUpsertById([
+            {
+              id: knowsId(shape.id),
+              from: alice,
+              to: bob,
+              props: { since: "A" },
+            },
+          ]);
+
+          const updatesBefore = counter.updates();
+          const results = await store.edges.knows.bulkUpsertById(
+            shape.inputs.map((since) => ({
+              id: knowsId(shape.id),
+              from: alice,
+              to: bob,
+              props: { since },
+            })),
+          );
+          expect(counter.updates() - updatesBefore).toBe(shape.writes);
+
+          const final = await store.edges.knows.getById(knowsId(shape.id));
+          expect((final as { since?: string }).since).toBe(shape.final);
+          // Each position returns the row as of its own item — a coalesced
+          // item resolves to its (matching) input value, so results mirror
+          // inputs.
+          expect(results).toHaveLength(shape.inputs.length);
+          for (const [index, edge] of results.entries()) {
+            expect((edge as { since?: string }).since).toBe(
+              shape.inputs[index],
+            );
+          }
+        }
       });
 
       it("routes a dirty-check validation error through onError (not the collection layer)", async () => {
