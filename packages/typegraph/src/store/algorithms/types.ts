@@ -54,18 +54,31 @@ export type InternalTemporalAlgorithmOptions = Omit<
   Readonly<{ recordedAsOf?: RecordedInstant }>;
 
 /**
- * Transaction-scoped memory budget for iterative graph rounds.
+ * Opt-in, transaction-scoped override of the session's working memory for
+ * iterative graph rounds.
  *
- * Applies to backends with a per-operation memory setting (PostgreSQL
- * `work_mem`, applied via `SET LOCAL` semantics inside the operation's own
- * transaction — the session and server settings are never modified). SQLite
- * has no equivalent setting and ignores the option. The value must be a
- * plain integer with a `kB`, `MB`, or `GB` suffix within PostgreSQL's
- * accepted `work_mem` range (`64kB` to `2147483647kB`); both backends reject
- * out-of-range values identically. Defaults to `"64MB"`.
+ * When set, PostgreSQL applies it with `SET LOCAL work_mem` semantics inside
+ * the operation's own transaction — the override ends with the transaction
+ * and the session and server settings are never modified. When omitted (the
+ * default), the operation inherits the server's configured `work_mem`.
+ *
+ * `work_mem` is a threshold each sort/hash operator (and each parallel
+ * worker) may allocate up to, NOT a per-operation budget: a single round can
+ * allocate several multiples of it, and concurrent algorithm calls multiply
+ * again. Raise it deliberately — e.g. `"64MB"` for large single-tenant
+ * analytical runs where the configured default spills whole-graph sorts to
+ * disk — not as a blanket setting on a shared cluster.
+ *
+ * The value must be a plain integer with a `kB`, `MB`, or `GB` suffix within
+ * PostgreSQL's accepted `work_mem` range (`64kB` to `2147483647kB`); both
+ * backends reject malformed or out-of-range values identically. SQLite has
+ * no equivalent setting and otherwise ignores the option.
  */
 type IterativeMemoryOptions = Readonly<{
-  /** Per-operation round memory budget, e.g. `"64MB"` (the default). */
+  /**
+   * Transaction-scoped `work_mem` override, e.g. `"64MB"`. Omit to inherit
+   * the server's configured setting.
+   */
   workingMemory?: string;
 }>;
 

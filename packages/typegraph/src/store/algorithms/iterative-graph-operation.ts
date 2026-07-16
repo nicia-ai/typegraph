@@ -39,8 +39,11 @@ export type IterativeGraphOperation = Readonly<{
   nodeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   edgeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   schema: ReturnType<typeof resolveReadSchema>;
-  /** Validated transaction-scoped memory budget for working-table rounds. */
-  workingMemory: string;
+  /**
+   * Validated caller-requested transaction-scoped memory override for
+   * working-table rounds; `undefined` inherits the engine's configuration.
+   */
+  workingMemory: string | undefined;
 }>;
 
 export type NodeIdentityKey = string & {
@@ -118,15 +121,6 @@ export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 16;
 export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 
 /**
- * Default transaction-scoped working-memory budget for iterative graph
- * operations. PostgreSQL's stock `work_mem` (4MB) makes whole-graph rounds
- * spill their candidate sorts and DISTINCT reductions to disk (measured
- * ~106MB external merges per WCC round on LDBC SNB SF1); 64MB keeps typical
- * rounds in memory while staying transaction-local. SQLite ignores it.
- */
-export const DEFAULT_ITERATIVE_WORKING_MEMORY = "64MB";
-
-/**
  * Accepts only a plain integer with a binary unit suffix. The value reaches
  * the engine as a bound parameter, but a strict shape keeps the option from
  * ever smuggling arbitrary text into a settings statement and rejects
@@ -149,9 +143,19 @@ const WORKING_MEMORY_KILOBYTES_PER_UNIT: Readonly<Record<string, number>> = {
 const MIN_WORKING_MEMORY_KILOBYTES = 64;
 const MAX_WORKING_MEMORY_KILOBYTES = 2_147_483_647;
 
-function resolveWorkingMemory(workingMemory: string | undefined): string {
-  const resolved = workingMemory ?? DEFAULT_ITERATIVE_WORKING_MEMORY;
-  const match = ITERATIVE_WORKING_MEMORY_PATTERN.exec(resolved);
+/**
+ * Validates an explicitly requested working-memory override. `undefined`
+ * means the caller did not opt in: the operation inherits the engine's
+ * configured setting and emits no override — `work_mem` is a threshold each
+ * sort/hash operator (and each parallel worker) may allocate up to, not a
+ * per-operation budget, so silently raising it for every algorithm call
+ * could multiply memory use far past what a DBA provisioned.
+ */
+function resolveWorkingMemory(
+  workingMemory: string | undefined,
+): string | undefined {
+  if (workingMemory === undefined) return undefined;
+  const match = ITERATIVE_WORKING_MEMORY_PATTERN.exec(workingMemory);
   if (match === null) {
     throw new ConfigurationError(
       `Iterative graph operation workingMemory must be digits followed by kB, MB, or GB (for example "64MB"), got ${JSON.stringify(workingMemory)}.`,
@@ -169,7 +173,7 @@ function resolveWorkingMemory(workingMemory: string | undefined): string {
       { workingMemory, kilobytes },
     );
   }
-  return resolved;
+  return workingMemory;
 }
 
 /**
@@ -240,14 +244,18 @@ export async function runIterativeGraphOperation<
         },
       };
 
-      // Transaction-scoped only: `set_config(..., is_local => true)` reverts
+      // Opt-in only: without an explicit workingMemory the rounds inherit
+      // the engine's configured setting. When requested, the override is
+      // transaction-scoped — `set_config(..., is_local => true)` reverts
       // when this transaction ends, so the session/server setting is never
       // touched. SQLite returns no statement here.
-      const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
-        context.operation.workingMemory,
-      );
-      if (workingMemoryStatement !== undefined) {
-        await context.executeTemporary(workingMemoryStatement);
+      if (context.operation.workingMemory !== undefined) {
+        const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+          context.operation.workingMemory,
+        );
+        if (workingMemoryStatement !== undefined) {
+          await context.executeTemporary(workingMemoryStatement);
+        }
       }
       await context.executeTemporary(plan.createWorkingTable(context));
       let operationError: unknown;

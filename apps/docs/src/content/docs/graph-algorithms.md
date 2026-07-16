@@ -61,7 +61,7 @@ Every traversal algorithm takes the same base options:
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Compatibility option; both values use set-based node de-duplication |
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes and edges along the traversal — see [Temporal Behavior](#temporal-behavior) |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
-| `workingMemory` | `string` | `"64MB"` | Transaction-scoped memory budget for iterative rounds on PostgreSQL (`SET LOCAL work_mem` semantics); validated as `<digits>kB\|MB\|GB` within 64kB–2147483647kB, ignored by SQLite |
+| `workingMemory` | `string` | *(inherits server `work_mem`)* | Opt-in, transaction-scoped `work_mem` override for iterative rounds on PostgreSQL (`SET LOCAL` semantics); validated as `<digits>kB\|MB\|GB` within 64kB–2147483647kB, ignored by SQLite |
 
 `direction: "both"` treats edges as undirected. `cyclePolicy` remains accepted
 for compatibility with recursive query-builder traversals, but it does not
@@ -215,13 +215,22 @@ plans based on PostgreSQL's initial one-row estimate for a new temporary table.
 The policy is automatic, applies to WCC and growing traversal frontiers, and is
 a no-op on SQLite.
 
-Iterative operations (WCC and the working-table traversals) also raise
-PostgreSQL's per-operation memory budget for their rounds. The `workingMemory`
-option (default `"64MB"`) is applied with `SET LOCAL work_mem` semantics inside
-the operation's own transaction — the session and server settings are never
-modified, and the override ends with the transaction. The value must be a
-plain integer with a `kB`, `MB`, or `GB` suffix within PostgreSQL's accepted
-`work_mem` range (64kB to 2147483647kB) — both backends reject out-of-range
+Iterative operations (WCC and the working-table traversals) accept an opt-in
+`workingMemory` override of the session's `work_mem` for their rounds. When
+set, it is applied with `SET LOCAL work_mem` semantics inside the operation's
+own transaction — the session and server settings are never modified, and the
+override ends with the transaction. When omitted (the default), operations
+inherit the server's configured `work_mem`.
+
+Note that `work_mem` is a threshold each sort/hash operator (and each parallel
+worker) may allocate up to, **not** a per-operation budget: a single round can
+allocate several multiples of it, and concurrent algorithm calls multiply
+again. Raise it deliberately — for example `workingMemory: "64MB"` keeps
+whole-graph rounds from spilling their sorts to disk on large single-tenant
+analytical runs (such as LDBC SNB SF1-scale benchmarks) — rather than as a
+blanket setting on a shared cluster. The value must be a plain integer with a
+`kB`, `MB`, or `GB` suffix within PostgreSQL's accepted `work_mem` range
+(64kB to 2147483647kB) — both backends reject malformed or out-of-range
 values with the same error. SQLite validates and otherwise ignores it.
 
 Without `nodeKinds`, WCC seeds every visible node, so unrelated nodes still

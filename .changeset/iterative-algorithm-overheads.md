@@ -27,11 +27,15 @@ collation could pick a different (equally shortest) path.
 
 New option: iterative algorithm calls (`reachable`, `shortestPath`,
 `canReach`, `neighbors`, `weaklyConnectedComponents`) accept
-`workingMemory?: string` (default `"64MB"`), a transaction-scoped memory
-budget applied on PostgreSQL with `SET LOCAL work_mem` semantics via
-parameterized `set_config`. It prevents whole-graph rounds from spilling
-their sorts to disk (measured ~106MB external merges per WCC round on SF1),
-never touches the session or server setting, is validated as
-`<digits>kB|MB|GB` within PostgreSQL's accepted `work_mem` range
-(64kB–2147483647kB) with the same typed error on both backends, and is
-ignored by SQLite.
+`workingMemory?: string`, an opt-in, transaction-scoped override of the
+session's `work_mem`, applied on PostgreSQL with `SET LOCAL` semantics via
+parameterized `set_config`. By default (option omitted) operations inherit
+the server's configured `work_mem` — nothing is overridden. `work_mem` is a
+threshold each sort/hash operator (and each parallel worker) may allocate up
+to, not a per-operation budget, and concurrent calls multiply it; set it
+deliberately (e.g. `"64MB"`) for large single-tenant analytical runs where
+the configured default spills whole-graph sorts to disk (measured ~106MB
+external merges per WCC round on SF1). The override never touches the
+session or server setting, is validated as `<digits>kB|MB|GB` within
+PostgreSQL's accepted `work_mem` range (64kB–2147483647kB) with the same
+typed error on both backends, and is ignored by SQLite.
