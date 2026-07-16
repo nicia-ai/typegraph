@@ -117,6 +117,7 @@ import {
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
 import { introspectSchema, type SchemaIntrospection } from "./introspect";
 import {
+  backendSupportsIndexMaterialization,
   computeIndexSignature,
   materializeIndexes as materializeIndexesImpl,
   type MaterializeIndexesOptions,
@@ -3590,13 +3591,7 @@ async function materializeSystemIndexesOnBoot(
   result: SchemaValidationResult,
 ): Promise<void> {
   if (result.status === "breaking") return;
-  if (
-    backend.executeDdl === undefined ||
-    backend.getIndexMaterialization === undefined ||
-    backend.recordIndexMaterialization === undefined
-  ) {
-    return;
-  }
+  if (!backendSupportsIndexMaterialization(backend)) return;
   const schemaVersion =
     result.status === "migrated" ? result.toVersion : result.version;
   const { results } = await materializeSystemIndexesImpl(

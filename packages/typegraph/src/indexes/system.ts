@@ -21,6 +21,7 @@
  * operator drops the old physical index. Rename (new suffix) instead,
  * exactly like graph-declared indexes.
  */
+import { quoteIdentifier } from "../query/dialect/vector-strategy";
 
 /** The TypeGraph relations that carry system indexes. */
 export type SystemIndexTable =
@@ -260,10 +261,6 @@ export function systemIndexName(
   suffix: string,
 ): string {
   return `${physicalTableName}_${suffix}`;
-}
-
-function quoteIdentifier(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
 }
 
 /**

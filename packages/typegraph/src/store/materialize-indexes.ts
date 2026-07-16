@@ -63,7 +63,10 @@ import { sortedReplacer } from "../schema/canonical";
 import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
-import { ensureFocusedStatusTable } from "./materialize-shared";
+import {
+  ensureFocusedStatusTable,
+  runBucketedMaterialization,
+} from "./materialize-shared";
 
 /**
  * Cross-caller build claim timing (Postgres).
@@ -288,61 +291,19 @@ export async function materializeIndexes(
         invalidLeftovers,
       );
 
-  if (options.stopOnError === true) {
-    const results: MaterializeIndexesEntry[] = [];
-    for (const declaration of candidates) {
-      const entry = await materializeEntry(declaration);
-      results.push(entry);
-      if (entry.status === "failed") break;
-    }
-    await refreshStatisticsAfterCreation(
-      backend,
-      results,
-      options,
-      ddlOptions.concurrent,
-    );
-    return { results };
-  }
-
   // Postgres restricts `CREATE INDEX CONCURRENTLY` to one in-flight
-  // build per relation, so we group declarations by target table and
-  // run each group sequentially while running the groups in parallel.
+  // build per relation, so declarations group by target relation and
+  // each group runs sequentially while the groups run in parallel.
   // Typical schemas land in three buckets (nodes, edges, vector
   // embeddings), giving a ~3× round-trip win over fully sequential
   // without ever issuing two CONCURRENTLY builds against the same
   // relation. SQLite ignores the grouping (writes serialize at the
   // engine level either way).
-  const buckets = new Map<IndexEntity, IndexDeclaration[]>();
-  for (const declaration of candidates) {
-    const key = parallelBucketKey(declaration);
-    const list = buckets.get(key);
-    if (list === undefined) buckets.set(key, [declaration]);
-    else list.push(declaration);
-  }
-
-  const bucketResults = await Promise.all(
-    [...buckets.values()].map(async (group) => {
-      const out: MaterializeIndexesEntry[] = [];
-      for (const declaration of group) {
-        out.push(await materializeEntry(declaration));
-      }
-      return out;
-    }),
-  );
-
-  // Flatten in declaration order so callers see a stable result shape
-  // regardless of how the buckets resolved.
-  const byDeclaration = new Map<IndexDeclaration, MaterializeIndexesEntry>();
-  let bucketIndex = 0;
-  for (const group of buckets.values()) {
-    const entries = bucketResults[bucketIndex]!;
-    for (const [declarationIndex, declaration] of group.entries()) {
-      byDeclaration.set(declaration, entries[declarationIndex]!);
-    }
-    bucketIndex += 1;
-  }
-  const results = candidates.map((declaration) =>
-    byDeclaration.get(declaration)!,
+  const results = await runBucketedMaterialization(
+    candidates,
+    options,
+    (declaration) => parallelBucketKey(declaration),
+    (declaration) => materializeEntry(declaration),
   );
   await refreshStatisticsAfterCreation(
     backend,
@@ -911,16 +872,58 @@ async function preloadInvalidIndexLeftovers(
   if (backend.dialect !== "postgres" || physicalIndexNames.length === 0) {
     return new Set();
   }
+  const { invalid } = await preloadPhysicalIndexStates(
+    backend,
+    physicalIndexNames,
+  );
+  return invalid;
+}
+
+type PhysicalIndexStates = Readonly<{
+  /** Names that exist as usable indexes in the engine catalog. */
+  valid: ReadonlySet<string>;
+  /** Postgres INVALID leftovers from interrupted CONCURRENTLY builds. */
+  invalid: ReadonlySet<string>;
+}>;
+
+/**
+ * Partitions `physicalIndexNames` by their catalog state in ONE query:
+ * `valid` (usable index exists) and `invalid` (Postgres CONCURRENTLY
+ * leftover needing the healing build path). SQLite has no invalid state,
+ * so its `invalid` set is always empty. The single query serves both the
+ * relational runner's leftover preload and the system runner's
+ * name-presence fast path — the two predicates are complementary halves
+ * of the same `pg_class ⋈ pg_index` probe.
+ */
+async function preloadPhysicalIndexStates(
+  backend: GraphBackend,
+  physicalIndexNames: readonly string[],
+): Promise<PhysicalIndexStates> {
+  const valid = new Set<string>();
+  const invalid = new Set<string>();
+  if (physicalIndexNames.length === 0) return { valid, invalid };
+  if (backend.dialect === "postgres") {
+    const rows = await backend.execute<{ name: string; valid: boolean }>(
+      asCompiledRowsSql(sql`
+        SELECT c.relname AS name, i.indisvalid AS valid
+        FROM pg_class c
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
+      `),
+    );
+    for (const row of rows) (row.valid ? valid : invalid).add(row.name);
+    return { valid, invalid };
+  }
   const rows = await backend.execute<{ name: string }>(
     asCompiledRowsSql(sql`
-      SELECT c.relname AS name
-      FROM pg_class c
-      JOIN pg_index i ON i.indexrelid = c.oid
-      WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
-        AND NOT i.indisvalid
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name IN (${sqlValueList(physicalIndexNames)})
     `),
   );
-  return new Set(rows.map((row) => row.name));
+  for (const row of rows) valid.add(row.name);
+  return { valid, invalid };
 }
 
 /**
@@ -1072,7 +1075,7 @@ type SystemIndexCandidate = Readonly<{
  * status table, drift signatures, invalid-leftover healing, and Postgres
  * `CREATE INDEX CONCURRENTLY` cross-caller claim protocol as
  * graph-declared indexes; on a database whose indexes all exist, a warm
- * call costs two reads (status preload + leftover preload) and runs no
+ * call costs two concurrent reads (status preload + catalog preload) and runs no
  * DDL after the first recorded success.
  *
  * Graph-independent: the declarations don't depend on `GraphDef`. The
@@ -1084,10 +1087,27 @@ type SystemIndexCandidate = Readonly<{
  * (valid, with no recorded status row) settles as `alreadyMaterialized`
  * from one bulk catalog read — no claim, no DDL, no status write. Status
  * rows are recorded only for genuine builds and failures, which keeps the
- * common boot (fresh bootstrap or wiped status table) at three reads
- * total. A status row that exists with a mismatching signature still
+ * common boot (fresh bootstrap or wiped status table) at two concurrent
+ * reads. A status row that exists with a mismatching signature still
  * surfaces as drift, exactly like graph-declared indexes.
  */
+/**
+ * Whether the backend carries every primitive index materialization
+ * requires (DDL execution + status reads/writes). The strict runners
+ * throw `ConfigurationError` exactly when this is false; the boot path
+ * (`createStoreWithSchema`) consults the same predicate to skip instead
+ * — one definition so the two contracts cannot drift apart.
+ */
+export function backendSupportsIndexMaterialization(
+  backend: GraphBackend,
+): boolean {
+  return (
+    backend.executeDdl !== undefined &&
+    backend.getIndexMaterialization !== undefined &&
+    backend.recordIndexMaterialization !== undefined
+  );
+}
+
 export async function materializeSystemIndexes(
   context: Readonly<{
     backend: RawBackend;
@@ -1138,19 +1158,16 @@ export async function materializeSystemIndexes(
       };
     });
 
+  // The two preloads are mutually independent reads (status table +
+  // catalog); running them concurrently keeps the warm boot at one
+  // round-trip latency after the ensure step.
   const statusKeys = candidates.map((candidate) => candidate.name);
-  const existingByStatusKey = await preloadMaterializations(
-    backend,
-    statusKeys,
-  );
-  const invalidLeftovers = await preloadInvalidIndexLeftovers(
-    backend,
-    statusKeys,
-  );
-  const physicallyPresent = await preloadValidPhysicalIndexes(
-    backend,
-    statusKeys,
-  );
+  const [existingByStatusKey, physicalStates] = await Promise.all([
+    preloadMaterializations(backend, statusKeys),
+    preloadPhysicalIndexStates(backend, statusKeys),
+  ]);
+  const { valid: physicallyPresent, invalid: invalidLeftovers } =
+    physicalStates;
 
   const materializeEntry = async (
     candidate: SystemIndexCandidate,
@@ -1160,9 +1177,15 @@ export async function materializeSystemIndexes(
       entity: "system",
       kind: candidate.declaration.table,
     };
-    // Name-presence fast path: valid physical index, no status row. A row
-    // with a mismatching signature must NOT take it — that is drift, and
-    // the frame below records it as a failure.
+    // Name-presence fast path: valid physical index, no status row — the
+    // normal steady state, since bootstrap DDL creates system indexes
+    // without recording status rows. Trusting name-presence is sound
+    // ONLY here: system index names are library-owned with a stable
+    // name→shape contract (reshaping requires a rename), whereas a
+    // graph-declared index name could collide with a foreign index whose
+    // shape only the recorded signature can vouch for. A row with a
+    // mismatching signature must NOT take the fast path — that is drift,
+    // and the frame below records it as a failure.
     if (
       existingByStatusKey.get(candidate.name) === undefined &&
       physicallyPresent.has(candidate.name)
@@ -1189,78 +1212,16 @@ export async function materializeSystemIndexes(
     });
   };
 
-  if (options.stopOnError === true) {
-    const results: MaterializeIndexesEntry[] = [];
-    for (const candidate of candidates) {
-      const result = await materializeEntry(candidate);
-      results.push(result);
-      if (result.status === "failed") break;
-    }
-    await refreshStatisticsAfterCreation(backend, results, options, concurrent);
-    return { results };
-  }
-
-  // Postgres restricts CREATE INDEX CONCURRENTLY to one in-flight build
-  // per relation — group by physical table, sequential within a group,
-  // groups in parallel (same shape as the relational bucketing above).
-  const buckets = new Map<string, SystemIndexCandidate[]>();
-  for (const candidate of candidates) {
-    const bucket = buckets.get(candidate.physicalTable);
-    if (bucket === undefined) buckets.set(candidate.physicalTable, [candidate]);
-    else bucket.push(candidate);
-  }
-  const bucketResults = await Promise.all(
-    [...buckets.values()].map(async (group) => {
-      const out: MaterializeIndexesEntry[] = [];
-      for (const candidate of group) {
-        out.push(await materializeEntry(candidate));
-      }
-      return out;
-    }),
+  // Same shape as the relational runner: one CONCURRENTLY build per
+  // relation, so buckets key on the physical table.
+  const results = await runBucketedMaterialization(
+    candidates,
+    options,
+    (candidate) => candidate.physicalTable,
+    (candidate) => materializeEntry(candidate),
   );
-  const byName = new Map<string, MaterializeIndexesEntry>();
-  for (const group of bucketResults) {
-    for (const result of group) byName.set(result.indexName, result);
-  }
-  const results = candidates.map((candidate) => byName.get(candidate.name)!);
   await refreshStatisticsAfterCreation(backend, results, options, concurrent);
   return { results };
-}
-
-/**
- * The subset of `physicalIndexNames` that exist as VALID indexes in the
- * engine catalog, in one query. Plain system indexes are fully identified
- * by name, so catalog presence is a sound "already built" signal — unlike
- * expression indexes, where only the recorded signature proves shape.
- * Postgres excludes INVALID leftovers (interrupted CONCURRENTLY builds)
- * so they fall through to the healing build path.
- */
-async function preloadValidPhysicalIndexes(
-  backend: GraphBackend,
-  physicalIndexNames: readonly string[],
-): Promise<ReadonlySet<string>> {
-  if (physicalIndexNames.length === 0) return new Set();
-  if (backend.dialect === "postgres") {
-    const rows = await backend.execute<{ name: string }>(
-      asCompiledRowsSql(sql`
-        SELECT c.relname AS name
-        FROM pg_class c
-        JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
-          AND i.indisvalid
-      `),
-    );
-    return new Set(rows.map((row) => row.name));
-  }
-  const rows = await backend.execute<{ name: string }>(
-    asCompiledRowsSql(sql`
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'index'
-        AND name IN (${sqlValueList(physicalIndexNames)})
-    `),
-  );
-  return new Set(rows.map((row) => row.name));
 }
 
 /**

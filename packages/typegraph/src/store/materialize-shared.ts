@@ -33,13 +33,61 @@ export async function ensureFocusedStatusTable(
 }
 
 /**
+ * Bucketed orchestration for index-materialization runners.
+ *
+ * `stopOnError === true` runs sequentially in input order and
+ * short-circuits after the first `failed` entry (returning the partial
+ * results). Otherwise items are grouped by `bucketKey` and the groups run
+ * concurrently with each group sequential — the shape Postgres requires
+ * for `CREATE INDEX CONCURRENTLY` (one in-flight build per relation).
+ * Results always come back in input order regardless of how the buckets
+ * resolved.
+ */
+export async function runBucketedMaterialization<
+  TItem,
+  TEntry extends { status: string },
+>(
+  items: readonly TItem[],
+  options: Readonly<{ stopOnError?: boolean }>,
+  bucketKey: (item: TItem) => string,
+  runOne: (item: TItem) => Promise<TEntry>,
+): Promise<readonly TEntry[]> {
+  if (options.stopOnError === true) {
+    const results: TEntry[] = [];
+    for (const item of items) {
+      const entry = await runOne(item);
+      results.push(entry);
+      if (entry.status === "failed") break;
+    }
+    return results;
+  }
+
+  const buckets = new Map<string, [number, TItem][]>();
+  for (const [index, item] of items.entries()) {
+    const key = bucketKey(item);
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [[index, item]]);
+    else bucket.push([index, item]);
+  }
+
+  const results: TEntry[] = Array.from({ length: items.length });
+  await Promise.all(
+    [...buckets.values()].map(async (group) => {
+      for (const [index, item] of group) {
+        results[index] = await runOne(item);
+      }
+    }),
+  );
+  return results;
+}
+
+/**
  * Best-effort vs strict orchestration for materialization runners.
  * `stopOnError === true` runs sequentially and short-circuits on the
  * first `failed` entry (mirrors typical schema-migration safety
  * semantics); the default best-effort path runs `runOne` over `items`
- * concurrently. Custom orchestrators (e.g. `materializeIndexes`'s
- * per-relation bucketing) bypass this helper and assemble their own
- * Promise topology.
+ * concurrently. Custom orchestrators bypass this helper and assemble
+ * their own Promise topology.
  */
 export async function runMaterialization<
   TInput,
