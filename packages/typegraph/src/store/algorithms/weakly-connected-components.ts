@@ -14,7 +14,7 @@ import {
   type InternalTraversalOptions,
 } from "./context";
 import {
-  compileWorkingTableExpansion,
+  compileWorkingTableEdgeExpansion,
   type IterativeGraphRunContext,
   runIterativeGraphOperation,
 } from "./iterative-graph-operation";
@@ -182,12 +182,22 @@ async function resetNextLabels(
   `);
 }
 
+/**
+ * Propagates the minimum neighbor label along one edge-kind chunk. The
+ * expansion deliberately skips the target-node visibility join: the working
+ * table was seeded through the same graph/kind/temporal filters inside the
+ * same snapshot, WCC never inserts rows after seeding, and both edge
+ * endpoints are re-joined against the working table below — membership is
+ * the visibility-and-scope proof, so a per-edge `typegraph_nodes` lookup
+ * would only re-check what the `source`/`scoped_target` joins already
+ * guarantee.
+ */
 async function propagateChunkLabels(
   context: IterativeGraphRunContext,
   edgeKinds: readonly string[],
 ): Promise<void> {
   const { operation, workingTable, graphId, runId } = context;
-  const expansion = compileWorkingTableExpansion(
+  const expansion = compileWorkingTableEdgeExpansion(
     operation,
     workingTable,
     sql`w.graph_id = ${graphId} AND w.run_id = ${runId}`,

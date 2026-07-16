@@ -677,6 +677,50 @@ describe("store.algorithms", () => {
       ).toBe(true);
     });
 
+    it("propagates labels without re-joining node visibility per edge", async () => {
+      const statements: string[] = [];
+      const observedBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                statements.push(backend.compileSql!(query).sql);
+                await tx.executeTemporaryStatement!(query);
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.algorithms.weaklyConnectedComponents({
+        edges: ["knows"],
+      });
+
+      // The working table is seeded with exactly the visible, in-scope nodes
+      // and WCC never inserts rows afterwards, so the propagate round proves
+      // endpoint visibility via working-table membership alone.
+      const seedStatement = statements.find((statement) =>
+        statement.trimStart().startsWith("INSERT INTO"),
+      );
+      expect(seedStatement).toContain('"typegraph_nodes"');
+      const propagateStatements = statements.filter((statement) =>
+        statement.includes("WITH candidates"),
+      );
+      expect(propagateStatements.length).toBeGreaterThan(0);
+      for (const statement of propagateStatements) {
+        expect(statement).not.toContain('"typegraph_nodes"');
+      }
+    });
+
     it("rejects a backend without graph-analytics support", async () => {
       const unsupportedBackend: GraphBackend = {
         ...backend,
