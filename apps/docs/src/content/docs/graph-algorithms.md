@@ -196,8 +196,9 @@ default collation. Edges are always treated as undirected—WCC has no
 
 WCC is iterative and runs multiple SQL rounds in one repeatable snapshot. It
 requires `backend.capabilities.graphAnalytics?.supported === true`; built-in
-transactional SQLite and PostgreSQL backends advertise support. If propagation
-has not converged after `maxIterations`, TypeGraph throws
+transactional SQLite and PostgreSQL backends advertise support. Other backends
+throw `UnsupportedBackendCapabilityError` before temporary state is created. If
+propagation has not converged after `maxIterations`, TypeGraph throws
 `GraphAlgorithmConvergenceError` rather than returning a partial partition.
 
 PostgreSQL refreshes planner statistics for a sufficiently large temporary
