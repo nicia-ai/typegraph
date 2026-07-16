@@ -114,11 +114,14 @@ Fastest engine per row in **bold**.
   scale-gate's 2867/2969 ms (~1.6–1.7×). tg-sqlite runs them in ~0.2 s.
 - **GA_WCC: architectural, not overhead.** tg-postgres 47.4 s vs pgGraph's
   native CSR union-find 8.82 ms is the SQL-iteration-vs-CSR gap
-  (community-detection design §7), not a pathology. #285 + the restored 64MB
-  `work_mem` moved it 65.1 → 47.4 s; that undershoots the review's ~15–25 s
-  estimate (tight, CV 0%; the `work_mem` override is verified
-  transaction-scoped-effective), most plausibly the shared-vCPU EC2 host
-  stretching a CPU-bound loop — a dedicated-core confirmation is the open item.
+  (community-detection design §7), not a pathology. A dedicated-core local
+  confirmation (14-core, disk-backed PG) decomposes the 47.4 s and **corrects the
+  #285 review's ~15–25 s estimate**: (1) the 64MB `work_mem` override is a
+  **no-op at SF1** — 25.4 s without vs ~27 s with; the scoped-Person working
+  table fits the 4MB default, no spill to avoid (kept as a fair-config default
+  that may matter at SF10); (2) the shared-vCPU EC2 host is ~1.8× (47.4 s EC2 vs
+  ~26 s dedicated); (3) the residual ~26 s is inherent iteration cost. No
+  `work_mem` value closes the gap to native CSR.
 - **Correct at scale.** All three `comparable=yes` vs pgGraph's native CSR —
   TypeGraph's whole-component reachability, min-depth sums, and component-size
   multiset are byte-identical to pgGraph over the SF1 `knows` graph.

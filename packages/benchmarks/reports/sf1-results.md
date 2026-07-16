@@ -39,15 +39,20 @@ connected-components / whole-component primitive). Loads: ladybug 42s, neo4j
 
 - **IC13 tg-postgres 23.8 → 14.8ms (~1.6×)** — #285 round-trip reduction.
 - **GA_WCC tg-postgres 65.1 → 47.4s (~1.4×)** — #285 + the restored 64MB
-  `work_mem`. **Below the ~15–25s the #285 review anticipated.** The result is
-  tight (p95 47.5s, CV 0% — not noise), and the 64MB override is verified
-  effective (set transaction-scoped via `set_config('work_mem','64MB',true)`
-  before all WCC rounds). The residual is most likely the shared-vCPU EC2 host:
-  WCC is CPU-bound label propagation (~15 rounds of a window/aggregate over 361k
-  edges), which a throttled shared core stretches. Worth a dedicated-core local
-  confirmation to isolate host vs. algorithm. Either way the framing holds — the
-  gap to pggraph's native CSR union-find (**8.82ms**) is the
-  SQL-iteration-vs-CSR *architecture*, not removable overhead.
+  `work_mem`, **below the ~15–25s the #285 review anticipated**. A dedicated-core
+  local confirmation (14-core, disk-backed PG, same merged code) settles why:
+  - **The 64MB override is a no-op at SF1** — WCC ran 25.4s *without* the
+    override vs ~27s *with* it (statistically identical). The scoped-Person
+    working table (~9,892 rows/round) fits in the 4MB default, so there is no
+    spill for 64MB to avoid. The reviewer's spill-avoidance rationale applies at
+    larger scale (SF10 / unscoped WCC), not here; the option is kept as a
+    harmless fair-config default that may matter at SF10.
+  - **~1.8× of the gap is the shared-vCPU EC2 host** — 47.4s on EC2 vs ~26s on
+    dedicated cores for the identical run.
+  - **The residual ~26s is architectural** — ~15 rounds of a window/aggregate
+    over ~180k undirected edges. The gap to pggraph's native CSR union-find
+    (**8.82ms**) is the SQL-iteration-vs-CSR architecture, not removable
+    overhead; no `work_mem` value closes it.
 - GA_DEGREE, IC9, late-materialization wins from #282/#283 hold (GA_DEGREE
   tg-sqlite 0.05ms; IC9 tg-sqlite ~2.7–3.0s, still ≤ pggraph 3.2s and near
   neo4j 2.5s). IC9 is NOISY, so its ~10% run-to-run drift is within noise.
@@ -108,10 +113,13 @@ columnar vectorized top-K (736ms) sidesteps the materialization entirely; pgGrap
 ## GA_WCC is architectural, not overhead
 
 GA_WCC is exact label propagation on the D2 iterative substrate (~15 rounds of a
-window/aggregate over 361k `knows` edges). tg-sqlite 11.4s / tg-postgres 47.4s
-vs pgGraph's native CSR union-find **8.82ms** — a 3–4 orders-of-magnitude gap
-that is the SQL-iteration-vs-CSR architecture, not removable overhead. #285 +
-the restored 64MB `work_mem` moved tg-postgres 65.1s → 47.4s; that undershoots
-the #285 review's ~15–25s estimate (tight, CV 0%, and the `work_mem` override is
-verified transaction-scoped-effective), most plausibly the shared-vCPU EC2 host
-stretching a CPU-bound loop — worth a dedicated-core confirmation.
+window/aggregate over ~180k undirected `knows` edges). tg-sqlite 11.4s /
+tg-postgres 47.4s vs pgGraph's native CSR union-find **8.82ms** — a 3–4
+orders-of-magnitude gap that is the SQL-iteration-vs-CSR architecture, not
+removable overhead. A dedicated-core local confirmation decomposes the
+tg-postgres figure: the 64MB `work_mem` override is **a no-op at SF1** (25.4s
+without vs ~27s with — the scoped-Person working table fits the 4MB default, no
+spill to avoid; kept as a fair-config default that may matter at SF10); the
+shared-vCPU EC2 host accounts for ~1.8× (47.4s EC2 vs ~26s dedicated); and the
+residual ~26s is the inherent iteration cost. No `work_mem` value closes the gap
+to native CSR.
