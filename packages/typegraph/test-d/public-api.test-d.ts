@@ -582,7 +582,9 @@ declare const materializeEntry: MaterializeIndexesEntry;
 expectAssignable<"created" | "alreadyMaterialized" | "failed" | "skipped">(
   materializeEntry.status,
 );
-expectAssignable<"node" | "edge" | "vector">(materializeEntry.entity);
+expectAssignable<"node" | "edge" | "vector" | "system">(
+  materializeEntry.entity,
+);
 
 // defineNodeIndex / defineEdgeIndex are the current 1.0 surface — the
 // `(Type, { fields: [...] })` config shape, not the legacy
