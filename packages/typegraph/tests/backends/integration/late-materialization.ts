@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createStore } from "../../../src";
+import { createStore, createStoreWithSchema } from "../../../src";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -10,9 +10,12 @@ import { type IntegrationTestContext } from "./test-context";
  * These cases run `ORDER BY … LIMIT` selective queries whose projection reads
  * columns beyond the sort/identity keys, which routes through the compiler's
  * late-materialization branch (sort+limit a lean candidate set, then re-fetch
- * the deferred columns by identity for the survivors). The transform must be
- * result-identical to the flat plan on every backend, so these assert the exact
- * top-K rows and their deferred-column values.
+ * the deferred columns by identity for the survivors). The transform must
+ * return the same rows as the flat plan on every backend whenever the ORDER BY
+ * determines a unique top-K, so these assert the exact top-K rows and their
+ * deferred-column values. (When ties span the LIMIT boundary both plans pick
+ * an arbitrary tied subset, and the two plan shapes may pick differently —
+ * the same non-determinism class the flat plan already has.)
  *
  * A `traversalExpansion: "none"` store is used so traversal `.select()` queries
  * take the selective path the transform targets (matching how a fulltext/graph
@@ -175,6 +178,54 @@ export function registerLateMaterializationIntegrationTests(
         "Hana",
         "Ivan",
         "June",
+      ]);
+    });
+
+    it("returns exact single-version rows for a recorded-time read", async () => {
+      // A recorded pin swaps the query's node source to the recorded history
+      // relation, where (graph_id, kind, id) matches one row per version. The
+      // late-mat outer re-join keys on exactly that identity with no temporal
+      // predicate, so recorded reads must fall back to the flat plan — this
+      // guards against duplicated survivors and stale-version props.
+      const [history] = await createStoreWithSchema(
+        integrationTestGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+
+      const nodes = [];
+      for (const person of [
+        { name: "Rae", age: 41, email: "rae@v1.example.com" },
+        { name: "Sam", age: 36, email: "sam@v1.example.com" },
+        { name: "Tia", age: 31, email: "tia@v1.example.com" },
+      ]) {
+        nodes.push(await history.nodes.Person.create(person));
+      }
+      const pin = await history.recordedNow();
+      if (pin === undefined) throw new Error("recorded clock was not written");
+
+      // A second recorded version per node after the pin: an outer re-join
+      // without a temporal predicate would both multiply the survivors and
+      // surface these later emails at the pin.
+      for (const node of nodes) {
+        await history.nodes.Person.update(node.id, {
+          email: `${node.name.toLowerCase()}@v2.example.com`,
+        });
+      }
+
+      const results = await history
+        .asOfRecorded(pin)
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.age.gte(30))
+        .select((ctx) => ({ name: ctx.person.name, email: ctx.person.email }))
+        .orderBy("person", "age", "desc")
+        .limit(2)
+        .execute();
+
+      expect(results).toEqual([
+        { name: "Rae", email: "rae@v1.example.com" },
+        { name: "Sam", email: "sam@v1.example.com" },
       ]);
     });
 

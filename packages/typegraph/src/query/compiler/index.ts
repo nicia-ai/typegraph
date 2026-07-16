@@ -873,6 +873,66 @@ function stripLimitOffsetFromPlanNode(node: LogicalPlanNode): LogicalPlanNode {
   return node;
 }
 
+/**
+ * The start CTE followed by one CTE per traversal — the candidate-set prefix
+ * shared by the flat plan and the late-materialization plan (which feeds it a
+ * lean AST/column set and no per-traversal limit).
+ */
+function buildStandardStartAndTraversalCtes(
+  input: Readonly<{
+    ast: QueryAst;
+    carryForwardPreviousColumns: boolean;
+    ctx: PredicateCompilerContext;
+    graphId: string;
+    predicateIndex: PredicateIndex;
+    requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
+    temporalFilterPass: TemporalFilterPass;
+    traversalLimit: number | undefined;
+  }>,
+): SQL[] {
+  const {
+    ast,
+    carryForwardPreviousColumns,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias,
+    temporalFilterPass,
+    traversalLimit,
+  } = input;
+  const ctes: SQL[] = [
+    buildStandardStartCte({
+      ast,
+      ctx,
+      graphId,
+      predicateIndex,
+      requiredColumnsByAlias,
+      temporalFilterPass,
+    }),
+  ];
+  for (let index = 0; index < ast.traversals.length; index++) {
+    ctes.push(
+      buildStandardTraversalCte({
+        ast,
+        carryForwardPreviousColumns,
+        ctx,
+        graphId,
+        materializeCte: shouldMaterializeTraversalCte(
+          ctx.dialect,
+          ast.traversals.length,
+          index,
+        ),
+        predicateIndex,
+        requiredColumnsByAlias,
+        temporalFilterPass,
+        traversalIndex: index,
+        traversalLimit,
+      }),
+    );
+  }
+  return ctes;
+}
+
 type LateMaterializationPlan = Readonly<{
   leanAst: QueryAst;
   limit: number;
@@ -900,6 +960,15 @@ function selectiveFieldIsIdentity(field: SelectiveField): boolean {
 function resolveLateMaterializationPlan(
   ast: QueryAst,
 ): LateMaterializationPlan | undefined {
+  // Recorded-time reads swap `ctx.schema.nodesTable` to the recorded history
+  // relation (see `recordedReadSchemaFor`), where `(graph_id, kind, id)` is
+  // NOT unique — one row per recorded interval. The outer re-fetch joins on
+  // exactly that key with no temporal predicate, so it would match every
+  // historical version of each survivor (duplicate rows, stale props).
+  if (ast.recordedAsOf !== undefined) {
+    return undefined;
+  }
+
   // v1 targets the selective `.select()` path. The non-selective path would
   // have to carry the full `props` blob into the lean CTE to order by a prop,
   // which defeats the deferral — left to a follow-up.
@@ -986,9 +1055,11 @@ function resolveLateMaterializationPlan(
 
 /**
  * The outer FROM clause: the topK CTE joined to the physical node table for each
- * projected alias, keyed on `(graph_id, kind, id)`. The topK already validated
- * temporal/soft-delete visibility, so this is a pure PK re-fetch of the deferred
- * columns for the surviving rows.
+ * projected alias, keyed on `(graph_id, kind, id)`. Sound only because that key
+ * is the live nodes PK (one row per identity, the exact row the topK already
+ * validated for temporal/soft-delete visibility). Recorded-time reads are gated
+ * out in `resolveLateMaterializationPlan` — under a recorded pin `nodesTable`
+ * is the history relation where this key matches every version.
  */
 function buildLateMaterializedOuterFromClause(
   ast: QueryAst,
@@ -1026,36 +1097,16 @@ function compileLateMaterializedQuery(
     includeProjection: false,
   });
 
-  const ctes: SQL[] = [
-    buildStandardStartCte({
-      ast: leanAst,
-      ctx,
-      graphId,
-      predicateIndex,
-      requiredColumnsByAlias: leanRequiredColumns,
-      temporalFilterPass,
-    }),
-  ];
-  for (let index = 0; index < leanAst.traversals.length; index++) {
-    ctes.push(
-      buildStandardTraversalCte({
-        ast: leanAst,
-        carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
-        ctx,
-        graphId,
-        materializeCte: shouldMaterializeTraversalCte(
-          dialect,
-          leanAst.traversals.length,
-          index,
-        ),
-        predicateIndex,
-        requiredColumnsByAlias: leanRequiredColumns,
-        temporalFilterPass,
-        traversalIndex: index,
-        traversalLimit: undefined,
-      }),
-    );
-  }
+  const ctes = buildStandardStartAndTraversalCtes({
+    ast: leanAst,
+    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias: leanRequiredColumns,
+    temporalFilterPass,
+    traversalLimit: undefined,
+  });
   ctes.push(
     buildLateMaterializedTopKCte({
       ast: leanAst,
@@ -1248,40 +1299,17 @@ function compileStandardQueryWithCteStrategy(
     }
   }
 
-  // Build CTEs
-  const ctes: SQL[] = [
-    buildStandardStartCte({
-      ast,
-      ctx,
-      graphId,
-      predicateIndex,
-      requiredColumnsByAlias,
-      temporalFilterPass,
-    }),
-  ];
-
-  // Traversal CTEs
-  for (let index = 0; index < ast.traversals.length; index++) {
-    const materializeTraversalCte = shouldMaterializeTraversalCte(
-      dialect,
-      ast.traversals.length,
-      index,
-    );
-    ctes.push(
-      buildStandardTraversalCte({
-        ast,
-        carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
-        ctx,
-        graphId,
-        materializeCte: materializeTraversalCte,
-        predicateIndex,
-        requiredColumnsByAlias,
-        temporalFilterPass,
-        traversalIndex: index,
-        traversalLimit: traversalCteLimit,
-      }),
-    );
-  }
+  // Start + traversal candidate CTEs
+  const ctes = buildStandardStartAndTraversalCtes({
+    ast,
+    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias,
+    temporalFilterPass,
+    traversalLimit: traversalCteLimit,
+  });
 
   // Add embeddings CTE if vector similarity is used
   if (vectorPredicate) {
