@@ -1170,7 +1170,8 @@ type SystemIndexCandidate = Readonly<{
  * status table, drift signatures, invalid-leftover healing, and Postgres
  * `CREATE INDEX CONCURRENTLY` cross-caller claim protocol as
  * graph-declared indexes; on a database whose indexes all exist, a warm
- * call costs two concurrent reads (status preload + catalog preload) and runs no
+ * call costs three concurrent reads (status, index-catalog, and
+ * table-catalog preloads) after the idempotent status-table ensure, and runs no
  * DDL after the first recorded success.
  *
  * Graph-independent: the declarations don't depend on `GraphDef`. The
@@ -1182,7 +1183,7 @@ type SystemIndexCandidate = Readonly<{
  * (valid, with no recorded status row) settles as `alreadyMaterialized`
  * from one bulk catalog read — no claim, no DDL, no status write. Status
  * rows are recorded only for genuine builds and failures, which keeps the
- * common boot (fresh bootstrap or wiped status table) at two concurrent
+ * common boot (fresh bootstrap or wiped status table) at three concurrent
  * reads. A status row that exists with a mismatching signature still
  * surfaces as drift, exactly like graph-declared indexes.
  */

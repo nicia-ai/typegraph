@@ -20,9 +20,12 @@ gap #282 exposed). Now:
   CONCURRENTLY` on PostgreSQL, riding the same status table, drift
   signatures, invalid-leftover healing, and cross-caller claim protocol as
   graph-declared indexes. A database whose indexes all exist settles from
-  one catalog read (scoped to the session `search_path`, so schema-per-
-  tenant databases never observe each other's indexes) with no DDL and no
-  writes; a system index that is physically absent or invalid is rebuilt
+  three concurrent catalog/status reads (scoped to the session
+  `search_path`, so schema-per-tenant databases never observe each other's
+  indexes) with no index DDL and no status writes — the only DDL on that
+  warm path is the idempotent status-table `CREATE TABLE IF NOT EXISTS`
+  ensure step every materialize verb runs. A system index that is
+  physically absent or invalid is rebuilt
   even when a stale success row survives (dump/restore, manual drop).
   Failures — including status-table infrastructure errors — degrade to a
   warning: indexes are a performance concern and the store still boots.
