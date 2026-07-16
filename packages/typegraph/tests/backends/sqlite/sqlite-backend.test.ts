@@ -155,6 +155,8 @@ describe("SQLite Backend - Adapter Specific", () => {
       expect(sql).toContain("CREATE INDEX IF NOT EXISTS");
       expect(sql).toContain("typegraph_nodes_kind_idx");
       expect(sql).toContain("typegraph_nodes_kind_created_idx");
+      // Bare-id node lookup (kind resolved by id) — see typegraph#280.
+      expect(sql).toContain('"typegraph_nodes" ("graph_id", "id")');
       expect(sql).toContain("typegraph_edges_from_idx");
       expect(sql).toContain("typegraph_edges_to_idx");
       expect(sql).toContain("typegraph_edges_kind_created_idx");

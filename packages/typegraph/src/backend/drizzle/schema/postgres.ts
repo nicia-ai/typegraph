@@ -125,6 +125,11 @@ export function createPostgresTables(
       ),
       index(`${n.nodes}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.nodes}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
+      // Bare-id lookup: the primary key leads with `kind` (graph_id, kind, id),
+      // so a `WHERE graph_id = ? AND id = ?` probe that doesn't know the kind
+      // can't seek it. `store.algorithms.degree`'s node-kind subquery resolves a
+      // seed's kind by id, so it depends on this access path. See typegraph#280.
+      index(`${n.nodes}_id_idx`).on(t.graphId, t.id),
       ...buildPostgresNodeIndexBuilders(t, indexes),
     ],
   );

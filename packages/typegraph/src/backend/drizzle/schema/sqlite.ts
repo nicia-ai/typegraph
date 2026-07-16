@@ -123,6 +123,14 @@ export function createSqliteTables(
       ),
       index(`${n.nodes}_deleted_idx`).on(t.graphId, t.deletedAt),
       index(`${n.nodes}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
+      // Bare-id lookup: the primary key leads with `kind` (graph_id, kind, id),
+      // so a `WHERE graph_id = ? AND id = ?` probe that doesn't know the kind
+      // can't seek it — SQLite falls back to a graph_id-only scan of every node
+      // in the graph (~3M at LDBC SF1). `store.algorithms.degree`'s
+      // node-kind subquery does exactly that lookup (it resolves the seed's
+      // kind by id), so without this index degree is a full nodes scan (~95ms
+      // at SF1). See typegraph#280.
+      index(`${n.nodes}_id_idx`).on(t.graphId, t.id),
       ...buildSqliteNodeIndexBuilders(t, indexes),
     ],
   );
