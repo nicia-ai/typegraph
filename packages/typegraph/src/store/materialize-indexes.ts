@@ -45,6 +45,14 @@ import type { IndexEntity } from "../core/types";
 import { ConfigurationError, KindNotFoundError } from "../errors";
 import { generateIndexDDL } from "../indexes/ddl";
 import {
+  generateSystemIndexDDL,
+  resolveSystemIndexNames,
+  resolveSystemIndexTableName,
+  SYSTEM_INDEX_DECLARATIONS,
+  type SystemIndexDeclaration,
+  systemIndexName,
+} from "../indexes/system";
+import {
   type IndexDeclaration,
   type RelationalIndexDeclaration,
   type VectorIndexDeclaration,
@@ -56,7 +64,10 @@ import { sortedReplacer } from "../schema/canonical";
 import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
-import { ensureFocusedStatusTable } from "./materialize-shared";
+import {
+  ensureFocusedStatusTable,
+  runBucketedMaterialization,
+} from "./materialize-shared";
 
 /**
  * Cross-caller build claim timing (Postgres).
@@ -159,26 +170,10 @@ export async function materializeIndexes(
 ): Promise<MaterializeIndexesResult> {
   const { graph, graphId, backend, schemaVersion } = context;
 
-  if (backend.executeDdl === undefined) {
-    throw new ConfigurationError(
-      "store.materializeIndexes() requires a backend with `executeDdl` " +
-        "support. The bundled SQLite and Postgres backends provide it; " +
-        "a custom backend without `executeDdl` cannot run index DDL.",
-      { code: "MATERIALIZE_BACKEND_UNSUPPORTED" },
-    );
-  }
-  if (
-    backend.getIndexMaterialization === undefined ||
-    backend.recordIndexMaterialization === undefined
-  ) {
-    throw new ConfigurationError(
-      "store.materializeIndexes() requires a backend with index " +
-        "materialization status primitives. The bundled SQLite and " +
-        "Postgres backends provide them; a custom backend must implement " +
-        "`getIndexMaterialization` and `recordIndexMaterialization`.",
-      { code: "MATERIALIZE_BACKEND_UNSUPPORTED" },
-    );
-  }
+  assertBackendSupportsIndexMaterialization(
+    backend,
+    "store.materializeIndexes()",
+  );
 
   const declared = graph.indexes ?? [];
   const kindFilter =
@@ -258,84 +253,67 @@ export async function materializeIndexes(
     relationalPhysicalNames,
   );
 
+  // System index names are reserved: a colliding relational declaration's
+  // `CREATE INDEX IF NOT EXISTS` would silently no-op against the
+  // (differently shaped) system index while recording a false success.
+  // The schema factories reject the same collision at table-definition
+  // time; this covers declarations that never pass through them.
+  const reservedSystemNames = resolveSystemIndexNames(backend.tableNames);
+
   const materializeEntry = (
     declaration: IndexDeclaration,
-  ): Promise<MaterializeIndexesEntry> =>
-    declaration.entity === "vector" ?
-      materializeVectorIndex(
-        declaration,
-        backend,
-        graphId,
-        schemaVersion,
-        existingByStatusKey,
-        invalidLeftovers,
-      )
-    : materializeRelationalIndex(
-        declaration,
-        backend,
-        dialect,
-        ddlOptions,
-        graphId,
-        schemaVersion,
-        existingByStatusKey,
-        invalidLeftovers,
+  ): Promise<MaterializeIndexesEntry> => {
+    if (
+      declaration.entity !== "vector" &&
+      reservedSystemNames.has(declaration.name)
+    ) {
+      return Promise.resolve(
+        entry(
+          declaration,
+          "failed",
+          new Error(
+            `Index name "${declaration.name}" collides with a TypeGraph ` +
+              `system index. Rename the declaration — a same-named CREATE ` +
+              `INDEX IF NOT EXISTS would silently no-op against the system ` +
+              `index instead of creating the declared one.`,
+          ),
+        ),
       );
-
-  if (options.stopOnError === true) {
-    const results: MaterializeIndexesEntry[] = [];
-    for (const declaration of candidates) {
-      const entry = await materializeEntry(declaration);
-      results.push(entry);
-      if (entry.status === "failed") break;
     }
-    await refreshStatisticsAfterCreation(
-      backend,
-      results,
-      options,
-      ddlOptions.concurrent,
-    );
-    return { results };
-  }
+    return declaration.entity === "vector" ?
+        materializeVectorIndex(
+          declaration,
+          backend,
+          graphId,
+          schemaVersion,
+          existingByStatusKey,
+          invalidLeftovers,
+        )
+      : materializeRelationalIndex(
+          declaration,
+          backend,
+          dialect,
+          ddlOptions,
+          graphId,
+          schemaVersion,
+          existingByStatusKey,
+          invalidLeftovers,
+        );
+  };
 
   // Postgres restricts `CREATE INDEX CONCURRENTLY` to one in-flight
-  // build per relation, so we group declarations by target table and
-  // run each group sequentially while running the groups in parallel.
+  // build per relation, so declarations group by target relation and
+  // each group runs sequentially while the groups run in parallel.
   // Typical schemas land in three buckets (nodes, edges, vector
   // embeddings), giving a ~3× round-trip win over fully sequential
   // without ever issuing two CONCURRENTLY builds against the same
   // relation. SQLite ignores the grouping (writes serialize at the
   // engine level either way).
-  const buckets = new Map<IndexEntity, IndexDeclaration[]>();
-  for (const declaration of candidates) {
-    const key = parallelBucketKey(declaration);
-    const list = buckets.get(key);
-    if (list === undefined) buckets.set(key, [declaration]);
-    else list.push(declaration);
-  }
-
-  const bucketResults = await Promise.all(
-    [...buckets.values()].map(async (group) => {
-      const out: MaterializeIndexesEntry[] = [];
-      for (const declaration of group) {
-        out.push(await materializeEntry(declaration));
-      }
-      return out;
-    }),
-  );
-
-  // Flatten in declaration order so callers see a stable result shape
-  // regardless of how the buckets resolved.
-  const byDeclaration = new Map<IndexDeclaration, MaterializeIndexesEntry>();
-  let bucketIndex = 0;
-  for (const group of buckets.values()) {
-    const entries = bucketResults[bucketIndex]!;
-    for (const [declarationIndex, declaration] of group.entries()) {
-      byDeclaration.set(declaration, entries[declarationIndex]!);
-    }
-    bucketIndex += 1;
-  }
-  const results = candidates.map((declaration) =>
-    byDeclaration.get(declaration)!,
+  const results = await runBucketedMaterialization(
+    candidates,
+    options,
+    (declaration) => parallelBucketKey(declaration),
+    (declaration) => materializeEntry(declaration),
   );
   await refreshStatisticsAfterCreation(
     backend,
@@ -460,7 +438,7 @@ async function materializeRelationalIndex(
       await backend.executeDdl!(ddl);
     },
     existingByStatusKey,
-    invalidLeftovers,
+    physicalRebuildPreload: invalidLeftovers,
   });
 }
 
@@ -554,20 +532,32 @@ async function materializeVectorIndex(
     driftLabel: "Vector index",
     run: () => backend.createVectorIndex!(params),
     existingByStatusKey,
-    invalidLeftovers,
+    physicalRebuildPreload: invalidLeftovers,
   });
 }
 
 /**
- * Shared "check existing → run → record" frame for both relational and
- * vector materialization. Both paths track a per-deployment status row
+ * The identity a materialization run needs from its declaration: the
+ * physical/status name plus the `(entity, kind)` pair recorded on the
+ * status row. Relational and vector declarations satisfy it structurally;
+ * system indexes construct it from `SYSTEM_INDEX_DECLARATIONS`.
+ */
+type MaterializableIndexIdentity = Readonly<{
+  name: string;
+  entity: IndexEntity;
+  kind: string;
+}>;
+
+/**
+ * Shared "check existing → run → record" frame for relational, vector,
+ * and system materialization. All paths track a per-deployment status row
  * keyed by `statusKey`, short-circuit on a matching signature, surface
  * signature drift as a recorded failure, and execute `run()` on first
  * materialization. Differences live entirely in the `MaterializeAction`
  * the caller passes.
  */
 async function materializeOne(
-  declaration: IndexDeclaration,
+  declaration: MaterializableIndexIdentity,
   backend: GraphBackend,
   graphId: string,
   schemaVersion: number,
@@ -577,7 +567,27 @@ async function materializeOne(
     driftLabel: string;
     run: () => Promise<void>;
     existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>;
-    invalidLeftovers: ReadonlySet<string>;
+    /**
+     * Physical index names whose catalog state requires a rebuild despite
+     * a matching success row. Relational: INVALID `CONCURRENTLY`
+     * leftovers. System: leftovers plus physically absent indexes —
+     * name-presence identifies a system index, so absence is proof the
+     * recorded success is stale (dump/restore, manual drop).
+     */
+    physicalRebuildPreload: ReadonlySet<string>;
+    /**
+     * Fresh per-name variant of `physicalRebuildPreload` for the
+     * post-claim re-check (the preload is stale after waiting on another
+     * builder's claim). Defaults to the Postgres invalid-leftover query.
+     */
+    freshNeedsPhysicalRebuild?: (physicalIndexName: string) => Promise<boolean>;
+    /**
+     * Allow the physical-rebuild check to trigger even on backends
+     * without the claim protocol (SQLite). Sound only when the rebuild is
+     * a plain idempotent CREATE (system indexes); relational leftover
+     * healing requires the claim and keeps the default `false`.
+     */
+    rebuildWithoutClaim?: boolean;
   }>,
 ): Promise<MaterializeIndexesEntry> {
   // Narrowed by callsite — guaranteed defined when this is reached
@@ -588,7 +598,7 @@ async function materializeOne(
   const statusOverride =
     statusKey === declaration.name ? undefined : { statusName: statusKey };
 
-  // Pre-claim leftover check reads the bulk-preloaded set (one `pg_index`
+  // Pre-claim physical check reads the bulk-preloaded set (one catalog
   // query for all candidates), not one round-trip per index.
   const settled = await settleAgainstExisting(
     existingByStatusKey.get(statusKey),
@@ -600,8 +610,11 @@ async function materializeOne(
       statusKey,
       signature,
       driftLabel,
-      isInvalidLeftover: (physicalIndexName) =>
-        action.invalidLeftovers.has(physicalIndexName),
+      needsPhysicalRebuild: (physicalIndexName) =>
+        action.physicalRebuildPreload.has(physicalIndexName),
+      ...(action.rebuildWithoutClaim === undefined ?
+        {}
+      : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
     },
   );
   if (settled !== undefined) return settled;
@@ -615,6 +628,12 @@ async function materializeOne(
       signature,
       driftLabel,
       run,
+      ...(action.freshNeedsPhysicalRebuild === undefined ?
+        {}
+      : { freshNeedsPhysicalRebuild: action.freshNeedsPhysicalRebuild }),
+      ...(action.rebuildWithoutClaim === undefined ?
+        {}
+      : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
     });
   }
 
@@ -660,7 +679,7 @@ async function materializeOne(
  */
 async function settleAgainstExisting(
   existing: IndexMaterializationRow | undefined,
-  declaration: IndexDeclaration,
+  declaration: MaterializableIndexIdentity,
   backend: GraphBackend,
   graphId: string,
   schemaVersion: number,
@@ -669,28 +688,35 @@ async function settleAgainstExisting(
     signature: string;
     driftLabel: string;
     /**
-     * Whether a physical index with this name exists but is INVALID. The
-     * pre-claim caller reads a bulk-preloaded set (one query for all
-     * candidates); the post-claim caller reads fresh (the preload is stale
-     * after waiting on another builder's claim).
+     * Whether the physical index behind this name is unusable and must be
+     * rebuilt despite the recorded success (INVALID leftover; for system
+     * indexes also physically absent). The pre-claim caller reads a
+     * bulk-preloaded set (one query for all candidates); the post-claim
+     * caller reads fresh (the preload is stale after waiting on another
+     * builder's claim).
      */
-    isInvalidLeftover: (
+    needsPhysicalRebuild: (
       physicalIndexName: string,
     ) => boolean | Promise<boolean>;
+    /** See `materializeOne`'s action field of the same name. */
+    rebuildWithoutClaim?: boolean;
   }>,
 ): Promise<MaterializeIndexesEntry | undefined> {
   if (existing?.materializedAt === undefined) return undefined;
-  const { statusKey, signature, driftLabel, isInvalidLeftover } = action;
+  const { statusKey, signature, driftLabel, needsPhysicalRebuild } = action;
   if (existing.signature === signature) {
     // A recorded success is only trustworthy while the physical index is
-    // valid: a run interrupted after `CREATE ... IF NOT EXISTS` silently
+    // usable: a run interrupted after `CREATE ... IF NOT EXISTS` silently
     // kept an invalid leftover (or a pre-claim-protocol run recorded
-    // success over one), leaving a poisoned status row. Fall through to
-    // the build path — under the claim it drops the leftover and rebuilds.
+    // success over one), and a dump/restore or manual drop can leave a
+    // success row for an index that no longer exists. Fall through to the
+    // build path — under the claim it drops any leftover and rebuilds;
+    // `rebuildWithoutClaim` callers re-run their plain idempotent CREATE.
     if (
       declaration.entity !== "vector" &&
-      hasIndexBuildClaimProtocol(backend) &&
-      (await isInvalidLeftover(declaration.name))
+      (hasIndexBuildClaimProtocol(backend) ||
+        action.rebuildWithoutClaim === true) &&
+      (await needsPhysicalRebuild(declaration.name))
     ) {
       return undefined;
     }
@@ -728,7 +754,7 @@ async function settleAgainstExisting(
  * rebuilding.
  */
 async function materializeWithClaim(
-  declaration: IndexDeclaration,
+  declaration: MaterializableIndexIdentity,
   backend: GraphBackend,
   graphId: string,
   schemaVersion: number,
@@ -737,6 +763,8 @@ async function materializeWithClaim(
     signature: string;
     driftLabel: string;
     run: () => Promise<void>;
+    freshNeedsPhysicalRebuild?: (physicalIndexName: string) => Promise<boolean>;
+    rebuildWithoutClaim?: boolean;
   }>,
 ): Promise<MaterializeIndexesEntry> {
   const { statusKey, signature, driftLabel, run } = action;
@@ -788,8 +816,13 @@ async function materializeWithClaim(
           driftLabel,
           // Post-claim the bulk preload is stale (we may have waited on
           // another builder's claim), so re-check this index fresh.
-          isInvalidLeftover: (physicalIndexName) =>
-            hasInvalidIndexLeftover(backend, physicalIndexName),
+          needsPhysicalRebuild:
+            action.freshNeedsPhysicalRebuild ??
+            ((physicalIndexName) =>
+              hasInvalidIndexLeftover(backend, physicalIndexName)),
+          ...(action.rebuildWithoutClaim === undefined ?
+            {}
+          : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
         },
       );
       if (settled !== undefined) return settled;
@@ -863,12 +896,16 @@ async function hasInvalidIndexLeftover(
   physicalIndexName: string,
 ): Promise<boolean> {
   if (backend.dialect !== "postgres") return false;
+  // Scoped to the session search_path like preloadPhysicalIndexStates —
+  // an unscoped probe could steer the unqualified DROP INDEX heal at
+  // another schema's identically-named (valid) index.
   const rows = await backend.execute<{ invalid: boolean }>(
     asCompiledRowsSql(sql`
       SELECT NOT i.indisvalid AS invalid
       FROM pg_class c
       JOIN pg_index i ON i.indexrelid = c.oid
       WHERE c.relname = ${physicalIndexName}
+        AND pg_catalog.pg_table_is_visible(c.oid)
     `),
   );
   return rows[0]?.invalid === true;
@@ -892,16 +929,96 @@ async function preloadInvalidIndexLeftovers(
   if (backend.dialect !== "postgres" || physicalIndexNames.length === 0) {
     return new Set();
   }
+  const { invalid } = await preloadPhysicalIndexStates(
+    backend,
+    physicalIndexNames,
+  );
+  return invalid;
+}
+
+/**
+ * The subset of `tableNames` that exist as tables in the engine catalog,
+ * in one query — `search_path`-scoped on Postgres like the index probes.
+ */
+async function preloadExistingTables(
+  backend: GraphBackend,
+  tableNames: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (tableNames.length === 0) return new Set();
+  if (backend.dialect === "postgres") {
+    const rows = await backend.execute<{ name: string }>(
+      asCompiledRowsSql(sql`
+        SELECT c.relname AS name
+        FROM pg_class c
+        WHERE c.relname IN (${sqlValueList(tableNames)})
+          AND c.relkind IN ('r', 'p')
+          AND pg_catalog.pg_table_is_visible(c.oid)
+      `),
+    );
+    return new Set(rows.map((row) => row.name));
+  }
   const rows = await backend.execute<{ name: string }>(
     asCompiledRowsSql(sql`
-      SELECT c.relname AS name
-      FROM pg_class c
-      JOIN pg_index i ON i.indexrelid = c.oid
-      WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
-        AND NOT i.indisvalid
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN (${sqlValueList(tableNames)})
     `),
   );
   return new Set(rows.map((row) => row.name));
+}
+
+type PhysicalIndexStates = Readonly<{
+  /** Names that exist as usable indexes in the engine catalog. */
+  valid: ReadonlySet<string>;
+  /** Postgres INVALID leftovers from interrupted CONCURRENTLY builds. */
+  invalid: ReadonlySet<string>;
+}>;
+
+/**
+ * Partitions `physicalIndexNames` by their catalog state in ONE query:
+ * `valid` (usable index exists) and `invalid` (Postgres CONCURRENTLY
+ * leftover needing the healing build path). SQLite has no invalid state,
+ * so its `invalid` set is always empty. The single query serves both the
+ * relational runner's leftover preload and the system runner's
+ * name-presence fast path — the two predicates are complementary halves
+ * of the same `pg_class ⋈ pg_index` probe.
+ */
+async function preloadPhysicalIndexStates(
+  backend: GraphBackend,
+  physicalIndexNames: readonly string[],
+): Promise<PhysicalIndexStates> {
+  const valid = new Set<string>();
+  const invalid = new Set<string>();
+  if (physicalIndexNames.length === 0) return { valid, invalid };
+  if (backend.dialect === "postgres") {
+    // `pg_table_is_visible` scopes the probe to the session search_path —
+    // the same resolution the unqualified CREATE/DROP INDEX DDL uses — so
+    // a schema-per-tenant database never settles one schema's index based
+    // on another schema's identically-named one (matches buildTableExists
+    // in backend/drizzle/operations/strategy.ts).
+    const rows = await backend.execute<{ name: string; valid: boolean }>(
+      asCompiledRowsSql(sql`
+        SELECT c.relname AS name, i.indisvalid AS valid
+        FROM pg_class c
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
+          AND pg_catalog.pg_table_is_visible(c.oid)
+      `),
+    );
+    for (const row of rows) (row.valid ? valid : invalid).add(row.name);
+    return { valid, invalid };
+  }
+  const rows = await backend.execute<{ name: string }>(
+    asCompiledRowsSql(sql`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name IN (${sqlValueList(physicalIndexNames)})
+    `),
+  );
+  for (const row of rows) valid.add(row.name);
+  return { valid, invalid };
 }
 
 /**
@@ -923,7 +1040,7 @@ async function dropInvalidIndexLeftover(
 }
 
 function entry(
-  declaration: IndexDeclaration,
+  declaration: MaterializableIndexIdentity,
   status: MaterializeIndexesEntry["status"],
   error?: Error,
 ): MaterializeIndexesEntry {
@@ -997,7 +1114,7 @@ async function preloadMaterializations(
 
 function buildAttempt(
   args: Readonly<{
-    declaration: IndexDeclaration;
+    declaration: MaterializableIndexIdentity;
     graphId: string;
     signature: string;
     schemaVersion: number;
@@ -1024,6 +1141,257 @@ function buildAttempt(
     materializedAt: args.materializedAt,
     error: args.error?.message,
   };
+}
+
+// ============================================================
+// System indexes
+// ============================================================
+
+export type MaterializeSystemIndexesOptions = Readonly<{
+  /** Stop on the first failure. Default: false (best-effort). */
+  stopOnError?: boolean;
+  /** Refresh planner statistics after a creation. Default: true. */
+  refreshStatistics?: boolean;
+}>;
+
+type SystemIndexCandidate = Readonly<{
+  declaration: SystemIndexDeclaration;
+  physicalTable: string;
+  name: string;
+}>;
+
+/**
+ * Materializes TypeGraph's own base-relation indexes
+ * (`SYSTEM_INDEX_DECLARATIONS`) against the live database.
+ *
+ * Bootstrap DDL runs only on first boot, so a system index added in a new
+ * library version never reaches an already-initialized database on its
+ * own — this runner is the upgrade path. It rides the same per-deployment
+ * status table, drift signatures, invalid-leftover healing, and Postgres
+ * `CREATE INDEX CONCURRENTLY` cross-caller claim protocol as
+ * graph-declared indexes; on a database whose indexes all exist, a warm
+ * call costs three concurrent reads (status, index-catalog, and
+ * table-catalog preloads) after the idempotent status-table ensure, and runs no
+ * DDL after the first recorded success.
+ *
+ * Graph-independent: the declarations don't depend on `GraphDef`. The
+ * `graphId` is recorded on status rows for observability only ("who
+ * materialized this"), matching relational rows' semantics.
+ *
+ * Unlike expression indexes, a system index is fully identified by its
+ * physical name, so a candidate that already exists in the engine catalog
+ * (valid, with no recorded status row) settles as `alreadyMaterialized`
+ * from one bulk catalog read — no claim, no DDL, no status write. Status
+ * rows are recorded only for genuine builds and failures, which keeps the
+ * common boot (fresh bootstrap or wiped status table) at three concurrent
+ * reads. A status row that exists with a mismatching signature still
+ * surfaces as drift, exactly like graph-declared indexes.
+ */
+/**
+ * Whether the backend carries every primitive index materialization
+ * requires (DDL execution + status reads/writes). The strict runners
+ * throw `ConfigurationError` exactly when this is false; the boot path
+ * (`createStoreWithSchema`) consults the same predicate to skip instead
+ * — one definition so the two contracts cannot drift apart.
+ */
+export function backendSupportsIndexMaterialization(
+  backend: GraphBackend,
+): boolean {
+  return (
+    backend.executeDdl !== undefined &&
+    backend.getIndexMaterialization !== undefined &&
+    backend.recordIndexMaterialization !== undefined
+  );
+}
+
+/**
+ * Strict-side counterpart of {@link backendSupportsIndexMaterialization}:
+ * the runners' throw-guard, derived from the same predicate the boot
+ * path's skip-guard consults.
+ */
+function assertBackendSupportsIndexMaterialization(
+  backend: GraphBackend,
+  surface: string,
+): void {
+  if (backendSupportsIndexMaterialization(backend)) return;
+  throw new ConfigurationError(
+    `${surface} requires a backend with \`executeDdl\` and the index ` +
+      "materialization status primitives (`getIndexMaterialization`, " +
+      "`recordIndexMaterialization`). The bundled SQLite and Postgres " +
+      "backends provide them; a custom backend must implement all three.",
+    { code: "MATERIALIZE_BACKEND_UNSUPPORTED" },
+  );
+}
+
+export async function materializeSystemIndexes(
+  context: Readonly<{
+    backend: RawBackend;
+    graphId: string;
+    schemaVersion: number;
+  }>,
+  options: MaterializeSystemIndexesOptions = {},
+): Promise<MaterializeIndexesResult> {
+  const { backend, graphId, schemaVersion } = context;
+
+  assertBackendSupportsIndexMaterialization(
+    backend,
+    "store.materializeSystemIndexes()",
+  );
+
+  await ensureFocusedStatusTable(
+    backend,
+    backend.ensureIndexMaterializationsTable,
+  );
+
+  const concurrent = backend.dialect === "postgres";
+  const candidates: readonly SystemIndexCandidate[] =
+    SYSTEM_INDEX_DECLARATIONS.map((declaration) => {
+      const physicalTable = resolveSystemIndexTableName(
+        declaration.table,
+        backend.tableNames,
+      );
+      return {
+        declaration,
+        physicalTable,
+        name: systemIndexName(physicalTable, declaration.suffix),
+      };
+    });
+
+  // The three preloads are mutually independent reads (status table +
+  // two catalog probes); running them concurrently keeps the warm boot at
+  // one round-trip latency after the ensure step.
+  const statusKeys = candidates.map((candidate) => candidate.name);
+  const targetTables = [
+    ...new Set(candidates.map((candidate) => candidate.physicalTable)),
+  ];
+  const [existingByStatusKey, physicalStates, existingTables] =
+    await Promise.all([
+      preloadMaterializations(backend, statusKeys),
+      preloadPhysicalIndexStates(backend, statusKeys),
+      preloadExistingTables(backend, targetTables),
+    ]);
+  const { valid: physicallyPresent } = physicalStates;
+  // Physical state is authoritative for system indexes: absent or INVALID
+  // must rebuild even under a matching success row (dump/restore, manual
+  // drop). One set serves every candidate's pre-claim check.
+  const physicalRebuildPreload: ReadonlySet<string> = new Set(
+    statusKeys.filter((name) => !physicallyPresent.has(name)),
+  );
+
+  const materializeEntry = async (
+    candidate: SystemIndexCandidate,
+  ): Promise<MaterializeIndexesEntry> => {
+    const identity: MaterializableIndexIdentity = {
+      name: candidate.name,
+      entity: "system",
+      kind: candidate.declaration.table,
+    };
+    // Legacy databases can predate optional relations (the recorded
+    // tables ship with history support; `operation-backend-core` guards
+    // its clears the same way). Their indexes are skipped, not failed —
+    // the relation appearing later (bootstrap on a fresh database always
+    // creates it) brings the indexes with it.
+    if (!existingTables.has(candidate.physicalTable)) {
+      return {
+        indexName: candidate.name,
+        entity: "system",
+        kind: candidate.declaration.table,
+        status: "skipped",
+        reason: `Relation "${candidate.physicalTable}" does not exist in this database`,
+      };
+    }
+
+    const existing = existingByStatusKey.get(candidate.name);
+
+    // A status row owned by another entity means a graph-declared index
+    // was materialized under this name. Refuse WITHOUT writing: driving
+    // this through the drift path would record a system-signature failure
+    // over the graph-declared index's row and permanently brick it.
+    if (existing !== undefined && existing.entity !== "system") {
+      return entry(
+        identity,
+        "failed",
+        new Error(
+          `System index name "${candidate.name}" is already recorded by a ` +
+            `${existing.entity} index declaration (graph "${existing.graphId}"). ` +
+            `Rename the graph-declared index — "typegraph_"-prefixed names ` +
+            `belong to TypeGraph's system indexes.`,
+        ),
+      );
+    }
+
+    // Name-presence fast path: valid physical index, no status row — the
+    // normal steady state, since bootstrap DDL creates system indexes
+    // without recording status rows. Trusting name-presence is sound
+    // ONLY here: system index names are library-owned with a stable
+    // name→shape contract (reshaping requires a rename), whereas a
+    // graph-declared index name could collide with a foreign index whose
+    // shape only the recorded signature can vouch for. Known limitation
+    // of that contract: a declaration reshaped in place (violating the
+    // rename rule) is NOT detected on bootstrap-created databases, since
+    // there is no recorded signature to drift against — the rename rule
+    // is enforced by review and the parity tests, not at runtime. A row
+    // with a mismatching signature must NOT take the fast path — that is
+    // drift, and the frame below records it as a failure.
+    if (existing === undefined && physicallyPresent.has(candidate.name)) {
+      return entry(identity, "alreadyMaterialized");
+    }
+    const signature = await computeSystemIndexSignature(
+      backend.dialect,
+      candidate.physicalTable,
+      candidate.declaration,
+    );
+    const ddl = generateSystemIndexDDL(
+      candidate.declaration,
+      candidate.physicalTable,
+      { concurrent },
+    );
+    return materializeOne(identity, backend, graphId, schemaVersion, {
+      statusKey: candidate.name,
+      signature,
+      driftLabel: "System index",
+      run: () => backend.executeDdl!(ddl),
+      existingByStatusKey,
+      physicalRebuildPreload,
+      freshNeedsPhysicalRebuild: async (physicalIndexName) => {
+        const fresh = await preloadPhysicalIndexStates(backend, [
+          physicalIndexName,
+        ]);
+        return !fresh.valid.has(physicalIndexName);
+      },
+      rebuildWithoutClaim: true,
+    });
+  };
+
+  // Same shape as the relational runner: one CONCURRENTLY build per
+  // relation, so buckets key on the physical table.
+  const results = await runBucketedMaterialization(
+    candidates,
+    options,
+    (candidate) => candidate.physicalTable,
+    (candidate) => materializeEntry(candidate),
+  );
+  await refreshStatisticsAfterCreation(backend, results, options, concurrent);
+  return { results };
+}
+
+/**
+ * Canonical hash of `{ dialect, targetTableName, declaration }` for a
+ * system-index declaration — same drift contract as
+ * `computeIndexSignature`: changing a declaration's shape under the same
+ * suffix mismatches the recorded signature and surfaces as a `failed`
+ * entry until the operator drops the old physical index (rename instead).
+ */
+async function computeSystemIndexSignature(
+  dialect: SqlDialect,
+  targetTableName: string,
+  declaration: SystemIndexDeclaration,
+): Promise<string> {
+  const json = JSON.stringify(
+    { dialect, targetTableName, declaration },
+    sortedReplacer,
+  );
+  return sha256Hex(json, 16);
 }
 
 /**

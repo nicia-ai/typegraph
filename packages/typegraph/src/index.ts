@@ -358,6 +358,7 @@ export type {
   MaterializeRemovalsEntry,
   MaterializeRemovalsOptions,
   MaterializeRemovalsResult,
+  MaterializeSystemIndexesOptions,
   MeasurableHistoryTransactionContext,
   OntologyIntrospection,
   RebuildFulltextOptions,
@@ -626,6 +627,9 @@ export {
   type NodeIndexWhereBuilder,
   notWhere,
   orWhere,
+  SYSTEM_INDEX_DECLARATIONS,
+  type SystemIndexDeclaration,
+  type SystemIndexTable,
 } from "./indexes";
 
 // ============================================================

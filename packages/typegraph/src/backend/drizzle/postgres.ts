@@ -821,10 +821,7 @@ export function createPostgresBackend(
         )
         .onConflictDoUpdate({
           target: t.indexName,
-          set: buildMaterializationOnConflictSet(
-            t.materializedAt,
-            params.materializedAt,
-          ),
+          set: buildMaterializationOnConflictSet(params.materializedAt),
         });
     },
 

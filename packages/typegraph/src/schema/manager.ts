@@ -276,6 +276,15 @@ export type SchemaManagerOptions = Readonly<{
   autoMigrate?: boolean;
   /** If true, throw on breaking changes. Default: true */
   throwOnBreaking?: boolean;
+  /**
+   * Whether `createStoreWithSchema` brings the base-relation system
+   * indexes up to the running library version at boot. Default:
+   * `"materialize"`. Pass `"skip"` when a boot must not run potentially
+   * long index builds inline (e.g. a large PostgreSQL deployment behind a
+   * readiness probe) — then run `store.materializeSystemIndexes()`
+   * out-of-band after upgrading.
+   */
+  systemIndexes?: "materialize" | "skip";
   /** Called before a safe auto-migration is applied. For observability only. */
   onBeforeMigrate?: (context: MigrationHookContext) => void | Promise<void>;
   /** Called after a safe auto-migration is applied. For observability only. */

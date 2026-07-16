@@ -85,6 +85,7 @@ export type {
   MaterializeIndexesEntry,
   MaterializeIndexesOptions,
   MaterializeIndexesResult,
+  MaterializeSystemIndexesOptions,
 } from "./materialize-indexes";
 export type {
   MaterializeRemovalsEntry,

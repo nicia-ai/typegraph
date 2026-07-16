@@ -458,6 +458,21 @@ const profiler = new QueryProfiler({
   through `store.materializeIndexes()` (pgvector builds an HNSW / IVFFlat ANN index; sqlite-vec and
   libSQL report `skipped`/build their own). See [Semantic Search](/semantic-search).
 
+## System Indexes
+
+TypeGraph ships a set of **system indexes** on its own relations (nodes, edges, and the recorded
+history tables) — the traversal, listing, temporal-validity, and bare-id access paths every
+compiled query relies on. They are declared once (`SYSTEM_INDEX_DECLARATIONS`, exported for
+inspection), and both dialects' schemas derive from that single list, so SQLite and PostgreSQL
+always carry the same set.
+
+You normally never manage them: fresh databases get them at bootstrap, and
+`createStoreWithSchema()` brings an already-initialized database up to the running library
+version's set on boot (with `CREATE INDEX CONCURRENTLY` on PostgreSQL). Deployments that boot
+without `createStoreWithSchema` can run `store.materializeSystemIndexes()` once after a library
+upgrade; it shares `materializeIndexes()`'s status tracking, drift signatures, and concurrent-build
+claim protocol, and settles with no DDL when everything already exists.
+
 ## Next Steps
 
 - [Performance Overview](/performance/overview) — Best practices, N+1 prevention, batch patterns

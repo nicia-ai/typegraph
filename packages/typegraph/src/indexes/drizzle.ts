@@ -2,11 +2,13 @@ import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
+  type PgColumn,
   uniqueIndex as pgUniqueIndex,
 } from "drizzle-orm/pg-core";
 import {
   index as sqliteIndex,
   type IndexBuilder as SqliteIndexBuilder,
+  type SQLiteColumn,
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
@@ -16,6 +18,12 @@ import {
   compileNodeIndexKeys,
   type IndexCompilationContext,
 } from "./compiler";
+import {
+  SYSTEM_INDEX_DECLARATIONS,
+  type SystemIndexDeclaration,
+  systemIndexName,
+  type SystemIndexTable,
+} from "./system";
 import {
   type EdgeIndexDeclaration,
   type IndexDeclaration,
@@ -369,6 +377,95 @@ function getSqliteEdgeSystemColumn(
       throw new Error(`Unsupported edge system column for indexes: ${column}`);
     }
   }
+}
+
+// ============================================================
+// System indexes (both dialects)
+// ============================================================
+//
+// The schema factories derive their system-index Drizzle builders from
+// `SYSTEM_INDEX_DECLARATIONS` so both dialects emit the same index set by
+// construction. The builders receive the table's real column objects (not
+// SQL wrappers) so the DDL generator renders plain quoted column names —
+// byte-identical to the runtime DDL `materializeSystemIndexes` emits.
+
+type SystemIndexColumns<C extends { name: string }> = Readonly<
+  Record<string, C>
+>;
+
+/**
+ * Resolves a declaration's physical column names against the table's own
+ * column objects by each column's `.name` — the SQL name Drizzle carries on
+ * the column itself — so no naming convention sits between the declaration
+ * and the schema. A column the table doesn't define throws at
+ * table-construction time (exercised by the system-index parity tests).
+ */
+function resolveSystemIndexColumns<C extends { name: string }>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+): readonly [C, ...C[]] {
+  const byPhysicalName = new Map(
+    Object.values(columns).map((column) => [column.name, column]),
+  );
+  const resolved = declaration.columns.map((column) => {
+    const value = byPhysicalName.get(column);
+    if (value === undefined) {
+      throw new Error(
+        `System index "${declaration.table}_${declaration.suffix}" references ` +
+          `a column "${column}" the ${declaration.table} table does not define`,
+      );
+    }
+    return value;
+  });
+  // `declaration.columns` is non-empty by type, so `resolved` is too.
+  return resolved as [C, ...C[]];
+}
+
+/**
+ * The two dialect variants do no dialect-specific work (no unique, no
+ * where, no expression compilation — unlike the node/edge builder pairs
+ * above), so they share one body parameterized by the dialect's index
+ * factory.
+ */
+function buildSystemIndexBuilders<C extends { name: string }, B>(
+  tableKey: SystemIndexTable,
+  physicalTableName: string,
+  columns: SystemIndexColumns<C>,
+  indexFactory: (name: string) => { on: (...cols: [C, ...C[]]) => B },
+): readonly B[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) => declaration.table === tableKey,
+  ).map((declaration) =>
+    indexFactory(systemIndexName(physicalTableName, declaration.suffix)).on(
+      ...resolveSystemIndexColumns(declaration, columns),
+    ),
+  );
+}
+
+export function buildSqliteSystemIndexBuilders(
+  tableKey: SystemIndexTable,
+  physicalTableName: string,
+  columns: SystemIndexColumns<SQLiteColumn>,
+): readonly SqliteIndexBuilder[] {
+  return buildSystemIndexBuilders(
+    tableKey,
+    physicalTableName,
+    columns,
+    (name) => sqliteIndex(name),
+  );
+}
+
+export function buildPostgresSystemIndexBuilders(
+  tableKey: SystemIndexTable,
+  physicalTableName: string,
+  columns: SystemIndexColumns<PgColumn>,
+): readonly PgIndexBuilder[] {
+  return buildSystemIndexBuilders(
+    tableKey,
+    physicalTableName,
+    columns,
+    (name) => pgIndex(name),
+  );
 }
 
 // ============================================================

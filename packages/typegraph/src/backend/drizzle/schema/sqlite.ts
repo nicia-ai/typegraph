@@ -31,7 +31,9 @@ import {
 import {
   buildSqliteEdgeIndexBuilders,
   buildSqliteNodeIndexBuilders,
+  buildSqliteSystemIndexBuilders,
 } from "../../../indexes/drizzle";
+import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 
 /**
@@ -97,6 +99,7 @@ export function createSqliteTables(
 ) {
   const n: SqliteTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
+  assertNoSystemIndexNameCollision(indexes, n);
 
   const nodes = sqliteTable(
     n.nodes,
@@ -114,23 +117,9 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.kind, t.id] }),
-      index(`${n.nodes}_kind_idx`).on(t.graphId, t.kind),
-      index(`${n.nodes}_kind_created_idx`).on(
-        t.graphId,
-        t.kind,
-        t.deletedAt,
-        t.createdAt,
-      ),
-      index(`${n.nodes}_deleted_idx`).on(t.graphId, t.deletedAt),
-      index(`${n.nodes}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
-      // Bare-id lookup: the primary key leads with `kind` (graph_id, kind, id),
-      // so a `WHERE graph_id = ? AND id = ?` probe that doesn't know the kind
-      // can't seek it — SQLite falls back to a graph_id-only scan of every node
-      // in the graph (~3M at LDBC SF1). `store.algorithms.degree`'s
-      // node-kind subquery does exactly that lookup (it resolves the seed's
-      // kind by id), so without this index degree is a full nodes scan (~95ms
-      // at SF1). See typegraph#280.
-      index(`${n.nodes}_id_idx`).on(t.graphId, t.id),
+      // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
+      // for both dialects + the runtime materializer).
+      ...buildSqliteSystemIndexBuilders("nodes", n.nodes, t),
       ...buildSqliteNodeIndexBuilders(t, indexes),
     ],
   );
@@ -154,55 +143,7 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
-      index(`${n.edges}_kind_idx`).on(t.graphId, t.kind),
-      // Directional traversal index (outgoing): supports endpoint lookups
-      // and extra filtering by edge kind / target kind. Includes every
-      // system column the compiled query's soft-delete/temporal-validity
-      // predicate touches (deleted_at, valid_from, valid_to), trailed by
-      // to_id — the compiled traversal join reads `n.id = e.to_id` for an
-      // outgoing traversal (standard-builders.ts), so without to_id here
-      // the join still fetches the edge's heap row for that one column
-      // even with the seek/predicate columns covered.
-      index(`${n.edges}_from_idx`).on(
-        t.graphId,
-        t.fromKind,
-        t.fromId,
-        t.kind,
-        t.toKind,
-        t.deletedAt,
-        t.validFrom,
-        t.validTo,
-        t.toId,
-      ),
-      // Directional traversal index (incoming): mirrors from_idx for
-      // reverse traversals, trailed by from_id for the same reason
-      // (`n.id = e.from_id` for an incoming traversal).
-      index(`${n.edges}_to_idx`).on(
-        t.graphId,
-        t.toKind,
-        t.toId,
-        t.kind,
-        t.fromKind,
-        t.deletedAt,
-        t.validFrom,
-        t.validTo,
-        t.fromId,
-      ),
-      index(`${n.edges}_kind_created_idx`).on(
-        t.graphId,
-        t.kind,
-        t.deletedAt,
-        t.createdAt,
-      ),
-      index(`${n.edges}_deleted_idx`).on(t.graphId, t.deletedAt),
-      index(`${n.edges}_valid_idx`).on(t.graphId, t.validFrom, t.validTo),
-      index(`${n.edges}_cardinality_idx`).on(
-        t.graphId,
-        t.kind,
-        t.fromKind,
-        t.fromId,
-        t.validTo,
-      ),
+      ...buildSqliteSystemIndexBuilders("edges", n.edges, t),
       ...buildSqliteEdgeIndexBuilders(t, indexes),
     ],
   );
@@ -230,25 +171,7 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.historyId] }),
-      index(`${n.recordedNodes}_entity_idx`).on(
-        t.graphId,
-        t.kind,
-        t.id,
-        t.recordedFrom,
-        t.recordedTo,
-      ),
-      index(`${n.recordedNodes}_open_idx`).on(t.graphId, t.recordedTo),
-      index(`${n.recordedNodes}_valid_idx`).on(
-        t.graphId,
-        t.validFrom,
-        t.validTo,
-      ),
-      // Bare-id lookup parity with the live nodes table: recorded-pinned
-      // reads swap this relation in as the node source, and `_entity_idx`
-      // leads with `kind`, so the same kind-by-bare-id probe (e.g.
-      // `degree()` at a recorded coordinate) would otherwise scan every
-      // historical version in the graph. See typegraph#280.
-      index(`${n.recordedNodes}_id_idx`).on(t.graphId, t.id),
+      ...buildSqliteSystemIndexBuilders("recordedNodes", n.recordedNodes, t),
     ],
   );
 
@@ -278,37 +201,7 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.historyId] }),
-      index(`${n.recordedEdges}_entity_idx`).on(
-        t.graphId,
-        t.kind,
-        t.id,
-        t.recordedFrom,
-        t.recordedTo,
-      ),
-      index(`${n.recordedEdges}_open_idx`).on(t.graphId, t.recordedTo),
-      index(`${n.recordedEdges}_from_idx`).on(
-        t.graphId,
-        t.fromKind,
-        t.fromId,
-        t.kind,
-        t.toKind,
-        t.recordedFrom,
-        t.recordedTo,
-      ),
-      index(`${n.recordedEdges}_to_idx`).on(
-        t.graphId,
-        t.toKind,
-        t.toId,
-        t.kind,
-        t.fromKind,
-        t.recordedFrom,
-        t.recordedTo,
-      ),
-      index(`${n.recordedEdges}_valid_idx`).on(
-        t.graphId,
-        t.validFrom,
-        t.validTo,
-      ),
+      ...buildSqliteSystemIndexBuilders("recordedEdges", n.recordedEdges, t),
     ],
   );
 
