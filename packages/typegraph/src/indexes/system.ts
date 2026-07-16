@@ -19,7 +19,12 @@
  * Changing a declaration's shape under the same suffix is a signature
  * drift: `materializeSystemIndexes` reports `failed` for it until the
  * operator drops the old physical index. Rename (new suffix) instead,
- * exactly like graph-declared indexes.
+ * exactly like graph-declared indexes. Two acknowledged limits of that
+ * contract: on databases whose indexes were bootstrap-created (no status
+ * rows) an in-place reshape is undetectable at runtime — the rename rule
+ * is enforced by review and the parity tests; and a renamed suffix
+ * strands the old physical index (the runner only adds). When the first
+ * rename actually happens, add a retired-suffixes list + drop path here.
  */
 import { quoteIdentifier } from "../query/dialect/vector-strategy";
 

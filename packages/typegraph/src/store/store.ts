@@ -3561,8 +3561,12 @@ export async function createStoreWithSchema<G extends GraphDef>(
   // Bring the base-relation system indexes up to this library version.
   // Bootstrap DDL only runs on first boot, so an index shipped in a newer
   // version reaches already-initialized databases here — this is the same
-  // privileged-boot step the contributions above use.
-  await materializeSystemIndexesOnBoot(backend, merged.id, result);
+  // privileged-boot step the contributions above use. `systemIndexes:
+  // "skip"` defers to an out-of-band store.materializeSystemIndexes()
+  // for deployments that must not run index builds inline at boot.
+  if (options?.systemIndexes !== "skip") {
+    await materializeSystemIndexesOnBoot(backend, merged.id, result);
+  }
 
   const store = new Store(
     merged,
@@ -3594,22 +3598,35 @@ async function materializeSystemIndexesOnBoot(
   if (!backendSupportsIndexMaterialization(backend)) return;
   const schemaVersion =
     result.status === "migrated" ? result.toVersion : result.version;
-  const { results } = await materializeSystemIndexesImpl(
-    { backend: asRawBackend(backend), graphId, schemaVersion },
-    {},
-  );
-  const failed = results.filter(
-    (entryResult) => entryResult.status === "failed",
-  );
-  if (failed.length === 0) return;
-  console.warn(
-    `[typegraph] ${String(failed.length)} system index(es) failed to ` +
-      `materialize at boot (${failed
-        .map((entryResult) => entryResult.indexName)
-        .join(", ")}); the store is usable but the affected access paths ` +
-      "fall back to scans. Retry via store.materializeSystemIndexes().",
-    failed[0]?.error,
-  );
+  try {
+    const { results } = await materializeSystemIndexesImpl(
+      { backend: asRawBackend(backend), graphId, schemaVersion },
+      {},
+    );
+    const failed = results.filter(
+      (entryResult) => entryResult.status === "failed",
+    );
+    if (failed.length === 0) return;
+    console.warn(
+      `[typegraph] ${String(failed.length)} system index(es) failed to ` +
+        `materialize at boot (${failed
+          .map((entryResult) => entryResult.indexName)
+          .join(", ")}); the store is usable but the affected access paths ` +
+        "fall back to scans. Retry via store.materializeSystemIndexes().",
+      failed[0]?.error,
+    );
+  } catch (error) {
+    // Leniency must hold for infrastructure throws too (status-table
+    // ensure/preload/record failures, claim writes) — not only per-index
+    // build failures. A store that booted on the previous version must
+    // still come up after an upgrade; the operator retries explicitly.
+    console.warn(
+      "[typegraph] system-index materialization failed at boot; the store " +
+        "is usable but new system indexes were not adopted. Retry via " +
+        "store.materializeSystemIndexes().",
+      error,
+    );
+  }
 }
 
 /**

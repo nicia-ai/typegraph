@@ -908,7 +908,9 @@ least-privilege, DML-only database role.
   Deployments that never run `createStoreWithSchema` (manual-DDL boot with
   a plain `createStore` attach) adopt new system indexes by calling
   `store.materializeSystemIndexes()` once under a DDL-capable role after
-  upgrading.
+  upgrading; deployments that must not run index builds inline at boot
+  (large tables behind a readiness probe) pass `systemIndexes: "skip"` to
+  `createStoreWithSchema` and materialize out-of-band the same way.
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage

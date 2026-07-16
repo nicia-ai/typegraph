@@ -20,8 +20,15 @@ gap #282 exposed). Now:
   CONCURRENTLY` on PostgreSQL, riding the same status table, drift
   signatures, invalid-leftover healing, and cross-caller claim protocol as
   graph-declared indexes. A database whose indexes all exist settles from
-  one catalog read with no DDL and no writes. Failures degrade to a warning
-  (indexes are a performance concern; the store still boots).
+  one catalog read (scoped to the session `search_path`, so schema-per-
+  tenant databases never observe each other's indexes) with no DDL and no
+  writes; a system index that is physically absent or invalid is rebuilt
+  even when a stale success row survives (dump/restore, manual drop).
+  Failures — including status-table infrastructure errors — degrade to a
+  warning: indexes are a performance concern and the store still boots.
+  Deployments that must not run index builds inline at boot pass
+  `systemIndexes: "skip"` to `createStoreWithSchema` and materialize
+  out-of-band.
 - **New API: `store.materializeSystemIndexes()`** for deployments that boot
   without `createStoreWithSchema` (zero-DDL attach) — call once under a
   DDL-capable role after upgrading. Strict where the boot path is lenient:

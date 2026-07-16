@@ -127,27 +127,33 @@ export function buildMaterializationInsertValues<TEncoded>(
 /**
  * Build the `set` clause for the upsert's ON CONFLICT DO UPDATE.
  *
- * The `materializedAt` column uses `COALESCE` to preserve any prior
- * successful timestamp when this attempt failed (`materializedAt ===
- * undefined`). On success the new timestamp wins. This keeps the
- * status table truthful: the most recent successful materialization
- * timestamp survives even if a subsequent re-attempt errored.
+ * A failed attempt (`materializedAt === undefined`) updates ONLY the
+ * attempt bookkeeping (`lastAttemptedAt`/`lastError`): the row's shape
+ * columns (`signature`, `entity`, `kind`, `graphId`, `schemaVersion`)
+ * and `materializedAt` describe the index that IS materialized, and a
+ * failed re-attempt must not overwrite them. In particular, a
+ * signature-drift failure that rewrote `signature` to the new value
+ * while keeping the old success `materializedAt` would settle as
+ * `alreadyMaterialized` on the very next run — silencing the drift
+ * signal after one report. Omitted columns are preserved by ON CONFLICT
+ * DO UPDATE semantics. On success every column takes the new value.
  */
 export function buildMaterializationOnConflictSet(
-  materializedAtColumn: unknown,
   paramsMaterializedAt: string | undefined,
 ): Readonly<Record<string, ReturnType<typeof sql>>> {
-  const materializedAtSet =
-    paramsMaterializedAt === undefined ?
-      sql`COALESCE(excluded.${sql.identifier("materialized_at")}, ${materializedAtColumn})`
-    : sql`excluded.${sql.identifier("materialized_at")}`;
+  if (paramsMaterializedAt === undefined) {
+    return {
+      lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
+      lastError: sql`excluded.${sql.identifier("last_error")}`,
+    };
+  }
   return {
     graphId: sql`excluded.${sql.identifier("graph_id")}`,
     entity: sql`excluded.${sql.identifier("entity")}`,
     kind: sql`excluded.${sql.identifier("kind")}`,
     signature: sql`excluded.${sql.identifier("signature")}`,
     schemaVersion: sql`excluded.${sql.identifier("schema_version")}`,
-    materializedAt: materializedAtSet,
+    materializedAt: sql`excluded.${sql.identifier("materialized_at")}`,
     lastAttemptedAt: sql`excluded.${sql.identifier("last_attempted_at")}`,
     lastError: sql`excluded.${sql.identifier("last_error")}`,
   };

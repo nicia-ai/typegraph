@@ -127,10 +127,7 @@ describe("materializeSystemIndexes", () => {
       const [store] = await createStoreWithSchema(graph, backend);
 
       // Simulate a database initialized by an older library version: the
-      // index does not exist AND no materialization was ever recorded.
-      // (The materializer trusts recorded status rows by design — same
-      // contract as graph-declared indexes — so a drop with a surviving
-      // success row is operator repair, not the upgrade scenario.)
+      // index does not exist and no materialization was ever recorded.
       db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
       db.run(sql`DROP INDEX "typegraph_recorded_edges_from_idx"`);
       db.run(
@@ -167,6 +164,102 @@ describe("materializeSystemIndexes", () => {
       for (const result of second.results) {
         expect(result.status).toBe("alreadyMaterialized");
       }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("rebuilds a physically missing index even when a success row survives", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      // Adopt once so a genuine success row exists for the index.
+      db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
+      await store.materializeSystemIndexes();
+
+      // Dump/restore or a manual drop can lose the index but keep the
+      // row. Physical state is authoritative for system indexes: the
+      // runner must rebuild, not settle on the stale success.
+      db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
+      const { results } = await store.materializeSystemIndexes();
+      const target = results.find(
+        (result) => result.indexName === "typegraph_nodes_id_idx",
+      );
+      expect(target?.status).toBe("created");
+      expect(await indexNames(backend)).toContain("typegraph_nodes_id_idx");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("reports signature drift persistently instead of self-silencing", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      // A recorded success under a DIFFERENT signature — the shape an
+      // in-place declaration change would leave behind.
+      await backend.recordIndexMaterialization!({
+        indexName: "typegraph_nodes_id_idx",
+        graphId: "system-indexes",
+        entity: "system",
+        kind: "nodes",
+        signature: "stale-signature",
+        schemaVersion: 1,
+        attemptedAt: new Date().toISOString(),
+        materializedAt: new Date().toISOString(),
+        error: undefined,
+      });
+
+      const first = await store.materializeSystemIndexes();
+      const firstTarget = first.results.find(
+        (result) => result.indexName === "typegraph_nodes_id_idx",
+      );
+      expect(firstTarget?.status).toBe("failed");
+      expect(firstTarget?.error?.message).toContain("different signature");
+
+      // The drift record must not overwrite the row's signature — the
+      // second run has to keep failing, not settle as alreadyMaterialized.
+      const second = await store.materializeSystemIndexes();
+      const secondTarget = second.results.find(
+        (result) => result.indexName === "typegraph_nodes_id_idx",
+      );
+      expect(secondTarget?.status).toBe("failed");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses a name collision with a graph-declared index without touching its row", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      // A graph-declared index materialized under a system index's name.
+      await backend.recordIndexMaterialization!({
+        indexName: "typegraph_nodes_id_idx",
+        graphId: "someone-elses-graph",
+        entity: "node",
+        kind: "Person",
+        signature: "relational-signature",
+        schemaVersion: 3,
+        attemptedAt: new Date().toISOString(),
+        materializedAt: new Date().toISOString(),
+        error: undefined,
+      });
+
+      const { results } = await store.materializeSystemIndexes();
+      const target = results.find(
+        (result) => result.indexName === "typegraph_nodes_id_idx",
+      );
+      expect(target?.status).toBe("failed");
+      expect(target?.error?.message).toContain("Rename the graph-declared");
+
+      // The foreign row is untouched — no drift write bricked it.
+      const row = await backend.getIndexMaterialization!(
+        "typegraph_nodes_id_idx",
+      );
+      expect(row?.signature).toBe("relational-signature");
+      expect(row?.entity).toBe("node");
+      expect(row?.materializedAt).toBeDefined();
     } finally {
       await backend.close();
     }

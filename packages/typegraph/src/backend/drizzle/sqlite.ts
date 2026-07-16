@@ -1377,10 +1377,7 @@ export function createSqliteBackend(
         )
         .onConflictDoUpdate({
           target: t.indexName,
-          set: buildMaterializationOnConflictSet(
-            t.materializedAt,
-            params.materializedAt,
-          ),
+          set: buildMaterializationOnConflictSet(params.materializedAt),
         });
     },
 
