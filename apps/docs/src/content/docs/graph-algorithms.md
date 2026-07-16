@@ -61,6 +61,7 @@ Every traversal algorithm takes the same base options:
 | `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Compatibility option; both values use set-based node de-duplication |
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes and edges along the traversal — see [Temporal Behavior](#temporal-behavior) |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
+| `workingMemory` | `string` | `"64MB"` | Transaction-scoped memory budget for iterative rounds on PostgreSQL (`SET LOCAL work_mem` semantics); validated as `<digits>kB\|MB\|GB`, ignored by SQLite |
 
 `direction: "both"` treats edges as undirected. `cyclePolicy` remains accepted
 for compatibility with recursive query-builder traversals, but it does not
@@ -174,6 +175,7 @@ const everything = await store.algorithms.degree(alice);
 | `direction` | `"out" \| "in" \| "both"` | `"both"` | Count outgoing, incoming, or either |
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to the counted edges |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
+| `workingMemory` | `string` | `"64MB"` | Transaction-scoped memory budget for iterative rounds on PostgreSQL (`SET LOCAL work_mem` semantics); validated as `<digits>kB\|MB\|GB`, ignored by SQLite |
 
 `degree` runs a single `COUNT` query, not a recursive CTE, so it's
 efficient even for hub nodes with thousands of edges.
@@ -213,6 +215,14 @@ working table and refreshes them again after multiplicative growth. This avoids
 plans based on PostgreSQL's initial one-row estimate for a new temporary table.
 The policy is automatic, applies to WCC and growing traversal frontiers, and is
 a no-op on SQLite.
+
+Iterative operations (WCC and the working-table traversals) also raise
+PostgreSQL's per-operation memory budget for their rounds. The `workingMemory`
+option (default `"64MB"`) is applied with `SET LOCAL work_mem` semantics inside
+the operation's own transaction — the session and server settings are never
+modified, and the override ends with the transaction. The value must be a
+plain integer with a `kB`, `MB`, or `GB` suffix; SQLite validates and ignores
+it.
 
 Without `nodeKinds`, WCC seeds every visible node, so unrelated nodes still
 appear as singleton components. On heterogeneous graphs, pass the kinds that

@@ -159,6 +159,42 @@ async function seed(store: Store<TestGraph>): Promise<Fixture> {
   };
 }
 
+/**
+ * Counts every statement (row-returning and temporary) issued inside a
+ * traversal's transaction, so a reintroduced per-round COUNT or meeting
+ * probe fails the round-trip budget tests instead of silently doubling
+ * round-trips.
+ */
+function createCountingBackend(
+  backend: GraphBackend,
+  collected: string[],
+): GraphBackend {
+  return {
+    ...backend,
+    transaction<T>(
+      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      return backend.transaction(async (tx, adoptedTransaction) => {
+        const observedTransaction: TransactionBackend = {
+          ...tx,
+          execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
+            collected.push(backend.compileSql!(query).sql);
+            return tx.execute<Result>(query);
+          },
+          async executeTemporaryStatement(
+            query: CompiledTemporaryStatementSql,
+          ): Promise<void> {
+            collected.push(backend.compileSql!(query).sql);
+            await tx.executeTemporaryStatement!(query);
+          },
+        };
+        return fn(observedTransaction, adoptedTransaction);
+      }, options);
+    },
+  };
+}
+
 // ============================================================
 // Test Setup
 // ============================================================
@@ -496,45 +532,11 @@ describe("store.algorithms", () => {
   // --------------------------------------------------------------
 
   describe("working-table round-trip budget", () => {
-    /**
-     * Counts every statement (row-returning and temporary) issued inside the
-     * traversal's transaction, so a reintroduced per-round COUNT or meeting
-     * probe fails this test instead of silently doubling round-trips.
-     */
-    function createCountingBackend(collected: string[]): GraphBackend {
-      return {
-        ...backend,
-        transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-          options?: TransactionOptions,
-        ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
-            const observedTransaction: TransactionBackend = {
-              ...tx,
-              execute<Result>(
-                query: CompiledRowsSql,
-              ): Promise<readonly Result[]> {
-                collected.push(backend.compileSql!(query).sql);
-                return tx.execute<Result>(query);
-              },
-              async executeTemporaryStatement(
-                query: CompiledTemporaryStatementSql,
-              ): Promise<void> {
-                collected.push(backend.compileSql!(query).sql);
-                await tx.executeTemporaryStatement!(query);
-              },
-            };
-            return fn(observedTransaction, adoptedTransaction);
-          }, options);
-        },
-      };
-    }
-
     it("runs a 3-hop reachable in one statement per round", async () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(statements),
+        createCountingBackend(backend, statements),
       );
 
       const reached = await observedStore.algorithms.reachable(ids.alice, {
@@ -552,7 +554,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(statements),
+        createCountingBackend(backend, statements),
       );
 
       const path = await observedStore.algorithms.shortestPath(
@@ -573,6 +575,26 @@ describe("store.algorithms", () => {
         statements.some((statement) =>
           statement.trimStart().startsWith("SELECT COUNT"),
         ),
+      ).toBe(false);
+    });
+
+    it("emits no working-memory settings statement on SQLite", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(backend, statements),
+      );
+
+      const reached = await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+        workingMemory: "32MB",
+      });
+
+      expect(reached.map((node) => node.id)).toContain(ids.dave);
+      expect(statements).toHaveLength(7);
+      expect(
+        statements.some((statement) => statement.includes("set_config")),
       ).toBe(false);
     });
   });
@@ -882,6 +904,48 @@ describe("store.algorithms", () => {
           depth: -1,
         }),
       ).rejects.toBeInstanceOf(ConfigurationError);
+    });
+
+    it("rejects malformed workingMemory values across iterative algorithms", async () => {
+      // SET LOCAL work_mem cannot take arbitrary text, so the option accepts
+      // only <digits><kB|MB|GB> — no spaces, fractions, lowercase units, or
+      // anything that could smuggle SQL into a settings statement.
+      const malformedValues = [
+        "64 MB",
+        "64mb",
+        "-64MB",
+        "1.5GB",
+        "64MB; DROP TABLE typegraph_nodes",
+        "",
+      ];
+      for (const workingMemory of malformedValues) {
+        await expect(
+          store.algorithms.reachable(ids.alice, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.shortestPath(ids.alice, ids.bob, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+    });
+
+    it("accepts a well-formed workingMemory value", async () => {
+      const reached = await store.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        workingMemory: "32MB",
+      });
+      expect(reached.some((node) => node.id === ids.dave)).toBe(true);
     });
 
     it("rejects maxHops over the explicit recursive limit", async () => {

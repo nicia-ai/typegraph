@@ -39,6 +39,8 @@ export type IterativeGraphOperation = Readonly<{
   nodeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   edgeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   schema: ReturnType<typeof resolveReadSchema>;
+  /** Validated transaction-scoped memory budget for working-table rounds. */
+  workingMemory: string;
 }>;
 
 export type NodeIdentityKey = string & {
@@ -116,6 +118,34 @@ export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 16;
 export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 
 /**
+ * Default transaction-scoped working-memory budget for iterative graph
+ * operations. PostgreSQL's stock `work_mem` (4MB) makes whole-graph rounds
+ * spill their candidate sorts and DISTINCT reductions to disk (measured
+ * ~106MB external merges per WCC round on LDBC SNB SF1); 64MB keeps typical
+ * rounds in memory while staying transaction-local. SQLite ignores it.
+ */
+export const DEFAULT_ITERATIVE_WORKING_MEMORY = "64MB";
+
+/**
+ * Accepts only a plain integer with a binary unit suffix. The value reaches
+ * the engine as a bound parameter, but a strict shape keeps the option from
+ * ever smuggling arbitrary text into a settings statement and rejects
+ * ambiguous inputs (fractions, spaces, unknown units) up front.
+ */
+const ITERATIVE_WORKING_MEMORY_PATTERN = /^\d+(kB|MB|GB)$/;
+
+function resolveWorkingMemory(workingMemory: string | undefined): string {
+  const resolved = workingMemory ?? DEFAULT_ITERATIVE_WORKING_MEMORY;
+  if (!ITERATIVE_WORKING_MEMORY_PATTERN.test(resolved)) {
+    throw new ConfigurationError(
+      `Iterative graph operation workingMemory must be digits followed by kB, MB, or GB (for example "64MB"), got ${JSON.stringify(workingMemory)}.`,
+      { workingMemory },
+    );
+  }
+  return resolved;
+}
+
+/**
  * Opens the shared execution scope for iterative graph algorithms. The host
  * controls rounds and convergence; this scope supplies a snapshot-consistent,
  * bind-limit-aware SQL working relation for each round.
@@ -183,6 +213,15 @@ export async function runIterativeGraphOperation<
         },
       };
 
+      // Transaction-scoped only: `set_config(..., is_local => true)` reverts
+      // when this transaction ends, so the session/server setting is never
+      // touched. SQLite returns no statement here.
+      const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+        context.operation.workingMemory,
+      );
+      if (workingMemoryStatement !== undefined) {
+        await context.executeTemporary(workingMemoryStatement);
+      }
       await context.executeTemporary(plan.createWorkingTable(context));
       let operationError: unknown;
       try {
@@ -621,6 +660,7 @@ function createOperation(
     nodeTemporalFilter,
     edgeTemporalFilter,
     schema: resolveReadSchema(ctx, options),
+    workingMemory: resolveWorkingMemory(options.workingMemory),
   };
 }
 

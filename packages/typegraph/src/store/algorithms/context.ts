@@ -50,6 +50,7 @@ export type InternalTraversalOptions = InternalTemporalOptions &
     maxHops?: number;
     direction?: TraversalDirection;
     cyclePolicy?: AlgorithmCyclePolicy;
+    workingMemory?: string;
   }>;
 
 /**

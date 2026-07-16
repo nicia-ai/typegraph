@@ -319,6 +319,32 @@ export function registerAlgorithmIntegrationTests(
         ).resolves.toEqual([]);
       });
 
+      it("honors an explicit workingMemory budget for iterative rounds", async () => {
+        // PostgreSQL applies the value as a transaction-scoped work_mem via
+        // set_config(..., is_local => true); SQLite validates and ignores it.
+        // Results must be identical on both backends either way.
+        const store = context.getStore();
+        const [left, right] = await Promise.all([
+          store.nodes.Person.create({ name: "Memory left" }, { id: "mem-a" }),
+          store.nodes.Person.create({ name: "Memory right" }, { id: "mem-b" }),
+        ]);
+        await store.edges.knows.create(left, right, {});
+
+        const memberships = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          workingMemory: "32MB",
+        });
+        const byId = new Map(memberships.map((row) => [row.id, row]));
+        expect(byId.get("mem-a")?.componentId).toBe("mem-a");
+        expect(byId.get("mem-b")?.componentId).toBe("mem-a");
+
+        const reached = await store.algorithms.reachable("mem-a", {
+          edges: ["knows"],
+          workingMemory: "32MB",
+        });
+        expect(reached.map((row) => row.id)).toContain("mem-b");
+      });
+
       it("throws instead of returning partial labels at the iteration limit", async () => {
         const store = context.getStore();
         const [alpha, beta, gamma] = await Promise.all([

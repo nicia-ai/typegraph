@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import {
+  DEFAULT_ITERATIVE_WORKING_MEMORY,
   shouldRefreshWorkingTableStatistics,
   WORKING_TABLE_ANALYZE_GROWTH_FACTOR,
   WORKING_TABLE_ANALYZE_MINIMUM_ROWS,
@@ -58,5 +59,29 @@ describe("iterative graph working-table statistics", () => {
       'ANALYZE "typegraph_iterative_test"',
     );
     expect(sqliteDialect.analyzeTemporaryTable(workingTable)).toBeUndefined();
+  });
+});
+
+describe("iterative graph working-memory dialect seam", () => {
+  it("emits a parameterized, transaction-local work_mem override on PostgreSQL only", () => {
+    const postgresStatement = postgresDialect.setTransactionWorkingMemory(
+      DEFAULT_ITERATIVE_WORKING_MEMORY,
+    );
+
+    if (postgresStatement === undefined) {
+      throw new Error("PostgreSQL must emit a work_mem override");
+    }
+    const compiled = new PgDialect().sqlToQuery(postgresStatement);
+    // set_config(..., is_local => true) is the parameterizable form of
+    // SET LOCAL: it reverts at transaction end and binds the value instead
+    // of splicing it into the statement text.
+    expect(compiled.sql).toBe("SELECT set_config('work_mem', $1, true)");
+    expect(compiled.params).toEqual([DEFAULT_ITERATIVE_WORKING_MEMORY]);
+
+    expect(
+      sqliteDialect.setTransactionWorkingMemory(
+        DEFAULT_ITERATIVE_WORKING_MEMORY,
+      ),
+    ).toBeUndefined();
   });
 });

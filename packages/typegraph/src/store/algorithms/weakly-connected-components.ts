@@ -63,6 +63,9 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     ...(options.recordedAsOf === undefined ?
       {}
     : { recordedAsOf: options.recordedAsOf }),
+    ...(options.workingMemory === undefined ?
+      {}
+    : { workingMemory: options.workingMemory }),
   };
 
   return runIterativeGraphOperation(ctx, traversalOptions, {

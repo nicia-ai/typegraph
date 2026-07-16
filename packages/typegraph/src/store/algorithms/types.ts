@@ -54,10 +54,25 @@ export type InternalTemporalAlgorithmOptions = Omit<
   Readonly<{ recordedAsOf?: RecordedInstant }>;
 
 /**
+ * Transaction-scoped memory budget for iterative graph rounds.
+ *
+ * Applies to backends with a per-operation memory setting (PostgreSQL
+ * `work_mem`, applied via `SET LOCAL` semantics inside the operation's own
+ * transaction — the session and server settings are never modified). SQLite
+ * has no equivalent setting and ignores the option. The value must be a
+ * plain integer with a `kB`, `MB`, or `GB` suffix; defaults to `"64MB"`.
+ */
+export type IterativeMemoryOptions = Readonly<{
+  /** Per-operation round memory budget, e.g. `"64MB"` (the default). */
+  workingMemory?: string;
+}>;
+
+/**
  * Base options for traversal-style algorithms.
  */
 export type BaseTraversalOptions<G extends GraphDef> =
   TemporalAlgorithmOptions &
+    IterativeMemoryOptions &
     Readonly<{
       /** Edge kinds to follow. At least one kind is required. */
       edges: readonly EdgeKinds<G>[];
@@ -140,6 +155,7 @@ export type InternalReachableOptions<G extends GraphDef> =
  * The source is always excluded.
  */
 export type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions &
+  IterativeMemoryOptions &
   Readonly<{
     /** Edge kinds to follow. At least one kind is required. */
     edges: readonly EdgeKinds<G>[];
@@ -186,6 +202,7 @@ export type InternalDegreeOptions<G extends GraphDef> =
  */
 export type WeaklyConnectedComponentsOptions<G extends GraphDef> =
   TemporalAlgorithmOptions &
+    IterativeMemoryOptions &
     Readonly<{
       /** Edge kinds whose undirected projection defines connectivity. */
       edges: readonly EdgeKinds<G>[];

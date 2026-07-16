@@ -78,6 +78,11 @@ export const sqliteDialect: DialectAdapter = {
     return;
   },
 
+  setTransactionWorkingMemory(): undefined {
+    // SQLite has no per-transaction working-memory budget to raise.
+    return;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================
