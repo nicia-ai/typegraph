@@ -85,45 +85,44 @@ Lowering the generic trigger to 16 rows restored the hash-join plan and brought
 the scoped lane to **18.8 ms**, still with one `ANALYZE` per run. This threshold
 is evidence-driven rather than algorithm-specific.
 
-### Scale gate: BFS/SSSP on PostgreSQL at SF1 — PASSED
+### Scale gate: algorithms on PostgreSQL at SF1 — PASSED
 
 The growth-factor re-analysis targets the case smoke can't reach (a working
-table that grows well beyond the initial threshold). Validated on a real SF1 `knows` graph (9,892
-persons, 361,246 directed / ~180k undirected edges), `--engines=typegraph-postgres,pggraph
---queries=GA_BFS,GA_SSSP`:
+table that grows well beyond the initial threshold). Full-lane numbers from the
+post-merge SF1 run (ref `e095e176`, all 5 engines, 9,892 persons / 361,246
+directed / ~180k undirected `knows` edges; `workingMemory: "64MB"` on the
+iterative calls):
 
-| Query | typegraph-postgres p50 | pggraph p50 | parity |
-| --- | ---: | ---: | :---: |
-| GA_BFS | 2867 ms | 129 ms | `comparable=yes` |
-| GA_SSSP | 2969 ms | 130 ms | `comparable=yes` |
+| Query | tg-sqlite p50 | tg-postgres p50 | pggraph p50 | parity |
+| --- | ---: | ---: | ---: | :---: |
+| GA_WCC | 11425 ms | 47406 ms | 8.82 ms | `comparable=yes` |
+| GA_BFS | 209 ms | 1741 ms | 283 ms | `comparable=yes` |
+| GA_SSSP | 211 ms | 1723 ms | 281 ms | `comparable=yes` |
 
 - **No planner cliff.** A stale-stats nested-loop plan over 9,892 nodes / ~180k
   edges across ~7 BFS rounds would run for minutes-to-hours (extrapolating the
-  pre-fix 1146 ms at 181 nodes). A bounded ~3 s means hash joins — the size/4×
+  pre-fix 1146 ms at 181 nodes). Bounded seconds means hash joins — the size/4×
   growth-factor `ANALYZE` fires as the frontier grows and keeps the plan off
-  nested loops on a real large frontier. Combined with the unit test (synthetic
-  1→64→256, two refreshes) this closes the growth-path gate.
-- **Correct at scale.** GA_BFS/GA_SSSP `comparable=yes` vs pgGraph's native CSR
-  traversal — TypeGraph's whole-component reachability and min-depth sums are
-  byte-identical to pgGraph over the SF1 `knows` graph.
-- **~22× slower than pgGraph** — the honest specialized-CSR vs multi-round
-  in-database-SQL-iteration gap (community-detection design §7). ~3 s is the
-  scale cost of an in-database BFS on networked PostgreSQL, not a pathology.
+  nested loops. Combined with the unit test (synthetic 1→64→256, two refreshes)
+  this closes the growth-path gate.
+- **Reachability optimization confirmed end-to-end.** The predecessor-free
+  `reachable()` path (dedup edge targets before the node join, skip the
+  shortest-path-only `ROW_NUMBER` ranking) plus #285's iterative-round overhead
+  removal bring GA_BFS/GA_SSSP tg-postgres to ~1.7 s — down from the pre-merge
+  scale-gate's 2867/2969 ms (~1.6–1.7×). tg-sqlite runs them in ~0.2 s.
+- **GA_WCC: architectural, not overhead.** tg-postgres 47.4 s vs pgGraph's
+  native CSR union-find 8.82 ms is the SQL-iteration-vs-CSR gap
+  (community-detection design §7), not a pathology. #285 + the restored 64MB
+  `work_mem` moved it 65.1 → 47.4 s; that undershoots the review's ~15–25 s
+  estimate (tight, CV 0%; the `work_mem` override is verified
+  transaction-scoped-effective), most plausibly the shared-vCPU EC2 host
+  stretching a CPU-bound loop — a dedicated-core confirmation is the open item.
+- **Correct at scale.** All three `comparable=yes` vs pgGraph's native CSR —
+  TypeGraph's whole-component reachability, min-depth sums, and component-size
+  multiset are byte-identical to pgGraph over the SF1 `knows` graph.
 
-Secondary observation (not this run's focus): SF1 load was 190.8 s for
-typegraph-postgres (trusted import + covering index + `VACUUM`) vs 66.4 s for
-pggraph (batched INSERT + CSR build) — consistent with the trusted-import
-double-CSV-pass caveat in `trusted-import-load-perf.md`; worth a dedicated look,
-but one run, not a firm finding.
-
-### Reachability follow-up folded into the same PR
-
-`GA_BFS` and `GA_SSSP` both call `reachable()`. Its predecessor-free path now
-deduplicates edge targets before joining visible nodes and skips the
-shortest-path-only `ROW_NUMBER` predecessor ranking. A PostgreSQL query-shape
-control at SF1 dimensions improved the dominant expansion statement from
-709–772 ms to 194 ms (~3.7×). The next real SF1 lane will measure the end-to-end
-effect; the 2867/2969 ms scale-gate figures above predate this optimization.
+See `sf1-results.md` for the full 16-query, 5-engine table and the IC9 PG
+`EXPLAIN ANALYZE` fan-out breakdown.
 
 ## Lane status
 
