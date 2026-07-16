@@ -429,6 +429,9 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       expect(sql).toContain(
         '"typegraph_nodes_id_idx" ON "typegraph_nodes" ("graph_id", "id")',
       );
+      expect(sql).toContain(
+        '"typegraph_recorded_nodes_id_idx" ON "typegraph_recorded_nodes" ("graph_id", "id")',
+      );
       expect(sql).toContain('"typegraph_edges_from_idx"');
       expect(sql).toContain('"typegraph_edges_to_idx"');
       expect(sql).toContain('"typegraph_edges_kind_created_idx"');
@@ -493,6 +496,33 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
       expect(fetched).toBeDefined();
+    });
+  });
+
+  describe("bootstrapTables() index adoption", () => {
+    it("adds newly shipped indexes to an already-initialized database", async (ctx) => {
+      const { db, pool } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      await backend.bootstrapTables!();
+
+      // Simulate a database initialized before the bare-id indexes shipped.
+      // Bootstrap never re-runs automatically on an initialized database
+      // (createStore is zero-DDL), so a one-time explicit
+      // `backend.bootstrapTables()` is the documented adoption path — every
+      // statement is CREATE … IF NOT EXISTS.
+      await pool.query('DROP INDEX IF EXISTS "typegraph_nodes_id_idx"');
+      await pool.query(
+        'DROP INDEX IF EXISTS "typegraph_recorded_nodes_id_idx"',
+      );
+
+      await backend.bootstrapTables!();
+
+      const adopted = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename IN ('typegraph_nodes', 'typegraph_recorded_nodes')`,
+      );
+      const names = adopted.rows.map((row) => row.indexname);
+      expect(names).toContain("typegraph_nodes_id_idx");
+      expect(names).toContain("typegraph_recorded_nodes_id_idx");
     });
   });
 

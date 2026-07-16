@@ -243,6 +243,12 @@ export function createSqliteTables(
         t.validFrom,
         t.validTo,
       ),
+      // Bare-id lookup parity with the live nodes table: recorded-pinned
+      // reads swap this relation in as the node source, and `_entity_idx`
+      // leads with `kind`, so the same kind-by-bare-id probe (e.g.
+      // `degree()` at a recorded coordinate) would otherwise scan every
+      // historical version in the graph. See typegraph#280.
+      index(`${n.recordedNodes}_id_idx`).on(t.graphId, t.id),
     ],
   );
 
