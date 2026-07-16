@@ -894,12 +894,21 @@ least-privilege, DML-only database role.
   base tables on a fresh database, applies safe auto-migrations, and
   durably materializes strategy-owned runtime storage — both fulltext and
   each `embedding()` field's per-`(kind, field)` vector table, plus a
-  durable marker for each. It re-issues idempotent DDL on every cold boot
-  — at minimum a `CREATE TABLE IF NOT EXISTS` for the contribution-marker
-  table — so the role it runs under **must hold `CREATE` / DDL
-  privileges**. Run it once at startup, outside request handlers and
-  transactions. (`store.evolve()` likewise provisions any embedding field
-  it introduces, so it too needs DDL privileges.)
+  durable marker for each. It also brings TypeGraph's own base-relation
+  **system indexes** up to the running library version: bootstrap DDL only
+  runs on the very first boot, so an index shipped in a newer version
+  reaches an already-initialized database through this step (built with
+  `CREATE INDEX CONCURRENTLY` on PostgreSQL; a database whose indexes all
+  exist settles from the catalog with no DDL). It re-issues idempotent DDL
+  on every cold boot — at minimum a `CREATE TABLE IF NOT EXISTS` for the
+  contribution-marker table — so the role it runs under **must hold
+  `CREATE` / DDL privileges**. Run it once at startup, outside request
+  handlers and transactions. (`store.evolve()` likewise provisions any
+  embedding field it introduces, so it too needs DDL privileges.)
+  Deployments that never run `createStoreWithSchema` (manual-DDL boot with
+  a plain `createStore` attach) adopt new system indexes by calling
+  `store.materializeSystemIndexes()` once under a DDL-capable role after
+  upgrading.
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage

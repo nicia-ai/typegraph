@@ -526,6 +526,42 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
     });
   });
 
+  describe("materializeSystemIndexes()", () => {
+    it("adopts a physically missing system index via the CONCURRENTLY build path", async (ctx) => {
+      const { db, pool } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createStoreWithSchema(testGraph, backend);
+
+      // Simulate a database initialized by an older library version: the
+      // index does not exist and no materialization row was recorded.
+      await pool.query('DROP INDEX IF EXISTS "typegraph_nodes_id_idx"');
+      await pool.query(
+        `DELETE FROM typegraph_index_materializations WHERE index_name = 'typegraph_nodes_id_idx'`,
+      );
+
+      const { results } = await store.materializeSystemIndexes();
+      const target = results.find(
+        (result) => result.indexName === "typegraph_nodes_id_idx",
+      );
+      expect(target?.status).toBe("created");
+      expect(target?.entity).toBe("system");
+      // Everything else settles from the catalog without DDL or writes.
+      for (const result of results) {
+        expect(["created", "alreadyMaterialized"]).toContain(result.status);
+      }
+
+      const created = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'typegraph_nodes_id_idx'`,
+      );
+      expect(created.rows.length).toBe(1);
+
+      const status = await pool.query<{ entity: string; kind: string }>(
+        `SELECT entity, kind FROM typegraph_index_materializations WHERE index_name = 'typegraph_nodes_id_idx'`,
+      );
+      expect(status.rows[0]).toEqual({ entity: "system", kind: "nodes" });
+    });
+  });
+
   describe("refreshStatistics()", () => {
     it("runs ANALYZE on the default TypeGraph tables", async (ctx) => {
       const { db } = requirePostgres(ctx);

@@ -3,6 +3,7 @@
  *
  * Uses createLocalSqliteBackend from the public sqlite module.
  */
+import type Database from "better-sqlite3";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { afterEach } from "vitest";
 
@@ -63,6 +64,77 @@ export async function createInitializedStore<G extends GraphDef>(
 ): Promise<Store<G>> {
   const [store] = await createStoreWithSchema(graph, backend);
   return store;
+}
+
+export type CapturedStatement = Readonly<{
+  sql: string;
+  params: readonly unknown[];
+}>;
+
+export type PlanCaptureHarness = Readonly<{
+  /** Pass to createStore/createStoreWithSchema; auto-closed after the test. */
+  backend: GraphBackend;
+  /** Every executed statement, in order. Reset with `captured.length = 0`. */
+  captured: CapturedStatement[];
+  /** Raw better-sqlite3 client, for EXPLAIN QUERY PLAN. */
+  client: Database.Database;
+}>;
+
+/**
+ * An in-memory SQLite backend that captures every executed statement so a
+ * test can assert its actual query plan — the "index exists but the
+ * planner won't use it" failure class that DDL-presence assertions can't
+ * catch. Pair with {@link explainQueryPlan}:
+ *
+ * ```ts
+ * const { backend, captured, client } = createPlanCaptureBackend();
+ * const store = createStore(graph, backend);
+ * // ... seed data, refreshStatistics() ...
+ * captured.length = 0;
+ * await store.algorithms.degree(node.id);
+ * const plan = explainQueryPlan(client, captured.at(-1)!);
+ * expect(plan).toContain("my_expected_idx");
+ * expect(plan).not.toContain("SCAN typegraph_nodes");
+ * ```
+ */
+export function createPlanCaptureBackend(): PlanCaptureHarness {
+  const { backend: raw, db } = createLocalSqliteBackend();
+  const captured: CapturedStatement[] = [];
+  const backend: GraphBackend = {
+    ...raw,
+    async execute(query) {
+      const compiled = raw.compileSql?.(query);
+      if (compiled) {
+        captured.push({ sql: compiled.sql, params: compiled.params });
+      }
+      return raw.execute(query);
+    },
+    // Reads run through the cached-template fast path (executeRaw), which
+    // receives SQL text with all placeholders already filled — directly
+    // EXPLAIN-able.
+    async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
+      captured.push({ sql: sqlText, params });
+      return raw.executeRaw!<T>(sqlText, params);
+    },
+  };
+  backendsToClose.push(raw);
+  const client = (db as unknown as { $client: Database.Database }).$client;
+  return { backend, captured, client };
+}
+
+/**
+ * The `EXPLAIN QUERY PLAN` detail lines for a captured statement, joined
+ * with newlines — assert index usage with `toContain("<index name>")` and
+ * scan absence with `not.toContain("SCAN <table>")`.
+ */
+export function explainQueryPlan(
+  client: Database.Database,
+  statement: CapturedStatement,
+): string {
+  const rows = client
+    .prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+    .all(...statement.params) as readonly { detail: string }[];
+  return rows.map((row) => row.detail).join("\n");
 }
 
 /**

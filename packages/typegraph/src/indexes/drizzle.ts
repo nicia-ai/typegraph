@@ -2,11 +2,13 @@ import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
+  type PgColumn,
   uniqueIndex as pgUniqueIndex,
 } from "drizzle-orm/pg-core";
 import {
   index as sqliteIndex,
   type IndexBuilder as SqliteIndexBuilder,
+  type SQLiteColumn,
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
@@ -16,6 +18,12 @@ import {
   compileNodeIndexKeys,
   type IndexCompilationContext,
 } from "./compiler";
+import {
+  SYSTEM_INDEX_DECLARATIONS,
+  type SystemIndexDeclaration,
+  systemIndexName,
+  type SystemIndexTable,
+} from "./system";
 import {
   type EdgeIndexDeclaration,
   type IndexDeclaration,
@@ -369,6 +377,67 @@ function getSqliteEdgeSystemColumn(
       throw new Error(`Unsupported edge system column for indexes: ${column}`);
     }
   }
+}
+
+// ============================================================
+// System indexes (both dialects)
+// ============================================================
+//
+// The schema factories derive their system-index Drizzle builders from
+// `SYSTEM_INDEX_DECLARATIONS` so both dialects emit the same index set by
+// construction. The builders receive the table's real column objects (not
+// SQL wrappers) so the DDL generator renders plain quoted column names —
+// byte-identical to the runtime DDL `materializeSystemIndexes` emits.
+
+type SystemIndexColumns<C> = Readonly<Record<string, C>>;
+
+function resolveSystemIndexColumns<C>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+): readonly [C, ...C[]] {
+  const resolved = declaration.columns.map((column) => {
+    const camel = column.replaceAll(/_([a-z])/gu, (_match, letter: string) =>
+      letter.toUpperCase(),
+    );
+    const value = columns[camel];
+    if (value === undefined) {
+      throw new Error(
+        `System index "${declaration.table}_${declaration.suffix}" references ` +
+          `a column "${column}" the ${declaration.table} table does not define`,
+      );
+    }
+    return value;
+  });
+  // `declaration.columns` is non-empty by type, so `resolved` is too.
+  return resolved as [C, ...C[]];
+}
+
+export function buildSqliteSystemIndexBuilders(
+  tableKey: SystemIndexTable,
+  physicalTableName: string,
+  columns: SystemIndexColumns<SQLiteColumn>,
+): readonly SqliteIndexBuilder[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) => declaration.table === tableKey,
+  ).map((declaration) =>
+    sqliteIndex(systemIndexName(physicalTableName, declaration.suffix)).on(
+      ...resolveSystemIndexColumns(declaration, columns),
+    ),
+  );
+}
+
+export function buildPostgresSystemIndexBuilders(
+  tableKey: SystemIndexTable,
+  physicalTableName: string,
+  columns: SystemIndexColumns<PgColumn>,
+): readonly PgIndexBuilder[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) => declaration.table === tableKey,
+  ).map((declaration) =>
+    pgIndex(systemIndexName(physicalTableName, declaration.suffix)).on(
+      ...resolveSystemIndexColumns(declaration, columns),
+    ),
+  );
 }
 
 // ============================================================

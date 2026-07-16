@@ -18,8 +18,13 @@ export type KindEntity = "node" | "edge";
  * kind directly (they back a per-`(kind, field)` typed embedding table
  * owned by the active `VectorStrategy`), but they participate in the same
  * materialization and diff pipelines, so they share this discriminator.
+ *
+ * `"system"` marks TypeGraph's own base-relation indexes
+ * (`SYSTEM_INDEX_DECLARATIONS`) — graph-independent, but materialized and
+ * status-tracked through the same pipeline; their status rows carry the
+ * relation key (e.g. `"recordedNodes"`) in the `kind` column.
  */
-export type IndexEntity = "node" | "edge" | "vector";
+export type IndexEntity = "node" | "edge" | "vector" | "system";
 
 /**
  * Field-level null-check operations that round-trip through persisted

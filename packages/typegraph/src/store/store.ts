@@ -121,6 +121,8 @@ import {
   materializeIndexes as materializeIndexesImpl,
   type MaterializeIndexesOptions,
   type MaterializeIndexesResult,
+  materializeSystemIndexes as materializeSystemIndexesImpl,
+  type MaterializeSystemIndexesOptions,
   vectorStatusKey,
 } from "./materialize-indexes";
 import {
@@ -2529,6 +2531,32 @@ export class Store<G extends GraphDef> {
   }
 
   /**
+   * Materializes TypeGraph's own base-relation indexes
+   * (`SYSTEM_INDEX_DECLARATIONS`) against the live database.
+   *
+   * Bootstrap DDL runs only on first boot, so a system index shipped in a
+   * newer library version never reaches an already-initialized database on
+   * its own. `createStoreWithSchema` runs this automatically; deployments
+   * that boot with plain `createStore` / `createVerifiedStore` (zero-DDL by
+   * contract) adopt new system indexes by calling this once under a role
+   * that may run DDL. Same status-table, drift-signature, and Postgres
+   * `CREATE INDEX CONCURRENTLY` claim semantics as `materializeIndexes`.
+   */
+  async materializeSystemIndexes(
+    options?: MaterializeSystemIndexesOptions,
+  ): Promise<MaterializeIndexesResult> {
+    const { activeRow } = await this.#loadCaughtUp("materialize");
+    return materializeSystemIndexesImpl(
+      {
+        backend: this.#baseBackend,
+        graphId: this.graphId,
+        schemaVersion: activeRow.version,
+      },
+      options ?? {},
+    );
+  }
+
+  /**
    * Recreate a vector field's per-field storage at its current declared
    * dimension, then optionally re-embed existing rows.
    *
@@ -3529,6 +3557,11 @@ export async function createStoreWithSchema<G extends GraphDef>(
   // durable marker under the privileged role, so a least-privilege runtime
   // asserts the markers (SELECT) and writes embeddings without `CREATE`.
   await materializeVectorContributions(backend, merged);
+  // Bring the base-relation system indexes up to this library version.
+  // Bootstrap DDL only runs on first boot, so an index shipped in a newer
+  // version reaches already-initialized databases here — this is the same
+  // privileged-boot step the contributions above use.
+  await materializeSystemIndexesOnBoot(backend, merged.id, result);
 
   const store = new Store(
     merged,
@@ -3537,6 +3570,51 @@ export async function createStoreWithSchema<G extends GraphDef>(
     schemaMetadataForResult(activeRow, result),
   );
   return [store, result];
+}
+
+/**
+ * Boot-path system-index materialization. Lenient where the explicit
+ * `store.materializeSystemIndexes()` API is strict:
+ *
+ * - Backends without `executeDdl` / status primitives are skipped —
+ *   their deployments keep the bootstrap-only behavior they had before
+ *   system indexes were materialized at boot, instead of failing to boot.
+ * - Skipped when the schema gate did not pass (`"breaking"`).
+ * - Individual index failures degrade to a warning: system indexes are a
+ *   performance concern, and a store that cannot build one must still
+ *   come up (the operator retries via `store.materializeSystemIndexes()`).
+ */
+async function materializeSystemIndexesOnBoot(
+  backend: GraphBackend,
+  graphId: string,
+  result: SchemaValidationResult,
+): Promise<void> {
+  if (result.status === "breaking") return;
+  if (
+    backend.executeDdl === undefined ||
+    backend.getIndexMaterialization === undefined ||
+    backend.recordIndexMaterialization === undefined
+  ) {
+    return;
+  }
+  const schemaVersion =
+    result.status === "migrated" ? result.toVersion : result.version;
+  const { results } = await materializeSystemIndexesImpl(
+    { backend: asRawBackend(backend), graphId, schemaVersion },
+    {},
+  );
+  const failed = results.filter(
+    (entryResult) => entryResult.status === "failed",
+  );
+  if (failed.length === 0) return;
+  console.warn(
+    `[typegraph] ${String(failed.length)} system index(es) failed to ` +
+      `materialize at boot (${failed
+        .map((entryResult) => entryResult.indexName)
+        .join(", ")}); the store is usable but the affected access paths ` +
+      "fall back to scans. Retry via store.materializeSystemIndexes().",
+    failed[0]?.error,
+  );
 }
 
 /**

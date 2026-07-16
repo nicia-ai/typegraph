@@ -54,6 +54,12 @@ export {
   buildSqliteNodeIndexBuilders,
 } from "./drizzle";
 export { toDeclaredIndex, toDeclaredIndexes } from "./profiler";
+export {
+  generateSystemIndexDDL,
+  SYSTEM_INDEX_DECLARATIONS,
+  type SystemIndexDeclaration,
+  type SystemIndexTable,
+} from "./system";
 export type {
   EdgeIndexConfig,
   EdgeIndexDeclaration,
