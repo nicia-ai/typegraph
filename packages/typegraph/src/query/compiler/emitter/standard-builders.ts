@@ -832,7 +832,7 @@ export function lateMaterializedPhysicalAlias(alias: string): string {
 }
 
 /** Node aliases in the query: the start alias plus each traversal's node. */
-export function lateMaterializedNodeAliases(ast: QueryAst): readonly string[] {
+function lateMaterializedNodeAliases(ast: QueryAst): readonly string[] {
   return [
     ast.start.alias,
     ...ast.traversals.map((traversal) => traversal.nodeAlias),
