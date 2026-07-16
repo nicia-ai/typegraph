@@ -63,6 +63,7 @@ import {
   type HybridSearchParams,
   type HybridSearchRow,
   type IndexMaterializationRow,
+  INTERNAL_TEMPORARY_WRITES,
   type KindRemovalRow,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
@@ -123,10 +124,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import {
-  hybridCandidatesRef,
-  mapHybridSearchRow,
-} from "./operations/hybrid";
+import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   coerceNumericScore,
@@ -389,9 +387,9 @@ function createSerializedExecutionQueue(): SerializedExecutionQueue {
         if (isDisposed()) return pendingForever<T>();
         try {
           const context = queueTaskContext;
-          return context === undefined ? await task() : (
-              await context.run(taskMarker, () => task())
-            );
+          return context === undefined ?
+              await task()
+            : await context.run(taskMarker, () => task());
         } catch (error) {
           if (isDisposed()) return pendingForever<T>();
           throw error;
@@ -1545,8 +1543,16 @@ export function createSqliteBackend(
 
     async transaction<T>(
       fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-      _options?: TransactionOptions,
+      options?: TransactionOptions,
     ): Promise<T> {
+      const temporaryWrites =
+        options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+      if (temporaryWrites && options.accessMode !== "read_only") {
+        throw new ConfigurationError(
+          "Temporary-write transactions must be semantically read-only.",
+          { dialect: "sqlite" },
+        );
+      }
       if (transactionMode === "none") {
         throwSqliteTransactionsDisabled(
           "This SQLite backend does not support atomic transactions. " +
@@ -1582,14 +1588,17 @@ export function createSqliteBackend(
             vectorStrategy,
             contributionMaterializer,
           });
-          // BEGIN IMMEDIATE, matching runSchemaWriteTransaction and the
-          // "drizzle" branch below: take the reserved write lock at the start of
-          // the transaction rather than on first write. A deferred BEGIN lets a
-          // read-then-write upgrade the lock mid-transaction, which fails
-          // immediately with "database is locked" against a writer on another
-          // connection (the serialized queue only orders writes within THIS
-          // backend); IMMEDIATE instead waits on SQLite's busy timeout.
-          await runFrameStatement(sql`BEGIN IMMEDIATE`);
+          // Read-only multi-statement operations need one snapshot but must not
+          // reserve SQLite's single writer slot. Business transactions retain
+          // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
+          await runFrameStatement(
+            (
+              options?.accessMode === "read_only" ||
+                temporaryWrites
+            ) ?
+              sql`BEGIN`
+            : sql`BEGIN IMMEDIATE`,
+          );
 
           try {
             const result = await fn(
@@ -1614,17 +1623,19 @@ export function createSqliteBackend(
         );
       }
 
-      // transactionMode === "drizzle". Open with BEGIN IMMEDIATE (the same
-      // behavior runSchemaWriteTransaction uses) so the reserved write lock is
-      // taken at the start of the transaction rather than on first write — a
-      // deferred BEGIN would let a read-then-write race the lock upgrade and
-      // fail with SQLITE_BUSY. The serialized queue orders transactions within
-      // this backend; the immediate lock covers contention across connections.
+      // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
+      // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
       return runWithSerializedQueue(
         serializedQueue,
         async () =>
           db.transaction(async (tx) => fn(bindTransactionBackend(tx), tx), {
-            behavior: "immediate",
+            behavior:
+              (
+                options?.accessMode === "read_only" ||
+                temporaryWrites
+              ) ?
+                "deferred"
+              : "immediate",
           }) as Promise<T>,
       );
     },

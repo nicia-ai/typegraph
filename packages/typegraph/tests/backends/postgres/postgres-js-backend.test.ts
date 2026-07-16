@@ -12,15 +12,26 @@
  * EXISTS` DDL and per-test TRUNCATE, and the harness runs files
  * serially.
  */
+import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { count, defineEdge, defineGraph, defineNode } from "../../../src";
+import {
+  asCompiledRowsSql,
+  count,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { rowPropsToObject } from "../../../src/backend/types";
+import {
+  INTERNAL_TEMPORARY_WRITES,
+  rowPropsToObject,
+} from "../../../src/backend/types";
+import { asCompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -303,6 +314,74 @@ describe("postgres-js driver — coercion sanity", () => {
     const fetched = await backend.getNode("postgres_js_test", "Person", "tx-1");
     expect(fetched).toBeDefined();
     expect(rowPropsToObject(fetched!.props).name).toBe("Alice");
+  });
+
+  it("honors repeatable-read access for read-only transactions", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+
+    const settings = await backend.transaction(
+      async (tx) =>
+        tx.execute<
+          Readonly<{
+            isolation_level: string;
+            read_only: string;
+          }>
+        >(
+          asCompiledRowsSql(drizzleSql`
+            SELECT
+              current_setting('transaction_isolation') AS isolation_level,
+              current_setting('transaction_read_only') AS read_only
+          `),
+        ),
+      { accessMode: "read_only", isolationLevel: "repeatable_read" },
+    );
+
+    expect(settings).toEqual([
+      { isolation_level: "repeatable read", read_only: "on" },
+    ]);
+  });
+
+  it("allows only temporary writes in the internal snapshot mode", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const backend = createPostgresBackend(db);
+
+    const settings = await backend.transaction(
+      async (tx) => {
+        await tx.executeTemporaryStatement!(
+          asCompiledTemporaryStatementSql(
+            drizzleSql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
+          ),
+        );
+        const rows = await tx.execute<
+          Readonly<{
+            isolation_level: string;
+            read_only: string;
+          }>
+        >(
+          asCompiledRowsSql(drizzleSql`
+            SELECT
+              current_setting('transaction_isolation') AS isolation_level,
+              current_setting('transaction_read_only') AS read_only
+          `),
+        );
+        await tx.executeTemporaryStatement!(
+          asCompiledTemporaryStatementSql(
+            drizzleSql`DROP TABLE iterative_probe`,
+          ),
+        );
+        return rows;
+      },
+      {
+        accessMode: "read_only",
+        isolationLevel: "repeatable_read",
+        temporaryWrites: INTERNAL_TEMPORARY_WRITES,
+      },
+    );
+
+    expect(settings).toEqual([
+      { isolation_level: "repeatable read", read_only: "off" },
+    ]);
   });
 });
 

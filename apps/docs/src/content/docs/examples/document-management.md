@@ -684,9 +684,8 @@ async function getBreadcrumb(
 }
 ```
 
-`reachable` returns `{ id, kind, depth }` — one recursive-CTE query returns
-the full ancestor chain, then a single batched `getByIds` hydrates the folder
-properties.
+`reachable` returns `{ id, kind, depth }` from a set-based BFS frontier, then a
+single batched `getByIds` hydrates the folder properties.
 
 ## Bulk Operations
 

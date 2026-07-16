@@ -182,4 +182,15 @@ describe("recorded-time capture capability gate", () => {
       }),
     ).rejects.toThrow("requires read_committed isolation");
   });
+
+  it("allows snapshot isolation for read-only history transactions", async () => {
+    const store = createStore(graph, postgresLikeBackend(), { history: true });
+
+    await expect(
+      store.transaction(() => Promise.resolve("snapshot"), {
+        accessMode: "read_only",
+        isolationLevel: "repeatable_read",
+      }),
+    ).resolves.toBe("snapshot");
+  });
 });

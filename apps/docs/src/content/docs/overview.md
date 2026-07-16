@@ -129,8 +129,9 @@ policy. Cycle prevention is the default.
 See [Recursive Traversals](/queries/recursive) for details.
 
 Note: TypeGraph ships **Tier 1 graph algorithms** (shortest path, reachability,
-neighborhoods, and degree) on `store.algorithms.*`. Each call compiles to a
-single recursive CTE. See [Graph Algorithms](/graph-algorithms) for details.
+neighborhoods, and degree) on `store.algorithms.*`. Traversal calls use a
+set-based BFS frontier, while degree uses a single count query. See
+[Graph Algorithms](/graph-algorithms) for details.
 
 Note: TypeGraph supports **runtime schema induction** via graph
 extensions. An LLM or ingestion agent can propose a typed schema as a

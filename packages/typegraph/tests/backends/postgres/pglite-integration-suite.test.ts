@@ -11,8 +11,10 @@
  * suites run on separate vitest workers (parallel files) rather than one serial
  * long-pole. One shared engine per file; data is reset between tests.
  */
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
+import { asCompiledRowsSql } from "../../../src";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 import {
   setupSharedPgliteEngine,
@@ -26,6 +28,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  const leakedWorkingTables = await engine.makeBackend().execute(
+    asCompiledRowsSql(sql`
+      SELECT relation.relname
+      FROM pg_catalog.pg_class relation
+      WHERE relation.relpersistence = 't'
+        AND relation.relname LIKE 'typegraph_iterative_%'
+    `),
+  );
+  if (leakedWorkingTables.length > 0) {
+    throw new Error(
+      `Iterative graph operations leaked temporary tables: ${JSON.stringify(leakedWorkingTables)}`,
+    );
+  }
   await engine.dispose();
 });
 

@@ -701,9 +701,9 @@ export function createRecordedBackend(
       const backendOptions = stripRecordedFlushObserver(options);
       assertRequestedRecordedIsolation(backend, backendOptions);
       return backend.transaction(async (target) => {
-        await assertRecordedCaptureTransactionIsolation(target);
-        // Bundled BEGIN IMMEDIATE transaction — the write lock is already held.
-        const scope = createRecordedTransactionScope(target, schema, true);
+        await assertRecordedCaptureTransactionIsolation(target, backendOptions);
+        const readOnly = backendOptions?.accessMode === "read_only";
+        const scope = createRecordedTransactionScope(target, schema, !readOnly);
         const result = await fn(scope.backend, createHistoryUnsafeSqlRef());
         const instants = await scope.flush();
         observer?.(instants);

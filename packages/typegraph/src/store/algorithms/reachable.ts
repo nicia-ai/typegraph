@@ -1,7 +1,4 @@
-import { sql } from "drizzle-orm";
-
-import { asCompiledRowsSql } from "../../query/sql-intent";
-import { buildReachableCte } from "../recursive-cte";
+import { findReachableNodes, findShortestPath } from "./breadth-first";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
@@ -9,7 +6,6 @@ import {
   DEFAULT_NEIGHBOR_DEPTH,
   type InternalTraversalOptions,
   resolveMaxHops,
-  resolveTemporalOptions,
 } from "./context";
 import type { ReachableNode } from "./types";
 
@@ -18,12 +14,6 @@ type InternalReachableOptions = InternalTraversalOptions &
 
 type InternalNeighborsOptions = Omit<InternalTraversalOptions, "maxHops"> &
   Readonly<{ depth?: number }>;
-
-type ReachableRow = Readonly<{
-  id: string;
-  kind: string;
-  depth: number | string;
-}>;
 
 export async function executeReachable(
   ctx: AlgorithmContext,
@@ -37,35 +27,10 @@ export async function executeReachable(
     "maxHops",
   );
 
-  const cte = buildReachableCte({
-    graphId: ctx.graphId,
-    sourceId,
-    edgeKinds: options.edges,
-    maxHops,
-    direction: options.direction ?? "out",
-    cyclePolicy: options.cyclePolicy ?? "prevent",
-    includePath: false,
-    ...resolveTemporalOptions(ctx, options),
-    dialect: ctx.dialect,
-    schema: ctx.schema,
-    ...(ctx.recordedReadBinding === undefined ?
-      {}
-    : { recordedReadBinding: ctx.recordedReadBinding }),
-  });
-
-  const sourceFilter =
-    options.excludeSource === true ? sql` WHERE id != ${sourceId}` : sql``;
-
-  const query = sql`${cte} SELECT id, kind, MIN(depth) AS depth FROM reachable${sourceFilter} GROUP BY id, kind ORDER BY depth ASC, id ASC`;
-
-  const rows = await ctx.backend.execute<ReachableRow>(
-    asCompiledRowsSql(query),
-  );
-  return rows.map((row) => ({
-    id: row.id,
-    kind: row.kind,
-    depth: Number(row.depth),
-  }));
+  const reached = await findReachableNodes(ctx, sourceId, maxHops, options);
+  return options.excludeSource === true ?
+      reached.filter((node) => node.id !== sourceId)
+    : reached;
 }
 
 export async function executeCanReach(
@@ -82,32 +47,10 @@ export async function executeCanReach(
     "maxHops",
   );
 
-  // Self-case (sourceId === targetId) is not short-circuited: the CTE base
-  // case emits the source row only if it passes the temporal filter, so
-  // `canReach(a, a)` correctly returns false when `a` is not visible under
-  // the resolved mode — consistent with `shortestPath(a, a)`.
-  const cte = buildReachableCte({
-    graphId: ctx.graphId,
-    sourceId,
-    edgeKinds: options.edges,
-    maxHops,
-    direction: options.direction ?? "out",
-    cyclePolicy: options.cyclePolicy ?? "prevent",
-    includePath: false,
-    ...resolveTemporalOptions(ctx, options),
-    dialect: ctx.dialect,
-    schema: ctx.schema,
-    ...(ctx.recordedReadBinding === undefined ?
-      {}
-    : { recordedReadBinding: ctx.recordedReadBinding }),
-  });
-
-  const query = sql`${cte} SELECT 1 AS hit FROM reachable WHERE id = ${targetId} LIMIT 1`;
-
-  const rows = await ctx.backend.execute<Readonly<{ hit: number }>>(
-    asCompiledRowsSql(query),
+  return (
+    (await findShortestPath(ctx, sourceId, targetId, maxHops, options)) !==
+    undefined
   );
-  return rows.length > 0;
 }
 
 export async function executeNeighbors(

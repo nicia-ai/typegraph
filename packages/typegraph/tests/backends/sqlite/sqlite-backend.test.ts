@@ -36,11 +36,13 @@ import {
 } from "../../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
+  INTERNAL_TEMPORARY_WRITES,
   type UpsertEmbeddingParams,
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../../../src/backend/types";
 import { sqliteVecStrategy } from "../../../src/query/dialect/vector/sqlite-vec-strategy";
+import { asCompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
@@ -1190,5 +1192,101 @@ describe("SQLite Backend - business transaction write lock", () => {
     }
 
     expect(probeTookLock).toBe(false);
+  });
+
+  it("leaves the writer slot free for a read-only transaction", async () => {
+    const dbPath = temporaryDbPath();
+    const { backend } = createLocalSqliteBackend({ path: dbPath });
+
+    let signalInside!: () => void;
+    const inside = new Promise<void>((resolve) => {
+      signalInside = resolve;
+    });
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const txDone = backend.transaction(
+      async (tx) => {
+        await tx.execute(asCompiledRowsSql(sql`SELECT 1 AS value`));
+        signalInside();
+        await barrier;
+      },
+      { accessMode: "read_only", isolationLevel: "repeatable_read" },
+    );
+    await inside;
+
+    try {
+      const probe = new Database(dbPath);
+      try {
+        probe.pragma("busy_timeout = 100");
+        probe.exec("BEGIN IMMEDIATE");
+        probe.exec("ROLLBACK");
+      } finally {
+        probe.close();
+      }
+    } finally {
+      release();
+      await txDone;
+      await backend.close();
+      removeDbFiles(dbPath);
+    }
+  });
+
+  it("leaves the writer slot free while writing temporary working state", async () => {
+    const dbPath = temporaryDbPath();
+    const { backend } = createLocalSqliteBackend({ path: dbPath });
+
+    let signalInside!: () => void;
+    const inside = new Promise<void>((resolve) => {
+      signalInside = resolve;
+    });
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const txDone = backend.transaction(
+      async (tx) => {
+        await tx.executeTemporaryStatement!(
+          asCompiledTemporaryStatementSql(
+            sql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
+          ),
+        );
+        await tx.executeTemporaryStatement!(
+          asCompiledTemporaryStatementSql(
+            sql`INSERT INTO iterative_probe (value) VALUES (1)`,
+          ),
+        );
+        signalInside();
+        await barrier;
+        await tx.executeTemporaryStatement!(
+          asCompiledTemporaryStatementSql(sql`DROP TABLE iterative_probe`),
+        );
+      },
+      {
+        accessMode: "read_only",
+        isolationLevel: "repeatable_read",
+        temporaryWrites: INTERNAL_TEMPORARY_WRITES,
+      },
+    );
+    await inside;
+
+    try {
+      const probe = new Database(dbPath);
+      try {
+        probe.pragma("busy_timeout = 100");
+        probe.exec("BEGIN IMMEDIATE");
+        probe.exec("ROLLBACK");
+      } finally {
+        probe.close();
+      }
+    } finally {
+      release();
+      await txDone;
+      await backend.close();
+      removeDbFiles(dbPath);
+    }
   });
 });
