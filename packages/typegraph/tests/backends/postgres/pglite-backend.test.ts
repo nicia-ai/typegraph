@@ -86,6 +86,10 @@ describe("PGlite backend", () => {
       const { backend } = await createLocalPgliteBackend();
       cleanups.push(() => backend.close());
       expect(backend.capabilities.vector?.supported).toBe(true);
+      expect(backend.capabilities.graphAnalytics).toEqual({
+        supported: true,
+        mathFunctions: true,
+      });
 
       const [store] = await createStoreWithSchema(documentsGraph, backend);
       await store.nodes.Doc.create({ title: "near", embedding: [1, 0, 0, 0] });

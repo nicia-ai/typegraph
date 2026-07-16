@@ -130,6 +130,7 @@ export type {
   FulltextQueryMode,
   FulltextSearchParams,
   FulltextSearchResult,
+  GraphAnalyticsCapabilities,
   GraphBackend,
   GraphEntityReadBackend,
   GraphEntityWriteBackend,
@@ -300,6 +301,7 @@ export {
   EndpointNotFoundError,
   // Error utility functions
   getErrorSuggestion,
+  GraphAlgorithmConvergenceError,
   isConstraintError,
   isRecordedCaptureGuardError,
   isSystemError,
@@ -320,6 +322,7 @@ export {
   TrustedImportError,
   TypeGraphError,
   UniquenessError,
+  UnsupportedBackendCapabilityError,
   UnsupportedPredicateError,
   ValidationError,
   VersionConflictError,
@@ -389,12 +392,14 @@ export type {
   StoreViewDegreeOptions,
   StoreViewEdgeCollection,
   StoreViewEdgeCollections,
+  StoreViewGraphAlgorithms,
   StoreViewNeighborsOptions,
   StoreViewNodeCollection,
   StoreViewNodeCollections,
   StoreViewReachableOptions,
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,
+  StoreViewWeaklyConnectedComponentsOptions,
   TypedRecordedStoreViewEdgeCollection,
   TypedStoreViewEdgeCollection,
 } from "./store";
@@ -420,6 +425,8 @@ export type {
   ShortestPathResult,
   TemporalAlgorithmOptions,
   TraversalDirection,
+  WeaklyConnectedComponentMembership,
+  WeaklyConnectedComponentsOptions,
 } from "./store/algorithms";
 export type {
   AnyEdge,

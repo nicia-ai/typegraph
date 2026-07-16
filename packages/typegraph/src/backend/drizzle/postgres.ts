@@ -85,6 +85,7 @@ import {
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type KindRemovalRow,
+  normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordContributionMaterializationParams,
@@ -355,12 +356,21 @@ export function createPostgresBackend(
   // unavailable regardless of what we declare. Auto-detect and downgrade
   // the capability so callers get correct fallback behavior without
   // having to remember to override it themselves.
-  const httpOnlyOverrides = isNeonHttpClient(db) ? { transactions: false } : {};
-  const capabilities: BackendCapabilities = {
+  const httpOnlyOverrides =
+    isNeonHttpClient(db) ?
+      {
+        transactions: false,
+        graphAnalytics: {
+          ...(baseCapabilities.graphAnalytics ?? { mathFunctions: true }),
+          supported: false,
+        },
+      }
+    : {};
+  const capabilities = normalizeGraphAnalyticsCapabilities({
     ...baseCapabilities,
     ...httpOnlyOverrides,
     ...options.capabilities,
-  };
+  });
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
       {}

@@ -66,6 +66,14 @@ export const postgresDialect: DialectAdapter = {
     supportsFulltext: true,
   },
 
+  binaryText(expression) {
+    return sql`${expression} COLLATE "C"`;
+  },
+
+  analyzeTemporaryTable(table) {
+    return sql`ANALYZE ${table}`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

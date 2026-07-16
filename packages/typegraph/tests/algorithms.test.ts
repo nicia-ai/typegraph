@@ -16,7 +16,11 @@ import type {
   TransactionOptions,
 } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
-import { ConfigurationError, ValidationError } from "../src/errors";
+import {
+  ConfigurationError,
+  GraphAlgorithmConvergenceError,
+  ValidationError,
+} from "../src/errors";
 import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
@@ -364,6 +368,47 @@ describe("store.algorithms", () => {
       ).toBe(true);
     });
 
+    it("deduplicates edge targets before node visibility without ranking predecessors", async () => {
+      const statements: string[] = [];
+      const observedBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                statements.push(backend.compileSql!(query).sql);
+                return tx.execute<Result>(query);
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+      });
+
+      const expansionStatement = statements.find(
+        (statement) =>
+          statement.includes("SELECT DISTINCT") &&
+          statement.includes("RETURNING node_id"),
+      );
+      expect(expansionStatement).toBeDefined();
+      expect(expansionStatement).not.toContain("ROW_NUMBER");
+      expect(expansionStatement).toMatch(
+        /SELECT DISTINCT[\s\S]+JOIN "typegraph_nodes"/,
+      );
+    });
+
     it("chunks duplicate edge filters within a small bind budget", async () => {
       const constrainedBackend: GraphBackend = {
         ...backend,
@@ -592,6 +637,86 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // weaklyConnectedComponents
+  // --------------------------------------------------------------
+
+  describe("weaklyConnectedComponents", () => {
+    it("returns exact component membership and singleton nodes", async () => {
+      const memberships = await store.algorithms.weaklyConnectedComponents({
+        edges: ["knows"],
+      });
+      const byId = new Map(memberships.map((row) => [row.id, row]));
+      const connectedIds = [ids.alice, ids.bob, ids.charlie, ids.dave, ids.eve];
+      const connectedLabels = new Set(
+        connectedIds.map((id) => {
+          const membership = byId.get(id)!;
+          expect(membership.size).toBe(5);
+          return `${membership.componentKind}\u0000${membership.componentId}`;
+        }),
+      );
+
+      expect(connectedLabels.size).toBe(1);
+      expect(byId.get(ids.xavier)?.size).toBe(2);
+      expect(byId.get(ids.yves)?.size).toBe(2);
+      expect(byId.get(ids.frank)?.size).toBe(1);
+      expect(byId.get(ids.t1)?.size).toBe(1);
+      expect(memberships).toHaveLength(13);
+    });
+
+    it("uses only the selected edge kinds", async () => {
+      const memberships = await store.algorithms.weaklyConnectedComponents({
+        edges: ["depends_on"],
+      });
+      const taskMemberships = memberships.filter((row) => row.kind === "Task");
+      expect(taskMemberships).toHaveLength(4);
+      expect(taskMemberships.every((row) => row.size === 4)).toBe(true);
+      expect(
+        memberships
+          .filter((row) => row.kind === "Person")
+          .every((row) => row.size === 1),
+      ).toBe(true);
+    });
+
+    it("rejects a backend without graph-analytics support", async () => {
+      const unsupportedBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: false, mathFunctions: false },
+        },
+      };
+      const unsupportedStore = createStore(testGraph, unsupportedBackend);
+
+      await expect(
+        unsupportedStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: { capability: "graphAnalytics", supported: false },
+      });
+    });
+
+    it("validates maxIterations", async () => {
+      await expect(
+        store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          maxIterations: 0,
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+    });
+
+    it("throws a typed error when exact convergence is not reached", async () => {
+      await expect(
+        store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          maxIterations: 1,
+        }),
+      ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+    });
+  });
+
+  // --------------------------------------------------------------
   // validation
   // --------------------------------------------------------------
 
@@ -608,6 +733,9 @@ describe("store.algorithms", () => {
       ).rejects.toBeInstanceOf(ConfigurationError);
       await expect(
         store.algorithms.neighbors(ids.alice, { edges: [] }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.weaklyConnectedComponents({ edges: [] }),
       ).rejects.toBeInstanceOf(ConfigurationError);
     });
 

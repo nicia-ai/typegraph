@@ -76,6 +76,7 @@ describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () =
     // `commitSchemaVersion` is the exception — it requires atomicity
     // and refuses with a typed ConfigurationError on this backend.
     expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.windowFunctions).toBe(true);
     expect(backend.capabilities.vector?.supported).toBe(true);

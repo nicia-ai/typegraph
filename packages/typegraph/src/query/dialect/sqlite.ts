@@ -70,6 +70,14 @@ export const sqliteDialect: DialectAdapter = {
     supportsFulltext: true,
   },
 
+  binaryText(expression) {
+    return expression;
+  },
+
+  analyzeTemporaryTable(): undefined {
+    return;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

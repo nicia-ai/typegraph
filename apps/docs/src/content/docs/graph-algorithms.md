@@ -1,6 +1,6 @@
 ---
 title: Graph Algorithms
-description: Shortest path, reachability, neighborhoods, and degree on store.algorithms
+description: Shortest path, reachability, neighborhoods, degree, and weakly connected components on store.algorithms
 ---
 
 Graph queries like "are Alice and Bob connected?" or "who is within two hops
@@ -14,14 +14,20 @@ store.algorithms.reachable(alice, { edges: ["knows"] });
 store.algorithms.canReach(alice, bob, { edges: ["knows"] });
 store.algorithms.neighbors(alice, { edges: ["knows"], depth: 2 });
 store.algorithms.degree(alice, { edges: ["knows"] });
+store.algorithms.weaklyConnectedComponents({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+});
 ```
 
 Traversal calls use a set-based breadth-first frontier. Each level expands the
 current `(id, kind)` set with a bind-limit-aware SQL query. Transactional
 backends keep the visited set in a temporary working table; backends without a
 pinned transaction use a chunked inline working relation. Each node is admitted
-only at its minimum depth. `shortestPath` and `canReach` search from both
-endpoints and stop when the frontiers meet.
+only at its minimum depth. Reachability rounds deduplicate edge targets before
+checking target-node visibility and do not compute unused predecessors.
+`shortestPath` and `canReach` search from both endpoints, retain predecessors for
+path reconstruction, and stop when the frontiers meet.
 `degree` remains a single `COUNT` query. The algorithms work identically on
 SQLite and PostgreSQL.
 
@@ -34,12 +40,14 @@ SQLite and PostgreSQL.
 | Check whether a node is reachable at all | `canReach` |
 | Get the k-hop neighborhood of a node | `neighbors` |
 | Count incident edges (in, out, or both) | `degree` |
+| Partition all visible nodes by undirected connectivity | `weaklyConnectedComponents` |
 | Filter, sort, or project over traversal results | `.query().traverse()` / `.recursive()` |
 | Hydrate an entity plus all its relationships | `store.subgraph()` |
 
-The algorithms return lightweight `{ id, kind, depth }` records rather than
-fully hydrated nodes. Use `store.nodes.<Kind>.getByIds(...)` when you need
-the full node data.
+Traversal algorithms return lightweight `{ id, kind, depth }` records rather
+than fully hydrated nodes. WCC returns one
+`{ id, kind, componentId, componentKind, size }` membership per visible node.
+Use `store.nodes.<Kind>.getByIds(...)` when you need the full node data.
 
 ## Shared Options
 
@@ -170,11 +178,61 @@ const everything = await store.algorithms.degree(alice);
 `degree` runs a single `COUNT` query, not a recursive CTE, so it's
 efficient even for hub nodes with thousands of edges.
 
+## weaklyConnectedComponents
+
+Computes an exact partition over the undirected projection of the selected edge
+kinds. By default every visible node is returned. `nodeKinds` restricts the
+operation to the induced subgraph over those kinds; an in-scope node with no
+selected incident edge forms a singleton component.
+
+```typescript
+const memberships =
+  await store.algorithms.weaklyConnectedComponents({
+    edges: ["knows", "worksAt"],
+    nodeKinds: ["Person", "Company"], // optional; all kinds by default
+    maxIterations: 1000, // default
+  });
+// [{ id, kind, componentId, componentKind, size }, ...]
+```
+
+The component identity is the smallest `(id, kind)` member under portable
+binary ordering. Results and representatives are therefore deterministic on
+SQLite and PostgreSQL even when the PostgreSQL database uses a linguistic
+default collation. Edges are always treated as undirected—WCC has no
+`direction` option.
+
+WCC is iterative and runs multiple SQL rounds in one repeatable snapshot. It
+requires `backend.capabilities.graphAnalytics?.supported === true`; built-in
+transactional SQLite and PostgreSQL backends advertise support. Other backends
+throw `UnsupportedBackendCapabilityError` before temporary state is created. If
+propagation has not converged after `maxIterations`, TypeGraph throws
+`GraphAlgorithmConvergenceError` rather than returning a partial partition.
+
+PostgreSQL refreshes planner statistics for a sufficiently large temporary
+working table and refreshes them again after multiplicative growth. This avoids
+plans based on PostgreSQL's initial one-row estimate for a new temporary table.
+The policy is automatic, applies to WCC and growing traversal frontiers, and is
+a no-op on SQLite.
+
+Without `nodeKinds`, WCC seeds every visible node, so unrelated nodes still
+appear as singleton components. On heterogeneous graphs, pass the kinds that
+define the graph being analyzed. For example, `{ edges: ["knows"], nodeKinds:
+["Person"] }` avoids seeding posts and comments while retaining isolated people.
+
+Temporal views expose the same facade with the coordinate sealed:
+
+```typescript
+const historical = await store
+  .asOf("2024-01-01T00:00:00.000Z")
+  .algorithms.weaklyConnectedComponents({ edges: ["knows"] });
+```
+
 ## Passing Nodes or IDs
 
-Every algorithm accepts either a raw ID string or any object with an
-`id: string` field — `Node`, `NodeRef`, the lightweight records returned by
-these algorithms, and `store.subgraph()` results all work:
+Every node-oriented algorithm accepts either a raw ID string or any object with
+an `id: string` field — `Node`, `NodeRef`, the lightweight records returned by
+traversals, and `store.subgraph()` results all work. WCC is a whole-graph
+operation and does not take a node identifier.
 
 ```typescript
 const alice = await store.nodes.Person.getById(aliceId);
@@ -281,11 +339,11 @@ file — a good starting point for your own RAG + graph workloads.
 
 ## What's Not Included
 
-These algorithms cover shortest path, reachability, neighborhoods, and
-degree. They do **not** cover:
+These algorithms cover shortest path, reachability, neighborhoods, degree,
+and weakly connected components. They do **not** cover:
 
 - Weighted shortest path (Dijkstra / A*)
-- Connected components or strongly connected components
+- Strongly connected components
 - Topological sort
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
 - PageRank or community detection
@@ -293,5 +351,5 @@ degree. They do **not** cover:
 For those, export edges via `.query().traverse()` or `store.subgraph()` and
 use a specialized library such as
 [graphology](https://graphology.github.io/) in memory. See
-[Limitations](/limitations#no-built-in-graph-analytics) for the full list
+[Limitations](/limitations#graph-analytics-limits) for the full list
 of excluded analytics.

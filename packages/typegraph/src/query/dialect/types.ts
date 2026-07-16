@@ -5,7 +5,7 @@
  * Implementing a new dialect (MySQL, SQL Server, etc.) requires
  * implementing this interface.
  */
-import { type SQL } from "drizzle-orm";
+import { type SQL, type SQLWrapper } from "drizzle-orm";
 
 import { type VectorMetric } from "../../backend/types";
 import { type JsonPointer } from "../json-pointer";
@@ -103,6 +103,21 @@ export interface DialectAdapter {
    * Dialect capabilities and strategy selection used by query compilers.
    */
   readonly capabilities: DialectCapabilities;
+
+  /**
+   * Applies the dialect's binary/code-point text collation to an expression.
+   * SQLite's default BINARY collation already has this order; PostgreSQL must
+   * force `COLLATE "C"` so database locale cannot change deterministic graph
+   * labels or query tie-breaks.
+   */
+  binaryText(expression: SQL): SQL;
+
+  /**
+   * Builds the dialect's planner-statistics refresh for a temporary table.
+   * Returns undefined when the engine plans temporary tables well enough
+   * without an explicit refresh.
+   */
+  analyzeTemporaryTable(table: SQLWrapper): SQL | undefined;
 
   // ============================================================
   // JSON Path Operations

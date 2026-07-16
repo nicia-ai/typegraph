@@ -263,11 +263,11 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 }
 ```
 
-## No Built-in Graph Analytics
+## Graph Analytics Limits
 
-TypeGraph ships a small set of Tier 1 connectivity algorithms on
-`store.algorithms.*` — shortest path, reachability, k-hop neighborhoods,
-and degree. See [Graph Algorithms](/graph-algorithms) for the full API.
+TypeGraph ships connectivity algorithms on `store.algorithms.*` — shortest
+path, reachability, k-hop neighborhoods, degree, and exact weakly connected
+components. See [Graph Algorithms](/graph-algorithms) for the full API.
 
 The following heavier analytics are **not** provided:
 
@@ -275,7 +275,7 @@ The following heavier analytics are **not** provided:
 - PageRank
 - Community detection
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
-- Connected components / strongly connected components
+- Strongly connected components
 - Topological sort
 - Graph partitioning
 

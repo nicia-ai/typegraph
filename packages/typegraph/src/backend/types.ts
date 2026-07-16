@@ -160,6 +160,20 @@ export type FulltextCapabilities = Readonly<{
   highlighting: boolean;
 }>;
 
+/**
+ * Whole-graph analytics capabilities declared by a backend.
+ *
+ * `supported` means the backend can pin one transactional connection while
+ * an algorithm creates, updates, and drops session-local temporary state.
+ * `mathFunctions` records whether transcendental SQL functions needed by
+ * deferred algorithms such as MCL/spectral are available; exact WCC does not
+ * require them.
+ */
+export type GraphAnalyticsCapabilities = Readonly<{
+  supported: boolean;
+  mathFunctions: boolean;
+}>;
+
 // ============================================================
 // SQL Dialect & Capabilities
 // ============================================================
@@ -200,7 +214,27 @@ export type BackendCapabilities = Readonly<{
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
   fulltext?: FulltextCapabilities | undefined;
+  /** Whole-graph analytics capabilities (undefined when unavailable). */
+  graphAnalytics?: GraphAnalyticsCapabilities | undefined;
 }>;
+
+/** Keeps session-scoped analytics honest when a required SQL feature is absent. */
+export function normalizeGraphAnalyticsCapabilities(
+  capabilities: BackendCapabilities,
+): BackendCapabilities {
+  if (
+    capabilities.graphAnalytics?.supported !== true ||
+    (capabilities.transactions &&
+      capabilities.windowFunctions &&
+      capabilities.returning !== false)
+  ) {
+    return capabilities;
+  }
+  return {
+    ...capabilities,
+    graphAnalytics: { ...capabilities.graphAnalytics, supported: false },
+  };
+}
 
 // ============================================================
 // Row Types (Database Records)
@@ -2292,6 +2326,9 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = {
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   returning: true, // SQLite has supported RETURNING since 3.35.0
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
+  // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
+  // better-sqlite3 factory overrides this flag for its bundled build contract.
+  graphAnalytics: { supported: true, mathFunctions: false },
 };
 
 /**
@@ -2302,4 +2339,5 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = {
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   returning: true, // PostgreSQL has supported RETURNING since 8.2
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
+  graphAnalytics: { supported: true, mathFunctions: true },
 };

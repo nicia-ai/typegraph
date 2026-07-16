@@ -417,7 +417,16 @@ export function createLocalSqliteBackend(
     },
     tables,
     ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
-    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
+    capabilities: {
+      ...options.capabilities,
+      graphAnalytics: {
+        supported:
+          options.capabilities?.graphAnalytics?.supported ??
+          options.capabilities?.transactions !== false,
+        mathFunctions:
+          options.capabilities?.graphAnalytics?.mathFunctions ?? true,
+      },
+    },
   });
   const managedBackend = wrapWithManagedClose(backend, () => {
     sqlite.close();

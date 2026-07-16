@@ -83,6 +83,10 @@ describe("SQLite Backend - Adapter Specific", () => {
 
       expect(backend.dialect).toBe("sqlite");
       expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.graphAnalytics).toEqual({
+        supported: true,
+        mathFunctions: false,
+      });
     });
 
     it("reuses prepared statements in execute() for repeated SQL shapes", async () => {
@@ -513,6 +517,7 @@ describe("SQLite Backend - Transaction Modes", () => {
       executionProfile: { transactionMode: "none" },
     });
     expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
 
     await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
       /does not support atomic transactions/,
@@ -564,6 +569,15 @@ describe("SQLite Backend - Transaction Modes", () => {
 // ============================================================
 
 describe("SQLite Backend - close() disposes serialized queue", () => {
+  it("advertises bundled better-sqlite3 math functions", async () => {
+    const { backend } = createLocalSqliteBackend();
+    expect(backend.capabilities.graphAnalytics).toEqual({
+      supported: true,
+      mathFunctions: true,
+    });
+    await backend.close();
+  });
+
   it("throws BackendDisposedError for operations after close()", async () => {
     const { backend } = createLocalSqliteBackend();
     const store = createStore(testGraph, backend);

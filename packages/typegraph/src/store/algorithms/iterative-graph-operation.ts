@@ -5,7 +5,10 @@ import {
   INTERNAL_TEMPORARY_WRITES,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  GraphAlgorithmConvergenceError,
+} from "../../errors";
 import {
   compileKindFilter,
   sqlValueList,
@@ -64,7 +67,15 @@ export type IterativeGraphRunContext = Readonly<{
   executeTemporary: (query: SQL) => Promise<void>;
 }>;
 
-export type IterativeGraphPlan<State, Result> = Readonly<{
+export type IterativeGraphState = Readonly<{
+  workingTableSize: number;
+}>;
+
+export type IterativeGraphPlan<
+  State extends IterativeGraphState,
+  Result,
+> = Readonly<{
+  algorithm: string;
   maxIterations: number;
   createWorkingTable: (context: IterativeGraphRunContext) => SQL;
   initialize: (context: IterativeGraphRunContext) => Promise<State>;
@@ -94,6 +105,15 @@ type VisibleNodeRow = Readonly<{
 
 const DEFAULT_MAX_BIND_PARAMETERS = 999;
 const RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH = 12;
+/**
+ * PostgreSQL initially estimates an un-analyzed temporary relation at one row.
+ * Even a few dozen rows can distort join ordering on a dense edge expansion,
+ * while ANALYZE remains a low-single-digit-millisecond operation at this size.
+ * Keep the trigger below the 31-person smoke graph that exposed this cliff.
+ */
+export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 16;
+/** Caps statistics drift for growing BFS-style working tables at under 4x. */
+export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 
 /**
  * Opens the shared execution scope for iterative graph algorithms. The host
@@ -128,7 +148,10 @@ export async function withInlineIterativeGraphOperation<T>(
  * check, and `finally` cleanup; the plan owns only table shape, round SQL, and
  * result extraction.
  */
-export async function runIterativeGraphOperation<State, Result>(
+export async function runIterativeGraphOperation<
+  State extends IterativeGraphState,
+  Result,
+>(
   ctx: AlgorithmContext,
   options: InternalTraversalOptions,
   plan: IterativeGraphPlan<State, Result>,
@@ -164,12 +187,29 @@ export async function runIterativeGraphOperation<State, Result>(
       let operationError: unknown;
       try {
         let state = await plan.initialize(context);
+        let analyzedRowCount = await refreshWorkingTableStatistics(
+          context,
+          state.workingTableSize,
+        );
         for (
           let iteration = 1;
           iteration <= plan.maxIterations && !plan.hasConverged(state);
           iteration++
         ) {
           state = await plan.runRound(context, state, iteration);
+          if (!plan.hasConverged(state)) {
+            analyzedRowCount = await refreshWorkingTableStatistics(
+              context,
+              state.workingTableSize,
+              analyzedRowCount,
+            );
+          }
+        }
+        if (!plan.hasConverged(state)) {
+          throw new GraphAlgorithmConvergenceError(
+            plan.algorithm,
+            plan.maxIterations,
+          );
         }
         return await plan.extractResult(context, state);
       } catch (error) {
@@ -185,6 +225,35 @@ export async function runIterativeGraphOperation<State, Result>(
       temporaryWrites: INTERNAL_TEMPORARY_WRITES,
     },
   );
+}
+
+export function shouldRefreshWorkingTableStatistics(
+  workingTableSize: number,
+  analyzedRowCount?: number,
+): boolean {
+  if (workingTableSize < WORKING_TABLE_ANALYZE_MINIMUM_ROWS) return false;
+  if (analyzedRowCount === undefined) return true;
+  return (
+    workingTableSize >= analyzedRowCount * WORKING_TABLE_ANALYZE_GROWTH_FACTOR
+  );
+}
+
+async function refreshWorkingTableStatistics(
+  context: IterativeGraphRunContext,
+  workingTableSize: number,
+  analyzedRowCount?: number,
+): Promise<number | undefined> {
+  if (
+    !shouldRefreshWorkingTableStatistics(workingTableSize, analyzedRowCount)
+  ) {
+    return analyzedRowCount;
+  }
+  const statement = context.operation.ctx.dialect.analyzeTemporaryTable(
+    context.workingTable,
+  );
+  if (statement === undefined) return analyzedRowCount;
+  await context.executeTemporary(statement);
+  return workingTableSize;
 }
 
 async function dropWorkingTable(
@@ -367,6 +436,70 @@ export function compileWorkingTableExpansion(
   }
 }
 
+/**
+ * Expands a working-table frontier through visible edges without joining target
+ * nodes. Callers that reduce duplicate targets first can defer the target-node
+ * visibility join until after that reduction, avoiding repeated point lookups
+ * for the same target on dense frontiers.
+ */
+export function compileWorkingTableEdgeExpansion(
+  operation: IterativeGraphOperation,
+  workingTable: WorkingTableIdentifier,
+  sourceFilter: SQL,
+  direction: TraversalDirection,
+  edgeKinds: readonly string[],
+): SQL {
+  switch (direction) {
+    case "out": {
+      return compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "from_id",
+        "from_kind",
+        "to_id",
+        "to_kind",
+      );
+    }
+    case "in": {
+      return compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "to_id",
+        "to_kind",
+        "from_id",
+        "from_kind",
+      );
+    }
+    case "both": {
+      const outgoing = compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "from_id",
+        "from_kind",
+        "to_id",
+        "to_kind",
+      );
+      const incoming = compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "to_id",
+        "to_kind",
+        "from_id",
+        "from_kind",
+      );
+      return sql`${outgoing} UNION ALL ${incoming}`;
+    }
+  }
+}
+
 function compileDirectionalExpansion(
   operation: IterativeGraphOperation,
   workingRelation: SQL | WorkingTableIdentifier,
@@ -377,8 +510,31 @@ function compileDirectionalExpansion(
   targetField: "from_id" | "to_id",
   targetKindField: "from_kind" | "to_kind",
 ): ReturnType<typeof sql> {
+  const edgeExpansion = compileDirectionalEdgeExpansion(
+    operation,
+    workingRelation,
+    sourceFilter,
+    edgeKinds,
+    joinField,
+    joinKindField,
+    targetField,
+    targetKindField,
+  );
+  return sql`SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (${edgeExpansion}) expanded JOIN ${operation.schema.nodesTable} n ON n.graph_id = ${operation.ctx.graphId} AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE ${operation.nodeTemporalFilter}`;
+}
+
+function compileDirectionalEdgeExpansion(
+  operation: IterativeGraphOperation,
+  workingRelation: SQL | WorkingTableIdentifier,
+  sourceFilter: SQL,
+  edgeKinds: readonly string[],
+  joinField: "from_id" | "to_id",
+  joinKindField: "from_kind" | "to_kind",
+  targetField: "from_id" | "to_id",
+  targetKindField: "from_kind" | "to_kind",
+): ReturnType<typeof sql> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
-  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, n.id AS target_id, n.kind AS target_kind FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} JOIN ${operation.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(targetField)} AND n.kind = e.${sql.raw(targetKindField)} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter} AND ${operation.nodeTemporalFilter}`;
+  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
 }
 
 function chunkValues<T>(

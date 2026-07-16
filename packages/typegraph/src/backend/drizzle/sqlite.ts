@@ -65,6 +65,7 @@ import {
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type KindRemovalRow,
+  normalizeGraphAnalyticsCapabilities,
   type RecordContributionMaterializationParams,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
@@ -449,7 +450,16 @@ function buildSqliteCapabilities(
 ): BackendCapabilities {
   const base =
     options.transactionMode === "none" ?
-      { ...SQLITE_CAPABILITIES, transactions: false }
+      {
+        ...SQLITE_CAPABILITIES,
+        transactions: false,
+        graphAnalytics: {
+          ...(SQLITE_CAPABILITIES.graphAnalytics ?? {
+            mathFunctions: false,
+          }),
+          supported: false,
+        },
+      }
     : SQLITE_CAPABILITIES;
   return {
     ...base,
@@ -946,7 +956,7 @@ export function createSqliteBackend(
   // (`createLibsqlBackend` always; `createLocalSqliteBackend` when the
   // extension loads); absent for plain SQLite drivers with no extension.
   const vectorStrategy = options.vector;
-  const capabilities: BackendCapabilities = {
+  const capabilities = normalizeGraphAnalyticsCapabilities({
     ...buildSqliteCapabilities({
       fulltextStrategy,
       vectorStrategy,
@@ -954,7 +964,7 @@ export function createSqliteBackend(
       maxBindParameters: executionAdapter.profile.maxBindParameters,
     }),
     ...options.capabilities,
-  };
+  });
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
