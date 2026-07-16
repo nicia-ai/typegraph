@@ -67,7 +67,14 @@ export type IterativeGraphRunContext = Readonly<{
   executeTemporary: (query: SQL) => Promise<void>;
 }>;
 
-export type IterativeGraphPlan<State, Result> = Readonly<{
+export type IterativeGraphState = Readonly<{
+  workingTableSize: number;
+}>;
+
+export type IterativeGraphPlan<
+  State extends IterativeGraphState,
+  Result,
+> = Readonly<{
   algorithm: string;
   maxIterations: number;
   createWorkingTable: (context: IterativeGraphRunContext) => SQL;
@@ -98,6 +105,14 @@ type VisibleNodeRow = Readonly<{
 
 const DEFAULT_MAX_BIND_PARAMETERS = 999;
 const RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH = 12;
+/**
+ * PostgreSQL initially estimates an un-analyzed temporary relation at one row.
+ * A 64x miss is large enough to distort join ordering, while ANALYZE remains a
+ * low-single-digit-millisecond operation at this size.
+ */
+export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 64;
+/** Caps statistics drift for growing BFS-style working tables at under 4x. */
+export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 
 /**
  * Opens the shared execution scope for iterative graph algorithms. The host
@@ -132,7 +147,10 @@ export async function withInlineIterativeGraphOperation<T>(
  * check, and `finally` cleanup; the plan owns only table shape, round SQL, and
  * result extraction.
  */
-export async function runIterativeGraphOperation<State, Result>(
+export async function runIterativeGraphOperation<
+  State extends IterativeGraphState,
+  Result,
+>(
   ctx: AlgorithmContext,
   options: InternalTraversalOptions,
   plan: IterativeGraphPlan<State, Result>,
@@ -168,12 +186,23 @@ export async function runIterativeGraphOperation<State, Result>(
       let operationError: unknown;
       try {
         let state = await plan.initialize(context);
+        let analyzedRowCount = await refreshWorkingTableStatistics(
+          context,
+          state.workingTableSize,
+        );
         for (
           let iteration = 1;
           iteration <= plan.maxIterations && !plan.hasConverged(state);
           iteration++
         ) {
           state = await plan.runRound(context, state, iteration);
+          if (!plan.hasConverged(state)) {
+            analyzedRowCount = await refreshWorkingTableStatistics(
+              context,
+              state.workingTableSize,
+              analyzedRowCount,
+            );
+          }
         }
         if (!plan.hasConverged(state)) {
           throw new GraphAlgorithmConvergenceError(
@@ -195,6 +224,35 @@ export async function runIterativeGraphOperation<State, Result>(
       temporaryWrites: INTERNAL_TEMPORARY_WRITES,
     },
   );
+}
+
+export function shouldRefreshWorkingTableStatistics(
+  workingTableSize: number,
+  analyzedRowCount?: number,
+): boolean {
+  if (workingTableSize < WORKING_TABLE_ANALYZE_MINIMUM_ROWS) return false;
+  if (analyzedRowCount === undefined) return true;
+  return (
+    workingTableSize >= analyzedRowCount * WORKING_TABLE_ANALYZE_GROWTH_FACTOR
+  );
+}
+
+async function refreshWorkingTableStatistics(
+  context: IterativeGraphRunContext,
+  workingTableSize: number,
+  analyzedRowCount?: number,
+): Promise<number | undefined> {
+  if (
+    !shouldRefreshWorkingTableStatistics(workingTableSize, analyzedRowCount)
+  ) {
+    return analyzedRowCount;
+  }
+  const statement = context.operation.ctx.dialect.analyzeTemporaryTable(
+    context.workingTable,
+  );
+  if (statement === undefined) return analyzedRowCount;
+  await context.executeTemporary(statement);
+  return workingTableSize;
 }
 
 async function dropWorkingTable(

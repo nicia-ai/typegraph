@@ -70,6 +70,10 @@ export const postgresDialect: DialectAdapter = {
     return sql`${expression} COLLATE "C"`;
   },
 
+  analyzeTemporaryTable(table) {
+    return sql`ANALYZE ${table}`;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

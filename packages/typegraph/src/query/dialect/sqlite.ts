@@ -74,6 +74,10 @@ export const sqliteDialect: DialectAdapter = {
     return expression;
   },
 
+  analyzeTemporaryTable(): undefined {
+    return;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

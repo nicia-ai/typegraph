@@ -106,9 +106,11 @@ async function findReachableNodesInWorkingTable(
     createWorkingTable,
     async initialize(context) {
       await seedWorkingSide(context, sourceId, "forward");
+      const frontierCount = await countWorkingDepth(context, "forward", 0);
       return {
         depth: 0,
-        frontierCount: await countWorkingDepth(context, "forward", 0),
+        frontierCount,
+        workingTableSize: frontierCount,
       };
     },
     async runRound(context, state) {
@@ -120,7 +122,11 @@ async function findReachableNodesInWorkingTable(
         nextDepth,
         context.operation.direction,
       );
-      return { depth: nextDepth, frontierCount };
+      return {
+        depth: nextDepth,
+        frontierCount,
+        workingTableSize: state.workingTableSize + frontierCount,
+      };
     },
     hasConverged(state) {
       return state.frontierCount === 0 || state.depth >= maxHops;
@@ -167,6 +173,7 @@ async function findShortestPathInWorkingTable(
         forwardFrontierCount,
         reverseFrontierCount,
         meeting,
+        workingTableSize: forwardFrontierCount + reverseFrontierCount,
       };
     },
     async runRound(context, state) {
@@ -197,6 +204,7 @@ async function findShortestPathInWorkingTable(
         reverseFrontierCount:
           expandForward ? state.reverseFrontierCount : frontierCount,
         meeting,
+        workingTableSize: state.workingTableSize + frontierCount,
       };
     },
     hasConverged(state) {

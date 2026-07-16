@@ -29,7 +29,14 @@ import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
+import type {
+  AdoptedTransaction,
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
+import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../../../src/store";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -294,6 +301,37 @@ const testGraph = defineGraph({
   },
   ontology: [subClassOf(Company, Organization)],
 });
+
+function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
+  backend: GraphBackend;
+  statements: string[];
+}> {
+  const statements: string[] = [];
+  return {
+    statements,
+    backend: {
+      ...backend,
+      transaction<T>(
+        fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+        options?: TransactionOptions,
+      ): Promise<T> {
+        return backend.transaction(async (tx, adoptedTransaction) => {
+          const observedTransaction: TransactionBackend = {
+            ...tx,
+            async executeTemporaryStatement(
+              query: CompiledTemporaryStatementSql,
+            ): Promise<void> {
+              const statement = tx.compileSql!(query).sql;
+              if (statement.startsWith("ANALYZE ")) statements.push(statement);
+              await tx.executeTemporaryStatement!(query);
+            },
+          };
+          return fn(observedTransaction, adoptedTransaction);
+        }, options);
+      },
+    },
+  };
+}
 
 // ============================================================
 // Shared Adapter Test Suite
@@ -750,6 +788,66 @@ describe("Store with PostgreSQL Backend", () => {
 
     expect(store.graphId).toBe("test_graph");
     expect(store.registry).toBeDefined();
+  });
+
+  it("analyzes a bulk-seeded iterative working table once", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const observed = observeTemporaryAnalyzeStatements(
+      createPostgresBackend(db),
+    );
+    const store = createStore(testGraph, observed.backend);
+    await store.nodes.Person.bulkCreate(
+      Array.from({ length: 64 }, (_, index) => ({
+        props: { name: `WCC ${index}` },
+      })),
+    );
+
+    const memberships = await store.algorithms.weaklyConnectedComponents({
+      edges: ["knows"],
+    });
+
+    expect(memberships).toHaveLength(64);
+    expect(observed.statements).toHaveLength(1);
+  });
+
+  it("re-analyzes a growing iterative working table at multiplicative thresholds", async (ctx) => {
+    const { db } = requirePostgres(ctx);
+    const observed = observeTemporaryAnalyzeStatements(
+      createPostgresBackend(db),
+    );
+    const store = createStore(testGraph, observed.backend);
+    const root = await store.nodes.Person.create({ name: "Root" });
+    const firstLayer = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 63 }, (_, index) => ({
+        props: { name: `First ${index}` },
+      })),
+    );
+    const secondLayer = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 192 }, (_, index) => ({
+        props: { name: `Second ${index}` },
+      })),
+    );
+    await store.edges.knows.bulkCreate([
+      ...firstLayer.map((node) => ({ from: root, to: node, props: {} })),
+      ...secondLayer.map((node, index) => ({
+        from: firstLayer[index % firstLayer.length]!,
+        to: node,
+        props: {},
+      })),
+    ]);
+
+    const reached = await store.algorithms.reachable(root, {
+      edges: ["knows"],
+      maxHops: 3,
+    });
+
+    expect(reached).toHaveLength(256);
+    expect(observed.statements).toHaveLength(2);
+    expect(
+      observed.statements.every((statement) =>
+        /^ANALYZE "typegraph_iterative_[^"]+"$/.test(statement),
+      ),
+    ).toBe(true);
   });
 
   it("creates and retrieves nodes through the store", async (ctx) => {

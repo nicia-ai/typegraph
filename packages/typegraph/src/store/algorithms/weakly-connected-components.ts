@@ -22,7 +22,10 @@ import type {
   WeaklyConnectedComponentMembership,
 } from "./types";
 
-type IterationState = Readonly<{ changedCount: number }>;
+type IterationState = Readonly<{
+  changedCount: number;
+  workingTableSize: number;
+}>;
 type CountRow = Readonly<{ count: number | string }>;
 type ChangedRow = Readonly<{ node_id: string }>;
 type MembershipRow = Readonly<{
@@ -137,18 +140,23 @@ async function initializeWorkingTable(
       WHERE graph_id = ${graphId} AND run_id = ${runId}
     `),
   );
-  return { changedCount: Number(rows[0]?.count ?? 0) };
+  const workingTableSize = Number(rows[0]?.count ?? 0);
+  return { changedCount: workingTableSize, workingTableSize };
 }
 
 async function runLabelPropagationRound(
   context: IterativeGraphRunContext,
+  state: IterationState,
 ): Promise<IterationState> {
   await resetNextLabels(context);
   for (const edgeKinds of context.operation.edgeKindChunks) {
     await propagateChunkLabels(context, edgeKinds);
   }
   const changedRows = await applyNextLabels(context);
-  return { changedCount: changedRows.length };
+  return {
+    changedCount: changedRows.length,
+    workingTableSize: state.workingTableSize,
+  };
 }
 
 async function resetNextLabels(
