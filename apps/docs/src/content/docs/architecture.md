@@ -492,13 +492,14 @@ nearest neighbor search efficiently.
 ### What's Fast
 
 - **Point lookups by ID**: O(1) with primary key index
-- **Traversals**: Single SQL query with JOINs, optimized by the database
+- **Traversal frontiers**: Set-based SQL rounds with database-managed joins and de-duplication
 - **Ontology expansion**: Precomputed at initialization, O(1) at query time
 - **Semantic search**: ANN indexes (pgvector HNSW/IVFFlat, sqlite-vec `vec0`, libSQL DiskANN) provide sub-linear search
 
 ### What's Slower
 
 - **Deep recursive traversals**: Recursive CTEs are more expensive than simple JOINs
+- **Whole-graph algorithms**: WCC iterates over every visible node and its selected edges
 - **Large property filtering without indexes**: JSON extraction is slower than column access
 - **Cross-kind queries**: `includeSubClasses: true` increases the WHERE IN set
 

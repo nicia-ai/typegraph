@@ -39,9 +39,10 @@ SQLite and PostgreSQL.
 | Filter, sort, or project over traversal results | `.query().traverse()` / `.recursive()` |
 | Hydrate an entity plus all its relationships | `store.subgraph()` |
 
-The algorithms return lightweight `{ id, kind, depth }` records rather than
-fully hydrated nodes. Use `store.nodes.<Kind>.getByIds(...)` when you need
-the full node data.
+Traversal algorithms return lightweight `{ id, kind, depth }` records rather
+than fully hydrated nodes. WCC returns one
+`{ id, kind, componentId, componentKind, size }` membership per visible node.
+Use `store.nodes.<Kind>.getByIds(...)` when you need the full node data.
 
 ## Shared Options
 
@@ -199,6 +200,17 @@ transactional SQLite and PostgreSQL backends advertise support. If propagation
 has not converged after `maxIterations`, TypeGraph throws
 `GraphAlgorithmConvergenceError` rather than returning a partial partition.
 
+PostgreSQL refreshes planner statistics for a sufficiently large temporary
+working table and refreshes them again after multiplicative growth. This avoids
+plans based on PostgreSQL's initial one-row estimate for a new temporary table.
+The policy is automatic, applies to WCC and growing traversal frontiers, and is
+a no-op on SQLite.
+
+WCC currently seeds every visible node. Selecting edge kinds controls which
+connections participate, but it does not restrict node kinds; unrelated nodes
+still appear as singleton components. On heterogeneous graphs with millions of
+visible nodes, seeding that full set can dominate the operation's cost.
+
 Temporal views expose the same facade with the coordinate sealed:
 
 ```typescript
@@ -209,9 +221,10 @@ const historical = await store
 
 ## Passing Nodes or IDs
 
-Every algorithm accepts either a raw ID string or any object with an
-`id: string` field — `Node`, `NodeRef`, the lightweight records returned by
-these algorithms, and `store.subgraph()` results all work:
+Every node-oriented algorithm accepts either a raw ID string or any object with
+an `id: string` field — `Node`, `NodeRef`, the lightweight records returned by
+traversals, and `store.subgraph()` results all work. WCC is a whole-graph
+operation and does not take a node identifier.
 
 ```typescript
 const alice = await store.nodes.Person.getById(aliceId);
