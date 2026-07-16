@@ -2,7 +2,7 @@ import { type SQL } from "drizzle-orm";
 
 declare const SqlIntentBrand: unique symbol;
 
-export type SqlIntent = "rows" | "statement";
+export type SqlIntent = "rows" | "statement" | "temporary-statement";
 
 export type IntentSql<I extends SqlIntent> = SQL &
   Readonly<{ [SqlIntentBrand]: I }>;
@@ -10,6 +10,7 @@ export type IntentSql<I extends SqlIntent> = SQL &
 export type CompiledRowsSql = IntentSql<"rows">;
 export type CompiledSelectSql = CompiledRowsSql;
 export type CompiledStatementSql = IntentSql<"statement">;
+export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 export function asCompiledRowsSql(query: SQL): CompiledRowsSql {
   return query as CompiledRowsSql;
@@ -21,6 +22,18 @@ export function asCompiledSelectSql(query: SQL): CompiledSelectSql {
 
 export function asCompiledStatementSql(query: SQL): CompiledStatementSql {
   return query as CompiledStatementSql;
+}
+
+/**
+ * Marks an internal statement that may write only connection-local temporary
+ * state. This is intentionally separate from the public raw-statement intent:
+ * history-enabled stores block arbitrary raw writes but iterative graph
+ * operations still need to manage ephemeral working tables.
+ */
+export function asCompiledTemporaryStatementSql(
+  query: SQL,
+): CompiledTemporaryStatementSql {
+  return query as CompiledTemporaryStatementSql;
 }
 
 /**

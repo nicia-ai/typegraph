@@ -67,6 +67,7 @@ export type CommonOperationBackend = Pick<
   | "deleteUnique"
   | "edgeExistsBetween"
   | "executeStatement"
+  | "executeTemporaryStatement"
   | "findEdgesByKind"
   | "findEdgesConnectedTo"
   | "findNodesByKind"
@@ -189,10 +190,11 @@ export function createCommonOperationBackend(
   // recorded DDL is stable; Postgres disables that cache because visibility is
   // search_path-sensitive. Missing tables stay re-probable unless a caller opts
   // into negative caching.
-  const requiredClearTableExists = createCachedTableExistence((tableName) =>
-    execution.execGet<Record<string, unknown>>(
-      operationStrategy.buildTableExists(tableName),
-    ),
+  const requiredClearTableExists = createCachedTableExistence(
+    (tableName) =>
+      execution.execGet<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      ),
     options.tableExistenceCache,
   );
 
@@ -231,17 +233,28 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
+    async executeTemporaryStatement(query: SQL): Promise<void> {
+      await execution.execRun(query);
+    },
+
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertNode(params, timestamp);
       const row = await execution.execGet<Record<string, unknown>>(query);
-      if (!row) throw new DatabaseOperationError("Insert node failed: no row returned", { operation: "insert", entity: "node" });
+      if (!row)
+        throw new DatabaseOperationError(
+          "Insert node failed: no row returned",
+          { operation: "insert", entity: "node" },
+        );
       return rowMappers.toNodeRow(row);
     },
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = operationStrategy.buildInsertNodeNoReturn(params, timestamp);
+      const query = operationStrategy.buildInsertNodeNoReturn(
+        params,
+        timestamp,
+      );
       await execution.execRun(query);
     },
 
@@ -265,8 +278,10 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const allRows: NodeRow[] = [];
       for (const chunk of chunkArray(params, batchConfig.nodeInsertBatchSize)) {
-        const query =
-          operationStrategy.buildInsertNodesBatchReturning(chunk, timestamp);
+        const query = operationStrategy.buildInsertNodesBatchReturning(
+          chunk,
+          timestamp,
+        );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
       }
@@ -302,7 +317,11 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildUpdateNode(params, timestamp);
       const row = await execution.execGet<Record<string, unknown>>(query);
-      if (!row) throw new DatabaseOperationError("Update node failed: no row returned", { operation: "update", entity: "node" });
+      if (!row)
+        throw new DatabaseOperationError(
+          "Update node failed: no row returned",
+          { operation: "update", entity: "node" },
+        );
       return rowMappers.toNodeRow(row);
     },
 
@@ -353,13 +372,20 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertEdge(params, timestamp);
       const row = await execution.execGet<Record<string, unknown>>(query);
-      if (!row) throw new DatabaseOperationError("Insert edge failed: no row returned", { operation: "insert", entity: "edge" });
+      if (!row)
+        throw new DatabaseOperationError(
+          "Insert edge failed: no row returned",
+          { operation: "insert", entity: "edge" },
+        );
       return rowMappers.toEdgeRow(row);
     },
 
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
       const timestamp = nowIso();
-      const query = operationStrategy.buildInsertEdgeNoReturn(params, timestamp);
+      const query = operationStrategy.buildInsertEdgeNoReturn(
+        params,
+        timestamp,
+      );
       await execution.execRun(query);
     },
 
@@ -383,8 +409,10 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const allRows: EdgeRow[] = [];
       for (const chunk of chunkArray(params, batchConfig.edgeInsertBatchSize)) {
-        const query =
-          operationStrategy.buildInsertEdgesBatchReturning(chunk, timestamp);
+        const query = operationStrategy.buildInsertEdgesBatchReturning(
+          chunk,
+          timestamp,
+        );
         const rows = await execution.execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
       }
@@ -415,7 +443,11 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildUpdateEdge(params, timestamp);
       const row = await execution.execGet<Record<string, unknown>>(query);
-      if (!row) throw new DatabaseOperationError("Update edge failed: no row returned", { operation: "update", entity: "edge" });
+      if (!row)
+        throw new DatabaseOperationError(
+          "Update edge failed: no row returned",
+          { operation: "update", entity: "edge" },
+        );
       return rowMappers.toEdgeRow(row);
     },
 
@@ -438,7 +470,10 @@ export function createCommonOperationBackend(
       // is budgeted for, so a full chunk would overflow the bind limit by 1.
       // Reserve a slot for the timestamp. The hard-delete batch below has no
       // such extra bind and keeps the full chunk size.
-      const softDeleteChunkSize = Math.max(1, batchConfig.getEdgesChunkSize - 1);
+      const softDeleteChunkSize = Math.max(
+        1,
+        batchConfig.getEdgesChunkSize - 1,
+      );
       for (const chunk of chunkArray(params.ids, softDeleteChunkSize)) {
         const query = operationStrategy.buildDeleteEdgesBatch(
           { graphId: params.graphId, ids: chunk },
@@ -450,7 +485,10 @@ export function createCommonOperationBackend(
 
     async hardDeleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
       if (params.ids.length === 0) return;
-      for (const chunk of chunkArray(params.ids, batchConfig.getEdgesChunkSize)) {
+      for (const chunk of chunkArray(
+        params.ids,
+        batchConfig.getEdgesChunkSize,
+      )) {
         const query = operationStrategy.buildHardDeleteEdgesBatch({
           graphId: params.graphId,
           ids: chunk,
@@ -603,8 +641,14 @@ export function createCommonOperationBackend(
     ): Promise<readonly UniqueRow[]> {
       if (params.keys.length === 0) return [];
       const allRows: UniqueRow[] = [];
-      for (const chunk of chunkArray(params.keys, batchConfig.checkUniqueBatchChunkSize)) {
-        const query = operationStrategy.buildCheckUniqueBatch({ ...params, keys: chunk });
+      for (const chunk of chunkArray(
+        params.keys,
+        batchConfig.checkUniqueBatchChunkSize,
+      )) {
+        const query = operationStrategy.buildCheckUniqueBatch({
+          ...params,
+          keys: chunk,
+        });
         const rows = await execution.execAll<Record<string, unknown>>(query);
         allRows.push(...rows.map((row) => rowMappers.toUniqueRow(row)));
       }
@@ -637,10 +681,7 @@ export function createCommonOperationBackend(
       // sequence below is serialized against concurrent commits.
 
       const existingRaw = await execution.execGet<Record<string, unknown>>(
-        operationStrategy.buildGetSchemaVersion(
-          params.graphId,
-          params.version,
-        ),
+        operationStrategy.buildGetSchemaVersion(params.graphId, params.version),
       );
       const actualActiveVersion = await readActiveVersion(params.graphId);
 
@@ -732,10 +773,7 @@ export function createCommonOperationBackend(
       );
 
       const targetRaw = await execution.execGet<Record<string, unknown>>(
-        operationStrategy.buildGetSchemaVersion(
-          params.graphId,
-          params.version,
-        ),
+        operationStrategy.buildGetSchemaVersion(params.graphId, params.version),
       );
       if (!targetRaw) {
         throw new MigrationError(

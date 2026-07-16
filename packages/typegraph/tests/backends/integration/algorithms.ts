@@ -207,6 +207,89 @@ export function registerAlgorithmIntegrationTests(
       });
     });
 
+    describe("dense cyclic graph", () => {
+      it("visits each node once instead of enumerating simple paths", async () => {
+        const store = context.getStore();
+        const people = await store.nodes.Person.bulkCreate(
+          Array.from({ length: 9 }, (_, index) => ({
+            props: { name: `Dense ${index}` },
+          })),
+        );
+        await store.edges.knows.bulkCreate(
+          people.flatMap((from) =>
+            people
+              .filter((to) => to.id !== from.id)
+              .map((to) => ({ from, to, props: { since: "2020" } })),
+          ),
+        );
+
+        const source = people[0]!;
+        const target = people.at(-1)!;
+        const reached = await store.algorithms.reachable(source, {
+          edges: ["knows"],
+          maxHops: 8,
+        });
+        const neighbors = await store.algorithms.neighbors(source, {
+          edges: ["knows"],
+          depth: 8,
+        });
+        const path = await store.algorithms.shortestPath(source, target, {
+          edges: ["knows"],
+          maxHops: 8,
+        });
+
+        expect(reached).toHaveLength(9);
+        expect(reached.filter((node) => node.depth === 1)).toHaveLength(8);
+        expect(neighbors).toHaveLength(8);
+        expect(path).toEqual({
+          nodes: [
+            { id: source.id, kind: "Person" },
+            { id: target.id, kind: "Person" },
+          ],
+          depth: 1,
+        });
+        await expect(
+          store.algorithms.canReach(source, target, {
+            edges: ["knows"],
+            maxHops: 8,
+          }),
+        ).resolves.toBe(true);
+      });
+    });
+
+    describe("node identity", () => {
+      it("keeps different node kinds that share an ID", async () => {
+        const store = context.getStore();
+        const source = await store.nodes.Person.create(
+          { name: "Identity source" },
+          { id: "algorithm-identity-source" },
+        );
+        const person = await store.nodes.Person.create(
+          { name: "Shared person" },
+          { id: "algorithm-shared-id" },
+        );
+        const company = await store.nodes.Company.create(
+          { name: "Shared company" },
+          { id: "algorithm-shared-id" },
+        );
+        await Promise.all([
+          store.edges.knows.create(source, person, {}),
+          store.edges.worksAt.create(source, company, { role: "Founder" }),
+        ]);
+
+        const reached = await store.algorithms.reachable(source, {
+          edges: ["knows", "worksAt"],
+          maxHops: 1,
+          excludeSource: true,
+        });
+
+        expect(reached).toEqual([
+          { id: "algorithm-shared-id", kind: "Company", depth: 1 },
+          { id: "algorithm-shared-id", kind: "Person", depth: 1 },
+        ]);
+      });
+    });
+
     describe("temporal behavior", () => {
       const { BEFORE } = TEMPORAL_ANCHORS;
       let ids: TemporalFixture;

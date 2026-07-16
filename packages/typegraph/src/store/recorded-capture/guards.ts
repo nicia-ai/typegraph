@@ -103,6 +103,7 @@ export function assertRequestedRecordedIsolation(
   options: TransactionOptions | undefined,
 ): void {
   if (backend.dialect !== "postgres") return;
+  if (options?.accessMode === "read_only") return;
   const isolationLevel = options?.isolationLevel;
   if (isSupportedRecordedIsolationLevel(isolationLevel)) return;
 
@@ -116,8 +117,10 @@ function normalizeIsolationLevel(value: unknown): string | undefined {
 
 export async function assertRecordedCaptureTransactionIsolation(
   target: Pick<TransactionBackend, "dialect" | "execute">,
+  options?: TransactionOptions,
 ): Promise<void> {
   if (target.dialect !== "postgres") return;
+  if (options?.accessMode === "read_only") return;
 
   const rows = await target.execute<IsolationRow>(
     asCompiledRowsSql(sql`

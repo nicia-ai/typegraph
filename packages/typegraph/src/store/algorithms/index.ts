@@ -84,7 +84,7 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
 
   /**
    * Fast boolean check: is `to` reachable from `from` within `maxHops`
-   * edges? Short-circuits the underlying recursive CTE with `LIMIT 1`.
+   * edges? Uses bidirectional BFS and stops when the frontiers meet.
    */
   canReach: (
     from: NodeIdentifier,

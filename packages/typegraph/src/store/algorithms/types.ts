@@ -20,14 +20,10 @@ import type { NoRecordedCoordinate } from "../types";
 export type TraversalDirection = "out" | "in" | "both";
 
 /**
- * Cycle-handling strategy during recursive traversal.
- *
- * - `"prevent"` — skip any node already on the current path (default).
- *   Guarantees termination even in cyclic graphs.
- * - `"allow"` — permit revisiting nodes. Only safe with a bounded `maxHops`.
- *
- * Aliased to `RecursiveCyclePolicy` so algorithms and query-builder traversals
- * share a single canonical union.
+ * Cycle-handling option retained for compatibility with recursive query-builder
+ * traversals. Store algorithms are set-based and visit each node once at its
+ * minimum depth, so `"prevent"` and `"allow"` produce the same algorithm
+ * result. Aliased to `RecursiveCyclePolicy` so both APIs share one union.
  */
 export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
 
@@ -72,7 +68,7 @@ export type BaseTraversalOptions<G extends GraphDef> =
       maxHops?: number;
       /** Direction of traversal (default: `"out"`). */
       direction?: TraversalDirection;
-      /** Cycle policy (default: `"prevent"`). */
+      /** Compatibility option; set-based algorithms always visit a node once. */
       cyclePolicy?: AlgorithmCyclePolicy;
     }>;
 
@@ -151,7 +147,7 @@ export type NeighborsOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     depth?: number;
     /** Direction of traversal (default: `"out"`). */
     direction?: TraversalDirection;
-    /** Cycle policy (default: `"prevent"`). */
+    /** Compatibility option; set-based algorithms always visit a node once. */
     cyclePolicy?: AlgorithmCyclePolicy;
   }>;
 

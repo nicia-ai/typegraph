@@ -20,6 +20,7 @@ import {
 import {
   type CompiledRowsSql,
   type CompiledStatementSql,
+  type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
 import {
@@ -1005,6 +1006,11 @@ export type RecordKindRemovalParams = Readonly<{
 // Query Types
 // ============================================================
 
+/** @internal Capability token for connection-local temporary writes. */
+export const INTERNAL_TEMPORARY_WRITES = Symbol(
+  "typegraph.internalTemporaryWrites",
+);
+
 /**
  * Transaction options.
  */
@@ -1012,6 +1018,17 @@ export type TransactionOptions = Readonly<{
   /** Transaction isolation level (if supported) */
   isolationLevel?:
     "read_uncommitted" | "read_committed" | "repeatable_read" | "serializable";
+  /**
+   * Transaction access mode (if supported). `read_only` is intended for
+   * multi-statement reads that need one snapshot and must not perform writes.
+   */
+  accessMode?: "read_only" | "read_write";
+  /**
+   * @internal Permit writes only to connection-local temporary state. The
+   * iterative-operation primitive uses this when an engine rejects temporary
+   * DDL in a read-only transaction.
+   */
+  temporaryWrites?: typeof INTERNAL_TEMPORARY_WRITES;
 }>;
 
 /**
@@ -1590,6 +1607,16 @@ export type GraphBackend = Readonly<{
    */
   executeStatement?: (query: CompiledStatementSql) => Promise<void>;
 
+  /**
+   * Execute an internally compiled statement against connection-local
+   * temporary state. History wrappers preserve this path because it cannot
+   * mutate graph or history tables; callers cannot construct its branded
+   * input through the public API.
+   */
+  executeTemporaryStatement?: (
+    query: CompiledTemporaryStatementSql,
+  ) => Promise<void>;
+
   /** Execute pre-compiled SQL text with bound parameters. Available on sync SQLite and pg backends. */
   executeRaw?: <T>(
     sqlText: string,
@@ -1807,7 +1834,7 @@ export type RawQueryExecutionBackend = Pick<
 
 export type RawStatementExecutionBackend = Pick<
   GraphBackend,
-  "executeStatement" | "executeDdl"
+  "executeStatement" | "executeTemporaryStatement" | "executeDdl"
 >;
 
 export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;

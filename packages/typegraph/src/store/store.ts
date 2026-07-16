@@ -596,9 +596,11 @@ export class Store<G extends GraphDef> {
    * Tier 1 graph algorithms: shortest path, reachability, neighborhoods, and
    * degree centrality.
    *
-   * Each call compiles to a single recursive-CTE query against the backend.
-   * The facade is built lazily on first access and cached for the lifetime
-   * of the store.
+   * Traversal calls use the iterative graph-operation substrate: a set-based
+   * breadth-first frontier backed by a temporary working table, or a chunked
+   * inline relation when the backend cannot pin a transactional connection.
+   * `degree` uses a single count query. The facade is built lazily on first
+   * access and cached for the lifetime of the store.
    *
    * @example
    * ```typescript

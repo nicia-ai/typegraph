@@ -16,9 +16,13 @@ store.algorithms.neighbors(alice, { edges: ["knows"], depth: 2 });
 store.algorithms.degree(alice, { edges: ["knows"] });
 ```
 
-Each call compiles to a single `WITH RECURSIVE` CTE (or a plain `COUNT` for
-`degree`), using the same path-tracking and cycle-detection machinery as
-`.recursive()` and `store.subgraph()`. The algorithms work identically on
+Traversal calls use a set-based breadth-first frontier. Each level expands the
+current `(id, kind)` set with a bind-limit-aware SQL query. Transactional
+backends keep the visited set in a temporary working table; backends without a
+pinned transaction use a chunked inline working relation. Each node is admitted
+only at its minimum depth. `shortestPath` and `canReach` search from both
+endpoints and stop when the frontiers meet.
+`degree` remains a single `COUNT` query. The algorithms work identically on
 SQLite and PostgreSQL.
 
 ## When to Reach for Algorithms
@@ -46,13 +50,14 @@ Every traversal algorithm takes the same base options:
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
 | `maxHops` | `number` | `10` | Maximum traversal depth (1 – 1000) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Skip visited nodes per path |
+| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Compatibility option; both values use set-based node de-duplication |
 | `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes and edges along the traversal — see [Temporal Behavior](#temporal-behavior) |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 
-`direction: "both"` treats edges as undirected. `cyclePolicy: "allow"` skips
-cycle tracking and relies solely on `maxHops` to terminate — use it only
-when you know the graph is acyclic or you want maximum raw performance.
+`direction: "both"` treats edges as undirected. `cyclePolicy` remains accepted
+for compatibility with recursive query-builder traversals, but it does not
+change these algorithms: their node-set results and shortest paths never need
+to revisit a node.
 
 ## shortestPath
 
@@ -102,8 +107,8 @@ sorted by ascending depth.
 
 ## canReach
 
-Fast boolean check that short-circuits with `LIMIT 1` so the database stops
-traversing as soon as it finds the target.
+Fast boolean check that uses the same balanced bidirectional BFS as
+`shortestPath` and stops as soon as the two visited sets meet.
 
 ```typescript
 const connected = await store.algorithms.canReach(alice, bob, {
@@ -112,8 +117,8 @@ const connected = await store.algorithms.canReach(alice, bob, {
 });
 ```
 
-Use this when you only care whether a path exists — it's cheaper than
-`shortestPath` because it never decodes the path.
+Use this when you only care whether a path exists. It shares the same search
+cost as `shortestPath` but does not return the reconstructed path.
 
 ## neighbors
 
@@ -195,18 +200,26 @@ const knew = await store.algorithms.canReach(dave, alice, {
 });
 ```
 
-Cycles are prevented by default. The underlying CTE tracks visited nodes
-per path (the same mechanism described in
-[Cycle Detection](/queries/recursive#cycle-detection) for `.recursive()`).
-Switch to `cyclePolicy: "allow"` only when you're confident the traversal
-terminates via `maxHops` alone.
+Cycles cannot multiply work: a node enters the visited set once, at its minimum
+depth. This differs from `.recursive()`, whose path-returning semantics use the
+per-path behavior described in
+[Cycle Detection](/queries/recursive#cycle-detection). The algorithm
+`cyclePolicy` option is therefore compatibility-only.
 
 ## Depth Limits
 
-`maxHops` is capped at `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000) to prevent
-runaway queries. The default of 10 covers typical connectivity questions on
-most graphs. Graphs with branching factor *B* produce O(*B*^depth) rows
-before cycle detection can prune them, so raise `maxHops` deliberately.
+`maxHops` is capped at `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000). The default of 10
+covers typical connectivity questions on most graphs. Within that bound,
+single-source traversal examines each reached node once and each incident edge
+at most once per direction, rather than enumerating paths.
+
+Each expanded level costs a database round trip (inline working relations are
+split to respect the backend bind limit). Transactional backends keep those
+statements in one snapshot and drop their temporary working table in a
+`finally` cleanup; non-transactional backends use their normal best-effort
+multi-statement behavior. The application-clock valid-time instant is pinned
+once for the whole traversal, and recorded-time views remain pinned to their
+requested recorded coordinate.
 
 ## Temporal Behavior
 

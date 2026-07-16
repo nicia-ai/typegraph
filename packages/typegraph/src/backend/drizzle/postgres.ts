@@ -83,6 +83,7 @@ import {
   type HybridSearchParams,
   type HybridSearchRow,
   type IndexMaterializationRow,
+  INTERNAL_TEMPORARY_WRITES,
   type KindRemovalRow,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
@@ -139,10 +140,7 @@ import {
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
-import {
-  hybridCandidatesRef,
-  mapHybridSearchRow,
-} from "./operations/hybrid";
+import { hybridCandidatesRef, mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
@@ -1017,19 +1015,48 @@ export function createPostgresBackend(
       // fulltext never asserts; one that does runs pure DML against an
       // already-materialized table, with the "no DDL in the business
       // transaction" guarantee backed by the durable fact.
+      const temporaryWrites =
+        options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+      if (temporaryWrites && options.accessMode !== "read_only") {
+        throw new ConfigurationError(
+          "Temporary-write transactions must be semantically read-only.",
+          { dialect: "postgres" },
+        );
+      }
       const txConfig =
-        options?.isolationLevel ?
+        (
+          options?.isolationLevel !== undefined ||
+          options?.accessMode !== undefined ||
+          temporaryWrites
+        ) ?
           {
-            isolationLevel: options.isolationLevel.replace("_", " ") as
-              | "read uncommitted"
-              | "read committed"
-              | "repeatable read"
-              | "serializable",
+            ...(options.isolationLevel === undefined ?
+              {}
+            : {
+                isolationLevel: options.isolationLevel.replace("_", " ") as
+                  | "read uncommitted"
+                  | "read committed"
+                  | "repeatable read"
+                  | "serializable",
+              }),
+            ...((
+              options.accessMode === undefined &&
+              !temporaryWrites
+            ) ?
+              {}
+            : {
+                accessMode:
+                  temporaryWrites ?
+                    ("read write" as const)
+                  : (options.accessMode!.replace("_", " ") as
+                      "read only" | "read write"),
+              }),
           }
         : undefined;
 
       return db.transaction(async (tx) => {
-        const { backend: txBackend, drainAndClose } = bindTransactionBackend(tx);
+        const { backend: txBackend, drainAndClose } =
+          bindTransactionBackend(tx);
         try {
           return await fn(txBackend, tx);
         } finally {
@@ -1727,9 +1754,7 @@ function createPostgresOperationBackend(
               slot.fieldPath,
             ),
           );
-          await execRun(
-            sql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
-          );
+          await execRun(sql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
           try {
             await execRun(indexStatement);
           } finally {
@@ -1847,9 +1872,7 @@ function createPostgresOperationBackend(
         const overrides: SearchGucOverride[] = [];
         for (const indexType of annTypes) {
           if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
-          overrides.push(
-            ...(await vectorSearchGucOverrides({ indexType })),
-          );
+          overrides.push(...(await vectorSearchGucOverrides({ indexType })));
         }
         return runVectorSearch<T>(overrides, query);
       }

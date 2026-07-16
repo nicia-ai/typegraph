@@ -1831,7 +1831,7 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 | Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
-| Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Single recursive CTE or `COUNT` per call — see [Graph Algorithms](/graph-algorithms) |
+| Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
 
 **Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
 traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
@@ -1880,13 +1880,13 @@ const total = await store.algorithms.degree(alice, { edges: ["knows"] });
 ```
 
 Every traversal algorithm accepts `edges`, `maxHops` (default 10),
-`direction` (`"out" | "in" | "both"`, default `"out"`), and `cyclePolicy`
-(`"prevent" | "allow"`, default `"prevent"`), plus `temporalMode` / `asOf`
-for temporal filtering — see [Temporal Behavior](/graph-algorithms#temporal-behavior).
-Each call compiles to a single recursive CTE; `degree` compiles to a
-single `COUNT`. Node arguments accept either raw IDs or any object with
-an `id` field — `Node`, `NodeRef`, and the lightweight records returned
-by these algorithms all work.
+`direction` (`"out" | "in" | "both"`, default `"out"`), and the
+compatibility-only `cyclePolicy`, plus `temporalMode` / `asOf` for temporal
+filtering — see [Temporal Behavior](/graph-algorithms#temporal-behavior).
+Traversal calls expand a de-duplicated BFS frontier one level at a time;
+`degree` compiles to a single `COUNT`. Node arguments accept either raw IDs or
+any object with an `id` field — `Node`, `NodeRef`, and the lightweight records
+returned by these algorithms all work.
 
 ### Query Builder
 

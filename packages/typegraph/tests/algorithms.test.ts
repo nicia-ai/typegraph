@@ -9,9 +9,18 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
-import type { GraphBackend } from "../src/backend/types";
+import type {
+  AdoptedTransaction,
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { ConfigurationError, ValidationError } from "../src/errors";
+import type {
+  CompiledRowsSql,
+  CompiledTemporaryStatementSql,
+} from "../src/query/sql-intent";
 import { createStore, type Store } from "../src/store";
 import {
   collectAllEdges,
@@ -329,6 +338,111 @@ describe("store.algorithms", () => {
           reachable[index - 1]!.depth,
         );
       }
+    });
+
+    it("uses bounded frontier queries and stops when the frontier is empty", async () => {
+      const statements: string[] = [];
+      const observedBackend: GraphBackend = {
+        ...backend,
+        capabilities: { ...backend.capabilities, transactions: false },
+        execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
+          statements.push(backend.compileSql!(query).sql);
+          return backend.execute<T>(query);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+
+      const reachable = await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 1000,
+      });
+
+      expect(reachable).toHaveLength(5);
+      expect(statements).toHaveLength(5);
+      expect(
+        statements.every((statement) => !statement.includes("RECURSIVE")),
+      ).toBe(true);
+    });
+
+    it("chunks duplicate edge filters within a small bind budget", async () => {
+      const constrainedBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          transactions: false,
+          maxBindParameters: 100,
+        },
+      };
+      const constrainedStore = createStore(testGraph, constrainedBackend);
+
+      const reachable = await constrainedStore.algorithms.reachable(ids.alice, {
+        edges: Array.from({ length: 49 }, () => "knows" as const),
+        maxHops: 3,
+        direction: "both",
+      });
+
+      expect(reachable.some((node) => node.id === ids.dave)).toBe(true);
+    });
+
+    it("runs through the temporary working-table seam with history enabled", async () => {
+      const historyStore = createStore(testGraph, backend, { history: true });
+
+      const reachable = await historyStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+      });
+
+      expect(reachable.some((node) => node.id === ids.dave)).toBe(true);
+    });
+
+    it("drops the temporary working table when initialization fails", async () => {
+      const temporaryStatements: string[] = [];
+      let failNextRead = false;
+      const failingBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const failingTransaction: TransactionBackend = {
+              ...tx,
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                const statement = backend.compileSql!(query).sql;
+                temporaryStatements.push(statement);
+                await tx.executeTemporaryStatement!(query);
+                if (temporaryStatements.length === 1) {
+                  failNextRead = true;
+                }
+              },
+              execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                if (failNextRead) {
+                  failNextRead = false;
+                  return Promise.reject(new Error("forced round failure"));
+                }
+                return tx.execute<Result>(query);
+              },
+            };
+            return fn(failingTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const failingStore = createStore(testGraph, failingBackend);
+
+      await expect(
+        failingStore.algorithms.reachable(ids.alice, {
+          edges: ["knows"],
+        }),
+      ).rejects.toThrow("forced round failure");
+
+      expect(temporaryStatements[0]?.trimStart()).toMatch(/^CREATE TEMP TABLE/);
+      expect(temporaryStatements.at(-1)?.trimStart()).toMatch(
+        /^DROP TABLE IF EXISTS/,
+      );
     });
   });
 
