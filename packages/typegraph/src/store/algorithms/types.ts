@@ -64,7 +64,7 @@ export type InternalTemporalAlgorithmOptions = Omit<
  * accepted `work_mem` range (`64kB` to `2147483647kB`); both backends reject
  * out-of-range values identically. Defaults to `"64MB"`.
  */
-export type IterativeMemoryOptions = Readonly<{
+type IterativeMemoryOptions = Readonly<{
   /** Per-operation round memory budget, e.g. `"64MB"` (the default). */
   workingMemory?: string;
 }>;
