@@ -111,13 +111,37 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import {
+  BFS3_HOPS,
   canonicalDigest,
   compareIdsAscending,
+  compareMessageRecencyDesc,
+  degreeResult,
+  IC13_MAX_HOPS,
+  IC9_MAX_DATE,
+  IC_MESSAGE_LIMIT,
   type MessageRef,
+  type PersonPair,
+  reachableSetResult,
+  shortestPathDistanceResult,
+  type SnbCapabilityGaps,
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
+  unsupportedQuery,
 } from "./types";
+
+/**
+ * Neo4j gaps: the whole-graph algorithms (WCC, whole-component BFS/SSSP) need
+ * the Graph Data Science (GDS) plugin, which the pinned community image does
+ * not bundle. Plain Cypher's unbounded variable-length paths enumerate paths
+ * (they would explode, not compute a set-based traversal), so these are
+ * declared unsupported rather than run as an exploding query.
+ */
+const NEO4J_UNSUPPORTED: SnbCapabilityGaps = {
+  GA_WCC: "no connected-components in plain Cypher (needs the GDS plugin)",
+  GA_BFS: "no whole-component BFS in plain Cypher (needs the GDS plugin)",
+  GA_SSSP: "no whole-component SSSP in plain Cypher (needs the GDS plugin)",
+};
 
 // The published `neo4j-driver` .d.ts hand-rolls a subset of the driver
 // surface (e.g. its `auth` export omits `auth.none()`, which the underlying
@@ -952,7 +976,215 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     };
   }
 
-  return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
+  // IC13 (traversal): shortest-path hop distance between two persons over
+  // `knows`, via Neo4j's native `shortestPath`. KNOWS is imported in both
+  // directions (see dataset/ldbc-csv.ts), so the directed pattern reaches the
+  // same set an undirected one would. `length(path)` is the hop count; no
+  // path within the cap yields zero rows -> undefined distance. `CYPHER 5`
+  // pins the same planner the id-seek IS queries rely on (see IS2/IS3).
+  async function IC13(pair: PersonPair) {
+    const rows = await runRows<{ distance: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (source:Person {id: $sourceId}), (target:Person {id: $targetId})
+       MATCH path = shortestPath((source)-[:KNOWS*..${IC13_MAX_HOPS}]->(target))
+       RETURN length(path) AS distance`,
+      { sourceId: pair.sourceId, targetId: pair.targetId },
+    );
+    // `length(path)` comes back as a neo4j Integer ({low, high}), not a JS
+    // number — coerce so the digest is a plain integer like every other
+    // engine's (otherwise it stringifies as {"low":1,"high":0}).
+    const raw = rows[0]?.distance;
+    const distance =
+      raw === undefined ? undefined
+      : neo4j.isInt(raw) ? raw.toNumber()
+      : Number(raw);
+    return shortestPathDistanceResult(distance);
+  }
+
+  // BFS3 (traversal): distinct persons within BFS3_HOPS hops of a seed over
+  // `knows`, seed excluded (`friend.id <> $id`) to match every engine's
+  // source-excluding neighborhood contract. Directed `*1..N` over the
+  // bidirectionally-loaded KNOWS graph is the undirected reachable set.
+  async function BFS3(personId: string) {
+    const rows = await runRows<{ id: string }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..${BFS3_HOPS}]->(friend:Person)
+       WHERE friend.id <> $id
+       RETURN DISTINCT friend.id AS id`,
+      { id: personId },
+    );
+    return reachableSetResult(rows.map((row) => row.id));
+  }
+
+  // IC2 (complex read): the given person's friends' most recent messages.
+  // Neo4j's dual `:Message` label covers Post ∪ Comment in one match, so no
+  // per-type split is needed (unlike TypeGraph/Ladybug's separate node tables).
+  async function IC2(personId: string) {
+    const rows = await runRows<{
+      friendId: string;
+      friendFirstName: string;
+      friendLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(friend:Person)<-[:HAS_CREATOR]-(message:Message)
+       RETURN friend.id AS friendId, friend.firstName AS friendFirstName,
+              friend.lastName AS friendLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY message.creationDate DESC, message.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        friendId: row.friendId,
+        friendFirstName: row.friendFirstName,
+        friendLastName: row.friendLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC8 (complex read): the most recent replies to the person's own messages.
+  async function IC8(personId: string) {
+    const rows = await runRows<{
+      replyAuthorId: string;
+      replyAuthorFirstName: string;
+      replyAuthorLastName: string;
+      commentId: string;
+      commentContent: string;
+      commentCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(message:Message)<-[:REPLY_OF]-(reply:Comment)-[:HAS_CREATOR]->(author:Person)
+       RETURN author.id AS replyAuthorId, author.firstName AS replyAuthorFirstName,
+              author.lastName AS replyAuthorLastName, reply.id AS commentId,
+              reply.content AS commentContent, reply.creationDate AS commentCreationDate
+       ORDER BY reply.creationDate DESC, reply.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        replyAuthorId: row.replyAuthorId,
+        replyAuthorFirstName: row.replyAuthorFirstName,
+        replyAuthorLastName: row.replyAuthorLastName,
+        commentId: row.commentId,
+        commentContent: row.commentContent,
+        commentCreationDate: row.commentCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.commentCreationDate, id: left.commentId },
+          { creationDate: right.commentCreationDate, id: right.commentId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC9 (complex read): the most recent messages by the person's friends and
+  // friends-of-friends (2-hop KNOWS, self excluded) before the cutoff. DISTINCT
+  // collapses the duplicate (fof, message) rows the variable-length match
+  // produces; ORDER BY uses the projected aliases (post-DISTINCT scope).
+  async function IC9(personId: string) {
+    const rows = await runRows<{
+      personId: string;
+      personFirstName: string;
+      personLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..2]->(fof:Person)
+       WHERE fof.id <> $id
+       MATCH (fof)<-[:HAS_CREATOR]-(message:Message)
+       WHERE message.creationDate < $maxDate
+       RETURN DISTINCT fof.id AS personId, fof.firstName AS personFirstName,
+              fof.lastName AS personLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY messageCreationDate DESC, messageId DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId, maxDate: IC9_MAX_DATE },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        personId: row.personId,
+        personFirstName: row.personFirstName,
+        personLastName: row.personLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // GA_DEGREE (algorithm): the seed's KNOWS degree. `count(*)` returns a neo4j
+  // Integer — coerce so the digest is a plain number (see IC13).
+  async function GA_DEGREE(seedPersonId: string) {
+    const rows = await runRows<{ degree: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(:Person)
+       RETURN count(*) AS degree`,
+      { id: seedPersonId },
+    );
+    const raw = rows[0]?.degree;
+    const degree = neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+    return degreeResult(degree);
+  }
+
+  return {
+    IS1,
+    IS2,
+    IS3,
+    IS4,
+    IS5,
+    IS6,
+    IS7,
+    IC13,
+    BFS3,
+    IC2,
+    IC8,
+    IC9,
+    GA_DEGREE,
+    GA_WCC: unsupportedQuery("GA_WCC"),
+    GA_BFS: unsupportedQuery("GA_BFS"),
+    GA_SSSP: unsupportedQuery("GA_SSSP"),
+  };
 }
 
 // ---- Factory ----
@@ -1010,6 +1242,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
       "IS1-IS7, using native multi-label (:Message:Post/:Message:Comment) " +
       "polymorphism instead of TypeGraph's ontological supertype " +
       "workaround.",
+    unsupported: NEO4J_UNSUPPORTED,
     async load() {
       try {
         const memorySettings = await resolveNeo4jMemorySettings(options.log);

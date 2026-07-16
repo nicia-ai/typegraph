@@ -56,13 +56,36 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import {
+  BFS3_HOPS,
   canonicalDigest,
   compareIdsAscending,
+  compareMessageRecencyDesc,
+  degreeResult,
+  IC13_MAX_HOPS,
+  IC9_MAX_DATE,
+  IC_MESSAGE_LIMIT,
   type MessageRef,
+  type PersonPair,
+  reachableSetResult,
+  shortestPathDistanceResult,
+  type SnbCapabilityGaps,
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
+  unsupportedQuery,
 } from "./types";
+
+/**
+ * LadybugDB (Kùzu family) gaps: no whole-graph algorithm surface. WCC and
+ * whole-component BFS/SSSP have no native primitive, and its variable-length
+ * paths are capped at 30 hops and path-enumerate — so these are declared
+ * unsupported rather than run as an unbounded, exploding query.
+ */
+const LADYBUG_UNSUPPORTED: SnbCapabilityGaps = {
+  GA_WCC: "no connected-components primitive",
+  GA_BFS: "no whole-component BFS (variable-length paths cap at 30 hops)",
+  GA_SSSP: "no whole-component SSSP (variable-length paths cap at 30 hops)",
+};
 
 /**
  * LadybugDB's variable-length relationship pattern rejects an upper bound
@@ -507,6 +530,81 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     "MATCH (author:Person {id: $authorId})-[:Knows]->(friend:Person) WHERE friend.id IN $ids " +
       "RETURN friend.id AS id;",
   );
+  // IC13 traversal: native SHORTEST recursive-rel path over `Knows`;
+  // `length(e)` is the hop count, and no path within the cap returns zero
+  // rows (verified empirically). Knows is loaded in both directions, so the
+  // directed pattern reaches the same set an undirected one would.
+  const shortestPathStatement = await conn.prepare(
+    `MATCH (source:Person {id: $sourceId})-[e:Knows* SHORTEST 1..${IC13_MAX_HOPS}]->(target:Person {id: $targetId}) ` +
+      "RETURN length(e) AS distance;",
+  );
+  // BFS3 traversal: distinct persons within BFS3_HOPS hops of a seed, seed
+  // excluded. The seed value is bound under two names ($id, $seedId) so the
+  // prepared statement never relies on a single param being referenced twice.
+  const neighborhoodStatement = await conn.prepare(
+    `MATCH (:Person {id: $id})-[:Knows*1..${BFS3_HOPS}]->(friend:Person) WHERE friend.id <> $seedId ` +
+      "RETURN DISTINCT friend.id AS id;",
+  );
+  // IC2: friends' most recent messages (top-K-of-union split, see IC2 fn).
+  // Multi-hop patterns are split into separate MATCH clauses — the direction-
+  // changing single-path form (`->...<-`) trips Ladybug's binder.
+  const ic2PostsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})-[:Knows]->(friend:Person) " +
+      "MATCH (friend)<-[:HasCreator]-(post:Post) " +
+      "RETURN friend.id AS friendId, friend.firstName AS friendFirstName, friend.lastName AS friendLastName, " +
+      "post.id AS id, post.content AS content, post.creationDate AS creationDate " +
+      `ORDER BY post.creationDate DESC, post.id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  const ic2CommentsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})-[:Knows]->(friend:Person) " +
+      "MATCH (friend)<-[:HasCreator]-(comment:Comment) " +
+      "RETURN friend.id AS friendId, friend.firstName AS friendFirstName, friend.lastName AS friendLastName, " +
+      "comment.id AS id, comment.content AS content, comment.creationDate AS creationDate " +
+      `ORDER BY comment.creationDate DESC, comment.id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  // IC8: recent replies to the person's own messages (replies to Posts and to
+  // Comments are disjoint).
+  const ic8RepliesToPostsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})<-[:HasCreator]-(post:Post) " +
+      "MATCH (post)<-[:ReplyOf]-(reply:Comment) " +
+      "MATCH (reply)-[:HasCreator]->(author:Person) " +
+      "RETURN author.id AS authorId, author.firstName AS authorFirstName, author.lastName AS authorLastName, " +
+      "reply.id AS id, reply.content AS content, reply.creationDate AS creationDate " +
+      `ORDER BY reply.creationDate DESC, reply.id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  const ic8RepliesToCommentsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})<-[:HasCreator]-(message:Comment) " +
+      "MATCH (message)<-[:ReplyOf]-(reply:Comment) " +
+      "MATCH (reply)-[:HasCreator]->(author:Person) " +
+      "RETURN author.id AS authorId, author.firstName AS authorFirstName, author.lastName AS authorLastName, " +
+      "reply.id AS id, reply.content AS content, reply.creationDate AS creationDate " +
+      `ORDER BY reply.creationDate DESC, reply.id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  // IC9: friends+FoF (2-hop knows, self excluded) messages before the cutoff.
+  // DISTINCT collapses the duplicate (fof, message) rows a multi-path
+  // variable-length match produces, so the LIMIT sees distinct messages.
+  const ic9PostsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})-[:Knows*1..2]->(fof:Person) " +
+      "MATCH (fof)<-[:HasCreator]-(post:Post) " +
+      "WHERE fof.id <> $seedId AND post.creationDate < $maxDate " +
+      "RETURN DISTINCT fof.id AS creatorId, fof.firstName AS creatorFirstName, fof.lastName AS creatorLastName, " +
+      "post.id AS id, post.content AS content, post.creationDate AS creationDate " +
+      // ORDER BY the projected aliases, not `post.*`: after RETURN DISTINCT the
+      // `post` variable leaves scope, so `ORDER BY post.creationDate` fails
+      // Ladybug's binder ("Variable post is not in scope").
+      `ORDER BY creationDate DESC, id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  const ic9CommentsStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})-[:Knows*1..2]->(fof:Person) " +
+      "MATCH (fof)<-[:HasCreator]-(comment:Comment) " +
+      "WHERE fof.id <> $seedId AND comment.creationDate < $maxDate " +
+      "RETURN DISTINCT fof.id AS creatorId, fof.firstName AS creatorFirstName, fof.lastName AS creatorLastName, " +
+      "comment.id AS id, comment.content AS content, comment.creationDate AS creationDate " +
+      `ORDER BY creationDate DESC, id DESC LIMIT ${IC_MESSAGE_LIMIT};`,
+  );
+  const degreeStatement = await conn.prepare(
+    "MATCH (p:Person {id: $id})-[:Knows]->(:Person) RETURN count(*) AS degree;",
+  );
 
   async function resolveRootPostId(commentId: string): Promise<string> {
     const rows = await rowsOf(
@@ -749,7 +847,151 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     };
   }
 
-  return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
+  async function IC13(pair: PersonPair) {
+    const rows = await rowsOf(
+      await conn.execute(shortestPathStatement, {
+        sourceId: pair.sourceId,
+        targetId: pair.targetId,
+      }),
+    );
+    const distance = rows[0]?.distance;
+    return shortestPathDistanceResult(
+      distance === undefined ? undefined : Number(distance),
+    );
+  }
+
+  async function BFS3(personId: string) {
+    const rows = await rowsOf(
+      await conn.execute(neighborhoodStatement, {
+        id: personId,
+        seedId: personId,
+      }),
+    );
+    return reachableSetResult(rows.map((row) => String(row.id)));
+  }
+
+  async function IC2(personId: string) {
+    const [posts, comments] = await Promise.all([
+      rowsOf(await conn.execute(ic2PostsStatement, { id: personId })),
+      rowsOf(await conn.execute(ic2CommentsStatement, { id: personId })),
+    ]);
+    const canonicalRows = [...posts, ...comments]
+      .map((row) => ({
+        friendId: String(row.friendId),
+        friendFirstName: String(row.friendFirstName),
+        friendLastName: String(row.friendLastName),
+        id: String(row.id),
+        content: String(row.content),
+        creationDate: String(row.creationDate),
+      }))
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        friendId: row.friendId,
+        friendFirstName: row.friendFirstName,
+        friendLastName: row.friendLastName,
+        messageId: row.id,
+        messageContent: row.content,
+        messageCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  async function IC8(personId: string) {
+    const [toPosts, toComments] = await Promise.all([
+      rowsOf(await conn.execute(ic8RepliesToPostsStatement, { id: personId })),
+      rowsOf(
+        await conn.execute(ic8RepliesToCommentsStatement, { id: personId }),
+      ),
+    ]);
+    const canonicalRows = [...toPosts, ...toComments]
+      .map((row) => ({
+        authorId: String(row.authorId),
+        authorFirstName: String(row.authorFirstName),
+        authorLastName: String(row.authorLastName),
+        id: String(row.id),
+        content: String(row.content),
+        creationDate: String(row.creationDate),
+      }))
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        replyAuthorId: row.authorId,
+        replyAuthorFirstName: row.authorFirstName,
+        replyAuthorLastName: row.authorLastName,
+        commentId: row.id,
+        commentContent: row.content,
+        commentCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  async function IC9(personId: string) {
+    const params = {
+      id: personId,
+      seedId: personId,
+      maxDate: IC9_MAX_DATE,
+    };
+    const [posts, comments] = await Promise.all([
+      rowsOf(await conn.execute(ic9PostsStatement, params)),
+      rowsOf(await conn.execute(ic9CommentsStatement, params)),
+    ]);
+    const canonicalRows = [...posts, ...comments]
+      .map((row) => ({
+        creatorId: String(row.creatorId),
+        creatorFirstName: String(row.creatorFirstName),
+        creatorLastName: String(row.creatorLastName),
+        id: String(row.id),
+        content: String(row.content),
+        creationDate: String(row.creationDate),
+      }))
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        personId: row.creatorId,
+        personFirstName: row.creatorFirstName,
+        personLastName: row.creatorLastName,
+        messageId: row.id,
+        messageContent: row.content,
+        messageCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  async function GA_DEGREE(personId: string) {
+    const rows = await rowsOf(
+      await conn.execute(degreeStatement, { id: personId }),
+    );
+    return degreeResult(Number(rows[0]?.degree ?? 0));
+  }
+
+  return {
+    IS1,
+    IS2,
+    IS3,
+    IS4,
+    IS5,
+    IS6,
+    IS7,
+    IC13,
+    BFS3,
+    IC2,
+    IC8,
+    IC9,
+    GA_DEGREE,
+    GA_WCC: unsupportedQuery("GA_WCC"),
+    GA_BFS: unsupportedQuery("GA_BFS"),
+    GA_SSSP: unsupportedQuery("GA_SSSP"),
+  };
 }
 
 export const createLadybugEngine: SnbEngineFactory = async (
@@ -778,6 +1020,7 @@ export const createLadybugEngine: SnbEngineFactory = async (
         "builds it once from the whole file); IS1-IS7 point queries run through " +
         "conn.prepare()+execute() (cached query plan reused per request), matching TypeGraph's " +
         ".prepare()/.execute() split and Neo4j's server-side statement cache.",
+      unsupported: LADYBUG_UNSUPPORTED,
       async load() {
         return await loadSnbDataset(
           conn,

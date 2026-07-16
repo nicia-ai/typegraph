@@ -10,6 +10,8 @@
  *   launches one imperatively (docker run + tmpfs), so it needs Docker.
  * - `neo4j` — imperative Docker container (docker run + tmpfs/named volume).
  * - `ladybugdb` — embedded (`@ladybugdb/core`), no external dependency.
+ * - `pggraph` — imperative Docker container running the Evokoa pgGraph
+ *   PostgreSQL extension image; driven over `pg` like typegraph-postgres.
  */
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
@@ -25,6 +27,7 @@ export const SNB_ENGINE_NAMES = [
   "typegraph-postgres",
   "neo4j",
   "ladybugdb",
+  "pggraph",
 ] as const;
 export type SnbEngineName = (typeof SNB_ENGINE_NAMES)[number];
 
@@ -43,6 +46,13 @@ export const POSTGRES_IMAGE =
   process.env["TYPEGRAPH_BENCH_POSTGRES_IMAGE"] ?? "pgvector/pgvector:pg18";
 export const NEO4J_IMAGE =
   process.env["TYPEGRAPH_BENCH_NEO4J_IMAGE"] ?? "neo4j:2026.05.0";
+/**
+ * Evokoa pgGraph extension image (bundles PostgreSQL 17 + the `graph`
+ * extension + pg_cron). Pinned to a released version tag for reproducibility;
+ * override via env for a newer build.
+ */
+export const PGGRAPH_IMAGE =
+  process.env["TYPEGRAPH_BENCH_PGGRAPH_IMAGE"] ?? "ghcr.io/evokoa/pggraph:0.1.8";
 
 type CheckStatus = "ok" | "failed" | "skipped";
 
@@ -226,7 +236,8 @@ export async function runDoctor(
   const checks: DoctorCheck[] = [];
   checks.push(await checkLoopback());
 
-  const dockerRequired = wants("typegraph-postgres") || wants("neo4j");
+  const dockerRequired =
+    wants("typegraph-postgres") || wants("neo4j") || wants("pggraph");
   const docker = await checkCommand(
     "runtime",
     "Docker daemon",
@@ -239,7 +250,7 @@ export async function runDoctor(
   if (wants("typegraph-sqlite")) {
     checks.push(await checkPackage("better-sqlite3", true));
   }
-  if (wants("typegraph-postgres")) {
+  if (wants("typegraph-postgres") || wants("pggraph")) {
     checks.push(await checkPackage("pg", true));
   }
   if (wants("neo4j")) {
@@ -254,6 +265,9 @@ export async function runDoctor(
   }
   if (wants("neo4j")) {
     checks.push(await checkDockerImage(NEO4J_IMAGE, docker.status === "ok"));
+  }
+  if (wants("pggraph")) {
+    checks.push(await checkDockerImage(PGGRAPH_IMAGE, docker.status === "ok"));
   }
 
   const requiredFailed = (category: string, name: string): boolean =>
@@ -281,6 +295,8 @@ export async function runDoctor(
         );
       case "ladybugdb":
         return !requiredFailed("node-package", "@ladybugdb/core");
+      case "pggraph":
+        return docker.status === "ok" && !requiredFailed("node-package", "pg");
     }
   }
 
