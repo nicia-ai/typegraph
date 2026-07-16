@@ -283,8 +283,9 @@ async function seedWorkingSide(
 /**
  * Detects the depth-zero meeting for bidirectional search: a node seeded on
  * both sides (source equals target, possibly across kinds sharing that id).
- * Ties break like the SQL meeting probe used to — smallest node id, then
- * kind.
+ * Ties break by node id then kind in UTF-16 code-unit order — deterministic
+ * and identical on both backends, unlike the collation-dependent SQL probe
+ * this replaced.
  */
 function findSeedMeeting(
   forwardSeeds: readonly SeededRow[],
@@ -387,9 +388,12 @@ async function expandWorkingTableRound(
 }
 
 /**
- * Folds one round's inserted rows into the best meeting so far, matching the
- * former SQL probe's selection: smallest total depth within `maxHops`, ties
- * broken by node id then kind.
+ * Folds one round's inserted rows into the best meeting so far: smallest
+ * total depth within `maxHops`, ties broken by node id then kind in UTF-16
+ * code-unit order. That tie-break is deterministic and identical on both
+ * backends; the SQL probe it replaced ordered under the database collation,
+ * so equal-depth meetings could previously pick a different node on a
+ * PostgreSQL cluster with a linguistic default collation.
  */
 function selectRoundMeeting(
   currentMeeting: MeetingNode | undefined,
@@ -399,10 +403,10 @@ function selectRoundMeeting(
 ): MeetingNode | undefined {
   let meeting = currentMeeting;
   for (const row of rows) {
-    if (
-      typeof row.meeting_depth !== "number" &&
-      typeof row.meeting_depth !== "string"
-    ) {
+    // Drivers may deliver the INTEGER column as number, text, or bigint
+    // (e.g. better-sqlite3 with defaultSafeIntegers); only its absence means
+    // "no meeting". Number() coerces every numeric shape.
+    if (row.meeting_depth === null || row.meeting_depth === undefined) {
       continue;
     }
     const totalDepth = nextDepth + Number(row.meeting_depth);

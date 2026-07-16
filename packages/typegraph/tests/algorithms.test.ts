@@ -545,9 +545,17 @@ describe("store.algorithms", () => {
       });
 
       expect(reached.map((node) => node.id)).toContain(ids.dave);
-      // CREATE TEMP TABLE, seed (INSERT … RETURNING), 3 expansion rounds,
-      // result read, DROP TABLE. SQLite emits no working-table ANALYZE.
-      expect(statements).toHaveLength(7);
+      // Budget: CREATE TEMP TABLE + seed (INSERT … RETURNING) + one
+      // statement per round (3 on this fixture) + result read + DROP TABLE
+      // = 7. An upper bound so incidental fixture changes don't fail it; a
+      // reintroduced per-round COUNT would push a round to two statements
+      // and blow the budget.
+      expect(statements.length).toBeLessThanOrEqual(7);
+      expect(
+        statements.some((statement) =>
+          statement.trimStart().startsWith("SELECT COUNT"),
+        ),
+      ).toBe(false);
     });
 
     it("runs a 3-hop shortestPath in one statement per round", async () => {
@@ -564,9 +572,13 @@ describe("store.algorithms", () => {
       );
 
       expect(path?.depth).toBe(3);
-      // CREATE TEMP TABLE, two seeds (INSERT … RETURNING), 3 bidirectional
-      // rounds carrying their own meeting probe, result read, DROP TABLE.
-      expect(statements).toHaveLength(8);
+      // Budget: CREATE TEMP TABLE + two seeds (INSERT … RETURNING) + one
+      // statement per bidirectional round (3 on this fixture) + result read
+      // + DROP TABLE = 8. An upper bound so incidental fixture changes don't
+      // fail it; the content assertions below are the real regression guard.
+      expect(statements.length).toBeLessThanOrEqual(8);
+      // Rounds must carry their own meeting probe (meeting_depth) rather
+      // than issuing separate COUNT / meeting statements.
       const roundStatements = statements.filter((statement) =>
         statement.includes("meeting_depth"),
       );
@@ -575,6 +587,9 @@ describe("store.algorithms", () => {
         statements.some((statement) =>
           statement.trimStart().startsWith("SELECT COUNT"),
         ),
+      ).toBe(false);
+      expect(
+        statements.some((statement) => statement.includes("AS total_depth")),
       ).toBe(false);
     });
 
@@ -592,10 +607,54 @@ describe("store.algorithms", () => {
       });
 
       expect(reached.map((node) => node.id)).toContain(ids.dave);
-      expect(statements).toHaveLength(7);
+      // Same 7-statement budget as the plain 3-hop reachable above: SQLite
+      // must not add a settings statement for workingMemory.
+      expect(statements.length).toBeLessThanOrEqual(7);
       expect(
         statements.some((statement) => statement.includes("set_config")),
       ).toBe(false);
+    });
+
+    it("detects a meeting when the driver returns meeting_depth as BigInt", async () => {
+      // better-sqlite3 with defaultSafeIntegers(true) (and custom pg int
+      // parsers) deliver INTEGER columns as BigInt. A meeting must still be
+      // detected — regression for a typeof guard that silently dropped
+      // BigInt rows and made shortestPath return undefined.
+      const bigintBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              async execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                const rows = await tx.execute<Record<string, unknown>>(query);
+                return rows.map((row) =>
+                  typeof row.meeting_depth === "number" ?
+                    { ...row, meeting_depth: BigInt(row.meeting_depth) }
+                  : row,
+                ) as readonly Result[];
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const bigintStore = createStore(testGraph, bigintBackend);
+
+      const path = await bigintStore.algorithms.shortestPath(
+        ids.alice,
+        ids.dave,
+        { edges: ["knows"], maxHops: 3 },
+      );
+
+      expect(path?.depth).toBe(3);
+      expect(path?.nodes.at(0)?.id).toBe(ids.alice);
+      expect(path?.nodes.at(-1)?.id).toBe(ids.dave);
     });
   });
 
@@ -940,12 +999,41 @@ describe("store.algorithms", () => {
       }
     });
 
-    it("accepts a well-formed workingMemory value", async () => {
-      const reached = await store.algorithms.reachable(ids.alice, {
-        edges: ["knows"],
-        workingMemory: "32MB",
-      });
-      expect(reached.some((node) => node.id === ids.dave)).toBe(true);
+    it("rejects workingMemory values outside PostgreSQL's work_mem range", async () => {
+      // work_mem accepts 64kB..2147483647kB; anything outside would fail
+      // set_config mid-transaction with a raw engine error on PostgreSQL
+      // while SQLite silently succeeded. Both backends reject up front.
+      const outOfRangeValues = [
+        "0MB",
+        "1kB",
+        "63kB",
+        "2147483648kB",
+        "999999GB",
+      ];
+      for (const workingMemory of outOfRangeValues) {
+        await expect(
+          store.algorithms.reachable(ids.alice, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+    });
+
+    it("accepts well-formed workingMemory values including the range bounds", async () => {
+      for (const workingMemory of ["32MB", "64kB", "2147483647kB", "2GB"]) {
+        const reached = await store.algorithms.reachable(ids.alice, {
+          edges: ["knows"],
+          workingMemory,
+        });
+        expect(reached.some((node) => node.id === ids.dave)).toBe(true);
+      }
     });
 
     it("rejects maxHops over the explicit recursive limit", async () => {

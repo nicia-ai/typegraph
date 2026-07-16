@@ -20,6 +20,10 @@ shortest-path traversal that used to issue two to three statements per round
 now issues one, roughly halving round-trip latency on latency-bound
 connections. The working-table `ANALYZE` policy is unchanged in its
 thresholds but no longer runs when no further round will read the table.
+When several equal-depth meetings exist, the tie now breaks by node id then
+kind in code-unit order on both backends — previously the selection followed
+the database collation, so a PostgreSQL cluster with a linguistic default
+collation could pick a different (equally shortest) path.
 
 New option: iterative algorithm calls (`reachable`, `shortestPath`,
 `canReach`, `neighbors`, `weaklyConnectedComponents`) accept
@@ -28,4 +32,6 @@ budget applied on PostgreSQL with `SET LOCAL work_mem` semantics via
 parameterized `set_config`. It prevents whole-graph rounds from spilling
 their sorts to disk (measured ~106MB external merges per WCC round on SF1),
 never touches the session or server setting, is validated as
-`<digits>kB|MB|GB`, and is ignored by SQLite.
+`<digits>kB|MB|GB` within PostgreSQL's accepted `work_mem` range
+(64kB–2147483647kB) with the same typed error on both backends, and is
+ignored by SQLite.

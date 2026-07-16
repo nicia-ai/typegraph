@@ -60,7 +60,9 @@ export type InternalTemporalAlgorithmOptions = Omit<
  * `work_mem`, applied via `SET LOCAL` semantics inside the operation's own
  * transaction — the session and server settings are never modified). SQLite
  * has no equivalent setting and ignores the option. The value must be a
- * plain integer with a `kB`, `MB`, or `GB` suffix; defaults to `"64MB"`.
+ * plain integer with a `kB`, `MB`, or `GB` suffix within PostgreSQL's
+ * accepted `work_mem` range (`64kB` to `2147483647kB`); both backends reject
+ * out-of-range values identically. Defaults to `"64MB"`.
  */
 export type IterativeMemoryOptions = Readonly<{
   /** Per-operation round memory budget, e.g. `"64MB"` (the default). */

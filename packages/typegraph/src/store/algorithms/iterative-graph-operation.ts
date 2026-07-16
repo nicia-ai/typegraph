@@ -132,14 +132,41 @@ export const DEFAULT_ITERATIVE_WORKING_MEMORY = "64MB";
  * ever smuggling arbitrary text into a settings statement and rejects
  * ambiguous inputs (fractions, spaces, unknown units) up front.
  */
-const ITERATIVE_WORKING_MEMORY_PATTERN = /^\d+(kB|MB|GB)$/;
+const ITERATIVE_WORKING_MEMORY_PATTERN = /^(\d+)(kB|MB|GB)$/;
+
+const WORKING_MEMORY_KILOBYTES_PER_UNIT: Readonly<Record<string, number>> = {
+  kB: 1,
+  MB: 1024,
+  GB: 1024 * 1024,
+};
+
+/**
+ * PostgreSQL's accepted `work_mem` range (in kB, its base unit). Values
+ * outside it fail `set_config` mid-transaction with a raw engine error on
+ * PostgreSQL while SQLite would silently accept them — so both backends
+ * reject them up front with the same typed error instead.
+ */
+const MIN_WORKING_MEMORY_KILOBYTES = 64;
+const MAX_WORKING_MEMORY_KILOBYTES = 2_147_483_647;
 
 function resolveWorkingMemory(workingMemory: string | undefined): string {
   const resolved = workingMemory ?? DEFAULT_ITERATIVE_WORKING_MEMORY;
-  if (!ITERATIVE_WORKING_MEMORY_PATTERN.test(resolved)) {
+  const match = ITERATIVE_WORKING_MEMORY_PATTERN.exec(resolved);
+  if (match === null) {
     throw new ConfigurationError(
       `Iterative graph operation workingMemory must be digits followed by kB, MB, or GB (for example "64MB"), got ${JSON.stringify(workingMemory)}.`,
       { workingMemory },
+    );
+  }
+  const kilobytes =
+    Number(match[1]) * (WORKING_MEMORY_KILOBYTES_PER_UNIT[match[2] ?? ""] ?? 0);
+  if (
+    kilobytes < MIN_WORKING_MEMORY_KILOBYTES ||
+    kilobytes > MAX_WORKING_MEMORY_KILOBYTES
+  ) {
+    throw new ConfigurationError(
+      `Iterative graph operation workingMemory must be between ${MIN_WORKING_MEMORY_KILOBYTES}kB and ${MAX_WORKING_MEMORY_KILOBYTES}kB, got ${JSON.stringify(workingMemory)}.`,
+      { workingMemory, kilobytes },
     );
   }
   return resolved;
