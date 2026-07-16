@@ -93,11 +93,13 @@ post-merge SF1 run (ref `e095e176`, all 5 engines, 9,892 persons / 361,246
 directed / ~180k undirected `knows` edges; `workingMemory: "64MB"` on the
 iterative calls):
 
+Fastest engine per row in **bold**.
+
 | Query | tg-sqlite p50 | tg-postgres p50 | pggraph p50 | parity |
 | --- | ---: | ---: | ---: | :---: |
-| GA_WCC | 11425 ms | 47406 ms | 8.82 ms | `comparable=yes` |
-| GA_BFS | 209 ms | 1741 ms | 283 ms | `comparable=yes` |
-| GA_SSSP | 211 ms | 1723 ms | 281 ms | `comparable=yes` |
+| GA_WCC | 11425 ms | 47406 ms | **8.82 ms** | `comparable=yes` |
+| GA_BFS | **209 ms** | 1741 ms | 283 ms | `comparable=yes` |
+| GA_SSSP | **211 ms** | 1723 ms | 281 ms | `comparable=yes` |
 
 - **No planner cliff.** A stale-stats nested-loop plan over 9,892 nodes / ~180k
   edges across ~7 BFS rounds would run for minutes-to-hours (extrapolating the
