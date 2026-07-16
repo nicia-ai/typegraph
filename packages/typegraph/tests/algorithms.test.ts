@@ -492,6 +492,92 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // round-trip budget
+  // --------------------------------------------------------------
+
+  describe("working-table round-trip budget", () => {
+    /**
+     * Counts every statement (row-returning and temporary) issued inside the
+     * traversal's transaction, so a reintroduced per-round COUNT or meeting
+     * probe fails this test instead of silently doubling round-trips.
+     */
+    function createCountingBackend(collected: string[]): GraphBackend {
+      return {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                collected.push(backend.compileSql!(query).sql);
+                return tx.execute<Result>(query);
+              },
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                collected.push(backend.compileSql!(query).sql);
+                await tx.executeTemporaryStatement!(query);
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+    }
+
+    it("runs a 3-hop reachable in one statement per round", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(statements),
+      );
+
+      const reached = await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+      });
+
+      expect(reached.map((node) => node.id)).toContain(ids.dave);
+      // CREATE TEMP TABLE, seed (INSERT … RETURNING), 3 expansion rounds,
+      // result read, DROP TABLE. SQLite emits no working-table ANALYZE.
+      expect(statements).toHaveLength(7);
+    });
+
+    it("runs a 3-hop shortestPath in one statement per round", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(statements),
+      );
+
+      const path = await observedStore.algorithms.shortestPath(
+        ids.alice,
+        ids.dave,
+        { edges: ["knows"], maxHops: 3 },
+      );
+
+      expect(path?.depth).toBe(3);
+      // CREATE TEMP TABLE, two seeds (INSERT … RETURNING), 3 bidirectional
+      // rounds carrying their own meeting probe, result read, DROP TABLE.
+      expect(statements).toHaveLength(8);
+      const roundStatements = statements.filter((statement) =>
+        statement.includes("meeting_depth"),
+      );
+      expect(roundStatements.length).toBeGreaterThan(0);
+      expect(
+        statements.some((statement) =>
+          statement.trimStart().startsWith("SELECT COUNT"),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  // --------------------------------------------------------------
   // canReach
   // --------------------------------------------------------------
 

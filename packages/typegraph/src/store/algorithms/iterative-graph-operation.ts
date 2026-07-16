@@ -197,7 +197,10 @@ export async function runIterativeGraphOperation<
           iteration++
         ) {
           state = await plan.runRound(context, state, iteration);
-          if (!plan.hasConverged(state)) {
+          // Statistics only pay off in a subsequent round: skip the refresh
+          // when the operation just converged or the iteration budget is
+          // spent — no further round will read the working table.
+          if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
             analyzedRowCount = await refreshWorkingTableStatistics(
               context,
               state.workingTableSize,
