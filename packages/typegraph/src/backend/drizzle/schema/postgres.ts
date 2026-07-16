@@ -42,6 +42,7 @@ import {
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
+import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
 
@@ -100,6 +101,7 @@ export function createPostgresTables(
 ) {
   const n: PostgresTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
+  assertNoSystemIndexNameCollision(indexes, n);
 
   const nodes = pgTable(
     n.nodes,

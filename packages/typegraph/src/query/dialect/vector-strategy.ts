@@ -381,7 +381,7 @@ function sanitizeIdentifierPart(value: string): string {
  * identifiers. Self-contained so the strategy layer has no backend-runtime
  * dependency.
  */
-function shortHash(input: string): string {
+export function shortHash(input: string): string {
   let h1 = 0xde_ad_be_ef;
   let h2 = 0x41_c6_ce_57;
   for (let index = 0; index < input.length; index++) {

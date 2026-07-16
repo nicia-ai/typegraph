@@ -33,6 +33,7 @@ import {
   buildSqliteNodeIndexBuilders,
   buildSqliteSystemIndexBuilders,
 } from "../../../indexes/drizzle";
+import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 
 /**
@@ -98,6 +99,7 @@ export function createSqliteTables(
 ) {
   const n: SqliteTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
+  assertNoSystemIndexNameCollision(indexes, n);
 
   const nodes = sqliteTable(
     n.nodes,

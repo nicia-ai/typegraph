@@ -36,5 +36,14 @@ gap #282 exposed). Now:
 - `IndexEntity` gains a `"system"` member; system status rows carry the
   relation key (e.g. `"recordedNodes"`) in their `kind` column.
 
-Generated DDL is unchanged — same index names, columns, and order — so
-existing databases and drizzle-kit migrations are unaffected.
+Generated DDL is unchanged for default and short custom table names — same
+index names, columns, and order — so existing databases and drizzle-kit
+migrations are unaffected. Names that would exceed PostgreSQL's 63-char
+identifier bound (very long custom table names) are now deterministically
+truncated + hash-suffixed instead of being silently truncated by the engine
+into collisions. System index names are reserved: a graph-declared index
+using one is rejected at table definition and by `materializeIndexes()`
+(previously its `CREATE INDEX IF NOT EXISTS` silently no-opped against the
+differently-shaped system index while recording success). Legacy databases
+that predate the recorded relations skip those indexes cleanly instead of
+attempting failing DDL at every boot.

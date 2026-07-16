@@ -26,7 +26,7 @@
  * strands the old physical index (the runner only adds). When the first
  * rename actually happens, add a retired-suffixes list + drop path here.
  */
-import { quoteIdentifier } from "../query/dialect/vector-strategy";
+import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
 
 /** The TypeGraph relations that carry system indexes. */
 export type SystemIndexTable =
@@ -260,12 +260,81 @@ export function resolveSystemIndexTableName(
   return overrides?.[table] ?? DEFAULT_SYSTEM_INDEX_TABLE_NAMES[table];
 }
 
-/** Physical index name: `${physicalTableName}_${suffix}`. */
+/**
+ * PostgreSQL truncates identifiers to NAMEDATALEN-1 = 63 bytes SILENTLY —
+ * two suffixes of one long custom table name would collide after
+ * truncation, and the catalog probes (which compare by exact name) would
+ * never match the stored name, re-attempting the build on every boot.
+ * SQLite has no such limit but uses the same bound so the two dialects'
+ * index sets stay in byte-for-byte parity. (Char-based like the vector
+ * identifier bound — multibyte table names are out of scope.)
+ */
+const MAX_SQL_IDENTIFIER_LENGTH = 63;
+
+/**
+ * Physical index name: `${physicalTableName}_${suffix}`, deterministically
+ * truncated + hash-suffixed past the 63-char identifier bound so distinct
+ * indexes stay distinct. Single choke point — the Drizzle builders, the
+ * runtime DDL, the catalog probes, and the status keys all derive the
+ * name here, so they can never disagree.
+ */
 export function systemIndexName(
   physicalTableName: string,
   suffix: string,
 ): string {
-  return `${physicalTableName}_${suffix}`;
+  const full = `${physicalTableName}_${suffix}`;
+  if (full.length <= MAX_SQL_IDENTIFIER_LENGTH) return full;
+  const hash = shortHash(JSON.stringify([physicalTableName, suffix]));
+  return `${full.slice(0, MAX_SQL_IDENTIFIER_LENGTH - 1 - hash.length)}_${hash}`;
+}
+
+/**
+ * Every system index name for a deployment's (possibly overridden) table
+ * names. Graph-declared index names must not collide with these: a
+ * colliding `CREATE INDEX IF NOT EXISTS` would silently no-op against the
+ * system index (wrong shape) while recording a false success — see the
+ * guards in the schema factories and `materializeIndexes`.
+ */
+export function resolveSystemIndexNames(
+  overrides:
+    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+): ReadonlySet<string> {
+  return new Set(
+    SYSTEM_INDEX_DECLARATIONS.map((declaration) =>
+      systemIndexName(
+        resolveSystemIndexTableName(declaration.table, overrides),
+        declaration.suffix,
+      ),
+    ),
+  );
+}
+
+/**
+ * Rejects graph-declared indexes whose names collide with this
+ * deployment's system index names. Called by both dialect schema
+ * factories so a colliding declaration fails at table-definition time
+ * instead of silently no-opping against the (differently shaped) system
+ * index at CREATE INDEX IF NOT EXISTS time. `materializeIndexes` applies
+ * the same check per-declaration on its runtime path.
+ */
+export function assertNoSystemIndexNameCollision(
+  indexes: readonly Readonly<{ name: string }>[],
+  overrides:
+    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+): void {
+  if (indexes.length === 0) return;
+  const reserved = resolveSystemIndexNames(overrides);
+  for (const index of indexes) {
+    if (reserved.has(index.name)) {
+      throw new Error(
+        `Index name "${index.name}" collides with a TypeGraph system ` +
+          `index. Choose a different name — system index names are ` +
+          `reserved, and a same-named CREATE INDEX IF NOT EXISTS would ` +
+          `silently no-op against the system index instead of creating ` +
+          `the declared one.`,
+      );
+    }
+  }
 }
 
 /**

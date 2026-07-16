@@ -46,6 +46,7 @@ import { ConfigurationError, KindNotFoundError } from "../errors";
 import { generateIndexDDL } from "../indexes/ddl";
 import {
   generateSystemIndexDDL,
+  resolveSystemIndexNames,
   resolveSystemIndexTableName,
   SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
@@ -252,28 +253,53 @@ export async function materializeIndexes(
     relationalPhysicalNames,
   );
 
+  // System index names are reserved: a colliding relational declaration's
+  // `CREATE INDEX IF NOT EXISTS` would silently no-op against the
+  // (differently shaped) system index while recording a false success.
+  // The schema factories reject the same collision at table-definition
+  // time; this covers declarations that never pass through them.
+  const reservedSystemNames = resolveSystemIndexNames(backend.tableNames);
+
   const materializeEntry = (
     declaration: IndexDeclaration,
-  ): Promise<MaterializeIndexesEntry> =>
-    declaration.entity === "vector" ?
-      materializeVectorIndex(
-        declaration,
-        backend,
-        graphId,
-        schemaVersion,
-        existingByStatusKey,
-        invalidLeftovers,
-      )
-    : materializeRelationalIndex(
-        declaration,
-        backend,
-        dialect,
-        ddlOptions,
-        graphId,
-        schemaVersion,
-        existingByStatusKey,
-        invalidLeftovers,
+  ): Promise<MaterializeIndexesEntry> => {
+    if (
+      declaration.entity !== "vector" &&
+      reservedSystemNames.has(declaration.name)
+    ) {
+      return Promise.resolve(
+        entry(
+          declaration,
+          "failed",
+          new Error(
+            `Index name "${declaration.name}" collides with a TypeGraph ` +
+              `system index. Rename the declaration — a same-named CREATE ` +
+              `INDEX IF NOT EXISTS would silently no-op against the system ` +
+              `index instead of creating the declared one.`,
+          ),
+        ),
       );
+    }
+    return declaration.entity === "vector" ?
+        materializeVectorIndex(
+          declaration,
+          backend,
+          graphId,
+          schemaVersion,
+          existingByStatusKey,
+          invalidLeftovers,
+        )
+      : materializeRelationalIndex(
+          declaration,
+          backend,
+          dialect,
+          ddlOptions,
+          graphId,
+          schemaVersion,
+          existingByStatusKey,
+          invalidLeftovers,
+        );
+  };
 
   // Postgres restricts `CREATE INDEX CONCURRENTLY` to one in-flight
   // build per relation, so declarations group by target relation and
@@ -910,6 +936,38 @@ async function preloadInvalidIndexLeftovers(
   return invalid;
 }
 
+/**
+ * The subset of `tableNames` that exist as tables in the engine catalog,
+ * in one query — `search_path`-scoped on Postgres like the index probes.
+ */
+async function preloadExistingTables(
+  backend: GraphBackend,
+  tableNames: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (tableNames.length === 0) return new Set();
+  if (backend.dialect === "postgres") {
+    const rows = await backend.execute<{ name: string }>(
+      asCompiledRowsSql(sql`
+        SELECT c.relname AS name
+        FROM pg_class c
+        WHERE c.relname IN (${sqlValueList(tableNames)})
+          AND c.relkind IN ('r', 'p')
+          AND pg_catalog.pg_table_is_visible(c.oid)
+      `),
+    );
+    return new Set(rows.map((row) => row.name));
+  }
+  const rows = await backend.execute<{ name: string }>(
+    asCompiledRowsSql(sql`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN (${sqlValueList(tableNames)})
+    `),
+  );
+  return new Set(rows.map((row) => row.name));
+}
+
 type PhysicalIndexStates = Readonly<{
   /** Names that exist as usable indexes in the engine catalog. */
   valid: ReadonlySet<string>;
@@ -1198,14 +1256,19 @@ export async function materializeSystemIndexes(
       };
     });
 
-  // The two preloads are mutually independent reads (status table +
-  // catalog); running them concurrently keeps the warm boot at one
-  // round-trip latency after the ensure step.
+  // The three preloads are mutually independent reads (status table +
+  // two catalog probes); running them concurrently keeps the warm boot at
+  // one round-trip latency after the ensure step.
   const statusKeys = candidates.map((candidate) => candidate.name);
-  const [existingByStatusKey, physicalStates] = await Promise.all([
-    preloadMaterializations(backend, statusKeys),
-    preloadPhysicalIndexStates(backend, statusKeys),
-  ]);
+  const targetTables = [
+    ...new Set(candidates.map((candidate) => candidate.physicalTable)),
+  ];
+  const [existingByStatusKey, physicalStates, existingTables] =
+    await Promise.all([
+      preloadMaterializations(backend, statusKeys),
+      preloadPhysicalIndexStates(backend, statusKeys),
+      preloadExistingTables(backend, targetTables),
+    ]);
   const { valid: physicallyPresent } = physicalStates;
   // Physical state is authoritative for system indexes: absent or INVALID
   // must rebuild even under a matching success row (dump/restore, manual
@@ -1222,6 +1285,21 @@ export async function materializeSystemIndexes(
       entity: "system",
       kind: candidate.declaration.table,
     };
+    // Legacy databases can predate optional relations (the recorded
+    // tables ship with history support; `operation-backend-core` guards
+    // its clears the same way). Their indexes are skipped, not failed —
+    // the relation appearing later (bootstrap on a fresh database always
+    // creates it) brings the indexes with it.
+    if (!existingTables.has(candidate.physicalTable)) {
+      return {
+        indexName: candidate.name,
+        entity: "system",
+        kind: candidate.declaration.table,
+        status: "skipped",
+        reason: `Relation "${candidate.physicalTable}" does not exist in this database`,
+      };
+    }
+
     const existing = existingByStatusKey.get(candidate.name);
 
     // A status row owned by another entity means a graph-declared index
