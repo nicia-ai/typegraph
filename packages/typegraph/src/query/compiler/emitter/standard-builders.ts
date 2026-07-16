@@ -810,6 +810,171 @@ export function buildStandardOrderBy(
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
 }
 
+// ============================================================
+// Late materialization (deferred projection)
+// ============================================================
+//
+// For an ORDER BY … LIMIT query whose projection reads columns beyond the
+// ordering/identity keys, the flat plan carries every projected column (e.g. a
+// large `content` prop) through the sorter for every candidate row and then
+// discards all but the LIMIT survivors. Late materialization sorts+limits a
+// *lean* candidate set (identity + sort keys only), then re-joins the physical
+// node table by `(graph_id, kind, id)` to fetch the deferred columns for only
+// the surviving rows. See the standard emitter's late-materialization branch
+// for the eligibility gate; these builders assume it already held.
+
+export const LATE_MAT_TOPK_CTE_ALIAS = "cte_lm_topk";
+const LATE_MAT_SORT_KEY_PREFIX = "__lm_sk";
+const LATE_MAT_PHYSICAL_ALIAS_PREFIX = "lm_";
+
+export function lateMaterializedPhysicalAlias(alias: string): string {
+  return `${LATE_MAT_PHYSICAL_ALIAS_PREFIX}${alias}`;
+}
+
+/** Node aliases in the query: the start alias plus each traversal's node. */
+export function lateMaterializedNodeAliases(ast: QueryAst): readonly string[] {
+  return [
+    ast.start.alias,
+    ...ast.traversals.map((traversal) => traversal.nodeAlias),
+  ];
+}
+
+/**
+ * Node aliases the projection actually reads — the physical tables the outer
+ * SELECT must re-join. Edge aliases are gated out upstream, so every projected
+ * alias resolves to a node table here.
+ */
+export function lateMaterializedProjectedNodeAliases(
+  ast: QueryAst,
+): readonly string[] {
+  const referenced = new Set<string>();
+  for (const field of ast.selectiveFields ?? []) {
+    referenced.add(field.alias);
+  }
+  return lateMaterializedNodeAliases(ast).filter((alias) =>
+    referenced.has(alias),
+  );
+}
+
+type BuildLateMaterializedTopKCteInput = Readonly<{
+  ast: QueryAst;
+  collapsedTraversalCteAlias?: string;
+  dialect: DialectAdapter;
+  fromClause: SQL;
+  limit: number;
+  offset?: number | undefined;
+}>;
+
+/**
+ * The topK CTE: selects each node alias's identity `(id, kind)` plus each sort
+ * key value (aliased `__lm_sk{n}` so the outer SELECT can re-order the survivors
+ * without re-extracting), ordered and limited on the lean candidate set.
+ *
+ * When the traversal rowset is collapsed onto a single CTE, every alias's
+ * identity is carried into that one CTE (keyed by alias prefix), so all columns
+ * resolve against `collapsedTraversalCteAlias` and the FROM references it alone.
+ */
+export function buildLateMaterializedTopKCte(
+  input: BuildLateMaterializedTopKCteInput,
+): SQL {
+  const { ast, collapsedTraversalCteAlias, dialect, fromClause } = input;
+  const aliasToCte = buildAliasToCteMap(ast);
+  const cteAliasFor = (alias: string): string =>
+    collapsedTraversalCteAlias ??
+    aliasToCte.get(alias) ??
+    `${ALIAS_CTE_PREFIX}${alias}`;
+
+  const columns: SQL[] = [];
+  for (const alias of lateMaterializedNodeAliases(ast)) {
+    const cteAlias = cteAliasFor(alias);
+    columns.push(
+      sql`${qualifyColumn(cteAlias, `${alias}_id`)} AS ${sql.raw(`${alias}_id`)}`,
+      sql`${qualifyColumn(cteAlias, `${alias}_kind`)} AS ${sql.raw(`${alias}_kind`)}`,
+    );
+  }
+  for (const [index, orderSpec] of (ast.orderBy ?? []).entries()) {
+    const value = compileOrderFieldValue(
+      ast,
+      orderSpec.field,
+      dialect,
+      cteAliasFor(orderSpec.field.alias),
+    );
+    columns.push(
+      sql`${value} AS ${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`,
+    );
+  }
+
+  const innerOrderBy = buildStandardOrderBy({
+    ast,
+    dialect,
+    ...(collapsedTraversalCteAlias === undefined ?
+      {}
+    : { collapsedTraversalCteAlias }),
+  });
+  const limitOffset = buildLimitOffsetClause({
+    limit: input.limit,
+    offset: input.offset,
+  });
+
+  const parts: SQL[] = [sql`SELECT ${sql.join(columns, sql`, `)}`, fromClause];
+  if (innerOrderBy !== undefined) parts.push(innerOrderBy);
+  if (limitOffset !== undefined) parts.push(limitOffset);
+
+  return sql`${sql.raw(LATE_MAT_TOPK_CTE_ALIAS)} AS (${sql.join(parts, sql` `)})`;
+}
+
+/**
+ * The outer projection: each selective field sourced from the re-joined
+ * physical node table alias `lm_<alias>` rather than a candidate CTE, so the
+ * deferred columns are read only for the surviving rows.
+ */
+export function buildLateMaterializedOuterProjection(
+  ast: QueryAst,
+  dialect: DialectAdapter,
+): SQL {
+  const columns = (ast.selectiveFields ?? []).map((field) => {
+    const physicalAlias = lateMaterializedPhysicalAlias(field.alias);
+    if (field.isSystemField) {
+      const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
+      return sql`${compileColumnReference(physicalAlias, dbColumn)} AS ${quoteIdentifier(field.outputName)}`;
+    }
+    const extracted = compileSelectivePropsExtraction(
+      field,
+      compileColumnReference(physicalAlias, "props"),
+      dialect,
+    );
+    return sql`${extracted} AS ${quoteIdentifier(field.outputName)}`;
+  });
+  return sql.join(columns, sql`, `);
+}
+
+/**
+ * The outer ORDER BY: re-orders the LIMIT survivors by the `__lm_sk{n}` sort
+ * values carried out of the topK CTE, matching `buildStandardOrderBy`'s
+ * null-ordering semantics. Referencing the CTE's real columns (not bare output
+ * aliases) keeps the `(x IS NULL)` null-placement trick valid on both dialects.
+ */
+export function buildLateMaterializedOuterOrderBy(
+  ast: QueryAst,
+): SQL | undefined {
+  const orderBy = ast.orderBy ?? [];
+  if (orderBy.length === 0) return undefined;
+  const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
+  const parts: SQL[] = [];
+  for (const [index, orderSpec] of orderBy.entries()) {
+    const column = sql`${topk}.${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`;
+    const direction = sql.raw(orderSpec.direction.toUpperCase());
+    const nulls =
+      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
+    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
+    parts.push(
+      sql`(${column} IS NULL) ${nullsDirection}`,
+      sql`${column} ${direction}`,
+    );
+  }
+  return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
+}
+
 function fieldRefKey(field: FieldRef): string {
   const pointer = field.jsonPointer ?? "";
   return `${field.alias}:${field.path.join(".")}:${pointer}`;

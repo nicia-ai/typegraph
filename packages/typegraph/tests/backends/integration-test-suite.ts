@@ -33,6 +33,7 @@ import {
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
   registerImportUniquenessIntegrationTests,
+  registerLateMaterializationIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -126,6 +127,7 @@ export function createIntegrationTestSuite(
     registerPredicateIntegrationTests(context);
     registerProvenanceIntegrationTests(context);
     registerOrderingIntegrationTests(context);
+    registerLateMaterializationIntegrationTests(context);
     registerTemporalIntegrationTests(context);
     registerTransactionReceiptIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
