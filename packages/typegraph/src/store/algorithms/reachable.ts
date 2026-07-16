@@ -72,6 +72,9 @@ export async function executeNeighbors(
     ...(options.recordedAsOf !== undefined && {
       recordedAsOf: options.recordedAsOf,
     }),
+    ...(options.workingMemory !== undefined && {
+      workingMemory: options.workingMemory,
+    }),
     excludeSource: true,
   });
 }

@@ -39,6 +39,11 @@ export type IterativeGraphOperation = Readonly<{
   nodeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   edgeTemporalFilter: ReturnType<typeof compileTemporalFilter>;
   schema: ReturnType<typeof resolveReadSchema>;
+  /**
+   * Validated caller-requested transaction-scoped memory override for
+   * working-table rounds; `undefined` inherits the engine's configuration.
+   */
+  workingMemory: string | undefined;
 }>;
 
 export type NodeIdentityKey = string & {
@@ -116,6 +121,62 @@ export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 16;
 export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 
 /**
+ * Accepts only a plain integer with a binary unit suffix. The value reaches
+ * the engine as a bound parameter, but a strict shape keeps the option from
+ * ever smuggling arbitrary text into a settings statement and rejects
+ * ambiguous inputs (fractions, spaces, unknown units) up front.
+ */
+const ITERATIVE_WORKING_MEMORY_PATTERN = /^(\d+)(kB|MB|GB)$/;
+
+const WORKING_MEMORY_KILOBYTES_PER_UNIT: Readonly<Record<string, number>> = {
+  kB: 1,
+  MB: 1024,
+  GB: 1024 * 1024,
+};
+
+/**
+ * PostgreSQL's accepted `work_mem` range (in kB, its base unit). Values
+ * outside it fail `set_config` mid-transaction with a raw engine error on
+ * PostgreSQL while SQLite would silently accept them — so both backends
+ * reject them up front with the same typed error instead.
+ */
+const MIN_WORKING_MEMORY_KILOBYTES = 64;
+const MAX_WORKING_MEMORY_KILOBYTES = 2_147_483_647;
+
+/**
+ * Validates an explicitly requested working-memory override. `undefined`
+ * means the caller did not opt in: the operation inherits the engine's
+ * configured setting and emits no override — `work_mem` is a threshold each
+ * sort/hash operator (and each parallel worker) may allocate up to, not a
+ * per-operation budget, so silently raising it for every algorithm call
+ * could multiply memory use far past what a DBA provisioned.
+ */
+function resolveWorkingMemory(
+  workingMemory: string | undefined,
+): string | undefined {
+  if (workingMemory === undefined) return undefined;
+  const match = ITERATIVE_WORKING_MEMORY_PATTERN.exec(workingMemory);
+  if (match === null) {
+    throw new ConfigurationError(
+      `Iterative graph operation workingMemory must be digits followed by kB, MB, or GB (for example "64MB"), got ${JSON.stringify(workingMemory)}.`,
+      { workingMemory },
+    );
+  }
+  const kilobytes =
+    Number(match[1]) * (WORKING_MEMORY_KILOBYTES_PER_UNIT[match[2] ?? ""] ?? 0);
+  if (
+    kilobytes < MIN_WORKING_MEMORY_KILOBYTES ||
+    kilobytes > MAX_WORKING_MEMORY_KILOBYTES
+  ) {
+    throw new ConfigurationError(
+      `Iterative graph operation workingMemory must be between ${MIN_WORKING_MEMORY_KILOBYTES}kB and ${MAX_WORKING_MEMORY_KILOBYTES}kB, got ${JSON.stringify(workingMemory)}.`,
+      { workingMemory, kilobytes },
+    );
+  }
+  return workingMemory;
+}
+
+/**
  * Opens the shared execution scope for iterative graph algorithms. The host
  * controls rounds and convergence; this scope supplies a snapshot-consistent,
  * bind-limit-aware SQL working relation for each round.
@@ -183,6 +244,19 @@ export async function runIterativeGraphOperation<
         },
       };
 
+      // Opt-in only: without an explicit workingMemory the rounds inherit
+      // the engine's configured setting. When requested, the override is
+      // transaction-scoped — `set_config(..., is_local => true)` reverts
+      // when this transaction ends, so the session/server setting is never
+      // touched. SQLite returns no statement here.
+      if (context.operation.workingMemory !== undefined) {
+        const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+          context.operation.workingMemory,
+        );
+        if (workingMemoryStatement !== undefined) {
+          await context.executeTemporary(workingMemoryStatement);
+        }
+      }
       await context.executeTemporary(plan.createWorkingTable(context));
       let operationError: unknown;
       try {
@@ -197,7 +271,10 @@ export async function runIterativeGraphOperation<
           iteration++
         ) {
           state = await plan.runRound(context, state, iteration);
-          if (!plan.hasConverged(state)) {
+          // Statistics only pay off in a subsequent round: skip the refresh
+          // when the operation just converged or the iteration budget is
+          // spent — no further round will read the working table.
+          if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
             analyzedRowCount = await refreshWorkingTableStatistics(
               context,
               state.workingTableSize,
@@ -618,6 +695,7 @@ function createOperation(
     nodeTemporalFilter,
     edgeTemporalFilter,
     schema: resolveReadSchema(ctx, options),
+    workingMemory: resolveWorkingMemory(options.workingMemory),
   };
 }
 

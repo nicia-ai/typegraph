@@ -159,6 +159,42 @@ async function seed(store: Store<TestGraph>): Promise<Fixture> {
   };
 }
 
+/**
+ * Counts every statement (row-returning and temporary) issued inside a
+ * traversal's transaction, so a reintroduced per-round COUNT or meeting
+ * probe fails the round-trip budget tests instead of silently doubling
+ * round-trips.
+ */
+function createCountingBackend(
+  backend: GraphBackend,
+  collected: string[],
+): GraphBackend {
+  return {
+    ...backend,
+    transaction<T>(
+      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      return backend.transaction(async (tx, adoptedTransaction) => {
+        const observedTransaction: TransactionBackend = {
+          ...tx,
+          execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
+            collected.push(backend.compileSql!(query).sql);
+            return tx.execute<Result>(query);
+          },
+          async executeTemporaryStatement(
+            query: CompiledTemporaryStatementSql,
+          ): Promise<void> {
+            collected.push(backend.compileSql!(query).sql);
+            await tx.executeTemporaryStatement!(query);
+          },
+        };
+        return fn(observedTransaction, adoptedTransaction);
+      }, options);
+    },
+  };
+}
+
 // ============================================================
 // Test Setup
 // ============================================================
@@ -492,6 +528,137 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // round-trip budget
+  // --------------------------------------------------------------
+
+  describe("working-table round-trip budget", () => {
+    it("runs a 3-hop reachable in one statement per round", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(backend, statements),
+      );
+
+      const reached = await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+      });
+
+      expect(reached.map((node) => node.id)).toContain(ids.dave);
+      // Budget: CREATE TEMP TABLE + seed (INSERT … RETURNING) + one
+      // statement per round (3 on this fixture) + result read + DROP TABLE
+      // = 7. An upper bound so incidental fixture changes don't fail it; a
+      // reintroduced per-round COUNT would push a round to two statements
+      // and blow the budget.
+      expect(statements.length).toBeLessThanOrEqual(7);
+      expect(
+        statements.some((statement) =>
+          statement.trimStart().startsWith("SELECT COUNT"),
+        ),
+      ).toBe(false);
+    });
+
+    it("runs a 3-hop shortestPath in one statement per round", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(backend, statements),
+      );
+
+      const path = await observedStore.algorithms.shortestPath(
+        ids.alice,
+        ids.dave,
+        { edges: ["knows"], maxHops: 3 },
+      );
+
+      expect(path?.depth).toBe(3);
+      // Budget: CREATE TEMP TABLE + two seeds (INSERT … RETURNING) + one
+      // statement per bidirectional round (3 on this fixture) + result read
+      // + DROP TABLE = 8. An upper bound so incidental fixture changes don't
+      // fail it; the content assertions below are the real regression guard.
+      expect(statements.length).toBeLessThanOrEqual(8);
+      // Rounds must carry their own meeting probe (meeting_depth) rather
+      // than issuing separate COUNT / meeting statements.
+      const roundStatements = statements.filter((statement) =>
+        statement.includes("meeting_depth"),
+      );
+      expect(roundStatements.length).toBeGreaterThan(0);
+      expect(
+        statements.some((statement) =>
+          statement.trimStart().startsWith("SELECT COUNT"),
+        ),
+      ).toBe(false);
+      expect(
+        statements.some((statement) => statement.includes("AS total_depth")),
+      ).toBe(false);
+    });
+
+    it("emits no working-memory settings statement on SQLite", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(backend, statements),
+      );
+
+      const reached = await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+        workingMemory: "32MB",
+      });
+
+      expect(reached.map((node) => node.id)).toContain(ids.dave);
+      // Same 7-statement budget as the plain 3-hop reachable above: SQLite
+      // must not add a settings statement for workingMemory.
+      expect(statements.length).toBeLessThanOrEqual(7);
+      expect(
+        statements.some((statement) => statement.includes("set_config")),
+      ).toBe(false);
+    });
+
+    it("detects a meeting when the driver returns meeting_depth as BigInt", async () => {
+      // better-sqlite3 with defaultSafeIntegers(true) (and custom pg int
+      // parsers) deliver INTEGER columns as BigInt. A meeting must still be
+      // detected — regression for a typeof guard that silently dropped
+      // BigInt rows and made shortestPath return undefined.
+      const bigintBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              async execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                const rows = await tx.execute<Record<string, unknown>>(query);
+                return rows.map((row) =>
+                  typeof row.meeting_depth === "number" ?
+                    { ...row, meeting_depth: BigInt(row.meeting_depth) }
+                  : row,
+                ) as readonly Result[];
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const bigintStore = createStore(testGraph, bigintBackend);
+
+      const path = await bigintStore.algorithms.shortestPath(
+        ids.alice,
+        ids.dave,
+        { edges: ["knows"], maxHops: 3 },
+      );
+
+      expect(path?.depth).toBe(3);
+      expect(path?.nodes.at(0)?.id).toBe(ids.alice);
+      expect(path?.nodes.at(-1)?.id).toBe(ids.dave);
+    });
+  });
+
+  // --------------------------------------------------------------
   // canReach
   // --------------------------------------------------------------
 
@@ -677,6 +844,50 @@ describe("store.algorithms", () => {
       ).toBe(true);
     });
 
+    it("propagates labels without re-joining node visibility per edge", async () => {
+      const statements: string[] = [];
+      const observedBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                statements.push(backend.compileSql!(query).sql);
+                await tx.executeTemporaryStatement!(query);
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.algorithms.weaklyConnectedComponents({
+        edges: ["knows"],
+      });
+
+      // The working table is seeded with exactly the visible, in-scope nodes
+      // and WCC never inserts rows afterwards, so the propagate round proves
+      // endpoint visibility via working-table membership alone.
+      const seedStatement = statements.find((statement) =>
+        statement.trimStart().startsWith("INSERT INTO"),
+      );
+      expect(seedStatement).toContain('"typegraph_nodes"');
+      const propagateStatements = statements.filter((statement) =>
+        statement.includes("WITH candidates"),
+      );
+      expect(propagateStatements.length).toBeGreaterThan(0);
+      for (const statement of propagateStatements) {
+        expect(statement).not.toContain('"typegraph_nodes"');
+      }
+    });
+
     it("rejects a backend without graph-analytics support", async () => {
       const unsupportedBackend: GraphBackend = {
         ...backend,
@@ -752,6 +963,77 @@ describe("store.algorithms", () => {
           depth: -1,
         }),
       ).rejects.toBeInstanceOf(ConfigurationError);
+    });
+
+    it("rejects malformed workingMemory values across iterative algorithms", async () => {
+      // SET LOCAL work_mem cannot take arbitrary text, so the option accepts
+      // only <digits><kB|MB|GB> — no spaces, fractions, lowercase units, or
+      // anything that could smuggle SQL into a settings statement.
+      const malformedValues = [
+        "64 MB",
+        "64mb",
+        "-64MB",
+        "1.5GB",
+        "64MB; DROP TABLE typegraph_nodes",
+        "",
+      ];
+      for (const workingMemory of malformedValues) {
+        await expect(
+          store.algorithms.reachable(ids.alice, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.shortestPath(ids.alice, ids.bob, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+    });
+
+    it("rejects workingMemory values outside PostgreSQL's work_mem range", async () => {
+      // work_mem accepts 64kB..2147483647kB; anything outside would fail
+      // set_config mid-transaction with a raw engine error on PostgreSQL
+      // while SQLite silently succeeded. Both backends reject up front.
+      const outOfRangeValues = [
+        "0MB",
+        "1kB",
+        "63kB",
+        "2147483648kB",
+        "999999GB",
+      ];
+      for (const workingMemory of outOfRangeValues) {
+        await expect(
+          store.algorithms.reachable(ids.alice, {
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+    });
+
+    it("accepts well-formed workingMemory values including the range bounds", async () => {
+      for (const workingMemory of ["32MB", "64kB", "2147483647kB", "2GB"]) {
+        const reached = await store.algorithms.reachable(ids.alice, {
+          edges: ["knows"],
+          workingMemory,
+        });
+        expect(reached.some((node) => node.id === ids.dave)).toBe(true);
+      }
     });
 
     it("rejects maxHops over the explicit recursive limit", async () => {

@@ -119,6 +119,17 @@ export interface DialectAdapter {
    */
   analyzeTemporaryTable(table: SQLWrapper): SQL | undefined;
 
+  /**
+   * Builds the dialect's transaction-scoped working-memory override for
+   * sort/hash-heavy iterative rounds. PostgreSQL emits the parameterized
+   * `SET LOCAL work_mem` form (`set_config(..., is_local => true)`), which
+   * reverts automatically when the transaction ends and never touches the
+   * session or server setting. Returns undefined when the engine has no
+   * per-operation memory budget to raise (SQLite). Callers must run the
+   * statement inside a transaction and validate the value's shape first.
+   */
+  setTransactionWorkingMemory(workingMemory: string): SQL | undefined;
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

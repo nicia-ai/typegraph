@@ -47,14 +47,24 @@ type WorkingRow = Readonly<{
   predecessor_kind: unknown;
 }>;
 
-type CountRow = Readonly<{ count: number | string }>;
 type InsertedRow = Readonly<{ node_id: string }>;
+type SeededRow = Readonly<{ node_id: string; node_kind: string }>;
+type InsertedFrontierRow = Readonly<{
+  node_id: string;
+  node_kind: string;
+  meeting_depth: unknown;
+}>;
 type WorkingSide = "forward" | "reverse";
 
 type MeetingNode = Readonly<{
   id: string;
   kind: string;
   depth: number;
+}>;
+
+type FrontierRound = Readonly<{
+  insertedCount: number;
+  meeting: MeetingNode | undefined;
 }>;
 
 export async function findReachableNodes(
@@ -89,8 +99,12 @@ export async function findShortestPath(
 }
 
 function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
+  // Working-table rounds fold their frontier and meeting bookkeeping into
+  // `INSERT … RETURNING`, so an engine without RETURNING must take the
+  // inline fallback.
   return (
     ctx.backend.capabilities.transactions &&
+    ctx.backend.capabilities.returning !== false &&
     ctx.backend.executeTemporaryStatement !== undefined
   );
 }
@@ -106,12 +120,11 @@ async function findReachableNodesInWorkingTable(
     maxIterations: maxHops,
     createWorkingTable,
     async initialize(context) {
-      await seedWorkingSide(context, sourceId, "forward");
-      const frontierCount = await countWorkingDepth(context, "forward", 0);
+      const seeded = await seedWorkingSide(context, sourceId, "forward");
       return {
         depth: 0,
-        frontierCount,
-        workingTableSize: frontierCount,
+        frontierCount: seeded.length,
+        workingTableSize: seeded.length,
       };
     },
     async runRound(context, state) {
@@ -160,21 +173,15 @@ async function findShortestPathInWorkingTable(
     maxIterations: maxHops,
     createWorkingTable,
     async initialize(context) {
-      await seedWorkingSide(context, sourceId, "forward");
-      await seedWorkingSide(context, targetId, "reverse");
-      const [forwardFrontierCount, reverseFrontierCount, meeting] =
-        await Promise.all([
-          countWorkingDepth(context, "forward", 0),
-          countWorkingDepth(context, "reverse", 0),
-          findWorkingMeeting(context, maxHops),
-        ]);
+      const forwardSeeds = await seedWorkingSide(context, sourceId, "forward");
+      const reverseSeeds = await seedWorkingSide(context, targetId, "reverse");
       return {
         forwardDepth: 0,
         reverseDepth: 0,
-        forwardFrontierCount,
-        reverseFrontierCount,
-        meeting,
-        workingTableSize: forwardFrontierCount + reverseFrontierCount,
+        forwardFrontierCount: forwardSeeds.length,
+        reverseFrontierCount: reverseSeeds.length,
+        meeting: findSeedMeeting(forwardSeeds, reverseSeeds),
+        workingTableSize: forwardSeeds.length + reverseSeeds.length,
       };
     },
     async runRound(context, state) {
@@ -188,24 +195,24 @@ async function findShortestPathInWorkingTable(
         expandForward ?
           context.operation.direction
         : reverseDirection(context.operation.direction);
-      const frontierCount = await expandWorkingTableRound(
+      const round = await expandWorkingTableRound(
         context,
         side,
         currentDepth,
         nextDepth,
         direction,
+        maxHops,
       );
-      const meeting = await findWorkingMeeting(context, maxHops);
 
       return {
         forwardDepth: expandForward ? nextDepth : state.forwardDepth,
         reverseDepth: expandForward ? state.reverseDepth : nextDepth,
         forwardFrontierCount:
-          expandForward ? frontierCount : state.forwardFrontierCount,
+          expandForward ? round.insertedCount : state.forwardFrontierCount,
         reverseFrontierCount:
-          expandForward ? state.reverseFrontierCount : frontierCount,
-        meeting,
-        workingTableSize: state.workingTableSize + frontierCount,
+          expandForward ? state.reverseFrontierCount : round.insertedCount,
+        meeting: round.meeting,
+        workingTableSize: state.workingTableSize + round.insertedCount,
       };
     },
     hasConverged(state) {
@@ -239,56 +246,87 @@ function createWorkingTable(context: IterativeGraphRunContext) {
         depth INTEGER NOT NULL,
         predecessor_id TEXT,
         predecessor_kind TEXT,
+        meeting_depth INTEGER,
         PRIMARY KEY (graph_id, run_id, side, node_kind, node_id)
       )
   `;
 }
 
+/**
+ * Seeds one traversal side and returns the seeded node identities from the
+ * same statement, so the caller reads the frontier size (and, for
+ * bidirectional search, the source-equals-target meeting) without a
+ * follow-up COUNT round-trip.
+ */
 async function seedWorkingSide(
   context: IterativeGraphRunContext,
   nodeId: string,
   side: WorkingSide,
-): Promise<void> {
+): Promise<readonly SeededRow[]> {
   const { operation, workingTable, graphId, runId } = context;
-  await context.executeTemporary(sql`
-    INSERT INTO ${workingTable}
-      (graph_id, run_id, side, node_id, node_kind, depth,
-       predecessor_id, predecessor_kind)
-    SELECT ${graphId}, ${runId}, ${side}, n.id, n.kind, 0, NULL, NULL
-    FROM ${operation.schema.nodesTable} n
-    WHERE n.graph_id = ${graphId}
-      AND n.id = ${nodeId}
-      AND ${operation.nodeTemporalFilter}
-    ON CONFLICT (graph_id, run_id, side, node_kind, node_id) DO NOTHING
-  `);
-}
-
-async function countWorkingDepth(
-  context: IterativeGraphRunContext,
-  side: WorkingSide,
-  depth: number,
-): Promise<number> {
-  const rows = await context.backend.execute<CountRow>(
+  return context.backend.execute<SeededRow>(
     asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS count
-      FROM ${context.workingTable}
-      WHERE graph_id = ${context.graphId}
-        AND run_id = ${context.runId}
-        AND side = ${side}
-        AND depth = ${depth}
+      INSERT INTO ${workingTable}
+        (graph_id, run_id, side, node_id, node_kind, depth,
+         predecessor_id, predecessor_kind)
+      SELECT ${graphId}, ${runId}, ${side}, n.id, n.kind, 0, NULL, NULL
+      FROM ${operation.schema.nodesTable} n
+      WHERE n.graph_id = ${graphId}
+        AND n.id = ${nodeId}
+        AND ${operation.nodeTemporalFilter}
+      ON CONFLICT (graph_id, run_id, side, node_kind, node_id) DO NOTHING
+      RETURNING node_id, node_kind
     `),
   );
-  return Number(rows[0]?.count ?? 0);
 }
 
+/**
+ * Detects the depth-zero meeting for bidirectional search: a node seeded on
+ * both sides (source equals target, possibly across kinds sharing that id).
+ * Ties break by node id then kind in UTF-16 code-unit order — deterministic
+ * and identical on both backends, unlike the collation-dependent SQL probe
+ * this replaced.
+ */
+function findSeedMeeting(
+  forwardSeeds: readonly SeededRow[],
+  reverseSeeds: readonly SeededRow[],
+): MeetingNode | undefined {
+  const reverseKeys = new Set(
+    reverseSeeds.map((row) =>
+      nodeIdentityKey({ id: row.node_id, kind: row.node_kind }),
+    ),
+  );
+  let meeting: MeetingNode | undefined;
+  for (const row of forwardSeeds) {
+    const candidate = { id: row.node_id, kind: row.node_kind, depth: 0 };
+    if (!reverseKeys.has(nodeIdentityKey(candidate))) continue;
+    if (meeting === undefined || compareNodeIdentity(candidate, meeting) < 0) {
+      meeting = candidate;
+    }
+  }
+  return meeting;
+}
+
+/**
+ * Expands one bidirectional round and detects meetings in the same
+ * statement. Each inserted frontier row captures the opposite side's depth
+ * for the same node identity (`meeting_depth`); a non-null value marks a
+ * meeting. Only newly inserted rows can create a new meeting — both sides'
+ * existing rows are immutable and any meeting among them would have
+ * converged an earlier round — so the returned rows are a complete meeting
+ * probe and the separate per-round meeting query is unnecessary.
+ */
 async function expandWorkingTableRound(
   context: IterativeGraphRunContext,
   side: WorkingSide,
   currentDepth: number,
   nextDepth: number,
   direction: TraversalDirection,
-): Promise<number> {
+  maxHops: number,
+): Promise<FrontierRound> {
+  const oppositeSide: WorkingSide = side === "forward" ? "reverse" : "forward";
   let insertedCount = 0;
+  let meeting: MeetingNode | undefined;
   for (const edgeKinds of context.operation.edgeKindChunks) {
     const sourceFilter = sql`
       w.graph_id = ${context.graphId}
@@ -303,15 +341,24 @@ async function expandWorkingTableRound(
       direction,
       edgeKinds,
     );
-    const rows = await context.backend.execute<InsertedRow>(
+    const rows = await context.backend.execute<InsertedFrontierRow>(
       asCompiledRowsSql(sql`
         INSERT INTO ${context.workingTable}
           (graph_id, run_id, side, node_id, node_kind, depth,
-           predecessor_id, predecessor_kind)
+           predecessor_id, predecessor_kind, meeting_depth)
         SELECT
           ${context.graphId}, ${context.runId}, ${side},
           ranked.target_id, ranked.target_kind, ${nextDepth},
-          ranked.source_id, ranked.source_kind
+          ranked.source_id, ranked.source_kind,
+          (
+            SELECT opposite.depth
+            FROM ${context.workingTable} opposite
+            WHERE opposite.graph_id = ${context.graphId}
+              AND opposite.run_id = ${context.runId}
+              AND opposite.side = ${oppositeSide}
+              AND opposite.node_id = ranked.target_id
+              AND opposite.node_kind = ranked.target_kind
+          )
         FROM (
           SELECT expanded.*,
             ROW_NUMBER() OVER (
@@ -331,12 +378,54 @@ async function expandWorkingTableRound(
               AND visited.node_kind = ranked.target_kind
           )
         ON CONFLICT (graph_id, run_id, side, node_kind, node_id) DO NOTHING
-        RETURNING node_id
+        RETURNING node_id, node_kind, meeting_depth
       `),
     );
     insertedCount += rows.length;
+    meeting = selectRoundMeeting(meeting, rows, nextDepth, maxHops);
   }
-  return insertedCount;
+  return { insertedCount, meeting };
+}
+
+/**
+ * Folds one round's inserted rows into the best meeting so far: smallest
+ * total depth within `maxHops`, ties broken by node id then kind in UTF-16
+ * code-unit order. That tie-break is deterministic and identical on both
+ * backends; the SQL probe it replaced ordered under the database collation,
+ * so equal-depth meetings could previously pick a different node on a
+ * PostgreSQL cluster with a linguistic default collation.
+ */
+function selectRoundMeeting(
+  currentMeeting: MeetingNode | undefined,
+  rows: readonly InsertedFrontierRow[],
+  nextDepth: number,
+  maxHops: number,
+): MeetingNode | undefined {
+  let meeting = currentMeeting;
+  for (const row of rows) {
+    // Drivers may deliver the INTEGER column as number, text, or bigint
+    // (e.g. better-sqlite3 with defaultSafeIntegers); only its absence means
+    // "no meeting". Number() coerces every numeric shape.
+    if (row.meeting_depth === null || row.meeting_depth === undefined) {
+      continue;
+    }
+    const totalDepth = nextDepth + Number(row.meeting_depth);
+    if (totalDepth > maxHops) continue;
+    const candidate = {
+      id: row.node_id,
+      kind: row.node_kind,
+      depth: totalDepth,
+    };
+    if (
+      meeting === undefined ||
+      candidate.depth < meeting.depth ||
+      (candidate.depth === meeting.depth &&
+        compareNodeIdentity(candidate, meeting) < 0)
+    ) {
+      meeting = candidate;
+    }
+  }
+  return meeting;
 }
 
 /**
@@ -401,46 +490,6 @@ async function expandReachableWorkingTableRound(
     insertedCount += rows.length;
   }
   return insertedCount;
-}
-
-async function findWorkingMeeting(
-  context: IterativeGraphRunContext,
-  maxHops: number,
-): Promise<MeetingNode | undefined> {
-  const rows = await context.backend.execute<
-    Readonly<{
-      node_id: string;
-      node_kind: string;
-      total_depth: number | string;
-    }>
-  >(
-    asCompiledRowsSql(sql`
-      SELECT
-        forward.node_id,
-        forward.node_kind,
-        forward.depth + reverse.depth AS total_depth
-      FROM ${context.workingTable} forward
-      JOIN ${context.workingTable} reverse
-        ON reverse.graph_id = forward.graph_id
-        AND reverse.run_id = forward.run_id
-        AND reverse.node_id = forward.node_id
-        AND reverse.node_kind = forward.node_kind
-      WHERE forward.graph_id = ${context.graphId}
-        AND forward.run_id = ${context.runId}
-        AND forward.side = 'forward'
-        AND reverse.side = 'reverse'
-        AND forward.depth + reverse.depth <= ${maxHops}
-      ORDER BY total_depth, forward.node_id, forward.node_kind
-      LIMIT 1
-    `),
-  );
-  const row = rows[0];
-  if (row === undefined) return;
-  return {
-    id: row.node_id,
-    kind: row.node_kind,
-    depth: Number(row.total_depth),
-  };
 }
 
 async function readWorkingRows(
