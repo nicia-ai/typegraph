@@ -133,6 +133,41 @@ describe("SQLite Backend - Adapter Specific", () => {
     });
   });
 
+  describe("bootstrapTables() index adoption", () => {
+    it("adds newly shipped indexes to an already-initialized database", async () => {
+      const { backend, db } = createLocalSqliteBackend();
+      try {
+        await backend.bootstrapTables!();
+
+        // Simulate a database initialized before the bare-id indexes
+        // shipped. Bootstrap never re-runs automatically on an initialized
+        // database (createStore is zero-DDL), so a one-time explicit
+        // `backend.bootstrapTables()` is the documented adoption path —
+        // every statement is CREATE … IF NOT EXISTS.
+        db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
+        db.run(sql`DROP INDEX "typegraph_recorded_nodes_id_idx"`);
+
+        async function indexNames(): Promise<readonly string[]> {
+          const rows = await backend.execute<{ name: string }>(
+            asCompiledRowsSql(
+              sql`SELECT name FROM sqlite_master WHERE type = 'index'`,
+            ),
+          );
+          return rows.map((row) => row.name);
+        }
+        expect(await indexNames()).not.toContain("typegraph_nodes_id_idx");
+
+        await backend.bootstrapTables!();
+
+        const adopted = await indexNames();
+        expect(adopted).toContain("typegraph_nodes_id_idx");
+        expect(adopted).toContain("typegraph_recorded_nodes_id_idx");
+      } finally {
+        await backend.close();
+      }
+    });
+  });
+
   describe("generateSqliteDDL()", () => {
     it("generates DDL that creates all required tables", () => {
       const ddl = generateSqliteDDL(tables);
@@ -155,6 +190,9 @@ describe("SQLite Backend - Adapter Specific", () => {
       expect(sql).toContain("CREATE INDEX IF NOT EXISTS");
       expect(sql).toContain("typegraph_nodes_kind_idx");
       expect(sql).toContain("typegraph_nodes_kind_created_idx");
+      // Bare-id node lookup (kind resolved by id) — see typegraph#280.
+      expect(sql).toContain('"typegraph_nodes" ("graph_id", "id")');
+      expect(sql).toContain('"typegraph_recorded_nodes" ("graph_id", "id")');
       expect(sql).toContain("typegraph_edges_from_idx");
       expect(sql).toContain("typegraph_edges_to_idx");
       expect(sql).toContain("typegraph_edges_kind_created_idx");

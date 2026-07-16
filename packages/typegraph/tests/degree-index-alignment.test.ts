@@ -66,6 +66,7 @@ async function withCapturingStore<T>(
     captured: CapturedStatement[],
     client: Database.Database,
   ) => Promise<T>,
+  options?: Readonly<{ history?: boolean }>,
 ): Promise<T> {
   const { backend: raw, db } = createLocalSqliteBackend();
   try {
@@ -87,7 +88,7 @@ async function withCapturingStore<T>(
         return raw.executeRaw!<T>(sqlText, params);
       },
     };
-    const store = createStore(buildGraph(), backend);
+    const store = createStore(buildGraph(), backend, options);
     const client = (db as unknown as { $client: Database.Database }).$client;
     return await run(store, captured, client);
   } finally {
@@ -132,6 +133,10 @@ describe("degree() direction filter index alignment", () => {
       const outPlan = explainPlan(client, captured.at(-1)!);
       expect(outPlan).toContain("typegraph_edges_from_idx");
       expect(outPlan).not.toContain("SCAN typegraph_edges");
+      // The node-kind subquery resolves the seed's kind by bare id; without
+      // the (graph_id, id) node index it scans the graph's node partition.
+      expect(outPlan).toContain("typegraph_nodes_id_idx");
+      expect(outPlan).not.toContain("SCAN typegraph_nodes");
 
       captured.length = 0;
       await store.algorithms.degree(bob.id, { direction: "in" });
@@ -144,6 +149,45 @@ describe("degree() direction filter index alignment", () => {
       const bothPlan = explainPlan(client, captured.at(-1)!);
       expect(bothPlan).not.toContain("SCAN typegraph_edges");
     });
+  });
+
+  it("seeks the recorded bare-id node index at a recorded coordinate", async () => {
+    await withCapturingStore(
+      async (store, captured, client) => {
+        const people = await store.nodes.Person.bulkCreate(
+          Array.from({ length: 40 }, (_, index) => ({
+            props: { name: `p${index}` },
+          })),
+        );
+        for (const [index, person] of people.entries()) {
+          for (let step = 1; step <= 3; step++) {
+            await store.edges.knows.create(
+              person,
+              people[(index + step) % people.length]!,
+            );
+          }
+        }
+        await store.refreshStatistics();
+        const pin = await store.recordedNow();
+        if (pin === undefined) {
+          throw new Error("recorded clock was not written");
+        }
+        const alice = people[0]!;
+
+        // A recorded pin swaps the node source to the recorded relation,
+        // whose entity index leads with `kind` — the kind-by-bare-id probe
+        // needs the recorded (graph_id, id) index to seek.
+        captured.length = 0;
+        const outDegree = await store
+          .asOfRecorded(pin)
+          .degree(alice.id, { direction: "out" });
+        expect(outDegree).toBe(3);
+        const plan = explainPlan(client, captured.at(-1)!);
+        expect(plan).toContain("typegraph_recorded_nodes_id_idx");
+        expect(plan).not.toContain("SCAN typegraph_recorded_nodes");
+      },
+      { history: true },
+    );
   });
 
   it("counts edges whose endpoint kind is a subclass of the declared kind", async () => {
