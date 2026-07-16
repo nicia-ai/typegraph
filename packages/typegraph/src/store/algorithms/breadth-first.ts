@@ -101,6 +101,7 @@ async function findReachableNodesInWorkingTable(
   options: InternalTraversalOptions,
 ): Promise<readonly ReachableNode[]> {
   return runIterativeGraphOperation(ctx, options, {
+    algorithm: "reachable",
     maxIterations: maxHops,
     createWorkingTable,
     async initialize(context) {
@@ -148,6 +149,7 @@ async function findShortestPathInWorkingTable(
   options: InternalTraversalOptions,
 ): Promise<ShortestPathResult | undefined> {
   return runIterativeGraphOperation(ctx, options, {
+    algorithm: "shortestPath",
     maxIterations: maxHops,
     createWorkingTable,
     async initialize(context) {

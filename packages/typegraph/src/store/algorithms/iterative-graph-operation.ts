@@ -5,7 +5,10 @@ import {
   INTERNAL_TEMPORARY_WRITES,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  GraphAlgorithmConvergenceError,
+} from "../../errors";
 import {
   compileKindFilter,
   sqlValueList,
@@ -65,6 +68,7 @@ export type IterativeGraphRunContext = Readonly<{
 }>;
 
 export type IterativeGraphPlan<State, Result> = Readonly<{
+  algorithm: string;
   maxIterations: number;
   createWorkingTable: (context: IterativeGraphRunContext) => SQL;
   initialize: (context: IterativeGraphRunContext) => Promise<State>;
@@ -170,6 +174,12 @@ export async function runIterativeGraphOperation<State, Result>(
           iteration++
         ) {
           state = await plan.runRound(context, state, iteration);
+        }
+        if (!plan.hasConverged(state)) {
+          throw new GraphAlgorithmConvergenceError(
+            plan.algorithm,
+            plan.maxIterations,
+          );
         }
         return await plan.extractResult(context, state);
       } catch (error) {

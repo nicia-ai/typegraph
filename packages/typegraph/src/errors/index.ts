@@ -916,6 +916,49 @@ export class ConfigurationError extends TypeGraphError {
   }
 }
 
+/**
+ * Thrown when an iterative graph algorithm exhausts its caller-visible round
+ * budget before reaching its convergence predicate.
+ */
+export class GraphAlgorithmConvergenceError extends TypeGraphError {
+  constructor(algorithm: string, maxIterations: number) {
+    super(
+      `${algorithm} did not converge within ${maxIterations} iterations.`,
+      "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+      {
+        details: { algorithm, maxIterations },
+        category: "user",
+        suggestion:
+          "Increase maxIterations or reduce the selected graph before retrying.",
+      },
+    );
+    this.name = "GraphAlgorithmConvergenceError";
+  }
+}
+
+/** Thrown when an operation requires a backend capability it does not expose. */
+export class UnsupportedBackendCapabilityError extends TypeGraphError {
+  constructor(
+    operation: string,
+    capability: string,
+    details: Readonly<Record<string, unknown>> = {},
+    suggestion?: string,
+  ) {
+    super(
+      `${operation} requires backend capability '${capability}'.`,
+      "UNSUPPORTED_BACKEND_CAPABILITY",
+      {
+        details: { operation, capability, ...details },
+        category: "user",
+        suggestion:
+          suggestion ??
+          "Use a backend that advertises this capability before invoking the operation.",
+      },
+    );
+    this.name = "UnsupportedBackendCapabilityError";
+  }
+}
+
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
   | "backend_unsupported"

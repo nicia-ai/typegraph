@@ -60,10 +60,12 @@ export type {
   StoreViewCanReachOptions,
   StoreViewCoordinate,
   StoreViewDegreeOptions,
+  StoreViewGraphAlgorithms,
   StoreViewNeighborsOptions,
   StoreViewReachableOptions,
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,
+  StoreViewWeaklyConnectedComponentsOptions,
 } from "./store-view";
 export { RecordedStoreView, StoreView } from "./store-view";
 

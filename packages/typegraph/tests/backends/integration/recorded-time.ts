@@ -1076,6 +1076,13 @@ export function registerRecordedTimeIntegrationTests(
       });
       expect(earlyPath?.depth).toBe(2);
       expect(await early.degree(b.id, { edges: ["knows"] })).toBe(2);
+      const earlyComponents = await early.algorithms.weaklyConnectedComponents({
+        edges: ["knows"],
+      });
+      expect(earlyComponents).toHaveLength(3);
+      expect(earlyComponents.every((membership) => membership.size === 3)).toBe(
+        true,
+      );
 
       const earlySubgraph = await early.subgraph(a.id, {
         edges: ["knows"],

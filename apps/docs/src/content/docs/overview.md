@@ -169,7 +169,7 @@ Graph databases are powerful but come with operational overhead:
 | **Network** | Additional latency for every query | In-process, no network hop |
 | **Transactions** | Separate transaction scope from your SQL data | Same ACID transaction as your other data |
 | **Learning curve** | New query language (Cypher, Gremlin) | TypeScript you already know |
-| **Graph algorithms** | Built-in (PageRank, shortest path, community detection) | Tier 1 only (shortest path, reachability, neighborhoods, degree) |
+| **Graph algorithms** | Built-in (PageRank, shortest path, community detection) | Connectivity algorithms (shortest path, reachability, neighborhoods, degree, WCC) |
 | **Scale** | Optimized for billions of nodes | Best for thousands to millions |
 
 **Choose TypeGraph** when your graph is part of your application domain (knowledge bases, org

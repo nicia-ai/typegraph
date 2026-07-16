@@ -44,6 +44,7 @@ import {
   type StoreViewEdgeCollection,
   type StoreViewNodeCollection,
   type TemporalMode,
+  type WeaklyConnectedComponentMembership,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -137,6 +138,9 @@ expectType<StoreSearch<typeof graph>>(view.search);
 expectAssignable<Promise<readonly ReachableNode[]>>(
   view.reachable(personId, { edges: ["knows"] }),
 );
+expectAssignable<Promise<readonly WeaklyConnectedComponentMembership[]>>(
+  view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+);
 
 // StoreView owns the read coordinate. Its query builder stays fluent for
 // predicates/projections, but callers cannot re-coordinate it with
@@ -212,6 +216,12 @@ expectError(
 );
 expectError(view.degree(personId, { temporalMode: "asOf" }));
 expectError(
+  view.algorithms.weaklyConnectedComponents({
+    edges: ["knows"],
+    temporalMode: "asOf",
+  }),
+);
+expectError(
   view.subgraph(personId, { edges: ["knows"], temporalMode: "asOf" }),
 );
 expectError(
@@ -270,6 +280,12 @@ expectError(
 );
 expectError(
   store.algorithms.degree(personId, {
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.weaklyConnectedComponents({
     edges: ["knows"],
     ...LEAKED_RECORDED_OPTIONS,
   }),
@@ -380,6 +396,8 @@ type RecordedSharedKeys =
   | "shortestPath"
   | "neighbors"
   | "degree"
+  | "weaklyConnectedComponents"
+  | "algorithms"
   | "mode"
   | "asOf";
 

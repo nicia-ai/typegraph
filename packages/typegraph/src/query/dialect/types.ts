@@ -104,6 +104,14 @@ export interface DialectAdapter {
    */
   readonly capabilities: DialectCapabilities;
 
+  /**
+   * Applies the dialect's binary/code-point text collation to an expression.
+   * SQLite's default BINARY collation already has this order; PostgreSQL must
+   * force `COLLATE "C"` so database locale cannot change deterministic graph
+   * labels or query tie-breaks.
+   */
+  binaryText(expression: SQL): SQL;
+
   // ============================================================
   // JSON Path Operations
   // ============================================================

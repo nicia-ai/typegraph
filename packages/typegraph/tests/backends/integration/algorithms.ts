@@ -9,6 +9,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { GraphAlgorithmConvergenceError } from "../../../src";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationStore } from "./fixtures";
 import { seedKnowsChain } from "./seed-helpers";
@@ -207,6 +208,87 @@ export function registerAlgorithmIntegrationTests(
       });
     });
 
+    describe("weaklyConnectedComponents", () => {
+      it("returns deterministic memberships, sizes, isolated nodes, and cross-kind identities", async () => {
+        const store = context.getStore();
+        const [alpha, beta, gamma, company, isolated] = await Promise.all([
+          store.nodes.Person.create({ name: "WCC alpha" }, { id: "wcc-A" }),
+          store.nodes.Person.create({ name: "WCC beta" }, { id: "wcc-b" }),
+          store.nodes.Person.create({ name: "WCC gamma" }, { id: "wcc-c" }),
+          store.nodes.Company.create({ name: "WCC company" }, { id: "wcc-b" }),
+          store.nodes.Person.create({ name: "WCC isolated" }, { id: "wcc-z" }),
+        ]);
+        await Promise.all([
+          // Reverse the intuitive order to pin weak/undirected semantics.
+          store.edges.knows.create(beta, alpha, {}),
+          store.edges.knows.create(gamma, beta, {}),
+          store.edges.worksAt.create(gamma, company, { role: "Founder" }),
+        ]);
+
+        const memberships = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows", "worksAt"],
+        });
+
+        expect(memberships).toEqual([
+          {
+            id: "wcc-A",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 4,
+          },
+          {
+            id: "wcc-b",
+            kind: "Company",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 4,
+          },
+          {
+            id: "wcc-b",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 4,
+          },
+          {
+            id: "wcc-c",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 4,
+          },
+          {
+            id: isolated.id,
+            kind: "Person",
+            componentId: isolated.id,
+            componentKind: "Person",
+            size: 1,
+          },
+        ]);
+      });
+
+      it("throws instead of returning partial labels at the iteration limit", async () => {
+        const store = context.getStore();
+        const [alpha, beta, gamma] = await Promise.all([
+          store.nodes.Person.create({ name: "Limit alpha" }, { id: "limit-a" }),
+          store.nodes.Person.create({ name: "Limit beta" }, { id: "limit-b" }),
+          store.nodes.Person.create({ name: "Limit gamma" }, { id: "limit-c" }),
+        ]);
+        await Promise.all([
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.knows.create(beta, gamma, {}),
+        ]);
+
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            maxIterations: 1,
+          }),
+        ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+      });
+    });
+
     describe("dense cyclic graph", () => {
       it("visits each node once instead of enumerating simple paths", async () => {
         const store = context.getStore();
@@ -321,6 +403,23 @@ export function registerAlgorithmIntegrationTests(
         expect(reachedIds).toContain(ids.activeId);
         expect(reachedIds).toContain(ids.endedId);
         expect(reachedIds).not.toContain(ids.futureId);
+      });
+
+      it("exposes WCC through the StoreView algorithms facade", async () => {
+        const store = context.getStore();
+        const current = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        });
+        const historical = await store
+          .asOf(BEFORE)
+          .algorithms.weaklyConnectedComponents({ edges: ["knows"] });
+
+        const currentRoot = current.find((row) => row.id === ids.rootId);
+        const historicalRoot = historical.find((row) => row.id === ids.rootId);
+        expect(currentRoot?.size).toBe(2);
+        expect(historicalRoot?.size).toBe(3);
+        expect(historical.some((row) => row.id === ids.endedId)).toBe(true);
+        expect(historical.some((row) => row.id === ids.futureId)).toBe(false);
       });
 
       it("reachable under includeEnded includes validity-ended nodes and edges", async () => {

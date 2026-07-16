@@ -771,6 +771,7 @@ if (backend.capabilities.vector?.supported) {
 | --- | --- |
 | `transactions` | Atomic transactions available (see note below) |
 | `windowFunctions` | SQL window functions such as `ROW_NUMBER()` are available |
+| `graphAnalytics?.{supported,mathFunctions}` | Whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
 

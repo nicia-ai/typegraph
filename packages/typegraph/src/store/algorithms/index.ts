@@ -25,12 +25,16 @@ import type {
   InternalNeighborsOptions,
   InternalReachableOptions,
   InternalShortestPathOptions,
+  InternalWeaklyConnectedComponentsOptions,
   NeighborsOptions,
   ReachableNode,
   ReachableOptions,
   ShortestPathOptions,
   ShortestPathResult,
+  WeaklyConnectedComponentMembership,
+  WeaklyConnectedComponentsOptions,
 } from "./types";
+import { executeWeaklyConnectedComponents } from "./weakly-connected-components";
 
 /**
  * Raw node id or any object with an `id: string` field. Covers `Node`,
@@ -108,6 +112,16 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
    * With `direction: "both"` (default), self-loops contribute once.
    */
   degree: (node: NodeIdentifier, options?: DegreeOptions<G>) => Promise<number>;
+
+  /**
+   * Computes exact weakly connected components over the selected edge kinds.
+   *
+   * Iterative: runs multiple SQL rounds in one snapshot and requires
+   * `backend.capabilities.graphAnalytics.supported`.
+   */
+  weaklyConnectedComponents: (
+    options: WeaklyConnectedComponentsOptions<G>,
+  ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
 }>;
 
 export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
@@ -133,6 +147,9 @@ export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
     node: NodeIdentifier,
     options?: InternalDegreeOptions<G>,
   ) => Promise<number>;
+  weaklyConnectedComponents: (
+    options: InternalWeaklyConnectedComponentsOptions<G>,
+  ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
 }>;
 
 export type CreateGraphAlgorithmsParams = Readonly<{
@@ -157,7 +174,7 @@ function assertRecordedAsOfInternalOnly(
     message: `recordedAsOf is only available through store.asOfRecorded(...).${method}(...).`,
     context: { method },
     suggestion:
-      "Use store.asOfRecorded(recordedAt).reachable/shortestPath/canReach/neighbors/degree(...) instead of passing recordedAsOf directly.",
+      "Use store.asOfRecorded(recordedAt) or a recorded StoreView instead of passing recordedAsOf directly.",
   });
 }
 
@@ -211,6 +228,14 @@ export function createGraphAlgorithms<G extends GraphDef>(
       assertRecordedAsOfInternalOnly(options, "degree", allowRecordedAsOf);
       return executeDegree(ctx, resolveNodeId(node), options ?? {});
     },
+    weaklyConnectedComponents(options) {
+      assertRecordedAsOfInternalOnly(
+        options,
+        "weaklyConnectedComponents",
+        allowRecordedAsOf,
+      );
+      return executeWeaklyConnectedComponents(ctx, options);
+    },
   };
 }
 
@@ -224,6 +249,7 @@ export type {
   InternalReachableOptions,
   InternalShortestPathOptions,
   InternalTemporalAlgorithmOptions,
+  InternalWeaklyConnectedComponentsOptions,
   NeighborsOptions,
   PathNode,
   ReachableNode,
@@ -232,4 +258,6 @@ export type {
   ShortestPathResult,
   TemporalAlgorithmOptions,
   TraversalDirection,
+  WeaklyConnectedComponentMembership,
+  WeaklyConnectedComponentsOptions,
 } from "./types";

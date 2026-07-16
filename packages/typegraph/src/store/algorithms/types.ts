@@ -175,3 +175,35 @@ export type DegreeOptions<G extends GraphDef> = TemporalAlgorithmOptions &
 export type InternalDegreeOptions<G extends GraphDef> =
   InternalTemporalAlgorithmOptions &
     Omit<DegreeOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/**
+ * Options for exact weakly connected components.
+ *
+ * Selected edges are treated as undirected, regardless of their declared
+ * direction. Every visible graph node is returned; nodes with no selected
+ * incident edge form singleton components.
+ */
+export type WeaklyConnectedComponentsOptions<G extends GraphDef> =
+  TemporalAlgorithmOptions &
+    Readonly<{
+      /** Edge kinds whose undirected projection defines connectivity. */
+      edges: readonly EdgeKinds<G>[];
+      /** Maximum label-propagation rounds before throwing. Defaults to 1000. */
+      maxIterations?: number;
+    }>;
+
+export type InternalWeaklyConnectedComponentsOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/** One node's membership in an exact weakly connected component. */
+export type WeaklyConnectedComponentMembership = Readonly<{
+  id: string;
+  kind: string;
+  /** Deterministic minimum node id in this component. */
+  componentId: string;
+  /** Kind paired with `componentId`; node identity is `(kind, id)`. */
+  componentKind: string;
+  /** Number of visible nodes in this component. */
+  size: number;
+}>;

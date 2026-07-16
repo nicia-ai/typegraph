@@ -51,6 +51,8 @@ import {
   type ShortestPathOptions,
   type ShortestPathResult,
   type TemporalAlgorithmOptions,
+  type WeaklyConnectedComponentMembership,
+  type WeaklyConnectedComponentsOptions,
 } from "./algorithms";
 import {
   CURRENT_ONLY_READ_NAMES,
@@ -144,6 +146,39 @@ export type StoreViewDegreeOptions<G extends GraphDef> = Omit<
   DegreeOptions<G>,
   keyof TemporalAlgorithmOptions
 >;
+
+/** WCC options with the temporal axis removed (the view's pin supplies it). */
+export type StoreViewWeaklyConnectedComponentsOptions<G extends GraphDef> =
+  Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/** Graph-algorithm facade sealed to a {@link StoreView}'s coordinate. */
+export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
+  shortestPath: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: StoreViewShortestPathOptions<G>,
+  ) => Promise<ShortestPathResult | undefined>;
+  reachable: (
+    from: NodeIdentifier,
+    options: StoreViewReachableOptions<G>,
+  ) => Promise<readonly ReachableNode[]>;
+  canReach: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: StoreViewCanReachOptions<G>,
+  ) => Promise<boolean>;
+  neighbors: (
+    node: NodeIdentifier,
+    options: StoreViewNeighborsOptions<G>,
+  ) => Promise<readonly ReachableNode[]>;
+  degree: (
+    node: NodeIdentifier,
+    options?: StoreViewDegreeOptions<G>,
+  ) => Promise<number>;
+  weaklyConnectedComponents: (
+    options: StoreViewWeaklyConnectedComponentsOptions<G>,
+  ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
+}>;
 
 function isReadCoordinate(
   coordinate: StoreViewCoordinate | ReadCoordinate,
@@ -722,7 +757,8 @@ function recordedSearch<G extends GraphDef>(
 abstract class CoordinatePinnedView<G extends GraphDef> {
   protected readonly store: Store<G>;
   protected readonly coordinate: ReadCoordinate;
-  #algorithms: InternalGraphAlgorithms<G> | undefined;
+  #algorithmFacade: StoreViewGraphAlgorithms<G> | undefined;
+  #internalAlgorithms: InternalGraphAlgorithms<G> | undefined;
 
   constructor(store: Store<G>, coordinate: ReadCoordinate) {
     this.store = store;
@@ -748,9 +784,25 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     return this.store.sealedQuery(this.coordinate);
   }
 
-  protected algorithms(): InternalGraphAlgorithms<G> {
-    this.#algorithms ??= this.store.algorithmsAtCoordinate(this.coordinate);
-    return this.#algorithms;
+  protected internalAlgorithms(): InternalGraphAlgorithms<G> {
+    this.#internalAlgorithms ??= this.store.algorithmsAtCoordinate(
+      this.coordinate,
+    );
+    return this.#internalAlgorithms;
+  }
+
+  /** Graph algorithms pinned to this view's immutable temporal coordinate. */
+  get algorithms(): StoreViewGraphAlgorithms<G> {
+    this.#algorithmFacade ??= Object.freeze({
+      shortestPath: (from, to, options) => this.shortestPath(from, to, options),
+      reachable: (from, options) => this.reachable(from, options),
+      canReach: (from, to, options) => this.canReach(from, to, options),
+      neighbors: (node, options) => this.neighbors(node, options),
+      degree: (node, options) => this.degree(node, options),
+      weaklyConnectedComponents: (options) =>
+        this.weaklyConnectedComponents(options),
+    });
+    return this.#algorithmFacade;
   }
 
   /** Extracts a subgraph at this view's pinned coordinate. */
@@ -775,7 +827,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     to: NodeIdentifier,
     options: StoreViewShortestPathOptions<G>,
   ): Promise<ShortestPathResult | undefined> {
-    return this.algorithms().shortestPath(from, to, {
+    return this.internalAlgorithms().shortestPath(from, to, {
       ...options,
       ...withCoordinate(this.coordinate),
     });
@@ -786,7 +838,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     from: NodeIdentifier,
     options: StoreViewReachableOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.algorithms().reachable(from, {
+    return this.internalAlgorithms().reachable(from, {
       ...options,
       ...withCoordinate(this.coordinate),
     });
@@ -798,7 +850,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     to: NodeIdentifier,
     options: StoreViewCanReachOptions<G>,
   ): Promise<boolean> {
-    return this.algorithms().canReach(from, to, {
+    return this.internalAlgorithms().canReach(from, to, {
       ...options,
       ...withCoordinate(this.coordinate),
     });
@@ -809,7 +861,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     node: NodeIdentifier,
     options: StoreViewNeighborsOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.algorithms().neighbors(node, {
+    return this.internalAlgorithms().neighbors(node, {
       ...options,
       ...withCoordinate(this.coordinate),
     });
@@ -820,7 +872,17 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     node: NodeIdentifier,
     options?: StoreViewDegreeOptions<G>,
   ): Promise<number> {
-    return this.algorithms().degree(node, {
+    return this.internalAlgorithms().degree(node, {
+      ...options,
+      ...withCoordinate(this.coordinate),
+    });
+  }
+
+  /** Exact WCC memberships at this view's pinned coordinate. */
+  weaklyConnectedComponents(
+    options: StoreViewWeaklyConnectedComponentsOptions<G>,
+  ): Promise<readonly WeaklyConnectedComponentMembership[]> {
+    return this.internalAlgorithms().weaklyConnectedComponents({
       ...options,
       ...withCoordinate(this.coordinate),
     });

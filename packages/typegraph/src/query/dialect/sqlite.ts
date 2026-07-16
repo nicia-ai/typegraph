@@ -70,6 +70,10 @@ export const sqliteDialect: DialectAdapter = {
     supportsFulltext: true,
   },
 
+  binaryText(expression) {
+    return expression;
+  },
+
   // ============================================================
   // JSON Path Operations
   // ============================================================
