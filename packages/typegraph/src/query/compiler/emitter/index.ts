@@ -18,6 +18,9 @@ export {
   type StandardQueryEmitterInput,
 } from "./standard";
 export {
+  buildLateMaterializedOuterOrderBy,
+  buildLateMaterializedOuterProjection,
+  buildLateMaterializedTopKCte,
   buildLimitOffsetClause,
   buildStandardEmbeddingsCte,
   buildStandardFromClause,
@@ -32,5 +35,8 @@ export {
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
+  LATE_MAT_TOPK_CTE_ALIAS,
+  lateMaterializedPhysicalAlias,
+  lateMaterializedProjectedNodeAliases,
   type StandardEmitterPredicateIndex,
 } from "./standard-builders";

@@ -109,7 +109,20 @@ function markPredicateFieldsAsRequired(
   }
 }
 
-function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
+/**
+ * Collects the columns each alias must carry out of its CTE.
+ *
+ * `includeProjection` (default true) folds in the SELECT-list fields. The late
+ * materialization path passes `false` to build a *lean* candidate CTE that
+ * carries only identity, ordering, and predicate columns — the projection-only
+ * columns (e.g. a large `content` prop) are deferred and re-fetched by identity
+ * for the surviving rows, not materialized for every candidate.
+ */
+export function collectRequiredColumnsByAlias(
+  ast: QueryAst,
+  options?: Readonly<{ includeProjection?: boolean }>,
+): RequiredColumnsByAlias {
+  const includeProjection = options?.includeProjection ?? true;
   const requiredColumnsByAlias = new Map<string, Set<string>>();
 
   addRequiredColumn(requiredColumnsByAlias, ast.start.alias, "id");
@@ -119,24 +132,26 @@ function collectRequiredColumnsByAlias(ast: QueryAst): RequiredColumnsByAlias {
 
   const hasSelectiveFields = (ast.selectiveFields?.length ?? 0) > 0;
 
-  if (hasSelectiveFields) {
-    for (const field of ast.selectiveFields ?? []) {
-      if (field.isSystemField) {
-        addRequiredColumn(
-          requiredColumnsByAlias,
-          field.alias,
-          mapSelectiveSystemFieldToColumn(field.field),
-        );
+  if (includeProjection) {
+    if (hasSelectiveFields) {
+      for (const field of ast.selectiveFields ?? []) {
+        if (field.isSystemField) {
+          addRequiredColumn(
+            requiredColumnsByAlias,
+            field.alias,
+            mapSelectiveSystemFieldToColumn(field.field),
+          );
+        }
       }
-    }
-  } else {
-    for (const projectedField of ast.projection.fields) {
-      const source = projectedField.source;
-      if (source.__type === "field_ref") {
-        markFieldRefAsRequired(requiredColumnsByAlias, source);
-      } else {
-        addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
-        markFieldRefAsRequired(requiredColumnsByAlias, source.field);
+    } else {
+      for (const projectedField of ast.projection.fields) {
+        const source = projectedField.source;
+        if (source.__type === "field_ref") {
+          markFieldRefAsRequired(requiredColumnsByAlias, source);
+        } else {
+          addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
+          markFieldRefAsRequired(requiredColumnsByAlias, source.field);
+        }
       }
     }
   }

@@ -55,6 +55,7 @@ import {
   type FulltextMatchPredicate,
   type HybridFusionOptions,
   type QueryAst,
+  type SelectiveField,
   type SetOperation,
   type VectorSimilarityPredicate,
 } from "../ast";
@@ -74,6 +75,9 @@ import {
 } from "../sql-intent";
 import { emitStandardQuerySql } from "./emitter";
 import {
+  buildLateMaterializedOuterOrderBy,
+  buildLateMaterializedOuterProjection,
+  buildLateMaterializedTopKCte,
   buildLimitOffsetClause,
   buildStandardEmbeddingsCte,
   buildStandardFromClause,
@@ -88,6 +92,9 @@ import {
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
+  LATE_MAT_TOPK_CTE_ALIAS,
+  lateMaterializedPhysicalAlias,
+  lateMaterializedProjectedNodeAliases,
 } from "./emitter";
 import { type TemporalFilterPass } from "./passes";
 import { type LogicalPlan, type LogicalPlanNode } from "./plan";
@@ -114,12 +121,15 @@ import {
 } from "./schema";
 import { compileSetOperation as compileSetOp } from "./set-operations";
 import {
+  collectRequiredColumnsByAlias,
   runStandardQueryPassPipeline,
   shouldMaterializeTraversalCte,
 } from "./standard-pass-pipeline";
 import {
+  findSelectivePropsFieldForFieldRef,
   isAggregateExpr,
   isIdFieldRef,
+  mapSelectiveSystemFieldToColumn,
   quoteIdentifier,
   type RequiredColumnsByAlias,
 } from "./utils";
@@ -864,6 +874,268 @@ function stripLimitOffsetFromPlanNode(node: LogicalPlanNode): LogicalPlanNode {
 }
 
 /**
+ * The start CTE followed by one CTE per traversal — the candidate-set prefix
+ * shared by the flat plan and the late-materialization plan (which feeds it a
+ * lean AST/column set and no per-traversal limit).
+ */
+function buildStandardStartAndTraversalCtes(
+  input: Readonly<{
+    ast: QueryAst;
+    carryForwardPreviousColumns: boolean;
+    ctx: PredicateCompilerContext;
+    graphId: string;
+    predicateIndex: PredicateIndex;
+    requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
+    temporalFilterPass: TemporalFilterPass;
+    traversalLimit: number | undefined;
+  }>,
+): SQL[] {
+  const {
+    ast,
+    carryForwardPreviousColumns,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias,
+    temporalFilterPass,
+    traversalLimit,
+  } = input;
+  const ctes: SQL[] = [
+    buildStandardStartCte({
+      ast,
+      ctx,
+      graphId,
+      predicateIndex,
+      requiredColumnsByAlias,
+      temporalFilterPass,
+    }),
+  ];
+  for (let index = 0; index < ast.traversals.length; index++) {
+    ctes.push(
+      buildStandardTraversalCte({
+        ast,
+        carryForwardPreviousColumns,
+        ctx,
+        graphId,
+        materializeCte: shouldMaterializeTraversalCte(
+          ctx.dialect,
+          ast.traversals.length,
+          index,
+        ),
+        predicateIndex,
+        requiredColumnsByAlias,
+        temporalFilterPass,
+        traversalIndex: index,
+        traversalLimit,
+      }),
+    );
+  }
+  return ctes;
+}
+
+type LateMaterializationPlan = Readonly<{
+  leanAst: QueryAst;
+  limit: number;
+  offset: number | undefined;
+}>;
+
+/**
+ * A selective field that resolves to a node's identity (`id`/`kind`) — already
+ * carried in the topK CTE, so it needs no deferred re-fetch.
+ */
+function selectiveFieldIsIdentity(field: SelectiveField): boolean {
+  if (!field.isSystemField) {
+    return false;
+  }
+  const column = mapSelectiveSystemFieldToColumn(field.field);
+  return column === "id" || column === "kind";
+}
+
+/**
+ * Decides whether a query is eligible for late materialization and, if so,
+ * produces the lean AST whose CTEs carry only identity, ordering, and predicate
+ * columns. Returns undefined (fall back to the flat plan) for anything outside
+ * the v1 envelope — see the inline gates.
+ */
+function resolveLateMaterializationPlan(
+  ast: QueryAst,
+): LateMaterializationPlan | undefined {
+  // Recorded-time reads swap `ctx.schema.nodesTable` to the recorded history
+  // relation (see `recordedReadSchemaFor`), where `(graph_id, kind, id)` is
+  // NOT unique — one row per recorded interval. The outer re-fetch joins on
+  // exactly that key with no temporal predicate, so it would match every
+  // historical version of each survivor (duplicate rows, stale props).
+  if (ast.recordedAsOf !== undefined) {
+    return undefined;
+  }
+
+  // v1 targets the selective `.select()` path. The non-selective path would
+  // have to carry the full `props` blob into the lean CTE to order by a prop,
+  // which defeats the deferral — left to a follow-up.
+  const selectiveFields = ast.selectiveFields;
+  if (selectiveFields === undefined || selectiveFields.length === 0) {
+    return undefined;
+  }
+
+  // The transform only pays off when rows past the LIMIT are discarded before
+  // their deferred columns are materialized — so both ORDER BY and a positive
+  // LIMIT must be present.
+  const orderBy = ast.orderBy;
+  if (orderBy === undefined || orderBy.length === 0) {
+    return undefined;
+  }
+  if (ast.limit === undefined || ast.limit <= 0) {
+    return undefined;
+  }
+
+  // Aggregation owns the count fast path / group-by shape, not this transform.
+  if (ast.groupBy !== undefined || ast.having !== undefined) {
+    return undefined;
+  }
+  if (ast.aggregateOrderBy !== undefined && ast.aggregateOrderBy.length > 0) {
+    return undefined;
+  }
+
+  // Optional (LEFT JOIN) traversals yield NULL-identity candidate rows that the
+  // outer identity re-join would drop. Out of v1 scope.
+  if (ast.traversals.some((traversal) => traversal.optional)) {
+    return undefined;
+  }
+
+  const nodeAliases = new Set<string>([
+    ast.start.alias,
+    ...ast.traversals.map((traversal) => traversal.nodeAlias),
+  ]);
+
+  // Every projected and ordered field must resolve to a node alias — edge
+  // fields live in the traversal CTE keyed differently, a follow-up.
+  for (const field of selectiveFields) {
+    if (!nodeAliases.has(field.alias)) {
+      return undefined;
+    }
+  }
+  for (const orderSpec of orderBy) {
+    if (!nodeAliases.has(orderSpec.field.alias)) {
+      return undefined;
+    }
+  }
+
+  // Sort-key props fields must stay in the lean CTE so the topK can order by
+  // them; everything else non-identity is deferred to the outer re-fetch.
+  const orderReferenced = new Set<SelectiveField>();
+  for (const orderSpec of orderBy) {
+    const matched = findSelectivePropsFieldForFieldRef(
+      selectiveFields,
+      orderSpec.field,
+    );
+    if (matched !== undefined) {
+      orderReferenced.add(matched);
+    }
+  }
+
+  // Worth doing only if some projected column is genuinely deferrable: a
+  // non-identity field that isn't already carried as a sort key.
+  const hasDeferredColumn = selectiveFields.some(
+    (field) => !selectiveFieldIsIdentity(field) && !orderReferenced.has(field),
+  );
+  if (!hasDeferredColumn) {
+    return undefined;
+  }
+
+  const prunedSelectiveFields = selectiveFields.filter(
+    (field) => field.isSystemField || orderReferenced.has(field),
+  );
+
+  return {
+    leanAst: { ...ast, selectiveFields: prunedSelectiveFields },
+    limit: ast.limit,
+    offset: ast.offset,
+  };
+}
+
+/**
+ * The outer FROM clause: the topK CTE joined to the physical node table for each
+ * projected alias, keyed on `(graph_id, kind, id)`. Sound only because that key
+ * is the live nodes PK (one row per identity, the exact row the topK already
+ * validated for temporal/soft-delete visibility). Recorded-time reads are gated
+ * out in `resolveLateMaterializationPlan` — under a recorded pin `nodesTable`
+ * is the history relation where this key matches every version.
+ */
+function buildLateMaterializedOuterFromClause(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+): SQL {
+  const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
+  const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
+    const physical = sql.raw(lateMaterializedPhysicalAlias(alias));
+    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(`${alias}_kind`)} AND ${physical}.id = ${topk}.${sql.raw(`${alias}_id`)}`;
+  });
+  return joins.length === 0 ?
+      sql`FROM ${topk}`
+    : sql`FROM ${topk} ${sql.join(joins, sql` `)}`;
+}
+
+function compileLateMaterializedQuery(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+  logicalPlan: LogicalPlan,
+  predicateIndex: PredicateIndex,
+  temporalFilterPass: TemporalFilterPass,
+  collapsedTraversalCteAlias: string | undefined,
+  shouldCollapseSelectiveTraversalRowset: boolean,
+): SQL | undefined {
+  const plan = resolveLateMaterializationPlan(ast);
+  if (plan === undefined) {
+    return undefined;
+  }
+
+  const { leanAst, limit, offset } = plan;
+  const { dialect } = ctx;
+  const leanRequiredColumns = collectRequiredColumnsByAlias(leanAst, {
+    includeProjection: false,
+  });
+
+  const ctes = buildStandardStartAndTraversalCtes({
+    ast: leanAst,
+    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias: leanRequiredColumns,
+    temporalFilterPass,
+    traversalLimit: undefined,
+  });
+  ctes.push(
+    buildLateMaterializedTopKCte({
+      ast: leanAst,
+      dialect,
+      fromClause: buildStandardFromClause({
+        ast: leanAst,
+        ...(collapsedTraversalCteAlias === undefined ?
+          {}
+        : { collapsedTraversalCteAlias }),
+      }),
+      limit,
+      offset,
+      ...(collapsedTraversalCteAlias === undefined ?
+        {}
+      : { collapsedTraversalCteAlias }),
+    }),
+  );
+
+  const orderBy = buildLateMaterializedOuterOrderBy(ast);
+  return emitStandardQuerySql({
+    ctes,
+    fromClause: buildLateMaterializedOuterFromClause(ast, graphId, ctx),
+    ...(orderBy === undefined ? {} : { orderBy }),
+    logicalPlan: stripLimitOffsetFromPlan(logicalPlan),
+    projection: buildLateMaterializedOuterProjection(ast, dialect),
+  });
+}
+
+/**
  * Compiles a standard (non-recursive) query to SQL using CTEs.
  */
 type StandardQueryStrategyHandler = (
@@ -1011,42 +1283,33 @@ function compileStandardQueryWithCteStrategy(
     if (fastPathSql) {
       return fastPathSql;
     }
-  }
 
-  // Build CTEs
-  const ctes: SQL[] = [
-    buildStandardStartCte({
+    const lateMaterializedSql = compileLateMaterializedQuery(
       ast,
-      ctx,
       graphId,
+      ctx,
+      logicalPlan,
       predicateIndex,
-      requiredColumnsByAlias,
       temporalFilterPass,
-    }),
-  ];
-
-  // Traversal CTEs
-  for (let index = 0; index < ast.traversals.length; index++) {
-    const materializeTraversalCte = shouldMaterializeTraversalCte(
-      dialect,
-      ast.traversals.length,
-      index,
+      collapsedTraversalCteAlias,
+      shouldCollapseSelectiveTraversalRowset,
     );
-    ctes.push(
-      buildStandardTraversalCte({
-        ast,
-        carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
-        ctx,
-        graphId,
-        materializeCte: materializeTraversalCte,
-        predicateIndex,
-        requiredColumnsByAlias,
-        temporalFilterPass,
-        traversalIndex: index,
-        traversalLimit: traversalCteLimit,
-      }),
-    );
+    if (lateMaterializedSql) {
+      return lateMaterializedSql;
+    }
   }
+
+  // Start + traversal candidate CTEs
+  const ctes = buildStandardStartAndTraversalCtes({
+    ast,
+    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    ctx,
+    graphId,
+    predicateIndex,
+    requiredColumnsByAlias,
+    temporalFilterPass,
+    traversalLimit: traversalCteLimit,
+  });
 
   // Add embeddings CTE if vector similarity is used
   if (vectorPredicate) {
