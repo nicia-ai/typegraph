@@ -107,10 +107,11 @@ const DEFAULT_MAX_BIND_PARAMETERS = 999;
 const RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH = 12;
 /**
  * PostgreSQL initially estimates an un-analyzed temporary relation at one row.
- * A 64x miss is large enough to distort join ordering, while ANALYZE remains a
- * low-single-digit-millisecond operation at this size.
+ * Even a few dozen rows can distort join ordering on a dense edge expansion,
+ * while ANALYZE remains a low-single-digit-millisecond operation at this size.
+ * Keep the trigger below the 31-person smoke graph that exposed this cliff.
  */
-export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 64;
+export const WORKING_TABLE_ANALYZE_MINIMUM_ROWS = 16;
 /** Caps statistics drift for growing BFS-style working tables at under 4x. */
 export const WORKING_TABLE_ANALYZE_GROWTH_FACTOR = 4;
 

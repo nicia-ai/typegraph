@@ -39,7 +39,7 @@ describe("iterative graph working-table statistics", () => {
   });
 
   it("keeps a stable whole-graph working table on one refresh", () => {
-    const workingTableSize = 181;
+    const workingTableSize = 31;
     expect(shouldRefreshWorkingTableStatistics(workingTableSize)).toBe(true);
     expect(
       shouldRefreshWorkingTableStatistics(workingTableSize, workingTableSize),
