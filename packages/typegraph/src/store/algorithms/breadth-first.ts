@@ -5,6 +5,7 @@ import { compareStrings } from "../../utils/compare";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import {
   compareNodeIdentity,
+  compileWorkingTableEdgeExpansion,
   compileWorkingTableExpansion,
   fetchVisibleWorkingNodes,
   type IterativeGraphOperation,
@@ -115,7 +116,7 @@ async function findReachableNodesInWorkingTable(
     },
     async runRound(context, state) {
       const nextDepth = state.depth + 1;
-      const frontierCount = await expandWorkingTableRound(
+      const frontierCount = await expandReachableWorkingTableRound(
         context,
         "forward",
         state.depth,
@@ -328,6 +329,70 @@ async function expandWorkingTableRound(
               AND visited.side = ${side}
               AND visited.node_id = ranked.target_id
               AND visited.node_kind = ranked.target_kind
+          )
+        ON CONFLICT (graph_id, run_id, side, node_kind, node_id) DO NOTHING
+        RETURNING node_id
+      `),
+    );
+    insertedCount += rows.length;
+  }
+  return insertedCount;
+}
+
+/**
+ * Reachability needs only minimum depth, not a reconstructable predecessor.
+ * Reduce duplicate edge targets before checking target-node visibility so a
+ * dense frontier performs one node lookup per candidate identity rather than
+ * one lookup per incident edge.
+ */
+async function expandReachableWorkingTableRound(
+  context: IterativeGraphRunContext,
+  side: WorkingSide,
+  currentDepth: number,
+  nextDepth: number,
+  direction: TraversalDirection,
+): Promise<number> {
+  let insertedCount = 0;
+  for (const edgeKinds of context.operation.edgeKindChunks) {
+    const sourceFilter = sql`
+      w.graph_id = ${context.graphId}
+      AND w.run_id = ${context.runId}
+      AND w.side = ${side}
+      AND w.depth = ${currentDepth}
+    `;
+    const edgeExpansion = compileWorkingTableEdgeExpansion(
+      context.operation,
+      context.workingTable,
+      sourceFilter,
+      direction,
+      edgeKinds,
+    );
+    const rows = await context.backend.execute<InsertedRow>(
+      asCompiledRowsSql(sql`
+        INSERT INTO ${context.workingTable}
+          (graph_id, run_id, side, node_id, node_kind, depth,
+           predecessor_id, predecessor_kind)
+        SELECT
+          ${context.graphId}, ${context.runId}, ${side},
+          candidates.target_id, candidates.target_kind, ${nextDepth},
+          NULL, NULL
+        FROM (
+          SELECT DISTINCT expanded.target_id, expanded.target_kind
+          FROM (${edgeExpansion}) expanded
+        ) candidates
+        JOIN ${context.operation.schema.nodesTable} n
+          ON n.graph_id = ${context.graphId}
+          AND n.id = candidates.target_id
+          AND n.kind = candidates.target_kind
+        WHERE ${context.operation.nodeTemporalFilter}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ${context.workingTable} visited
+            WHERE visited.graph_id = ${context.graphId}
+              AND visited.run_id = ${context.runId}
+              AND visited.side = ${side}
+              AND visited.node_id = candidates.target_id
+              AND visited.node_kind = candidates.target_kind
           )
         ON CONFLICT (graph_id, run_id, side, node_kind, node_id) DO NOTHING
         RETURNING node_id

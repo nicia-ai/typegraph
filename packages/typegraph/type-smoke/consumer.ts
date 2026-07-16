@@ -152,7 +152,10 @@ void store.algorithms.shortestPath(
 void store.algorithms.reachable(aliceId, { edges: ["knows"] });
 void store.algorithms.canReach(aliceId, bobId, { edges: ["knows"] });
 void store.algorithms.neighbors(aliceId, { edges: ["knows"], depth: 2 });
-void store.algorithms.weaklyConnectedComponents({ edges: ["knows"] });
+void store.algorithms.weaklyConnectedComponents({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+});
 
 // Degree accepts an options-less call and a specific edge-kind selection.
 void store.algorithms.degree(aliceId);
@@ -189,6 +192,12 @@ void store.algorithms.reachable(aliceId, { edges: ["not_a_kind"] });
 
 // @ts-expect-error - "not_a_kind" isn't a registered WCC edge kind
 void store.algorithms.weaklyConnectedComponents({ edges: ["not_a_kind"] });
+
+void store.algorithms.weaklyConnectedComponents({
+  edges: ["knows"],
+  // @ts-expect-error - "not_a_kind" isn't a registered WCC node kind
+  nodeKinds: ["not_a_kind"],
+});
 
 void store.algorithms.reachable(aliceId, {
   edges: ["knows"],

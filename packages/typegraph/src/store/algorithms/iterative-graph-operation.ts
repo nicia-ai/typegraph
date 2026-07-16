@@ -435,6 +435,70 @@ export function compileWorkingTableExpansion(
   }
 }
 
+/**
+ * Expands a working-table frontier through visible edges without joining target
+ * nodes. Callers that reduce duplicate targets first can defer the target-node
+ * visibility join until after that reduction, avoiding repeated point lookups
+ * for the same target on dense frontiers.
+ */
+export function compileWorkingTableEdgeExpansion(
+  operation: IterativeGraphOperation,
+  workingTable: WorkingTableIdentifier,
+  sourceFilter: SQL,
+  direction: TraversalDirection,
+  edgeKinds: readonly string[],
+): SQL {
+  switch (direction) {
+    case "out": {
+      return compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "from_id",
+        "from_kind",
+        "to_id",
+        "to_kind",
+      );
+    }
+    case "in": {
+      return compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "to_id",
+        "to_kind",
+        "from_id",
+        "from_kind",
+      );
+    }
+    case "both": {
+      const outgoing = compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "from_id",
+        "from_kind",
+        "to_id",
+        "to_kind",
+      );
+      const incoming = compileDirectionalEdgeExpansion(
+        operation,
+        workingTable,
+        sourceFilter,
+        edgeKinds,
+        "to_id",
+        "to_kind",
+        "from_id",
+        "from_kind",
+      );
+      return sql`${outgoing} UNION ALL ${incoming}`;
+    }
+  }
+}
+
 function compileDirectionalExpansion(
   operation: IterativeGraphOperation,
   workingRelation: SQL | WorkingTableIdentifier,
@@ -445,8 +509,31 @@ function compileDirectionalExpansion(
   targetField: "from_id" | "to_id",
   targetKindField: "from_kind" | "to_kind",
 ): ReturnType<typeof sql> {
+  const edgeExpansion = compileDirectionalEdgeExpansion(
+    operation,
+    workingRelation,
+    sourceFilter,
+    edgeKinds,
+    joinField,
+    joinKindField,
+    targetField,
+    targetKindField,
+  );
+  return sql`SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (${edgeExpansion}) expanded JOIN ${operation.schema.nodesTable} n ON n.graph_id = ${operation.ctx.graphId} AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE ${operation.nodeTemporalFilter}`;
+}
+
+function compileDirectionalEdgeExpansion(
+  operation: IterativeGraphOperation,
+  workingRelation: SQL | WorkingTableIdentifier,
+  sourceFilter: SQL,
+  edgeKinds: readonly string[],
+  joinField: "from_id" | "to_id",
+  joinKindField: "from_kind" | "to_kind",
+  targetField: "from_id" | "to_id",
+  targetKindField: "from_kind" | "to_kind",
+): ReturnType<typeof sql> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
-  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, n.id AS target_id, n.kind AS target_kind FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} JOIN ${operation.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(targetField)} AND n.kind = e.${sql.raw(targetKindField)} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter} AND ${operation.nodeTemporalFilter}`;
+  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
 }
 
 function chunkValues<T>(

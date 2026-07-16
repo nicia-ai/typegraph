@@ -4,7 +4,7 @@
  * Algorithms operate over one or more edge kinds and may traverse edges
  * in the forward direction ("out"), reverse ("in"), or undirected ("both").
  */
-import type { EdgeKinds, GraphDef } from "../../core/define-graph";
+import type { EdgeKinds, GraphDef, NodeKinds } from "../../core/define-graph";
 import type { RecordedInstant } from "../../core/temporal";
 import type { TemporalMode } from "../../core/types";
 import type { RecursiveCyclePolicy } from "../../query/ast";
@@ -180,14 +180,17 @@ export type InternalDegreeOptions<G extends GraphDef> =
  * Options for exact weakly connected components.
  *
  * Selected edges are treated as undirected, regardless of their declared
- * direction. Every visible graph node is returned; nodes with no selected
- * incident edge form singleton components.
+ * direction. By default every visible graph node is returned; `nodeKinds`
+ * restricts the operation to the induced subgraph over those kinds. Nodes in
+ * scope with no selected incident edge form singleton components.
  */
 export type WeaklyConnectedComponentsOptions<G extends GraphDef> =
   TemporalAlgorithmOptions &
     Readonly<{
       /** Edge kinds whose undirected projection defines connectivity. */
       edges: readonly EdgeKinds<G>[];
+      /** Optional node kinds defining the induced subgraph to analyze. */
+      nodeKinds?: readonly NodeKinds<G>[];
       /** Maximum label-propagation rounds before throwing. Defaults to 1000. */
       maxIterations?: number;
     }>;

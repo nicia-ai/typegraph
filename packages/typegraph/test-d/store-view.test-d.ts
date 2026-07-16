@@ -139,7 +139,10 @@ expectAssignable<Promise<readonly ReachableNode[]>>(
   view.reachable(personId, { edges: ["knows"] }),
 );
 expectAssignable<Promise<readonly WeaklyConnectedComponentMembership[]>>(
-  view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+  view.algorithms.weaklyConnectedComponents({
+    edges: ["knows"],
+    nodeKinds: ["Person"],
+  }),
 );
 
 // StoreView owns the read coordinate. Its query builder stays fluent for

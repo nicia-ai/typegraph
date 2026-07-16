@@ -14,15 +14,20 @@ store.algorithms.reachable(alice, { edges: ["knows"] });
 store.algorithms.canReach(alice, bob, { edges: ["knows"] });
 store.algorithms.neighbors(alice, { edges: ["knows"], depth: 2 });
 store.algorithms.degree(alice, { edges: ["knows"] });
-store.algorithms.weaklyConnectedComponents({ edges: ["knows"] });
+store.algorithms.weaklyConnectedComponents({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+});
 ```
 
 Traversal calls use a set-based breadth-first frontier. Each level expands the
 current `(id, kind)` set with a bind-limit-aware SQL query. Transactional
 backends keep the visited set in a temporary working table; backends without a
 pinned transaction use a chunked inline working relation. Each node is admitted
-only at its minimum depth. `shortestPath` and `canReach` search from both
-endpoints and stop when the frontiers meet.
+only at its minimum depth. Reachability rounds deduplicate edge targets before
+checking target-node visibility and do not compute unused predecessors.
+`shortestPath` and `canReach` search from both endpoints, retain predecessors for
+path reconstruction, and stop when the frontiers meet.
 `degree` remains a single `COUNT` query. The algorithms work identically on
 SQLite and PostgreSQL.
 
@@ -175,14 +180,16 @@ efficient even for hub nodes with thousands of edges.
 
 ## weaklyConnectedComponents
 
-Computes an exact whole-graph partition over the undirected projection of the
-selected edge kinds. Every visible node is returned; a node with no selected
-incident edge forms a singleton component.
+Computes an exact partition over the undirected projection of the selected edge
+kinds. By default every visible node is returned. `nodeKinds` restricts the
+operation to the induced subgraph over those kinds; an in-scope node with no
+selected incident edge forms a singleton component.
 
 ```typescript
 const memberships =
   await store.algorithms.weaklyConnectedComponents({
     edges: ["knows", "worksAt"],
+    nodeKinds: ["Person", "Company"], // optional; all kinds by default
     maxIterations: 1000, // default
   });
 // [{ id, kind, componentId, componentKind, size }, ...]
@@ -207,10 +214,10 @@ plans based on PostgreSQL's initial one-row estimate for a new temporary table.
 The policy is automatic, applies to WCC and growing traversal frontiers, and is
 a no-op on SQLite.
 
-WCC currently seeds every visible node. Selecting edge kinds controls which
-connections participate, but it does not restrict node kinds; unrelated nodes
-still appear as singleton components. On heterogeneous graphs with millions of
-visible nodes, seeding that full set can dominate the operation's cost.
+Without `nodeKinds`, WCC seeds every visible node, so unrelated nodes still
+appear as singleton components. On heterogeneous graphs, pass the kinds that
+define the graph being analyzed. For example, `{ edges: ["knows"], nodeKinds:
+["Person"] }` avoids seeding posts and comments while retaining isolated people.
 
 Temporal views expose the same facade with the coordinate sealed:
 

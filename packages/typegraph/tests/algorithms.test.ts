@@ -368,6 +368,47 @@ describe("store.algorithms", () => {
       ).toBe(true);
     });
 
+    it("deduplicates edge targets before node visibility without ranking predecessors", async () => {
+      const statements: string[] = [];
+      const observedBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const observedTransaction: TransactionBackend = {
+              ...tx,
+              execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                statements.push(backend.compileSql!(query).sql);
+                return tx.execute<Result>(query);
+              },
+            };
+            return fn(observedTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const observedStore = createStore(testGraph, observedBackend);
+
+      await observedStore.algorithms.reachable(ids.alice, {
+        edges: ["knows"],
+        maxHops: 3,
+      });
+
+      const expansionStatement = statements.find(
+        (statement) =>
+          statement.includes("SELECT DISTINCT") &&
+          statement.includes("RETURNING node_id"),
+      );
+      expect(expansionStatement).toBeDefined();
+      expect(expansionStatement).not.toContain("ROW_NUMBER");
+      expect(expansionStatement).toMatch(
+        /SELECT DISTINCT[\s\S]+JOIN "typegraph_nodes"/,
+      );
+    });
+
     it("chunks duplicate edge filters within a small bind budget", async () => {
       const constrainedBackend: GraphBackend = {
         ...backend,

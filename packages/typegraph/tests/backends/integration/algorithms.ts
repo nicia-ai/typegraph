@@ -266,6 +266,57 @@ export function registerAlgorithmIntegrationTests(
             size: 1,
           },
         ]);
+
+        const personMemberships =
+          await store.algorithms.weaklyConnectedComponents({
+            edges: ["knows", "worksAt"],
+            nodeKinds: ["Person"],
+          });
+        expect(personMemberships).toEqual([
+          {
+            id: "wcc-A",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 3,
+          },
+          {
+            id: "wcc-b",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 3,
+          },
+          {
+            id: "wcc-c",
+            kind: "Person",
+            componentId: "wcc-A",
+            componentKind: "Person",
+            size: 3,
+          },
+          {
+            id: isolated.id,
+            kind: "Person",
+            componentId: isolated.id,
+            componentKind: "Person",
+            size: 1,
+          },
+        ]);
+      });
+
+      it("returns an empty induced subgraph for an empty node-kind scope", async () => {
+        const store = context.getStore();
+        await store.nodes.Person.create(
+          { name: "Outside empty WCC scope" },
+          { id: "empty-scope" },
+        );
+
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            nodeKinds: [],
+          }),
+        ).resolves.toEqual([]);
       });
 
       it("throws instead of returning partial labels at the iteration limit", async () => {

@@ -5,6 +5,7 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
+import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { compareCodePoints } from "../../utils/compare";
 import {
@@ -46,6 +47,12 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
   assertEdgeKinds(options.edges);
   assertWeaklyConnectedComponentsSupported(ctx);
   const maxIterations = resolveMaxIterations(options.maxIterations);
+  const nodeKinds =
+    options.nodeKinds === undefined ?
+      undefined
+    : [...new Set(options.nodeKinds)].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
@@ -62,7 +69,7 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     algorithm: "weaklyConnectedComponents",
     maxIterations,
     createWorkingTable,
-    initialize: initializeWorkingTable,
+    initialize: (context) => initializeWorkingTable(context, nodeKinds),
     runRound: runLabelPropagationRound,
     hasConverged(state) {
       return state.changedCount === 0;
@@ -120,8 +127,13 @@ function createWorkingTable(context: IterativeGraphRunContext): SQL {
 
 async function initializeWorkingTable(
   context: IterativeGraphRunContext,
+  nodeKinds: readonly string[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
+  const nodeKindFilter =
+    nodeKinds === undefined ?
+      sql`TRUE`
+    : compileKindFilter(sql.raw("n.kind"), nodeKinds);
   await context.executeTemporary(sql`
     INSERT INTO ${workingTable}
       (graph_id, run_id, node_id, node_kind, label_id, label_kind,
@@ -130,6 +142,7 @@ async function initializeWorkingTable(
       ${graphId}, ${runId}, n.id, n.kind, n.id, n.kind, n.id, n.kind
     FROM ${operation.schema.nodesTable} n
     WHERE n.graph_id = ${graphId}
+      AND ${nodeKindFilter}
       AND ${operation.nodeTemporalFilter}
   `);
 
@@ -207,6 +220,11 @@ async function propagateChunkLabels(
         AND source.run_id = ${runId}
         AND source.node_id = expanded.source_id
         AND source.node_kind = expanded.source_kind
+      JOIN ${workingTable} scoped_target
+        ON scoped_target.graph_id = ${graphId}
+        AND scoped_target.run_id = ${runId}
+        AND scoped_target.node_id = expanded.target_id
+        AND scoped_target.node_kind = expanded.target_kind
     ), ranked AS (
       SELECT
         target_id,
