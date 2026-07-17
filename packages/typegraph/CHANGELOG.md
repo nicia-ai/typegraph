@@ -1,5 +1,262 @@
 # @nicia-ai/typegraph
 
+## 0.37.0
+
+### Minor Changes
+
+- [#269](https://github.com/nicia-ai/typegraph/pull/269) [`92479d4`](https://github.com/nicia-ai/typegraph/commit/92479d44ba7f0fc76985d51174cb9801c055fd4d) Thanks [@pdlug](https://github.com/pdlug)! - Vector storage now rides the [#135](https://github.com/nicia-ai/typegraph/issues/135) durable-contribution machinery, so the
+  runtime never issues DDL on the embedding hot path.
+
+  Previously every vector op (`upsertEmbedding` / `deleteEmbedding` /
+  `vectorSearch` / `createVectorIndex`) lazily ran `CREATE TABLE IF NOT EXISTS`
+  for its per-`(kind, field)` table on whatever connection it executed on. On a
+  least-privilege Postgres role (USAGE on `public`, full DML, but no `CREATE`)
+  this failed with `permission denied for schema public` (SQLSTATE 42501) — even
+  when the table already existed, because Postgres runs the schema aclcheck before
+  the `IF NOT EXISTS` short-circuit. The fulltext path already avoided this via
+  durable markers; vectors now do too.
+
+  What changed:
+
+  - **Boot (privileged):** `createStoreWithSchema` provisions every embedding
+    `(kind, field)` table + a durable contribution marker, enumerated from the
+    graph. `evolve()` provisions any embedding fields it introduces. A slot
+    already provisioned at a _different_ shape (the declared dimension changed)
+    is warned about and left untouched — boot stays reachable so
+    `store.reembedVectorField()` can recreate it; until then, writes to that
+    field fail with a `stale` `StoreNotInitializedError` that points at
+    `reembedVectorField`.
+  - **Runtime writes (DML-only):** `upsertEmbedding` (single and batch) and
+    `deleteEmbedding` assert the durable marker with a cached, signature-checked
+    SELECT and run DML — never DDL. `createVerifiedStore` verifies vector markers
+    at attach, alongside fulltext.
+  - **Vector reads are not marker-gated:** `store.search.vector`,
+    `store.search.hybrid`, and query-builder `.similarTo()` predicates compile to
+    SQL against the per-field table directly (searches may override the metric at
+    query time, so their slot legitimately differs from the provisioned shape);
+    against an un-provisioned database they surface the engine's missing-relation
+    error, which `createVerifiedStore` catches at attach.
+  - `reembedVectorField` re-stamps the marker after recreating storage at a new
+    dimension; vector-field reclaim (`materializeRemovals`) clears the marker when
+    it drops a table.
+
+  **Breaking:** vector ops now require a prior privileged `createStoreWithSchema`
+  (exactly as fulltext already does). A plain `createStore` + embedding write with
+  no provisioning step throws `StoreNotInitializedError` instead of lazily
+  creating the table.
+
+  **Migration:** after upgrading, run `createStoreWithSchema(graph, adminBackend)`
+  once under the schema-owner role. It creates the per-field vector tables +
+  markers; least-privilege runtimes then assert markers (SELECT) and run vector
+  DML with zero DDL — no `GRANT CREATE` required.
+
+  Consumers that boot manually (raw DDL + the sync `createStore` attach +
+  `backend.ensureRuntimeContributions`) provision vectors the same way: the new
+  `resolveGraphVectorSlots(graph)` export enumerates every embedding
+  `(kind, field)` slot, and `backend.ensureVectorSlotContribution(slot)`
+  materializes each — the exact step `createStoreWithSchema` performs. Batch
+  counterparts (`backend.ensureVectorSlotContributions(slots)` /
+  `backend.assertVectorSlotsInitialized(slots)`) resolve every slot's markers
+  with one graph-scoped query — what boot and verified attach use, and the
+  right choice for many embedding fields over a remote connection.
+
+- [#284](https://github.com/nicia-ai/typegraph/pull/284) [`26f5b4a`](https://github.com/nicia-ai/typegraph/commit/26f5b4a3f129353e0ec92040497ddca685563c7f) Thanks [@pdlug](https://github.com/pdlug)! - TypeGraph's base-relation indexes are now **system-index declarations** — a
+  single declared list (`SYSTEM_INDEX_DECLARATIONS`) that both dialect schemas
+  derive from and that materializes onto already-initialized databases.
+
+  Previously the base indexes were hand-written twice (once per dialect schema)
+  and applied only by first-boot bootstrap DDL, so an index added in a newer
+  library version never reached an existing database without manual DDL (the
+  gap [#282](https://github.com/nicia-ai/typegraph/issues/282) exposed). Now:
+
+  - **Single source, parity by construction.** `createSqliteTables` /
+    `createPostgresTables` build their node/edge/recorded-relation indexes from
+    the same declarations, and a cross-dialect extraction test asserts the two
+    generated DDL scripts' full index sets stay identical.
+  - **Upgrade path.** `createStoreWithSchema` brings a database's system
+    indexes up to the running library version at boot — `CREATE INDEX
+CONCURRENTLY` on PostgreSQL, riding the same status table, drift
+    signatures, invalid-leftover healing, and cross-caller claim protocol as
+    graph-declared indexes. A database whose indexes all exist settles from
+    three concurrent catalog/status reads (scoped to the session
+    `search_path`, so schema-per-tenant databases never observe each other's
+    indexes) with no index DDL and no status writes — the only DDL on that
+    warm path is the idempotent status-table `CREATE TABLE IF NOT EXISTS`
+    ensure step every materialize verb runs. A system index that is
+    physically absent or invalid is rebuilt
+    even when a stale success row survives (dump/restore, manual drop).
+    Failures — including status-table infrastructure errors — degrade to a
+    warning: indexes are a performance concern and the store still boots.
+    Deployments that must not run index builds inline at boot pass
+    `systemIndexes: "skip"` to `createStoreWithSchema` and materialize
+    out-of-band.
+  - **New API: `store.materializeSystemIndexes()`** for deployments that boot
+    without `createStoreWithSchema` (zero-DDL attach) — call once under a
+    DDL-capable role after upgrading. Strict where the boot path is lenient:
+    throws `ConfigurationError` on backends without DDL/status primitives.
+  - `IndexEntity` gains a `"system"` member; system status rows carry the
+    relation key (e.g. `"recordedNodes"`) in their `kind` column.
+
+  Generated DDL is unchanged for default and short custom table names — same
+  index names, columns, and order — so existing databases and drizzle-kit
+  migrations are unaffected. Names that would exceed PostgreSQL's 63-char
+  identifier bound (very long custom table names) are now deterministically
+  truncated + hash-suffixed instead of being silently truncated by the engine
+  into collisions. System index names are reserved: a graph-declared index
+  using one is rejected at table definition and by `materializeIndexes()`
+  (previously its `CREATE INDEX IF NOT EXISTS` silently no-opped against the
+  differently-shaped system index while recording success). Legacy databases
+  that predate the recorded relations skip those indexes cleanly instead of
+  attempting failing DDL at every boot.
+
+- [#273](https://github.com/nicia-ai/typegraph/pull/273) [`42f6941`](https://github.com/nicia-ai/typegraph/commit/42f6941fdb601629c0f45ec54fa9f3e50bd028ae) Thanks [@pdlug](https://github.com/pdlug)! - Add `trustedImportGraph` and `trustedImportGraphStream` for atomic initial loads
+  into a fresh, dedicated database. The distinct trusted surface bypasses schema,
+  reference, cardinality, and conflict validation; uses prepared SQLite writes or
+  PostgreSQL `UNNEST` ingestion; defers rebuildable secondary indexes; refreshes
+  planner statistics; and rolls the complete stream back on any failure.
+
+  The first version rejects non-empty TypeGraph data tables, recorded history,
+  revision tracking, uniqueness constraints, searchable fields, vector fields,
+  and backends without the required native transactional path.
+
+- [#279](https://github.com/nicia-ai/typegraph/pull/279) [`c44eeac`](https://github.com/nicia-ai/typegraph/commit/c44eeac36805be144b25123fafb5c52ae30b73a4) Thanks [@pdlug](https://github.com/pdlug)! - Add exact `store.algorithms.weaklyConnectedComponents()` for transactional
+  SQLite and PostgreSQL backends. Results include deterministic component
+  representatives and sizes, honor valid/recorded temporal views, and fail with a
+  typed convergence error instead of returning partial labels when the configured
+  iteration budget is exhausted. Callers can restrict WCC to a `nodeKinds`
+  induced subgraph, retaining isolated in-scope nodes without seeding unrelated
+  node kinds.
+
+  PostgreSQL iterative operations now refresh temporary-table planner statistics
+  after sufficiently large seeds and multiplicative growth, avoiding plans based
+  on the engine's initial one-row estimate. The policy also covers growing BFS
+  working tables and is a no-op on SQLite.
+
+  Set-based reachability now deduplicates edge targets before target-node
+  visibility checks and avoids computing unused predecessor paths. This reduces
+  dense-frontier work while preserving minimum-depth results and cross-backend
+  semantics.
+
+- [#288](https://github.com/nicia-ai/typegraph/pull/288) [`17a3f83`](https://github.com/nicia-ai/typegraph/commit/17a3f83d806e0b77748c346f5c320d8d55080b91) Thanks [@pdlug](https://github.com/pdlug)! - Add `store.algorithms.weightedShortestPath` — a minimum-total-weight path
+  search weighting each traversed edge by a numeric edge property (LDBC
+  Interactive IC14 shape). Runs frontier-based relaxation on the shared
+  iterative substrate with best-target pruning, works on both execution paths
+  (temporary working table and inline fallback), and honors valid-time and
+  recorded-time coordinates including pinned StoreViews. Edge weights are
+  audited up front: negative, non-numeric, out-of-range, or (without
+  `defaultWeight`) missing weights throw the new typed
+  `InvalidEdgeWeightError`. Weight arithmetic is IEEE 754 double precision on
+  both backends, so total weights are backend-identical; among
+  equal-total-weight paths the returned node sequence is too, except when the
+  `edges` list exceeds the backend's bind-parameter budget (hundreds of edge
+  kinds in one call).
+
+### Patch Changes
+
+- [#282](https://github.com/nicia-ai/typegraph/pull/282) [`923219d`](https://github.com/nicia-ai/typegraph/commit/923219d6854a0a97cc186c2f4f27e6564bb935be) Thanks [@pdlug](https://github.com/pdlug)! - Add a `(graph_id, id)` index to the live and recorded node tables so bare-id
+  lookups (a node's `id` without its `kind`) seek instead of scanning the
+  graph's node partition — the composite keys lead with `kind`, so they can't
+  serve that probe. `store.algorithms.degree()`'s node-kind subquery is the
+  main consumer: ~95 ms → sub-millisecond at LDBC SNB SF1 (3.16M nodes) on
+  SQLite, at the live and recorded coordinates alike.
+
+  New databases get both indexes at bootstrap. Existing databases adopt them
+  with a one-time `await backend.bootstrapTables()` — every statement is
+  `CREATE … IF NOT EXISTS`, so the call is idempotent and only creates what's
+  missing. On PostgreSQL this issues a plain `CREATE INDEX` (briefly locks
+  writes on large tables); schedule it, or apply the equivalent
+  `CREATE INDEX CONCURRENTLY` statements manually.
+
+- [#265](https://github.com/nicia-ai/typegraph/pull/265) [`35ab2a0`](https://github.com/nicia-ai/typegraph/commit/35ab2a02af728df9059750518ddbdd12e489450e) Thanks [@pdlug](https://github.com/pdlug)! - Docs: scope the `coalesceUnchangedUpserts` benefit correctly. Coalescing
+  eliminates _re-delivery_ churn (an already-applied change delivered again,
+  value-identical to the live row). It does not make a full replay-from-zero
+  free when the stream supersedes values in place: re-applying an older value
+  over the live row is a genuine change, and restoring the current value
+  afterwards is another, so such a replay still writes — and leaves a spurious
+  back-and-forth band in the live store's recorded history. Churn-free rebuilds
+  replay into a fresh store instead. Clarified in the option's TSDoc and in the
+  "Materializing external event logs" guide; no behavior change.
+
+- [#289](https://github.com/nicia-ai/typegraph/pull/289) [`199b33a`](https://github.com/nicia-ai/typegraph/commit/199b33aabffa304b6a11f34ad7ca9b0e5f449218) Thanks [@pdlug](https://github.com/pdlug)! - Cap SQLite-backed Durable Object statements at Cloudflare's 100-bound-parameter
+  limit. Structural client detection now makes platform identity authoritative
+  over stale execution hints, and capability overrides cannot raise the hard
+  ceiling. Recorded-history capture and every capability-driven SQLite batch path
+  chunk large writes before workerd rejects the query, while SQLite literal list
+  predicates use one JSON-bound parameter instead of one bind per element.
+
+- [#285](https://github.com/nicia-ai/typegraph/pull/285) [`9949562`](https://github.com/nicia-ai/typegraph/commit/99495623057610e502671515709c29d8f5139ae2) Thanks [@pdlug](https://github.com/pdlug)! - Cut three overheads out of the iterative graph algorithms, root-caused with
+  `EXPLAIN (ANALYZE, BUFFERS)` against LDBC SNB SF1 on PostgreSQL.
+
+  Weakly connected components no longer re-validates node visibility per edge in
+  its propagate rounds. The working table is seeded through the same
+  graph/kind/temporal filters inside the same snapshot and both edge endpoints
+  are already joined against it, so membership is the visibility proof; the
+  per-edge `typegraph_nodes` index loops (hundreds of thousands per round on
+  SF1) added nothing. Results are byte-identical.
+
+  Traversal rounds now carry their own bookkeeping instead of issuing follow-up
+  statements: seeding returns the frontier through `INSERT … RETURNING`, and
+  bidirectional shortest-path rounds detect the frontier meeting inside the
+  expansion statement rather than with a separate probe per round. A
+  shortest-path traversal that used to issue two to three statements per round
+  now issues one, roughly halving round-trip latency on latency-bound
+  connections. The working-table `ANALYZE` policy is unchanged in its
+  thresholds but no longer runs when no further round will read the table.
+  When several equal-depth meetings exist, the tie now breaks by node id then
+  kind in code-unit order on both backends — previously the selection followed
+  the database collation, so a PostgreSQL cluster with a linguistic default
+  collation could pick a different (equally shortest) path.
+
+  New option: iterative algorithm calls (`reachable`, `shortestPath`,
+  `canReach`, `neighbors`, `weaklyConnectedComponents`) accept
+  `workingMemory?: string`, an opt-in, transaction-scoped override of the
+  session's `work_mem`, applied on PostgreSQL with `SET LOCAL` semantics via
+  parameterized `set_config`. By default (option omitted) operations inherit
+  the server's configured `work_mem` — nothing is overridden. `work_mem` is a
+  threshold each sort/hash operator (and each parallel worker) may allocate up
+  to, not a per-operation budget, and concurrent calls multiply it; set it
+  deliberately (e.g. `"64MB"`) for large single-tenant analytical runs where
+  the configured default spills whole-graph sorts to disk (measured ~106MB
+  external merges per WCC round on SF1). The override never touches the
+  session or server setting, is validated as `<digits>kB|MB|GB` within
+  PostgreSQL's accepted `work_mem` range (64kB–2147483647kB) with the same
+  typed error on both backends, and is ignored by SQLite.
+
+- [#290](https://github.com/nicia-ai/typegraph/pull/290) [`247c1b7`](https://github.com/nicia-ai/typegraph/commit/247c1b77b8c30d2f03520d52214bfaebbf1a0e6c) Thanks [@pdlug](https://github.com/pdlug)! - Fix PostgreSQL pointer-level `pathIsNull()` / `pathIsNotNull()` predicates
+  misclassifying two stored value shapes. The previous text-comparison form
+  (`#>> path = 'null'`) went three-valued on a stored JSON `null` — so
+  `pathIsNull()` silently failed to match those rows on PostgreSQL while
+  matching them on SQLite — and misread the JSON _string_ `"null"` as null,
+  falsely matching it with `pathIsNull()` and excluding it from
+  `pathIsNotNull()`. Both predicates are now type-based (`jsonb_typeof`) and
+  never SQL NULL, converging on SQLite's (correct) semantics. Field-level
+  `isNull()` / `isNotNull()` predicates were already correct and are unchanged.
+  Behavior change on PostgreSQL for affected data: rows holding a JSON `null`
+  now match `pathIsNull()`, and rows holding the string `"null"` no longer do.
+
+- [#283](https://github.com/nicia-ai/typegraph/pull/283) [`8306680`](https://github.com/nicia-ai/typegraph/commit/830668032328e5fdc031deccfaf0c452f466a15c) Thanks [@pdlug](https://github.com/pdlug)! - Selective `ORDER BY … LIMIT` queries now compile with late materialization:
+  the query sorts and limits a lean candidate set carrying only identity, sort
+  keys, and predicate columns, then re-fetches the deferred projection columns
+  by primary key for only the surviving rows — instead of extracting every
+  projected column for every candidate and discarding all but the `LIMIT`
+  survivors after the sort. At LDBC SNB SF1, IC9's top-20 over a 1.18M-comment
+  fan-out stops extracting `content` 1.18M times, ~30–37% faster on SQLite.
+
+  The transform fires only on the selective `.select()` path with `ORDER BY`
+  and a positive `LIMIT` at the live coordinate. Aggregates, vector/fulltext,
+  optional (LEFT JOIN) traversals, edge-field projections, non-selective
+  queries, and recorded-time reads keep the flat plan unchanged.
+
+- [#274](https://github.com/nicia-ai/typegraph/pull/274) [`2a889aa`](https://github.com/nicia-ai/typegraph/commit/2a889aaea095a842fdd6f1b4a97feba5e6026d82) Thanks [@pdlug](https://github.com/pdlug)! - Replace path-enumerating recursive CTEs in `reachable`, `neighbors`,
+  `shortestPath`, and `canReach` with set-based breadth-first search.
+
+  Transactional SQLite and PostgreSQL backends now execute graph iterations
+  against a connection-local temporary working table, de-duplicated by node kind
+  and ID on every round. Non-transactional backends retain parity through a
+  bind-limit-aware inline frontier. Traversals run in one snapshot where the
+  backend supports transactions, preserve temporal filtering, and clean up
+  temporary state on success or failure.
+
 ## 0.36.0
 
 ### Minor Changes
