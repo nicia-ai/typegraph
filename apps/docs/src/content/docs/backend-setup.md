@@ -710,6 +710,11 @@ A store backed by `drizzle(ctx.storage)` inside a Durable Object is
 `capabilities.transactions: true` — no `executionProfile` hint needed.
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so `store.transaction()` and `store.withTransaction()` are fully atomic.
+The same profile advertises Cloudflare's 100-bound-parameter query limit.
+TypeGraph uses that hard ceiling for its managed write batches and
+recorded-history flushes; capability overrides may lower it but cannot raise
+it. Literal `.in()` and `.notIn()` query lists are packed into one JSON-bound
+parameter, so the list itself does not exhaust the Durable Object budget.
 
 ```typescript
 import { drizzle } from "drizzle-orm/durable-sqlite";

@@ -3,6 +3,7 @@ import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import {
   D1_MAX_BIND_PARAMETERS,
+  DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
@@ -36,9 +37,24 @@ type SqliteClientWithPrepare = Readonly<{
   prepare: (sqlText: string) => PreparedAllStatement;
 }>;
 
-type SqliteClientCarrier = Readonly<{
-  $client?: SqliteClientWithPrepare;
+type SqliteClientCarrier = Readonly<{ $client?: unknown }>;
+
+type DurableObjectSqlApi = Readonly<{
+  exec: (...args: readonly unknown[]) => unknown;
 }>;
+
+/**
+ * Runtime shape of the Durable Object storage client exposed as
+ * `drizzle(ctx.storage).$client`. Structural because Drizzle does not export
+ * this client type and constructor names are not stable under bundling.
+ */
+export type DurableObjectStorageClient = Readonly<{
+  sql: DurableObjectSqlApi;
+  transaction: <Result>(run: () => Promise<Result>) => Promise<Result>;
+  transactionSync: <Result>(run: () => Result) => Result;
+}>;
+
+type SqliteHostedPlatform = "d1" | "durable-object";
 
 type SessionLike = Readonly<{
   constructor?: Readonly<{
@@ -90,12 +106,16 @@ type SqliteExecutionAdapterOptions = Readonly<{
 export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 export type SqliteExecutionProfile = Readonly<{
+  /** Hosted runtime detected independently of caller-supplied hints. */
+  hostedPlatform?: SqliteHostedPlatform;
+  /** Platform ceiling that capability overrides may lower but never raise. */
+  hardMaxBindParameters?: number;
   isSync: boolean;
   /**
    * Detected per-statement bound-parameter ceiling for this connection:
-   * D1's documented cap, the probed `SQLITE_MAX_VARIABLE_NUMBER` on
-   * synchronous drivers, or the conservative 999 floor when the limit
-   * cannot be probed (async/remote drivers).
+   * Cloudflare's documented D1 / Durable Objects cap, the probed
+   * `SQLITE_MAX_VARIABLE_NUMBER` on synchronous drivers, or the conservative
+   * 999 floor when the limit cannot be probed (async/remote drivers).
    */
   maxBindParameters: number;
   supportsCompiledExecution: boolean;
@@ -146,6 +166,47 @@ function isDurableObjectBySessionName(db: AnySqliteDatabase): boolean {
   );
 }
 
+function isDurableObjectStorageClient(
+  value: unknown,
+): value is DurableObjectStorageClient {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  const sqlApi = candidate.sql;
+  return (
+    typeof candidate.transaction === "function" &&
+    typeof candidate.transactionSync === "function" &&
+    typeof sqlApi === "object" &&
+    sqlApi !== null &&
+    typeof (sqlApi as Record<string, unknown>).exec === "function"
+  );
+}
+
+/**
+ * Returns the real Durable Object storage client when the Drizzle connection
+ * exposes its distinctive async + sync transaction runners and SQL API.
+ * Requiring the full shape avoids mistaking better-sqlite3's transaction
+ * wrapper factory for the Durable Object async runner.
+ */
+export function getDurableObjectStorageClient(
+  db: AnySqliteDatabase,
+): DurableObjectStorageClient | undefined {
+  const client = (db as SqliteClientCarrier).$client;
+  return isDurableObjectStorageClient(client) ? client : undefined;
+}
+
+function detectHostedPlatform(
+  db: AnySqliteDatabase,
+): SqliteHostedPlatform | undefined {
+  if (
+    getDurableObjectStorageClient(db) !== undefined ||
+    isDurableObjectBySessionName(db)
+  ) {
+    return "durable-object";
+  }
+  if (isD1DatabaseBySessionName(db)) return "d1";
+  return undefined;
+}
+
 function isSyncDatabaseBySessionName(db: AnySqliteDatabase): boolean {
   const sessionName = getSessionName(db);
   return (
@@ -156,22 +217,20 @@ function isSyncDatabaseBySessionName(db: AnySqliteDatabase): boolean {
 function detectSyncProfile(
   db: AnySqliteDatabase,
   profileHints: SqliteExecutionProfileHints,
+  hostedPlatform: SqliteHostedPlatform | undefined,
 ): boolean {
+  if (hostedPlatform === "durable-object") return true;
+  if (hostedPlatform === "d1") return false;
   if (profileHints.isSync !== undefined) {
     return profileHints.isSync;
   }
 
   const sessionName = getSessionName(db);
-  if (sessionName === "BetterSQLiteSession" || sessionName === "BunSQLiteSession") {
+  if (
+    sessionName === "BetterSQLiteSession" ||
+    sessionName === "BunSQLiteSession"
+  ) {
     return true;
-  }
-  // Durable Objects SQLite is synchronous (`ctx.storage` exec /
-  // `transactionSync`); detect it by name rather than the SQL probe.
-  if (isDurableObjectBySessionName(db)) {
-    return true;
-  }
-  if (sessionName === "SQLiteD1Session") {
-    return false;
   }
 
   try {
@@ -183,10 +242,14 @@ function detectSyncProfile(
 }
 
 function detectTransactionMode(
-  db: AnySqliteDatabase,
   profileHints: SqliteExecutionProfileHints,
   isSync: boolean,
+  hostedPlatform: SqliteHostedPlatform | undefined,
 ): SqliteTransactionMode {
+  // Hosted platform identity is authoritative. A stale hint must not disable
+  // Durable Object rollback or opt D1 into unsupported interactive writes.
+  if (hostedPlatform === "durable-object") return "do-sqlite";
+  if (hostedPlatform === "d1") return "none";
   if (profileHints.transactionMode !== undefined) {
     return profileHints.transactionMode;
   }
@@ -198,12 +261,6 @@ function detectTransactionMode(
   // `db.$client.transaction`) — route those through "do-sqlite" (#140).
   // D1 has no equivalent interactive runner (only batch); it stays
   // "none" pending a separate batch-mode investigation.
-  if (isDurableObjectBySessionName(db)) {
-    return "do-sqlite";
-  }
-  if (isD1DatabaseBySessionName(db)) {
-    return "none";
-  }
   if (isSync) return "sql";
   return "drizzle";
 }
@@ -251,11 +308,25 @@ function hasModernBindLimitByVersion(rows: readonly unknown[]): boolean {
  * runtime and too low wastes round trips (999 vs 32,766 is ~33× more
  * chunks per bulk insert).
  */
+function detectHardMaxBindParameters(
+  transactionMode: SqliteTransactionMode,
+  hostedPlatform: SqliteHostedPlatform | undefined,
+): number | undefined {
+  if (
+    hostedPlatform === "durable-object" ||
+    transactionMode === "do-sqlite"
+  ) {
+    return DURABLE_OBJECT_MAX_BIND_PARAMETERS;
+  }
+  if (hostedPlatform === "d1") return D1_MAX_BIND_PARAMETERS;
+  return undefined;
+}
+
 function detectMaxBindParameters(
-  db: AnySqliteDatabase,
   sqliteClient: SqliteClientWithPrepare | undefined,
+  hardMaxBindParameters: number | undefined,
 ): number {
-  if (isD1DatabaseBySessionName(db)) return D1_MAX_BIND_PARAMETERS;
+  if (hardMaxBindParameters !== undefined) return hardMaxBindParameters;
   if (sqliteClient === undefined) return SQLITE_MAX_BIND_PARAMETERS;
   try {
     const compiled = parseCompiledMaxVariableNumber(
@@ -277,12 +348,11 @@ function detectMaxBindParameters(
 function resolveSqliteClient(
   db: AnySqliteDatabase,
 ): SqliteClientWithPrepare | undefined {
-  const databaseWithClient = db as SqliteClientCarrier;
-  const sqliteClient = databaseWithClient.$client;
-  if (sqliteClient?.prepare === undefined) {
-    return undefined;
-  }
-  return sqliteClient;
+  const sqliteClient = (db as SqliteClientCarrier).$client;
+  if (typeof sqliteClient !== "object" || sqliteClient === null) return;
+  const candidate = sqliteClient as Record<string, unknown>;
+  if (typeof candidate.prepare !== "function") return;
+  return sqliteClient as SqliteClientWithPrepare;
 }
 
 function getOrCreatePreparedStatement(
@@ -337,13 +407,30 @@ export function createSqliteExecutionAdapter(
     options.statementCacheMax ?? DEFAULT_PREPARED_STATEMENT_CACHE_MAX;
   const profileHints = options.profileHints ?? {};
 
-  const isSync = detectSyncProfile(db, profileHints);
+  const hostedPlatform = detectHostedPlatform(db);
+  const isSync = detectSyncProfile(db, profileHints, hostedPlatform);
   const sqliteClient = isSync ? resolveSqliteClient(db) : undefined;
-  const transactionMode = detectTransactionMode(db, profileHints, isSync);
+  const transactionMode = detectTransactionMode(
+    profileHints,
+    isSync,
+    hostedPlatform,
+  );
+  const hardMaxBindParameters = detectHardMaxBindParameters(
+    transactionMode,
+    hostedPlatform,
+  );
+  const maxBindParameters = detectMaxBindParameters(
+    sqliteClient,
+    hardMaxBindParameters,
+  );
 
   const profile: SqliteExecutionProfile = {
+    ...(hostedPlatform === undefined ? {} : { hostedPlatform }),
+    ...(hardMaxBindParameters === undefined ?
+      {}
+    : { hardMaxBindParameters }),
     isSync,
-    maxBindParameters: detectMaxBindParameters(db, sqliteClient),
+    maxBindParameters,
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };

@@ -109,6 +109,23 @@ export function registerPredicateIntegrationTests(
       expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
     });
 
+    it("executes an IN predicate larger than Durable Objects' bind limit", async () => {
+      const store = context.getStore();
+      const names = [
+        ...Array.from({ length: 150 }, (_, index) => `missing-${index}`),
+        "Alice",
+        "Charlie",
+      ];
+      const results = await store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.in(names))
+        .select((ctx) => ctx.p.name)
+        .execute();
+
+      expect(results.toSorted()).toEqual(["Alice", "Charlie"]);
+    });
+
     it("executes IN predicate with empty array (returns no results)", async () => {
       const store = context.getStore();
       const results = await store

@@ -221,6 +221,12 @@ export const postgresDialect: DialectAdapter = {
     return sql`${left} IS NOT DISTINCT FROM ${right}`;
   },
 
+  inList(left, values, negated) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    const placeholders = values.map((value) => sql`${value}`);
+    return sql`${left} ${operator} (${sql.join(placeholders, sql`, `)})`;
+  },
+
   // ============================================================
   // String Operations
   // ============================================================

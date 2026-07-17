@@ -37,9 +37,18 @@ import {
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import {
+  asEdgeId,
+  createStore,
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../../src";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
+import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
+import { RECORDED_EDGE_COLUMNS } from "../../src/store/recorded-capture";
 
 import { SpikeDO } from "./worker";
 
@@ -63,6 +72,35 @@ const DocGraph = defineGraph({
   nodes: { Doc: { type: Doc } },
   edges: {},
 });
+
+const Message = defineNode("Message", {
+  schema: z.object({ text: z.string() }),
+});
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const mentions = defineEdge("mentions");
+
+const HistoryGraph = defineGraph({
+  id: "do-sqlite-history",
+  nodes: { Message: { type: Message }, Person: { type: Person } },
+  edges: {
+    mentions: {
+      type: mentions,
+      from: [Message],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
+// Exercise several chunks, with enough margin that a modest reduction in
+// recorded columns cannot make the pre-fix single statement fit accidentally.
+const RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT =
+  Math.ceil(DURABLE_OBJECT_MAX_BIND_PARAMETERS / RECORDED_EDGE_COLUMNS.length) *
+  4;
 
 async function bootInsideDurableObject(storage: DurableObjectStorage) {
   // No executionProfile hint: detection must classify drizzle(ctx.storage)
@@ -88,6 +126,15 @@ async function bootInsideDurableObject(storage: DurableObjectStorage) {
   return { db, backend, store };
 }
 
+async function bootHistoryInsideDurableObject(storage: DurableObjectStorage) {
+  const db = drizzle(storage);
+  const backend = createSqliteBackend(db, { tables: defaultTables });
+  const [store] = await createStoreWithSchema(HistoryGraph, backend, {
+    history: true,
+  });
+  return store;
+}
+
 function inObject<T>(
   name: string,
   body: (
@@ -109,7 +156,112 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(db.$client).toBe(storage);
       expect(typeof storage.transaction).toBe("function");
       expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.maxBindParameters).toBe(
+        DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+      );
+
+      const staleHintBackend = createSqliteBackend(db, {
+        capabilities: { maxBindParameters: 999 },
+        executionProfile: { isSync: false, transactionMode: "none" },
+        tables: defaultTables,
+      });
+      expect(staleHintBackend.capabilities.transactions).toBe(true);
+      expect(staleHintBackend.capabilities.maxBindParameters).toBe(
+        DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+      );
+      const staleHintStore = createStore(DocGraph, staleHintBackend);
+      await expect(
+        staleHintStore.transaction(async (tx) => {
+          await tx.nodes.Doc.create({ title: "must-roll-back" });
+          throw new Error("stale-hint-rollback");
+        }),
+      ).rejects.toThrow("stale-hint-rollback");
+      expect(await staleHintStore.nodes.Doc.count()).toBe(0);
     });
+  });
+
+  it("packs a literal IN list larger than the platform bind limit", async () => {
+    await inObject("large-in-list", async ({ store }) => {
+      await store.nodes.Doc.create({ title: "included" });
+      await store.nodes.Doc.create({ title: "excluded" });
+      const titles = [
+        ...Array.from(
+          { length: DURABLE_OBJECT_MAX_BIND_PARAMETERS + 1 },
+          (_, index) => `missing-${index}`,
+        ),
+        "included",
+      ];
+
+      const results = await store
+        .query()
+        .from("Doc", "doc")
+        .whereNode("doc", (doc) => doc.title.in(titles))
+        .select((ctx) => ctx.doc.title)
+        .execute();
+
+      expect(results).toEqual(["included"]);
+    });
+  });
+
+  it("chunks recorded history flushes to Durable Objects' 100-bind limit", async () => {
+    const stub = env.SPIKE_DO.get(
+      env.SPIKE_DO.idFromName("history-bind-limit"),
+    );
+    await runInDurableObject(
+      stub,
+      async (_instance: SpikeDO, state: DurableObjectState) => {
+        const store = await bootHistoryInsideDurableObject(state.storage);
+
+        await store.transaction(async (tx) => {
+          const message = await tx.nodes.Message.create(
+            { text: "hello" },
+            { id: "message" },
+          );
+          for (
+            let index = 0;
+            index < RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT;
+            index += 1
+          ) {
+            const person = await tx.nodes.Person.create(
+              { name: `person-${index}` },
+              { id: `person-${index}` },
+            );
+            await tx.edges.mentions.create(
+              message,
+              person,
+              {},
+              {
+                id: `mention-${index}`,
+              },
+            );
+          }
+        });
+
+        expect(await store.nodes.Person.count()).toBe(
+          RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT,
+        );
+        expect(await store.edges.mentions.count()).toBe(
+          RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT,
+        );
+        const recordedAt = await store.recordedNow();
+        expect(recordedAt).toBeDefined();
+        if (recordedAt === undefined) {
+          throw new Error("expected a recorded commit instant");
+        }
+        const recordedEdges = await Promise.all(
+          Array.from(
+            { length: RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT },
+            (_, index) =>
+              store
+                .asOfRecorded(recordedAt)
+                .edges.mentions.getById(
+                  asEdgeId<typeof mentions>(`mention-${index}`),
+                ),
+          ),
+        );
+        expect(recordedEdges.every((edge) => edge !== undefined)).toBe(true);
+      },
+    );
   });
 
   it("A) graph-owned store.transaction(): throw-after-await rolls back BOTH TypeGraph and product writes", async () => {
