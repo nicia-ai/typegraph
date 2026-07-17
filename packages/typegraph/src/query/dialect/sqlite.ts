@@ -111,6 +111,13 @@ export const sqliteDialect: DialectAdapter = {
     return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
   },
 
+  jsonExtractDouble(column, pointer) {
+    // json_extract already yields INTEGER/REAL affinity for JSON numbers,
+    // and SQLite arithmetic on those values is IEEE 754 double.
+    const path = toSqlitePath(pointer);
+    return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
+  },
+
   jsonExtractBoolean(column, pointer) {
     // SQLite json_extract returns 0/1 for boolean values
     const path = toSqlitePath(pointer);

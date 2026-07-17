@@ -6,6 +6,7 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import {
+  CompilerInvariantError,
   ConfigurationError,
   GraphAlgorithmConvergenceError,
 } from "../../errors";
@@ -25,6 +26,7 @@ import {
 } from "../../query/sql-intent";
 import { compareStrings } from "../../utils/compare";
 import { generateId } from "../../utils/id";
+import { isPresent } from "../../utils/presence";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
 import type { PathNode, TraversalDirection } from "./types";
@@ -402,14 +404,21 @@ export async function reduceExpandedWorkingSet<T>(
         ),
       );
       for (const row of rows) {
+        // A weighted operation compiles a weight column into every
+        // expansion, and weighted algorithms audit their weight domain
+        // before expanding — so a NULL weight here means a plan skipped
+        // that audit, and silently dropping the edge would return
+        // plausible-but-wrong results.
+        if (operation.weightExpression !== undefined && !isPresent(row.weight)) {
+          throw new CompilerInvariantError(
+            "Weighted graph expansion produced a NULL weight; the operation's weight domain was not audited.",
+            { source: row.source_id, target: row.target_id },
+          );
+        }
         const expansion = {
           source: { id: row.source_id, kind: row.source_kind },
           target: { id: row.target_id, kind: row.target_kind },
-          // Missing-weight edges are pre-audited away unless a default is
-          // configured, so a NULL weight can only mean "not a weighted run".
-          ...(row.weight === undefined || row.weight === null ?
-            {}
-          : { weight: Number(row.weight) }),
+          ...(isPresent(row.weight) ? { weight: Number(row.weight) } : {}),
         } satisfies NodeExpansion;
         const targetKey = nodeIdentityKey(expansion.target);
         const selected = reduce(reduced.get(targetKey), expansion);
@@ -422,6 +431,19 @@ export async function reduceExpandedWorkingSet<T>(
 
 export function nodeIdentityKey(node: PathNode): NodeIdentityKey {
   return `${node.kind}\u0000${node.id}` as NodeIdentityKey;
+}
+
+/**
+ * Builds a node-identity key from a working-table row's nullable
+ * predecessor columns. Drivers deliver SQL NULL in varying shapes, so only
+ * a string pair counts as a real predecessor.
+ */
+export function nodeIdentityKeyFromRow(
+  id: unknown,
+  kind: unknown,
+): NodeIdentityKey | undefined {
+  if (typeof id !== "string" || typeof kind !== "string") return undefined;
+  return nodeIdentityKey({ id, kind });
 }
 
 export function compareNodeIdentity(left: PathNode, right: PathNode): number {
@@ -753,7 +775,10 @@ function compileWeightExpression(
   weightProperty: string,
   defaultWeight: number | undefined,
 ): SQL {
-  const extracted = sql`CAST(${dialect.jsonExtractText(sql.raw("e.props"), jsonPointer([weightProperty]))} AS DOUBLE PRECISION)`;
+  const extracted = dialect.jsonExtractDouble(
+    sql.raw("e.props"),
+    jsonPointer([weightProperty]),
+  );
   return defaultWeight === undefined ? extracted : (
       sql`COALESCE(${extracted}, ${defaultWeight})`
     );

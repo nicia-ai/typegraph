@@ -21,6 +21,7 @@ import {
   type NodeExpansion,
   type NodeIdentityKey,
   nodeIdentityKey,
+  nodeIdentityKeyFromRow,
   reduceExpandedWorkingSet,
   runIterativeGraphOperation,
   supportsTemporaryIteration,
@@ -43,10 +44,21 @@ type WeightedTraversalOptions = InternalTraversalOptions &
 type WeightedState = Readonly<{
   frontierCount: number;
   workingTableSize: number;
+  /**
+   * Cheapest known distance to any node with the target id, tracked in JS
+   * from each round's RETURNING rows so the next round can prune with a
+   * plain bound parameter instead of per-candidate subqueries.
+   */
+  bestTargetDistance: number | undefined;
 }>;
 
 type SeededRow = Readonly<{ node_id: string }>;
-type ImprovedRow = Readonly<{ node_id: string }>;
+type ImprovedRow = Readonly<{ node_id: string; distance: number | string }>;
+
+type FrontierRound = Readonly<{
+  frontierCount: number;
+  bestTargetDistance: number | undefined;
+}>;
 
 type DistanceRow = Readonly<{
   node_id: string;
@@ -109,26 +121,16 @@ export async function executeWeightedShortestPath<G extends GraphDef>(
     DEFAULT_WEIGHTED_SHORTEST_PATH_MAX_ITERATIONS,
     WEIGHTED_ALGORITHM_NAME,
   );
-  const traversalOptions: WeightedTraversalOptions = {
-    edges: options.edges,
-    weightProperty: options.weightProperty,
-    ...(options.defaultWeight === undefined ?
-      {}
-    : { defaultWeight: options.defaultWeight }),
-    ...(options.direction === undefined ?
-      {}
-    : { direction: options.direction }),
-    ...(options.temporalMode === undefined ?
-      {}
-    : { temporalMode: options.temporalMode }),
-    ...(options.asOf === undefined ? {} : { asOf: options.asOf }),
-    ...(options.recordedAsOf === undefined ?
-      {}
-    : { recordedAsOf: options.recordedAsOf }),
-    ...(options.workingMemory === undefined ?
-      {}
-    : { workingMemory: options.workingMemory }),
-  };
+  // Structurally assignable — the internal options are the traversal options
+  // plus the algorithm-only `maxIterations`, which the substrate ignores.
+  const traversalOptions: WeightedTraversalOptions = options;
+
+  // Non-negative weights make distance 0 unbeatable, so a self path needs
+  // no relaxation rounds — only the weight audit (for deterministic data
+  // errors) and a visibility check on the node itself.
+  if (sourceId === targetId) {
+    return findWeightedSelfPath(ctx, sourceId, traversalOptions);
+  }
 
   if (supportsTemporaryIteration(ctx)) {
     return findWeightedShortestPathInWorkingTable(
@@ -189,31 +191,42 @@ async function assertValidEdgeWeights(
   const { dialect } = operation.ctx;
   const pointer = jsonPointer([weightProperty]);
   const propsColumn = sql.raw("e.props");
+  // The inner projection extracts the JSON path once per edge; the outer
+  // violation predicate then works over plain projected columns. Composing
+  // the checks directly over `e.props` would re-parse the JSON payload for
+  // every predicate branch on the audit's full edge scan.
   const isNumber = dialect.jsonPathIsNumber(propsColumn, pointer);
   const isMissing = dialect.jsonPathIsNull(propsColumn, pointer);
   const weightText = dialect.jsonExtractText(propsColumn, pointer);
-  // CASE keeps the cast unreachable for non-numeric values: PostgreSQL does
-  // not short-circuit AND, and casting arbitrary text would error before the
-  // audit could produce its typed report.
-  const isNegative = sql`CASE WHEN ${isNumber} THEN CAST(${weightText} AS DOUBLE PRECISION) < 0 ELSE ${dialect.booleanLiteral(false)} END`;
   const missingViolation =
-    defaultWeight === undefined ? isMissing : dialect.booleanLiteral(false);
-  const invalid = sql`(${missingViolation}) OR ((NOT ${isMissing}) AND (NOT ${isNumber})) OR (${isNegative})`;
+    defaultWeight === undefined ?
+      sql`audited.is_missing = 1`
+    : dialect.booleanLiteral(false);
+  // CASE keeps the cast unreachable for non-numeric values: PostgreSQL does
+  // not short-circuit OR/AND, and casting arbitrary text would error before
+  // the audit could produce its typed report.
+  const negativeViolation = sql`CASE WHEN audited.is_number = 1 THEN CAST(audited.weight_text AS DOUBLE PRECISION) < 0 ELSE ${dialect.booleanLiteral(false)} END`;
 
   for (const edgeKinds of operation.edgeKindChunks) {
     const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
     const rows = await operation.backend.execute<WeightAuditRow>(
       asCompiledRowsSql(sql`
-        SELECT e.id AS edge_id, e.kind AS edge_kind,
-          ${weightText} AS weight_text,
-          CASE WHEN ${isNumber} THEN 1 ELSE 0 END AS is_number,
-          CASE WHEN ${isMissing} THEN 1 ELSE 0 END AS is_missing
-        FROM ${operation.schema.edgesTable} e
-        WHERE e.graph_id = ${operation.ctx.graphId}
-          AND ${edgeKindFilter}
-          AND ${operation.edgeTemporalFilter}
-          AND (${invalid})
-        ORDER BY ${dialect.binaryText(sql`e.id`)}
+        SELECT audited.edge_id, audited.edge_kind, audited.weight_text,
+          audited.is_number, audited.is_missing
+        FROM (
+          SELECT e.id AS edge_id, e.kind AS edge_kind,
+            ${weightText} AS weight_text,
+            CASE WHEN ${isNumber} THEN 1 ELSE 0 END AS is_number,
+            CASE WHEN ${isMissing} THEN 1 ELSE 0 END AS is_missing
+          FROM ${operation.schema.edgesTable} e
+          WHERE e.graph_id = ${operation.ctx.graphId}
+            AND ${edgeKindFilter}
+            AND ${operation.edgeTemporalFilter}
+        ) audited
+        WHERE (${missingViolation})
+          OR (audited.is_missing = 0 AND audited.is_number = 0)
+          OR (${negativeViolation})
+        ORDER BY ${dialect.binaryText(sql`audited.edge_id`)}
         LIMIT 1
       `),
     );
@@ -261,7 +274,10 @@ async function findWeightedShortestPathInWorkingTable(
   maxIterations: number,
   options: WeightedTraversalOptions,
 ): Promise<WeightedShortestPathResult | undefined> {
-  return runIterativeGraphOperation(ctx, options, {
+  return runIterativeGraphOperation<
+    WeightedState,
+    WeightedShortestPathResult | undefined
+  >(ctx, options, {
     algorithm: WEIGHTED_ALGORITHM_NAME,
     maxIterations,
     createWorkingTable,
@@ -275,17 +291,22 @@ async function findWeightedShortestPathInWorkingTable(
       return {
         frontierCount: seeded.length,
         workingTableSize: seeded.length,
+        // Seeds carry the source id, never the target's — the self-path
+        // case is short-circuited before this plan runs.
+        bestTargetDistance: undefined,
       };
     },
     async runRound(context, state, iteration) {
-      const frontierCount = await relaxFrontierRound(
+      const round = await relaxFrontierRound(
         context,
         targetId,
         iteration,
+        state.bestTargetDistance,
       );
       return {
-        frontierCount,
-        workingTableSize: state.workingTableSize + frontierCount,
+        frontierCount: round.frontierCount,
+        workingTableSize: state.workingTableSize + round.frontierCount,
+        bestTargetDistance: round.bestTargetDistance,
       };
     },
     hasConverged(state: WeightedState) {
@@ -342,18 +363,25 @@ async function seedDistances(
  * Relaxes one round: expands the previous round's frontier through visible
  * edges, keeps the cheapest candidate per target identity (ties broken by
  * source id then kind in binary collation, so both backends pick the same
- * predecessor), and upserts only strict distance improvements. Candidates
- * that already cost at least as much as a known path to the target are
- * pruned — sound because the audit guarantees non-negative weights.
+ * predecessor), and upserts only strict distance improvements.
+ *
+ * Candidates costing at least `roundBound` — the cheapest path to the
+ * target known at round start, tracked in JS from RETURNING rows — are
+ * pruned. Sound because the audit guarantees non-negative weights: no
+ * extension of such a candidate can beat the known path. A bound parameter
+ * keeps the pruning O(1) per candidate and applies the same round-start
+ * state on both execution paths, so they run identical round sequences.
  */
 async function relaxFrontierRound(
   context: IterativeGraphRunContext,
   targetId: string,
   iteration: number,
-): Promise<number> {
+  roundBound: number | undefined,
+): Promise<FrontierRound> {
   const { operation, workingTable, graphId, runId } = context;
   const { dialect } = operation.ctx;
   let frontierCount = 0;
+  let bestTargetDistance = roundBound;
   for (const edgeKinds of operation.edgeKindChunks) {
     const sourceFilter = sql`
       w.graph_id = ${graphId}
@@ -397,14 +425,7 @@ async function relaxFrontierRound(
               AND frontier.node_id = expanded.source_id
               AND frontier.node_kind = expanded.source_kind
           ) candidates
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM ${workingTable} settled_target
-            WHERE settled_target.graph_id = ${graphId}
-              AND settled_target.run_id = ${runId}
-              AND settled_target.node_id = ${targetId}
-              AND settled_target.distance <= candidates.candidate_distance
-          )
+          WHERE ${roundBound === undefined ? sql`TRUE` : sql`candidates.candidate_distance < ${roundBound}`}
         ) ranked
         WHERE ranked.candidate_rank = 1
         ON CONFLICT (graph_id, run_id, node_kind, node_id) DO UPDATE SET
@@ -414,12 +435,19 @@ async function relaxFrontierRound(
           predecessor_kind = excluded.predecessor_kind,
           improved_round = excluded.improved_round
         WHERE excluded.distance < ${workingTable}.distance
-        RETURNING node_id
+        RETURNING node_id, distance
       `),
     );
     frontierCount += rows.length;
+    for (const row of rows) {
+      if (row.node_id !== targetId) continue;
+      const distance = Number(row.distance);
+      if (bestTargetDistance === undefined || distance < bestTargetDistance) {
+        bestTargetDistance = distance;
+      }
+    }
   }
-  return frontierCount;
+  return { frontierCount, bestTargetDistance };
 }
 
 async function readVisitedFromWorkingTable(
@@ -436,26 +464,42 @@ async function readVisitedFromWorkingTable(
   );
   return new Map(
     rows.map((row) => {
-      const parentKey =
-        (
-          typeof row.predecessor_id !== "string" ||
-          typeof row.predecessor_kind !== "string"
-        ) ?
-          undefined
-        : nodeIdentityKey({
-            id: row.predecessor_id,
-            kind: row.predecessor_kind,
-          });
       const node = {
         id: row.node_id,
         kind: row.node_kind,
         distance: Number(row.distance),
         hops: Number(row.hops),
-        parentKey,
+        parentKey: nodeIdentityKeyFromRow(
+          row.predecessor_id,
+          row.predecessor_kind,
+        ),
       } satisfies WeightedVisitedNode;
       return [nodeIdentityKey(node), node];
     }),
   );
+}
+
+/**
+ * Zero-weight self path: audits the weight domain (so data errors surface
+ * identically to a full traversal) and checks the node's visibility, with
+ * no relaxation rounds. Multiple kinds sharing the id resolve to the
+ * smallest node identity, matching the traversal tie-break.
+ */
+async function findWeightedSelfPath(
+  ctx: AlgorithmContext,
+  nodeId: string,
+  options: WeightedTraversalOptions,
+): Promise<WeightedShortestPathResult | undefined> {
+  return withInlineIterativeGraphOperation(ctx, options, async (operation) => {
+    await assertValidEdgeWeights(
+      operation,
+      options.weightProperty,
+      options.defaultWeight,
+    );
+    const node = (await fetchVisibleWorkingNodes(operation, [nodeId]))[0];
+    if (node === undefined) return undefined;
+    return { nodes: [node], depth: 0, totalWeight: 0 };
+  });
 }
 
 // ============================================================
@@ -490,7 +534,7 @@ async function findWeightedShortestPathInline(
         },
       ]),
     );
-    let bestTargetDistance = sourceId === targetId ? 0 : undefined;
+    let bestTargetDistance: number | undefined;
     let frontier: readonly PathNode[] = sources;
     let rounds = 0;
 
@@ -561,8 +605,8 @@ function reduceWeightedCandidate(
   expansion: NodeExpansion,
   settled: ReadonlyMap<NodeIdentityKey, WeightedVisitedNode>,
 ): WeightedCandidate | undefined {
-  // Weighted operations always compile a weight column; the guard narrows
-  // the optional field.
+  // Unreachable on a weighted run — the substrate rejects NULL weights with
+  // an invariant error — but the field is optional, so narrow it.
   const weight = expansion.weight;
   if (weight === undefined) return existing;
   const sourceEntry = settled.get(nodeIdentityKey(expansion.source));

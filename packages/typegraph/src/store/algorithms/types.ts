@@ -162,28 +162,25 @@ export type InternalShortestPathOptions<G extends GraphDef> =
  * — the algorithm normally converges (and prunes against the best known
  * target distance) long before reaching it.
  */
-export type WeightedShortestPathOptions<G extends GraphDef> =
-  TemporalAlgorithmOptions &
-    IterativeMemoryOptions &
-    Readonly<{
-      /** Edge kinds to follow. At least one kind is required. */
-      edges: readonly EdgeKinds<G>[];
-      /**
-       * Top-level edge property supplying each edge's non-negative numeric
-       * weight.
-       */
-      weightProperty: string;
-      /**
-       * Weight substituted for edges missing `weightProperty`. Must be a
-       * finite non-negative number. Without it, a missing weight throws
-       * `InvalidEdgeWeightError`.
-       */
-      defaultWeight?: number;
-      /** Direction of traversal (default: `"out"`). */
-      direction?: TraversalDirection;
-      /** Maximum relaxation rounds before throwing. Defaults to 1000. */
-      maxIterations?: number;
-    }>;
+export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
+  BaseTraversalOptions<G>,
+  "maxHops" | "cyclePolicy"
+> &
+  Readonly<{
+    /**
+     * Top-level edge property supplying each edge's non-negative numeric
+     * weight.
+     */
+    weightProperty: string;
+    /**
+     * Weight substituted for edges missing `weightProperty`. Must be a
+     * finite non-negative number. Without it, a missing weight throws
+     * `InvalidEdgeWeightError`.
+     */
+    defaultWeight?: number;
+    /** Maximum relaxation rounds before throwing. Defaults to 1000. */
+    maxIterations?: number;
+  }>;
 
 export type InternalWeightedShortestPathOptions<G extends GraphDef> =
   InternalTemporalAlgorithmOptions &

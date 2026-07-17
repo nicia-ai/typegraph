@@ -939,23 +939,27 @@ export class GraphAlgorithmConvergenceError extends TypeGraphError {
 /** Stable reasons a weighted traversal can reject an edge's weight value. */
 export type InvalidEdgeWeightReason = "missing" | "negative" | "non_numeric";
 
-const EDGE_WEIGHT_REASON_MESSAGES: Readonly<
-  Record<InvalidEdgeWeightReason, string>
+const EDGE_WEIGHT_REASONS: Readonly<
+  Record<
+    InvalidEdgeWeightReason,
+    Readonly<{ message: string; suggestion: string }>
+  >
 > = {
-  missing: "has no value for weight property",
-  negative: "has a negative value for weight property",
-  non_numeric: "has a non-numeric value for weight property",
-};
-
-const EDGE_WEIGHT_REASON_SUGGESTIONS: Readonly<
-  Record<InvalidEdgeWeightReason, string>
-> = {
-  missing:
-    "Set the property on every selected edge, or provide defaultWeight for edges without it.",
-  negative:
-    "Weighted traversal requires non-negative weights; repair the edge data before retrying.",
-  non_numeric:
-    "Store the weight property as a JSON number on every selected edge before retrying.",
+  missing: {
+    message: "has no value for weight property",
+    suggestion:
+      "Set the property on every selected edge, or provide defaultWeight for edges without it.",
+  },
+  negative: {
+    message: "has a negative value for weight property",
+    suggestion:
+      "Weighted traversal requires non-negative weights; repair the edge data before retrying.",
+  },
+  non_numeric: {
+    message: "has a non-numeric value for weight property",
+    suggestion:
+      "Store the weight property as a JSON number on every selected edge before retrying.",
+  },
 };
 
 /**
@@ -975,14 +979,14 @@ export class InvalidEdgeWeightError extends TypeGraphError {
     }>,
   ) {
     super(
-      `Edge '${details.edgeId}' (kind '${details.edgeKind}') ${EDGE_WEIGHT_REASON_MESSAGES[details.reason]} '${details.property}'${
+      `Edge '${details.edgeId}' (kind '${details.edgeKind}') ${EDGE_WEIGHT_REASONS[details.reason].message} '${details.property}'${
         details.value === undefined ? "" : ` (value: ${details.value})`
       }.`,
       "INVALID_EDGE_WEIGHT",
       {
         details: { ...details },
         category: "user",
-        suggestion: EDGE_WEIGHT_REASON_SUGGESTIONS[details.reason],
+        suggestion: EDGE_WEIGHT_REASONS[details.reason].suggestion,
       },
     );
     this.name = "InvalidEdgeWeightError";

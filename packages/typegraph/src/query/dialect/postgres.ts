@@ -107,6 +107,13 @@ export const postgresDialect: DialectAdapter = {
     return sql`(${column} #>> ${path})::numeric`;
   },
 
+  jsonExtractDouble(column, pointer) {
+    // float8, not ::numeric — decimal arithmetic would diverge from
+    // SQLite's binary doubles when values accumulate.
+    const path = toPostgresPath(pointer);
+    return sql`(${column} #>> ${path})::double precision`;
+  },
+
   jsonExtractBoolean(column, pointer) {
     // Extract as text then cast to boolean
     const path = toPostgresPath(pointer);

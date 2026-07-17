@@ -171,6 +171,20 @@ export interface DialectAdapter {
   jsonExtractNumber(column: SQL, pointer: JsonPointer): SQL;
 
   /**
+   * Extracts a JSON value at a path as an IEEE 754 double.
+   *
+   * Unlike {@link jsonExtractNumber} — whose PostgreSQL form casts to
+   * `numeric` and therefore computes in exact decimal — this member
+   * guarantees binary double arithmetic on every dialect, so accumulated
+   * results (e.g. graph traversal weights) are backend-identical.
+   *
+   * @example
+   * SQLite: json_extract(column, '$.path')
+   * PostgreSQL: (column #>> ARRAY['path'])::double precision
+   */
+  jsonExtractDouble(column: SQL, pointer: JsonPointer): SQL;
+
+  /**
    * Extracts a JSON value at a path and casts to boolean.
    *
    * @example

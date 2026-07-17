@@ -13,6 +13,7 @@ import {
   type NodeExpansion,
   type NodeIdentityKey,
   nodeIdentityKey,
+  nodeIdentityKeyFromRow,
   reduceExpandedWorkingSet,
   runIterativeGraphOperation,
   supportsTemporaryIteration,
@@ -739,16 +740,10 @@ function createVisitedMapFromRows(
     rows
       .filter((row) => row.side === side)
       .map((row) => {
-        const parentKey =
-          (
-            typeof row.predecessor_id !== "string" ||
-            typeof row.predecessor_kind !== "string"
-          ) ?
-            undefined
-          : nodeIdentityKey({
-              id: row.predecessor_id,
-              kind: row.predecessor_kind,
-            });
+        const parentKey = nodeIdentityKeyFromRow(
+          row.predecessor_id,
+          row.predecessor_kind,
+        );
         const node = {
           id: row.node_id,
           kind: row.node_kind,
