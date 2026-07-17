@@ -220,11 +220,10 @@ async function assertValidEdgeWeights(
   // the checks directly over `e.props` would re-parse the JSON payload for
   // every predicate branch on the audit's full edge scan.
   //
-  // Both type predicates are the never-NULL, type-based dialect members —
-  // jsonPathIsNull's PostgreSQL text-comparison form would misclassify a
-  // JSON string "null" as null and go three-valued on a JSON null.
+  // Both type predicates are never-NULL by contract, so the multi-branch
+  // violation predicate below stays two-valued.
   const isNumber = dialect.jsonPathIsNumber(propsColumn, pointer);
-  const isMissing = dialect.jsonPathIsMissingOrNull(propsColumn, pointer);
+  const isMissing = dialect.jsonPathIsNull(propsColumn, pointer);
   const weightText = dialect.jsonExtractText(propsColumn, pointer);
   // CASE keeps the numeric extraction unreachable for non-numeric values:
   // PostgreSQL does not short-circuit OR/AND, and casting arbitrary text

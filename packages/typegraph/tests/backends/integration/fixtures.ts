@@ -51,6 +51,8 @@ const Document = defineNode("Document", {
     metadata: z
       .object({
         author: z.string().optional(),
+        // Nullable so pointer-predicate tests can pin the JSON-null case.
+        reviewer: z.string().nullable().optional(),
         version: z.number().optional(),
         flags: z
           .object({

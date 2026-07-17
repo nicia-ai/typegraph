@@ -256,16 +256,23 @@ export interface DialectAdapter {
   jsonHasPath(column: SQL, pointer: JsonPointer): SQL;
 
   /**
-   * Checks if a JSON value at a path is SQL NULL or JSON null.
+   * Checks if a JSON value at a path is absent or the JSON `null` literal —
+   * i.e. carries no usable value.
+   *
+   * The check is type-based (`json_type` / `jsonb_typeof`): a JSON *string*
+   * `"null"` is a string, not null. Never evaluates to SQL NULL — a missing
+   * path yields TRUE — so the predicate composes safely under NOT/OR.
    *
    * @example
-   * SQLite: json_extract(column, '$.path') IS NULL OR json_type(column, '$.path') = 'null'
-   * PostgreSQL: column #> path IS NULL OR column #>> path = 'null'
+   * SQLite: COALESCE(json_type(column, '$.path') = 'null', 1)
+   * PostgreSQL: COALESCE(jsonb_typeof(column #> path) = 'null', TRUE)
    */
   jsonPathIsNull(column: SQL, pointer: JsonPointer): SQL;
 
   /**
-   * Checks if a JSON value at a path is not null (neither SQL NULL nor JSON null).
+   * Checks if a JSON value at a path is present and not the JSON `null`
+   * literal. Exact negation of {@link jsonPathIsNull}: type-based, and
+   * never SQL NULL — a missing path yields FALSE.
    */
   jsonPathIsNotNull(column: SQL, pointer: JsonPointer): SQL;
 
@@ -280,21 +287,6 @@ export interface DialectAdapter {
    * PostgreSQL: jsonb_typeof(column #> path) = 'number'
    */
   jsonPathIsNumber(column: SQL, pointer: JsonPointer): SQL;
-
-  /**
-   * Checks if the JSON value at a path is absent or the JSON `null`
-   * literal — i.e. carries no usable value.
-   *
-   * Unlike {@link jsonPathIsNull}, this predicate is type-based
-   * (`json_type` / `jsonb_typeof`), so a JSON *string* `"null"` is NOT
-   * treated as null, and it never evaluates to SQL NULL — a missing path
-   * yields TRUE — so it composes safely inside audit-style WHERE clauses.
-   *
-   * @example
-   * SQLite: COALESCE(json_type(column, '$.path') = 'null', 1)
-   * PostgreSQL: COALESCE(jsonb_typeof(column #> path) = 'null', TRUE)
-   */
-  jsonPathIsMissingOrNull(column: SQL, pointer: JsonPointer): SQL;
 
   // ============================================================
   // Comparison Operations
