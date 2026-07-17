@@ -12,10 +12,23 @@ import { likeEscapeClause } from "./like-escape";
 import { type DialectAdapter } from "./types";
 
 /**
- * Escapes a string for use in a PostgreSQL string literal.
- * Uses single quotes and escapes embedded single quotes.
+ * Escapes a string for use in a PostgreSQL string literal, independent of
+ * server configuration.
+ *
+ * A plain `'…'` literal is only safe when the value contains no backslash:
+ * under the legacy `standard_conforming_strings = off` setting, backslashes
+ * act as escape characters inside regular literals, so a value ending in
+ * `\` could swallow the closing quote and change how the statement parses.
+ * Values containing a backslash therefore use the `E'…'` form — where
+ * backslash is an escape character under BOTH settings — with backslashes
+ * and quotes doubled. Backslash-free values keep the plain form so the
+ * emitted SQL text (which callers rely on being identical across clauses)
+ * is unchanged for the common case.
  */
 function escapePostgresLiteral(value: string): string {
+  if (value.includes("\\")) {
+    return `E'${value.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+  }
   // PostgreSQL uses '' to escape single quotes inside string literals
   return `'${value.replaceAll("'", "''")}'`;
 }
@@ -25,7 +38,10 @@ function escapePostgresLiteral(value: string): string {
  *
  * Uses raw SQL (non-parameterized) to ensure the same expression text
  * is generated when the same field is used in multiple clauses (SELECT, GROUP BY).
- * This is safe because JSON pointers come from schema definitions, not user input.
+ * Pointers usually come from schema definitions, but some (e.g. a weighted
+ * traversal's `weightProperty`) are runtime strings — safe either way
+ * because {@link escapePostgresLiteral} escapes independently of server
+ * configuration.
  *
  * @example
  * "/name" → ARRAY['name']
@@ -107,6 +123,13 @@ export const postgresDialect: DialectAdapter = {
     return sql`(${column} #>> ${path})::numeric`;
   },
 
+  jsonExtractDouble(column, pointer) {
+    // float8, not ::numeric — decimal arithmetic would diverge from
+    // SQLite's binary doubles when values accumulate.
+    const path = toPostgresPath(pointer);
+    return sql`(${column} #>> ${path})::double precision`;
+  },
+
   jsonExtractBoolean(column, pointer) {
     // Extract as text then cast to boolean
     const path = toPostgresPath(pointer);
@@ -170,6 +193,22 @@ export const postgresDialect: DialectAdapter = {
     const path = toPostgresPath(pointer);
     // Check both SQL NULL and JSON null literal
     return sql`(${column} #> ${path} IS NULL OR ${column} #>> ${path} = 'null')`;
+  },
+
+  jsonPathIsNumber(column, pointer) {
+    const path = toPostgresPath(pointer);
+    // jsonb_typeof returns NULL for a missing path; COALESCE keeps the
+    // predicate two-valued so negations don't silently drop rows.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'number', FALSE)`;
+  },
+
+  jsonPathIsMissingOrNull(column, pointer) {
+    const path = toPostgresPath(pointer);
+    // Type-based: a JSON string "null" is a string, not null (the `#>>`
+    // text comparison in jsonPathIsNull cannot tell them apart), and
+    // jsonb_typeof of a JSON null is 'null' rather than SQL NULL, so this
+    // stays two-valued where `column #> path IS NULL` would not.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'null', TRUE)`;
   },
 
   jsonPathIsNotNull(column, pointer) {

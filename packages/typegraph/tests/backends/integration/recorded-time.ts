@@ -1109,6 +1109,48 @@ export function registerRecordedTimeIntegrationTests(
       expect(replayedPath?.depth).toBe(2);
     });
 
+    it("reconstructs weighted shortest paths at recorded instants", async () => {
+      const store = await createHistoryStore(context);
+      const a = await store.nodes.Person.create({ name: "WA", age: 1 });
+      const b = await store.nodes.Person.create({ name: "WB", age: 2 });
+      const c = await store.nodes.Person.create({ name: "WC", age: 3 });
+      await store.edges.knows.create(a, b, { weight: 5 });
+      const beforeDetour = await readRecordedClock(store);
+
+      // A cheaper two-hop detour appears later; the weight audit and the
+      // relaxation rounds must both read the recorded relation at the pin.
+      await store.edges.knows.create(a, c, { weight: 1 });
+      await store.edges.knows.create(c, b, { weight: 1 });
+      const afterDetour = await readRecordedClock(store);
+
+      const early = await store
+        .asOfRecorded(beforeDetour)
+        .weightedShortestPath(a.id, b.id, {
+          edges: ["knows"],
+          weightProperty: "weight",
+        });
+      expect(early?.totalWeight).toBe(5);
+      expect(early?.depth).toBe(1);
+
+      const late = await store
+        .asOfRecorded(afterDetour)
+        .weightedShortestPath(a.id, b.id, {
+          edges: ["knows"],
+          weightProperty: "weight",
+        });
+      expect(late?.totalWeight).toBe(2);
+      expect(late?.nodes.map((node) => node.id)).toEqual([a.id, c.id, b.id]);
+
+      // History is immutable: replaying the earlier pin still sees weight 5.
+      const replayed = await store
+        .asOfRecorded(beforeDetour)
+        .weightedShortestPath(a.id, b.id, {
+          edges: ["knows"],
+          weightProperty: "weight",
+        });
+      expect(replayed?.totalWeight).toBe(5);
+    });
+
     it("rejects the recorded-time open sentinel in internal algorithm options", async () => {
       const store = await createHistoryStore(context);
       const alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
@@ -1275,6 +1317,16 @@ export function registerRecordedTimeIntegrationTests(
               alice.id,
               bob.id,
               algorithmOptions,
+            ]),
+          message: "recordedAsOf is only available through",
+        },
+        {
+          surface: "weightedShortestPath",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "weightedShortestPath", [
+              alice.id,
+              bob.id,
+              { ...algorithmOptions, weightProperty: "weight" },
             ]),
           message: "recordedAsOf is only available through",
         },

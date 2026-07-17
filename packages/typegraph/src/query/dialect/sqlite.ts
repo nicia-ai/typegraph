@@ -111,6 +111,13 @@ export const sqliteDialect: DialectAdapter = {
     return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
   },
 
+  jsonExtractDouble(column, pointer) {
+    // json_extract already yields INTEGER/REAL affinity for JSON numbers,
+    // and SQLite arithmetic on those values is IEEE 754 double.
+    const path = toSqlitePath(pointer);
+    return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
+  },
+
   jsonExtractBoolean(column, pointer) {
     // SQLite json_extract returns 0/1 for boolean values
     const path = toSqlitePath(pointer);
@@ -172,6 +179,22 @@ export const sqliteDialect: DialectAdapter = {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));
     return sql`(json_extract(${column}, ${pathSql}) IS NULL OR json_type(${column}, ${pathSql}) = 'null')`;
+  },
+
+  jsonPathIsNumber(column, pointer) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    // json_type returns NULL for a missing path; COALESCE keeps the
+    // predicate two-valued so negations don't silently drop rows.
+    return sql`COALESCE(json_type(${column}, ${pathSql}) IN ('integer', 'real'), 0)`;
+  },
+
+  jsonPathIsMissingOrNull(column, pointer) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    // Type-based: a JSON string "null" is a string, not null. json_type
+    // returns NULL for a missing path, which COALESCE maps to TRUE.
+    return sql`COALESCE(json_type(${column}, ${pathSql}) = 'null', 1)`;
   },
 
   jsonPathIsNotNull(column, pointer) {

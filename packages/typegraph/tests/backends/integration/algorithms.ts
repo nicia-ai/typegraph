@@ -81,6 +81,21 @@ async function seedTemporalGraph(
   };
 }
 
+/**
+ * Anna --(weight 5)--> Clara, and a cheaper detour through Bruno (1 + 1).
+ * Unweighted shortest path takes the direct edge; weighted must take the
+ * detour.
+ */
+async function seedWeightedTriangle(store: IntegrationStore) {
+  const anna = await store.nodes.Person.create({ name: "Anna" });
+  const bruno = await store.nodes.Person.create({ name: "Bruno" });
+  const clara = await store.nodes.Person.create({ name: "Clara" });
+  await store.edges.knows.create(anna, clara, { weight: 5 });
+  await store.edges.knows.create(anna, bruno, { weight: 1 });
+  await store.edges.knows.create(bruno, clara, { weight: 1 });
+  return { anna, bruno, clara };
+}
+
 export function registerAlgorithmIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -205,6 +220,194 @@ export function registerAlgorithmIntegrationTests(
         });
         // Alice→Bob (incoming), Bob→Charlie (outgoing)
         expect(degree).toBe(2);
+      });
+    });
+
+    describe("weightedShortestPath", () => {
+      it("finds the minimum-weight path, not the minimum-hop path", async () => {
+        const store = context.getStore();
+        const ids = await seedWeightedTriangle(store);
+
+        const weighted = await store.algorithms.weightedShortestPath(
+          ids.anna,
+          ids.clara,
+          { edges: ["knows"], weightProperty: "weight" },
+        );
+        expect(weighted?.totalWeight).toBe(2);
+        expect(weighted?.depth).toBe(2);
+        expect(weighted?.nodes.map((node) => node.id)).toEqual([
+          ids.anna.id,
+          ids.bruno.id,
+          ids.clara.id,
+        ]);
+
+        const unweighted = await store.algorithms.shortestPath(
+          ids.anna,
+          ids.clara,
+          { edges: ["knows"] },
+        );
+        expect(unweighted?.depth).toBe(1);
+      });
+
+      it("traverses undirected with direction 'both'", async () => {
+        const store = context.getStore();
+        const ids = await seedWeightedTriangle(store);
+
+        const path = await store.algorithms.weightedShortestPath(
+          ids.clara,
+          ids.anna,
+          { edges: ["knows"], weightProperty: "weight", direction: "both" },
+        );
+        expect(path?.totalWeight).toBe(2);
+        expect(path?.nodes.map((node) => node.id)).toEqual([
+          ids.clara.id,
+          ids.bruno.id,
+          ids.anna.id,
+        ]);
+      });
+
+      it("fails fast on missing weights unless defaultWeight is provided", async () => {
+        const store = context.getStore();
+        const ids = await seedWeightedTriangle(store);
+        const dora = await store.nodes.Person.create({ name: "Dora" });
+        await store.edges.knows.create(ids.clara, dora, {});
+
+        await expect(
+          store.algorithms.weightedShortestPath(ids.anna, dora.id, {
+            edges: ["knows"],
+            weightProperty: "weight",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "missing", property: "weight" },
+        });
+
+        const withDefault = await store.algorithms.weightedShortestPath(
+          ids.anna,
+          dora.id,
+          { edges: ["knows"], weightProperty: "weight", defaultWeight: 10 },
+        );
+        expect(withDefault?.totalWeight).toBe(12);
+      });
+
+      it("rejects a non-numeric weight property identically on both backends", async () => {
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "TextAnna" });
+        const bruno = await store.nodes.Person.create({ name: "TextBruno" });
+        await store.edges.knows.create(anna, bruno, { since: "2020" });
+
+        await expect(
+          store.algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "since",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "non_numeric", value: "2020" },
+        });
+      });
+
+      it('classifies the JSON string "null" as non-numeric, not missing', async () => {
+        // Regression: PostgreSQL's text-comparison null check cannot tell a
+        // JSON string "null" from a JSON null; the type-based audit must.
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "StrNullAnna" });
+        const bruno = await store.nodes.Person.create({ name: "StrNullBruno" });
+        await store.edges.knows.create(anna, bruno, { since: "null" });
+
+        await expect(
+          store.algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "since",
+            defaultWeight: 1,
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "non_numeric", value: "null" },
+        });
+      });
+
+      it("treats a JSON null weight as missing on both backends", async () => {
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "NullAnna" });
+        const bruno = await store.nodes.Person.create({ name: "NullBruno" });
+        // eslint-disable-next-line unicorn/no-null -- the JSON null value is the case under test
+        await store.edges.knows.create(anna, bruno, { weight: null });
+
+        await expect(
+          store.algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "weight",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "missing", property: "weight" },
+        });
+
+        const withDefault = await store.algorithms.weightedShortestPath(
+          anna,
+          bruno,
+          { edges: ["knows"], weightProperty: "weight", defaultWeight: 4 },
+        );
+        expect(withDefault?.totalWeight).toBe(4);
+      });
+
+      it("accumulates fractional weights identically on both backends", async () => {
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "FracAnna" });
+        const bruno = await store.nodes.Person.create({ name: "FracBruno" });
+        const clara = await store.nodes.Person.create({ name: "FracClara" });
+        await store.edges.knows.create(anna, bruno, { weight: 0.1 });
+        await store.edges.knows.create(bruno, clara, { weight: 0.2 });
+
+        const path = await store.algorithms.weightedShortestPath(anna, clara, {
+          edges: ["knows"],
+          weightProperty: "weight",
+        });
+        // Both backends must do IEEE 754 double arithmetic — a decimal
+        // NUMERIC accumulation would yield exactly 0.3 and diverge.
+        expect(path?.totalWeight).toBe(0.1 + 0.2);
+      });
+
+      it("honors the temporal coordinate, including through a pinned StoreView", async () => {
+        const store = context.getStore();
+        const { PAST, BEFORE, EDGE_ENDED } = TEMPORAL_ANCHORS;
+        const anna = await store.nodes.Person.create(
+          { name: "TemporalAnna" },
+          { validFrom: PAST },
+        );
+        const bruno = await store.nodes.Person.create(
+          { name: "TemporalBruno" },
+          { validFrom: PAST },
+        );
+        // A cheap edge that ended, and a pricier one still valid.
+        await store.edges.knows.create(
+          anna,
+          bruno,
+          { weight: 1 },
+          { validFrom: PAST, validTo: EDGE_ENDED },
+        );
+        await store.edges.knows.create(
+          anna,
+          bruno,
+          { weight: 8 },
+          { validFrom: PAST },
+        );
+
+        const current = await store.algorithms.weightedShortestPath(
+          anna,
+          bruno,
+          { edges: ["knows"], weightProperty: "weight" },
+        );
+        expect(current?.totalWeight).toBe(8);
+
+        const pinned = await store
+          .asOf(BEFORE)
+          .algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "weight",
+          });
+        expect(pinned?.totalWeight).toBe(1);
       });
     });
 

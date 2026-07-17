@@ -49,6 +49,7 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded).toHaveProperty("query");
     expectTypeOf(recorded).toHaveProperty("subgraph");
     expectTypeOf(recorded).toHaveProperty("shortestPath");
+    expectTypeOf(recorded).toHaveProperty("weightedShortestPath");
     expectTypeOf(recorded).toHaveProperty("reachable");
     expectTypeOf(recorded).toHaveProperty("degree");
     expectTypeOf(recorded).toHaveProperty("nodes");

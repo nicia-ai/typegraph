@@ -66,6 +66,7 @@ export type {
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,
   StoreViewWeaklyConnectedComponentsOptions,
+  StoreViewWeightedShortestPathOptions,
 } from "./store-view";
 export { RecordedStoreView, StoreView } from "./store-view";
 

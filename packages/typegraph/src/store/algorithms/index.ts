@@ -26,6 +26,7 @@ import type {
   InternalReachableOptions,
   InternalShortestPathOptions,
   InternalWeaklyConnectedComponentsOptions,
+  InternalWeightedShortestPathOptions,
   NeighborsOptions,
   ReachableNode,
   ReachableOptions,
@@ -33,8 +34,11 @@ import type {
   ShortestPathResult,
   WeaklyConnectedComponentMembership,
   WeaklyConnectedComponentsOptions,
+  WeightedShortestPathOptions,
+  WeightedShortestPathResult,
 } from "./types";
 import { executeWeaklyConnectedComponents } from "./weakly-connected-components";
+import { executeWeightedShortestPath } from "./weighted-shortest-path";
 
 /**
  * Raw node id or any object with an `id: string` field. Covers `Node`,
@@ -76,6 +80,32 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
     to: NodeIdentifier,
     options: ShortestPathOptions<G>,
   ) => Promise<ShortestPathResult | undefined>;
+
+  /**
+   * Finds the minimum-total-weight path from `from` to `to`, weighting each
+   * traversed edge by the numeric `weightProperty` stored on it. Returns
+   * `undefined` when no path exists. Weights must be non-negative; a
+   * negative, non-numeric, or (without `defaultWeight`) missing weight on
+   * any visible edge of the selected kinds throws `InvalidEdgeWeightError`
+   * before traversal starts.
+   *
+   * @example
+   * ```typescript
+   * const path = await store.algorithms.weightedShortestPath(alice, bob, {
+   *   edges: ["knows"],
+   *   weightProperty: "interactionCost",
+   *   direction: "both",
+   * });
+   * if (path) {
+   *   console.log(`total weight ${path.totalWeight} over ${path.depth} hops`);
+   * }
+   * ```
+   */
+  weightedShortestPath: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: WeightedShortestPathOptions<G>,
+  ) => Promise<WeightedShortestPathResult | undefined>;
 
   /**
    * Returns every node reachable from `from` within `maxHops` edges of the
@@ -130,6 +160,11 @@ export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
     to: NodeIdentifier,
     options: InternalShortestPathOptions<G>,
   ) => Promise<ShortestPathResult | undefined>;
+  weightedShortestPath: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: InternalWeightedShortestPathOptions<G>,
+  ) => Promise<WeightedShortestPathResult | undefined>;
   reachable: (
     from: NodeIdentifier,
     options: InternalReachableOptions<G>,
@@ -207,6 +242,19 @@ export function createGraphAlgorithms<G extends GraphDef>(
         options,
       );
     },
+    weightedShortestPath(from, to, options) {
+      assertRecordedAsOfInternalOnly(
+        options,
+        "weightedShortestPath",
+        allowRecordedAsOf,
+      );
+      return executeWeightedShortestPath(
+        ctx,
+        resolveNodeId(from),
+        resolveNodeId(to),
+        options,
+      );
+    },
     reachable(from, options) {
       assertRecordedAsOfInternalOnly(options, "reachable", allowRecordedAsOf);
       return executeReachable(ctx, resolveNodeId(from), options);
@@ -250,6 +298,7 @@ export type {
   InternalShortestPathOptions,
   InternalTemporalAlgorithmOptions,
   InternalWeaklyConnectedComponentsOptions,
+  InternalWeightedShortestPathOptions,
   NeighborsOptions,
   PathNode,
   ReachableNode,
@@ -260,4 +309,6 @@ export type {
   TraversalDirection,
   WeaklyConnectedComponentMembership,
   WeaklyConnectedComponentsOptions,
+  WeightedShortestPathOptions,
+  WeightedShortestPathResult,
 } from "./types";

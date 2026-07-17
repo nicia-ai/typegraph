@@ -171,6 +171,20 @@ export interface DialectAdapter {
   jsonExtractNumber(column: SQL, pointer: JsonPointer): SQL;
 
   /**
+   * Extracts a JSON value at a path as an IEEE 754 double.
+   *
+   * Unlike {@link jsonExtractNumber} — whose PostgreSQL form casts to
+   * `numeric` and therefore computes in exact decimal — this member
+   * guarantees binary double arithmetic on every dialect, so accumulated
+   * results (e.g. graph traversal weights) are backend-identical.
+   *
+   * @example
+   * SQLite: json_extract(column, '$.path')
+   * PostgreSQL: (column #>> ARRAY['path'])::double precision
+   */
+  jsonExtractDouble(column: SQL, pointer: JsonPointer): SQL;
+
+  /**
    * Extracts a JSON value at a path and casts to boolean.
    *
    * @example
@@ -254,6 +268,33 @@ export interface DialectAdapter {
    * Checks if a JSON value at a path is not null (neither SQL NULL nor JSON null).
    */
   jsonPathIsNotNull(column: SQL, pointer: JsonPointer): SQL;
+
+  /**
+   * Checks if the JSON value at a path exists and is a JSON number.
+   *
+   * Never evaluates to SQL NULL: a missing path yields FALSE, so the
+   * predicate can be negated safely inside audit-style WHERE clauses.
+   *
+   * @example
+   * SQLite: json_type(column, '$.path') IN ('integer', 'real')
+   * PostgreSQL: jsonb_typeof(column #> path) = 'number'
+   */
+  jsonPathIsNumber(column: SQL, pointer: JsonPointer): SQL;
+
+  /**
+   * Checks if the JSON value at a path is absent or the JSON `null`
+   * literal — i.e. carries no usable value.
+   *
+   * Unlike {@link jsonPathIsNull}, this predicate is type-based
+   * (`json_type` / `jsonb_typeof`), so a JSON *string* `"null"` is NOT
+   * treated as null, and it never evaluates to SQL NULL — a missing path
+   * yields TRUE — so it composes safely inside audit-style WHERE clauses.
+   *
+   * @example
+   * SQLite: COALESCE(json_type(column, '$.path') = 'null', 1)
+   * PostgreSQL: COALESCE(jsonb_typeof(column #> path) = 'null', TRUE)
+   */
+  jsonPathIsMissingOrNull(column: SQL, pointer: JsonPointer): SQL;
 
   // ============================================================
   // Comparison Operations

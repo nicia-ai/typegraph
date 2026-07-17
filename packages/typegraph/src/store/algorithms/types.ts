@@ -146,6 +146,65 @@ export type InternalShortestPathOptions<G extends GraphDef> =
   InternalBaseTraversalOptions<G>;
 
 /**
+ * Options for `weightedShortestPath`.
+ *
+ * Each traversed edge contributes the value of `weightProperty` — a JSON
+ * number stored on the edge — to the path's total weight. The traversal
+ * fails fast with `InvalidEdgeWeightError` (before any rounds run) when any
+ * visible edge of the selected kinds has a negative, non-numeric, or
+ * out-of-range weight, or is missing the property with no `defaultWeight`
+ * configured. Weight arithmetic uses IEEE 754 doubles on both backends:
+ * total weights are always backend-identical, and — unless the `edges` list
+ * is large enough to exceed the backend's bind-parameter budget (hundreds
+ * of kinds in one call, where equal-weight predecessor ties may resolve
+ * differently) — so is the returned node sequence.
+ *
+ * Unlike `shortestPath`, there is no `maxHops`: cost-ordered discovery does
+ * not settle nodes in hop order, so a hop bound is not a natural stopping
+ * rule. `maxIterations` caps relaxation rounds purely as a runaway backstop
+ * — the algorithm normally converges (and prunes against the best known
+ * target distance) long before reaching it.
+ */
+export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
+  BaseTraversalOptions<G>,
+  "maxHops" | "cyclePolicy"
+> &
+  Readonly<{
+    /**
+     * Top-level edge property supplying each edge's non-negative numeric
+     * weight.
+     */
+    weightProperty: string;
+    /**
+     * Weight substituted for edges missing `weightProperty`. Must be a
+     * non-negative number within the same upper bound the audit applies to
+     * stored weights (~9.7e289, so accumulated path sums can never
+     * overflow). Without it, a missing weight throws
+     * `InvalidEdgeWeightError`.
+     */
+    defaultWeight?: number;
+    /** Maximum relaxation rounds before throwing. Defaults to 1000. */
+    maxIterations?: number;
+  }>;
+
+export type InternalWeightedShortestPathOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<WeightedShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/**
+ * Result of `weightedShortestPath`: the minimum-total-weight node sequence
+ * from source to target.
+ */
+export type WeightedShortestPathResult = Readonly<{
+  /** Ordered nodes from source to target (inclusive). */
+  nodes: readonly PathNode[];
+  /** Number of edges traversed. Equals `nodes.length - 1`. */
+  depth: number;
+  /** Sum of the traversed edges' weights. 0 for a self-path. */
+  totalWeight: number;
+}>;
+
+/**
  * Options for `reachable`.
  *
  * Returns every node reachable from the source within `maxHops`, each

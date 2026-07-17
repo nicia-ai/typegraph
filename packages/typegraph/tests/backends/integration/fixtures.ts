@@ -88,6 +88,8 @@ const worksAt = defineEdge("worksAt", {
 const knows = defineEdge("knows", {
   schema: z.object({
     since: z.string().optional(),
+    // Nullable so weighted-traversal tests can pin the JSON-null case.
+    weight: z.number().nullable().optional(),
   }),
 });
 
