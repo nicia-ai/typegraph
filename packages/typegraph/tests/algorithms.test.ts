@@ -597,6 +597,53 @@ describe("store.algorithms", () => {
       expect(path?.nodes.at(-1)).toEqual({ id: targetId, kind: "Person" });
     });
 
+    it("reaches a smaller-identity target through a zero-weight edge from an equal-cost intermediate", async () => {
+      // Equal-bound pruning regression: after TaskT settles at cost 2, the
+      // intermediate x also costs exactly 2, and only a zero-weight edge
+      // from x reaches PersonT — the documented smallest-identity winner.
+      // Pruning must drop strictly-worse candidates only, or x (and with it
+      // PersonT) disappears.
+      const targetId = "wsp-zero-weight-target";
+      const a = await store.nodes.Person.create({ name: "PlateauA" });
+      const b = await store.nodes.Person.create({ name: "PlateauB" });
+      const x = await store.nodes.Person.create({ name: "PlateauX" });
+      const personTarget = await store.nodes.Person.create(
+        { name: "PlateauTarget" },
+        { id: targetId },
+      );
+      const taskTarget = await store.nodes.Task.create(
+        { title: "PlateauTarget" },
+        { id: targetId },
+      );
+      await store.edges.road.create(a, taskTarget, { cost: 2 });
+      await store.edges.road.create(a, b, { cost: 1 });
+      await store.edges.road.create(b, x, { cost: 1 });
+      await store.edges.road.create(x, personTarget, { cost: 0 });
+
+      const options = { edges: ["road"], weightProperty: "cost" } as const;
+      const workingTablePath = await store.algorithms.weightedShortestPath(
+        a,
+        targetId,
+        options,
+      );
+      expect(workingTablePath?.totalWeight).toBe(2);
+      expect(workingTablePath?.nodes.at(-1)).toEqual({
+        id: targetId,
+        kind: "Person",
+      });
+
+      const inlineStore = createStore(testGraph, {
+        ...backend,
+        capabilities: { ...backend.capabilities, transactions: false },
+      });
+      const inlinePath = await inlineStore.algorithms.weightedShortestPath(
+        a,
+        targetId,
+        options,
+      );
+      expect(inlinePath).toEqual(workingTablePath);
+    });
+
     it("rejects weights beyond the double range instead of overflowing", async () => {
       const { backend: rawBackend, db } = createLocalSqliteBackend();
       try {
@@ -615,7 +662,7 @@ describe("store.algorithms", () => {
           }),
         ).rejects.toMatchObject({
           name: "InvalidEdgeWeightError",
-          details: { reason: "not_finite" },
+          details: { reason: "out_of_range" },
         });
       } finally {
         await rawBackend.close();

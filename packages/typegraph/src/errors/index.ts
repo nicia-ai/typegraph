@@ -938,7 +938,21 @@ export class GraphAlgorithmConvergenceError extends TypeGraphError {
 
 /** Stable reasons a weighted traversal can reject an edge's weight value. */
 export type InvalidEdgeWeightReason =
-  "missing" | "negative" | "non_numeric" | "not_finite";
+  "missing" | "negative" | "non_numeric" | "out_of_range";
+
+/** Details for InvalidEdgeWeightError. */
+export type InvalidEdgeWeightErrorDetails = Readonly<{
+  /** Id of the first offending edge, in binary-collation order. */
+  edgeId: string;
+  /** Kind of the offending edge. */
+  edgeKind: string;
+  /** The audited weight property. */
+  property: string;
+  /** Why the weight was rejected. */
+  reason: InvalidEdgeWeightReason;
+  /** The offending value, when one was present and renderable. */
+  value?: string;
+}>;
 
 const EDGE_WEIGHT_REASONS: Readonly<
   Record<
@@ -961,11 +975,10 @@ const EDGE_WEIGHT_REASONS: Readonly<
     suggestion:
       "Store the weight property as a JSON number on every selected edge before retrying.",
   },
-  not_finite: {
-    message:
-      "has a value outside the IEEE 754 double range for weight property",
+  out_of_range: {
+    message: "has a value outside the supported range for weight property",
     suggestion:
-      "Keep weight values within the finite double-precision range on every selected edge.",
+      "Keep weight magnitudes within the range weightedShortestPath documents (large enough to be a normal IEEE 754 double, small enough that path sums cannot overflow).",
   },
 };
 
@@ -976,15 +989,9 @@ const EDGE_WEIGHT_REASONS: Readonly<
  * weighted call either observes a fully valid weight domain or fails fast.
  */
 export class InvalidEdgeWeightError extends TypeGraphError {
-  constructor(
-    details: Readonly<{
-      edgeId: string;
-      edgeKind: string;
-      property: string;
-      reason: InvalidEdgeWeightReason;
-      value?: string;
-    }>,
-  ) {
+  declare readonly details: InvalidEdgeWeightErrorDetails;
+
+  constructor(details: InvalidEdgeWeightErrorDetails) {
     super(
       `Edge '${details.edgeId}' (kind '${details.edgeKind}') ${EDGE_WEIGHT_REASONS[details.reason].message} '${details.property}'${
         details.value === undefined ? "" : ` (value: ${details.value})`

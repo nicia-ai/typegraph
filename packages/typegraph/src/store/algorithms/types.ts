@@ -151,10 +151,13 @@ export type InternalShortestPathOptions<G extends GraphDef> =
  * Each traversed edge contributes the value of `weightProperty` — a JSON
  * number stored on the edge — to the path's total weight. The traversal
  * fails fast with `InvalidEdgeWeightError` (before any rounds run) when any
- * visible edge of the selected kinds has a negative or non-numeric weight,
- * or is missing the property with no `defaultWeight` configured. Weight
- * arithmetic uses IEEE 754 doubles on both backends, so results are
- * backend-identical.
+ * visible edge of the selected kinds has a negative, non-numeric, or
+ * out-of-range weight, or is missing the property with no `defaultWeight`
+ * configured. Weight arithmetic uses IEEE 754 doubles on both backends, so
+ * total weights are backend-identical; among equal-total-weight paths, the
+ * returned node sequence is also backend-identical except when the `edges`
+ * list is large enough to exceed the backend's bind-parameter budget
+ * (hundreds of kinds in one call).
  *
  * Unlike `shortestPath`, there is no `maxHops`: cost-ordered discovery does
  * not settle nodes in hop order, so a hop bound is not a natural stopping

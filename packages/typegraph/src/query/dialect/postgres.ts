@@ -12,10 +12,23 @@ import { likeEscapeClause } from "./like-escape";
 import { type DialectAdapter } from "./types";
 
 /**
- * Escapes a string for use in a PostgreSQL string literal.
- * Uses single quotes and escapes embedded single quotes.
+ * Escapes a string for use in a PostgreSQL string literal, independent of
+ * server configuration.
+ *
+ * A plain `'…'` literal is only safe when the value contains no backslash:
+ * under the legacy `standard_conforming_strings = off` setting, backslashes
+ * act as escape characters inside regular literals, so a value ending in
+ * `\` could swallow the closing quote and change how the statement parses.
+ * Values containing a backslash therefore use the `E'…'` form — where
+ * backslash is an escape character under BOTH settings — with backslashes
+ * and quotes doubled. Backslash-free values keep the plain form so the
+ * emitted SQL text (which callers rely on being identical across clauses)
+ * is unchanged for the common case.
  */
 function escapePostgresLiteral(value: string): string {
+  if (value.includes("\\")) {
+    return `E'${value.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+  }
   // PostgreSQL uses '' to escape single quotes inside string literals
   return `'${value.replaceAll("'", "''")}'`;
 }
@@ -25,7 +38,10 @@ function escapePostgresLiteral(value: string): string {
  *
  * Uses raw SQL (non-parameterized) to ensure the same expression text
  * is generated when the same field is used in multiple clauses (SELECT, GROUP BY).
- * This is safe because JSON pointers come from schema definitions, not user input.
+ * Pointers usually come from schema definitions, but some (e.g. a weighted
+ * traversal's `weightProperty`) are runtime strings — safe either way
+ * because {@link escapePostgresLiteral} escapes independently of server
+ * configuration.
  *
  * @example
  * "/name" → ARRAY['name']

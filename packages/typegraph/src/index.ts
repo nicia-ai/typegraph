@@ -266,6 +266,7 @@ export type {
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
   ErrorCategory,
+  InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,

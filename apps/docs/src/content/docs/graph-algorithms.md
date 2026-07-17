@@ -157,7 +157,11 @@ visible edge of the selected kinds is audited; the call throws a typed
 - **non-numeric** — a JSON string like `"5"` does not count; the property
   must be stored as a JSON number (a JSON `null` counts as missing, not
   non-numeric);
-- **not finite** — a JSON number beyond the IEEE 754 double range;
+- **out of range** — a magnitude above ~9.7e289 (bounded so path sums can
+  never overflow the double range, on either backend) or a nonzero
+  magnitude below the smallest IEEE 754 double. One engine caveat:
+  SQLite's JSON parser rounds sub-denormal text like `1e-400` to `0`
+  before SQL can observe it, so only PostgreSQL can reject that case;
 - **missing** without a configured `defaultWeight`.
 
 The audit covers the selected edge kinds globally (not just edges the

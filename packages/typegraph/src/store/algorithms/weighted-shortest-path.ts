@@ -21,7 +21,6 @@ import {
   type NodeExpansion,
   type NodeIdentityKey,
   nodeIdentityKey,
-  nodeIdentityKeyFromRow,
   reduceExpandedWorkingSet,
   runIterativeGraphOperation,
   supportsTemporaryIteration,
@@ -36,6 +35,27 @@ import type {
 const DEFAULT_WEIGHTED_SHORTEST_PATH_MAX_ITERATIONS = 1000;
 
 const WEIGHTED_ALGORITHM_NAME = "weightedShortestPath";
+
+/**
+ * Largest accepted edge weight (~9.7e289). Auditing weights to this bound
+ * makes accumulated overflow impossible rather than merely unlikely: a path
+ * gains one working-table row per hop, so it has at most 2^53 hops, and
+ * 2^53 · MAX_EDGE_WEIGHT stays far below Number.MAX_VALUE even after
+ * float-addition rounding (the 2^64 divisor leaves an ~2000x margin).
+ * Without the bound, PostgreSQL's float8 addition would raise a raw 22003
+ * overflow mid-round while SQLite silently saturated to Infinity.
+ */
+const MAX_EDGE_WEIGHT = Number.MAX_VALUE / 2 ** 64;
+
+/**
+ * Smallest accepted nonzero weight magnitude: the smallest IEEE 754 double
+ * (5e-324). PostgreSQL stores smaller nonzero JSON numbers exactly in jsonb
+ * and raises a raw underflow when the traversal casts them to float8, so
+ * the audit rejects them with the typed error instead. SQLite's JSON parser
+ * has already rounded such text to 0 before any SQL can observe it — an
+ * engine-level difference the audit cannot detect there.
+ */
+const MIN_EDGE_WEIGHT = Number.MIN_VALUE;
 
 /** Traversal options with the weight source guaranteed present. */
 type WeightedTraversalOptions = InternalTraversalOptions &
@@ -60,13 +80,11 @@ type FrontierRound = Readonly<{
   bestTargetDistance: number | undefined;
 }>;
 
-type DistanceRow = Readonly<{
+type ChainRow = Readonly<{
   node_id: string;
   node_kind: string;
   distance: number | string;
   hops: number | string;
-  predecessor_id: unknown;
-  predecessor_kind: unknown;
 }>;
 
 type WeightAuditRow = Readonly<{
@@ -214,10 +232,13 @@ async function assertValidEdgeWeights(
       sql`audited.is_missing = 1`
     : dialect.booleanLiteral(false);
   const negativeViolation = sql`audited.is_number = 1 AND audited.weight_number < 0`;
-  // CAST the bound to NUMERIC so PostgreSQL compares in the arbitrary-
+  // CAST the bounds to NUMERIC so PostgreSQL compares in the arbitrary-
   // precision domain — a numeric-vs-float8 comparison would coerce the
-  // out-of-range value to float8 and overflow before comparing.
-  const outOfRangeViolation = sql`audited.is_number = 1 AND ABS(audited.weight_number) > CAST(${Number.MAX_VALUE} AS NUMERIC)`;
+  // out-of-range value to float8 and overflow before comparing. The lower
+  // arm rejects sub-denormal magnitudes (float8 cast underflow on
+  // PostgreSQL); on SQLite they parsed to exactly 0 and the arm cannot
+  // fire, which is the declared engine caveat on MIN_EDGE_WEIGHT.
+  const outOfRangeViolation = sql`audited.is_number = 1 AND (ABS(audited.weight_number) > CAST(${MAX_EDGE_WEIGHT} AS NUMERIC) OR (audited.weight_number <> 0 AND ABS(audited.weight_number) < CAST(${MIN_EDGE_WEIGHT} AS NUMERIC)))`;
 
   for (const edgeKinds of operation.edgeKindChunks) {
     const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
@@ -274,10 +295,10 @@ function resolveInvalidWeightReason(
 ): InvalidEdgeWeightReason {
   if (flagIsSet(row.is_missing)) return "missing";
   if (!flagIsSet(row.is_number)) return "non_numeric";
-  // A numeric violation is either negative or beyond the double range;
-  // Number() maps an out-of-range magnitude to ±Infinity, which is exactly
-  // the distinction needed here.
-  return Number(row.weight_text) < 0 ? "negative" : "not_finite";
+  // A numeric violation is either negative or outside the accepted
+  // magnitude range; the sign distinguishes them (Number() of an oversized
+  // magnitude yields ±Infinity, whose sign still holds).
+  return Number(row.weight_text) < 0 ? "negative" : "out_of_range";
 }
 
 /** Coerces a driver-shaped 0/1 flag (number, bigint, or boolean) to boolean. */
@@ -339,6 +360,22 @@ async function findWeightedShortestPathInWorkingTable(
         options.weightProperty,
         options.defaultWeight,
       );
+      // A target no visible node carries can never be reached; converge
+      // immediately instead of relaxing the source's entire component.
+      if (!(await hasVisibleNode(context.operation, targetId))) {
+        return {
+          frontierCount: 0,
+          workingTableSize: 0,
+          bestTargetDistance: undefined,
+        };
+      }
+      // Each round scans only the previous round's frontier; without this
+      // index that filter re-scans the whole (growing) working table, since
+      // the identity primary key cannot serve an improved_round lookup.
+      await context.executeTemporary(sql`
+        CREATE INDEX ${frontierIndexIdentifier(context)}
+        ON ${context.workingTable} (graph_id, run_id, improved_round)
+      `);
       const seeded = await seedDistances(context, sourceId);
       return {
         frontierCount: seeded.length,
@@ -368,10 +405,34 @@ async function findWeightedShortestPathInWorkingTable(
       return state.frontierCount === 0;
     },
     async extractResult(context) {
-      const visited = await readVisitedFromWorkingTable(context);
-      return buildWeightedPathResult(visited, targetId);
+      return extractPathFromWorkingTable(context, targetId, maxIterations);
     },
   });
+}
+
+function frontierIndexIdentifier(context: IterativeGraphRunContext) {
+  return sql.identifier(
+    `typegraph_iterative_${context.runId.replaceAll("-", "_")}_frontier`,
+  );
+}
+
+/**
+ * Point lookup: does any visible node carry this id (under any kind)?
+ */
+async function hasVisibleNode(
+  operation: IterativeGraphOperation,
+  nodeId: string,
+): Promise<boolean> {
+  const rows = await operation.backend.execute<Readonly<{ id: string }>>(
+    asCompiledRowsSql(sql`
+      SELECT n.id FROM ${operation.schema.nodesTable} n
+      WHERE n.graph_id = ${operation.ctx.graphId}
+        AND n.id = ${nodeId}
+        AND ${operation.nodeTemporalFilter}
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
 }
 
 function createWorkingTable(context: IterativeGraphRunContext): SQL {
@@ -420,12 +481,16 @@ async function seedDistances(
  * source id then kind in binary collation, so both backends pick the same
  * predecessor), and upserts only strict distance improvements.
  *
- * Candidates costing at least `roundBound` — the cheapest path to the
- * target known at round start, tracked in JS from RETURNING rows — are
+ * Candidates costing strictly more than `roundBound` — the cheapest path to
+ * the target known at round start, tracked in JS from RETURNING rows — are
  * pruned. Sound because the audit guarantees non-negative weights: no
- * extension of such a candidate can beat the known path. A bound parameter
- * keeps the pruning O(1) per candidate and applies the same round-start
- * state on both execution paths, so they run identical round sequences.
+ * extension of such a candidate can beat the known path. Equal-cost
+ * candidates stay admitted, because zero-weight edges can extend an
+ * equal-cost node to another node with the target id, and the documented
+ * smallest-identity target tie-break must see that node; strict-improvement
+ * upserts keep the equal-cost plateau finite. A bound parameter keeps the
+ * pruning O(1) per candidate and applies the same round-start state on both
+ * execution paths, so they run identical round sequences.
  */
 async function relaxFrontierRound(
   context: IterativeGraphRunContext,
@@ -481,13 +546,9 @@ async function relaxFrontierRound(
               AND frontier.node_kind = expanded.source_kind
           ) candidates
           WHERE ${
-            // Equal-distance candidates for the target id itself stay
-            // admitted: when the id exists under several kinds, the
-            // documented smallest-identity tie-break must see an equal-cost
-            // target found in a later round, not have it pruned away.
             roundBound === undefined ?
               sql`TRUE`
-            : sql`(candidates.candidate_distance < ${roundBound} OR (candidates.target_id = ${targetId} AND candidates.candidate_distance <= ${roundBound}))`
+            : sql`candidates.candidate_distance <= ${roundBound}`
           }
         ) ranked
         WHERE ranked.candidate_rank = 1
@@ -513,33 +574,61 @@ async function relaxFrontierRound(
   return { frontierCount, bestTargetDistance };
 }
 
-async function readVisitedFromWorkingTable(
+/**
+ * Extracts the result path directly in SQL: pick the cheapest row carrying
+ * the target id (ties by kind in binary collation, matching the inline
+ * path's code-point tie-break since the id is fixed), then walk predecessor
+ * pointers through a recursive CTE. Transfer and JS memory stay
+ * proportional to the path length instead of the visited set. The
+ * `position` guard bounds recursion at the round budget — predecessor
+ * chains cannot cycle, but a recursive CTE should never rely on that alone.
+ */
+async function extractPathFromWorkingTable(
   context: IterativeGraphRunContext,
-): Promise<ReadonlyMap<NodeIdentityKey, WeightedVisitedNode>> {
-  const rows = await context.backend.execute<DistanceRow>(
+  targetId: string,
+  maxIterations: number,
+): Promise<WeightedShortestPathResult | undefined> {
+  const { operation, workingTable, graphId, runId } = context;
+  const { dialect } = operation.ctx;
+  const rows = await context.backend.execute<ChainRow>(
     asCompiledRowsSql(sql`
-      SELECT node_id, node_kind, distance, hops,
-        predecessor_id, predecessor_kind
-      FROM ${context.workingTable}
-      WHERE graph_id = ${context.graphId}
-        AND run_id = ${context.runId}
+      WITH RECURSIVE chain AS (
+        SELECT best.node_id, best.node_kind, best.distance, best.hops,
+          best.predecessor_id, best.predecessor_kind, 0 AS position
+        FROM (
+          SELECT node_id, node_kind, distance, hops,
+            predecessor_id, predecessor_kind
+          FROM ${workingTable}
+          WHERE graph_id = ${graphId}
+            AND run_id = ${runId}
+            AND node_id = ${targetId}
+          ORDER BY distance ASC, ${dialect.binaryText(sql`node_kind`)}
+          LIMIT 1
+        ) best
+        UNION ALL
+        SELECT w.node_id, w.node_kind, w.distance, w.hops,
+          w.predecessor_id, w.predecessor_kind, c.position + 1
+        FROM chain c
+        JOIN ${workingTable} w
+          ON w.graph_id = ${graphId}
+          AND w.run_id = ${runId}
+          AND w.node_id = c.predecessor_id
+          AND w.node_kind = c.predecessor_kind
+        WHERE c.position <= ${maxIterations}
+      )
+      SELECT node_id, node_kind, distance, hops
+      FROM chain
+      ORDER BY position DESC
     `),
   );
-  return new Map(
-    rows.map((row) => {
-      const node = {
-        id: row.node_id,
-        kind: row.node_kind,
-        distance: Number(row.distance),
-        hops: Number(row.hops),
-        parentKey: nodeIdentityKeyFromRow(
-          row.predecessor_id,
-          row.predecessor_kind,
-        ),
-      } satisfies WeightedVisitedNode;
-      return [nodeIdentityKey(node), node];
-    }),
-  );
+  // position DESC orders source-first, target-last.
+  const target = rows.at(-1);
+  if (target === undefined) return undefined;
+  return {
+    nodes: rows.map((row) => ({ id: row.node_id, kind: row.node_kind })),
+    depth: Number(target.hops),
+    totalWeight: Number(target.distance),
+  };
 }
 
 /**
@@ -585,8 +674,19 @@ async function findWeightedShortestPathInline(
       options.weightProperty,
       options.defaultWeight,
     );
-    const sources = await fetchVisibleWorkingNodes(operation, [sourceId]);
-    if (sources.length === 0) return;
+    const endpoints = await fetchVisibleWorkingNodes(operation, [
+      sourceId,
+      targetId,
+    ]);
+    const sources = endpoints.filter((node) => node.id === sourceId);
+    // A target no visible node carries can never be reached; skip relaxing
+    // the source's entire component.
+    if (
+      sources.length === 0 ||
+      !endpoints.some((node) => node.id === targetId)
+    ) {
+      return;
+    }
 
     const settled = new Map<NodeIdentityKey, WeightedVisitedNode>(
       sources.map((source) => [
@@ -631,14 +731,11 @@ async function findWeightedShortestPathInline(
         if (existing !== undefined && existing.distance <= candidate.distance) {
           continue;
         }
-        // Mirrors the working-table prune: equal-distance candidates are
-        // dropped unless they carry the target id, so a smaller-identity
-        // target kind found later still reaches the result tie-break.
-        if (
-          roundBound !== undefined &&
-          (candidate.distance > roundBound ||
-            (candidate.distance === roundBound && candidate.id !== targetId))
-        ) {
+        // Mirrors the working-table prune: only strictly-worse candidates
+        // are dropped. Equal-cost ones stay admitted so zero-weight edges
+        // from the equal-cost plateau can still reach a smaller-identity
+        // node carrying the target id.
+        if (roundBound !== undefined && candidate.distance > roundBound) {
           continue;
         }
         settled.set(candidateKey, {
