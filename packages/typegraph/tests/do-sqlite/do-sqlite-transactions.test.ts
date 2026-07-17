@@ -37,9 +37,15 @@ import {
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../../src";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
+import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
 
 import { SpikeDO } from "./worker";
 
@@ -62,6 +68,29 @@ const DocGraph = defineGraph({
   id: "do-sqlite",
   nodes: { Doc: { type: Doc } },
   edges: {},
+});
+
+const Message = defineNode("Message", {
+  schema: z.object({ text: z.string() }),
+});
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const mentions = defineEdge("mentions");
+
+const HistoryGraph = defineGraph({
+  id: "do-sqlite-history",
+  nodes: { Message: { type: Message }, Person: { type: Person } },
+  edges: {
+    mentions: {
+      type: mentions,
+      from: [Message],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
 });
 
 async function bootInsideDurableObject(storage: DurableObjectStorage) {
@@ -88,6 +117,15 @@ async function bootInsideDurableObject(storage: DurableObjectStorage) {
   return { db, backend, store };
 }
 
+async function bootHistoryInsideDurableObject(storage: DurableObjectStorage) {
+  const db = drizzle(storage);
+  const backend = createSqliteBackend(db, { tables: defaultTables });
+  const [store] = await createStoreWithSchema(HistoryGraph, backend, {
+    history: true,
+  });
+  return store;
+}
+
 function inObject<T>(
   name: string,
   body: (
@@ -109,7 +147,59 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(db.$client).toBe(storage);
       expect(typeof storage.transaction).toBe("function");
       expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.maxBindParameters).toBe(
+        DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+      );
     });
+  });
+
+  it("chunks recorded history flushes to Durable Objects' 100-bind limit", async () => {
+    const stub = env.SPIKE_DO.get(
+      env.SPIKE_DO.idFromName("history-bind-limit"),
+    );
+    await runInDurableObject(
+      stub,
+      async (_instance: SpikeDO, state: DurableObjectState) => {
+        const store = await bootHistoryInsideDurableObject(state.storage);
+
+        await store.transaction(async (tx) => {
+          const message = await tx.nodes.Message.create(
+            { text: "hello" },
+            { id: "message" },
+          );
+          for (let index = 0; index < 7; index += 1) {
+            const person = await tx.nodes.Person.create(
+              { name: `person-${index}` },
+              { id: `person-${index}` },
+            );
+            await tx.edges.mentions.create(
+              message,
+              person,
+              {},
+              {
+                id: `mention-${index}`,
+              },
+            );
+          }
+        });
+
+        expect(await store.nodes.Person.count()).toBe(7);
+        expect(await store.edges.mentions.count()).toBe(7);
+        const recordedAt = await store.recordedNow();
+        expect(recordedAt).toBeDefined();
+        if (recordedAt === undefined) {
+          throw new Error("expected a recorded commit instant");
+        }
+        const recordedEdges = await Promise.all(
+          Array.from({ length: 7 }, (_, index) =>
+            store
+              .asOfRecorded(recordedAt)
+              .edges.mentions.getById(`mention-${index}` as never),
+          ),
+        );
+        expect(recordedEdges.every((edge) => edge !== undefined)).toBe(true);
+      },
+    );
   });
 
   it("A) graph-owned store.transaction(): throw-after-await rolls back BOTH TypeGraph and product writes", async () => {

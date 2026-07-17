@@ -3,6 +3,7 @@ import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import {
   D1_MAX_BIND_PARAMETERS,
+  DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
@@ -93,9 +94,9 @@ export type SqliteExecutionProfile = Readonly<{
   isSync: boolean;
   /**
    * Detected per-statement bound-parameter ceiling for this connection:
-   * D1's documented cap, the probed `SQLITE_MAX_VARIABLE_NUMBER` on
-   * synchronous drivers, or the conservative 999 floor when the limit
-   * cannot be probed (async/remote drivers).
+   * Cloudflare's documented D1 / Durable Objects cap, the probed
+   * `SQLITE_MAX_VARIABLE_NUMBER` on synchronous drivers, or the conservative
+   * 999 floor when the limit cannot be probed (async/remote drivers).
    */
   maxBindParameters: number;
   supportsCompiledExecution: boolean;
@@ -254,7 +255,11 @@ function hasModernBindLimitByVersion(rows: readonly unknown[]): boolean {
 function detectMaxBindParameters(
   db: AnySqliteDatabase,
   sqliteClient: SqliteClientWithPrepare | undefined,
+  transactionMode: SqliteTransactionMode,
 ): number {
+  if (transactionMode === "do-sqlite") {
+    return DURABLE_OBJECT_MAX_BIND_PARAMETERS;
+  }
   if (isD1DatabaseBySessionName(db)) return D1_MAX_BIND_PARAMETERS;
   if (sqliteClient === undefined) return SQLITE_MAX_BIND_PARAMETERS;
   try {
@@ -343,7 +348,11 @@ export function createSqliteExecutionAdapter(
 
   const profile: SqliteExecutionProfile = {
     isSync,
-    maxBindParameters: detectMaxBindParameters(db, sqliteClient),
+    maxBindParameters: detectMaxBindParameters(
+      db,
+      sqliteClient,
+      transactionMode,
+    ),
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };

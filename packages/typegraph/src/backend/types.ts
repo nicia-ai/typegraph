@@ -202,11 +202,12 @@ export type BackendCapabilities = Readonly<{
   /**
    * Maximum number of bound parameters the engine accepts in one statement.
    * SQLite defaults to 999 (raisable at compile time via
-   * `SQLITE_MAX_VARIABLE_NUMBER`); PostgreSQL's wire protocol caps it at 65535.
+   * `SQLITE_MAX_VARIABLE_NUMBER`), while hosted SQLite runtimes may impose a
+   * lower platform ceiling; PostgreSQL's wire protocol caps it at 65535.
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
-   * inserts use — instead of a conservative dialect-blind constant. A custom
-   * build that raises the SQLite limit can override this here. Absent means the
+   * inserts use — instead of a conservative dialect-blind constant. Custom
+   * runtimes can override the detected limit here. Absent means the
    * recorded-time fallback budget applies.
    */
   maxBindParameters?: number;
@@ -2310,6 +2311,13 @@ export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32_766;
  * batched writes fail at runtime.
  */
 export const D1_MAX_BIND_PARAMETERS = 100;
+
+/**
+ * Cloudflare SQLite-backed Durable Objects' documented per-statement
+ * bound-parameter ceiling. The resolved `do-sqlite` execution profile must
+ * advertise this limit so every capability-driven batch path stays below it.
+ */
+export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
 /**
  * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
