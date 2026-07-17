@@ -54,7 +54,7 @@ export type DurableObjectStorageClient = Readonly<{
   transactionSync: <Result>(run: () => Result) => Result;
 }>;
 
-export type SqliteHostedPlatform = "d1" | "durable-object";
+type SqliteHostedPlatform = "d1" | "durable-object";
 
 type SessionLike = Readonly<{
   constructor?: Readonly<{
