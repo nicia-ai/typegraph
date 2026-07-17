@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { param as parameter } from "../../../src";
+import { type IntegrationStore } from "./fixtures";
 import {
   seedDocumentsForArrayPredicates,
   seedDocumentsForObjectPredicates,
@@ -8,6 +9,27 @@ import {
   seedPeopleForStringPredicates,
 } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
+
+/**
+ * Seeds the three shapes a "nullish-looking" property can take in stored
+ * JSON: absent, the JSON null literal, and the JSON *string* "null".
+ * isNull must match the first two and NOT the third; isNotNull is the exact
+ * complement.
+ */
+async function seedNullShapeEdges(store: IntegrationStore): Promise<void> {
+  const anna = await store.nodes.Person.create({ name: "ShapeAnna" });
+  const missing = await store.nodes.Person.create({ name: "ShapeMissing" });
+  const jsonNull = await store.nodes.Person.create({ name: "ShapeJsonNull" });
+  const stringNull = await store.nodes.Person.create({
+    name: "ShapeStringNull",
+  });
+  const numeric = await store.nodes.Person.create({ name: "ShapeNumeric" });
+  await store.edges.knows.create(anna, missing, {});
+  // eslint-disable-next-line unicorn/no-null -- the JSON null value is the case under test
+  await store.edges.knows.create(anna, jsonNull, { weight: null });
+  await store.edges.knows.create(anna, stringNull, { since: "null" });
+  await store.edges.knows.create(anna, numeric, { weight: 7 });
+}
 
 export function registerPredicateIntegrationTests(
   context: IntegrationTestContext,
@@ -136,6 +158,115 @@ export function registerPredicateIntegrationTests(
 
       expect(results).toHaveLength(3);
       expect(results.toSorted()).toEqual(["Alice", "Bob", "Charlie"]);
+    });
+  });
+
+  describe("Null predicates across stored value shapes", () => {
+    it('isNull matches absent and JSON-null values but not the string "null"', async () => {
+      const store = context.getStore();
+      await seedNullShapeEdges(store);
+
+      const nullWeights = await store
+        .query()
+        .from("Person", "p")
+        .traverse("knows", "e")
+        .whereEdge("e", (edge) => edge.weight.isNull())
+        .to("Person", "friend")
+        .select((ctx) => ctx.friend.name)
+        .execute();
+      expect(nullWeights.toSorted()).toEqual([
+        "ShapeJsonNull",
+        "ShapeMissing",
+        "ShapeStringNull",
+      ]);
+
+      const nullSince = await store
+        .query()
+        .from("Person", "p")
+        .traverse("knows", "e")
+        .whereEdge("e", (edge) => edge.since.isNull())
+        .to("Person", "friend")
+        .select((ctx) => ctx.friend.name)
+        .execute();
+      // "ShapeStringNull" stores the string "null" in `since` — a real
+      // value, so isNull must not match it.
+      expect(nullSince.toSorted()).toEqual([
+        "ShapeJsonNull",
+        "ShapeMissing",
+        "ShapeNumeric",
+      ]);
+    });
+
+    it("isNotNull is the exact complement across value shapes", async () => {
+      const store = context.getStore();
+      await seedNullShapeEdges(store);
+
+      const presentWeights = await store
+        .query()
+        .from("Person", "p")
+        .traverse("knows", "e")
+        .whereEdge("e", (edge) => edge.weight.isNotNull())
+        .to("Person", "friend")
+        .select((ctx) => ctx.friend.name)
+        .execute();
+      expect(presentWeights).toEqual(["ShapeNumeric"]);
+
+      const presentSince = await store
+        .query()
+        .from("Person", "p")
+        .traverse("knows", "e")
+        .whereEdge("e", (edge) => edge.since.isNotNull())
+        .to("Person", "friend")
+        .select((ctx) => ctx.friend.name)
+        .execute();
+      expect(presentSince).toEqual(["ShapeStringNull"]);
+    });
+
+    it('pathIsNull / pathIsNotNull distinguish JSON null from the string "null"', async () => {
+      // Regression for the PostgreSQL jsonPathIsNull dialect member, whose
+      // former `#>> path = 'null'` text comparison went three-valued on a
+      // stored JSON null (silently unmatched) and falsely matched the JSON
+      // *string* "null".
+      const store = context.getStore();
+      await store.nodes.Document.create({
+        title: "Reviewer JSON Null",
+        // eslint-disable-next-line unicorn/no-null -- the JSON null value is the case under test
+        metadata: { reviewer: null },
+      });
+      await store.nodes.Document.create({
+        title: "Reviewer String Null",
+        metadata: { reviewer: "null" },
+      });
+      await store.nodes.Document.create({
+        title: "Reviewer Missing",
+        metadata: {},
+      });
+      await store.nodes.Document.create({
+        title: "Reviewer Present",
+        metadata: { reviewer: "Ada" },
+      });
+
+      const nullish = await store
+        .query()
+        .from("Document", "d")
+        .whereNode("d", (d) => d.metadata.pathIsNull("/reviewer"))
+        .select((ctx) => ctx.d.title)
+        .execute();
+      expect(nullish.toSorted()).toEqual([
+        "Reviewer JSON Null",
+        "Reviewer Missing",
+      ]);
+
+      const present = await store
+        .query()
+        .from("Document", "d")
+        .whereNode("d", (d) => d.metadata.pathIsNotNull("/reviewer"))
+        .select((ctx) => ctx.d.title)
+        .execute();
+      expect(present.toSorted()).toEqual([
+        "Reviewer Present",
+        "Reviewer String Null",
+      ]);
     });
   });
 

@@ -191,8 +191,13 @@ export const postgresDialect: DialectAdapter = {
 
   jsonPathIsNull(column, pointer) {
     const path = toPostgresPath(pointer);
-    // Check both SQL NULL and JSON null literal
-    return sql`(${column} #> ${path} IS NULL OR ${column} #>> ${path} = 'null')`;
+    // Type-based, not the `#>> path = 'null'` text comparison this used to
+    // be: `#>>` renders a JSON null as SQL NULL (making the old form
+    // three-valued, so `.pathIsNull()` silently missed stored JSON nulls) and
+    // renders the JSON *string* "null" as the same text 'null' (falsely
+    // matching it). jsonb_typeof distinguishes both, and COALESCE maps a
+    // missing path to TRUE, keeping the predicate two-valued.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'null', TRUE)`;
   },
 
   jsonPathIsNumber(column, pointer) {
@@ -202,18 +207,10 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'number', FALSE)`;
   },
 
-  jsonPathIsMissingOrNull(column, pointer) {
-    const path = toPostgresPath(pointer);
-    // Type-based: a JSON string "null" is a string, not null (the `#>>`
-    // text comparison in jsonPathIsNull cannot tell them apart), and
-    // jsonb_typeof of a JSON null is 'null' rather than SQL NULL, so this
-    // stays two-valued where `column #> path IS NULL` would not.
-    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'null', TRUE)`;
-  },
-
   jsonPathIsNotNull(column, pointer) {
     const path = toPostgresPath(pointer);
-    return sql`(${column} #> ${path} IS NOT NULL AND ${column} #>> ${path} != 'null')`;
+    // Mirror image of jsonPathIsNull; COALESCE maps a missing path to FALSE.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) <> 'null', FALSE)`;
   },
 
   // ============================================================

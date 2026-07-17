@@ -1073,7 +1073,7 @@ describe("object predicates", () => {
     );
   });
 
-  it("compiles pathIsNull", () => {
+  it("compiles pathIsNull as a type-only null check", () => {
     const expr: ObjectPredicate = {
       __type: "object_op",
       op: "pathIsNull",
@@ -1082,10 +1082,13 @@ describe("object predicates", () => {
     };
     const result = compilePredicateExpression(expr, ctx);
     const sqlString = toSqlString(result);
-    expect(sqlString).toContain("IS NULL");
+    expect(sqlString).toContain("COALESCE");
+    expect(sqlString).toContain("json_type");
+    expect(sqlString).toContain("= 'null'");
+    expect(sqlString).not.toContain("json_extract");
   });
 
-  it("compiles pathIsNotNull", () => {
+  it("compiles pathIsNotNull as the type-only complement", () => {
     const expr: ObjectPredicate = {
       __type: "object_op",
       op: "pathIsNotNull",
@@ -1094,7 +1097,10 @@ describe("object predicates", () => {
     };
     const result = compilePredicateExpression(expr, ctx);
     const sqlString = toSqlString(result);
-    expect(sqlString).toContain("IS NOT NULL");
+    expect(sqlString).toContain("COALESCE");
+    expect(sqlString).toContain("json_type");
+    expect(sqlString).toContain("<> 'null'");
+    expect(sqlString).not.toContain("json_extract");
   });
 });
 

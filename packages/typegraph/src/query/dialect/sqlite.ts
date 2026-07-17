@@ -178,7 +178,7 @@ export const sqliteDialect: DialectAdapter = {
   jsonPathIsNull(column, pointer) {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));
-    return sql`(json_extract(${column}, ${pathSql}) IS NULL OR json_type(${column}, ${pathSql}) = 'null')`;
+    return sql`COALESCE(json_type(${column}, ${pathSql}) = 'null', 1)`;
   },
 
   jsonPathIsNumber(column, pointer) {
@@ -189,18 +189,10 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) IN ('integer', 'real'), 0)`;
   },
 
-  jsonPathIsMissingOrNull(column, pointer) {
-    const path = toSqlitePath(pointer);
-    const pathSql = sql.raw(escapeSqliteLiteral(path));
-    // Type-based: a JSON string "null" is a string, not null. json_type
-    // returns NULL for a missing path, which COALESCE maps to TRUE.
-    return sql`COALESCE(json_type(${column}, ${pathSql}) = 'null', 1)`;
-  },
-
   jsonPathIsNotNull(column, pointer) {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));
-    return sql`(json_extract(${column}, ${pathSql}) IS NOT NULL AND json_type(${column}, ${pathSql}) != 'null')`;
+    return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
   },
 
   // ============================================================
