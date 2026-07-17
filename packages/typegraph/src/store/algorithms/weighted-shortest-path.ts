@@ -10,10 +10,10 @@ import {
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { jsonPointer } from "../../query/json-pointer";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { assertEdgeKinds, resolveMaxIterations } from "./context";
 import {
-  compareNodeIdentity,
   compileWorkingTableExpansion,
   fetchVisibleWorkingNodes,
   type IterativeGraphOperation,
@@ -195,17 +195,29 @@ async function assertValidEdgeWeights(
   // violation predicate then works over plain projected columns. Composing
   // the checks directly over `e.props` would re-parse the JSON payload for
   // every predicate branch on the audit's full edge scan.
+  //
+  // Both type predicates are the never-NULL, type-based dialect members —
+  // jsonPathIsNull's PostgreSQL text-comparison form would misclassify a
+  // JSON string "null" as null and go three-valued on a JSON null.
   const isNumber = dialect.jsonPathIsNumber(propsColumn, pointer);
-  const isMissing = dialect.jsonPathIsNull(propsColumn, pointer);
+  const isMissing = dialect.jsonPathIsMissingOrNull(propsColumn, pointer);
   const weightText = dialect.jsonExtractText(propsColumn, pointer);
+  // CASE keeps the numeric extraction unreachable for non-numeric values:
+  // PostgreSQL does not short-circuit OR/AND, and casting arbitrary text
+  // would error before the audit could produce its typed report. The
+  // extraction is jsonExtractNumber (PostgreSQL `numeric`), NOT the double
+  // extraction the traversal uses: a JSON number beyond the float8 range
+  // must reach the range check below instead of overflowing the cast.
+  const weightNumber = sql`CASE WHEN ${isNumber} THEN ${dialect.jsonExtractNumber(propsColumn, pointer)} END`;
   const missingViolation =
     defaultWeight === undefined ?
       sql`audited.is_missing = 1`
     : dialect.booleanLiteral(false);
-  // CASE keeps the cast unreachable for non-numeric values: PostgreSQL does
-  // not short-circuit OR/AND, and casting arbitrary text would error before
-  // the audit could produce its typed report.
-  const negativeViolation = sql`CASE WHEN audited.is_number = 1 THEN CAST(audited.weight_text AS DOUBLE PRECISION) < 0 ELSE ${dialect.booleanLiteral(false)} END`;
+  const negativeViolation = sql`audited.is_number = 1 AND audited.weight_number < 0`;
+  // CAST the bound to NUMERIC so PostgreSQL compares in the arbitrary-
+  // precision domain — a numeric-vs-float8 comparison would coerce the
+  // out-of-range value to float8 and overflow before comparing.
+  const outOfRangeViolation = sql`audited.is_number = 1 AND ABS(audited.weight_number) > CAST(${Number.MAX_VALUE} AS NUMERIC)`;
 
   for (const edgeKinds of operation.edgeKindChunks) {
     const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
@@ -216,6 +228,7 @@ async function assertValidEdgeWeights(
         FROM (
           SELECT e.id AS edge_id, e.kind AS edge_kind,
             ${weightText} AS weight_text,
+            ${weightNumber} AS weight_number,
             CASE WHEN ${isNumber} THEN 1 ELSE 0 END AS is_number,
             CASE WHEN ${isMissing} THEN 1 ELSE 0 END AS is_missing
           FROM ${operation.schema.edgesTable} e
@@ -226,6 +239,7 @@ async function assertValidEdgeWeights(
         WHERE (${missingViolation})
           OR (audited.is_missing = 0 AND audited.is_number = 0)
           OR (${negativeViolation})
+          OR (${outOfRangeViolation})
         ORDER BY ${dialect.binaryText(sql`audited.edge_id`)}
         LIMIT 1
       `),
@@ -241,14 +255,11 @@ function createInvalidEdgeWeightError(
   row: WeightAuditRow,
   weightProperty: string,
 ): InvalidEdgeWeightError {
-  const reason: InvalidEdgeWeightReason =
-    flagIsSet(row.is_missing) ? "missing"
-    : flagIsSet(row.is_number) ? "negative"
-    : "non_numeric";
+  const reason = resolveInvalidWeightReason(row);
   const value =
     reason === "missing" || row.weight_text === null ?
       undefined
-    : String(row.weight_text);
+    : formatWeightValue(row.weight_text);
   return new InvalidEdgeWeightError({
     edgeId: row.edge_id,
     edgeKind: row.edge_kind,
@@ -258,9 +269,50 @@ function createInvalidEdgeWeightError(
   });
 }
 
+function resolveInvalidWeightReason(
+  row: WeightAuditRow,
+): InvalidEdgeWeightReason {
+  if (flagIsSet(row.is_missing)) return "missing";
+  if (!flagIsSet(row.is_number)) return "non_numeric";
+  // A numeric violation is either negative or beyond the double range;
+  // Number() maps an out-of-range magnitude to ±Infinity, which is exactly
+  // the distinction needed here.
+  return Number(row.weight_text) < 0 ? "negative" : "not_finite";
+}
+
 /** Coerces a driver-shaped 0/1 flag (number, bigint, or boolean) to boolean. */
 function flagIsSet(value: unknown): boolean {
   return Number(value) !== 0;
+}
+
+/** Renders an extracted weight value for the error message. */
+function formatWeightValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (
+    typeof value === "number" ||
+    typeof value === "bigint" ||
+    typeof value === "boolean"
+  ) {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Node-identity comparison in code-point order — the order SQLite BINARY
+ * and PostgreSQL `COLLATE "C"` sort in. Every JS-side tie-break in this
+ * algorithm must reproduce the working-table round's `binaryText` ORDER BY,
+ * and the substrate's UTF-16 `compareNodeIdentity` disagrees with it for
+ * astral characters.
+ */
+function compareNodeIdentityCodePoints(
+  left: PathNode,
+  right: PathNode,
+): number {
+  return (
+    compareCodePoints(left.id, right.id) ||
+    compareCodePoints(left.kind, right.kind)
+  );
 }
 
 // ============================================================
@@ -305,6 +357,9 @@ async function findWeightedShortestPathInWorkingTable(
       );
       return {
         frontierCount: round.frontierCount,
+        // Overcounts by re-improved existing rows (RETURNING includes
+        // updates); acceptable because the size only paces the substrate's
+        // ANALYZE refresh, where too-early merely refreshes stats sooner.
         workingTableSize: state.workingTableSize + round.frontierCount,
         bestTargetDistance: round.bestTargetDistance,
       };
@@ -425,7 +480,15 @@ async function relaxFrontierRound(
               AND frontier.node_id = expanded.source_id
               AND frontier.node_kind = expanded.source_kind
           ) candidates
-          WHERE ${roundBound === undefined ? sql`TRUE` : sql`candidates.candidate_distance < ${roundBound}`}
+          WHERE ${
+            // Equal-distance candidates for the target id itself stay
+            // admitted: when the id exists under several kinds, the
+            // documented smallest-identity tie-break must see an equal-cost
+            // target found in a later round, not have it pruned away.
+            roundBound === undefined ?
+              sql`TRUE`
+            : sql`(candidates.candidate_distance < ${roundBound} OR (candidates.target_id = ${targetId} AND candidates.candidate_distance <= ${roundBound}))`
+          }
         ) ranked
         WHERE ranked.candidate_rank = 1
         ON CONFLICT (graph_id, run_id, node_kind, node_id) DO UPDATE SET
@@ -496,8 +559,11 @@ async function findWeightedSelfPath(
       options.weightProperty,
       options.defaultWeight,
     );
-    const node = (await fetchVisibleWorkingNodes(operation, [nodeId]))[0];
-    if (node === undefined) return undefined;
+    const nodes = await fetchVisibleWorkingNodes(operation, [nodeId]);
+    const node = nodes.toSorted((left, right) =>
+      compareNodeIdentityCodePoints(left, right),
+    )[0];
+    if (node === undefined) return;
     return { nodes: [node], depth: 0, totalWeight: 0 };
   });
 }
@@ -520,7 +586,7 @@ async function findWeightedShortestPathInline(
       options.defaultWeight,
     );
     const sources = await fetchVisibleWorkingNodes(operation, [sourceId]);
-    if (sources.length === 0) return undefined;
+    if (sources.length === 0) return;
 
     const settled = new Map<NodeIdentityKey, WeightedVisitedNode>(
       sources.map((source) => [
@@ -565,7 +631,14 @@ async function findWeightedShortestPathInline(
         if (existing !== undefined && existing.distance <= candidate.distance) {
           continue;
         }
-        if (roundBound !== undefined && candidate.distance >= roundBound) {
+        // Mirrors the working-table prune: equal-distance candidates are
+        // dropped unless they carry the target id, so a smaller-identity
+        // target kind found later still reaches the result tie-break.
+        if (
+          roundBound !== undefined &&
+          (candidate.distance > roundBound ||
+            (candidate.distance === roundBound && candidate.id !== targetId))
+        ) {
           continue;
         }
         settled.set(candidateKey, {
@@ -588,7 +661,7 @@ async function findWeightedShortestPathInline(
         }
       }
       frontier = improved.toSorted((left, right) =>
-        compareNodeIdentity(left, right),
+        compareNodeIdentityCodePoints(left, right),
       );
     }
 
@@ -616,7 +689,7 @@ function reduceWeightedCandidate(
     existing !== undefined &&
     (existing.distance < candidateDistance ||
       (existing.distance === candidateDistance &&
-        compareNodeIdentity(
+        compareNodeIdentityCodePoints(
           { id: existing.parentId, kind: existing.parentKind },
           expansion.source,
         ) <= 0))
@@ -653,7 +726,7 @@ function buildWeightedPathResult(
       target === undefined ||
       node.distance < target.distance ||
       (node.distance === target.distance &&
-        compareNodeIdentity(node, target) < 0)
+        compareNodeIdentityCodePoints(node, target) < 0)
     ) {
       target = node;
     }
@@ -665,7 +738,9 @@ function buildWeightedPathResult(
   while (cursor !== undefined) {
     reversedNodes.push({ id: cursor.id, kind: cursor.kind });
     cursor =
-      cursor.parentKey === undefined ? undefined : visited.get(cursor.parentKey);
+      cursor.parentKey === undefined ?
+        undefined
+      : visited.get(cursor.parentKey);
   }
 
   return {

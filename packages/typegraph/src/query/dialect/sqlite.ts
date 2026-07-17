@@ -189,6 +189,14 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) IN ('integer', 'real'), 0)`;
   },
 
+  jsonPathIsMissingOrNull(column, pointer) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    // Type-based: a JSON string "null" is a string, not null. json_type
+    // returns NULL for a missing path, which COALESCE maps to TRUE.
+    return sql`COALESCE(json_type(${column}, ${pathSql}) = 'null', 1)`;
+  },
+
   jsonPathIsNotNull(column, pointer) {
     const path = toSqlitePath(pointer);
     const pathSql = sql.raw(escapeSqliteLiteral(path));

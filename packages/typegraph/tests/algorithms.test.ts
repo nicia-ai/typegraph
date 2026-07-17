@@ -5,10 +5,12 @@
  * neighbors, degree}` against the SQLite backend with a fixture that
  * includes branching paths, cycles, self-loops, and disconnected regions.
  */
+import { sql as drizzleSql } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type {
   AdoptedTransaction,
   GraphBackend,
@@ -64,7 +66,7 @@ const testGraph = defineGraph({
     knows: { type: knows, from: [Person], to: [Person] },
     reports_to: { type: reportsTo, from: [Person], to: [Person] },
     depends_on: { type: dependsOn, from: [Task], to: [Task] },
-    road: { type: road, from: [Person], to: [Person] },
+    road: { type: road, from: [Person], to: [Person, Task] },
   },
 });
 
@@ -379,11 +381,9 @@ describe("store.algorithms", () => {
         roads.c,
       ]);
 
-      const unweighted = await store.algorithms.shortestPath(
-        roads.a,
-        roads.c,
-        { edges: ["road"] },
-      );
+      const unweighted = await store.algorithms.shortestPath(roads.a, roads.c, {
+        edges: ["road"],
+      });
       expect(unweighted?.depth).toBe(1);
     });
 
@@ -568,6 +568,58 @@ describe("store.algorithms", () => {
           maxIterations: 1,
         }),
       ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+    });
+
+    it("keeps the smallest-identity tie-break for a target id under multiple kinds", async () => {
+      // Target id exists as both a Person and a Task at equal total weight,
+      // with the smaller identity (Person) discovered one round later — the
+      // best-target pruning must still admit it.
+      const targetId = "wsp-multi-kind-target";
+      const a = await store.nodes.Person.create({ name: "MultiA" });
+      const b = await store.nodes.Person.create({ name: "MultiB" });
+      const personTarget = await store.nodes.Person.create(
+        { name: "MultiTarget" },
+        { id: targetId },
+      );
+      const taskTarget = await store.nodes.Task.create(
+        { title: "MultiTarget" },
+        { id: targetId },
+      );
+      await store.edges.road.create(a, taskTarget, { cost: 2 });
+      await store.edges.road.create(a, b, { cost: 1 });
+      await store.edges.road.create(b, personTarget, { cost: 1 });
+
+      const path = await store.algorithms.weightedShortestPath(a, targetId, {
+        edges: ["road"],
+        weightProperty: "cost",
+      });
+      expect(path?.totalWeight).toBe(2);
+      expect(path?.nodes.at(-1)).toEqual({ id: targetId, kind: "Person" });
+    });
+
+    it("rejects weights beyond the double range instead of overflowing", async () => {
+      const { backend: rawBackend, db } = createLocalSqliteBackend();
+      try {
+        const rawStore = createStore(testGraph, rawBackend);
+        const a = await rawStore.nodes.Person.create({ name: "HugeA" });
+        const b = await rawStore.nodes.Person.create({ name: "HugeB" });
+        await rawStore.edges.road.create(a, b, { cost: 1 });
+        // 1e999 is valid JSON but outside IEEE 754 double range; it can only
+        // enter through raw writes or imports, never the Zod write path.
+        db.run(drizzleSql`UPDATE typegraph_edges SET props = '{"cost":1e999}'`);
+
+        await expect(
+          rawStore.algorithms.weightedShortestPath(a, b, {
+            edges: ["road"],
+            weightProperty: "cost",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "not_finite" },
+        });
+      } finally {
+        await rawBackend.close();
+      }
     });
 
     it("produces identical results through the inline fallback", async () => {

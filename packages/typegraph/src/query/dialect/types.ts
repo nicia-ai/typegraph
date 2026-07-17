@@ -281,6 +281,21 @@ export interface DialectAdapter {
    */
   jsonPathIsNumber(column: SQL, pointer: JsonPointer): SQL;
 
+  /**
+   * Checks if the JSON value at a path is absent or the JSON `null`
+   * literal — i.e. carries no usable value.
+   *
+   * Unlike {@link jsonPathIsNull}, this predicate is type-based
+   * (`json_type` / `jsonb_typeof`), so a JSON *string* `"null"` is NOT
+   * treated as null, and it never evaluates to SQL NULL — a missing path
+   * yields TRUE — so it composes safely inside audit-style WHERE clauses.
+   *
+   * @example
+   * SQLite: COALESCE(json_type(column, '$.path') = 'null', 1)
+   * PostgreSQL: COALESCE(jsonb_typeof(column #> path) = 'null', TRUE)
+   */
+  jsonPathIsMissingOrNull(column: SQL, pointer: JsonPointer): SQL;
+
   // ============================================================
   // Comparison Operations
   // ============================================================

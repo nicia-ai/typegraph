@@ -937,7 +937,8 @@ export class GraphAlgorithmConvergenceError extends TypeGraphError {
 }
 
 /** Stable reasons a weighted traversal can reject an edge's weight value. */
-export type InvalidEdgeWeightReason = "missing" | "negative" | "non_numeric";
+export type InvalidEdgeWeightReason =
+  "missing" | "negative" | "non_numeric" | "not_finite";
 
 const EDGE_WEIGHT_REASONS: Readonly<
   Record<
@@ -959,6 +960,12 @@ const EDGE_WEIGHT_REASONS: Readonly<
     message: "has a non-numeric value for weight property",
     suggestion:
       "Store the weight property as a JSON number on every selected edge before retrying.",
+  },
+  not_finite: {
+    message:
+      "has a value outside the IEEE 754 double range for weight property",
+    suggestion:
+      "Keep weight values within the finite double-precision range on every selected edge.",
   },
 };
 

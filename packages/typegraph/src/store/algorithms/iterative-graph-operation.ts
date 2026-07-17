@@ -406,12 +406,16 @@ export async function reduceExpandedWorkingSet<T>(
       for (const row of rows) {
         // A weighted operation compiles a weight column into every
         // expansion, and weighted algorithms audit their weight domain
-        // before expanding — so a NULL weight here means a plan skipped
-        // that audit, and silently dropping the edge would return
-        // plausible-but-wrong results.
-        if (operation.weightExpression !== undefined && !isPresent(row.weight)) {
+        // before expanding — so a NULL weight here means either a plan
+        // skipped that audit, or (on a backend without snapshot isolation)
+        // a concurrent write invalidated a weight mid-run. Silently
+        // dropping the edge would return plausible-but-wrong results.
+        if (
+          operation.weightExpression !== undefined &&
+          !isPresent(row.weight)
+        ) {
           throw new CompilerInvariantError(
-            "Weighted graph expansion produced a NULL weight; the operation's weight domain was not audited.",
+            "Weighted graph expansion produced a NULL weight. Either the plan skipped its weight audit, or edge data changed concurrently during a run on a backend without snapshot isolation.",
             { source: row.source_id, target: row.target_id },
           );
         }
@@ -699,13 +703,13 @@ function createOperation(
     currentTimestamp,
   });
   const weightExpression =
-    options.weightProperty === undefined ? undefined : (
-      compileWeightExpression(
+    options.weightProperty === undefined ?
+      undefined
+    : compileWeightExpression(
         ctx.dialect,
         options.weightProperty,
         options.defaultWeight,
-      )
-    );
+      );
   const direction = options.direction ?? "out";
   const branchCount = direction === "both" ? 2 : 1;
   const parameterLimit =
@@ -734,7 +738,8 @@ function createOperation(
     ...edgeKindChunks.map((chunk) => chunk.length),
   );
   const maxWorkingSetSize = Math.floor(
-    (parameterLimit - branchCount * (largestEdgeKindChunk + reservedPerBranch)) /
+    (parameterLimit -
+      branchCount * (largestEdgeKindChunk + reservedPerBranch)) /
       2,
   );
   if (maxWorkingSetSize < 1) {

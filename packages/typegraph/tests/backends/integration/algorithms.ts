@@ -81,6 +81,21 @@ async function seedTemporalGraph(
   };
 }
 
+/**
+ * Anna --(weight 5)--> Clara, and a cheaper detour through Bruno (1 + 1).
+ * Unweighted shortest path takes the direct edge; weighted must take the
+ * detour.
+ */
+async function seedWeightedTriangle(store: IntegrationStore) {
+  const anna = await store.nodes.Person.create({ name: "Anna" });
+  const bruno = await store.nodes.Person.create({ name: "Bruno" });
+  const clara = await store.nodes.Person.create({ name: "Clara" });
+  await store.edges.knows.create(anna, clara, { weight: 5 });
+  await store.edges.knows.create(anna, bruno, { weight: 1 });
+  await store.edges.knows.create(bruno, clara, { weight: 1 });
+  return { anna, bruno, clara };
+}
+
 export function registerAlgorithmIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -209,25 +224,9 @@ export function registerAlgorithmIntegrationTests(
     });
 
     describe("weightedShortestPath", () => {
-      /**
-       * Anna --(weight 5)--> Clara, and a cheaper detour through Bruno
-       * (1 + 1). Unweighted shortest path takes the direct edge; weighted
-       * must take the detour.
-       */
-      async function seedWeightedTriangle() {
-        const store = context.getStore();
-        const anna = await store.nodes.Person.create({ name: "Anna" });
-        const bruno = await store.nodes.Person.create({ name: "Bruno" });
-        const clara = await store.nodes.Person.create({ name: "Clara" });
-        await store.edges.knows.create(anna, clara, { weight: 5 });
-        await store.edges.knows.create(anna, bruno, { weight: 1 });
-        await store.edges.knows.create(bruno, clara, { weight: 1 });
-        return { anna, bruno, clara };
-      }
-
       it("finds the minimum-weight path, not the minimum-hop path", async () => {
         const store = context.getStore();
-        const ids = await seedWeightedTriangle();
+        const ids = await seedWeightedTriangle(store);
 
         const weighted = await store.algorithms.weightedShortestPath(
           ids.anna,
@@ -252,7 +251,7 @@ export function registerAlgorithmIntegrationTests(
 
       it("traverses undirected with direction 'both'", async () => {
         const store = context.getStore();
-        const ids = await seedWeightedTriangle();
+        const ids = await seedWeightedTriangle(store);
 
         const path = await store.algorithms.weightedShortestPath(
           ids.clara,
@@ -269,7 +268,7 @@ export function registerAlgorithmIntegrationTests(
 
       it("fails fast on missing weights unless defaultWeight is provided", async () => {
         const store = context.getStore();
-        const ids = await seedWeightedTriangle();
+        const ids = await seedWeightedTriangle(store);
         const dora = await store.nodes.Person.create({ name: "Dora" });
         await store.edges.knows.create(ids.clara, dora, {});
 
@@ -308,6 +307,51 @@ export function registerAlgorithmIntegrationTests(
         });
       });
 
+      it('classifies the JSON string "null" as non-numeric, not missing', async () => {
+        // Regression: PostgreSQL's text-comparison null check cannot tell a
+        // JSON string "null" from a JSON null; the type-based audit must.
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "StrNullAnna" });
+        const bruno = await store.nodes.Person.create({ name: "StrNullBruno" });
+        await store.edges.knows.create(anna, bruno, { since: "null" });
+
+        await expect(
+          store.algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "since",
+            defaultWeight: 1,
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "non_numeric", value: "null" },
+        });
+      });
+
+      it("treats a JSON null weight as missing on both backends", async () => {
+        const store = context.getStore();
+        const anna = await store.nodes.Person.create({ name: "NullAnna" });
+        const bruno = await store.nodes.Person.create({ name: "NullBruno" });
+        // eslint-disable-next-line unicorn/no-null -- the JSON null value is the case under test
+        await store.edges.knows.create(anna, bruno, { weight: null });
+
+        await expect(
+          store.algorithms.weightedShortestPath(anna, bruno, {
+            edges: ["knows"],
+            weightProperty: "weight",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "missing", property: "weight" },
+        });
+
+        const withDefault = await store.algorithms.weightedShortestPath(
+          anna,
+          bruno,
+          { edges: ["knows"], weightProperty: "weight", defaultWeight: 4 },
+        );
+        expect(withDefault?.totalWeight).toBe(4);
+      });
+
       it("accumulates fractional weights identically on both backends", async () => {
         const store = context.getStore();
         const anna = await store.nodes.Person.create({ name: "FracAnna" });
@@ -316,11 +360,10 @@ export function registerAlgorithmIntegrationTests(
         await store.edges.knows.create(anna, bruno, { weight: 0.1 });
         await store.edges.knows.create(bruno, clara, { weight: 0.2 });
 
-        const path = await store.algorithms.weightedShortestPath(
-          anna,
-          clara,
-          { edges: ["knows"], weightProperty: "weight" },
-        );
+        const path = await store.algorithms.weightedShortestPath(anna, clara, {
+          edges: ["knows"],
+          weightProperty: "weight",
+        });
         // Both backends must do IEEE 754 double arithmetic — a decimal
         // NUMERIC accumulation would yield exactly 0.3 and diverge.
         expect(path?.totalWeight).toBe(0.1 + 0.2);

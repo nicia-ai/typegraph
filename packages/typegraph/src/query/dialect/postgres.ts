@@ -186,6 +186,15 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'number', FALSE)`;
   },
 
+  jsonPathIsMissingOrNull(column, pointer) {
+    const path = toPostgresPath(pointer);
+    // Type-based: a JSON string "null" is a string, not null (the `#>>`
+    // text comparison in jsonPathIsNull cannot tell them apart), and
+    // jsonb_typeof of a JSON null is 'null' rather than SQL NULL, so this
+    // stays two-valued where `column #> path IS NULL` would not.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'null', TRUE)`;
+  },
+
   jsonPathIsNotNull(column, pointer) {
     const path = toPostgresPath(pointer);
     return sql`(${column} #> ${path} IS NOT NULL AND ${column} #>> ${path} != 'null')`;

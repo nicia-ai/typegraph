@@ -155,13 +155,19 @@ visible edge of the selected kinds is audited; the call throws a typed
 - **negative** — the pruning that makes the search terminate early assumes
   non-negative weights, so they are rejected rather than silently mis-answered;
 - **non-numeric** — a JSON string like `"5"` does not count; the property
-  must be stored as a JSON number;
+  must be stored as a JSON number (a JSON `null` counts as missing, not
+  non-numeric);
+- **not finite** — a JSON number beyond the IEEE 754 double range;
 - **missing** without a configured `defaultWeight`.
 
 The audit covers the selected edge kinds globally (not just edges the
 traversal happens to reach), so a data problem fails deterministically no
 matter which endpoints you query. Weight arithmetic uses IEEE 754 double
-precision on both backends, so paths and totals are backend-identical.
+precision on both backends, so paths and totals are backend-identical. (One
+documented corner: with enough edge kinds in a single call to exceed the
+backend's bind-parameter budget — hundreds of kinds — equal-weight
+predecessor ties can resolve differently across backends; totals are
+unaffected.)
 
 ## reachable
 
