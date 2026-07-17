@@ -137,7 +137,7 @@ Options differ from the unweighted traversals:
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
 | `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight |
-| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be finite and non-negative |
+| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e289) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
 | `temporalMode` / `asOf` / `workingMemory` | | | Same as the shared options above |
@@ -145,8 +145,10 @@ Options differ from the unweighted traversals:
 There is no `maxHops`: cost-ordered search does not settle nodes in hop
 order, so a hop bound is not a natural stopping rule here. The algorithm
 relaxes frontier nodes round by round (with parallel edges collapsing to
-their cheapest member), prunes any candidate that already costs at least as
-much as a known path to the target, and stops when no distance improves.
+their cheapest member), prunes any candidate costing strictly more than a
+known path to the target — equal-cost candidates stay in play so every
+equal-cost route to the target is considered — and stops when no distance
+improves.
 
 **Weights are validated up front.** Before any traversal rounds run, every
 visible edge of the selected kinds is audited; the call throws a typed
@@ -167,11 +169,10 @@ visible edge of the selected kinds is audited; the call throws a typed
 The audit covers the selected edge kinds globally (not just edges the
 traversal happens to reach), so a data problem fails deterministically no
 matter which endpoints you query. Weight arithmetic uses IEEE 754 double
-precision on both backends, so paths and totals are backend-identical. (One
-documented corner: with enough edge kinds in a single call to exceed the
-backend's bind-parameter budget — hundreds of kinds — equal-weight
-predecessor ties can resolve differently across backends; totals are
-unaffected.)
+precision on both backends: total weights are always backend-identical,
+and — unless a single call's `edges` list exceeds the backend's
+bind-parameter budget (hundreds of kinds, where equal-weight predecessor
+ties can resolve differently) — so is the returned node sequence.
 
 ## reachable
 

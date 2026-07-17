@@ -123,8 +123,9 @@ type WeightedCandidate = Readonly<{
  * out of the nodes improved in the previous round, keeping one best
  * `(distance, predecessor)` per node identity, until no distance improves.
  * Weights must be non-negative, which makes pruning against the best known
- * target distance safe: once a candidate costs at least as much as a path
- * already reaching the target, no extension of it can win.
+ * target distance safe: a candidate costing strictly more than a path
+ * already reaching the target can never win, while equal-cost candidates
+ * stay admitted so the result tie-break sees every equal-cost target.
  */
 export async function executeWeightedShortestPath<G extends GraphDef>(
   ctx: AlgorithmContext,
@@ -178,13 +179,18 @@ function assertWeightOptions(
       { weightProperty },
     );
   }
+  // The same upper bound the audit applies to stored weights: a default
+  // above it would reopen the accumulated-overflow gap for missing-weight
+  // edges the audit deliberately lets through.
   if (
     defaultWeight !== undefined &&
-    (!Number.isFinite(defaultWeight) || defaultWeight < 0)
+    (!Number.isFinite(defaultWeight) ||
+      defaultWeight < 0 ||
+      defaultWeight > MAX_EDGE_WEIGHT)
   ) {
     throw new ConfigurationError(
-      `${WEIGHTED_ALGORITHM_NAME} defaultWeight must be a finite non-negative number, got ${String(defaultWeight)}.`,
-      { defaultWeight },
+      `${WEIGHTED_ALGORITHM_NAME} defaultWeight must be a non-negative number no greater than ${MAX_EDGE_WEIGHT}, got ${String(defaultWeight)}.`,
+      { defaultWeight, maximum: MAX_EDGE_WEIGHT },
     );
   }
 }

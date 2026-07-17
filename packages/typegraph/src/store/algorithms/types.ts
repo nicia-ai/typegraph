@@ -153,11 +153,11 @@ export type InternalShortestPathOptions<G extends GraphDef> =
  * fails fast with `InvalidEdgeWeightError` (before any rounds run) when any
  * visible edge of the selected kinds has a negative, non-numeric, or
  * out-of-range weight, or is missing the property with no `defaultWeight`
- * configured. Weight arithmetic uses IEEE 754 doubles on both backends, so
- * total weights are backend-identical; among equal-total-weight paths, the
- * returned node sequence is also backend-identical except when the `edges`
- * list is large enough to exceed the backend's bind-parameter budget
- * (hundreds of kinds in one call).
+ * configured. Weight arithmetic uses IEEE 754 doubles on both backends:
+ * total weights are always backend-identical, and — unless the `edges` list
+ * is large enough to exceed the backend's bind-parameter budget (hundreds
+ * of kinds in one call, where equal-weight predecessor ties may resolve
+ * differently) — so is the returned node sequence.
  *
  * Unlike `shortestPath`, there is no `maxHops`: cost-ordered discovery does
  * not settle nodes in hop order, so a hop bound is not a natural stopping
@@ -177,7 +177,9 @@ export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
     weightProperty: string;
     /**
      * Weight substituted for edges missing `weightProperty`. Must be a
-     * finite non-negative number. Without it, a missing weight throws
+     * non-negative number within the same upper bound the audit applies to
+     * stored weights (~9.7e289, so accumulated path sums can never
+     * overflow). Without it, a missing weight throws
      * `InvalidEdgeWeightError`.
      */
     defaultWeight?: number;

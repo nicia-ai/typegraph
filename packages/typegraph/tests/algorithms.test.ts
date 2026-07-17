@@ -509,6 +509,35 @@ describe("store.algorithms", () => {
       expect(path?.totalWeight).toBe(9);
     });
 
+    it("bounds defaultWeight like stored weights so missing-weight sums cannot overflow", async () => {
+      const maxEdgeWeight = Number.MAX_VALUE / 2 ** 64;
+      const a = await store.nodes.Person.create({ name: "BoundA" });
+      const b = await store.nodes.Person.create({ name: "BoundB" });
+      const c = await store.nodes.Person.create({ name: "BoundC" });
+      await store.edges.road.create(a, b, {});
+      await store.edges.road.create(b, c, {});
+
+      // Above the audit bound: rejected up front, before any SQL runs —
+      // otherwise two defaulted hops at MAX_VALUE would overflow float8 on
+      // PostgreSQL (raw 22003) while SQLite returned Infinity.
+      await expect(
+        store.algorithms.weightedShortestPath(a, c, {
+          edges: ["road"],
+          weightProperty: "cost",
+          defaultWeight: Number.MAX_VALUE,
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      // At the exact bound: accepted, and the two-hop sum stays finite.
+      const path = await store.algorithms.weightedShortestPath(a, c, {
+        edges: ["road"],
+        weightProperty: "cost",
+        defaultWeight: maxEdgeWeight,
+      });
+      expect(path?.totalWeight).toBe(maxEdgeWeight * 2);
+      expect(Number.isFinite(path?.totalWeight)).toBe(true);
+    });
+
     it("throws InvalidEdgeWeightError for a negative weight anywhere in the selected kinds", async () => {
       const roads = await seedRoads();
       const x = await store.nodes.Person.create({ name: "NegativeX" });
@@ -1345,7 +1374,15 @@ describe("store.algorithms", () => {
           weightProperty: "",
         }),
       ).rejects.toBeInstanceOf(ConfigurationError);
-      for (const defaultWeight of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      // Number.MAX_VALUE is finite but above the audit's accumulation
+      // bound — accepting it would reopen the overflow gap for
+      // missing-weight edges that skip the stored-weight audit.
+      for (const defaultWeight of [
+        -1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.MAX_VALUE,
+      ]) {
         await expect(
           store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
             edges: ["road"],
