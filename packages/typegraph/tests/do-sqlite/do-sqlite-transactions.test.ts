@@ -38,6 +38,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -46,6 +48,7 @@ import {
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
 import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
+import { RECORDED_EDGE_COLUMNS } from "../../src/store/recorded-capture";
 
 import { SpikeDO } from "./worker";
 
@@ -92,6 +95,12 @@ const HistoryGraph = defineGraph({
     },
   },
 });
+
+// Exercise several chunks, with enough margin that a modest reduction in
+// recorded columns cannot make the pre-fix single statement fit accidentally.
+const RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT =
+  Math.ceil(DURABLE_OBJECT_MAX_BIND_PARAMETERS / RECORDED_EDGE_COLUMNS.length) *
+  4;
 
 async function bootInsideDurableObject(storage: DurableObjectStorage) {
   // No executionProfile hint: detection must classify drizzle(ctx.storage)
@@ -150,6 +159,47 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
       );
+
+      const staleHintBackend = createSqliteBackend(db, {
+        capabilities: { maxBindParameters: 999 },
+        executionProfile: { isSync: false, transactionMode: "none" },
+        tables: defaultTables,
+      });
+      expect(staleHintBackend.capabilities.transactions).toBe(true);
+      expect(staleHintBackend.capabilities.maxBindParameters).toBe(
+        DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+      );
+      const staleHintStore = createStore(DocGraph, staleHintBackend);
+      await expect(
+        staleHintStore.transaction(async (tx) => {
+          await tx.nodes.Doc.create({ title: "must-roll-back" });
+          throw new Error("stale-hint-rollback");
+        }),
+      ).rejects.toThrow("stale-hint-rollback");
+      expect(await staleHintStore.nodes.Doc.count()).toBe(0);
+    });
+  });
+
+  it("packs a literal IN list larger than the platform bind limit", async () => {
+    await inObject("large-in-list", async ({ store }) => {
+      await store.nodes.Doc.create({ title: "included" });
+      await store.nodes.Doc.create({ title: "excluded" });
+      const titles = [
+        ...Array.from(
+          { length: DURABLE_OBJECT_MAX_BIND_PARAMETERS + 1 },
+          (_, index) => `missing-${index}`,
+        ),
+        "included",
+      ];
+
+      const results = await store
+        .query()
+        .from("Doc", "doc")
+        .whereNode("doc", (doc) => doc.title.in(titles))
+        .select((ctx) => ctx.doc.title)
+        .execute();
+
+      expect(results).toEqual(["included"]);
     });
   });
 
@@ -167,7 +217,11 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
             { text: "hello" },
             { id: "message" },
           );
-          for (let index = 0; index < 7; index += 1) {
+          for (
+            let index = 0;
+            index < RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT;
+            index += 1
+          ) {
             const person = await tx.nodes.Person.create(
               { name: `person-${index}` },
               { id: `person-${index}` },
@@ -183,18 +237,26 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
           }
         });
 
-        expect(await store.nodes.Person.count()).toBe(7);
-        expect(await store.edges.mentions.count()).toBe(7);
+        expect(await store.nodes.Person.count()).toBe(
+          RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT,
+        );
+        expect(await store.edges.mentions.count()).toBe(
+          RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT,
+        );
         const recordedAt = await store.recordedNow();
         expect(recordedAt).toBeDefined();
         if (recordedAt === undefined) {
           throw new Error("expected a recorded commit instant");
         }
         const recordedEdges = await Promise.all(
-          Array.from({ length: 7 }, (_, index) =>
-            store
-              .asOfRecorded(recordedAt)
-              .edges.mentions.getById(`mention-${index}` as never),
+          Array.from(
+            { length: RECORDED_EDGE_COUNT_EXCEEDING_ONE_STATEMENT },
+            (_, index) =>
+              store
+                .asOfRecorded(recordedAt)
+                .edges.mentions.getById(
+                  asEdgeId<typeof mentions>(`mention-${index}`),
+                ),
           ),
         );
         expect(recordedEdges.every((edge) => edge !== undefined)).toBe(true);

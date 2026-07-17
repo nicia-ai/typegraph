@@ -139,24 +139,31 @@ export const sqliteDialect: DialectAdapter = {
     if (values.length === 0) {
       return sql.raw("1=1");
     }
-
-    const conditions = values.map(
-      (value) =>
-        sql`EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value})`,
-    );
-    return sql`(${sql.join(conditions, sql` AND `)})`;
+    const packedValues = JSON.stringify(values);
+    return sql`
+      NOT EXISTS (
+            SELECT 1 FROM json_each(${packedValues}) AS tg_required
+            WHERE NOT EXISTS (
+              SELECT 1 FROM json_each(${column}) AS tg_actual
+              WHERE tg_actual.value = tg_required.value
+            )
+          )
+    `;
   },
 
   jsonArrayContainsAny(column, values) {
     if (values.length === 0) {
       return sql.raw("1=0");
     }
-
-    const conditions = values.map(
-      (value) =>
-        sql`EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value})`,
-    );
-    return sql`(${sql.join(conditions, sql` OR `)})`;
+    const packedValues = JSON.stringify(values);
+    return sql`
+      EXISTS (
+            SELECT 1
+            FROM json_each(${column}) AS tg_actual
+            JOIN json_each(${packedValues}) AS tg_wanted
+              ON tg_actual.value = tg_wanted.value
+          )
+    `;
   },
 
   // ============================================================
@@ -188,6 +195,12 @@ export const sqliteDialect: DialectAdapter = {
     // SQLite's IS operator is null-safe equality (equivalent to = for
     // non-null operands, TRUE when both sides are NULL).
     return sql`${left} IS ${right}`;
+  },
+
+  inList(left, values, negated) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    const packedValues = JSON.stringify(values);
+    return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
   },
 
   // ============================================================

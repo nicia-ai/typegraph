@@ -13,14 +13,18 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../../../src";
-import { computeSqliteBatchChunkSizes } from "../../../src/backend/drizzle/sqlite";
+import {
+  computeSqliteBatchChunkSizes,
+  createSqliteBackend,
+} from "../../../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
+  DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
   wrapWithManagedClose,
 } from "../../../src/backend/types";
-import { createTestBackend } from "../../test-utils";
+import { createTestBackend, createTestDatabase } from "../../test-utils";
 
 const MODERN_BETTER_SQLITE3_BUDGET = 32_766;
 
@@ -77,6 +81,17 @@ describe("SQLite bind-parameter budget detection", () => {
     } finally {
       await backend.close();
     }
+  });
+
+  it("caps an explicit do-sqlite profile in the default unit-test lane", () => {
+    const backend = createSqliteBackend(createTestDatabase(), {
+      capabilities: { maxBindParameters: 999 },
+      executionProfile: { transactionMode: "do-sqlite" },
+    });
+
+    expect(backend.capabilities.maxBindParameters).toBe(
+      DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+    );
   });
 
   it("bulk-creates beyond the historic 999-parameter budget in one call", async () => {

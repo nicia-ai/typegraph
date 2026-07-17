@@ -273,6 +273,16 @@ export interface DialectAdapter {
    */
   nullSafeEquals(left: SQL, right: SQL): SQL;
 
+  /**
+   * Tests scalar membership in a literal list. Dialects may choose a packed
+   * representation to keep the statement's bound-parameter count constant.
+   *
+   * @example
+   * SQLite: left IN (SELECT value FROM json_each(?))
+   * PostgreSQL: left IN ($1, $2, ...)
+   */
+  inList(left: SQL, values: readonly unknown[], negated: boolean): SQL;
+
   // ============================================================
   // String Operations
   // ============================================================

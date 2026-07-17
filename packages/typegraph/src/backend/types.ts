@@ -207,8 +207,9 @@ export type BackendCapabilities = Readonly<{
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
    * inserts use — instead of a conservative dialect-blind constant. Custom
-   * runtimes can override the detected limit here. Absent means the
-   * recorded-time fallback budget applies.
+   * runtimes can override a detected or probed limit here, but hosted platform
+   * hard ceilings may only be lowered. Absent means the recorded-time fallback
+   * budget applies.
    */
   maxBindParameters?: number;
   /** Vector search capabilities (undefined if not configured) */

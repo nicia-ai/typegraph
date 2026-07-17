@@ -562,6 +562,20 @@ describe("SQLite Backend - Transaction Modes", () => {
       /cannot return a promise/i,
     );
   });
+
+  it("rejects do-sqlite mode when the client is not Durable Object storage", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { transactionMode: "do-sqlite" },
+    });
+
+    await expect(
+      backend.transaction(() =>
+        Promise.reject(new Error("transaction body must not run")),
+      ),
+    ).rejects.toThrow(
+      /exposes the SQL, transactionSync, and async transaction/u,
+    );
+  });
 });
 
 // ============================================================

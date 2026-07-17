@@ -6,7 +6,14 @@ import {
   createPostgresExecutionAdapter,
   resetStatementNameCacheForTests,
 } from "../src/backend/drizzle/execution/postgres-execution";
-import { createSqliteExecutionAdapter } from "../src/backend/drizzle/execution/sqlite-execution";
+import {
+  type AnySqliteDatabase,
+  createSqliteExecutionAdapter,
+} from "../src/backend/drizzle/execution/sqlite-execution";
+import {
+  D1_MAX_BIND_PARAMETERS,
+  DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+} from "../src/backend/types";
 import { createTestDatabase } from "./test-utils";
 
 describe("sqlite execution adapter", () => {
@@ -174,6 +181,45 @@ describe("sqlite execution adapter", () => {
         profileHints: { isSync: false },
       });
       expect(adapter.profile.transactionMode).toBe("drizzle");
+    });
+
+    it("uses the structural Durable Object client despite minified names and stale hints", () => {
+      const db = {
+        $client: {
+          sql: { exec: vi.fn() },
+          transaction: <Result>(run: () => Promise<Result>) => run(),
+          transactionSync: <Result>(run: () => Result) => run(),
+        },
+        session: { constructor: { name: "a" } },
+      } as unknown as AnySqliteDatabase;
+      const adapter = createSqliteExecutionAdapter(db, {
+        profileHints: { isSync: false, transactionMode: "none" },
+      });
+
+      expect(adapter.profile).toMatchObject({
+        hardMaxBindParameters: DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+        hostedPlatform: "durable-object",
+        isSync: true,
+        maxBindParameters: DURABLE_OBJECT_MAX_BIND_PARAMETERS,
+        transactionMode: "do-sqlite",
+      });
+    });
+
+    it("keeps detected D1 limits and transaction mode authoritative", () => {
+      const db = {
+        session: { constructor: { name: "SQLiteD1Session" } },
+      } as unknown as AnySqliteDatabase;
+      const adapter = createSqliteExecutionAdapter(db, {
+        profileHints: { isSync: true, transactionMode: "drizzle" },
+      });
+
+      expect(adapter.profile).toMatchObject({
+        hardMaxBindParameters: D1_MAX_BIND_PARAMETERS,
+        hostedPlatform: "d1",
+        isSync: false,
+        maxBindParameters: D1_MAX_BIND_PARAMETERS,
+        transactionMode: "none",
+      });
     });
   });
 });

@@ -86,7 +86,9 @@ import {
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
+  getDurableObjectStorageClient,
   type SqliteExecutionAdapter,
+  type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import {
@@ -163,7 +165,8 @@ export type SqliteBackendOptions = Readonly<{
    * Optional execution profile hints used to avoid runtime driver reflection.
    * Set `transactionMode: "none"` for drivers without transactions (e.g.
    * Cloudflare D1). Durable Objects (`drizzle(ctx.storage)`) auto-detect
-   * `transactionMode: "do-sqlite"` and do not need a hint.
+   * `transactionMode: "do-sqlite"` and do not need a hint. Hosted platform
+   * identity is authoritative when it conflicts with a stale hint.
    */
   executionProfile?: SqliteExecutionProfileHints;
   /**
@@ -185,7 +188,8 @@ export type SqliteBackendOptions = Readonly<{
   vector?: VectorStrategy;
   /**
    * Override specific backend capabilities. Useful for custom SQLite builds
-   * or tests that need to simulate an engine-level capability gap.
+   * or tests that need to simulate an engine-level capability gap. Overrides
+   * may lower, but cannot raise, a hosted platform's hard parameter ceiling.
    */
   capabilities?: Partial<BackendCapabilities>;
 }>;
@@ -422,15 +426,6 @@ function runWithSerializedQueue<T>(
   return queue.runExclusive(task);
 }
 
-/**
- * The async storage transaction runner Drizzle's durable-sqlite driver
- * exposes as `db.$client` (`ctx.storage.transaction(async () => ...)`).
- * Structural because drizzle-orm does not export the DO `$client` type.
- */
-interface DurableObjectStorageClient {
-  transaction?: <R>(closure: () => Promise<R>) => Promise<R>;
-}
-
 /** Every SQLite "atomic transactions unavailable" refusal shares this shape. */
 function throwSqliteTransactionsDisabled(message: string): never {
   throw new ConfigurationError(message, {
@@ -469,6 +464,16 @@ function buildSqliteCapabilities(
       {}
     : { vector: buildVectorCapabilities(options.vectorStrategy) }),
   };
+}
+
+function resolveMaxBindParametersCapability(
+  profile: SqliteExecutionProfile,
+  override: number | undefined,
+): number {
+  const requested = override ?? profile.maxBindParameters;
+  return profile.hardMaxBindParameters === undefined ?
+      requested
+    : Math.min(requested, profile.hardMaxBindParameters);
 }
 
 // ============================================================
@@ -956,6 +961,7 @@ export function createSqliteBackend(
   // (`createLibsqlBackend` always; `createLocalSqliteBackend` when the
   // extension loads); absent for plain SQLite drivers with no extension.
   const vectorStrategy = options.vector;
+  const capabilityOverrides = options.capabilities ?? {};
   const capabilities = normalizeGraphAnalyticsCapabilities({
     ...buildSqliteCapabilities({
       fulltextStrategy,
@@ -963,7 +969,11 @@ export function createSqliteBackend(
       transactionMode,
       maxBindParameters: executionAdapter.profile.maxBindParameters,
     }),
-    ...options.capabilities,
+    ...capabilityOverrides,
+    maxBindParameters: resolveMaxBindParametersCapability(
+      executionAdapter.profile,
+      capabilityOverrides.maxBindParameters,
+    ),
   });
 
   const tableNames: ResolvedSqlTableNames = {
@@ -1142,18 +1152,17 @@ export function createSqliteBackend(
    * holds because `bootstrapTables` runs outside any transaction).
    */
   function runDoSqliteStorageTransaction<T>(run: () => Promise<T>): Promise<T> {
-    const storage = (db as { $client?: DurableObjectStorageClient }).$client;
-    const storageTransaction = storage?.transaction;
-    if (typeof storageTransaction !== "function") {
+    const storage = getDurableObjectStorageClient(db);
+    if (storage === undefined) {
       throwSqliteTransactionsDisabled(
         "transactionMode 'do-sqlite' requires a Drizzle Durable Objects " +
-          "database (drizzle(ctx.storage)) whose `$client` exposes the " +
-          "async storage `transaction(async () => ...)` runner.",
+          "database (drizzle(ctx.storage)) whose `$client` exposes the SQL, " +
+          "transactionSync, and async transaction runners.",
       );
     }
     return runWithSerializedQueue(
       serializedQueue,
-      async () => storageTransaction.call(storage, run) as Promise<T>,
+      () => storage.transaction(run),
     );
   }
 

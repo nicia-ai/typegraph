@@ -668,11 +668,10 @@ function compileComparisonPredicate(
     if (values.length === 0) {
       return expr.op === "in" ? sql.raw("1=0") : sql.raw("1=1");
     }
-    const placeholders = values.map(
-      (v) => sql`${convertValueForSql(v.value, dialect)}`,
+    const convertedValues = values.map((value) =>
+      convertValueForSql(value.value, dialect),
     );
-    const op = expr.op === "in" ? sql.raw("IN") : sql.raw("NOT IN");
-    return sql`${left} ${op} (${sql.join(placeholders, sql`, `)})`;
+    return dialect.inList(left, convertedValues, expr.op === "notIn");
   }
 
   // For single-value comparisons, extract the literal value

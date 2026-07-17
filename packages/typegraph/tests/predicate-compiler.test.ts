@@ -30,7 +30,7 @@ import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { type JsonPointer } from "../src/query/json-pointer";
-import { toSqlString } from "./sql-test-utils";
+import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
 // ============================================================
 // Test Helpers
@@ -399,6 +399,22 @@ describe("comparison predicates", () => {
       };
       const result = compilePredicateExpression(expr, ctx);
       expect(toSqlString(result)).toContain("IN");
+    });
+
+    it("packs a large SQLite IN list into one bound parameter", () => {
+      const values = Array.from({ length: 150 }, (_, index) => `id-${index}`);
+      const expr: ComparisonPredicate = {
+        __type: "comparison",
+        op: "in",
+        left: field("p", ["id"]),
+        right: values.map((value) => literal(value)),
+      };
+
+      const result = compilePredicateExpression(expr, ctx);
+      const compiled = toSqlWithParams(result);
+
+      expect(compiled.sql).toContain("json_each(?)");
+      expect(compiled.params).toEqual([JSON.stringify(values)]);
     });
 
     it("compiles notIn with multiple values", () => {
@@ -926,9 +942,10 @@ describe("array predicates", () => {
       values: [literal("a"), literal("b"), literal("c")],
     };
     const result = compilePredicateExpression(expr, ctx);
-    const sqlString = toSqlString(result);
-    expect(sqlString).toContain("AND");
-    expect(sqlString).toContain("json_each");
+    const compiled = toSqlWithParams(result);
+    expect(compiled.sql).toContain("NOT EXISTS");
+    expect(compiled.sql).toContain("json_each");
+    expect(compiled.params).toEqual([JSON.stringify(["a", "b", "c"])]);
   });
 
   it("compiles containsAll with empty values as true", () => {
@@ -950,9 +967,10 @@ describe("array predicates", () => {
       values: [literal("x"), literal("y")],
     };
     const result = compilePredicateExpression(expr, ctx);
-    const sqlString = toSqlString(result);
-    expect(sqlString).toContain("OR");
-    expect(sqlString).toContain("json_each");
+    const compiled = toSqlWithParams(result);
+    expect(compiled.sql).toContain("JOIN");
+    expect(compiled.sql).toContain("json_each");
+    expect(compiled.params).toEqual([JSON.stringify(["x", "y"])]);
   });
 
   it("compiles containsAny with empty values as false", () => {
