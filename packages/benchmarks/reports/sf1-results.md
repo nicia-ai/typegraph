@@ -100,15 +100,20 @@ read=1.1M`, ~10.4s), heap-fetching `n.props` per candidate to extract the
 Late materialization helps SQLite (the covering index served `creationDate`
 index-only, so `content` was a *separate* heap fetch late-mat removed — ~37% on
 the Comment leg) but not Postgres: the sort key lives *inside* `props`, so the
-topK heap-fetches `props` regardless (and `content` rides along free). Two levers
-remain (future work): (1) **index-only sort-key extraction** via
-`snb_message_by_creation_date_covering_idx` — the planner chose `(graph_id, id)`
-over the `(graph_id, kind, id, …)` covering index because the join didn't expose
-`kind`; wiring `from_kind` in drops the ~1.1M heap reads; (2) **per-author top-K
-pushdown** to shrink the 1.2M fan-out to ~73k — architectural, needs a
-`(creator, creationDate)` access path the generic edge schema lacks. ladybug's
-columnar vectorized top-K (736ms) sidesteps the materialization entirely; pgGraph
-(3.2s, same query shape) confirms this is the query, not a bug.
+topK heap-fetches `props` regardless (and `content` rides along free).
+
+**An index experiment refuted the cheap fix.** Dropping `typegraph_nodes_id_idx`
+(the #280 index, to test whether it was crowding out the covering index) made
+IC9 **slower**, not faster (8.4s → 9.6s): PG switched the topK node scan to
+`snb_message_by_creation_date_covering_idx` but still as a plain `Index Scan`
+(width 152, ~1.1M heap reads) — **not** index-only, because the `creationDate`
+sort key is a `json_extract(props, …)` expression the index doesn't serve
+index-only in this shape. So no index reshuffle removes the 1.2M `props` heap
+fetches. The only remaining lever is the **per-author top-K pushdown** — shrink
+the 1.2M fan-out to ~73k, architectural, needs a `(creator, creationDate)` access
+path the generic edge schema lacks. ladybug's columnar vectorized top-K (736ms)
+sidesteps the materialization entirely; pgGraph (3.2s, same query shape) confirms
+this is the query, not a bug.
 
 ## GA_WCC is architectural, not overhead
 

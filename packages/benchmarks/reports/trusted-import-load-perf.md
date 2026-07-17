@@ -57,3 +57,23 @@ git show 42f6941f^:packages/benchmarks/src/real/engines/typegraph-load.ts > /tmp
 Expectation to verify: SF1 `typegraph-sqlite` loadMs drops materially (target
 ≳2× end-to-end including the double CSV pass); if the double pass erodes the win
 below ~1.5× at SF10, revisit spilling edges to a temp file instead of a 2nd pass.
+
+## 4. SF1 load is write-bound, not CSV-read-bound (measured)
+
+A phase-timed SF1 load into a local disk-backed Postgres (`typegraph-postgres`
+path) settles the section-3 question: **the double CSV pass is not the
+bottleneck.** All entity enumeration (persons → comments) completes by **~30s**;
+the remaining **~154s** of the 184.6s `loadSnbDataset()` is the bulk write +
+in-transaction index rebuild. Post-load steps are minor: `refreshStatistics`
+1.4s, `materializeIndexes` (covering index) 10.7s, `VACUUM ANALYZE` 4.9s. Total
+~202s local (~346s on the shared-vCPU EC2 host, ~1.9× — the same host factor as
+GA_WCC).
+
+Implication: spilling edges to a temp file to avoid the second CSV pass would
+**not** materially help — the load is dominated by inserting ~9.6M rows +
+rebuilding indexes, not by reading the CSV twice. The real lever would be a
+faster bulk-write path (pgGraph loads the same SF1 data in ~118s via batched
+`INSERT`, ~3× faster than the trusted-import path) — a larger TypeGraph
+write-path project (e.g. `COPY`), not a benchmark change, and out of scope for
+an SF10 pass (SF10 `typegraph-postgres` load ≈ ~58min on EC2 — slow but tolerable
+for a one-off).
