@@ -1279,6 +1279,16 @@ export function registerRecordedTimeIntegrationTests(
           message: "recordedAsOf is only available through",
         },
         {
+          surface: "weightedShortestPath",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "weightedShortestPath", [
+              alice.id,
+              bob.id,
+              { ...algorithmOptions, weightProperty: "weight" },
+            ]),
+          message: "recordedAsOf is only available through",
+        },
+        {
           surface: "reachable",
           invoke: () =>
             invokeRuntimeMethod(algorithms, "reachable", [

@@ -51,6 +51,14 @@ export type InternalTraversalOptions = InternalTemporalOptions &
     direction?: TraversalDirection;
     cyclePolicy?: AlgorithmCyclePolicy;
     workingMemory?: string;
+    /**
+     * Numeric edge property supplying per-edge traversal weights. When set,
+     * the iterative operation compiles a shared weight expression and every
+     * edge expansion carries a `weight` column.
+     */
+    weightProperty?: string;
+    /** Weight substituted for edges missing `weightProperty`. */
+    defaultWeight?: number;
   }>;
 
 /**
@@ -151,6 +159,27 @@ export function resolveMaxHops(
   }
 
   return value;
+}
+
+/**
+ * Validates an iterative algorithm's round budget. Unlike {@link
+ * resolveMaxHops}, the budget is not a traversal depth bound — convergence
+ * normally ends the run first — so it is not capped at the recursive-CTE
+ * depth limit.
+ */
+export function resolveMaxIterations(
+  value: number | undefined,
+  fallback: number,
+  algorithm: string,
+): number {
+  const maxIterations = value ?? fallback;
+  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
+    throw new ConfigurationError(
+      `${algorithm} maxIterations must be a positive safe integer, got ${String(maxIterations)}.`,
+      { maxIterations },
+    );
+  }
+  return maxIterations;
 }
 
 export function assertEdgeKinds(edges: readonly string[]): void {

@@ -47,6 +47,12 @@ const Task = defineNode("Task", {
 const knows = defineEdge("knows", { schema: z.object({}) });
 const reportsTo = defineEdge("reports_to", { schema: z.object({}) });
 const dependsOn = defineEdge("depends_on", { schema: z.object({}) });
+const road = defineEdge("road", {
+  schema: z.object({
+    cost: z.number().optional(),
+    note: z.string().optional(),
+  }),
+});
 
 const testGraph = defineGraph({
   id: "algorithms_test",
@@ -58,6 +64,7 @@ const testGraph = defineGraph({
     knows: { type: knows, from: [Person], to: [Person] },
     reports_to: { type: reportsTo, from: [Person], to: [Person] },
     depends_on: { type: dependsOn, from: [Task], to: [Task] },
+    road: { type: road, from: [Person], to: [Person] },
   },
 });
 
@@ -323,6 +330,282 @@ describe("store.algorithms", () => {
         edges: ["knows"],
       });
       expect(path?.depth).toBe(1);
+    });
+  });
+
+  // --------------------------------------------------------------
+  // weightedShortestPath
+  // --------------------------------------------------------------
+
+  describe("weightedShortestPath", () => {
+    type RoadFixture = Readonly<{
+      a: string;
+      b: string;
+      c: string;
+      d: string;
+    }>;
+
+    /**
+     * Weighted road network:
+     *   a --(5)--> c            expensive direct road
+     *   a --(1)--> b --(1)--> c cheap detour
+     *   c --(2)--> d
+     * `d` has no outgoing roads; nothing reaches `a`.
+     */
+    async function seedRoads(): Promise<RoadFixture> {
+      const a = await store.nodes.Person.create({ name: "RoadA" });
+      const b = await store.nodes.Person.create({ name: "RoadB" });
+      const c = await store.nodes.Person.create({ name: "RoadC" });
+      const d = await store.nodes.Person.create({ name: "RoadD" });
+      await store.edges.road.create(a, c, { cost: 5 });
+      await store.edges.road.create(a, b, { cost: 1 });
+      await store.edges.road.create(b, c, { cost: 1 });
+      await store.edges.road.create(c, d, { cost: 2 });
+      return { a: a.id, b: b.id, c: c.id, d: d.id };
+    }
+
+    it("prefers a cheaper multi-hop path over an expensive direct edge", async () => {
+      const roads = await seedRoads();
+      const path = await store.algorithms.weightedShortestPath(
+        roads.a,
+        roads.c,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      expect(path?.totalWeight).toBe(2);
+      expect(path?.depth).toBe(2);
+      expect(path?.nodes.map((node) => node.id)).toEqual([
+        roads.a,
+        roads.b,
+        roads.c,
+      ]);
+
+      const unweighted = await store.algorithms.shortestPath(
+        roads.a,
+        roads.c,
+        { edges: ["road"] },
+      );
+      expect(unweighted?.depth).toBe(1);
+    });
+
+    it("accumulates weights across longer paths", async () => {
+      const roads = await seedRoads();
+      const path = await store.algorithms.weightedShortestPath(
+        roads.a,
+        roads.d,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      expect(path?.totalWeight).toBe(4);
+      expect(path?.depth).toBe(3);
+      expect(path?.nodes.map((node) => node.id)).toEqual([
+        roads.a,
+        roads.b,
+        roads.c,
+        roads.d,
+      ]);
+    });
+
+    it("uses the cheapest of parallel edges between the same endpoints", async () => {
+      const a = await store.nodes.Person.create({ name: "ParallelA" });
+      const b = await store.nodes.Person.create({ name: "ParallelB" });
+      await store.edges.road.create(a, b, { cost: 9 });
+      await store.edges.road.create(a, b, { cost: 3 });
+
+      const path = await store.algorithms.weightedShortestPath(a, b, {
+        edges: ["road"],
+        weightProperty: "cost",
+      });
+      expect(path?.totalWeight).toBe(3);
+      expect(path?.depth).toBe(1);
+    });
+
+    it("supports zero-weight edges, including zero-weight cycles", async () => {
+      const a = await store.nodes.Person.create({ name: "ZeroA" });
+      const b = await store.nodes.Person.create({ name: "ZeroB" });
+      const c = await store.nodes.Person.create({ name: "ZeroC" });
+      await store.edges.road.create(a, b, { cost: 0 });
+      await store.edges.road.create(b, a, { cost: 0 });
+      await store.edges.road.create(b, c, { cost: 1 });
+
+      const path = await store.algorithms.weightedShortestPath(a, c, {
+        edges: ["road"],
+        weightProperty: "cost",
+      });
+      expect(path?.totalWeight).toBe(1);
+      expect(path?.nodes.map((node) => node.id)).toEqual([a.id, b.id, c.id]);
+    });
+
+    it("returns a zero-weight self path", async () => {
+      const roads = await seedRoads();
+      const path = await store.algorithms.weightedShortestPath(
+        roads.a,
+        roads.a,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      expect(path?.totalWeight).toBe(0);
+      expect(path?.depth).toBe(0);
+      expect(path?.nodes.map((node) => node.id)).toEqual([roads.a]);
+    });
+
+    it("returns undefined when the target is unreachable", async () => {
+      const roads = await seedRoads();
+      const path = await store.algorithms.weightedShortestPath(
+        roads.d,
+        roads.a,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      expect(path).toBeUndefined();
+    });
+
+    it("follows direction 'in' and 'both'", async () => {
+      const roads = await seedRoads();
+      const inbound = await store.algorithms.weightedShortestPath(
+        roads.c,
+        roads.a,
+        { edges: ["road"], weightProperty: "cost", direction: "in" },
+      );
+      expect(inbound?.totalWeight).toBe(2);
+      expect(inbound?.nodes.map((node) => node.id)).toEqual([
+        roads.c,
+        roads.b,
+        roads.a,
+      ]);
+
+      const undirected = await store.algorithms.weightedShortestPath(
+        roads.d,
+        roads.a,
+        { edges: ["road"], weightProperty: "cost", direction: "both" },
+      );
+      expect(undirected?.totalWeight).toBe(4);
+    });
+
+    it("throws InvalidEdgeWeightError for a missing weight without defaultWeight", async () => {
+      const a = await store.nodes.Person.create({ name: "MissingA" });
+      const b = await store.nodes.Person.create({ name: "MissingB" });
+      await store.edges.road.create(a, b, {});
+
+      await expect(
+        store.algorithms.weightedShortestPath(a, b, {
+          edges: ["road"],
+          weightProperty: "cost",
+        }),
+      ).rejects.toMatchObject({
+        name: "InvalidEdgeWeightError",
+        details: { reason: "missing", property: "cost" },
+      });
+    });
+
+    it("substitutes defaultWeight for edges missing the property", async () => {
+      const a = await store.nodes.Person.create({ name: "DefaultA" });
+      const b = await store.nodes.Person.create({ name: "DefaultB" });
+      const c = await store.nodes.Person.create({ name: "DefaultC" });
+      await store.edges.road.create(a, b, {});
+      await store.edges.road.create(b, c, { cost: 2 });
+
+      const path = await store.algorithms.weightedShortestPath(a, c, {
+        edges: ["road"],
+        weightProperty: "cost",
+        defaultWeight: 7,
+      });
+      expect(path?.totalWeight).toBe(9);
+    });
+
+    it("throws InvalidEdgeWeightError for a negative weight anywhere in the selected kinds", async () => {
+      const roads = await seedRoads();
+      const x = await store.nodes.Person.create({ name: "NegativeX" });
+      const y = await store.nodes.Person.create({ name: "NegativeY" });
+      await store.edges.road.create(x, y, { cost: -1 });
+
+      // The offending edge is not even reachable from the queried source —
+      // the audit is global over the selected kinds, so the failure is
+      // deterministic regardless of traversal order.
+      await expect(
+        store.algorithms.weightedShortestPath(roads.a, roads.c, {
+          edges: ["road"],
+          weightProperty: "cost",
+        }),
+      ).rejects.toMatchObject({
+        name: "InvalidEdgeWeightError",
+        details: { reason: "negative" },
+      });
+    });
+
+    it("throws InvalidEdgeWeightError for a non-numeric weight property", async () => {
+      const a = await store.nodes.Person.create({ name: "TextA" });
+      const b = await store.nodes.Person.create({ name: "TextB" });
+      await store.edges.road.create(a, b, { cost: 1, note: "scenic" });
+
+      await expect(
+        store.algorithms.weightedShortestPath(a, b, {
+          edges: ["road"],
+          weightProperty: "note",
+        }),
+      ).rejects.toMatchObject({
+        name: "InvalidEdgeWeightError",
+        details: { reason: "non_numeric", value: "scenic" },
+      });
+    });
+
+    it("supports fractional weights with double-precision totals", async () => {
+      const a = await store.nodes.Person.create({ name: "FracA" });
+      const b = await store.nodes.Person.create({ name: "FracB" });
+      const c = await store.nodes.Person.create({ name: "FracC" });
+      await store.edges.road.create(a, b, { cost: 0.1 });
+      await store.edges.road.create(b, c, { cost: 0.2 });
+
+      const path = await store.algorithms.weightedShortestPath(a, c, {
+        edges: ["road"],
+        weightProperty: "cost",
+      });
+      expect(path?.totalWeight).toBe(0.1 + 0.2);
+    });
+
+    it("throws GraphAlgorithmConvergenceError when maxIterations is exhausted", async () => {
+      const roads = await seedRoads();
+      await expect(
+        store.algorithms.weightedShortestPath(roads.a, roads.d, {
+          edges: ["road"],
+          weightProperty: "cost",
+          maxIterations: 1,
+        }),
+      ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+    });
+
+    it("produces identical results through the inline fallback", async () => {
+      const roads = await seedRoads();
+      const inlineBackend: GraphBackend = {
+        ...backend,
+        capabilities: { ...backend.capabilities, transactions: false },
+      };
+      const inlineStore = createStore(testGraph, inlineBackend);
+
+      const workingTablePath = await store.algorithms.weightedShortestPath(
+        roads.a,
+        roads.d,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      const inlinePath = await inlineStore.algorithms.weightedShortestPath(
+        roads.a,
+        roads.d,
+        { edges: ["road"], weightProperty: "cost" },
+      );
+      expect(inlinePath).toEqual(workingTablePath);
+
+      await expect(
+        inlineStore.algorithms.weightedShortestPath(roads.d, roads.a, {
+          edges: ["road"],
+          weightProperty: "cost",
+        }),
+      ).resolves.toBeUndefined();
+
+      const x = await store.nodes.Person.create({ name: "InlineNegX" });
+      const y = await store.nodes.Person.create({ name: "InlineNegY" });
+      await store.edges.road.create(x, y, { cost: -2 });
+      await expect(
+        inlineStore.algorithms.weightedShortestPath(roads.a, roads.d, {
+          edges: ["road"],
+          weightProperty: "cost",
+        }),
+      ).rejects.toMatchObject({ name: "InvalidEdgeWeightError" });
     });
   });
 
@@ -948,6 +1231,39 @@ describe("store.algorithms", () => {
       await expect(
         store.algorithms.weaklyConnectedComponents({ edges: [] }),
       ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
+          edges: [],
+          weightProperty: "cost",
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+    });
+
+    it("rejects malformed weightedShortestPath weight options", async () => {
+      await expect(
+        store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
+          edges: ["road"],
+          weightProperty: "",
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      for (const defaultWeight of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(
+          store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
+            edges: ["road"],
+            weightProperty: "cost",
+            defaultWeight,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      for (const maxIterations of [0, -5, 1.5, Number.NaN]) {
+        await expect(
+          store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
+            edges: ["road"],
+            weightProperty: "cost",
+            maxIterations,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
     });
 
     it("rejects non-positive maxHops", async () => {

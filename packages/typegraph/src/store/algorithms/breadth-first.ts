@@ -15,6 +15,7 @@ import {
   nodeIdentityKey,
   reduceExpandedWorkingSet,
   runIterativeGraphOperation,
+  supportsTemporaryIteration,
   withInlineIterativeGraphOperation,
 } from "./iterative-graph-operation";
 import type {
@@ -96,17 +97,6 @@ export async function findShortestPath(
     );
   }
   return findShortestPathInline(ctx, sourceId, targetId, maxHops, options);
-}
-
-function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
-  // Working-table rounds fold their frontier and meeting bookkeeping into
-  // `INSERT … RETURNING`, so an engine without RETURNING must take the
-  // inline fallback.
-  return (
-    ctx.backend.capabilities.transactions &&
-    ctx.backend.capabilities.returning !== false &&
-    ctx.backend.executeTemporaryStatement !== undefined
-  );
 }
 
 async function findReachableNodesInWorkingTable(

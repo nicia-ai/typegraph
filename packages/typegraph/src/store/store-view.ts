@@ -53,6 +53,8 @@ import {
   type TemporalAlgorithmOptions,
   type WeaklyConnectedComponentMembership,
   type WeaklyConnectedComponentsOptions,
+  type WeightedShortestPathOptions,
+  type WeightedShortestPathResult,
 } from "./algorithms";
 import {
   CURRENT_ONLY_READ_NAMES,
@@ -129,6 +131,15 @@ export type StoreViewShortestPathOptions<G extends GraphDef> = Omit<
   keyof TemporalAlgorithmOptions
 >;
 
+/**
+ * `weightedShortestPath` options with the temporal axis removed (the pin
+ * supplies it).
+ */
+export type StoreViewWeightedShortestPathOptions<G extends GraphDef> = Omit<
+  WeightedShortestPathOptions<G>,
+  keyof TemporalAlgorithmOptions
+>;
+
 /** `canReach` options with the temporal axis removed (the pin supplies it). */
 export type StoreViewCanReachOptions<G extends GraphDef> = Omit<
   BaseTraversalOptions<G>,
@@ -158,6 +169,11 @@ export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
     to: NodeIdentifier,
     options: StoreViewShortestPathOptions<G>,
   ) => Promise<ShortestPathResult | undefined>;
+  weightedShortestPath: (
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: StoreViewWeightedShortestPathOptions<G>,
+  ) => Promise<WeightedShortestPathResult | undefined>;
   reachable: (
     from: NodeIdentifier,
     options: StoreViewReachableOptions<G>,
@@ -795,6 +811,8 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   get algorithms(): StoreViewGraphAlgorithms<G> {
     this.#algorithmFacade ??= Object.freeze({
       shortestPath: (from, to, options) => this.shortestPath(from, to, options),
+      weightedShortestPath: (from, to, options) =>
+        this.weightedShortestPath(from, to, options),
       reachable: (from, options) => this.reachable(from, options),
       canReach: (from, to, options) => this.canReach(from, to, options),
       neighbors: (node, options) => this.neighbors(node, options),
@@ -828,6 +846,18 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewShortestPathOptions<G>,
   ): Promise<ShortestPathResult | undefined> {
     return this.internalAlgorithms().shortestPath(from, to, {
+      ...options,
+      ...withCoordinate(this.coordinate),
+    });
+  }
+
+  /** Minimum-total-weight path at this view's pinned coordinate. */
+  weightedShortestPath(
+    from: NodeIdentifier,
+    to: NodeIdentifier,
+    options: StoreViewWeightedShortestPathOptions<G>,
+  ): Promise<WeightedShortestPathResult | undefined> {
+    return this.internalAlgorithms().weightedShortestPath(from, to, {
       ...options,
       ...withCoordinate(this.coordinate),
     });

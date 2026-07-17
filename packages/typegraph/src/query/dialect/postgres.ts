@@ -172,6 +172,13 @@ export const postgresDialect: DialectAdapter = {
     return sql`(${column} #> ${path} IS NULL OR ${column} #>> ${path} = 'null')`;
   },
 
+  jsonPathIsNumber(column, pointer) {
+    const path = toPostgresPath(pointer);
+    // jsonb_typeof returns NULL for a missing path; COALESCE keeps the
+    // predicate two-valued so negations don't silently drop rows.
+    return sql`COALESCE(jsonb_typeof(${column} #> ${path}) = 'number', FALSE)`;
+  },
+
   jsonPathIsNotNull(column, pointer) {
     const path = toPostgresPath(pointer);
     return sql`(${column} #> ${path} IS NOT NULL AND ${column} #>> ${path} != 'null')`;

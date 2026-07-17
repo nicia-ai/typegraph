@@ -936,6 +936,59 @@ export class GraphAlgorithmConvergenceError extends TypeGraphError {
   }
 }
 
+/** Stable reasons a weighted traversal can reject an edge's weight value. */
+export type InvalidEdgeWeightReason = "missing" | "negative" | "non_numeric";
+
+const EDGE_WEIGHT_REASON_MESSAGES: Readonly<
+  Record<InvalidEdgeWeightReason, string>
+> = {
+  missing: "has no value for weight property",
+  negative: "has a negative value for weight property",
+  non_numeric: "has a non-numeric value for weight property",
+};
+
+const EDGE_WEIGHT_REASON_SUGGESTIONS: Readonly<
+  Record<InvalidEdgeWeightReason, string>
+> = {
+  missing:
+    "Set the property on every selected edge, or provide defaultWeight for edges without it.",
+  negative:
+    "Weighted traversal requires non-negative weights; repair the edge data before retrying.",
+  non_numeric:
+    "Store the weight property as a JSON number on every selected edge before retrying.",
+};
+
+/**
+ * Thrown when a weighted graph algorithm finds an edge whose weight property
+ * violates the weighted-traversal contract (missing without a default,
+ * non-numeric, or negative). Raised before any traversal rounds run, so a
+ * weighted call either observes a fully valid weight domain or fails fast.
+ */
+export class InvalidEdgeWeightError extends TypeGraphError {
+  constructor(
+    details: Readonly<{
+      edgeId: string;
+      edgeKind: string;
+      property: string;
+      reason: InvalidEdgeWeightReason;
+      value?: string;
+    }>,
+  ) {
+    super(
+      `Edge '${details.edgeId}' (kind '${details.edgeKind}') ${EDGE_WEIGHT_REASON_MESSAGES[details.reason]} '${details.property}'${
+        details.value === undefined ? "" : ` (value: ${details.value})`
+      }.`,
+      "INVALID_EDGE_WEIGHT",
+      {
+        details: { ...details },
+        category: "user",
+        suggestion: EDGE_WEIGHT_REASON_SUGGESTIONS[details.reason],
+      },
+    );
+    this.name = "InvalidEdgeWeightError";
+  }
+}
+
 /** Thrown when an operation requires a backend capability it does not expose. */
 export class UnsupportedBackendCapabilityError extends TypeGraphError {
   constructor(

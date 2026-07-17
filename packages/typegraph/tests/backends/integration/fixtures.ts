@@ -88,6 +88,7 @@ const worksAt = defineEdge("worksAt", {
 const knows = defineEdge("knows", {
   schema: z.object({
     since: z.string().optional(),
+    weight: z.number().optional(),
   }),
 });
 

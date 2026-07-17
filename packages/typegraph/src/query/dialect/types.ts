@@ -255,6 +255,18 @@ export interface DialectAdapter {
    */
   jsonPathIsNotNull(column: SQL, pointer: JsonPointer): SQL;
 
+  /**
+   * Checks if the JSON value at a path exists and is a JSON number.
+   *
+   * Never evaluates to SQL NULL: a missing path yields FALSE, so the
+   * predicate can be negated safely inside audit-style WHERE clauses.
+   *
+   * @example
+   * SQLite: json_type(column, '$.path') IN ('integer', 'real')
+   * PostgreSQL: jsonb_typeof(column #> path) = 'number'
+   */
+  jsonPathIsNumber(column: SQL, pointer: JsonPointer): SQL;
+
   // ============================================================
   // Comparison Operations
   // ============================================================

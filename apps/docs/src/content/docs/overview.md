@@ -106,8 +106,8 @@ The same query code works with SQLite and PostgreSQL.
 
 TypeGraph deliberately excludes:
 
-- **Advanced graph analytics**: No PageRank, community detection, weighted
-  shortest path, or centrality measures beyond degree
+- **Advanced graph analytics**: No PageRank, community detection, or
+  centrality measures beyond degree
 - **Distributed storage**: Single-database deployment only
 
 These exclusions keep TypeGraph focused and maintainable.
@@ -234,6 +234,7 @@ TypeGraph is not ideal for:
 - Large-scale graph analytics requiring distributed processing
 - Social networks with billions of edges
 - Real-time streaming graph data
-- Applications requiring advanced graph algorithms such as PageRank,
-  community detection, or weighted shortest path (use Neo4j or a graph
-  library; Tier 1 connectivity algorithms ship on `store.algorithms.*`)
+- Applications requiring advanced graph algorithms such as PageRank or
+  community detection (use Neo4j or a graph library; Tier 1 connectivity
+  algorithms — including weighted shortest path — ship on
+  `store.algorithms.*`)

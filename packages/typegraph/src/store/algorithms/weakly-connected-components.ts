@@ -1,10 +1,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
-import {
-  ConfigurationError,
-  UnsupportedBackendCapabilityError,
-} from "../../errors";
+import { UnsupportedBackendCapabilityError } from "../../errors";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { compareCodePoints } from "../../utils/compare";
@@ -12,6 +9,7 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   type InternalTraversalOptions,
+  resolveMaxIterations,
 } from "./context";
 import {
   compileWorkingTableEdgeExpansion,
@@ -46,7 +44,11 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
 ): Promise<readonly WeaklyConnectedComponentMembership[]> {
   assertEdgeKinds(options.edges);
   assertWeaklyConnectedComponentsSupported(ctx);
-  const maxIterations = resolveMaxIterations(options.maxIterations);
+  const maxIterations = resolveMaxIterations(
+    options.maxIterations,
+    DEFAULT_WCC_MAX_ITERATIONS,
+    "weaklyConnectedComponents",
+  );
   const nodeKinds =
     options.nodeKinds === undefined ?
       undefined
@@ -99,17 +101,6 @@ function assertWeaklyConnectedComponentsSupported(ctx: AlgorithmContext): void {
     },
     "Use a built-in transactional SQLite/PostgreSQL backend, or declare graphAnalytics support on a compatible custom backend.",
   );
-}
-
-function resolveMaxIterations(value: number | undefined): number {
-  const maxIterations = value ?? DEFAULT_WCC_MAX_ITERATIONS;
-  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
-    throw new ConfigurationError(
-      `weaklyConnectedComponents maxIterations must be a positive safe integer, got ${String(maxIterations)}.`,
-      { maxIterations },
-    );
-  }
-  return maxIterations;
 }
 
 function createWorkingTable(context: IterativeGraphRunContext): SQL {

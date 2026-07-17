@@ -17,6 +17,8 @@ import {
   compileTemporalFilter,
   currentReadInstant,
 } from "../../query/compiler/temporal";
+import { type DialectAdapter } from "../../query/dialect/types";
+import { jsonPointer } from "../../query/json-pointer";
 import {
   asCompiledRowsSql,
   asCompiledTemporaryStatementSql,
@@ -44,6 +46,13 @@ export type IterativeGraphOperation = Readonly<{
    * working-table rounds; `undefined` inherits the engine's configuration.
    */
   workingMemory: string | undefined;
+  /**
+   * Per-edge traversal weight over the expansion's edge alias `e`, compiled
+   * from the caller's `weightProperty`/`defaultWeight`. When set, every edge
+   * expansion carries it as a `weight` column; `undefined` for unweighted
+   * operations.
+   */
+  weightExpression: SQL | undefined;
 }>;
 
 export type NodeIdentityKey = string & {
@@ -53,6 +62,8 @@ export type NodeIdentityKey = string & {
 export type NodeExpansion = Readonly<{
   source: PathNode;
   target: PathNode;
+  /** Edge weight; present exactly when the operation is weighted. */
+  weight?: number;
 }>;
 
 type TemporaryStatementBackend = QueryBackend &
@@ -101,6 +112,8 @@ type ExpansionRow = Readonly<{
   source_kind: string;
   target_id: string;
   target_kind: string;
+  /** Present when the operation is weighted; drivers may deliver text. */
+  weight?: number | string | null;
 }>;
 
 type VisibleNodeRow = Readonly<{
@@ -110,6 +123,8 @@ type VisibleNodeRow = Readonly<{
 
 const DEFAULT_MAX_BIND_PARAMETERS = 999;
 const RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH = 12;
+/** Headroom for the weight expression's path and default-weight binds. */
+const RESERVED_WEIGHT_BIND_PARAMETERS_PER_BRANCH = 4;
 /**
  * PostgreSQL initially estimates an un-analyzed temporary relation at one row.
  * Even a few dozen rows can distort join ordering on a dense edge expansion,
@@ -390,6 +405,11 @@ export async function reduceExpandedWorkingSet<T>(
         const expansion = {
           source: { id: row.source_id, kind: row.source_kind },
           target: { id: row.target_id, kind: row.target_kind },
+          // Missing-weight edges are pre-audited away unless a default is
+          // configured, so a NULL weight can only mean "not a weighted run".
+          ...(row.weight === undefined || row.weight === null ?
+            {}
+          : { weight: Number(row.weight) }),
         } satisfies NodeExpansion;
         const targetKey = nodeIdentityKey(expansion.target);
         const selected = reduce(reduced.get(targetKey), expansion);
@@ -597,7 +617,9 @@ function compileDirectionalExpansion(
     targetField,
     targetKindField,
   );
-  return sql`SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (${edgeExpansion}) expanded JOIN ${operation.schema.nodesTable} n ON n.graph_id = ${operation.ctx.graphId} AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE ${operation.nodeTemporalFilter}`;
+  const weightColumn =
+    operation.weightExpression === undefined ? sql`` : sql`, expanded.weight`;
+  return sql`SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind${weightColumn} FROM (${edgeExpansion}) expanded JOIN ${operation.schema.nodesTable} n ON n.graph_id = ${operation.ctx.graphId} AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE ${operation.nodeTemporalFilter}`;
 }
 
 function compileDirectionalEdgeExpansion(
@@ -611,7 +633,11 @@ function compileDirectionalEdgeExpansion(
   targetKindField: "from_kind" | "to_kind",
 ): ReturnType<typeof sql> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
-  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
+  const weightColumn =
+    operation.weightExpression === undefined ?
+      sql``
+    : sql`, ${operation.weightExpression} AS weight`;
+  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind${weightColumn} FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
 }
 
 function chunkValues<T>(
@@ -650,12 +676,24 @@ function createOperation(
     tableAlias: "e",
     currentTimestamp,
   });
+  const weightExpression =
+    options.weightProperty === undefined ? undefined : (
+      compileWeightExpression(
+        ctx.dialect,
+        options.weightProperty,
+        options.defaultWeight,
+      )
+    );
   const direction = options.direction ?? "out";
   const branchCount = direction === "both" ? 2 : 1;
   const parameterLimit =
     backend.capabilities.maxBindParameters ?? DEFAULT_MAX_BIND_PARAMETERS;
-  const fixedParameters =
-    branchCount * RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH;
+  const reservedPerBranch =
+    RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH +
+    (weightExpression === undefined ? 0 : (
+      RESERVED_WEIGHT_BIND_PARAMETERS_PER_BRANCH
+    ));
+  const fixedParameters = branchCount * reservedPerBranch;
   const sharedBudget = parameterLimit - fixedParameters;
   const maxEdgeKindsPerQuery = Math.floor(sharedBudget / (branchCount + 2));
   if (maxEdgeKindsPerQuery < 1) {
@@ -674,9 +712,7 @@ function createOperation(
     ...edgeKindChunks.map((chunk) => chunk.length),
   );
   const maxWorkingSetSize = Math.floor(
-    (parameterLimit -
-      branchCount *
-        (largestEdgeKindChunk + RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH)) /
+    (parameterLimit - branchCount * (largestEdgeKindChunk + reservedPerBranch)) /
       2,
   );
   if (maxWorkingSetSize < 1) {
@@ -696,7 +732,45 @@ function createOperation(
     edgeTemporalFilter,
     schema: resolveReadSchema(ctx, options),
     workingMemory: resolveWorkingMemory(options.workingMemory),
+    weightExpression,
   };
+}
+
+/**
+ * Compiles the per-edge weight expression over the expansion's edge alias
+ * `e`. The extraction is cast to DOUBLE PRECISION — a spelling both engines
+ * accept — so weight arithmetic is IEEE 754 double on both backends.
+ * PostgreSQL's `::numeric` extraction would use exact decimal arithmetic and
+ * could produce different accumulated distances (and therefore different
+ * paths) than SQLite's binary doubles.
+ *
+ * The weight audit runs before any expansion, so by the time this expression
+ * evaluates, every selected edge's property is a JSON number (never text the
+ * cast could mangle or reject) or absent with a configured default.
+ */
+function compileWeightExpression(
+  dialect: DialectAdapter,
+  weightProperty: string,
+  defaultWeight: number | undefined,
+): SQL {
+  const extracted = sql`CAST(${dialect.jsonExtractText(sql.raw("e.props"), jsonPointer([weightProperty]))} AS DOUBLE PRECISION)`;
+  return defaultWeight === undefined ? extracted : (
+      sql`COALESCE(${extracted}, ${defaultWeight})`
+    );
+}
+
+/**
+ * Whether the backend can host working-table rounds: a pinned transactional
+ * connection, temporary-statement support, and `INSERT … RETURNING` for the
+ * folded frontier bookkeeping. Callers without it take the inline
+ * chunked-`VALUES` fallback.
+ */
+export function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
+  return (
+    ctx.backend.capabilities.transactions &&
+    ctx.backend.capabilities.returning !== false &&
+    ctx.backend.executeTemporaryStatement !== undefined
+  );
 }
 
 function requireTemporaryStatements(

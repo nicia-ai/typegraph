@@ -266,12 +266,12 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 ## Graph Analytics Limits
 
 TypeGraph ships connectivity algorithms on `store.algorithms.*` — shortest
-path, reachability, k-hop neighborhoods, degree, and exact weakly connected
-components. See [Graph Algorithms](/graph-algorithms) for the full API.
+path (weighted and unweighted), reachability, k-hop neighborhoods, degree,
+and exact weakly connected components. See
+[Graph Algorithms](/graph-algorithms) for the full API.
 
 The following heavier analytics are **not** provided:
 
-- Weighted shortest path (Dijkstra, A*)
 - PageRank
 - Community detection
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)

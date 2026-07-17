@@ -266,6 +266,7 @@ export type {
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
   ErrorCategory,
+  InvalidEdgeWeightReason,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
   NodeConstraintNotFoundErrorDetails,
@@ -302,6 +303,7 @@ export {
   // Error utility functions
   getErrorSuggestion,
   GraphAlgorithmConvergenceError,
+  InvalidEdgeWeightError,
   isConstraintError,
   isRecordedCaptureGuardError,
   isSystemError,
@@ -401,6 +403,7 @@ export type {
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,
   StoreViewWeaklyConnectedComponentsOptions,
+  StoreViewWeightedShortestPathOptions,
   TypedRecordedStoreViewEdgeCollection,
   TypedStoreViewEdgeCollection,
 } from "./store";
@@ -428,6 +431,8 @@ export type {
   TraversalDirection,
   WeaklyConnectedComponentMembership,
   WeaklyConnectedComponentsOptions,
+  WeightedShortestPathOptions,
+  WeightedShortestPathResult,
 } from "./store/algorithms";
 export type {
   AnyEdge,

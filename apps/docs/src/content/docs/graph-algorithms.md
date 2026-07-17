@@ -1,6 +1,6 @@
 ---
 title: Graph Algorithms
-description: Shortest path, reachability, neighborhoods, degree, and weakly connected components on store.algorithms
+description: Shortest path (weighted and unweighted), reachability, neighborhoods, degree, and weakly connected components on store.algorithms
 ---
 
 Graph queries like "are Alice and Bob connected?" or "who is within two hops
@@ -10,6 +10,10 @@ facade on the store:
 
 ```typescript
 store.algorithms.shortestPath(alice, bob, { edges: ["knows"] });
+store.algorithms.weightedShortestPath(alice, bob, {
+  edges: ["knows"],
+  weightProperty: "strength",
+});
 store.algorithms.reachable(alice, { edges: ["knows"] });
 store.algorithms.canReach(alice, bob, { edges: ["knows"] });
 store.algorithms.neighbors(alice, { edges: ["knows"], depth: 2 });
@@ -36,6 +40,7 @@ SQLite and PostgreSQL.
 | You want to... | Use |
 |----------------|-----|
 | Find the fewest-hop route between two nodes | `shortestPath` |
+| Find the cheapest route by a numeric edge property | `weightedShortestPath` |
 | List every node reachable from a source | `reachable` |
 | Check whether a node is reachable at all | `canReach` |
 | Get the k-hop neighborhood of a node | `neighbors` |
@@ -97,6 +102,66 @@ type ShortestPathResult = Readonly<{
 Source equal to target returns a zero-length path containing just that
 node. Endpoints that don't pass the resolved temporal filter return
 `undefined` — see [Temporal Behavior](#temporal-behavior).
+
+## weightedShortestPath
+
+Finds the minimum-total-weight path from `from` to `to`, weighting each
+traversed edge by a numeric property stored on it. This is the shape of
+LDBC's "trusted connection paths" query (Interactive IC14): the cheapest
+route where each hop's cost reflects, say, interaction strength — which is
+usually not the fewest-hop route.
+
+```typescript
+const path = await store.algorithms.weightedShortestPath(alice, bob, {
+  edges: ["knows"],
+  weightProperty: "interactionCost",
+  direction: "both",
+});
+
+if (path) {
+  console.log(`weight ${path.totalWeight} over ${path.depth} hops`);
+}
+```
+
+```typescript
+type WeightedShortestPathResult = Readonly<{
+  nodes: readonly Readonly<{ id: string; kind: string }>[];
+  depth: number; // hop count, nodes.length - 1
+  totalWeight: number; // sum of traversed edge weights
+}>;
+```
+
+Options differ from the unweighted traversals:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
+| `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight |
+| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be finite and non-negative |
+| `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
+| `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
+| `temporalMode` / `asOf` / `workingMemory` | | | Same as the shared options above |
+
+There is no `maxHops`: cost-ordered search does not settle nodes in hop
+order, so a hop bound is not a natural stopping rule here. The algorithm
+relaxes frontier nodes round by round (with parallel edges collapsing to
+their cheapest member), prunes any candidate that already costs at least as
+much as a known path to the target, and stops when no distance improves.
+
+**Weights are validated up front.** Before any traversal rounds run, every
+visible edge of the selected kinds is audited; the call throws a typed
+`InvalidEdgeWeightError` naming the offending edge when a weight is:
+
+- **negative** — the pruning that makes the search terminate early assumes
+  non-negative weights, so they are rejected rather than silently mis-answered;
+- **non-numeric** — a JSON string like `"5"` does not count; the property
+  must be stored as a JSON number;
+- **missing** without a configured `defaultWeight`.
+
+The audit covers the selected edge kinds globally (not just edges the
+traversal happens to reach), so a data problem fails deterministically no
+matter which endpoints you query. Weight arithmetic uses IEEE 754 double
+precision on both backends, so paths and totals are backend-identical.
 
 ## reachable
 
@@ -358,10 +423,10 @@ file — a good starting point for your own RAG + graph workloads.
 
 ## What's Not Included
 
-These algorithms cover shortest path, reachability, neighborhoods, degree,
-and weakly connected components. They do **not** cover:
+These algorithms cover shortest path (weighted and unweighted),
+reachability, neighborhoods, degree, and weakly connected components. They
+do **not** cover:
 
-- Weighted shortest path (Dijkstra / A*)
 - Strongly connected components
 - Topological sort
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
