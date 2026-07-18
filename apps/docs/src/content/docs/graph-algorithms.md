@@ -35,6 +35,11 @@ path reconstruction, and stop when the frontiers meet.
 `degree` remains a single `COUNT` query. The algorithms work identically on
 SQLite and PostgreSQL.
 
+The inline fallback is intentionally limited to bounded traversals. Whole-graph
+iterative algorithms such as WCC require a pinned transactional connection and
+fail through their typed capability gate when one is unavailable; they never
+silently switch to a second full algorithm implementation.
+
 ## When to Reach for Algorithms
 
 | You want to... | Use |
@@ -102,6 +107,9 @@ type ShortestPathResult = Readonly<{
 Source equal to target returns a zero-length path containing just that
 node. Endpoints that don't pass the resolved temporal filter return
 `undefined` — see [Temporal Behavior](#temporal-behavior).
+When several minimum-hop paths exist, predecessor and meeting-node ties use
+the smallest `(id, kind)` identity under portable binary ordering, so the
+selected path is identical across backends and execution strategies.
 
 ## weightedShortestPath
 
@@ -285,6 +293,12 @@ support. Cloudflare D1, Durable Objects SQLite, `neon-http`, and other
 restricted backends throw `UnsupportedBackendCapabilityError` before temporary
 state is created. If propagation has not converged after `maxIterations`, TypeGraph throws
 `GraphAlgorithmConvergenceError` rather than returning a partial partition.
+
+Each round expands only the indexed frontier of nodes whose label changed in
+the previous round. Candidate labels remain staged until every edge-kind chunk
+has run, preserving synchronous and bind-limit-independent iteration semantics;
+only changed rows are written back. Late convergence rounds therefore avoid
+rescanning the full edge set and do not churn unchanged working rows.
 
 PostgreSQL refreshes planner statistics for a sufficiently large temporary
 working table and refreshes them again after multiplicative growth. This avoids

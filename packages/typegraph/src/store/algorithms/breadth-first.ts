@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compareStrings } from "../../utils/compare";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import {
   compareNodeIdentity,
@@ -274,7 +273,7 @@ async function seedWorkingSide(
 /**
  * Detects the depth-zero meeting for bidirectional search: a node seeded on
  * both sides (source equals target, possibly across kinds sharing that id).
- * Ties break by node id then kind in UTF-16 code-unit order — deterministic
+ * Ties break by node id then kind in code-point order — deterministic
  * and identical on both backends, unlike the collation-dependent SQL probe
  * this replaced.
  */
@@ -318,6 +317,11 @@ async function expandWorkingTableRound(
   const oppositeSide: WorkingSide = side === "forward" ? "reverse" : "forward";
   let insertedCount = 0;
   let meeting: MeetingNode | undefined;
+  const { dialect } = context.operation.ctx;
+  const targetKind = dialect.binaryText(sql`expanded.target_kind`);
+  const targetId = dialect.binaryText(sql`expanded.target_id`);
+  const sourceId = dialect.binaryText(sql`expanded.source_id`);
+  const sourceKind = dialect.binaryText(sql`expanded.source_kind`);
   for (const edgeKinds of context.operation.edgeKindChunks) {
     const sourceFilter = sql`
       w.graph_id = ${context.graphId}
@@ -353,8 +357,8 @@ async function expandWorkingTableRound(
         FROM (
           SELECT expanded.*,
             ROW_NUMBER() OVER (
-              PARTITION BY expanded.target_kind, expanded.target_id
-              ORDER BY expanded.source_id, expanded.source_kind
+              PARTITION BY ${targetKind}, ${targetId}
+              ORDER BY ${sourceId}, ${sourceKind}
             ) AS candidate_rank
           FROM (${expansion}) expanded
         ) ranked
@@ -380,8 +384,8 @@ async function expandWorkingTableRound(
 
 /**
  * Folds one round's inserted rows into the best meeting so far: smallest
- * total depth within `maxHops`, ties broken by node id then kind in UTF-16
- * code-unit order. That tie-break is deterministic and identical on both
+ * total depth within `maxHops`, ties broken by node id then kind in code-point
+ * order. That tie-break is deterministic and identical on both
  * backends; the SQL probe it replaced ordered under the database collation,
  * so equal-depth meetings could previously pick a different node on a
  * PostgreSQL cluster with a linguistic default collation.
@@ -496,7 +500,6 @@ async function readWorkingRows(
       WHERE graph_id = ${context.graphId}
         AND run_id = ${context.runId}
         AND ${sideFilter}
-      ORDER BY side, depth, node_id, node_kind
     `),
   );
 }
@@ -675,18 +678,28 @@ function findMeetingNodeKey(
   activeVisited: ReadonlyMap<NodeIdentityKey, VisitedNode>,
   oppositeVisited: ReadonlyMap<NodeIdentityKey, VisitedNode>,
 ): NodeIdentityKey | undefined {
-  let best: Readonly<{ key: NodeIdentityKey; depth: number }> | undefined;
+  let best:
+    | Readonly<{
+        key: NodeIdentityKey;
+        node: PathNode;
+        depth: number;
+      }>
+    | undefined;
   for (const candidate of candidates) {
     const key = nodeIdentityKey(candidate);
     const active = activeVisited.get(key);
     const opposite = oppositeVisited.get(key);
     if (active === undefined || opposite === undefined) continue;
-    const meeting = { key, depth: active.depth + opposite.depth };
+    const meeting = {
+      key,
+      node: { id: candidate.id, kind: candidate.kind },
+      depth: active.depth + opposite.depth,
+    };
     if (
       best === undefined ||
       meeting.depth < best.depth ||
       (meeting.depth === best.depth &&
-        compareStrings(meeting.key, best.key) < 0)
+        compareNodeIdentity(meeting.node, best.node) < 0)
     ) {
       best = meeting;
     }

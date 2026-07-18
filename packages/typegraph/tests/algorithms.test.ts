@@ -1255,37 +1255,36 @@ describe("store.algorithms", () => {
       ).toBe(true);
     });
 
-    it("propagates labels without re-joining node visibility per edge", async () => {
+    it("uses indexed delta frontiers without reset or redundant joins", async () => {
       const statements: string[] = [];
-      const observedBackend: GraphBackend = {
-        ...backend,
-        transaction<T>(
-          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
-          options?: TransactionOptions,
-        ): Promise<T> {
-          return backend.transaction(async (tx, adoptedTransaction) => {
-            const observedTransaction: TransactionBackend = {
-              ...tx,
-              async executeTemporaryStatement(
-                query: CompiledTemporaryStatementSql,
-              ): Promise<void> {
-                statements.push(backend.compileSql!(query).sql);
-                await tx.executeTemporaryStatement!(query);
-              },
-            };
-            return fn(observedTransaction, adoptedTransaction);
-          }, options);
-        },
-      };
+      const observedBackend = createCountingBackend(backend, statements);
       const observedStore = createStore(testGraph, observedBackend);
 
       await observedStore.algorithms.weaklyConnectedComponents({
         edges: ["knows"],
       });
 
-      // The working table is seeded with exactly the visible, in-scope nodes
-      // and WCC never inserts rows afterwards, so the propagate round proves
-      // endpoint visibility via working-table membership alone.
+      const createTableStatement = statements.find((statement) =>
+        statement.trimStart().startsWith("CREATE TEMP TABLE"),
+      );
+      expect(createTableStatement).toContain("improved_round INTEGER NOT NULL");
+      const createIndexStatement = statements.find((statement) =>
+        statement.trimStart().startsWith("CREATE INDEX"),
+      );
+      expect(createIndexStatement).toContain(
+        "(graph_id, run_id, improved_round)",
+      );
+      const seedStatementIndex = statements.findIndex((statement) =>
+        statement.trimStart().startsWith("INSERT INTO"),
+      );
+      const createIndexStatementIndex = statements.findIndex((statement) =>
+        statement.trimStart().startsWith("CREATE INDEX"),
+      );
+      expect(createIndexStatementIndex).toBeGreaterThan(seedStatementIndex);
+
+      // The working table is seeded with exactly the visible, in-scope nodes,
+      // so frontier and target membership prove endpoint visibility without
+      // re-checking the node table or re-joining the frontier row.
       const seedStatement = statements.find((statement) =>
         statement.trimStart().startsWith("INSERT INTO"),
       );
@@ -1295,8 +1294,18 @@ describe("store.algorithms", () => {
       );
       expect(propagateStatements.length).toBeGreaterThan(0);
       for (const statement of propagateStatements) {
+        expect(statement).toContain("w.improved_round = ?");
+        expect(statement).toContain("expanded.source_label_id AS label_id");
         expect(statement).not.toContain('"typegraph_nodes"');
+        expect(statement).not.toMatch(
+          /JOIN "typegraph_iterative_[^"]+" source/u,
+        );
       }
+      expect(
+        statements.some((statement) =>
+          statement.includes("SET next_label_id = label_id"),
+        ),
+      ).toBe(false);
     });
 
     it("rejects a backend without graph-analytics support", async () => {

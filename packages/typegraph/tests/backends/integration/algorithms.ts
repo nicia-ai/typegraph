@@ -9,9 +9,19 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { GraphAlgorithmConvergenceError } from "../../../src";
+import { createStore, GraphAlgorithmConvergenceError } from "../../../src";
+import type {
+  AdoptedTransaction,
+  GraphBackend,
+  TransactionBackend,
+  TransactionOptions,
+} from "../../../src/backend/types";
+import type {
+  CompiledRowsSql,
+  CompiledTemporaryStatementSql,
+} from "../../../src/query/sql-intent";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
-import { type IntegrationStore } from "./fixtures";
+import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { seedKnowsChain } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -96,6 +106,53 @@ async function seedWeightedTriangle(store: IntegrationStore) {
   return { anna, bruno, clara };
 }
 
+function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
+  return {
+    ...backend,
+    capabilities: { ...backend.capabilities, maxBindParameters },
+    transaction<T>(
+      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      return backend.transaction(async (tx, adoptedTransaction) => {
+        const constrainedTransaction: TransactionBackend = {
+          ...tx,
+          capabilities: { ...tx.capabilities, maxBindParameters },
+          execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
+            assertWithinBindLimit(backend, query, maxBindParameters);
+            return tx.execute<Result>(query);
+          },
+          async executeTemporaryStatement(
+            query: CompiledTemporaryStatementSql,
+          ): Promise<void> {
+            assertWithinBindLimit(backend, query, maxBindParameters);
+            await tx.executeTemporaryStatement!(query);
+          },
+        };
+        return fn(constrainedTransaction, adoptedTransaction);
+      }, options);
+    },
+  } satisfies GraphBackend;
+}
+
+function assertWithinBindLimit(
+  backend: GraphBackend,
+  query: CompiledRowsSql | CompiledTemporaryStatementSql,
+  maxBindParameters: number,
+): void {
+  const parameterCount = backend.compileSql!(query).params.length;
+  if (parameterCount <= maxBindParameters) return;
+  throw new Error(
+    `Statement used ${parameterCount} bind parameters; limit is ${maxBindParameters}.`,
+  );
+}
+
+function withoutTemporaryStatements(backend: GraphBackend): GraphBackend {
+  const { executeTemporaryStatement, ...inlineBackend } = backend;
+  void executeTemporaryStatement;
+  return inlineBackend;
+}
+
 export function registerAlgorithmIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -133,6 +190,57 @@ export function registerAlgorithmIntegrationTests(
         expect(path?.depth).toBe(3);
         expect(path?.nodes.at(0)?.id).toBe(ids.aliceId);
         expect(path?.nodes.at(-1)?.id).toBe(ids.eveId);
+      });
+
+      it("uses the same code-point predecessor tie-break in both execution paths", async () => {
+        const store = context.getStore();
+        const [source, bmpPredecessor, astralPredecessor, target] =
+          await Promise.all([
+            store.nodes.Person.create(
+              { name: "Collation source" },
+              { id: "bfs-collation-source" },
+            ),
+            store.nodes.Person.create(
+              { name: "BMP predecessor" },
+              { id: "bfs-collation-\uE000" },
+            ),
+            store.nodes.Person.create(
+              { name: "Astral predecessor" },
+              { id: "bfs-collation-\u{10000}" },
+            ),
+            store.nodes.Person.create(
+              { name: "Collation target" },
+              { id: "bfs-collation-target" },
+            ),
+          ]);
+        await Promise.all([
+          store.edges.knows.create(source, bmpPredecessor, {}),
+          store.edges.knows.create(source, astralPredecessor, {}),
+          store.edges.knows.create(bmpPredecessor, target, {}),
+          store.edges.knows.create(astralPredecessor, target, {}),
+        ]);
+
+        const options = { edges: ["knows"] } as const;
+        const workingTablePath = await store.algorithms.shortestPath(
+          source,
+          target,
+          options,
+        );
+        const inlineStore = createStore(
+          integrationTestGraph,
+          withoutTemporaryStatements(store.backend),
+        );
+        const inlinePath = await inlineStore.algorithms.shortestPath(
+          source,
+          target,
+          options,
+        );
+
+        const expectedIds = [source.id, bmpPredecessor.id, target.id];
+        expect(workingTablePath?.nodes.map((node) => node.id)).toEqual(
+          expectedIds,
+        );
+        expect(inlinePath).toEqual(workingTablePath);
       });
 
       it("shortestPath returns undefined for an unreachable target", async () => {
@@ -424,7 +532,9 @@ export function registerAlgorithmIntegrationTests(
         await Promise.all([
           // Reverse the intuitive order to pin weak/undirected semantics.
           store.edges.knows.create(beta, alpha, {}),
+          store.edges.knows.create(beta, alpha, {}),
           store.edges.knows.create(gamma, beta, {}),
+          store.edges.knows.create(gamma, gamma, {}),
           store.edges.worksAt.create(gamma, company, { role: "Founder" }),
         ]);
 
@@ -505,6 +615,176 @@ export function registerAlgorithmIntegrationTests(
             size: 1,
           },
         ]);
+      });
+
+      it("chooses exact binary representatives across ids and kinds", async () => {
+        const store = context.getStore();
+        const [upper, lower, bmp, astral, person, company] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Uppercase representative" },
+            { id: "wcc-collation-A" },
+          ),
+          store.nodes.Person.create(
+            { name: "Lowercase member" },
+            { id: "wcc-collation-a" },
+          ),
+          store.nodes.Person.create(
+            { name: "BMP representative" },
+            { id: "wcc-collation-\uE000" },
+          ),
+          store.nodes.Person.create(
+            { name: "Astral member" },
+            { id: "wcc-collation-\u{10000}" },
+          ),
+          store.nodes.Person.create(
+            { name: "Kind tie person" },
+            { id: "wcc-collation-shared" },
+          ),
+          store.nodes.Company.create(
+            { name: "Kind tie company" },
+            { id: "wcc-collation-shared" },
+          ),
+        ]);
+        await Promise.all([
+          store.edges.knows.create(upper, lower, {}),
+          store.edges.knows.create(bmp, astral, {}),
+          store.edges.worksAt.create(person, company, { role: "Member" }),
+        ]);
+
+        const allMemberships = await store.algorithms.weaklyConnectedComponents(
+          {
+            edges: ["knows", "worksAt"],
+          },
+        );
+        const memberships = allMemberships.filter((membership) =>
+          membership.id.startsWith("wcc-collation-"),
+        );
+
+        expect(memberships).toEqual([
+          {
+            id: upper.id,
+            kind: "Person",
+            componentId: upper.id,
+            componentKind: "Person",
+            size: 2,
+          },
+          {
+            id: lower.id,
+            kind: "Person",
+            componentId: upper.id,
+            componentKind: "Person",
+            size: 2,
+          },
+          {
+            id: company.id,
+            kind: "Company",
+            componentId: company.id,
+            componentKind: "Company",
+            size: 2,
+          },
+          {
+            id: person.id,
+            kind: "Person",
+            componentId: company.id,
+            componentKind: "Company",
+            size: 2,
+          },
+          {
+            id: bmp.id,
+            kind: "Person",
+            componentId: bmp.id,
+            componentKind: "Person",
+            size: 2,
+          },
+          {
+            id: astral.id,
+            kind: "Person",
+            componentId: bmp.id,
+            componentKind: "Person",
+            size: 2,
+          },
+        ]);
+      });
+
+      it("preserves synchronous convergence across edge-kind chunks", async () => {
+        const store = context.getStore();
+        const [alpha, beta, gamma] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Chunk alpha" },
+            { id: "wcc-chunk-a" },
+          ),
+          store.nodes.Person.create(
+            { name: "Chunk beta" },
+            { id: "wcc-chunk-b" },
+          ),
+          store.nodes.Company.create(
+            { name: "Chunk gamma" },
+            { id: "wcc-chunk-c" },
+          ),
+        ]);
+        await store.edges.knows.create(alpha, beta, {});
+        await store.edges.worksAt.create(beta, gamma, { role: "Member" });
+
+        const constrainedStore = createStore(
+          integrationTestGraph,
+          withBindLimit(store.backend, 28),
+        );
+        const limitedOptions = {
+          edges: ["knows", "worksAt"],
+          nodeKinds: ["Person", "Company"],
+          maxIterations: 2,
+        } as const;
+        await expect(
+          store.algorithms.weaklyConnectedComponents(limitedOptions),
+        ).rejects.toMatchObject({
+          code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+          details: {
+            algorithm: "weaklyConnectedComponents",
+            maxIterations: 2,
+          },
+        });
+        await expect(
+          constrainedStore.algorithms.weaklyConnectedComponents(limitedOptions),
+        ).rejects.toMatchObject({
+          code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+          details: {
+            algorithm: "weaklyConnectedComponents",
+            maxIterations: 2,
+          },
+        });
+
+        const convergingOptions = { ...limitedOptions, maxIterations: 3 };
+        const expected = [
+          {
+            id: alpha.id,
+            kind: "Person",
+            componentId: alpha.id,
+            componentKind: "Person",
+            size: 3,
+          },
+          {
+            id: beta.id,
+            kind: "Person",
+            componentId: alpha.id,
+            componentKind: "Person",
+            size: 3,
+          },
+          {
+            id: gamma.id,
+            kind: "Company",
+            componentId: alpha.id,
+            componentKind: "Person",
+            size: 3,
+          },
+        ];
+        await expect(
+          store.algorithms.weaklyConnectedComponents(convergingOptions),
+        ).resolves.toEqual(expected);
+        await expect(
+          constrainedStore.algorithms.weaklyConnectedComponents(
+            convergingOptions,
+          ),
+        ).resolves.toEqual(expected);
       });
 
       it("returns an empty induced subgraph for an empty node-kind scope", async () => {

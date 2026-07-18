@@ -61,6 +61,21 @@ export type InternalTraversalOptions = InternalTemporalOptions &
     defaultWeight?: number;
   }>;
 
+/** Copies only explicitly supplied temporal overrides for option forwarding. */
+export function pickTemporalOptions(
+  options: InternalTemporalOptions,
+): InternalTemporalOptions {
+  return {
+    ...(options.temporalMode === undefined ?
+      {}
+    : { temporalMode: options.temporalMode }),
+    ...(options.asOf === undefined ? {} : { asOf: options.asOf }),
+    ...(options.recordedAsOf === undefined ?
+      {}
+    : { recordedAsOf: options.recordedAsOf }),
+  };
+}
+
 /**
  * Resolves per-call temporal overrides against the graph's default mode into
  * a plain `{ temporalMode, asOf? }` object. Shared by callers that forward
