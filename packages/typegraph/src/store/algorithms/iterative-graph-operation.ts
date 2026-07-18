@@ -24,7 +24,7 @@ import {
   asCompiledRowsSql,
   asCompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
-import { compareStrings } from "../../utils/compare";
+import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
@@ -88,6 +88,12 @@ export type IterativeGraphRunContext = Readonly<{
 export type IterativeGraphState = Readonly<{
   workingTableSize: number;
 }>;
+
+export function frontierIndexIdentifier(context: IterativeGraphRunContext) {
+  return sql.identifier(
+    `typegraph_iterative_${context.runId.replaceAll("-", "_")}_frontier`,
+  );
+}
 
 export type IterativeGraphPlan<
   State extends IterativeGraphState,
@@ -452,7 +458,55 @@ export function nodeIdentityKeyFromRow(
 
 export function compareNodeIdentity(left: PathNode, right: PathNode): number {
   return (
-    compareStrings(left.id, right.id) || compareStrings(left.kind, right.kind)
+    compareCodePoints(left.id, right.id) ||
+    compareCodePoints(left.kind, right.kind)
+  );
+}
+
+type DirectionFields = Readonly<{
+  joinField: "from_id" | "to_id";
+  joinKindField: "from_kind" | "to_kind";
+  targetField: "from_id" | "to_id";
+  targetKindField: "from_kind" | "to_kind";
+}>;
+
+const OUTGOING_DIRECTION_FIELDS = {
+  joinField: "from_id",
+  joinKindField: "from_kind",
+  targetField: "to_id",
+  targetKindField: "to_kind",
+} as const satisfies DirectionFields;
+
+const INCOMING_DIRECTION_FIELDS = {
+  joinField: "to_id",
+  joinKindField: "to_kind",
+  targetField: "from_id",
+  targetKindField: "from_kind",
+} as const satisfies DirectionFields;
+
+function fieldsForDirection(
+  direction: TraversalDirection,
+): readonly DirectionFields[] {
+  switch (direction) {
+    case "out": {
+      return [OUTGOING_DIRECTION_FIELDS];
+    }
+    case "in": {
+      return [INCOMING_DIRECTION_FIELDS];
+    }
+    case "both": {
+      return [OUTGOING_DIRECTION_FIELDS, INCOMING_DIRECTION_FIELDS];
+    }
+  }
+}
+
+function compileDirectionUnion(
+  direction: TraversalDirection,
+  compileDirection: (fields: DirectionFields) => SQL,
+): SQL {
+  return sql.join(
+    fieldsForDirection(direction).map((fields) => compileDirection(fields)),
+    sql` UNION ALL `,
   );
 }
 
@@ -468,37 +522,19 @@ function compileExpansionQuery(
   );
   const workingCte = sql`WITH working_set(node_id, node_kind) AS (VALUES ${workingValues})`;
 
-  switch (direction) {
-    case "out": {
-      return sql`${workingCte} ${compileDirectionalExpansion(operation, sql`working_set`, sql`TRUE`, edgeKinds, "from_id", "from_kind", "to_id", "to_kind")}`;
-    }
-    case "in": {
-      return sql`${workingCte} ${compileDirectionalExpansion(operation, sql`working_set`, sql`TRUE`, edgeKinds, "to_id", "to_kind", "from_id", "from_kind")}`;
-    }
-    case "both": {
-      const outgoing = compileDirectionalExpansion(
-        operation,
-        sql`working_set`,
-        sql`TRUE`,
-        edgeKinds,
-        "from_id",
-        "from_kind",
-        "to_id",
-        "to_kind",
-      );
-      const incoming = compileDirectionalExpansion(
-        operation,
-        sql`working_set`,
-        sql`TRUE`,
-        edgeKinds,
-        "to_id",
-        "to_kind",
-        "from_id",
-        "from_kind",
-      );
-      return sql`${workingCte} ${outgoing} UNION ALL ${incoming}`;
-    }
-  }
+  const expansion = compileDirectionUnion(direction, (fields) =>
+    compileDirectionalExpansion(
+      operation,
+      sql`working_set`,
+      sql`TRUE`,
+      edgeKinds,
+      fields.joinField,
+      fields.joinKindField,
+      fields.targetField,
+      fields.targetKindField,
+    ),
+  );
+  return sql`${workingCte} ${expansion}`;
 }
 
 export function compileWorkingTableExpansion(
@@ -508,62 +544,26 @@ export function compileWorkingTableExpansion(
   direction: TraversalDirection,
   edgeKinds: readonly string[],
 ): SQL {
-  switch (direction) {
-    case "out": {
-      return compileDirectionalExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "from_id",
-        "from_kind",
-        "to_id",
-        "to_kind",
-      );
-    }
-    case "in": {
-      return compileDirectionalExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "to_id",
-        "to_kind",
-        "from_id",
-        "from_kind",
-      );
-    }
-    case "both": {
-      const outgoing = compileDirectionalExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "from_id",
-        "from_kind",
-        "to_id",
-        "to_kind",
-      );
-      const incoming = compileDirectionalExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "to_id",
-        "to_kind",
-        "from_id",
-        "from_kind",
-      );
-      return sql`${outgoing} UNION ALL ${incoming}`;
-    }
-  }
+  return compileDirectionUnion(direction, (fields) =>
+    compileDirectionalExpansion(
+      operation,
+      workingTable,
+      sourceFilter,
+      edgeKinds,
+      fields.joinField,
+      fields.joinKindField,
+      fields.targetField,
+      fields.targetKindField,
+    ),
+  );
 }
 
 /**
  * Expands a working-table frontier through visible edges without joining target
  * nodes. Callers that reduce duplicate targets first can defer the target-node
  * visibility join until after that reduction, avoiding repeated point lookups
- * for the same target on dense frontiers.
+ * for the same target on dense frontiers. `sourceProjection` lets callers
+ * carry trusted working-row state through the expansion without re-joining it.
  */
 export function compileWorkingTableEdgeExpansion(
   operation: IterativeGraphOperation,
@@ -571,56 +571,21 @@ export function compileWorkingTableEdgeExpansion(
   sourceFilter: SQL,
   direction: TraversalDirection,
   edgeKinds: readonly string[],
+  sourceProjection?: SQL,
 ): SQL {
-  switch (direction) {
-    case "out": {
-      return compileDirectionalEdgeExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "from_id",
-        "from_kind",
-        "to_id",
-        "to_kind",
-      );
-    }
-    case "in": {
-      return compileDirectionalEdgeExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "to_id",
-        "to_kind",
-        "from_id",
-        "from_kind",
-      );
-    }
-    case "both": {
-      const outgoing = compileDirectionalEdgeExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "from_id",
-        "from_kind",
-        "to_id",
-        "to_kind",
-      );
-      const incoming = compileDirectionalEdgeExpansion(
-        operation,
-        workingTable,
-        sourceFilter,
-        edgeKinds,
-        "to_id",
-        "to_kind",
-        "from_id",
-        "from_kind",
-      );
-      return sql`${outgoing} UNION ALL ${incoming}`;
-    }
-  }
+  return compileDirectionUnion(direction, (fields) =>
+    compileDirectionalEdgeExpansion(
+      operation,
+      workingTable,
+      sourceFilter,
+      edgeKinds,
+      fields.joinField,
+      fields.joinKindField,
+      fields.targetField,
+      fields.targetKindField,
+      sourceProjection,
+    ),
+  );
 }
 
 function compileDirectionalExpansion(
@@ -657,13 +622,16 @@ function compileDirectionalEdgeExpansion(
   joinKindField: "from_kind" | "to_kind",
   targetField: "from_id" | "to_id",
   targetKindField: "from_kind" | "to_kind",
+  sourceProjection?: SQL,
 ): ReturnType<typeof sql> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
   const weightColumn =
     operation.weightExpression === undefined ?
       sql``
     : sql`, ${operation.weightExpression} AS weight`;
-  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind${weightColumn} FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
+  const sourceColumns =
+    sourceProjection === undefined ? sql`` : sql`, ${sourceProjection}`;
+  return sql`SELECT w.node_id AS source_id, w.node_kind AS source_kind${sourceColumns}, e.${sql.raw(targetField)} AS target_id, e.${sql.raw(targetKindField)} AS target_kind${weightColumn} FROM ${workingRelation} w JOIN ${operation.schema.edgesTable} e ON e.${sql.raw(joinField)} = w.node_id AND e.${sql.raw(joinKindField)} = w.node_kind AND e.graph_id = ${operation.ctx.graphId} WHERE ${sourceFilter} AND ${edgeKindFilter} AND ${operation.edgeTemporalFilter}`;
 }
 
 function chunkValues<T>(

@@ -9,10 +9,12 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   type InternalTraversalOptions,
+  pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
 import {
   compileWorkingTableEdgeExpansion,
+  frontierIndexIdentifier,
   type IterativeGraphRunContext,
   runIterativeGraphOperation,
 } from "./iterative-graph-operation";
@@ -58,13 +60,7 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
-    ...(options.temporalMode === undefined ?
-      {}
-    : { temporalMode: options.temporalMode }),
-    ...(options.asOf === undefined ? {} : { asOf: options.asOf }),
-    ...(options.recordedAsOf === undefined ?
-      {}
-    : { recordedAsOf: options.recordedAsOf }),
+    ...pickTemporalOptions(options),
     ...(options.workingMemory === undefined ?
       {}
     : { workingMemory: options.workingMemory }),
@@ -114,6 +110,7 @@ function createWorkingTable(context: IterativeGraphRunContext): SQL {
       label_kind TEXT NOT NULL,
       next_label_id TEXT NOT NULL,
       next_label_kind TEXT NOT NULL,
+      improved_round INTEGER NOT NULL,
       PRIMARY KEY (graph_id, run_id, node_kind, node_id)
     )
   `;
@@ -131,13 +128,17 @@ async function initializeWorkingTable(
   await context.executeTemporary(sql`
     INSERT INTO ${workingTable}
       (graph_id, run_id, node_id, node_kind, label_id, label_kind,
-       next_label_id, next_label_kind)
+       next_label_id, next_label_kind, improved_round)
     SELECT
-      ${graphId}, ${runId}, n.id, n.kind, n.id, n.kind, n.id, n.kind
+      ${graphId}, ${runId}, n.id, n.kind, n.id, n.kind, n.id, n.kind, 0
     FROM ${operation.schema.nodesTable} n
     WHERE n.graph_id = ${graphId}
       AND ${nodeKindFilter}
       AND ${operation.nodeTemporalFilter}
+  `);
+  await context.executeTemporary(sql`
+    CREATE INDEX ${frontierIndexIdentifier(context)}
+    ON ${workingTable} (graph_id, run_id, improved_round)
   `);
 
   const rows = await context.backend.execute<CountRow>(
@@ -154,49 +155,45 @@ async function initializeWorkingTable(
 async function runLabelPropagationRound(
   context: IterativeGraphRunContext,
   state: IterationState,
+  iteration: number,
 ): Promise<IterationState> {
-  await resetNextLabels(context);
   for (const edgeKinds of context.operation.edgeKindChunks) {
-    await propagateChunkLabels(context, edgeKinds);
+    await propagateChunkLabels(context, edgeKinds, iteration);
   }
-  const changedRows = await applyNextLabels(context);
+  const changedRows = await applyNextLabels(context, iteration);
   return {
     changedCount: changedRows.length,
     workingTableSize: state.workingTableSize,
   };
 }
 
-async function resetNextLabels(
-  context: IterativeGraphRunContext,
-): Promise<void> {
-  await context.executeTemporary(sql`
-    UPDATE ${context.workingTable}
-    SET next_label_id = label_id, next_label_kind = label_kind
-    WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
-  `);
-}
-
 /**
  * Propagates the minimum neighbor label along one edge-kind chunk. The
- * expansion deliberately skips the target-node visibility join: the working
+ * expansion deliberately skips the target-node visibility join. The working
  * table was seeded through the same graph/kind/temporal filters inside the
- * same snapshot, WCC never inserts rows after seeding, and both edge
- * endpoints are re-joined against the working table below — membership is
- * the visibility-and-scope proof, so a per-edge `typegraph_nodes` lookup
- * would only re-check what the `source`/`scoped_target` joins already
- * guarantee.
+ * same snapshot, WCC never inserts rows after seeding, source labels are
+ * projected from the frontier, and each target is joined against the working
+ * table below. Membership is therefore the visibility-and-scope proof, so a
+ * per-edge `typegraph_nodes` lookup would only re-check what the frontier and
+ * `scoped_target` already guarantee.
  */
 async function propagateChunkLabels(
   context: IterativeGraphRunContext,
   edgeKinds: readonly string[],
+  iteration: number,
 ): Promise<void> {
   const { operation, workingTable, graphId, runId } = context;
   const expansion = compileWorkingTableEdgeExpansion(
     operation,
     workingTable,
-    sql`w.graph_id = ${graphId} AND w.run_id = ${runId}`,
+    sql`
+      w.graph_id = ${graphId}
+      AND w.run_id = ${runId}
+      AND w.improved_round = ${iteration - 1}
+    `,
     "both",
     edgeKinds,
+    sql`w.label_id AS source_label_id, w.label_kind AS source_label_kind`,
   );
   const candidateId = operation.ctx.dialect.binaryText(sql`ranked.label_id`);
   const candidateKind = operation.ctx.dialect.binaryText(
@@ -216,14 +213,9 @@ async function propagateChunkLabels(
       SELECT
         expanded.target_id,
         expanded.target_kind,
-        source.label_id,
-        source.label_kind
+        expanded.source_label_id AS label_id,
+        expanded.source_label_kind AS label_kind
       FROM (${expansion}) expanded
-      JOIN ${workingTable} source
-        ON source.graph_id = ${graphId}
-        AND source.run_id = ${runId}
-        AND source.node_id = expanded.source_id
-        AND source.node_kind = expanded.source_kind
       JOIN ${workingTable} scoped_target
         ON scoped_target.graph_id = ${graphId}
         AND scoped_target.run_id = ${runId}
@@ -262,11 +254,14 @@ async function propagateChunkLabels(
 
 function applyNextLabels(
   context: IterativeGraphRunContext,
+  iteration: number,
 ): Promise<readonly ChangedRow[]> {
   return context.backend.execute<ChangedRow>(
     asCompiledRowsSql(sql`
       UPDATE ${context.workingTable}
-      SET label_id = next_label_id, label_kind = next_label_kind
+      SET label_id = next_label_id,
+          label_kind = next_label_kind,
+          improved_round = ${iteration}
       WHERE graph_id = ${context.graphId}
         AND run_id = ${context.runId}
         AND (
@@ -301,25 +296,11 @@ async function extractMemberships(
     `),
   );
 
-  return rows
-    .map((row) => ({
-      id: row.node_id,
-      kind: row.node_kind,
-      componentId: row.component_id,
-      componentKind: row.component_kind,
-      size: Number(row.component_size),
-    }))
-    .toSorted(compareMemberships);
-}
-
-function compareMemberships(
-  left: WeaklyConnectedComponentMembership,
-  right: WeaklyConnectedComponentMembership,
-): number {
-  return (
-    compareCodePoints(left.componentId, right.componentId) ||
-    compareCodePoints(left.componentKind, right.componentKind) ||
-    compareCodePoints(left.id, right.id) ||
-    compareCodePoints(left.kind, right.kind)
-  );
+  return rows.map((row) => ({
+    id: row.node_id,
+    kind: row.node_kind,
+    componentId: row.component_id,
+    componentKind: row.component_kind,
+    size: Number(row.component_size),
+  }));
 }

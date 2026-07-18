@@ -10,12 +10,13 @@ import {
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { jsonPointer } from "../../query/json-pointer";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { assertEdgeKinds, resolveMaxIterations } from "./context";
 import {
+  compareNodeIdentity,
   compileWorkingTableExpansion,
   fetchVisibleWorkingNodes,
+  frontierIndexIdentifier,
   type IterativeGraphOperation,
   type IterativeGraphRunContext,
   type NodeExpansion,
@@ -324,23 +325,6 @@ function formatWeightValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/**
- * Node-identity comparison in code-point order — the order SQLite BINARY
- * and PostgreSQL `COLLATE "C"` sort in. Every JS-side tie-break in this
- * algorithm must reproduce the working-table round's `binaryText` ORDER BY,
- * and the substrate's UTF-16 `compareNodeIdentity` disagrees with it for
- * astral characters.
- */
-function compareNodeIdentityCodePoints(
-  left: PathNode,
-  right: PathNode,
-): number {
-  return (
-    compareCodePoints(left.id, right.id) ||
-    compareCodePoints(left.kind, right.kind)
-  );
-}
-
 // ============================================================
 // Working-table execution
 // ============================================================
@@ -413,12 +397,6 @@ async function findWeightedShortestPathInWorkingTable(
       return extractPathFromWorkingTable(context, targetId, maxIterations);
     },
   });
-}
-
-function frontierIndexIdentifier(context: IterativeGraphRunContext) {
-  return sql.identifier(
-    `typegraph_iterative_${context.runId.replaceAll("-", "_")}_frontier`,
-  );
 }
 
 /**
@@ -655,7 +633,7 @@ async function findWeightedSelfPath(
     );
     const nodes = await fetchVisibleWorkingNodes(operation, [nodeId]);
     const node = nodes.toSorted((left, right) =>
-      compareNodeIdentityCodePoints(left, right),
+      compareNodeIdentity(left, right),
     )[0];
     if (node === undefined) return;
     return { nodes: [node], depth: 0, totalWeight: 0 };
@@ -763,7 +741,7 @@ async function findWeightedShortestPathInline(
         }
       }
       frontier = improved.toSorted((left, right) =>
-        compareNodeIdentityCodePoints(left, right),
+        compareNodeIdentity(left, right),
       );
     }
 
@@ -791,7 +769,7 @@ function reduceWeightedCandidate(
     existing !== undefined &&
     (existing.distance < candidateDistance ||
       (existing.distance === candidateDistance &&
-        compareNodeIdentityCodePoints(
+        compareNodeIdentity(
           { id: existing.parentId, kind: existing.parentKind },
           expansion.source,
         ) <= 0))
@@ -828,7 +806,7 @@ function buildWeightedPathResult(
       target === undefined ||
       node.distance < target.distance ||
       (node.distance === target.distance &&
-        compareNodeIdentityCodePoints(node, target) < 0)
+        compareNodeIdentity(node, target) < 0)
     ) {
       target = node;
     }

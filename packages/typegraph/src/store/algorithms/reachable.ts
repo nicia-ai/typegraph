@@ -5,6 +5,7 @@ import {
   DEFAULT_ALGORITHM_MAX_HOPS,
   DEFAULT_NEIGHBOR_DEPTH,
   type InternalTraversalOptions,
+  pickTemporalOptions,
   resolveMaxHops,
 } from "./context";
 import type { ReachableNode } from "./types";
@@ -65,13 +66,7 @@ export async function executeNeighbors(
     maxHops: depth,
     direction: options.direction ?? "out",
     cyclePolicy: options.cyclePolicy ?? "prevent",
-    ...(options.temporalMode !== undefined && {
-      temporalMode: options.temporalMode,
-    }),
-    ...(options.asOf !== undefined && { asOf: options.asOf }),
-    ...(options.recordedAsOf !== undefined && {
-      recordedAsOf: options.recordedAsOf,
-    }),
+    ...pickTemporalOptions(options),
     ...(options.workingMemory !== undefined && {
       workingMemory: options.workingMemory,
     }),
