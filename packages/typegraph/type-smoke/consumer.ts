@@ -156,6 +156,15 @@ void store.algorithms.weaklyConnectedComponents({
   edges: ["knows"],
   nodeKinds: ["Person"],
 });
+void store.algorithms.pageRank({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+  direction: "both",
+});
+void store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  seeds: [{ id: aliceId, kind: "Person", weight: 2 }],
+});
 
 // Degree accepts an options-less call and a specific edge-kind selection.
 void store.algorithms.degree(aliceId);
@@ -178,6 +187,12 @@ void store.algorithms.weaklyConnectedComponents({
   edges: ["knows"],
   ...temporal,
 });
+void store.algorithms.pageRank({ edges: ["knows"], ...temporal });
+void store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  seeds: [{ id: aliceId, kind: "Person" }],
+  ...temporal,
+});
 
 // Subgraph also accepts the temporal options (requires a branded NodeId).
 void store.subgraph(aliceNodeId, {
@@ -197,6 +212,15 @@ void store.algorithms.weaklyConnectedComponents({
   edges: ["knows"],
   // @ts-expect-error - "not_a_kind" isn't a registered WCC node kind
   nodeKinds: ["not_a_kind"],
+});
+
+// @ts-expect-error - "not_a_kind" isn't a registered PageRank edge kind
+void store.algorithms.pageRank({ edges: ["not_a_kind"] });
+
+void store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  // @ts-expect-error - seed kind must be a registered node kind
+  seeds: [{ id: aliceId, kind: "not_a_kind" }],
 });
 
 void store.algorithms.reachable(aliceId, {

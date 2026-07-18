@@ -318,12 +318,23 @@ the scores normalized to approximately one. Parallel physical edges retain
 their multiplicity. With `direction: "both"`, a physical self-loop contributes
 once rather than once per expansion direction.
 
-PageRank uses double-precision arithmetic on both backends. Repeated runs on one
-backend are deterministic; SQLite and PostgreSQL scores are expected to agree
-within the requested numerical tolerance rather than bit-for-bit. Exact score
-ties use portable binary `(id, kind)` ordering. As with WCC, an exhausted
-iteration budget throws `GraphAlgorithmConvergenceError`—partial scores are
-never returned.
+PageRank uses double-precision arithmetic on both backends. Repeated runs on
+SQLite are deterministic; on PostgreSQL a plan change between runs can reorder
+floating-point summation and shift scores by a few last bits, which can reorder
+near-tied rows. SQLite and PostgreSQL scores are expected to agree within the
+requested numerical tolerance rather than bit-for-bit. Exact score ties use
+portable binary `(id, kind)` ordering. As with WCC, an exhausted iteration
+budget throws `GraphAlgorithmConvergenceError`—partial scores are never
+returned.
+
+Convergence needs roughly `ln(1/tolerance) / ln(1/dampingFactor)` rounds in the
+worst case. With the default `tolerance` and `maxIterations`, damping factors
+above roughly `0.985` cannot converge in time — every round still runs against
+the full working table before the budget-exhaustion error is thrown — so raise
+`maxIterations` (or loosen `tolerance`) alongside a high damping factor. The
+tolerance is also absolute: typical scores are on the order of `1/N`, so
+reliably ranking the low-score tail of a large graph calls for a
+proportionally smaller tolerance.
 
 ## weaklyConnectedComponents
 

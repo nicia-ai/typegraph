@@ -23,6 +23,7 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -207,6 +208,19 @@ export function assertEdgeKinds(edges: readonly string[]): void {
       { edges },
     );
   }
+}
+
+/**
+ * Deduplicates and code-point-sorts an induced-subgraph kind selection so
+ * compiled kind filters are deterministic across call sites and backends.
+ */
+export function normalizeNodeKinds(
+  nodeKinds: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (nodeKinds === undefined) return undefined;
+  return [...new Set(nodeKinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  );
 }
 
 export function assertGraphAnalyticsSupported(

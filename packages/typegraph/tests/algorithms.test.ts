@@ -1568,6 +1568,8 @@ describe("store.algorithms", () => {
         { id: "", kind: "Person" as const },
         { id: undefined as unknown as string, kind: "Person" as const },
         { id: ids.alice, kind: undefined as unknown as "Person" },
+        { id: `${ids.alice}\u0000x`, kind: "Person" as const },
+        { id: ids.alice, kind: "Person\u0000x" as unknown as "Person" },
       ]) {
         await expect(
           store.algorithms.personalizedPageRank({
@@ -1576,6 +1578,24 @@ describe("store.algorithms", () => {
           }),
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [
+            { id: ids.alice, kind: "Person", weight: Number.MAX_VALUE },
+            { id: ids.alice, kind: "Person", weight: Number.MAX_VALUE },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [
+            { id: ids.alice, kind: "Person", weight: Number.MIN_VALUE },
+            { id: ids.bob, kind: "Person", weight: Number.MAX_VALUE },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
     });
 
     it("rejects a backend without graph-analytics support", async () => {
@@ -1611,6 +1631,40 @@ describe("store.algorithms", () => {
           supported: false,
         },
       });
+    });
+
+    it("requires window functions for WCC but not for PageRank", async () => {
+      const noWindowFunctionsBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: true, mathFunctions: true },
+          windowFunctions: false,
+        },
+      };
+      const noWindowFunctionsStore = createStore(
+        testGraph,
+        noWindowFunctionsBackend,
+      );
+
+      await expect(
+        noWindowFunctionsStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "weaklyConnectedComponents",
+          supported: true,
+          windowFunctions: false,
+        },
+      });
+
+      const scores = await noWindowFunctionsStore.algorithms.pageRank({
+        edges: ["knows"],
+      });
+      expect(scores.length).toBeGreaterThan(0);
     });
   });
 

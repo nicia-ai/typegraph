@@ -129,7 +129,7 @@ type VisibleNodeRow = Readonly<{
   kind: string;
 }>;
 
-const DEFAULT_MAX_BIND_PARAMETERS = 999;
+export const DEFAULT_MAX_BIND_PARAMETERS = 999;
 const RESERVED_TEMPORAL_BIND_PARAMETERS_PER_BRANCH = 12;
 /** Headroom for the weight expression's path and default-weight binds. */
 const RESERVED_WEIGHT_BIND_PARAMETERS_PER_BRANCH = 4;

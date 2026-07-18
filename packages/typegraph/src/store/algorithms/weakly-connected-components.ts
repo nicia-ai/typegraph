@@ -3,12 +3,12 @@ import { type SQL, sql } from "drizzle-orm";
 import type { GraphDef } from "../../core/define-graph";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compareCodePoints } from "../../utils/compare";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
   type InternalTraversalOptions,
+  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -53,12 +53,7 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     DEFAULT_WCC_MAX_ITERATIONS,
     "weaklyConnectedComponents",
   );
-  const nodeKinds =
-    options.nodeKinds === undefined ?
-      undefined
-    : [...new Set(options.nodeKinds)].toSorted((left, right) =>
-        compareCodePoints(left, right),
-      );
+  const nodeKinds = normalizeNodeKinds(options.nodeKinds);
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",

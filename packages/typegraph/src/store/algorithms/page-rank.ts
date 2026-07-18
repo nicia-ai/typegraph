@@ -4,18 +4,19 @@ import type { GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compareCodePoints } from "../../utils/compare";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
   type InternalTraversalOptions,
+  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
 import {
   compareNodeIdentity,
   compileWorkingTableEdgeExpansion,
+  DEFAULT_MAX_BIND_PARAMETERS,
   type IterativeGraphRunContext,
   type NodeIdentityKey,
   nodeIdentityKey,
@@ -64,7 +65,10 @@ type ScoreRow = Readonly<{
 const DEFAULT_DAMPING_FACTOR = 0.85;
 const DEFAULT_TOLERANCE = 1e-8;
 const DEFAULT_MAX_ITERATIONS = 1000;
-const DEFAULT_MAX_BIND_PARAMETERS = 999;
+/** Each seed VALUES row binds its id, kind, and weight. */
+const BIND_PARAMETERS_PER_SEED = 3;
+/** The seed UPDATE statement also binds the graph and run identifiers. */
+const RESERVED_SEED_STATEMENT_BIND_PARAMETERS = 2;
 
 /** Computes global PageRank with a uniform teleport distribution. */
 export async function executePageRank<G extends GraphDef>(
@@ -148,12 +152,7 @@ function resolvePageRankOptions<G extends GraphDef>(
       DEFAULT_MAX_ITERATIONS,
       algorithm,
     ),
-    nodeKinds:
-      options.nodeKinds === undefined ?
-        undefined
-      : [...new Set(options.nodeKinds)].toSorted((left, right) =>
-          compareCodePoints(left, right),
-        ),
+    nodeKinds: normalizeNodeKinds(options.nodeKinds),
   };
 }
 
@@ -169,14 +168,18 @@ function normalizeSeeds<G extends GraphDef>(
 
   const combined = new Map<NodeIdentityKey, NormalizedSeed>();
   for (const seed of seeds) {
+    // Node-identity keys join kind and id with a NUL separator, so an
+    // embedded NUL could alias two distinct seeds onto one key.
     if (
       typeof seed.id !== "string" ||
       seed.id.length === 0 ||
+      seed.id.includes("\u0000") ||
       typeof seed.kind !== "string" ||
-      seed.kind.length === 0
+      seed.kind.length === 0 ||
+      seed.kind.includes("\u0000")
     ) {
       throw new ConfigurationError(
-        "Personalized PageRank seed id and kind must be non-empty strings.",
+        "Personalized PageRank seed id and kind must be non-empty strings without NUL characters.",
         { seed },
       );
     }
@@ -307,7 +310,10 @@ async function initializePersonalization(
   const parameterLimit =
     context.operation.backend.capabilities.maxBindParameters ??
     DEFAULT_MAX_BIND_PARAMETERS;
-  const seedChunkSize = Math.floor((parameterLimit - 2) / 3);
+  const seedChunkSize = Math.floor(
+    (parameterLimit - RESERVED_SEED_STATEMENT_BIND_PARAMETERS) /
+      BIND_PARAMETERS_PER_SEED,
+  );
   if (seedChunkSize < 1) {
     throw new ConfigurationError(
       "Personalized PageRank cannot fit one seed within the backend bind-parameter limit.",
