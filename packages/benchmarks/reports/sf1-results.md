@@ -1,11 +1,12 @@
 # SF1 five-engine comparison + perf investigation
 
-**Post-merge re-run** on merged `main` (ref `e095e176`) — all lane-surfaced
-fixes landed: #279 WCC, #282 (#280) node index, #283 (#281) late
-materialization, #284 system-index foundation, #285 iterative-algorithm levers.
-Iterative algorithm calls now pass `workingMemory: "64MB"` explicitly (the
-library no longer defaults it as of #285). EC2 c7i.4xlarge, all 5 engines × 16
-queries, `--check`. **Parity green** — `failures: []`.
+**Post-#288/#293 run** on merged `main` (ref `0331096f`). Adds the **IC14**
+weighted-shortest-path lane (#288, a SQLite-vs-Postgres comparison — no
+competitor does weighted SP in its available form) and confirms the **#293 WCC
+delta-frontier** speedup. Earlier fixes also in: #279 WCC, #282 (#280) node
+index, #283 (#281) late materialization, #284 system-index, #285 iterative
+levers; iterative algorithm calls pass `workingMemory: "64MB"`. EC2 c7i.4xlarge,
+all 5 engines, `--check`. **Parity green** — `failures: []`.
 
 ## p50 latency (ms), SF1 (9,892 persons / 361k directed `knows` edges)
 
@@ -13,27 +14,48 @@ Fastest engine per row in **bold**.
 
 | Query | tg-sqlite | tg-postgres | neo4j | ladybug | pggraph |
 | --- | --: | --: | --: | --: | --: |
-| IS1 | **0.04** | 0.16 | 3.43 | 0.36 | 0.09 |
-| IS2 | **1.95** | 6.03 | 48.7 | 33.4 | 3.27 |
-| IS3 | **0.25** | 0.92 | 17.8 | 3.74 | 0.54 |
-| IS4 | **0.02** | 0.12 | 1.44 | 0.24 | 0.09 |
-| IS5 | **0.03** | 0.17 | 2.67 | 1.38 | 0.10 |
-| IS6 | **0.07** | 0.32 | 3.43 | 1.59 | 0.19 |
-| IS7 | **0.08** | 0.35 | 3.67 | 3.68 | 0.19 |
-| IC13 (shortest path) | 2.97 | 14.8 | 6.97 | 7.32 | **1.26** |
-| BFS3 | **204** | 962 | 461 | 704 | 355 |
-| IC2 | **28.4** | 339 | 31.0 | 68.8 | 223 |
-| IC8 | **2.65** | 7.32 | 16.3 | 13.5 | 4.17 |
-| IC9 | 2959 | 13919 | 2530 | **736** | 3193 |
-| GA_DEGREE | **0.05** | 0.19 | 1.34 | 0.70 | 0.08 |
-| GA_WCC | 11425 | 47406 | gap | gap | **8.82** |
-| GA_BFS | **209** | 1741 | gap | gap | 283 |
-| GA_SSSP | **211** | 1723 | gap | gap | 281 |
+| IS1 | **0.03** | 1.06 | 4.72 | 1.16 | 0.90 |
+| IS2 | **1.89** | 19.7 | 75.9 | 62.2 | 18.2 |
+| IS3 | **0.24** | 1.42 | 26.2 | 8.52 | 1.38 |
+| IS4 | **0.02** | 0.91 | 3.13 | 1.03 | 0.88 |
+| IS5 | **0.03** | 1.01 | 4.35 | 2.10 | 0.90 |
+| IS6 | **0.08** | 2.18 | 4.94 | 3.94 | 1.78 |
+| IS7 | **0.07** | 2.08 | 7.30 | 7.81 | 1.76 |
+| IC13 (shortest path) | 2.65 | 22.2 | 11.7 | 8.18 | **2.14** |
+| IC14 (weighted SP) | 5153 | **4518** | gap | gap | gap |
+| BFS3 | **207** | 1136 | 456 | 2241 | 351 |
+| IC2 | **42.0** | 500 | 47.4 | 85.5 | 328 |
+| IC8 | **2.89** | 16.3 | 32.1 | 21.8 | 7.30 |
+| IC9 | 1940 | 14312 | 2655 | **769** | 3308 |
+| GA_DEGREE | **0.05** | 1.04 | 2.77 | 1.86 | 0.81 |
+| GA_WCC | 6943 | 22867 | gap | gap | **9.45** |
+| GA_BFS | **214** | 1724 | gap | gap | 279 |
+| GA_SSSP | **207** | 1643 | gap | gap | 275 |
 
-`gap` = declared unsupported (neo4j-community/ladybug have no
-connected-components / whole-component primitive). Loads: ladybug 42s, neo4j
-62s, pggraph 118s, tg-sqlite 160s, tg-postgres 346s. Shared-vCPU host
-(Xeon 8488C, 16 vCPU); treat sub-ms and NOISY (CV>25%) rows as order-of-magnitude.
+`gap` = declared unsupported. IC14 gaps: neo4j-community needs GDS, pgGraph's
+`graph.shortest_path` is hop-only, ladybug's Kuzu `WSHORTEST` not wired. GA gaps:
+neo4j/ladybug have no connected-components / whole-component primitive. Loads:
+ladybug 44s, neo4j 70s, pggraph 116s, tg-sqlite 159s, tg-postgres 340s.
+Shared-vCPU host (Xeon 8488C, 16 vCPU); treat sub-ms and NOISY (CV>25%) rows as
+order-of-magnitude.
+
+### #293 WCC delta frontier — confirmed (tight, CV 0–1%)
+
+GA_WCC dropped from the pre-#293 run: **tg-sqlite 11,425 → 6,943ms (~1.65×)** and
+**tg-postgres 47,406 → 22,867ms (~2.07×)**. Postgres improved *more* — confirming
+the prediction that the full-table-`UPDATE`/MVCC churn on the (never-vacuumed)
+temp working table was the PG-specific penalty #293's in-place delta frontier
+removes. Still architectural vs pgGraph's native CSR (9.45ms), just narrower.
+
+### IC14 weighted shortest path — heavy, noisy, PG-favored
+
+IC14 is ~4.5–5.2s (tg-postgres 4,518ms *faster* than tg-sqlite 5,153ms, both
+NOISY at CV 29–58%). Unlike IC13 it has no hop bound — a cost-ordered Dijkstra
+between random person pairs settles a large slice of the giant component, so it's
+inherently the heaviest traversal in the lane. Postgres's set-based iteration +
+64MB work_mem handles the large frontier better than SQLite's row-wise path here.
+Parity holds (`comparable=yes`); the synthetic weight is byte-identical across
+both backends by construction.
 
 ### Movement vs the pre-merge run (ref `0ea9962b`)
 
@@ -117,14 +139,15 @@ this is the query, not a bug.
 
 ## GA_WCC is architectural, not overhead
 
-GA_WCC is exact label propagation on the D2 iterative substrate (~15 rounds of a
-window/aggregate over ~180k undirected `knows` edges). tg-sqlite 11.4s /
-tg-postgres 47.4s vs pgGraph's native CSR union-find **8.82ms** — a 3–4
-orders-of-magnitude gap that is the SQL-iteration-vs-CSR architecture, not
-removable overhead. A dedicated-core local confirmation decomposes the
-tg-postgres figure: the 64MB `work_mem` override is **a no-op at SF1** (25.4s
-without vs ~27s with — the scoped-Person working table fits the 4MB default, no
-spill to avoid; kept as a fair-config default that may matter at SF10); the
-shared-vCPU EC2 host accounts for ~1.8× (47.4s EC2 vs ~26s dedicated); and the
-residual ~26s is the inherent iteration cost. No `work_mem` value closes the gap
-to native CSR.
+GA_WCC is exact label propagation on the D2 iterative substrate (rounds of a
+window/aggregate over ~180k undirected `knows` edges). **After #293's delta
+frontier**, tg-sqlite 6.9s / tg-postgres 22.9s vs pgGraph's native CSR union-find
+**9.45ms** — still a 3–4 orders-of-magnitude gap that is the
+SQL-iteration-vs-CSR architecture, not removable overhead. #293 nearly halved the
+PG figure (47.4 → 22.9s, ~2.07×) by replacing the per-round full-table
+reset/apply `UPDATE`s with in-place delta-frontier relaxation — removing the
+MVCC churn on the never-vacuumed temp working table (the PG-specific penalty; a
+dedicated-core decomposition of the *pre-#293* 47.4s had shown the 64MB
+`work_mem` was a no-op at SF1 and ~1.8× was the shared-vCPU host). The residual
+is the inherent per-round SQL-iteration cost — no algorithm-preserving change
+closes the gap to native CSR.
