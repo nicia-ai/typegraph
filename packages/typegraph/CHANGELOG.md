@@ -1,5 +1,20 @@
 # @nicia-ai/typegraph
 
+## 0.37.1
+
+### Patch Changes
+
+- [#292](https://github.com/nicia-ai/typegraph/pull/292) [`0152c3b`](https://github.com/nicia-ai/typegraph/commit/0152c3bf4a0bd3c047931041d1505b69a25fa05a) Thanks [@pdlug](https://github.com/pdlug)! - Restore graph algorithms on Cloudflare Durable Objects SQLite. The
+  auto-detected `do-sqlite` profile now marks temporary-table graph analytics as
+  unsupported, routes shortest-path and reachability algorithms through their
+  inline fallback, and rejects temporary-table-only algorithms with the existing
+  typed capability error instead of leaking workerd's `SQLITE_AUTH` failure.
+
+- [#293](https://github.com/nicia-ai/typegraph/pull/293) [`9309ec3`](https://github.com/nicia-ai/typegraph/commit/9309ec3f839b53474d389b9376f7851c87753e28) Thanks [@pdlug](https://github.com/pdlug)! - Speed up exact weakly connected components with indexed changed-label
+  frontiers, changed-row-only writes, and one fewer working-table join. Preserve
+  synchronous convergence across bind-limited edge-kind chunks, and align
+  shortest-path identity tie-breaks with portable binary ordering.
+
 ## 0.37.0
 
 ### Minor Changes
