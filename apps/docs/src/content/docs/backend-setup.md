@@ -710,6 +710,11 @@ A store backed by `drizzle(ctx.storage)` inside a Durable Object is
 `capabilities.transactions: true` — no `executionProfile` hint needed.
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so `store.transaction()` and `store.withTransaction()` are fully atomic.
+The runtime authorizer forbids temporary tables, so the same profile reports
+`capabilities.graphAnalytics.supported: false`. Traversal algorithms such as
+`shortestPath`, `reachable`, and `weightedShortestPath` automatically use their
+inline fallback; temporary-table-only analytics such as
+`weaklyConnectedComponents` throw `UnsupportedBackendCapabilityError`.
 The same profile advertises Cloudflare's 100-bound-parameter query limit.
 TypeGraph uses that hard ceiling for its managed write batches and
 recorded-history flushes; capability overrides may lower it but cannot raise
@@ -790,12 +795,13 @@ including traversal, subquery, `GROUP BY`/`HAVING`, and per-leaf `ORDER BY`/`LIM
 `plain`, `raw`) all behave identically. A query you write against one backend compiles and runs the same way on the
 other.
 
-The remaining differences are **engine-capability gaps in the vector and fulltext layers** — they stem from what
-`sqlite-vec`/FTS5 implement versus `pgvector`/`tsvector`, not from TypeGraph choosing to support a feature on one
-backend only:
+The remaining differences are **engine and runtime capability gaps** — they
+stem from what each database or hosted authorizer implements, not from
+TypeGraph choosing separate query semantics per backend:
 
 | Capability | SQLite | PostgreSQL | Behavior on the unsupported side |
 | --- | --- | --- | --- |
+| Whole-graph temporary-table analytics | ✓ standard connections / ✗ D1 and Durable Objects | ✓ connection-based drivers / ✗ `neon-http` | Throws `UnsupportedBackendCapabilityError`; traversal algorithms with an inline engine fall back automatically |
 | Vector metric `inner_product` | ✗ | ✓ | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
 | Vector index type `ivfflat` | ✗ | ✓ | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`) |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native` | ✗ (`pgvector` recovers, but is bounded) | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below |

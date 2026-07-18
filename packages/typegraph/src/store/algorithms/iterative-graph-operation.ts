@@ -798,6 +798,7 @@ function compileWeightExpression(
 export function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
   return (
     ctx.backend.capabilities.transactions &&
+    ctx.backend.capabilities.graphAnalytics?.supported !== false &&
     ctx.backend.capabilities.returning !== false &&
     ctx.backend.executeTemporaryStatement !== undefined
   );
