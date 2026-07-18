@@ -112,9 +112,11 @@ import {
 } from "../dataset/ldbc-csv";
 import {
   BFS3_HOPS,
+  bfsReachResult,
   canonicalDigest,
   compareIdsAscending,
   compareMessageRecencyDesc,
+  componentSizesResult,
   degreeResult,
   IC13_MAX_HOPS,
   IC9_MAX_DATE,
@@ -127,21 +129,20 @@ import {
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
+  ssspResult,
   unsupportedQuery,
 } from "./types";
 
 /**
- * Neo4j gaps: the whole-graph algorithms (WCC, whole-component BFS/SSSP) need
- * the Graph Data Science (GDS) plugin, which the pinned community image does
- * not bundle. Plain Cypher's unbounded variable-length paths enumerate paths
- * (they would explode, not compute a set-based traversal), so these are
- * declared unsupported rather than run as an exploding query.
+ * Neo4j's one remaining gap: IC14 weighted shortest path. GDS *does* offer
+ * `gds.shortestPath.dijkstra` with a relationship weight, but the SNB `knows`
+ * graph has no stored weight to project (TypeGraph's IC14 uses a synthetic
+ * per-edge weight materialized only in its own loader), so there is nothing to
+ * project weights from here. The whole-graph algorithms (GA_WCC/BFS/SSSP) now
+ * run through GDS (see `projectGdsGraph`) — Neo4j's native answer.
  */
 const NEO4J_UNSUPPORTED: SnbCapabilityGaps = {
-  IC14: "no weighted shortest path in plain Cypher (needs the GDS plugin)",
-  GA_WCC: "no connected-components in plain Cypher (needs the GDS plugin)",
-  GA_BFS: "no whole-component BFS in plain Cypher (needs the GDS plugin)",
-  GA_SSSP: "no whole-component SSSP in plain Cypher (needs the GDS plugin)",
+  IC14: "no stored knows weight to project for gds.shortestPath.dijkstra",
 };
 
 // The published `neo4j-driver` .d.ts hand-rolls a subset of the driver
@@ -316,6 +317,16 @@ async function runNeo4jContainer(
     "/tmp:rw,exec,size=256m",
     "-e",
     "NEO4J_AUTH=none",
+    // Auto-download the Graph Data Science library. GDS is Neo4j's native
+    // answer to graph algorithms (WCC/BFS/SSSP); without it plain Cypher has
+    // no connected-components and unbounded variable-length paths enumerate
+    // (explode). Loading it makes the GA lane a fair fight rather than testing
+    // the absence of a plugin. The image resolves a GDS build for its version
+    // and auto-configures the procedure allowlist.
+    "-e",
+    'NEO4J_PLUGINS=["graph-data-science"]',
+    "-e",
+    "NEO4J_dbms_security_procedures_unrestricted=gds.*",
     "-e",
     `NEO4J_server_memory_heap_initial__size=${memorySettings.heapSize}`,
     "-e",
@@ -418,6 +429,32 @@ async function ensureSchema(session: Session): Promise<void> {
     "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
   );
   await session.run("CALL db.awaitIndexes(600)");
+}
+
+/** Name of the in-memory GDS projection the GA_* algorithms run against. */
+const GDS_GRAPH = "knowsGraph";
+
+/**
+ * Project the Person + undirected-KNOWS graph into GDS once, after load — the
+ * same subgraph TypeGraph scopes its GA_WCC/GA_BFS/GA_SSSP to (Person nodes,
+ * undirected `knows`, isolated persons as singletons). GA queries then run the
+ * `gds.*` algorithm on this projection, so the measured latency is the
+ * algorithm, not a per-call projection (mirroring how TypeGraph runs against
+ * its already-loaded store).
+ */
+async function projectGdsGraph(session: Session): Promise<void> {
+  await session
+    .run(
+      `CALL gds.graph.exists($name) YIELD exists
+       WHERE exists
+       CALL gds.graph.drop($name) YIELD graphName RETURN graphName`,
+      { name: GDS_GRAPH },
+    )
+    .catch(() => undefined);
+  await session.run(
+    `CALL gds.graph.project($name, 'Person', {KNOWS: {orientation: 'UNDIRECTED'}})`,
+    { name: GDS_GRAPH },
+  );
 }
 
 // ---- Offline bulk load: neo4j-admin database import ----
@@ -1168,6 +1205,54 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     return degreeResult(degree);
   }
 
+  const toNumber = (raw: unknown): number =>
+    neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+
+  // GA_WCC (algorithm): weakly connected components of the Person `knows`
+  // subgraph via GDS. `gds.wcc.stream` over the undirected projection yields a
+  // componentId per Person (isolated persons form singletons — the projection
+  // carries every Person node), grouped into the same size multiset TypeGraph's
+  // native WCC produces.
+  async function GA_WCC(_seedPersonId: string) {
+    const rows = await runRows<{ size: unknown }>(
+      getSession(),
+      `CALL gds.wcc.stream($graph) YIELD componentId
+       RETURN componentId, count(*) AS size`,
+      { graph: GDS_GRAPH },
+    );
+    return componentSizesResult(rows.map((row) => toNumber(row.size)));
+  }
+
+  // GA_BFS / GA_SSSP (algorithms): whole-component reachability / min-depth sums
+  // from the seed. `gds.allShortestPaths.dijkstra` from the seed over the
+  // undirected, unit-weight projection is BFS distance to every reachable node;
+  // the source (cost 0) is excluded. BFS is the reached count; SSSP adds the
+  // depth sum — matching TypeGraph's `reachable`-based results.
+  async function GA_BFS(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode WHERE targetNode <> id(source)
+       RETURN count(*) AS reached`,
+      { id: seedPersonId, graph: GDS_GRAPH },
+    );
+    return bfsReachResult(toNumber(rows[0]?.reached));
+  }
+  async function GA_SSSP(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown; depthSum: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode, totalCost WHERE targetNode <> id(source)
+       RETURN count(*) AS reached, sum(totalCost) AS depthSum`,
+      { id: seedPersonId, graph: GDS_GRAPH },
+    );
+    return ssspResult(toNumber(rows[0]?.reached), toNumber(rows[0]?.depthSum));
+  }
+
   return {
     IS1,
     IS2,
@@ -1182,10 +1267,10 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     IC8,
     IC9,
     GA_DEGREE,
+    GA_WCC,
+    GA_BFS,
+    GA_SSSP,
     IC14: unsupportedQuery("IC14"),
-    GA_WCC: unsupportedQuery("GA_WCC"),
-    GA_BFS: unsupportedQuery("GA_BFS"),
-    GA_SSSP: unsupportedQuery("GA_SSSP"),
   };
 }
 
@@ -1284,6 +1369,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
         await waitForNeo4jBolt(containerName, driver);
         session = driver.session({ database: NEO4J_DATABASE });
         await ensureSchema(session);
+        await projectGdsGraph(session);
         return pools;
       } catch (error) {
         await cleanup();
