@@ -849,6 +849,219 @@ export function registerAlgorithmIntegrationTests(
       });
     });
 
+    describe("labelPropagation", () => {
+      it("is exact, synchronous, and independent of edge-kind chunking", async () => {
+        const store = context.getStore();
+        const [alpha, beta, company, delta, echo, foxtrot, isolated] =
+          await Promise.all([
+            store.nodes.Person.create(
+              { name: "Label alpha" },
+              { id: "label-a" },
+            ),
+            store.nodes.Person.create(
+              { name: "Label beta" },
+              { id: "label-b" },
+            ),
+            store.nodes.Company.create(
+              { name: "Label company" },
+              { id: "label-c" },
+            ),
+            store.nodes.Person.create(
+              { name: "Label delta" },
+              { id: "label-d" },
+            ),
+            store.nodes.Person.create(
+              { name: "Label echo" },
+              { id: "label-e" },
+            ),
+            store.nodes.Person.create(
+              { name: "Label foxtrot" },
+              { id: "label-f" },
+            ),
+            store.nodes.Person.create(
+              { name: "Label isolated" },
+              { id: "label-z" },
+            ),
+          ]);
+        await Promise.all([
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.worksAt.create(beta, company, { role: "Member" }),
+          store.edges.worksAt.create(alpha, company, { role: "Member" }),
+          store.edges.knows.create(delta, echo, {}),
+          store.edges.knows.create(echo, foxtrot, {}),
+          store.edges.knows.create(foxtrot, delta, {}),
+          // A duplicate and a self-loop must not multiply neighbor votes.
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.knows.create(alpha, alpha, {}),
+        ]);
+        const limitedOptions = {
+          edges: ["knows", "worksAt"],
+          nodeKinds: ["Person", "Company"],
+          maxIterations: 2,
+        } as const;
+        const constrainedStore = createStore(
+          integrationTestGraph,
+          withBindLimit(store.backend, 28),
+        );
+
+        for (const algorithmStore of [store, constrainedStore]) {
+          await expect(
+            algorithmStore.algorithms.labelPropagation(limitedOptions),
+          ).rejects.toMatchObject({
+            code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+            details: { algorithm: "labelPropagation", maxIterations: 2 },
+          });
+        }
+
+        const expected = [
+          {
+            id: alpha.id,
+            kind: "Person",
+            labelId: alpha.id,
+            labelKind: "Person",
+          },
+          {
+            id: beta.id,
+            kind: "Person",
+            labelId: alpha.id,
+            labelKind: "Person",
+          },
+          {
+            id: company.id,
+            kind: "Company",
+            labelId: alpha.id,
+            labelKind: "Person",
+          },
+          {
+            id: delta.id,
+            kind: "Person",
+            labelId: delta.id,
+            labelKind: "Person",
+          },
+          {
+            id: echo.id,
+            kind: "Person",
+            labelId: delta.id,
+            labelKind: "Person",
+          },
+          {
+            id: foxtrot.id,
+            kind: "Person",
+            labelId: delta.id,
+            labelKind: "Person",
+          },
+          {
+            id: isolated.id,
+            kind: "Person",
+            labelId: isolated.id,
+            labelKind: "Person",
+          },
+        ];
+        const convergingOptions = { ...limitedOptions, maxIterations: 3 };
+        await expect(
+          store.algorithms.labelPropagation(convergingOptions),
+        ).resolves.toEqual(expected);
+        await expect(
+          constrainedStore.algorithms.labelPropagation(convergingOptions),
+        ).resolves.toEqual(expected);
+      });
+
+      it("uses binary full-node-identity ordering for label ties", async () => {
+        const store = context.getStore();
+        const [
+          upper,
+          lower,
+          upperTail,
+          bmp,
+          astral,
+          astralTail,
+          person,
+          company,
+          kindTail,
+        ] = await Promise.all([
+          store.nodes.Person.create({ name: "Upper" }, { id: "label-case-A" }),
+          store.nodes.Person.create({ name: "Lower" }, { id: "label-case-a" }),
+          store.nodes.Person.create(
+            { name: "Case tail" },
+            { id: "label-case-z" },
+          ),
+          store.nodes.Person.create(
+            { name: "BMP" },
+            { id: "label-unicode-\uE000" },
+          ),
+          store.nodes.Person.create(
+            { name: "Astral" },
+            { id: "label-unicode-\u{10000}" },
+          ),
+          store.nodes.Person.create(
+            { name: "Astral tail" },
+            { id: "label-unicode-\u{10000}x" },
+          ),
+          store.nodes.Person.create(
+            { name: "Kind tie person" },
+            { id: "label-kind-shared" },
+          ),
+          store.nodes.Company.create(
+            { name: "Kind tie company" },
+            { id: "label-kind-shared" },
+          ),
+          store.nodes.Person.create(
+            { name: "Kind tie tail" },
+            { id: "label-kind-z" },
+          ),
+        ]);
+        await Promise.all([
+          store.edges.knows.create(upper, lower, {}),
+          store.edges.knows.create(lower, upperTail, {}),
+          store.edges.knows.create(upperTail, upper, {}),
+          store.edges.knows.create(bmp, astral, {}),
+          store.edges.knows.create(astral, astralTail, {}),
+          store.edges.knows.create(astralTail, bmp, {}),
+          store.edges.worksAt.create(person, company, { role: "Member" }),
+          store.edges.knows.create(person, kindTail, {}),
+          store.edges.worksAt.create(kindTail, company, { role: "Member" }),
+        ]);
+
+        const memberships = await store.algorithms.labelPropagation({
+          edges: ["knows", "worksAt"],
+          nodeKinds: ["Person", "Company"],
+        });
+        const byIdentity = new Map(
+          memberships.map((row) => [`${row.kind}\u0000${row.id}`, row]),
+        );
+        const labelFor = (kind: string, id: string) =>
+          byIdentity.get(`${kind}\u0000${id}`)?.labelId;
+        expect(labelFor("Person", upper.id)).toBe(upper.id);
+        expect(labelFor("Person", lower.id)).toBe(upper.id);
+        expect(labelFor("Person", upperTail.id)).toBe(upper.id);
+        expect(labelFor("Person", bmp.id)).toBe(bmp.id);
+        expect(labelFor("Person", astral.id)).toBe(bmp.id);
+        expect(labelFor("Person", astralTail.id)).toBe(bmp.id);
+        for (const node of [person, company, kindTail]) {
+          const membership = byIdentity.get(`${node.kind}\u0000${node.id}`);
+          expect(membership?.labelId).toBe(company.id);
+          expect(membership?.labelKind).toBe("Company");
+        }
+      });
+
+      it("throws for the explicit two-node oscillation", async () => {
+        const store = context.getStore();
+        const [left, right] = await Promise.all([
+          store.nodes.Person.create({ name: "Left" }, { id: "oscillate-a" }),
+          store.nodes.Person.create({ name: "Right" }, { id: "oscillate-b" }),
+        ]);
+        await store.edges.knows.create(left, right, {});
+
+        await expect(
+          store.algorithms.labelPropagation({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            maxIterations: 4,
+          }),
+        ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+      });
+    });
+
     describe("PageRank", () => {
       it("matches analytic global and personalized scores", async () => {
         const store = context.getStore();
@@ -1156,6 +1369,60 @@ export function registerAlgorithmIntegrationTests(
         expect(historicalRoot?.size).toBe(3);
         expect(historical.some((row) => row.id === ids.endedId)).toBe(true);
         expect(historical.some((row) => row.id === ids.futureId)).toBe(false);
+      });
+
+      it("exposes label propagation through pinned StoreView coordinates", async () => {
+        const store = context.getStore();
+        const people = await store.nodes.Person.find(undefined, {
+          temporalMode: "includeEnded",
+        });
+        const active = people.find((person) => person.id === ids.activeId);
+        const ended = people.find((person) => person.id === ids.endedId);
+        const root = people.find((person) => person.id === ids.rootId);
+        if (active === undefined || ended === undefined || root === undefined) {
+          throw new Error("Temporal label-propagation fixture is incomplete.");
+        }
+        const currentThird = await store.nodes.Person.create({
+          name: "Current label third",
+        });
+        await Promise.all([
+          store.edges.knows.create(
+            active,
+            ended,
+            {},
+            {
+              validFrom: TEMPORAL_ANCHORS.PAST,
+              validTo: TEMPORAL_ANCHORS.EDGE_ENDED,
+            },
+          ),
+          store.edges.knows.create(root, currentThird, {}),
+          store.edges.knows.create(active, currentThird, {}),
+        ]);
+
+        const current = await store.algorithms.labelPropagation({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+        });
+        const historicalView = store.asOf(BEFORE);
+        const historical = await historicalView.labelPropagation({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+        });
+        await expect(
+          historicalView.algorithms.labelPropagation({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+          }),
+        ).resolves.toEqual(historical);
+
+        expect(current.map((row) => row.id).toSorted()).toEqual(
+          [ids.activeId, currentThird.id, ids.rootId].toSorted(),
+        );
+        expect(historical.map((row) => row.id).toSorted()).toEqual(
+          [ids.activeId, ids.endedId, ids.rootId].toSorted(),
+        );
+        expect(new Set(current.map((row) => row.labelId)).size).toBe(1);
+        expect(new Set(historical.map((row) => row.labelId)).size).toBe(1);
       });
 
       it("exposes PageRank through the StoreView algorithms facade", async () => {

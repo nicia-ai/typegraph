@@ -44,8 +44,9 @@ TypeGraph is not designed for:
 - Distributed graph processing
 - Broad graph-data-science suites—its focused
   [Graph Algorithms](https://typegraph.dev/graph-algorithms) API includes
-  shortest path, reachability, neighborhoods, degree, exact WCC, and global
-  and personalized PageRank, but not community detection or centrality suites
+  shortest path, reachability, neighborhoods, degree, exact WCC, deterministic
+  label propagation, and global/personalized PageRank, but not broad community
+  detection or centrality suites
 - Billion-scale graphs requiring dedicated graph-engine performance
 
 ## Installation

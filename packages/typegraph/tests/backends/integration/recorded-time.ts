@@ -1168,6 +1168,58 @@ export function registerRecordedTimeIntegrationTests(
       expect(replayed?.totalWeight).toBe(5);
     });
 
+    it("reconstructs label propagation at recorded instants", async () => {
+      const store = await createHistoryStore(context);
+      const [alpha, beta, gamma] = await Promise.all([
+        store.nodes.Person.create(
+          { name: "Recorded label A", age: 1 },
+          { id: "recorded-label-a" },
+        ),
+        store.nodes.Person.create(
+          { name: "Recorded label B", age: 2 },
+          { id: "recorded-label-b" },
+        ),
+        store.nodes.Person.create(
+          { name: "Recorded label C", age: 3 },
+          { id: "recorded-label-c" },
+        ),
+      ]);
+      await Promise.all([
+        store.edges.knows.create(alpha, beta, { since: "1" }),
+        store.edges.knows.create(beta, gamma, { since: "1" }),
+        store.edges.knows.create(gamma, alpha, { since: "1" }),
+      ]);
+      const beforeExpansion = await readRecordedClock(store);
+      const delta = await store.nodes.Person.create(
+        { name: "Recorded label D", age: 4 },
+        { id: "recorded-label-d" },
+      );
+      await Promise.all([
+        store.edges.knows.create(delta, alpha, { since: "2" }),
+        store.edges.knows.create(delta, beta, { since: "2" }),
+        store.edges.knows.create(delta, gamma, { since: "2" }),
+      ]);
+      const afterExpansion = await readRecordedClock(store);
+
+      const earlyView = store.asOfRecorded(beforeExpansion);
+      const early = await earlyView.algorithms.labelPropagation({
+        edges: ["knows"],
+      });
+      const late = await store
+        .asOfRecorded(afterExpansion)
+        .labelPropagation({ edges: ["knows"] });
+
+      expect(early.map((row) => row.id)).toEqual([alpha.id, beta.id, gamma.id]);
+      expect(early.every((row) => row.labelId === alpha.id)).toBe(true);
+      expect(late.map((row) => row.id)).toEqual([
+        alpha.id,
+        beta.id,
+        gamma.id,
+        delta.id,
+      ]);
+      expect(late.every((row) => row.labelId === alpha.id)).toBe(true);
+    });
+
     it("rejects the recorded-time open sentinel in internal algorithm options", async () => {
       const store = await createHistoryStore(context);
       const alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
@@ -1388,6 +1440,14 @@ export function registerRecordedTimeIntegrationTests(
           surface: "weaklyConnectedComponents",
           invoke: () =>
             invokeRuntimeMethod(algorithms, "weaklyConnectedComponents", [
+              algorithmOptions,
+            ]),
+          message: "recordedAsOf is only available through",
+        },
+        {
+          surface: "labelPropagation",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "labelPropagation", [
               algorithmOptions,
             ]),
           message: "recordedAsOf is only available through",

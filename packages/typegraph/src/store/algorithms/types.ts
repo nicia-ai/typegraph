@@ -302,6 +302,41 @@ export type WeaklyConnectedComponentMembership = Readonly<{
   size: number;
 }>;
 
+/**
+ * Options for deterministic Community Detection using Label Propagation
+ * (CDLP).
+ *
+ * Selected edges are treated as undirected. Every synchronous round assigns
+ * each node the most frequent label among its visible neighbors from the
+ * previous round; ties resolve to the minimum `(id, kind)` label under binary
+ * ordering. Isolated nodes retain their own identity as a singleton label.
+ */
+export type LabelPropagationOptions<G extends GraphDef> =
+  TemporalAlgorithmOptions &
+    IterativeMemoryOptions &
+    Readonly<{
+      /** Edge kinds whose undirected projection supplies neighbor votes. */
+      edges: readonly EdgeKinds<G>[];
+      /** Optional node kinds defining the induced subgraph to analyze. */
+      nodeKinds?: readonly NodeKinds<G>[];
+      /** Maximum synchronous rounds before throwing. Defaults to `1000`. */
+      maxIterations?: number;
+    }>;
+
+export type InternalLabelPropagationOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<LabelPropagationOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/** One visible node's membership in a deterministic CDLP community. */
+export type LabelPropagationMembership = Readonly<{
+  id: string;
+  kind: string;
+  /** Final propagated label id. */
+  labelId: string;
+  /** Kind paired with `labelId`; node identity is `(kind, id)`. */
+  labelKind: string;
+}>;
+
 /** Options shared by global and personalized PageRank. */
 export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
   IterativeMemoryOptions &

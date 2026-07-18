@@ -1,6 +1,6 @@
 ---
 title: Graph Algorithms
-description: Shortest path, reachability, neighborhoods, degree, weakly connected components, and PageRank on store.algorithms
+description: Traversal, connectivity, label propagation, and PageRank on store.algorithms
 ---
 
 Graph queries like "are Alice and Bob connected?" or "who is within two hops
@@ -19,6 +19,10 @@ store.algorithms.canReach(alice, bob, { edges: ["knows"] });
 store.algorithms.neighbors(alice, { edges: ["knows"], depth: 2 });
 store.algorithms.degree(alice, { edges: ["knows"] });
 store.algorithms.weaklyConnectedComponents({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+});
+store.algorithms.labelPropagation({
   edges: ["knows"],
   nodeKinds: ["Person"],
 });
@@ -41,7 +45,7 @@ path reconstruction, and stop when the frontiers meet.
 SQLite and PostgreSQL; PageRank follows the numerical-tolerance contract below.
 
 The inline fallback is intentionally limited to bounded traversals. Whole-graph
-iterative algorithms such as WCC and PageRank require a pinned transactional connection and
+iterative algorithms such as WCC, label propagation, and PageRank require a pinned transactional connection and
 fail through their typed capability gate when one is unavailable; they never
 silently switch to a second full algorithm implementation.
 
@@ -56,6 +60,7 @@ silently switch to a second full algorithm implementation.
 | Get the k-hop neighborhood of a node | `neighbors` |
 | Count incident edges (in, out, or both) | `degree` |
 | Partition all visible nodes by undirected connectivity | `weaklyConnectedComponents` |
+| Find deterministic communities by neighbor-label voting | `labelPropagation` |
 | Rank nodes by global structural importance | `pageRank` |
 | Rank nodes relative to weighted seed nodes | `personalizedPageRank` |
 | Filter, sort, or project over traversal results | `.query().traverse()` / `.recursive()` |
@@ -64,6 +69,7 @@ silently switch to a second full algorithm implementation.
 Traversal algorithms return lightweight `{ id, kind, depth }` records rather
 than fully hydrated nodes. WCC returns one
 `{ id, kind, componentId, componentKind, size }` membership per visible node.
+Label propagation returns `{ id, kind, labelId, labelKind }` memberships.
 PageRank returns `{ id, kind, score }` records ordered by descending score.
 Use `store.nodes.<Kind>.getByIds(...)` when you need the full node data.
 
@@ -336,6 +342,43 @@ tolerance is also absolute: typical scores are on the order of `1/N`, so
 reliably ranking the low-score tail of a large graph calls for a
 proportionally smaller tolerance.
 
+## labelPropagation
+
+Runs deterministic synchronous Community Detection using Label Propagation
+(CDLP) over the undirected projection of selected edge kinds. Each visible node
+starts with its own `(id, kind)` identity as its label. A round adopts the most
+frequent label among the node's visible neighbors from the previous round;
+equal vote counts resolve to the minimum label under portable binary ordering.
+
+```typescript
+const memberships = await store.algorithms.labelPropagation({
+  edges: ["knows", "worksAt"],
+  nodeKinds: ["Person", "Company"], // optional; all kinds by default
+  maxIterations: 1000, // default
+});
+// [{ id, kind, labelId, labelKind }, ...]
+```
+
+The graph is a neighbor set for voting: parallel edges and repeated selected
+edge kinds do not multiply a vote, and self-loops do not make a node its own
+neighbor. An isolated in-scope node therefore retains its initial label.
+Labels and vote counts are exact integers, and edge-kind chunks are accumulated
+before a label is staged, so results do not depend on bind limits or chunk
+order. Changed-node frontiers restrict each later round to nodes whose neighbor
+labels may have changed.
+
+This API follows CDLP's synchronous mode-label rule but intentionally has a
+stronger completion contract than the fixed-round Graphalytics benchmark: it
+returns only a converged labeling. Synchronous label propagation can oscillate
+(a single edge between two otherwise isolated nodes swaps labels forever), so
+exhausting `maxIterations` throws `GraphAlgorithmConvergenceError` rather than
+returning a parity-dependent partial labeling.
+
+Like WCC and PageRank, label propagation requires
+`backend.capabilities.graphAnalytics?.supported === true`, runs in one
+repeatable snapshot, honors temporal and recorded-time views, and accepts the
+transaction-scoped `workingMemory` option.
+
 ## weaklyConnectedComponents
 
 Computes an exact partition over the undirected projection of the selected edge
@@ -376,10 +419,10 @@ rescanning the full edge set and do not churn unchanged working rows.
 PostgreSQL refreshes planner statistics for a sufficiently large temporary
 working table and refreshes them again after multiplicative growth. This avoids
 plans based on PostgreSQL's initial one-row estimate for a new temporary table.
-The policy is automatic, applies to WCC, PageRank, and growing traversal frontiers, and is
+The policy is automatic, applies to WCC, label propagation, PageRank, and growing traversal frontiers, and is
 a no-op on SQLite.
 
-Iterative operations (WCC, PageRank, and the working-table traversals) accept an opt-in
+Iterative operations (WCC, label propagation, PageRank, and the working-table traversals) accept an opt-in
 `workingMemory` override of the session's `work_mem` for their rounds. When
 set, it is applied with `SET LOCAL work_mem` semantics inside the operation's
 own transaction — the session and server settings are never modified, and the
@@ -525,14 +568,14 @@ file — a good starting point for your own RAG + graph workloads.
 ## What's Not Included
 
 These algorithms cover shortest path (weighted and unweighted),
-reachability, neighborhoods, degree, weakly connected components, and global
-and personalized PageRank. They
+reachability, neighborhoods, degree, weakly connected components,
+deterministic label propagation, and global and personalized PageRank. They
 do **not** cover:
 
 - Strongly connected components
 - Topological sort
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
-- Community detection
+- Modularity-optimizing community detection such as Leiden or Louvain
 
 For those, export edges via `.query().traverse()` or `store.subgraph()` and
 use a specialized library such as

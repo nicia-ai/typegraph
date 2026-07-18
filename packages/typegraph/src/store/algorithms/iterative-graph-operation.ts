@@ -33,6 +33,7 @@ import type { PathNode, TraversalDirection } from "./types";
 
 type QueryBackend = Pick<GraphBackend, "capabilities" | "execute">;
 type WorkingTableIdentifier = ReturnType<typeof sql.identifier>;
+type CapturedFailure = Readonly<{ error: unknown }>;
 
 export type IterativeGraphOperation = Readonly<{
   backend: QueryBackend;
@@ -113,6 +114,8 @@ export type IterativeGraphPlan<
     context: IterativeGraphRunContext,
     state: State,
   ) => Promise<Result>;
+  /** Drops any plan-owned temporary relations before the working table. */
+  cleanup?: (context: IterativeGraphRunContext) => Promise<void>;
 }>;
 
 type ExpansionRow = Readonly<{
@@ -281,7 +284,7 @@ export async function runIterativeGraphOperation<
         }
       }
       await context.executeTemporary(plan.createWorkingTable(context));
-      let operationError: unknown;
+      let operationFailure: CapturedFailure | undefined;
       try {
         let state = await plan.initialize(context);
         let analyzedRowCount = await refreshWorkingTableStatistics(
@@ -313,10 +316,10 @@ export async function runIterativeGraphOperation<
         }
         return await plan.extractResult(context, state);
       } catch (error) {
-        operationError = error;
+        operationFailure = { error };
         throw error;
       } finally {
-        await dropWorkingTable(context, operationError);
+        await cleanupWorkingTables(context, plan.cleanup, operationFailure);
       }
     },
     {
@@ -358,7 +361,7 @@ async function refreshWorkingTableStatistics(
 
 async function dropWorkingTable(
   context: IterativeGraphRunContext,
-  operationError: unknown,
+  hasPrimaryFailure: boolean,
 ): Promise<void> {
   try {
     await context.executeTemporary(
@@ -368,8 +371,30 @@ async function dropWorkingTable(
     // A failed PostgreSQL statement aborts the transaction, so DROP is
     // rejected too; rollback then owns cleanup. Preserve the algorithm's root
     // error instead of masking it with "transaction is aborted".
-    if (operationError === undefined) throw cleanupError;
+    if (!hasPrimaryFailure) throw cleanupError;
   }
+}
+
+async function cleanupWorkingTables(
+  context: IterativeGraphRunContext,
+  cleanup: IterativeGraphPlan<IterativeGraphState, unknown>["cleanup"],
+  operationFailure: CapturedFailure | undefined,
+): Promise<void> {
+  let cleanupFailure: CapturedFailure | undefined;
+  try {
+    await cleanup?.(context);
+  } catch (error) {
+    // Preserve a failed operation over a secondary cleanup failure. When
+    // cleanup itself is the first failure, preserve it over a subsequent
+    // PostgreSQL "transaction is aborted" error from dropping the main table.
+    if (operationFailure === undefined) cleanupFailure = { error };
+  }
+
+  await dropWorkingTable(
+    context,
+    operationFailure !== undefined || cleanupFailure !== undefined,
+  );
+  if (cleanupFailure !== undefined) throw cleanupFailure.error;
 }
 
 export async function fetchVisibleWorkingNodes(

@@ -267,12 +267,13 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 
 TypeGraph ships focused algorithms on `store.algorithms.*` — shortest path
 (weighted and unweighted), reachability, k-hop neighborhoods, degree, exact
-weakly connected components, and global/personalized PageRank. See
+weakly connected components, deterministic label propagation, and
+global/personalized PageRank. See
 [Graph Algorithms](/graph-algorithms) for the full API.
 
 The following heavier analytics are **not** provided:
 
-- Community detection
+- Modularity-optimizing community detection such as Leiden or Louvain
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
 - Strongly connected components
 - Topological sort

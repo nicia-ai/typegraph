@@ -165,6 +165,10 @@ void store.algorithms.personalizedPageRank({
   edges: ["knows"],
   seeds: [{ id: aliceId, kind: "Person", weight: 2 }],
 });
+void store.algorithms.labelPropagation({
+  edges: ["knows"],
+  nodeKinds: ["Person"],
+});
 
 // Degree accepts an options-less call and a specific edge-kind selection.
 void store.algorithms.degree(aliceId);
@@ -193,6 +197,7 @@ void store.algorithms.personalizedPageRank({
   seeds: [{ id: aliceId, kind: "Person" }],
   ...temporal,
 });
+void store.algorithms.labelPropagation({ edges: ["knows"], ...temporal });
 
 // Subgraph also accepts the temporal options (requires a branded NodeId).
 void store.subgraph(aliceNodeId, {
@@ -208,6 +213,9 @@ void store.algorithms.reachable(aliceId, { edges: ["not_a_kind"] });
 // @ts-expect-error - "not_a_kind" isn't a registered WCC edge kind
 void store.algorithms.weaklyConnectedComponents({ edges: ["not_a_kind"] });
 
+// @ts-expect-error - "not_a_kind" isn't a registered label-propagation edge kind
+void store.algorithms.labelPropagation({ edges: ["not_a_kind"] });
+
 void store.algorithms.weaklyConnectedComponents({
   edges: ["knows"],
   // @ts-expect-error - "not_a_kind" isn't a registered WCC node kind
@@ -221,6 +229,12 @@ void store.algorithms.personalizedPageRank({
   edges: ["knows"],
   // @ts-expect-error - seed kind must be a registered node kind
   seeds: [{ id: aliceId, kind: "not_a_kind" }],
+});
+
+void store.algorithms.labelPropagation({
+  edges: ["knows"],
+  // @ts-expect-error - "not_a_kind" isn't a registered label-propagation node kind
+  nodeKinds: ["not_a_kind"],
 });
 
 void store.algorithms.reachable(aliceId, {

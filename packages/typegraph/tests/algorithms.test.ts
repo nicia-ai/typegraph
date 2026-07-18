@@ -204,6 +204,22 @@ function createCountingBackend(
   };
 }
 
+function expectAuxiliaryTableDroppedBeforeWorkingTable(
+  statements: readonly string[],
+): void {
+  const neighborDropIndex = statements.findIndex((statement) =>
+    statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_n_'),
+  );
+  const workingDropIndex = statements.findIndex(
+    (statement, index) =>
+      index > neighborDropIndex &&
+      statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_') &&
+      !statement.includes('"typegraph_iterative_n_'),
+  );
+  expect(neighborDropIndex).toBeGreaterThan(-1);
+  expect(workingDropIndex).toBeGreaterThan(neighborDropIndex);
+}
+
 // ============================================================
 // Test Setup
 // ============================================================
@@ -1348,6 +1364,167 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // labelPropagation
+  // --------------------------------------------------------------
+
+  describe("labelPropagation", () => {
+    it("uses synchronous neighbor-mode labels and retains isolated nodes", async () => {
+      const labelStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta, gamma, isolated] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
+        labelStore.nodes.Person.create({ name: "Beta" }, { id: "label-b" }),
+        labelStore.nodes.Person.create({ name: "Gamma" }, { id: "label-c" }),
+        labelStore.nodes.Person.create({ name: "Isolated" }, { id: "label-z" }),
+      ]);
+      await Promise.all([
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(beta, gamma, {}),
+        labelStore.edges.knows.create(gamma, alpha, {}),
+        // Neither parallel edges nor self-loops multiply neighbor votes.
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(alpha, alpha, {}),
+      ]);
+
+      await expect(
+        labelStore.algorithms.labelPropagation({ edges: ["knows"] }),
+      ).resolves.toEqual([
+        {
+          id: alpha.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: beta.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: gamma.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: isolated.id,
+          kind: "Person",
+          labelId: isolated.id,
+          labelKind: "Person",
+        },
+      ]);
+    });
+
+    it("materializes adjacency once with PostgreSQL-safe relation names", async () => {
+      const statements: string[] = [];
+      const labelStore = createStore(
+        testGraph,
+        createCountingBackend(createTestBackend(), statements),
+      );
+      const [alpha, beta, gamma] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
+        labelStore.nodes.Person.create({ name: "Beta" }, { id: "label-b" }),
+        labelStore.nodes.Person.create({ name: "Gamma" }, { id: "label-c" }),
+      ]);
+      await Promise.all([
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(beta, gamma, {}),
+        labelStore.edges.knows.create(gamma, alpha, {}),
+      ]);
+
+      await labelStore.algorithms.labelPropagation({ edges: ["knows"] });
+
+      const adjacencyWrites = statements.filter(
+        (statement) =>
+          statement.includes('INSERT INTO "typegraph_iterative_n_') &&
+          statement.includes('"typegraph_edges"'),
+      );
+      expect(adjacencyWrites).toHaveLength(1);
+
+      const auxiliaryIdentifiers = new Set(
+        statements.flatMap((statement) =>
+          [
+            ...statement.matchAll(
+              /"(typegraph_iterative_[anr]_[a-zA-Z0-9_]+)"/g,
+            ),
+          ].flatMap((match) => (match[1] === undefined ? [] : [match[1]])),
+        ),
+      );
+      expect(auxiliaryIdentifiers.size).toBe(3);
+      for (const identifier of auxiliaryIdentifiers) {
+        expect(identifier.length).toBeLessThanOrEqual(63);
+      }
+
+      expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    });
+
+    it("throws instead of returning an oscillating partial labeling", async () => {
+      const statements: string[] = [];
+      const labelStore = createStore(
+        testGraph,
+        createCountingBackend(createTestBackend(), statements),
+      );
+      const [left, right] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Left" }, { id: "left" }),
+        labelStore.nodes.Person.create({ name: "Right" }, { id: "right" }),
+      ]);
+      await labelStore.edges.knows.create(left, right, {});
+
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 4,
+        }),
+      ).rejects.toMatchObject({
+        code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+        details: { algorithm: "labelPropagation", maxIterations: 4 },
+      });
+
+      expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    });
+
+    it("supports an empty induced node-kind scope", async () => {
+      await expect(
+        store.algorithms.labelPropagation({
+          edges: ["knows"],
+          nodeKinds: [],
+        }),
+      ).resolves.toEqual([]);
+    });
+
+    it("rejects invalid options and unsupported backends", async () => {
+      await expect(
+        store.algorithms.labelPropagation({ edges: [] }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 0,
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      const unsupportedBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: false, mathFunctions: false },
+        },
+      };
+      const unsupportedStore = createStore(testGraph, unsupportedBackend);
+      await expect(
+        unsupportedStore.algorithms.labelPropagation({ edges: ["knows"] }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          operation: "labelPropagation",
+          capability: "graphAnalytics",
+          supported: false,
+        },
+      });
+    });
+  });
+
+  // --------------------------------------------------------------
   // PageRank / personalized PageRank
   // --------------------------------------------------------------
 
@@ -1633,7 +1810,7 @@ describe("store.algorithms", () => {
       });
     });
 
-    it("requires window functions for WCC but not for PageRank", async () => {
+    it("requires window functions for label algorithms but not PageRank", async () => {
       const noWindowFunctionsBackend: GraphBackend = {
         ...backend,
         capabilities: {
@@ -1656,6 +1833,20 @@ describe("store.algorithms", () => {
         details: {
           capability: "graphAnalytics",
           operation: "weaklyConnectedComponents",
+          supported: true,
+          windowFunctions: false,
+        },
+      });
+
+      await expect(
+        noWindowFunctionsStore.algorithms.labelPropagation({
+          edges: ["knows"],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "labelPropagation",
           supported: true,
           windowFunctions: false,
         },

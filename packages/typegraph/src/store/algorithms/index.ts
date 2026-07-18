@@ -11,6 +11,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { assertNoRecordedCoordinate } from "../recorded-coordinate-guard";
 import { type AlgorithmContext } from "./context";
 import { executeDegree } from "./degree";
+import { executeLabelPropagation } from "./label-propagation";
 import { executePageRank, executePersonalizedPageRank } from "./page-rank";
 import {
   executeCanReach,
@@ -23,6 +24,7 @@ import type {
   DegreeOptions,
   InternalBaseTraversalOptions,
   InternalDegreeOptions,
+  InternalLabelPropagationOptions,
   InternalNeighborsOptions,
   InternalPageRankOptions,
   InternalPersonalizedPageRankOptions,
@@ -30,6 +32,8 @@ import type {
   InternalShortestPathOptions,
   InternalWeaklyConnectedComponentsOptions,
   InternalWeightedShortestPathOptions,
+  LabelPropagationMembership,
+  LabelPropagationOptions,
   NeighborsOptions,
   PageRankOptions,
   PageRankScore,
@@ -150,6 +154,14 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
   degree: (node: NodeIdentifier, options?: DegreeOptions<G>) => Promise<number>;
 
   /**
+   * Runs deterministic synchronous label propagation over an undirected
+   * projection of the selected edge kinds.
+   */
+  labelPropagation: (
+    options: LabelPropagationOptions<G>,
+  ) => Promise<readonly LabelPropagationMembership[]>;
+
+  /**
    * Computes exact weakly connected components over the selected edge kinds.
    *
    * Iterative: runs multiple SQL rounds in one snapshot and requires
@@ -201,6 +213,9 @@ export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
     node: NodeIdentifier,
     options?: InternalDegreeOptions<G>,
   ) => Promise<number>;
+  labelPropagation: (
+    options: InternalLabelPropagationOptions<G>,
+  ) => Promise<readonly LabelPropagationMembership[]>;
   weaklyConnectedComponents: (
     options: InternalWeaklyConnectedComponentsOptions<G>,
   ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
@@ -301,6 +316,14 @@ export function createGraphAlgorithms<G extends GraphDef>(
       assertRecordedAsOfInternalOnly(options, "degree", allowRecordedAsOf);
       return executeDegree(ctx, resolveNodeId(node), options ?? {});
     },
+    labelPropagation(options) {
+      assertRecordedAsOfInternalOnly(
+        options,
+        "labelPropagation",
+        allowRecordedAsOf,
+      );
+      return executeLabelPropagation(ctx, options);
+    },
     weaklyConnectedComponents(options) {
       assertRecordedAsOfInternalOnly(
         options,
@@ -330,6 +353,7 @@ export type {
   DegreeOptions,
   InternalBaseTraversalOptions,
   InternalDegreeOptions,
+  InternalLabelPropagationOptions,
   InternalNeighborsOptions,
   InternalPageRankOptions,
   InternalPersonalizedPageRankOptions,
@@ -338,6 +362,8 @@ export type {
   InternalTemporalAlgorithmOptions,
   InternalWeaklyConnectedComponentsOptions,
   InternalWeightedShortestPathOptions,
+  LabelPropagationMembership,
+  LabelPropagationOptions,
   NeighborsOptions,
   PageRankOptions,
   PageRankScore,
