@@ -59,6 +59,7 @@ import {
   type DropVectorIndexParams,
   type FulltextSearchParams,
   type FulltextSearchResult,
+  type GraphAnalyticsCapabilities,
   type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -474,6 +475,25 @@ function resolveMaxBindParametersCapability(
   return profile.hardMaxBindParameters === undefined ?
       requested
     : Math.min(requested, profile.hardMaxBindParameters);
+}
+
+function resolveSqliteGraphAnalyticsCapabilities(
+  profile: SqliteExecutionProfile,
+  override: GraphAnalyticsCapabilities | undefined,
+): GraphAnalyticsCapabilities {
+  const requested =
+    override ??
+    SQLITE_CAPABILITIES.graphAnalytics ?? {
+      supported: false,
+      mathFunctions: false,
+    };
+  if (
+    profile.transactionMode !== "do-sqlite" &&
+    profile.transactionMode !== "none"
+  ) {
+    return requested;
+  }
+  return { ...requested, supported: false };
 }
 
 // ============================================================
@@ -973,6 +993,10 @@ export function createSqliteBackend(
     maxBindParameters: resolveMaxBindParametersCapability(
       executionAdapter.profile,
       capabilityOverrides.maxBindParameters,
+    ),
+    graphAnalytics: resolveSqliteGraphAnalyticsCapabilities(
+      executionAdapter.profile,
+      capabilityOverrides.graphAnalytics,
     ),
   });
 

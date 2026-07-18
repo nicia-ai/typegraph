@@ -66,11 +66,14 @@ const docVersions = sqliteTable(
 );
 
 const Doc = defineNode("Doc", { schema: z.object({ title: z.string() }) });
+const linksTo = defineEdge("links_to", {
+  schema: z.object({ cost: z.number() }),
+});
 
 const DocGraph = defineGraph({
   id: "do-sqlite",
   nodes: { Doc: { type: Doc } },
-  edges: {},
+  edges: { links_to: { type: linksTo, from: [Doc], to: [Doc] } },
 });
 
 const Message = defineNode("Message", {
@@ -156,16 +159,23 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       expect(db.$client).toBe(storage);
       expect(typeof storage.transaction).toBe("function");
       expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
       );
 
       const staleHintBackend = createSqliteBackend(db, {
-        capabilities: { maxBindParameters: 999 },
+        capabilities: {
+          graphAnalytics: { supported: true, mathFunctions: false },
+          maxBindParameters: 999,
+        },
         executionProfile: { isSync: false, transactionMode: "none" },
         tables: defaultTables,
       });
       expect(staleHintBackend.capabilities.transactions).toBe(true);
+      expect(staleHintBackend.capabilities.graphAnalytics?.supported).toBe(
+        false,
+      );
       expect(staleHintBackend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
       );
@@ -177,6 +187,49 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
         }),
       ).rejects.toThrow("stale-hint-rollback");
       expect(await staleHintStore.nodes.Doc.count()).toBe(0);
+    });
+  });
+
+  it("routes graph algorithms around forbidden temporary tables", async () => {
+    await inObject("algorithms", async ({ store }) => {
+      const source = await store.nodes.Doc.create({ title: "source" });
+      const target = await store.nodes.Doc.create({ title: "target" });
+      await store.edges.links_to.create(source, target, { cost: 2 });
+
+      const path = await store.algorithms.shortestPath(source, target, {
+        edges: ["links_to"],
+      });
+
+      expect(path?.nodes.map((node) => node.id)).toEqual([
+        source.id,
+        target.id,
+      ]);
+
+      const reachable = await store.algorithms.reachable(source, {
+        edges: ["links_to"],
+      });
+      expect(reachable.map((node) => [node.id, node.depth])).toEqual([
+        [source.id, 0],
+        [target.id, 1],
+      ]);
+
+      const weightedPath = await store.algorithms.weightedShortestPath(
+        source,
+        target,
+        { edges: ["links_to"], weightProperty: "cost" },
+      );
+      expect(weightedPath?.totalWeight).toBe(2);
+      expect(weightedPath?.nodes.map((node) => node.id)).toEqual([
+        source.id,
+        target.id,
+      ]);
+
+      await expect(
+        store.algorithms.weaklyConnectedComponents({ edges: ["links_to"] }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: { capability: "graphAnalytics", supported: false },
+      });
     });
   });
 
