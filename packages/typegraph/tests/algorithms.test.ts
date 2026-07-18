@@ -1348,6 +1348,327 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // PageRank / personalized PageRank
+  // --------------------------------------------------------------
+
+  describe("PageRank", () => {
+    it("assigns equal scores to a directed cycle", async () => {
+      const rankStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta, gamma] = await Promise.all([
+        rankStore.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+        rankStore.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+        rankStore.nodes.Person.create({ name: "Rank gamma" }, { id: "rank-c" }),
+      ]);
+      await Promise.all([
+        rankStore.edges.knows.create(alpha, beta, {}),
+        rankStore.edges.knows.create(beta, gamma, {}),
+        rankStore.edges.knows.create(gamma, alpha, {}),
+      ]);
+
+      const scores = await rankStore.algorithms.pageRank({
+        edges: ["knows"],
+        tolerance: 1e-12,
+      });
+
+      expect(scores).toHaveLength(3);
+      expect(scores.map((row) => row.id)).toEqual([
+        "rank-a",
+        "rank-b",
+        "rank-c",
+      ]);
+      for (const row of scores) expect(row.score).toBeCloseTo(1 / 3, 12);
+      expect(scores.reduce((total, row) => total + row.score, 0)).toBeCloseTo(
+        1,
+        12,
+      );
+    });
+
+    it("redistributes dangling mass and ranks a terminal node highest", async () => {
+      const rankStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta, gamma] = await Promise.all([
+        rankStore.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+        rankStore.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+        rankStore.nodes.Person.create({ name: "Rank gamma" }, { id: "rank-c" }),
+      ]);
+      await Promise.all([
+        rankStore.edges.knows.create(alpha, beta, {}),
+        rankStore.edges.knows.create(beta, gamma, {}),
+      ]);
+
+      const scores = await rankStore.algorithms.pageRank({ edges: ["knows"] });
+      const reversedScores = await rankStore.algorithms.pageRank({
+        edges: ["knows"],
+        direction: "in",
+      });
+
+      expect(scores.map((row) => row.id)).toEqual([
+        "rank-c",
+        "rank-b",
+        "rank-a",
+      ]);
+      expect(reversedScores.map((row) => row.id)).toEqual([
+        "rank-a",
+        "rank-b",
+        "rank-c",
+      ]);
+      expect(scores.reduce((total, row) => total + row.score, 0)).toBeCloseTo(
+        1,
+        10,
+      );
+    });
+
+    it("precomputes weights and ping-pongs scores without an apply rewrite", async () => {
+      const statements: string[] = [];
+      const observedStore = createStore(
+        testGraph,
+        createCountingBackend(backend, statements),
+      );
+
+      await observedStore.algorithms.pageRank({ edges: ["knows"] });
+
+      const degreeStatements = statements.filter(
+        (statement) =>
+          statement.includes("degrees AS") && statement.includes("out_weight"),
+      );
+      expect(degreeStatements).toHaveLength(1);
+      const contributionStatements = statements.filter((statement) =>
+        statement.includes("contributions AS"),
+      );
+      expect(contributionStatements.length).toBeGreaterThan(1);
+      for (const statement of contributionStatements) {
+        expect(statement).toMatch(
+          /w\."?(?:next_score|score)"? AS source_score/,
+        );
+        expect(statement).toContain("w.out_weight AS source_out_weight");
+        expect(statement).not.toContain('"typegraph_nodes"');
+      }
+      const resetStatements = statements.filter((statement) =>
+        statement.includes("personalization *"),
+      );
+      const changeStatements = statements.filter((statement) =>
+        statement.includes("MAX(ABS("),
+      );
+      expect(resetStatements).toHaveLength(contributionStatements.length);
+      expect(changeStatements).toHaveLength(contributionStatements.length);
+      for (const statement of resetStatements) {
+        expect(statement).toContain("SELECT COALESCE(SUM(dangling.");
+      }
+      expect(
+        statements.some((statement) =>
+          /SET\s+"?score"?\s*=\s*"?next_score"?/.test(statement),
+        ),
+      ).toBe(false);
+    });
+
+    it("computes the analytic two-node personalized solution", async () => {
+      const rankStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta] = await Promise.all([
+        rankStore.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+        rankStore.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+      ]);
+      await Promise.all([
+        rankStore.edges.knows.create(alpha, beta, {}),
+        rankStore.edges.knows.create(beta, alpha, {}),
+      ]);
+
+      const scores = await rankStore.algorithms.personalizedPageRank({
+        edges: ["knows"],
+        seeds: [{ id: alpha.id, kind: "Person" }],
+        tolerance: 1e-12,
+        maxIterations: 200,
+      });
+      const byId = new Map(scores.map((row) => [row.id, row.score]));
+
+      expect(byId.get(alpha.id)).toBeCloseTo(1 / 1.85, 10);
+      expect(byId.get(beta.id)).toBeCloseTo(0.85 / 1.85, 10);
+    });
+
+    it("normalizes weighted and duplicate personalization seeds", async () => {
+      const rankStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta] = await Promise.all([
+        rankStore.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+        rankStore.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+      ]);
+
+      const scores = await rankStore.algorithms.personalizedPageRank({
+        edges: ["knows"],
+        dampingFactor: 0,
+        seeds: [
+          { id: alpha.id, kind: "Person" },
+          { id: beta.id, kind: "Person", weight: 2 },
+          { id: beta.id, kind: "Person" },
+        ],
+      });
+      const byId = new Map(scores.map((row) => [row.id, row.score]));
+
+      expect(byId.get(alpha.id)).toBeCloseTo(0.25, 12);
+      expect(byId.get(beta.id)).toBeCloseTo(0.75, 12);
+    });
+
+    it("returns an empty score set for an empty induced subgraph", async () => {
+      await expect(
+        store.algorithms.pageRank({ edges: ["knows"], nodeKinds: [] }),
+      ).resolves.toEqual([]);
+    });
+
+    it("rejects missing personalization seeds and incomplete convergence", async () => {
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [{ id: "missing", kind: "Person" }],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+
+      await expect(
+        store.algorithms.pageRank({
+          edges: ["knows"],
+          maxIterations: 1,
+          tolerance: 1e-15,
+        }),
+      ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+    });
+
+    it("rejects malformed numerical and personalization options", async () => {
+      for (const dampingFactor of [-0.1, 1, Number.NaN]) {
+        await expect(
+          store.algorithms.pageRank({ edges: ["knows"], dampingFactor }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      for (const tolerance of [0, -1, Number.POSITIVE_INFINITY]) {
+        await expect(
+          store.algorithms.pageRank({ edges: ["knows"], tolerance }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      for (const maxIterations of [0, -1, 1.5, Number.NaN]) {
+        await expect(
+          store.algorithms.pageRank({ edges: ["knows"], maxIterations }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      for (const weight of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(
+          store.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [{ id: ids.alice, kind: "Person", weight }],
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [{ id: ids.alice, kind: "Person", weight: 0 }],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      for (const seed of [
+        { id: "", kind: "Person" as const },
+        { id: undefined as unknown as string, kind: "Person" as const },
+        { id: ids.alice, kind: undefined as unknown as "Person" },
+        { id: `${ids.alice}\u0000x`, kind: "Person" as const },
+        { id: ids.alice, kind: "Person\u0000x" as unknown as "Person" },
+      ]) {
+        await expect(
+          store.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [seed],
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [
+            { id: ids.alice, kind: "Person", weight: Number.MAX_VALUE },
+            { id: ids.alice, kind: "Person", weight: Number.MAX_VALUE },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [
+            { id: ids.alice, kind: "Person", weight: Number.MIN_VALUE },
+            { id: ids.bob, kind: "Person", weight: Number.MAX_VALUE },
+          ],
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+    });
+
+    it("rejects a backend without graph-analytics support", async () => {
+      const unsupportedBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: false, mathFunctions: false },
+        },
+      };
+      const unsupportedStore = createStore(testGraph, unsupportedBackend);
+
+      await expect(
+        unsupportedStore.algorithms.pageRank({ edges: ["knows"] }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "pageRank",
+          supported: false,
+        },
+      });
+      await expect(
+        unsupportedStore.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          seeds: [{ id: ids.alice, kind: "Person" }],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "personalizedPageRank",
+          supported: false,
+        },
+      });
+    });
+
+    it("requires window functions for WCC but not for PageRank", async () => {
+      const noWindowFunctionsBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: true, mathFunctions: true },
+          windowFunctions: false,
+        },
+      };
+      const noWindowFunctionsStore = createStore(
+        testGraph,
+        noWindowFunctionsBackend,
+      );
+
+      await expect(
+        noWindowFunctionsStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "weaklyConnectedComponents",
+          supported: true,
+          windowFunctions: false,
+        },
+      });
+
+      const scores = await noWindowFunctionsStore.algorithms.pageRank({
+        edges: ["knows"],
+      });
+      expect(scores.length).toBeGreaterThan(0);
+    });
+  });
+
+  // --------------------------------------------------------------
   // validation
   // --------------------------------------------------------------
 
@@ -1367,6 +1688,15 @@ describe("store.algorithms", () => {
       ).rejects.toBeInstanceOf(ConfigurationError);
       await expect(
         store.algorithms.weaklyConnectedComponents({ edges: [] }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.pageRank({ edges: [] }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(
+        store.algorithms.personalizedPageRank({
+          edges: [],
+          seeds: [{ id: ids.alice, kind: "Person" }],
+        }),
       ).rejects.toBeInstanceOf(ConfigurationError);
       await expect(
         store.algorithms.weightedShortestPath(ids.alice, ids.bob, {
@@ -1457,6 +1787,9 @@ describe("store.algorithms", () => {
             workingMemory,
           }),
         ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.pageRank({ edges: ["knows"], workingMemory }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
       }
     });
 
@@ -1483,6 +1816,9 @@ describe("store.algorithms", () => {
             edges: ["knows"],
             workingMemory,
           }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          store.algorithms.pageRank({ edges: ["knows"], workingMemory }),
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
     });

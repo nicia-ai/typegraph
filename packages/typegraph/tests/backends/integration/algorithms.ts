@@ -849,6 +849,182 @@ export function registerAlgorithmIntegrationTests(
       });
     });
 
+    describe("PageRank", () => {
+      it("matches analytic global and personalized scores", async () => {
+        const store = context.getStore();
+        const [alpha, beta, gamma] = await Promise.all([
+          store.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+          store.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+          store.nodes.Person.create({ name: "Rank gamma" }, { id: "rank-c" }),
+        ]);
+        await Promise.all([
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.knows.create(beta, gamma, {}),
+          store.edges.knows.create(gamma, alpha, {}),
+        ]);
+
+        const globalScores = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          tolerance: 1e-12,
+        });
+        expect(globalScores.map((row) => row.id)).toEqual([
+          "rank-a",
+          "rank-b",
+          "rank-c",
+        ]);
+        for (const row of globalScores) {
+          expect(row.score).toBeCloseTo(1 / 3, 12);
+        }
+
+        const personalizedScores = await store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          seeds: [{ id: alpha.id, kind: "Person" }],
+          tolerance: 1e-12,
+          maxIterations: 200,
+        });
+        const byId = new Map(
+          personalizedScores.map((row) => [row.id, row.score]),
+        );
+        const normalization = 1 + 0.85 + 0.85 ** 2;
+        expect(byId.get(alpha.id)).toBeCloseTo(1 / normalization, 10);
+        expect(byId.get(beta.id)).toBeCloseTo(0.85 / normalization, 10);
+        expect(byId.get(gamma.id)).toBeCloseTo(0.85 ** 2 / normalization, 10);
+      });
+
+      it("preserves physical-edge and self-loop weights across chunking", async () => {
+        const store = context.getStore();
+        const [alpha, beta, company] = await Promise.all([
+          store.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+          store.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+          store.nodes.Company.create(
+            { name: "Rank company" },
+            { id: "rank-c" },
+          ),
+        ]);
+        await Promise.all([
+          store.edges.knows.create(alpha, alpha, {}),
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.knows.create(alpha, beta, {}),
+          store.edges.worksAt.create(beta, company, { role: "Member" }),
+        ]);
+        const options = {
+          edges: ["knows", "worksAt"],
+          nodeKinds: ["Person", "Company"],
+          direction: "both",
+          tolerance: 1e-12,
+        } as const;
+
+        const expected = await store.algorithms.pageRank(options);
+        await expect(store.algorithms.pageRank(options)).resolves.toEqual(
+          expected,
+        );
+        const constrainedStore = createStore(
+          integrationTestGraph,
+          withBindLimit(store.backend, 28),
+        );
+        const constrained = await constrainedStore.algorithms.pageRank(options);
+
+        expect(constrained.map((row) => `${row.kind}\u0000${row.id}`)).toEqual(
+          expected.map((row) => `${row.kind}\u0000${row.id}`),
+        );
+        for (const expectedRow of expected) {
+          const actual = constrained.find(
+            (row) => row.id === expectedRow.id && row.kind === expectedRow.kind,
+          );
+          expect(actual?.score).toBeCloseTo(expectedRow.score, 12);
+        }
+        expect(
+          expected.reduce((total, row) => total + row.score, 0),
+        ).toBeCloseTo(1, 10);
+        const byId = new Map(expected.map((row) => [row.id, row.score]));
+        expect(byId.get(alpha.id)).toBeCloseTo(0.405344795365352, 10);
+        expect(byId.get(beta.id)).toBeCloseTo(0.4244066529620634, 10);
+        expect(byId.get(company.id)).toBeCloseTo(0.17024855167258443, 10);
+      });
+
+      it("chunks large personalization vectors within the bind budget", async () => {
+        const store = context.getStore();
+        const people = await store.nodes.Person.bulkCreate(
+          Array.from({ length: 12 }, (_, index) => ({
+            id: `rank-seed-${String(index).padStart(2, "0")}`,
+            props: { name: `Rank seed ${index}` },
+          })),
+        );
+        const seeds = people.map((person, index) => ({
+          id: person.id,
+          kind: "Person" as const,
+          weight: index + 1,
+        }));
+        const constrainedStore = createStore(
+          integrationTestGraph,
+          withBindLimit(store.backend, 28),
+        );
+
+        const scores = await constrainedStore.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+          seeds,
+        });
+
+        expect(scores).toHaveLength(12);
+        expect(scores.reduce((total, row) => total + row.score, 0)).toBeCloseTo(
+          1,
+          12,
+        );
+        expect(scores[0]?.id).toBe("rank-seed-11");
+        expect(scores.at(-1)?.id).toBe("rank-seed-00");
+      });
+
+      it("qualifies personalization by full node identity", async () => {
+        const store = context.getStore();
+        const [person, company] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Rank person" },
+            { id: "rank-shared" },
+          ),
+          store.nodes.Company.create(
+            { name: "Rank company" },
+            { id: "rank-shared" },
+          ),
+        ]);
+        await store.edges.worksAt.create(person, company, { role: "Member" });
+
+        const scores = await store.algorithms.personalizedPageRank({
+          edges: ["worksAt"],
+          nodeKinds: ["Person", "Company"],
+          direction: "both",
+          dampingFactor: 0,
+          seeds: [{ id: "rank-shared", kind: "Company" }],
+        });
+
+        expect(scores).toEqual([
+          { id: "rank-shared", kind: "Company", score: 1 },
+          { id: "rank-shared", kind: "Person", score: 0 },
+        ]);
+      });
+
+      it("throws rather than returning unconverged scores", async () => {
+        const store = context.getStore();
+        const [alpha, beta] = await Promise.all([
+          store.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+          store.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+        ]);
+        await store.edges.knows.create(alpha, beta, {});
+
+        await expect(
+          store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            maxIterations: 1,
+            tolerance: 1e-15,
+          }),
+        ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+      });
+    });
+
     describe("dense cyclic graph", () => {
       it("visits each node once instead of enumerating simple paths", async () => {
         const store = context.getStore();
@@ -980,6 +1156,27 @@ export function registerAlgorithmIntegrationTests(
         expect(historicalRoot?.size).toBe(3);
         expect(historical.some((row) => row.id === ids.endedId)).toBe(true);
         expect(historical.some((row) => row.id === ids.futureId)).toBe(false);
+      });
+
+      it("exposes PageRank through the StoreView algorithms facade", async () => {
+        const store = context.getStore();
+        const current = await store.algorithms.pageRank({ edges: ["knows"] });
+        const historical = await store
+          .asOf(BEFORE)
+          .algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [{ id: ids.rootId, kind: "Person" }],
+          });
+
+        expect(current.map((row) => row.id).toSorted()).toEqual(
+          [ids.activeId, ids.rootId].toSorted(),
+        );
+        expect(historical.map((row) => row.id).toSorted()).toEqual(
+          [ids.activeId, ids.endedId, ids.rootId].toSorted(),
+        );
+        expect(
+          historical.reduce((total, row) => total + row.score, 0),
+        ).toBeCloseTo(1, 10);
       });
 
       it("reachable under includeEnded includes validity-ended nodes and edges", async () => {

@@ -6,7 +6,10 @@ import {
   resolveReadCoordinate,
 } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import {
   type RecordedReadBinding,
@@ -20,6 +23,7 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { compareCodePoints } from "../../utils/compare";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -204,4 +208,44 @@ export function assertEdgeKinds(edges: readonly string[]): void {
       { edges },
     );
   }
+}
+
+/**
+ * Deduplicates and code-point-sorts an induced-subgraph kind selection so
+ * compiled kind filters are deterministic across call sites and backends.
+ */
+export function normalizeNodeKinds(
+  nodeKinds: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (nodeKinds === undefined) return undefined;
+  return [...new Set(nodeKinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  );
+}
+
+export function assertGraphAnalyticsSupported(
+  ctx: AlgorithmContext,
+  algorithm: string,
+  options: Readonly<{ requiresWindowFunctions?: boolean }> = {},
+): void {
+  const graphAnalytics =
+    ctx.backend.capabilities.graphAnalytics?.supported === true;
+  const windowFunctions = ctx.backend.capabilities.windowFunctions;
+  if (
+    graphAnalytics &&
+    (options.requiresWindowFunctions !== true || windowFunctions)
+  ) {
+    return;
+  }
+
+  throw new UnsupportedBackendCapabilityError(
+    algorithm,
+    "graphAnalytics",
+    {
+      dialect: ctx.backend.dialect,
+      supported: graphAnalytics,
+      ...(options.requiresWindowFunctions === true ? { windowFunctions } : {}),
+    },
+    "Use a built-in transactional SQLite/PostgreSQL backend, or declare graphAnalytics support on a compatible custom backend.",
+  );
 }

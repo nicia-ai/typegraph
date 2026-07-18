@@ -1,14 +1,14 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
-import { UnsupportedBackendCapabilityError } from "../../errors";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compareCodePoints } from "../../utils/compare";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
+  assertGraphAnalyticsSupported,
   type InternalTraversalOptions,
+  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -45,18 +45,15 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
   options: InternalWeaklyConnectedComponentsOptions<G>,
 ): Promise<readonly WeaklyConnectedComponentMembership[]> {
   assertEdgeKinds(options.edges);
-  assertWeaklyConnectedComponentsSupported(ctx);
+  assertGraphAnalyticsSupported(ctx, "weaklyConnectedComponents", {
+    requiresWindowFunctions: true,
+  });
   const maxIterations = resolveMaxIterations(
     options.maxIterations,
     DEFAULT_WCC_MAX_ITERATIONS,
     "weaklyConnectedComponents",
   );
-  const nodeKinds =
-    options.nodeKinds === undefined ?
-      undefined
-    : [...new Set(options.nodeKinds)].toSorted((left, right) =>
-        compareCodePoints(left, right),
-      );
+  const nodeKinds = normalizeNodeKinds(options.nodeKinds);
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
@@ -77,26 +74,6 @@ export async function executeWeaklyConnectedComponents<G extends GraphDef>(
     },
     extractResult: extractMemberships,
   });
-}
-
-function assertWeaklyConnectedComponentsSupported(ctx: AlgorithmContext): void {
-  if (
-    ctx.backend.capabilities.graphAnalytics?.supported === true &&
-    ctx.backend.capabilities.windowFunctions
-  ) {
-    return;
-  }
-
-  throw new UnsupportedBackendCapabilityError(
-    "weaklyConnectedComponents",
-    "graphAnalytics",
-    {
-      dialect: ctx.backend.dialect,
-      supported: ctx.backend.capabilities.graphAnalytics?.supported === true,
-      windowFunctions: ctx.backend.capabilities.windowFunctions,
-    },
-    "Use a built-in transactional SQLite/PostgreSQL backend, or declare graphAnalytics support on a compatible custom backend.",
-  );
 }
 
 function createWorkingTable(context: IterativeGraphRunContext): SQL {

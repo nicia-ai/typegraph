@@ -32,6 +32,7 @@ import {
   type NodeTemporalReads,
   type NodeWrites,
   type InitialQueryBuilder,
+  type PageRankScore,
   type QueryOptions,
   type ReachableNode,
   type RecordedInstant,
@@ -144,6 +145,18 @@ expectAssignable<Promise<readonly WeaklyConnectedComponentMembership[]>>(
     nodeKinds: ["Person"],
   }),
 );
+expectAssignable<Promise<readonly PageRankScore[]>>(
+  view.algorithms.pageRank({
+    edges: ["knows"],
+    nodeKinds: ["Person"],
+  }),
+);
+expectAssignable<Promise<readonly PageRankScore[]>>(
+  view.algorithms.personalizedPageRank({
+    edges: ["knows"],
+    seeds: [{ id: "person-1", kind: "Person", weight: 2 }],
+  }),
+);
 
 // StoreView owns the read coordinate. Its query builder stays fluent for
 // predicates/projections, but callers cannot re-coordinate it with
@@ -225,6 +238,19 @@ expectError(
   }),
 );
 expectError(
+  view.algorithms.pageRank({
+    edges: ["knows"],
+    temporalMode: "asOf",
+  }),
+);
+expectError(
+  view.algorithms.personalizedPageRank({
+    edges: ["knows"],
+    seeds: [{ id: "person-1", kind: "Person" }],
+    temporalMode: "asOf",
+  }),
+);
+expectError(
   view.subgraph(personId, { edges: ["knows"], temporalMode: "asOf" }),
 );
 expectError(
@@ -290,6 +316,19 @@ expectError(
 expectError(
   store.algorithms.weaklyConnectedComponents({
     edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.pageRank({
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.personalizedPageRank({
+    edges: ["knows"],
+    seeds: [{ id: "person-1", kind: "Person" }],
     ...LEAKED_RECORDED_OPTIONS,
   }),
 );
@@ -400,6 +439,8 @@ type RecordedSharedKeys =
   | "neighbors"
   | "degree"
   | "weaklyConnectedComponents"
+  | "pageRank"
+  | "personalizedPageRank"
   | "algorithms"
   | "mode"
   | "asOf";

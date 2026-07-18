@@ -46,6 +46,9 @@ import {
   type InternalGraphAlgorithms,
   type NeighborsOptions,
   type NodeIdentifier,
+  type PageRankOptions,
+  type PageRankScore,
+  type PersonalizedPageRankOptions,
   type ReachableNode,
   type ReachableOptions,
   type ShortestPathOptions,
@@ -162,6 +165,18 @@ export type StoreViewDegreeOptions<G extends GraphDef> = Omit<
 export type StoreViewWeaklyConnectedComponentsOptions<G extends GraphDef> =
   Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
 
+/** PageRank options with the temporal axis removed (the view supplies it). */
+export type StoreViewPageRankOptions<G extends GraphDef> = Omit<
+  PageRankOptions<G>,
+  keyof TemporalAlgorithmOptions
+>;
+
+/** Personalized PageRank options pinned to the view's temporal coordinate. */
+export type StoreViewPersonalizedPageRankOptions<G extends GraphDef> = Omit<
+  PersonalizedPageRankOptions<G>,
+  keyof TemporalAlgorithmOptions
+>;
+
 /** Graph-algorithm facade sealed to a {@link StoreView}'s coordinate. */
 export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
   shortestPath: (
@@ -194,6 +209,12 @@ export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
   weaklyConnectedComponents: (
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
+  pageRank: (
+    options: StoreViewPageRankOptions<G>,
+  ) => Promise<readonly PageRankScore[]>;
+  personalizedPageRank: (
+    options: StoreViewPersonalizedPageRankOptions<G>,
+  ) => Promise<readonly PageRankScore[]>;
 }>;
 
 function isReadCoordinate(
@@ -819,6 +840,8 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
       degree: (node, options) => this.degree(node, options),
       weaklyConnectedComponents: (options) =>
         this.weaklyConnectedComponents(options),
+      pageRank: (options) => this.pageRank(options),
+      personalizedPageRank: (options) => this.personalizedPageRank(options),
     });
     return this.#algorithmFacade;
   }
@@ -913,6 +936,26 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ): Promise<readonly WeaklyConnectedComponentMembership[]> {
     return this.internalAlgorithms().weaklyConnectedComponents({
+      ...options,
+      ...withCoordinate(this.coordinate),
+    });
+  }
+
+  /** Global PageRank scores at this view's pinned coordinate. */
+  pageRank(
+    options: StoreViewPageRankOptions<G>,
+  ): Promise<readonly PageRankScore[]> {
+    return this.internalAlgorithms().pageRank({
+      ...options,
+      ...withCoordinate(this.coordinate),
+    });
+  }
+
+  /** Personalized PageRank scores at this view's pinned coordinate. */
+  personalizedPageRank(
+    options: StoreViewPersonalizedPageRankOptions<G>,
+  ): Promise<readonly PageRankScore[]> {
+    return this.internalAlgorithms().personalizedPageRank({
       ...options,
       ...withCoordinate(this.coordinate),
     });

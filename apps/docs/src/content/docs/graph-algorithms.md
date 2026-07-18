@@ -1,6 +1,6 @@
 ---
 title: Graph Algorithms
-description: Shortest path (weighted and unweighted), reachability, neighborhoods, degree, and weakly connected components on store.algorithms
+description: Shortest path, reachability, neighborhoods, degree, weakly connected components, and PageRank on store.algorithms
 ---
 
 Graph queries like "are Alice and Bob connected?" or "who is within two hops
@@ -22,6 +22,11 @@ store.algorithms.weaklyConnectedComponents({
   edges: ["knows"],
   nodeKinds: ["Person"],
 });
+store.algorithms.pageRank({ edges: ["knows"], nodeKinds: ["Person"] });
+store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  seeds: [{ id: alice.id, kind: "Person" }],
+});
 ```
 
 Traversal calls use a set-based breadth-first frontier. Each level expands the
@@ -32,11 +37,11 @@ only at its minimum depth. Reachability rounds deduplicate edge targets before
 checking target-node visibility and do not compute unused predecessors.
 `shortestPath` and `canReach` search from both endpoints, retain predecessors for
 path reconstruction, and stop when the frontiers meet.
-`degree` remains a single `COUNT` query. The algorithms work identically on
-SQLite and PostgreSQL.
+`degree` remains a single `COUNT` query. Exact algorithms behave identically on
+SQLite and PostgreSQL; PageRank follows the numerical-tolerance contract below.
 
 The inline fallback is intentionally limited to bounded traversals. Whole-graph
-iterative algorithms such as WCC require a pinned transactional connection and
+iterative algorithms such as WCC and PageRank require a pinned transactional connection and
 fail through their typed capability gate when one is unavailable; they never
 silently switch to a second full algorithm implementation.
 
@@ -51,12 +56,15 @@ silently switch to a second full algorithm implementation.
 | Get the k-hop neighborhood of a node | `neighbors` |
 | Count incident edges (in, out, or both) | `degree` |
 | Partition all visible nodes by undirected connectivity | `weaklyConnectedComponents` |
+| Rank nodes by global structural importance | `pageRank` |
+| Rank nodes relative to weighted seed nodes | `personalizedPageRank` |
 | Filter, sort, or project over traversal results | `.query().traverse()` / `.recursive()` |
 | Hydrate an entity plus all its relationships | `store.subgraph()` |
 
 Traversal algorithms return lightweight `{ id, kind, depth }` records rather
 than fully hydrated nodes. WCC returns one
 `{ id, kind, componentId, componentKind, size }` membership per visible node.
+PageRank returns `{ id, kind, score }` records ordered by descending score.
 Use `store.nodes.<Kind>.getByIds(...)` when you need the full node data.
 
 ## Shared Options
@@ -263,6 +271,71 @@ const everything = await store.algorithms.degree(alice);
 `degree` runs a single `COUNT` query, not a recursive CTE, so it's
 efficient even for hub nodes with thousands of edges.
 
+## PageRank and Personalized PageRank
+
+`pageRank` scores every visible node by the stationary probability of a random
+walk over the selected edges. `personalizedPageRank` uses the same power
+iteration but teleports to weighted seed nodes instead of uniformly across the
+graph. Both methods operate on the visible induced graph; `nodeKinds` can narrow
+that graph without allowing transitions through excluded nodes.
+
+```typescript
+const globalScores = await store.algorithms.pageRank({
+  edges: ["knows", "cites"],
+  nodeKinds: ["Person", "Paper"],
+  direction: "out",
+});
+
+const relatedToAlice = await store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  direction: "both",
+  seeds: [
+    { id: alice.id, kind: "Person", weight: 3 },
+    { id: bob.id, kind: "Person" }, // weight defaults to 1
+  ],
+});
+// [{ id, kind, score }, ...] — highest score first
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds defining transitions |
+| `nodeKinds` | `readonly NodeKinds<G>[]` | all visible kinds | Induced node subgraph to rank |
+| `direction` | `"out" \| "in" \| "both"` | `"out"` | Follow stored, reversed, or undirected transitions |
+| `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
+| `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |
+| `maxIterations` | positive integer | `1000` | Power-iteration backstop; exceeding it throws |
+| `workingMemory` | PostgreSQL memory string | inherited | Same transaction-scoped override described above |
+
+Personalized seeds are qualified by the full `(kind, id)` identity so same-ID
+nodes of different kinds remain distinct. Seed weights must be finite and
+positive; duplicates are combined and the vector is normalized. A seed outside
+the temporal/node-kind scope throws `ConfigurationError` instead of silently
+losing teleport mass.
+
+Dangling-node mass is redistributed through the same teleport vector, keeping
+the scores normalized to approximately one. Parallel physical edges retain
+their multiplicity. With `direction: "both"`, a physical self-loop contributes
+once rather than once per expansion direction.
+
+PageRank uses double-precision arithmetic on both backends. Repeated runs on
+SQLite are deterministic; on PostgreSQL a plan change between runs can reorder
+floating-point summation and shift scores by a few last bits, which can reorder
+near-tied rows. SQLite and PostgreSQL scores are expected to agree within the
+requested numerical tolerance rather than bit-for-bit. Exact score ties use
+portable binary `(id, kind)` ordering. As with WCC, an exhausted iteration
+budget throws `GraphAlgorithmConvergenceError`—partial scores are never
+returned.
+
+Convergence needs roughly `ln(1/tolerance) / ln(1/dampingFactor)` rounds in the
+worst case. With the default `tolerance` and `maxIterations`, damping factors
+above roughly `0.985` cannot converge in time — every round still runs against
+the full working table before the budget-exhaustion error is thrown — so raise
+`maxIterations` (or loosen `tolerance`) alongside a high damping factor. The
+tolerance is also absolute: typical scores are on the order of `1/N`, so
+reliably ranking the low-score tail of a large graph calls for a
+proportionally smaller tolerance.
+
 ## weaklyConnectedComponents
 
 Computes an exact partition over the undirected projection of the selected edge
@@ -303,10 +376,10 @@ rescanning the full edge set and do not churn unchanged working rows.
 PostgreSQL refreshes planner statistics for a sufficiently large temporary
 working table and refreshes them again after multiplicative growth. This avoids
 plans based on PostgreSQL's initial one-row estimate for a new temporary table.
-The policy is automatic, applies to WCC and growing traversal frontiers, and is
+The policy is automatic, applies to WCC, PageRank, and growing traversal frontiers, and is
 a no-op on SQLite.
 
-Iterative operations (WCC and the working-table traversals) accept an opt-in
+Iterative operations (WCC, PageRank, and the working-table traversals) accept an opt-in
 `workingMemory` override of the session's `work_mem` for their rounds. When
 set, it is applied with `SET LOCAL work_mem` semantics inside the operation's
 own transaction — the session and server settings are never modified, and the
@@ -342,7 +415,9 @@ const historical = await store
 Every node-oriented algorithm accepts either a raw ID string or any object with
 an `id: string` field — `Node`, `NodeRef`, the lightweight records returned by
 traversals, and `store.subgraph()` results all work. WCC is a whole-graph
-operation and does not take a node identifier.
+operation and does not take a node identifier. Global PageRank is also
+whole-graph; personalized PageRank instead takes explicit `{ id, kind, weight? }`
+seed identities.
 
 ```typescript
 const alice = await store.nodes.Person.getById(aliceId);
@@ -450,13 +525,14 @@ file — a good starting point for your own RAG + graph workloads.
 ## What's Not Included
 
 These algorithms cover shortest path (weighted and unweighted),
-reachability, neighborhoods, degree, and weakly connected components. They
+reachability, neighborhoods, degree, weakly connected components, and global
+and personalized PageRank. They
 do **not** cover:
 
 - Strongly connected components
 - Topological sort
 - Centrality measures beyond degree (betweenness, closeness, eigenvector)
-- PageRank or community detection
+- Community detection
 
 For those, export edges via `.query().traverse()` or `store.subgraph()` and
 use a specialized library such as
