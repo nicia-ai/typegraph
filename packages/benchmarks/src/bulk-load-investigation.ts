@@ -26,17 +26,23 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 import { startPostgresContainer } from "./real/harness/postgres-container";
 
-const NODE_COUNT = Number.parseInt(process.env.BULK_NODE_COUNT ?? "100000", 10);
-const EDGE_COUNT = Number.parseInt(process.env.BULK_EDGE_COUNT ?? "300000", 10);
+const NODE_COUNT = Number.parseInt(
+  process.env["BULK_NODE_COUNT"] ?? "100000",
+  10,
+);
+const EDGE_COUNT = Number.parseInt(
+  process.env["BULK_EDGE_COUNT"] ?? "300000",
+  10,
+);
 const BATCH_SIZE = 20_000;
-const USE_IN_MEMORY_SQLITE = process.env.BULK_STORAGE === "memory";
-const BULK_DIALECT = process.env.BULK_DIALECT ?? "sqlite";
+const USE_IN_MEMORY_SQLITE = process.env["BULK_STORAGE"] === "memory";
+const BULK_DIALECT = process.env["BULK_DIALECT"] ?? "sqlite";
 
 const Item = defineNode("Item", {
   schema: z.object({ content: z.string(), creationDate: z.string() }),
@@ -499,7 +505,7 @@ const scenarios = [
 ] as const;
 
 const requestedScenarios = new Set(
-  (process.env.BULK_SCENARIOS ?? "")
+  (process.env["BULK_SCENARIOS"] ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter((name) => name.length > 0),

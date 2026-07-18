@@ -169,8 +169,8 @@ describe("parse parity with collection.create — node", () => {
     const created = await store.nodes.Person.create(input);
 
     expect(parsed).toEqual({ name: "Alice", email: "alice@example.com" });
-    expect(created.name).toBe(parsed.name);
-    expect(created.email).toBe(parsed.email);
+    expect(created.name).toBe(parsed["name"]);
+    expect(created.email).toBe(parsed["email"]);
   });
 
   it("invalid props produce the same underlying Zod issues as create surfaces", async () => {
@@ -224,7 +224,7 @@ describe("parse parity with collection.create — edge", () => {
     const edge = await store.edges.worksAt.create(alice, acme, input);
 
     expect(parsed).toEqual({ role: "Engineer" });
-    expect(edge.role).toBe(parsed.role);
+    expect(edge.role).toBe(parsed["role"]);
   });
 
   it("invalid edge props produce the same underlying Zod issues as create surfaces", async () => {
@@ -351,8 +351,8 @@ describe("z.toJSONSchema interop (doc snippet sanity)", () => {
     ) as Record<string, unknown>;
 
     expect(jsonSchema).toBeTypeOf("object");
-    expect(jsonSchema.type).toBe("object");
-    expect(jsonSchema.properties).toBeTypeOf("object");
+    expect(jsonSchema["type"]).toBe("object");
+    expect(jsonSchema["properties"]).toBeTypeOf("object");
   });
 
   it("produces a JSON Schema object for an extension node kind", async () => {
@@ -365,8 +365,8 @@ describe("z.toJSONSchema interop (doc snippet sanity)", () => {
     ) as Record<string, unknown>;
 
     expect(jsonSchema).toBeTypeOf("object");
-    expect(jsonSchema.type).toBe("object");
-    const properties = jsonSchema.properties as Record<string, unknown>;
-    expect(properties.title).toBeDefined();
+    expect(jsonSchema["type"]).toBe("object");
+    const properties = jsonSchema["properties"] as Record<string, unknown>;
+    expect(properties["title"]).toBeDefined();
   });
 });

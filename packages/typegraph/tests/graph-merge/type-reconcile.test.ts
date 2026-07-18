@@ -17,6 +17,7 @@ import {
   INCOMPATIBLE_TYPES_FLAG_REASON,
   reconcileTypes,
 } from "../../src/graph-merge/type-reconcile";
+import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 /**
@@ -109,7 +110,7 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
       const result = reconcileTypes(clusters, closure, "ontology");
 
       expect(result.reconciliations).toHaveLength(1);
-      const reconciliation = result.reconciliations[0]!;
+      const reconciliation = requireDefined(result.reconciliations[0]);
       expect(reconciliation.entityId).toBe(canonicalId);
       expect(reconciliation.toType).toBe("SpecialistDoctor");
       expect([...reconciliation.fromTypes].sort()).toEqual([
@@ -131,7 +132,9 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
       const result = reconcileTypes(clusters, closure, "ontology");
 
       expect(result.reconciliations).toHaveLength(1);
-      expect(result.reconciliations[0]!.toType).toBe("SpecialistDoctor");
+      expect(requireDefined(result.reconciliations[0]).toType).toBe(
+        "SpecialistDoctor",
+      );
       expect(result.retypeMap.get(canonicalId)).toBe("SpecialistDoctor");
       expect(result.dropped).toEqual([]);
     });
@@ -158,10 +161,12 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
         closure,
         "ontology",
       );
-      expect(forward.reconciliations[0]!.toType).toBe(
-        reversed.reconciliations[0]!.toType,
+      expect(requireDefined(forward.reconciliations[0]).toType).toBe(
+        requireDefined(reversed.reconciliations[0]).toType,
       );
-      expect(forward.reconciliations[0]!.toType).toBe("SpecialistDoctor");
+      expect(requireDefined(forward.reconciliations[0]).toType).toBe(
+        "SpecialistDoctor",
+      );
     });
   });
 
@@ -179,7 +184,7 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
       // Physician ≡ Doctor: either qualifies as the minimum, so the
       // lexicographically-smallest representative ("Doctor") is chosen
       // deterministically — never flagged as incompatible.
-      expect(result.reconciliations[0]!.toType).toBe("Doctor");
+      expect(requireDefined(result.reconciliations[0]).toType).toBe("Doctor");
       expect(result.retypeMap.get(canonicalId)).toBe("Doctor");
     });
 
@@ -192,7 +197,9 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
         "ontology",
       );
       expect(result.dropped).toEqual([]);
-      expect(result.reconciliations[0]!.toType).toBe("SpecialistDoctor");
+      expect(requireDefined(result.reconciliations[0]).toType).toBe(
+        "SpecialistDoctor",
+      );
       expect(result.retypeMap.get(canonicalId)).toBe("SpecialistDoctor");
     });
   });
@@ -227,7 +234,9 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
         "ontology",
       );
       expect(result.reconciliations).toEqual([]);
-      expect(result.dropped[0]!.reason).toBe(INCOMPATIBLE_TYPES_FLAG_REASON);
+      expect(requireDefined(result.dropped[0]).reason).toBe(
+        INCOMPATIBLE_TYPES_FLAG_REASON,
+      );
     });
   });
 
@@ -262,11 +271,15 @@ describe("reconcileTypes over the public-closure glue (T10)", () => {
       );
 
       expect(result.reconciliations).toHaveLength(1);
-      expect(result.reconciliations[0]!.entityId).toBe(compatible);
-      expect(result.reconciliations[0]!.toType).toBe("SpecialistDoctor");
+      expect(requireDefined(result.reconciliations[0]).entityId).toBe(
+        compatible,
+      );
+      expect(requireDefined(result.reconciliations[0]).toType).toBe(
+        "SpecialistDoctor",
+      );
 
       expect(result.dropped).toHaveLength(1);
-      expect(result.dropped[0]!.id).toBe(incompatible);
+      expect(requireDefined(result.dropped[0]).id).toBe(incompatible);
       expect(result.retypeMap.get(compatible)).toBe("SpecialistDoctor");
       expect(result.retypeMap.has(incompatible)).toBe(false);
     });

@@ -4,11 +4,11 @@
  * Implements dialect-specific SQL generation for SQLite databases.
  * Uses SQLite's JSON1 extension for JSON operations.
  */
-import { sql } from "drizzle-orm";
-
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import { sql } from "../sql-fragment";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
+import { getSqlDialectProfile } from "./profile";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -265,19 +265,15 @@ export const sqliteDialect: DialectAdapter = {
   // ============================================================
 
   bindValue(value) {
-    // SQLite doesn't support native booleans, convert to 0/1
-    if (typeof value === "boolean") {
-      return value ? 1 : 0;
-    }
-    return value;
+    return getSqlDialectProfile("sqlite").bindValue(value);
   },
 
   booleanLiteral(value) {
-    return sql.raw(this.booleanLiteralString(value));
+    return sql.raw(getSqlDialectProfile("sqlite").booleanLiteralString(value));
   },
 
   booleanLiteralString(value) {
-    return value ? "1" : "0";
+    return getSqlDialectProfile("sqlite").booleanLiteralString(value);
   },
 
   quoteIdentifier(name) {

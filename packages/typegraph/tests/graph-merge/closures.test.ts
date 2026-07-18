@@ -14,6 +14,7 @@ import {
   isReachable,
   SUB_CLASS_OF_META_EDGE,
 } from "../../src/graph-merge/closures";
+import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -224,9 +225,9 @@ describe("equivalentTo folding", () => {
       },
     ];
     const shuffled: readonly OntologyIntrospection[] = [
-      base[2]!,
-      base[0]!,
-      base[1]!,
+      requireDefined(base[2]),
+      requireDefined(base[0]),
+      requireDefined(base[1]),
     ];
     const a = buildSubClassClosure(base);
     const b = buildSubClassClosure(shuffled);

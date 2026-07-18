@@ -14,8 +14,8 @@
 import { sql } from "drizzle-orm";
 
 import type { KindEntity } from "../../core/types";
+import { formatPostgresTimestamp } from "../row-mappers";
 import type { KindRemovalRow, RecordKindRemovalParams } from "../types";
-import { formatPostgresTimestamp } from "./row-mappers";
 
 /**
  * Bridges the dialect-specific timestamp column representation to the

@@ -13,19 +13,16 @@ npm install -D @types/better-sqlite3
 ```
 
 > **Edge environments or libsql:** Skip `better-sqlite3` and use
-> `@nicia-ai/typegraph/sqlite/libsql` with `@libsql/client`, or
-> `@nicia-ai/typegraph/sqlite` with your edge-compatible driver (D1, bun:sqlite).
+> `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` with `@libsql/client`, or
+> `@nicia-ai/typegraph/adapters/drizzle/sqlite` with your edge-compatible driver (D1, bun:sqlite).
 > See [Backend Setup](/backend-setup#libsql--turso) and [Edge and Serverless](/integration#edge-and-serverless).
 
 ## 2. Create Your First Graph
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, createStore } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
-
-// Create an in-memory SQLite backend
-const { backend } = createLocalSqliteBackend();
+import { defineNode, defineEdge, defineGraph } from "@nicia-ai/typegraph";
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
 
 // Define your schema
 const Person = defineNode("Person", {
@@ -42,8 +39,8 @@ const graph = defineGraph({
   edges: { worksOn: { type: worksOn, from: [Person], to: [Project] } },
 });
 
-// Create the store
-const store = createStore(graph, backend);
+// Provision an in-memory database and create the store
+const store = await createLocalSqliteStore(graph);
 
 // Use it!
 const alice = await store.nodes.Person.create({ name: "Alice", role: "Engineer" });
@@ -64,6 +61,12 @@ console.log(results); // [{ person: "Alice", project: "Website" }]
 
 That's it! You have a working knowledge graph. Read on for the complete setup guide.
 
+This managed entrypoint returns the complete typed `Store` while keeping its
+public declaration surface independent of Drizzle. Use
+`@nicia-ai/typegraph/postgres/pglite` for the same setup with in-process
+PostgreSQL. If your application owns the database connection or needs direct
+driver access, use the adapter entrypoints described below instead.
+
 ---
 
 ## Complete Setup Guide
@@ -77,22 +80,44 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 npm install -D @types/better-sqlite3
 ```
 
-> `better-sqlite3` is optional. For libsql/Turso, use `@nicia-ai/typegraph/sqlite/libsql`.
-> For D1 or bun:sqlite, use `@nicia-ai/typegraph/sqlite` with the matching Drizzle driver.
+> `better-sqlite3` is optional. For libsql/Turso, use `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql`.
+> For D1 or bun:sqlite, use `@nicia-ai/typegraph/adapters/drizzle/sqlite` with the matching Drizzle driver.
 
 ### SQLite Setup
 
 TypeGraph provides two ways to set up SQLite:
 
-#### Quick Setup (Recommended for Development)
+#### Managed Store (Recommended)
 
-The simplest way to get started. Handles database creation and schema setup automatically.
-
-> **Note:** `createLocalSqliteBackend` requires `better-sqlite3` and only works in Node.js.
-> For edge environments, see [Manual Setup](#manual-setup-full-control) with `/sqlite`.
+Use the managed Store when TypeGraph should own the connection and provision
+its schema:
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
+
+const store = await createLocalSqliteStore(graph, { path: "./my-app.db" });
+
+// The Store owns the connection.
+await store.close();
+```
+
+The return value is a `Store`: typed node and edge collections, queries,
+algorithms, graph-owned transactions, schema evolution, and schema-derived
+property types are all available. Adapter-native handles and caller-owned
+transaction adoption are absent by design; opt into `AdapterStore` through a
+Drizzle adapter entrypoint when application tables must share a transaction.
+
+#### Quick Setup (Recommended for Development)
+
+Use the backend wrapper when you also need the underlying Drizzle database or
+want to choose how the Store is created.
+
+> **Note:** `createLocalSqliteBackend` requires `better-sqlite3` and only works in Node.js.
+> For edge environments, see [Manual Setup](#manual-setup-full-control) with
+> `/adapters/drizzle/sqlite`.
+
+```typescript
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // In-memory database (data lost on restart)
 const { backend } = createLocalSqliteBackend();
@@ -111,7 +136,7 @@ For production deployments or when you need full control over the database confi
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 // Create database connection
 const sqlite = new Database("my-app.db");
@@ -132,7 +157,7 @@ For Turso, embedded replicas, or sharing a libsql connection with other librarie
 
 ```typescript
 import { createClient } from "@libsql/client";
-import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
 
 const client = createClient({ url: "file:app.db" });
 const { backend } = await createLibsqlBackend(client);
@@ -148,7 +173,7 @@ For Cloudflare Workers or Bun, use the driver-agnostic backend:
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1"; // or bun-sqlite
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 // D1 example
 const db = drizzle(env.DB);
@@ -244,7 +269,7 @@ const graph = defineGraph({
     worksOn: { type: worksOn, from: [Person], to: [Project] },
     hasTask: { type: hasTask, from: [Project], to: [Task] },
     assignedTo: { type: assignedTo, from: [Task], to: [Person] },
-    related,  // any→any
+    related, // any→any
   },
   ontology: [
     // A Person cannot be a Project or Task
@@ -267,13 +292,13 @@ const store = createStore(graph, backend);
 
 #### Store Creation: Which Function to Use
 
-| Function | Schema Handling | Use Case |
-|----------|-----------------|----------|
-| `createLocalSqliteBackend` | Automatic | Quick start, development, tests (Node.js) |
-| `createLibsqlBackend` | Automatic | libsql/Turso (Node.js, Workers, browser) |
-| `createLocalPgliteBackend` | Automatic | In-process Postgres, embedded apps, pgvector tests |
-| `createStore` + manual migration | None | When you manage migrations externally |
-| `createStoreWithSchema` | Auto-creates tables, validates & auto-migrates | **Recommended for production** |
+| Function                         | Schema Handling                                | Use Case                                           |
+| -------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| `createLocalSqliteBackend`       | Automatic                                      | Quick start, development, tests (Node.js)          |
+| `createLibsqlBackend`            | Automatic                                      | libsql/Turso (Node.js, Workers, browser)           |
+| `createLocalPgliteBackend`       | Automatic                                      | In-process Postgres, embedded apps, pgvector tests |
+| `createStore` + manual migration | None                                           | When you manage migrations externally              |
+| `createStoreWithSchema`          | Auto-creates tables, validates & auto-migrates | **Recommended for production**                     |
 
 :::caution[Fulltext requires `createStoreWithSchema`]
 If your graph has any `searchable()` fields, you must boot through
@@ -305,7 +330,7 @@ Every graph has a unique `id` that scopes its data:
 
 ```typescript
 const graph = defineGraph({
-  id: "my_app",  // Scopes all nodes/edges to this graph
+  id: "my_app", // Scopes all nodes/edges to this graph
   // ...
 });
 ```
@@ -481,7 +506,7 @@ npm install -D @types/pg
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Create connection pool
 const pool = new Pool({

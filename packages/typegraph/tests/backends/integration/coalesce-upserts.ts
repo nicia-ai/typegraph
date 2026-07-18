@@ -1,8 +1,6 @@
-import { sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  asCompiledRowsSql,
   asEdgeId,
   asNodeId,
   createStoreWithSchema,
@@ -11,12 +9,19 @@ import {
   type NodeId,
 } from "../../../src";
 import {
-  type AdoptedTransaction,
   type TransactionBackend,
   type TransactionOptions,
 } from "../../../src/backend/types";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
-import { type IntegrationStore, integrationTestGraph } from "./fixtures";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import { requireDefined } from "../../../src/utils/presence";
+import {
+  type HistoryIntegrationStore,
+  type IntegrationStore,
+  integrationTestGraph,
+} from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 // Postgres returns COUNT(*) as a string/bigint, SQLite as a number, so the
@@ -30,13 +35,17 @@ type CountRow = Readonly<{ cnt: unknown }>;
 async function createCoalesceStore(
   context: IntegrationTestContext,
   extra?: Readonly<{ history?: true; revisionTracking?: true }>,
-): Promise<IntegrationStore> {
-  const [store] = await createStoreWithSchema(
-    integrationTestGraph,
-    context.getStore().backend,
-    { coalesceUnchangedUpserts: true, ...extra },
-  );
-  return store;
+): Promise<HistoryIntegrationStore | IntegrationStore> {
+  if (extra?.history === true) {
+    return context.createHistoryStore(integrationTestGraph, {
+      coalesceUnchangedUpserts: true,
+      ...(extra.revisionTracking === true && { revisionTracking: true }),
+    });
+  }
+  return context.createStore(integrationTestGraph, {
+    coalesceUnchangedUpserts: true,
+    ...(extra?.revisionTracking === true && { revisionTracking: true }),
+  });
 }
 
 function personId(
@@ -57,12 +66,13 @@ function knowsId(
  * stays flat when coalesced.
  */
 async function countRecordedNodeRows(
-  store: IntegrationStore,
+  store: HistoryIntegrationStore | IntegrationStore,
   kind: string,
   id: string,
 ): Promise<number> {
-  const table = createSqlSchema(store.backend.tableNames).recordedNodesTable;
-  const rows = await store.backend.execute<CountRow>(
+  const backend = store[STORE_RUNTIME].backend;
+  const table = createSqlSchema(backend.tableNames).recordedNodesTable;
+  const rows = await backend.execute<CountRow>(
     asCompiledRowsSql(sql`
       SELECT COUNT(*) AS cnt
       FROM ${table}
@@ -99,15 +109,12 @@ function withEdgeUpdateCounting(base: GraphBackend): EdgeWriteCounter {
     ...base,
     updateEdge: countingUpdateEdge(base),
     transaction: <T>(
-      fn: (tx: TransactionBackend, sqlHandle: AdoptedTransaction) => Promise<T>,
+      fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ) =>
       base.transaction<T>(
-        (txBackend, sqlHandle) =>
-          fn(
-            { ...txBackend, updateEdge: countingUpdateEdge(txBackend) },
-            sqlHandle,
-          ),
+        (txBackend) =>
+          fn({ ...txBackend, updateEdge: countingUpdateEdge(txBackend) }),
         options,
       ),
   };
@@ -373,7 +380,9 @@ export function registerCoalesceUpsertIntegrationTests(
         expect(afterChange !== undefined && afterFirst !== undefined).toBe(
           true,
         );
-        expect(afterChange! > afterFirst!).toBe(true);
+        expect(requireDefined(afterChange) > requireDefined(afterFirst)).toBe(
+          true,
+        );
         expect(rowsAfterChange).toBeGreaterThan(rowsAfterReplay);
       });
     });

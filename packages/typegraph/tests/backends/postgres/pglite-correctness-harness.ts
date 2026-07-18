@@ -18,12 +18,13 @@
 import { type PGlite } from "@electric-sql/pglite";
 import { getTableName, is, Table } from "drizzle-orm";
 
+import type { AnyPgTransaction } from "../../../src/backend/drizzle/execution";
 import {
   createPostgresBackend,
   tables as defaultTables,
 } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
-import { type GraphBackend } from "../../../src/backend/types";
+import { type AdapterBackend } from "../../../src/backend/types";
 
 /**
  * Every TypeGraph-managed table name, derived from the schema module rather
@@ -53,7 +54,7 @@ export type SharedPgliteEngine = Readonly<{
    * A fresh plain backend over the shared engine. Its `close()` is a client
    * no-op, so the adapter suite's per-test close never disposes the engine.
    */
-  makeBackend: () => GraphBackend;
+  makeBackend: () => AdapterBackend<AnyPgTransaction>;
   /** TRUNCATE all managed metadata/data tables — default per-test isolation. */
   resetData: () => Promise<void>;
   /**

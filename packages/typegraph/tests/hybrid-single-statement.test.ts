@@ -36,6 +36,7 @@ import { type GraphBackend } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
 import { type HybridSearchHit } from "../src/store/search";
+import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "hybrid_single_stmt";
 const FIELD_PATH = "embedding";
@@ -227,7 +228,7 @@ function runHybrid(
       {}
     : {
         where: (document: { category: { eq: (v: string) => unknown } }) =>
-          document.category.eq(options.whereCategory!),
+          document.category.eq(requireDefined(options.whereCategory)),
       }),
   } as never);
 }
@@ -269,12 +270,12 @@ describe("single-statement hybrid search", () => {
   const libsql = libsqlDescriptor();
 
   const TEST_DATABASE_URL =
-    process.env.POSTGRES_URL ??
+    process.env["POSTGRES_URL"] ??
     "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
-    if (!process.env.POSTGRES_URL) return;
+    if (!process.env["POSTGRES_URL"]) return;
     const pool = new Pool({
       connectionString: TEST_DATABASE_URL,
       connectionTimeoutMillis: 5000,
@@ -297,7 +298,7 @@ describe("single-statement hybrid search", () => {
   const postgresDescriptor: BackendDescriptor = {
     label: "postgres-pgvector",
     async create() {
-      const pool = postgresPool!;
+      const pool = requireDefined(postgresPool);
       await pool.query(`
         DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
         DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;

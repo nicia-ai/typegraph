@@ -24,9 +24,11 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type StoreOptions,
   subClassOf,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { requireDefined } from "../src/utils/presence";
 import {
   type CapturedStatement,
   createPlanCaptureBackend,
@@ -68,7 +70,7 @@ async function withCapturingStore<T>(
     captured: CapturedStatement[],
     client: Database.Database,
   ) => Promise<T>,
-  options?: Readonly<{ history?: boolean }>,
+  options?: StoreOptions,
 ): Promise<T> {
   const { backend, captured, client } = createPlanCaptureBackend();
   const store = createStore(buildGraph(), backend, options);
@@ -89,17 +91,17 @@ describe("degree() direction filter index alignment", () => {
         for (let step = 1; step <= 3; step++) {
           await store.edges.knows.create(
             person,
-            people[(index + step) % people.length]!,
+            requireDefined(people[(index + step) % people.length]),
           );
         }
       }
       await store.refreshStatistics();
-      const alice = people[0]!;
-      const bob = people[1]!;
+      const alice = requireDefined(people[0]);
+      const bob = requireDefined(people[1]);
 
       captured.length = 0;
       await store.algorithms.degree(alice.id, { direction: "out" });
-      const outPlan = explainQueryPlan(client, captured.at(-1)!);
+      const outPlan = explainQueryPlan(client, requireDefined(captured.at(-1)));
       expect(outPlan).toContain("typegraph_edges_from_idx");
       expect(outPlan).not.toContain("SCAN typegraph_edges");
       // The node-kind subquery resolves the seed's kind by bare id; without
@@ -109,13 +111,16 @@ describe("degree() direction filter index alignment", () => {
 
       captured.length = 0;
       await store.algorithms.degree(bob.id, { direction: "in" });
-      const inPlan = explainQueryPlan(client, captured.at(-1)!);
+      const inPlan = explainQueryPlan(client, requireDefined(captured.at(-1)));
       expect(inPlan).toContain("typegraph_edges_to_idx");
       expect(inPlan).not.toContain("SCAN typegraph_edges");
 
       captured.length = 0;
       await store.algorithms.degree(alice.id);
-      const bothPlan = explainQueryPlan(client, captured.at(-1)!);
+      const bothPlan = explainQueryPlan(
+        client,
+        requireDefined(captured.at(-1)),
+      );
       expect(bothPlan).not.toContain("SCAN typegraph_edges");
     });
   });
@@ -132,7 +137,7 @@ describe("degree() direction filter index alignment", () => {
           for (let step = 1; step <= 3; step++) {
             await store.edges.knows.create(
               person,
-              people[(index + step) % people.length]!,
+              requireDefined(people[(index + step) % people.length]),
             );
           }
         }
@@ -141,7 +146,7 @@ describe("degree() direction filter index alignment", () => {
         if (pin === undefined) {
           throw new Error("recorded clock was not written");
         }
-        const alice = people[0]!;
+        const alice = requireDefined(people[0]);
 
         // A recorded pin swaps the node source to the recorded relation,
         // whose entity index leads with `kind` — the kind-by-bare-id probe
@@ -151,7 +156,7 @@ describe("degree() direction filter index alignment", () => {
           .asOfRecorded(pin)
           .degree(alice.id, { direction: "out" });
         expect(outDegree).toBe(3);
-        const plan = explainQueryPlan(client, captured.at(-1)!);
+        const plan = explainQueryPlan(client, requireDefined(captured.at(-1)));
         expect(plan).toContain("typegraph_recorded_nodes_id_idx");
         expect(plan).not.toContain("SCAN typegraph_recorded_nodes");
       },

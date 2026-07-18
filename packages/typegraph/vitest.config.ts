@@ -30,16 +30,24 @@ const UNIT_PROPERTY_EXCLUDE = UNIT_SCOPE ? ["tests/property/**"] : [];
 export default defineConfig({
   resolve: {
     alias: {
+      "@nicia-ai/typegraph/sqlite/local": resolve(
+        __dirname,
+        "src/backend/sqlite/local-store.ts",
+      ),
+      "@nicia-ai/typegraph/postgres/pglite": resolve(
+        __dirname,
+        "src/backend/postgres/pglite-store.ts",
+      ),
       "@nicia-ai/typegraph/indexes": resolve(__dirname, "src/indexes/index.ts"),
       "@nicia-ai/typegraph/interchange": resolve(
         __dirname,
         "src/interchange/index.ts",
       ),
-      "@nicia-ai/typegraph/postgres/pglite": resolve(
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite": resolve(
         __dirname,
         "src/backend/postgres/pglite.ts",
       ),
-      "@nicia-ai/typegraph/postgres": resolve(
+      "@nicia-ai/typegraph/adapters/drizzle/postgres": resolve(
         __dirname,
         "src/backend/postgres/index.ts",
       ),
@@ -52,11 +60,15 @@ export default defineConfig({
         __dirname,
         "src/graph-merge/index.ts",
       ),
-      "@nicia-ai/typegraph/sqlite/local": resolve(
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite/local": resolve(
         __dirname,
         "src/backend/sqlite/local.ts",
       ),
-      "@nicia-ai/typegraph/sqlite": resolve(
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql": resolve(
+        __dirname,
+        "src/backend/sqlite/libsql.ts",
+      ),
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite": resolve(
         __dirname,
         "src/backend/sqlite/index.ts",
       ),

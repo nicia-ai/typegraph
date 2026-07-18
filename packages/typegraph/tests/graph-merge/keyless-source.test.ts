@@ -11,7 +11,6 @@
  * duplicates that are adjacent in the similarity-text sort still merge. Plus a
  * determinism check (shuffled creation order → identical committed graph). Both backends.
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -26,6 +25,7 @@ import { merge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 // No unique constraint, no block key → every node falls into the "unblocked" bucket.
@@ -159,12 +159,12 @@ describe.each(backendMatrix())("keyless source [$name]", (entry) => {
   it("is DETERMINISTIC: shuffled creation order yields the same committed graph", async () => {
     cleanups = [];
     const shuffled = [
-      PATIENTS[3]!,
-      PATIENTS[0]!,
-      PATIENTS[5]!,
-      PATIENTS[1]!,
-      PATIENTS[4]!,
-      PATIENTS[2]!,
+      requireDefined(PATIENTS[3]),
+      requireDefined(PATIENTS[0]),
+      requireDefined(PATIENTS[5]),
+      requireDefined(PATIENTS[1]),
+      requireDefined(PATIENTS[4]),
+      requireDefined(PATIENTS[2]),
     ];
 
     const baseNatural = await emptyStore();

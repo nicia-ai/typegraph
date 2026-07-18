@@ -4,7 +4,6 @@ import { z } from "zod";
 import {
   asEdgeId,
   asNodeId,
-  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -80,8 +79,9 @@ export function registerTrustedImportIntegrationTests(
 ): void {
   describe("trusted import", () => {
     it("uses the native path when supported and rejects it explicitly otherwise", async () => {
-      const store = createStore(graph, context.getStore().backend);
-      const isSupported = store.backend.trustedImport !== undefined;
+      const store = await context.createStore(graph);
+      const isSupported =
+        context.getStore().backend.trustedImport !== undefined;
       const outcome = await trustedImportGraph(store, payload()).then(
         (result) => ({ status: "fulfilled" as const, result }),
         (error: unknown) => ({ status: "rejected" as const, error }),
@@ -109,7 +109,7 @@ export function registerTrustedImportIntegrationTests(
     });
 
     it("rolls back earlier chunks when the stream fails", async () => {
-      const store = createStore(graph, context.getStore().backend);
+      const store = await context.createStore(graph);
       const data = payload();
       const { nodes, edges, ...header } = data;
       const outcome = await trustedImportGraphStream(
@@ -125,13 +125,13 @@ export function registerTrustedImportIntegrationTests(
         (error: unknown) => ({
           reason:
             error instanceof TrustedImportError ?
-              error.details.reason
+              error.details["reason"]
             : "unknown",
         }),
       );
 
       expect(outcome.reason).toBe(
-        store.backend.trustedImport === undefined ?
+        context.getStore().backend.trustedImport === undefined ?
           "backend_unsupported"
         : "invalid_stream",
       );

@@ -1,15 +1,12 @@
-import { type SQL, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   type EdgeId,
-  type GraphBackend,
   type NodeId,
   type RecordedInstant,
   type TransactionReceipt,
@@ -17,16 +14,20 @@ import {
 } from "../../../src";
 import { RECORDED_MAX } from "../../../src/core/temporal";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { toCanonicalIso } from "../../../src/store/recorded-capture";
-import { type IntegrationStore, integrationTestGraph } from "./fixtures";
+import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import {
+  type HistoryIntegrationStore,
+  type IntegrationStore,
+  integrationTestGraph,
+} from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
 type RecordedFromRow = Readonly<{ recorded_from: unknown }>;
 
-type RecordedSqlStore = Readonly<{
-  backend: GraphBackend;
-  graphId: string;
-}>;
+type RecordedSqlStore = HistoryIntegrationStore | IntegrationStore;
 
 function missingPersonId(
   id: string,
@@ -104,22 +105,18 @@ function createDeferred(): Readonly<{
 
 async function createHistoryStore(
   context: IntegrationTestContext,
-): Promise<IntegrationStore> {
-  const [store] = await createStoreWithSchema(
-    integrationTestGraph,
-    context.getStore().backend,
-    { history: true },
-  );
-  return store;
+): Promise<HistoryIntegrationStore> {
+  return context.createHistoryStore(integrationTestGraph);
 }
 
 async function readOpenRecordedFrom(
   store: RecordedSqlStore,
-  table: SQL,
+  table: SqlFragment,
   kind: string,
   id: string,
 ): Promise<string> {
-  const rows = await store.backend.execute<RecordedFromRow>(
+  const backend = store[STORE_RUNTIME].backend;
+  const rows = await backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
       SELECT recorded_from
       FROM ${table}
@@ -143,7 +140,7 @@ async function readOpenRecordedNodeFrom(
 ): Promise<string> {
   return readOpenRecordedFrom(
     store,
-    createSqlSchema(store.backend.tableNames).recordedNodesTable,
+    createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedNodesTable,
     kind,
     id,
   );
@@ -156,7 +153,7 @@ async function readOpenRecordedEdgeFrom(
 ): Promise<string> {
   return readOpenRecordedFrom(
     store,
-    createSqlSchema(store.backend.tableNames).recordedEdgesTable,
+    createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedEdgesTable,
     kind,
     id,
   );

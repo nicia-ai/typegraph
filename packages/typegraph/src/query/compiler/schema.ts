@@ -5,11 +5,13 @@
  * This allows the compiler to work with custom table names instead of
  * hard-coded defaults.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import { ConfigurationError } from "../../errors";
+import { typeGraphGlobalSymbol } from "../../utils/global-symbol";
+import { isSqlFragment, sql, type SqlFragment } from "../sql-fragment";
+
+const SQL_SCHEMA_BRAND: unique symbol = typeGraphGlobalSymbol("sql-schema-v1");
 
 /**
  * Table names for TypeGraph SQL schema.
@@ -63,44 +65,60 @@ export type ResolvedSqlTableNames = Readonly<{
 type SqlSchemaFields = Readonly<{
   /** Table names */
   tables: ResolvedSqlTableNames;
-  /** Get a SQL reference to the nodes table */
-  nodesTable: SQL;
-  /** Get a SQL reference to the edges table */
-  edgesTable: SQL;
-  /** Get a SQL reference to the recorded node relation */
-  recordedNodesTable: SQL;
-  /** Get a SQL reference to the recorded edge relation */
-  recordedEdgesTable: SQL;
-  /** Get a SQL reference to the recorded-time commit clock */
-  recordedClockTable: SQL;
-  /** Get a SQL reference to the durable per-graph revision origins */
-  revisionOriginsTable: SQL;
-  /** Get a SQL reference to the fulltext table */
-  fulltextTable: SQL;
+  /** Get a `SqlFragment` reference to the nodes table. */
+  nodesTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the edges table. */
+  edgesTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the recorded node relation. */
+  recordedNodesTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the recorded edge relation. */
+  recordedEdgesTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the recorded-time commit clock. */
+  recordedClockTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the durable per-graph revision origins. */
+  revisionOriginsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the fulltext table. */
+  fulltextTable: SqlFragment;
 }>;
 
 /**
  * SQL schema configuration for query compilation.
- * Contains table identifiers and utility methods for generating SQL references.
+ * Contains table identifiers and utility methods for generating `SqlFragment` references.
  *
  * Branded and frozen by {@link createSqlSchema}; callers should not construct
  * schema-shaped objects by hand.
  */
-export type SqlSchema = SqlSchemaDescriptor;
+export abstract class SqlSchema implements SqlSchemaFields {
+  declare private readonly typeGraphSqlSchemaBrand: true;
+  abstract readonly tables: ResolvedSqlTableNames;
+  abstract readonly nodesTable: SqlFragment;
+  abstract readonly edgesTable: SqlFragment;
+  abstract readonly recordedNodesTable: SqlFragment;
+  abstract readonly recordedEdgesTable: SqlFragment;
+  abstract readonly recordedClockTable: SqlFragment;
+  abstract readonly revisionOriginsTable: SqlFragment;
+  abstract readonly fulltextTable: SqlFragment;
+}
 
-class SqlSchemaDescriptor implements SqlSchemaFields {
-  // Private field gives SqlSchema nominal identity; runtime checks use instanceof.
-  readonly #brand = true;
+class SqlSchemaDescriptor extends SqlSchema {
+  declare readonly [SQL_SCHEMA_BRAND]: true;
   readonly tables: ResolvedSqlTableNames;
-  readonly nodesTable: SQL;
-  readonly edgesTable: SQL;
-  readonly recordedNodesTable: SQL;
-  readonly recordedEdgesTable: SQL;
-  readonly recordedClockTable: SQL;
-  readonly revisionOriginsTable: SQL;
-  readonly fulltextTable: SQL;
+  readonly nodesTable: SqlFragment;
+  readonly edgesTable: SqlFragment;
+  readonly recordedNodesTable: SqlFragment;
+  readonly recordedEdgesTable: SqlFragment;
+  readonly recordedClockTable: SqlFragment;
+  readonly revisionOriginsTable: SqlFragment;
+  readonly fulltextTable: SqlFragment;
 
   constructor(fields: SqlSchemaFields) {
+    super();
+    Object.defineProperty(this, SQL_SCHEMA_BRAND, {
+      configurable: false,
+      enumerable: false,
+      value: true,
+      writable: false,
+    });
     this.tables = fields.tables;
     this.nodesTable = fields.nodesTable;
     this.edgesTable = fields.edgesTable;
@@ -109,7 +127,6 @@ class SqlSchemaDescriptor implements SqlSchemaFields {
     this.recordedClockTable = fields.recordedClockTable;
     this.revisionOriginsTable = fields.revisionOriginsTable;
     this.fulltextTable = fields.fulltextTable;
-    void this.#brand;
     Object.freeze(this);
   }
 }
@@ -174,22 +191,27 @@ function validateTableName(name: string, label: string): void {
   }
 }
 
-/**
- * Quotes a SQL identifier using ANSI SQL standard double quotes.
- * Escapes any embedded double quotes by doubling them.
- *
- * This works for both SQLite and PostgreSQL.
- */
-function quoteIdentifier(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
-}
-
 function freezeSqlSchema(fields: SqlSchemaFields): SqlSchema {
   return new SqlSchemaDescriptor(fields);
 }
 
 function isSqlSchema(schema: unknown): schema is SqlSchema {
-  return schema instanceof SqlSchemaDescriptor && Object.isFrozen(schema);
+  if (typeof schema !== "object" || schema === null) return false;
+  const candidate = schema as Record<PropertyKey, unknown>;
+  return (
+    candidate[SQL_SCHEMA_BRAND] === true &&
+    typeof candidate["tables"] === "object" &&
+    candidate["tables"] !== null &&
+    Object.isFrozen(candidate["tables"]) &&
+    isSqlFragment(candidate["nodesTable"]) &&
+    isSqlFragment(candidate["edgesTable"]) &&
+    isSqlFragment(candidate["recordedNodesTable"]) &&
+    isSqlFragment(candidate["recordedEdgesTable"]) &&
+    isSqlFragment(candidate["recordedClockTable"]) &&
+    isSqlFragment(candidate["revisionOriginsTable"]) &&
+    isSqlFragment(candidate["fulltextTable"]) &&
+    Object.isFrozen(candidate)
+  );
 }
 
 export function requireSqlSchema(
@@ -245,13 +267,13 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),
-    nodesTable: sql.raw(quoteIdentifier(tables.nodes)),
-    edgesTable: sql.raw(quoteIdentifier(tables.edges)),
-    recordedNodesTable: sql.raw(quoteIdentifier(tables.recordedNodes)),
-    recordedEdgesTable: sql.raw(quoteIdentifier(tables.recordedEdges)),
-    recordedClockTable: sql.raw(quoteIdentifier(tables.recordedClock)),
-    revisionOriginsTable: sql.raw(quoteIdentifier(tables.revisionOrigins)),
-    fulltextTable: sql.raw(quoteIdentifier(tables.fulltext)),
+    nodesTable: sql.identifier(tables.nodes),
+    edgesTable: sql.identifier(tables.edges),
+    recordedNodesTable: sql.identifier(tables.recordedNodes),
+    recordedEdgesTable: sql.identifier(tables.recordedEdges),
+    recordedClockTable: sql.identifier(tables.recordedClock),
+    revisionOriginsTable: sql.identifier(tables.revisionOrigins),
+    fulltextTable: sql.identifier(tables.fulltext),
   });
 }
 
@@ -265,8 +287,8 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
  * so future external/TMS-owned recorded relations can feed the same query
  * machinery without changing StoreView or ReadCoordinate.
  */
-const EXTERNAL_RECORDED_READ_SOURCE: unique symbol = Symbol(
-  "ExternalRecordedReadSource",
+const EXTERNAL_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
+  "external-recorded-read-source-v1",
 );
 
 export type ExternalRecordedReadSource = Readonly<{
@@ -281,8 +303,8 @@ type ExternalRecordedReadSourceCandidate = Readonly<{
   [EXTERNAL_RECORDED_READ_SOURCE]?: unknown;
 }>;
 
-const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol = Symbol(
-  "TypeGraphRecordedReadSource",
+const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
+  "typegraph-recorded-read-source-v1",
 );
 
 export type TypeGraphRecordedReadSource = Readonly<{

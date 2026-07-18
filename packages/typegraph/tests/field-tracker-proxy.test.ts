@@ -99,7 +99,7 @@ describe("Promise compatibility", () => {
     const context = createTypedContext(state, tracker, createTestOptions());
 
     // When a proxy returns undefined for 'then', it won't be treated as a thenable
-    expect(context.p.then).toBeUndefined();
+    expect(context.p["then"]).toBeUndefined();
   });
 
   it("does not record 'then' access as a field", () => {
@@ -108,7 +108,7 @@ describe("Promise compatibility", () => {
     const context = createTypedContext(state, tracker, createTestOptions());
 
     // Access 'then' - this should not be recorded
-    void context.p.then;
+    void context.p["then"];
 
     const fields = tracker.getAccessedFields();
     const thenField = fields.find((f) => f.field === "then");
@@ -135,8 +135,8 @@ describe("Promise compatibility", () => {
     // Simulate an async select callback
     const asyncSelect = () => {
       return {
-        name: context.p.name,
-        id: context.p.id,
+        name: context.p["name"],
+        id: context.p["id"],
       };
     };
 
@@ -169,7 +169,7 @@ describe("JSON serialization compatibility", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    expect(context.p.toJSON).toBeUndefined();
+    expect(context.p["toJSON"]).toBeUndefined();
   });
 
   it("does not record 'toJSON' access as a field", () => {
@@ -177,7 +177,7 @@ describe("JSON serialization compatibility", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    void context.p.toJSON;
+    void context.p["toJSON"];
 
     const fields = tracker.getAccessedFields();
     const toJsonField = fields.find((f) => f.field === "toJSON");
@@ -239,7 +239,7 @@ describe("Object prototype property handling", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    expect(context.p.__proto__).toBe(Object.prototype);
+    expect(context.p["__proto__"]).toBe(Object.prototype);
   });
 
   it("returns correct value for 'hasOwnProperty'", () => {
@@ -265,7 +265,7 @@ describe("Object prototype property handling", () => {
     const context = createTypedContext(state, tracker, createTestOptions());
 
     void context.p.constructor;
-    void context.p.__proto__;
+    void context.p["__proto__"];
     void context.p.hasOwnProperty;
     void context.p.toString;
 
@@ -284,7 +284,7 @@ describe("system field tracking", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    void context.p.id;
+    void context.p["id"];
 
     const fields = tracker.getAccessedFields();
     expect(fields).toContainEqual({
@@ -299,7 +299,7 @@ describe("system field tracking", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    void context.p.kind;
+    void context.p["kind"];
 
     const fields = tracker.getAccessedFields();
     expect(fields).toContainEqual({
@@ -325,10 +325,10 @@ describe("system field tracking", () => {
     );
 
     // Falsy mode returns empty string
-    expect(falsyContext.p.id).toBe("");
+    expect(falsyContext.p["id"]).toBe("");
 
     // Truthy mode returns non-empty string
-    expect(truthyContext.p.id).toBe("x");
+    expect(truthyContext.p["id"]).toBe("x");
   });
 });
 
@@ -342,7 +342,7 @@ describe("meta field tracking", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    void context.p.meta;
+    void context.p["meta"];
 
     const fields = tracker.getAccessedFields();
     const metaFields = fields.filter((f) => f.field.startsWith("meta."));
@@ -357,7 +357,7 @@ describe("meta field tracking", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    const meta = context.p.meta;
+    const meta = context.p["meta"];
 
     expect(meta).toHaveProperty("version");
     expect(meta).toHaveProperty("createdAt");
@@ -378,8 +378,8 @@ describe("user field tracking", () => {
     const state = createTestState();
     const context = createTypedContext(state, tracker, createTestOptions());
 
-    void context.p.name;
-    void context.p.email;
+    void context.p["name"];
+    void context.p["email"];
 
     const fields = tracker.getAccessedFields();
     expect(fields).toContainEqual({
@@ -404,8 +404,8 @@ describe("user field tracking", () => {
     );
 
     // String field should return truthy string placeholder
-    expect(typeof context.p.name).toBe("string");
-    expect(context.p.name).toBeTruthy();
+    expect(typeof context.p["name"]).toBe("string");
+    expect(context.p["name"]).toBeTruthy();
   });
 });
 
@@ -420,9 +420,9 @@ describe("field access deduplication", () => {
     const context = createTypedContext(state, tracker, createTestOptions());
 
     // Access same field multiple times
-    void context.p.name;
-    void context.p.name;
-    void context.p.name;
+    void context.p["name"];
+    void context.p["name"];
+    void context.p["name"];
 
     const fields = tracker.getAccessedFields();
     const nameFields = fields.filter((f) => f.field === "name");

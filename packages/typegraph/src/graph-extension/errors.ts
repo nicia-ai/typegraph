@@ -142,7 +142,7 @@ export abstract class GraphExtensionError extends TypeGraphError {
  * highlight every offending field at once.
  */
 export class GraphExtensionValidationError extends GraphExtensionError {
-  readonly code = "GRAPH_EXTENSION_INVALID" as const;
+  override readonly code = "GRAPH_EXTENSION_INVALID" as const;
   readonly issues: readonly GraphExtensionIssue[];
   declare readonly details: Readonly<{
     issues: readonly GraphExtensionIssue[];
@@ -197,7 +197,7 @@ function summarizeIssues(issues: readonly GraphExtensionIssue[]): string {
  * additive: graph-extension-declared kinds cannot shadow compile-time kinds.
  */
 export class KindCollisionError extends GraphExtensionError {
-  readonly code = "KIND_COLLISION" as const;
+  override readonly code = "KIND_COLLISION" as const;
   readonly kindName: string;
   readonly entity: KindEntity;
 
@@ -259,7 +259,7 @@ export type IncompatibleChange = Readonly<{
  * one shot.
  */
 export class IncompatibleChangeError extends GraphExtensionError {
-  readonly code = "INCOMPATIBLE_CHANGE" as const;
+  override readonly code = "INCOMPATIBLE_CHANGE" as const;
   readonly changes: readonly IncompatibleChange[];
 
   constructor(changes: readonly IncompatibleChange[], graphId: string) {
@@ -298,7 +298,7 @@ function summarizeChanges(changes: readonly IncompatibleChange[]): string {
  * call-site typo.
  */
 export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
-  readonly code = "GRAPH_EXTENSION_UNRESOLVED_ENDPOINT" as const;
+  override readonly code = "GRAPH_EXTENSION_UNRESOLVED_ENDPOINT" as const;
   readonly edgeKind: string;
   readonly side: "from" | "to";
   readonly endpoint: string;
@@ -330,7 +330,7 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
  * next deploy.
  */
 export class RemoveCompileTimeKindError extends GraphExtensionError {
-  readonly code = "REMOVE_COMPILE_TIME_KIND" as const;
+  override readonly code = "REMOVE_COMPILE_TIME_KIND" as const;
   readonly kindName: string;
   readonly entity: KindEntity;
 
@@ -354,7 +354,7 @@ export class RemoveCompileTimeKindError extends GraphExtensionError {
  * deploy.
  */
 export class KindHasReferentsError extends GraphExtensionError {
-  readonly code = "KIND_HAS_REFERENTS" as const;
+  override readonly code = "KIND_HAS_REFERENTS" as const;
   readonly kindName: string;
   readonly referents: readonly KindReferent[];
 
@@ -391,7 +391,7 @@ export type KindReferent = Readonly<{
  * than risk silently misreading newer fields.
  */
 export class GraphExtensionVersionUnsupportedError extends GraphExtensionError {
-  readonly code = "GRAPH_EXTENSION_VERSION_UNSUPPORTED" as const;
+  override readonly code = "GRAPH_EXTENSION_VERSION_UNSUPPORTED" as const;
   readonly persistedVersion: number;
   readonly currentVersion: number;
 

@@ -13,7 +13,6 @@
  * Misses emit nothing; a base node matched by several staged nodes yields ONE
  * deduped base member. Runs on BOTH backends (new-vs-base semantics parity).
  */
-
 import type { GraphBackend, Node, NodeType } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -30,6 +29,7 @@ import type {
   SourceScope,
 } from "../../src/graph-merge/sources";
 import { baseUniqueSource } from "../../src/graph-merge/sources";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -147,7 +147,7 @@ describe.each(backendMatrix())("baseUnique source [$name]", (entry) => {
       produced.baseMembers.map((m) => [m.id as string, m]),
     );
     expect([...membersById.keys()].sort()).toEqual(["base-anna", "base-bob"]);
-    const anna = membersById.get("base-anna")!;
+    const anna = requireDefined(membersById.get("base-anna"));
     expect(anna.origin).toBe("base");
     expect(anna.kind).toBe("Patient");
     expect(Object.keys(anna.props).sort()).toEqual(["mrn", "name"]);

@@ -14,11 +14,11 @@
  * what queries observe). Embedding tables are strategy-owned per
  * `(kind, field)` and are not captured here — cover them with targeted tests.
  */
-import { sql } from "drizzle-orm";
-
 import { type GraphBackend, rowPropsToObject } from "../src/backend/types";
 import type { GraphDef } from "../src/core/define-graph";
+import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { storeBackend } from "../src/store/runtime-port";
 import type { Store } from "../src/store/store";
 import { compareStrings } from "../src/utils/compare";
 
@@ -100,7 +100,7 @@ function byFulltextIdentity(
 export async function dumpObservableState<G extends GraphDef>(
   store: Store<G>,
 ): Promise<ObservableState> {
-  const backend: GraphBackend = store.backend;
+  const backend: GraphBackend = storeBackend(store);
   const graphId = store.graphId;
 
   const nodes: SnapshotNode[] = [];

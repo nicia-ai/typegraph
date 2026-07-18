@@ -59,7 +59,7 @@ const STUB_SCHEMA_DOC: SerializedSchema = {
   defaults: { onNodeDelete: "restrict", temporalMode: "current" },
 };
 
-describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless (HTTP)", () => {
+describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
   it("auto-disables transactions when neon-http is detected", () => {
     // `neon()` doesn't validate the URL until the first request, so we
     // can construct it safely. We never run a query, so no HTTP traffic

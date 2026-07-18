@@ -28,6 +28,7 @@
  * run on local SQLite regardless).
  */
 import { drizzle } from "drizzle-orm/node-postgres";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -42,15 +43,16 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { buildFulltextSearch } from "../../../src/backend/drizzle/operations/fulltext";
 import { liveNodeIdsSubquery } from "../../../src/backend/drizzle/operations/shared";
-import { nowIso } from "../../../src/backend/drizzle/row-mappers";
 import { tables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { nowIso } from "../../../src/backend/row-mappers";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import { type GraphBackend } from "../../../src/backend/types";
 import { tsvectorStrategy } from "../../../src/query/dialect";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let pool: Pool | undefined;
@@ -65,7 +67,7 @@ function requirePostgres(ctx: { skip: () => void }): Pool {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -139,14 +141,12 @@ describe("fulltext GIN index usage (constant declared language)", () => {
       "postgres",
       liveNodeIdsSubquery(tables.nodes, "gin_plan", "GinArticle", nowIso()),
     );
-    const compiled = backend.compileSql!(query);
-    const explained = await activePool.query(
+    const compiled = new PgDialect().sqlToQuery(query);
+    const explained = await activePool.query<{ "QUERY PLAN": string }>(
       `EXPLAIN (COSTS OFF) ${compiled.sql}`,
-      compiled.params as unknown[],
+      compiled.params,
     );
-    const plan = explained.rows
-      .map((row) => String(row["QUERY PLAN"]))
-      .join("\n");
+    const plan = explained.rows.map((row) => row["QUERY PLAN"]).join("\n");
     // The enabling property: the tsquery folded to a plan-time CONSTANT
     // (websearch_to_tsquery over a constant regconfig), not the per-row
     // language form.
@@ -163,14 +163,14 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     try {
       await client.query("BEGIN");
       await client.query("SET LOCAL enable_seqscan = off");
-      const explainedIndexed = await client.query(
+      const explainedIndexed = await client.query<{ "QUERY PLAN": string }>(
         `EXPLAIN (COSTS OFF)
          SELECT node_id FROM typegraph_node_fulltext
          WHERE tsv @@ websearch_to_tsquery('english', $1)`,
         ["zyzzogeton"],
       );
       indexPlan = explainedIndexed.rows
-        .map((row) => String(row["QUERY PLAN"]))
+        .map((row) => row["QUERY PLAN"])
         .join("\n");
       await client.query("ROLLBACK");
     } finally {
@@ -191,18 +191,17 @@ describe("fulltext GIN index usage (constant declared language)", () => {
       "postgres",
       liveNodeIdsSubquery(tables.nodes, "gin_plan", "GinArticle", nowIso()),
     );
-    const compiledPerRow = backend.compileSql!(perRow);
+    const compiledPerRow = new PgDialect().sqlToQuery(perRow);
     const clientPerRow = await activePool.connect();
     let perRowPlan: string;
     try {
       await clientPerRow.query("BEGIN");
       await clientPerRow.query("SET LOCAL enable_seqscan = off");
-      const explainedPerRow = await clientPerRow.query(
-        `EXPLAIN (COSTS OFF) ${compiledPerRow.sql}`,
-        compiledPerRow.params as unknown[],
-      );
+      const explainedPerRow = await clientPerRow.query<{
+        "QUERY PLAN": string;
+      }>(`EXPLAIN (COSTS OFF) ${compiledPerRow.sql}`, compiledPerRow.params);
       perRowPlan = explainedPerRow.rows
-        .map((row) => String(row["QUERY PLAN"]))
+        .map((row) => row["QUERY PLAN"])
         .join("\n");
       await clientPerRow.query("ROLLBACK");
     } finally {
@@ -269,7 +268,7 @@ describe("facade forwards the declared language (any backend)", () => {
         query: "signal",
         limit: 5,
       });
-      expect(spy.mock.calls[0]![0].language).toBe("english");
+      expect(requireDefined(spy.mock.calls[0])[0].language).toBe("english");
     } finally {
       await backend.close();
     }
@@ -297,6 +296,6 @@ describe("facade forwards the declared language (any backend)", () => {
       limit: 5,
       language: "simple",
     });
-    expect(spy.mock.calls[0]![0].language).toBe("simple");
+    expect(requireDefined(spy.mock.calls[0])[0].language).toBe("simple");
   });
 });

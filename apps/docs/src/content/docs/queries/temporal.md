@@ -262,18 +262,29 @@ await store.transaction(async (tx) => {
 
 #### Raw SQL under history capture
 
-Raw `tx.sql` is disabled under `history: true` (raw SQL would bypass capture),
-and `store.withTransaction(externalTx)` is replaced by the callback form
+The portable `HistoryStore` exposes neither raw SQL nor caller-owned
+transaction adoption. If the store was deliberately created through
+`createAdapterStore(..., { history: true })`, raw `tx.sql` is still disabled
+(it would bypass capture), and `store.withTransaction(externalTx)` is replaced
+by the callback form
 `store.withRecordedTransaction(externalTx, async (tx) => { ... })`, which gives
 capture a flush point before your transaction commits. Out-of-band database
 writes and row-returning raw SQL paths are not audited by the built-in capture
 wrapper; use TypeGraph collection writes when the recorded relation is the
 source of truth.
 
+The adapter history store's `.backend` is a runtime and type-level
+`HistoryStoreBackend` projection. Capture-wrapped graph reads and writes remain
+available. `executeRaw`, `executeStatement`, `executeDdl`, `trustedImport`,
+`clearGraph`, and nested `transaction` are absent because each can mutate live
+rows without a corresponding capture flush. The full guarded backend remains
+internal to TypeGraph's query and transaction implementation.
+
 `store.withTransaction` on a history-enabled store is a **compile error** (the
 `externalTx` argument is rejected with a message naming
 `withRecordedTransaction`); the runtime guard still throws `ConfigurationError`
-if suppressed. Inside `store.transaction(...)`, `tx.sql` is present but throwing:
+if suppressed. Inside an `AdapterHistoryStore.transaction(...)`, `tx.sql` is
+present but throwing:
 its static type is `sql?: never`, and `tx.sqlAvailability` reports `"history"`
 (or `"revisionTracking"`) so portable code can branch without touching the
 throwing handle — see the `tx.sqlAvailability` guidance in

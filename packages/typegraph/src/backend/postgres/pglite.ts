@@ -18,7 +18,7 @@
  *
  * @example In-memory database (default, vector enabled)
  * ```typescript
- * import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+ * import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
  *
  * const { backend } = await createLocalPgliteBackend();
  * const store = createStore(graph, backend);
@@ -45,12 +45,18 @@ import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
 } from "../drizzle/ddl";
+import { type AnyPgTransaction } from "../drizzle/execution";
+export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
 import {
   createPostgresBackend,
   type PostgresTables,
   tables as defaultTables,
 } from "../drizzle/postgres";
-import { type GraphBackend, wrapWithManagedClose } from "../types";
+import {
+  type AdapterBackend,
+  closeAfterFailure,
+  wrapWithManagedClose,
+} from "../types";
 
 // ============================================================
 // Types
@@ -97,7 +103,7 @@ export type LocalPgliteBackendResult = Readonly<{
    * The GraphBackend instance for use with createStore. Its `close()`
    * disposes the underlying PGlite engine.
    */
-  backend: GraphBackend;
+  backend: AdapterBackend<AnyPgTransaction>;
 
   /**
    * The underlying Drizzle database instance. Useful for direct SQL access.
@@ -182,22 +188,26 @@ export async function createLocalPgliteBackend(
     : { extensions: { vector: vectorExtension } }),
   });
 
-  // `exec` runs a multi-statement batch (DDL + the pgvector `CREATE
-  // EXTENSION` when enabled) in one round trip.
-  const migrationSql =
-    vectorEnabled ?
-      generatePostgresMigrationSQL(tables)
-    : generatePostgresDDL(tables).join("\n\n");
-  await client.exec(migrationSql);
+  try {
+    // `exec` runs a multi-statement batch (DDL + the pgvector `CREATE
+    // EXTENSION` when enabled) in one round trip.
+    const migrationSql =
+      vectorEnabled ?
+        generatePostgresMigrationSQL(tables)
+      : generatePostgresDDL(tables).join("\n\n");
+    await client.exec(migrationSql);
 
-  const db = drizzle(client);
-  const backend = createPostgresBackend(db, {
-    tables,
-    ...(vectorEnabled ? {} : { vector: false }),
-  });
-  const managedBackend = wrapWithManagedClose(backend, async () => {
-    await client.close();
-  });
+    const db = drizzle(client);
+    const backend = createPostgresBackend(db, {
+      tables,
+      ...(vectorEnabled ? {} : { vector: false }),
+    });
+    const managedBackend = wrapWithManagedClose(backend, async () => {
+      await client.close();
+    });
 
-  return { backend: managedBackend, db, client };
+    return { backend: managedBackend, db, client };
+  } catch (error) {
+    return closeAfterFailure(client, error);
+  }
 }

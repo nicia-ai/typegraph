@@ -2,7 +2,7 @@
  * Transaction-surface honesty (#252, #253, #254, #258).
  *
  * Pins the fixes that make the store transaction surface tell the truth:
- * - #253 `withTransaction()` on a {@link HistoryStore} is a compile error.
+ * - #253 `withTransaction()` on a {@link AdapterHistoryStore} is a compile error.
  * - #254 `tx.sqlAvailability` is an honest four-state discriminant for `tx.sql`.
  * - #258 the recorded-capture guards carry stable, branchable `details.code`s
  *   reachable through {@link isRecordedCaptureGuardError}.
@@ -15,19 +15,32 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AdoptedTransaction,
+  type AdapterBackend,
+  type AdapterHistoryStore,
+  type AdapterStore,
+  type AdapterTransactionContext,
   ConfigurationError,
-  createStoreWithSchema,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
+  createStore,
   defineGraph,
   defineNode,
-  type HistoryStore,
+  type GraphBackend,
   isRecordedCaptureGuardError,
   RECORDED_CAPTURE_GUARD_CODES,
   type RecordedCaptureGuardCode,
   type SqlAvailability,
   type Store,
   type TransactionContext,
+  type TransactionReadBackend,
 } from "../src";
+import { createGraphBackendProjection } from "../src/backend/graph-backend-projection";
+import {
+  POSTGRES_CAPABILITIES,
+  SQLITE_CAPABILITIES,
+} from "../src/backend/types";
+import { STORE_RUNTIME } from "../src/store/runtime-port";
+import { TRANSACTION_RUNTIME } from "../src/store/types";
 import {
   createInitializedStore,
   createTestBackend,
@@ -44,8 +57,17 @@ const graph = defineGraph({
   edges: {},
 });
 
+describe("backend capability descriptors", () => {
+  it("freezes the shared dialect capability singletons", () => {
+    expect(Object.isFrozen(SQLITE_CAPABILITIES)).toBe(true);
+    expect(Object.isFrozen(POSTGRES_CAPABILITIES)).toBe(true);
+    expect(Object.isFrozen(SQLITE_CAPABILITIES.graphAnalytics)).toBe(true);
+    expect(Object.isFrozen(POSTGRES_CAPABILITIES.graphAnalytics)).toBe(true);
+  });
+});
+
 /** Reads `tx.sql.run` — the access the guard fail-louds on under capture. */
-function readSqlRunAccessor(tx: TransactionContext<typeof graph>): unknown {
+function readSqlRunAccessor(tx: Readonly<{ sql?: unknown }>): unknown {
   return (tx.sql as { run?: unknown }).run;
 }
 
@@ -82,28 +104,190 @@ describe("#254 tx.sqlAvailability discriminant", () => {
   });
 
   it("reports 'history' with a present-but-throwing tx.sql under history capture", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("history");
-      // Present-but-throwing: not undefined, and every access fails loud.
-      expect(tx.sql).toBeDefined();
+      // Present-but-throwing: the property exists, and every access fails loud.
+      expect("sql" in tx).toBe(true);
+      expect(Object.hasOwn(tx, "sql")).toBe(true);
       expect(() => readSqlRunAccessor(tx)).toThrow(ConfigurationError);
     });
   });
 
   it("reports 'revisionTracking' with a present-but-throwing tx.sql", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      revisionTracking: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { revisionTracking: true },
+    );
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       expect(tx.sqlAvailability).toBe("revisionTracking");
-      expect(tx.sql).toBeDefined();
+      expect("sql" in tx).toBe(true);
+      expect(Object.hasOwn(tx, "sql")).toBe(true);
       expect(() => readSqlRunAccessor(tx)).toThrow(ConfigurationError);
     });
+  });
+});
+
+describe("portable runtime capability boundaries", () => {
+  it("does not expose adapter capabilities through a portable Store", async () => {
+    const adapterBackend = createTestBackend();
+    const store = createStore(graph, adapterBackend);
+
+    expect("backend" in store).toBe(false);
+    expect(Object.hasOwn(store, "backend")).toBe(false);
+    expect(store.capabilities).toBe(adapterBackend.capabilities);
+    expect(
+      Object.prototype.propertyIsEnumerable.call(store, STORE_RUNTIME),
+    ).toBe(false);
+
+    await store.transaction((tx) => {
+      expect(
+        Object.prototype.propertyIsEnumerable.call(tx, TRANSACTION_RUNTIME),
+      ).toBe(false);
+      for (const capability of [
+        "insertNode",
+        "executeRaw",
+        "executeStatement",
+        "transactionWithNative",
+        "adoptTransaction",
+      ]) {
+        expect(capability in tx.backend).toBe(false);
+        expect(Object.hasOwn(tx.backend, capability)).toBe(false);
+      }
+      return Promise.resolve();
+    });
+  });
+
+  it("projects adapter-native methods out of the public AdapterStore backend", () => {
+    const adapterBackend = createTestBackend();
+    const store = createAdapterStore(graph, adapterBackend);
+
+    expect(store.capabilities).toBe(adapterBackend.capabilities);
+    expect(Object.isFrozen(store.backend)).toBe(true);
+    for (const capability of ["transactionWithNative", "adoptTransaction"]) {
+      expect(capability in store.backend).toBe(false);
+      expect(Object.hasOwn(store.backend, capability)).toBe(false);
+    }
+  });
+
+  it("preserves the absence of optional members in backend projections", () => {
+    const { executeRaw: omittedExecuteRaw, ...backendWithoutExecuteRaw } =
+      createTestBackend();
+    expect(omittedExecuteRaw).toBeDefined();
+
+    const projection = createGraphBackendProjection(backendWithoutExecuteRaw);
+
+    expect("executeRaw" in projection).toBe(false);
+    expect(Object.hasOwn(projection, "executeRaw")).toBe(false);
+  });
+
+  it("keeps TypeGraph backend writes off adapter transaction contexts", async () => {
+    const store = createAdapterStore(graph, createTestBackend());
+
+    await store.transaction((tx) => {
+      expect("insertNode" in tx.backend).toBe(false);
+      expect("executeRaw" in tx.backend).toBe(false);
+      expect(Object.hasOwn(tx.backend, "insertNode")).toBe(false);
+      expect(Object.hasOwn(tx.backend, "executeRaw")).toBe(false);
+      return Promise.resolve();
+    });
+  });
+
+  it("projects every capture bypass out of a history Store backend", async () => {
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    expect(store.capabilities).toBe(backend.capabilities);
+    expect(Object.isFrozen(store.backend)).toBe(true);
+
+    for (const capability of [
+      "clearGraph",
+      "executeDdl",
+      "executeRaw",
+      "executeStatement",
+      "transaction",
+      "trustedImport",
+    ]) {
+      expect(Reflect.get(store.backend, capability)).toBeUndefined();
+      expect(capability in store.backend).toBe(false);
+      expect(Object.hasOwn(store.backend, capability)).toBe(false);
+    }
+
+    const capturedId = "captured-backend-write";
+    await store.backend.insertNode({
+      graphId: graph.id,
+      kind: "Person",
+      id: capturedId,
+      props: { name: "captured" },
+    });
+    const recordedAt = await store.recordedNow();
+    expect(recordedAt).toBeDefined();
+    if (recordedAt === undefined) throw new Error("Expected recorded instant");
+    await expect(
+      store.asOfRecorded(recordedAt).nodes.Person.getById(capturedId as never),
+    ).resolves.toMatchObject({ name: "captured" });
+
+    const transactionBypassId = "transaction-native-bypass";
+    let transactionCallbackRan = false;
+    const leakedTransactionWithNative = Reflect.get(
+      store.backend,
+      "transactionWithNative",
+    ) as unknown;
+    if (typeof leakedTransactionWithNative === "function") {
+      const transactionWithNative =
+        leakedTransactionWithNative as AdapterBackend<unknown>["transactionWithNative"];
+      await transactionWithNative(async (target) => {
+        transactionCallbackRan = true;
+        await target.insertNode({
+          graphId: graph.id,
+          kind: "Person",
+          id: transactionBypassId,
+          props: { name: "escaped" },
+        });
+      });
+    }
+
+    expect(leakedTransactionWithNative).toBeUndefined();
+    expect(transactionCallbackRan).toBe(false);
+    expect("transactionWithNative" in store.backend).toBe(false);
+    expect(Object.hasOwn(store.backend, "transactionWithNative")).toBe(false);
+    await expect(
+      backend.getNode(graph.id, "Person", transactionBypassId),
+    ).resolves.toBeUndefined();
+
+    const adoptionBypassId = "adopted-native-bypass";
+    const leakedAdoptTransaction = Reflect.get(
+      store.backend,
+      "adoptTransaction",
+    ) as unknown;
+    await backend.transactionWithNative(async (_target, nativeTransaction) => {
+      if (typeof leakedAdoptTransaction === "function") {
+        const adoptTransaction =
+          leakedAdoptTransaction as AdapterBackend<unknown>["adoptTransaction"];
+        const adopted = adoptTransaction(nativeTransaction);
+        await adopted.insertNode({
+          graphId: graph.id,
+          kind: "Person",
+          id: adoptionBypassId,
+          props: { name: "escaped" },
+        });
+      }
+    });
+
+    expect(leakedAdoptTransaction).toBeUndefined();
+    expect("adoptTransaction" in store.backend).toBe(false);
+    expect(Object.hasOwn(store.backend, "adoptTransaction")).toBe(false);
+    await expect(
+      backend.getNode(graph.id, "Person", adoptionBypassId),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -117,13 +301,19 @@ describe("#258 recorded-capture guard error codes", () => {
   });
 
   it("tags the withTransaction guard with RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
     // `withTransaction` is a compile error on a history store (#253); casting to
     // the general Store surface exercises the runtime guard behind it.
     const call = (): unknown =>
-      (store as Store<typeof graph>).withTransaction({} as AdoptedTransaction);
+      (
+        store as unknown as Readonly<{
+          withTransaction: (externalTx: unknown) => unknown;
+        }>
+      ).withTransaction({});
     expect(call).toThrow(ConfigurationError);
 
     const caught = thrownBy(call);
@@ -140,9 +330,11 @@ describe("#258 recorded-capture guard error codes", () => {
   });
 
   it("tags the history tx.sql guard with RECORDED_CAPTURE_RAW_SQL_DISABLED", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      history: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       const caught = thrownBy(() => readSqlRunAccessor(tx));
@@ -156,9 +348,11 @@ describe("#258 recorded-capture guard error codes", () => {
   });
 
   it("tags the revision-tracking tx.sql guard with REVISION_TRACKING_RAW_SQL_DISABLED", async () => {
-    const [store] = await createStoreWithSchema(graph, createTestBackend(), {
-      revisionTracking: true,
-    });
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { revisionTracking: true },
+    );
     await store.transaction(async (tx) => {
       await tx.nodes.Person.create({ name: "probe" });
       const caught = thrownBy(() => readSqlRunAccessor(tx));
@@ -211,19 +405,71 @@ describe("#258 recorded-capture guard error codes", () => {
 // Never invoked: the assertions are checked by `tsc`, and the bodies must not
 // run (they reference `declare`d values that are erased at runtime).
 function withTransactionTypeAssertions(
-  externalTx: AdoptedTransaction,
-  plain: Store<typeof graph>,
-  history: HistoryStore<typeof graph>,
+  externalTx: unknown,
+  portable: Store<typeof graph>,
+  plain: AdapterStore<typeof graph, unknown>,
+  history: AdapterHistoryStore<typeof graph, unknown>,
 ): void {
-  // A plain / generic Store<G> still adopts an external transaction.
+  expectTypeOf<Store<typeof graph>>().not.toHaveProperty("withTransaction");
+  expectTypeOf<TransactionContext<typeof graph>>().not.toHaveProperty(
+    "sqlAvailability",
+  );
+
+  // The default Store keeps graph-owned transactions but does not expose
+  // adapter-native handles or caller-owned transaction adoption.
+  void portable.transaction((tx) => {
+    expectTypeOf(tx).toEqualTypeOf<TransactionContext<typeof graph>>();
+    return Promise.resolve();
+  });
+
+  // AdapterStore is the explicit native-interoperability surface.
   expectTypeOf(plain.withTransaction(externalTx)).toEqualTypeOf<
-    TransactionContext<typeof graph>
+    AdapterTransactionContext<typeof graph, unknown>
   >();
 
-  // @ts-expect-error withTransaction is a compile error on a HistoryStore<G>.
-  history.withTransaction(externalTx);
+  expectTypeOf(history).not.toHaveProperty("withTransaction");
 }
 void withTransactionTypeAssertions;
+
+function portableFactoryTypeAssertions(backend: GraphBackend): void {
+  const store = createStore(graph, backend);
+  expectTypeOf(store).toEqualTypeOf<Store<typeof graph>>();
+  void store.transaction((tx) => {
+    expectTypeOf(tx.backend).toEqualTypeOf<TransactionReadBackend>();
+    expectTypeOf(tx.backend).not.toHaveProperty("insertNode");
+    expectTypeOf(tx.backend).not.toHaveProperty("executeRaw");
+    return Promise.resolve();
+  });
+}
+void portableFactoryTypeAssertions;
+
+type NativeTransactionProbe = Readonly<{
+  executeNative: (statement: string) => void;
+}>;
+
+function nativeTransactionTypeAssertions(
+  backend: AdapterBackend<NativeTransactionProbe>,
+  externalTx: NativeTransactionProbe,
+): void {
+  const store = createAdapterStore(graph, backend);
+
+  void store.transaction((tx) => {
+    expectTypeOf(tx.sql).toEqualTypeOf<NativeTransactionProbe | undefined>();
+    if (tx.sqlAvailability === "available") {
+      expectTypeOf(tx.sql).toEqualTypeOf<NativeTransactionProbe>();
+    } else {
+      expectTypeOf(tx.sql).toEqualTypeOf<undefined>();
+    }
+    return Promise.resolve();
+  });
+  expectTypeOf(store.withTransaction(externalTx)).toEqualTypeOf<
+    AdapterTransactionContext<typeof graph, NativeTransactionProbe>
+  >();
+
+  // @ts-expect-error the store accepts only its adapter's native handle.
+  store.withTransaction({ executeOther: String });
+}
+void nativeTransactionTypeAssertions;
 
 // Compile-time exhaustiveness pin: `satisfies Record<SqlAvailability, true>`
 // fails `pnpm typecheck` if the discriminant ever gains or loses a state (a

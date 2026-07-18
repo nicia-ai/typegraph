@@ -35,7 +35,7 @@ import {
 } from "../../src/graph-merge/state-diff";
 import type { BranchId, GraphBranch } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix } from "./test-utils";
+import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
   schema: z.object({ name: z.string() }),
@@ -77,7 +77,11 @@ async function liveNodeIds(
   store: Store<RollbackGraph>,
   kind: string,
 ): Promise<readonly string[]> {
-  const rows = await enumerateAllNodes(store.backend, store.graphId, kind);
+  const rows = await enumerateAllNodes(
+    getStoreBackend(store),
+    store.graphId,
+    kind,
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => row.id)
@@ -88,7 +92,11 @@ async function liveEdgeIds(
   store: Store<RollbackGraph>,
   kind: string,
 ): Promise<readonly string[]> {
-  const rows = await enumerateAllEdges(store.backend, store.graphId, kind);
+  const rows = await enumerateAllEdges(
+    getStoreBackend(store),
+    store.graphId,
+    kind,
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => row.id)

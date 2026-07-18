@@ -4,8 +4,6 @@
  * Compiles variable-length path traversals using WITH RECURSIVE.
  * Handles cycle detection and depth limiting using dialect-specific operations.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   CompilerInvariantError,
   UnsupportedPredicateError,
@@ -15,6 +13,7 @@ import {
   type DialectAdapter,
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
   createTemporalFilterPass,
@@ -182,13 +181,13 @@ function runRecursiveQueryPassPipeline(
  * @param ast - The query AST
  * @param graphId - The graph ID
  * @param ctx - Predicate compiler context
- * @returns SQL for the recursive query
+ * @returns `SqlFragment` for the recursive query
  */
 export function compileVariableLengthQuery(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const strategy = ctx.dialect.capabilities.recursiveQueryStrategy;
   const handler = RECURSIVE_QUERY_STRATEGY_HANDLERS[strategy];
   return handler(ast, graphId, ctx);
@@ -198,7 +197,7 @@ type RecursiveQueryStrategyHandler = (
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-) => SQL;
+) => SqlFragment;
 
 const RECURSIVE_QUERY_STRATEGY_HANDLERS: Record<
   DialectRecursiveQueryStrategy,
@@ -211,7 +210,7 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const passState = runRecursiveQueryPassPipeline(ast, graphId, ctx);
 
   const { dialect } = ctx;
@@ -291,7 +290,7 @@ function compileRecursiveCte(
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   temporalFilterPass: TemporalFilterPass,
-): SQL {
+): SqlFragment {
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
   const startKinds = ast.start.kinds;
@@ -402,7 +401,7 @@ function compileRecursiveCte(
     ...startPredicates,
   ];
 
-  const recursiveBaseWhereClauses: SQL[] = [
+  const recursiveBaseWhereClauses: SqlFragment[] = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
     edgeTemporalFilter,
@@ -421,9 +420,9 @@ function compileRecursiveCte(
       joinKindField: "from_kind" | "to_kind";
       targetKindField: "from_kind" | "to_kind";
       edgeKinds: readonly string[];
-      duplicateGuard?: SQL | undefined;
+      duplicateGuard?: SqlFragment | undefined;
     }>,
-  ): SQL {
+  ): SqlFragment {
     const recursiveFilterClauses = [
       ...recursiveBaseWhereClauses,
       compileKindFilter(branch.edgeKinds, "e.kind"),
@@ -443,7 +442,7 @@ function compileRecursiveCte(
     if (pathExtension !== undefined) {
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
-    const recursiveJoinClauses: SQL[] = [
+    const recursiveJoinClauses: SqlFragment[] = [
       sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`,
     ];
     if (previousNodeKinds.length > 1) {
@@ -493,7 +492,7 @@ function compileRecursiveCte(
     edgeKinds: directEdgeKinds,
   });
 
-  function compileInverseRecursiveBranch(): SQL {
+  function compileInverseRecursiveBranch(): SqlFragment {
     const inverseJoinField = direction === "out" ? "to_id" : "from_id";
     const inverseTargetField = direction === "out" ? "from_id" : "to_id";
     const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
@@ -561,7 +560,10 @@ function compileRecursiveCte(
  * Delegates to the shared compileKindFilter from predicate-utils
  * with a raw SQL column expression.
  */
-function compileKindFilter(kinds: readonly string[], columnExpr: string): SQL {
+function compileKindFilter(
+  kinds: readonly string[],
+  columnExpr: string,
+): SqlFragment {
   return sharedCompileKindFilter(sql.raw(columnExpr), kinds);
 }
 
@@ -573,7 +575,7 @@ function compileNodePredicates(
   ast: QueryAst,
   alias: string,
   ctx: PredicateCompilerContext,
-): SQL[] {
+): SqlFragment[] {
   return ast.predicates
     .filter((p) => p.targetAlias === alias && p.targetType !== "edge")
     .map((p) => compilePredicateExpression(p.expression, ctx));
@@ -587,7 +589,7 @@ function compileEdgePredicates(
   ast: QueryAst,
   edgeAlias: string,
   ctx: PredicateCompilerContext,
-): SQL[] {
+): SqlFragment[] {
   return ast.predicates
     .filter((p) => p.targetAlias === edgeAlias && p.targetType === "edge")
     .map((p) => compilePredicateExpression(p.expression, ctx));
@@ -631,7 +633,7 @@ function compileNodeSelectColumnsFromTable(
   alias: string,
   requiredColumns: ReadonlySet<string> | undefined,
   alwaysRequiredColumns: ReadonlySet<string>,
-): SQL[] {
+): SqlFragment[] {
   return NODE_COLUMNS.filter((column) =>
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map(
@@ -644,7 +646,7 @@ function compileNodeSelectColumnsFromRecursiveRow(
   alias: string,
   requiredColumns: ReadonlySet<string> | undefined,
   alwaysRequiredColumns: ReadonlySet<string>,
-): SQL[] {
+): SqlFragment[] {
   return NODE_COLUMNS.filter((column) =>
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map((column) => {
@@ -660,7 +662,7 @@ function compileRecursiveProjection(
   ast: QueryAst,
   traversal: VariableLengthTraversal,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileRecursiveSelectiveProjection(
       ast.selectiveFields,
@@ -674,7 +676,7 @@ function compileRecursiveProjection(
   const nodeAlias = traversal.nodeAlias;
   const vl = traversal.variableLength;
 
-  const fields: SQL[] = [
+  const fields: SqlFragment[] = [
     // Start alias fields with metadata
     sql`${sql.raw(startAlias)}_id`,
     sql`${sql.raw(startAlias)}_kind`,
@@ -713,10 +715,10 @@ function compileRecursiveSelectiveProjection(
   ast: QueryAst,
   traversal: VariableLengthTraversal,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const allowedAliases = new Set([ast.start.alias, traversal.nodeAlias]);
 
-  const columns: SQL[] = fields.map((field) => {
+  const columns: SqlFragment[] = fields.map((field) => {
     if (!allowedAliases.has(field.alias)) {
       throw new UnsupportedPredicateError(
         `Selective projection for recursive traversals does not support alias "${field.alias}"`,
@@ -751,12 +753,12 @@ function compileRecursiveSelectiveProjection(
 function compileRecursiveOrderBy(
   ast: QueryAst,
   dialect: DialectAdapter,
-): SQL | undefined {
+): SqlFragment | undefined {
   if (!ast.orderBy || ast.orderBy.length === 0) {
     return undefined;
   }
 
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
 
   for (const orderSpec of ast.orderBy) {
     const valueType = orderSpec.field.valueType;
@@ -783,8 +785,8 @@ function compileRecursiveOrderBy(
 /**
  * Compiles LIMIT and OFFSET clauses.
  */
-function compileLimitOffset(ast: QueryAst): SQL | undefined {
-  const parts: SQL[] = [];
+function compileLimitOffset(ast: QueryAst): SqlFragment | undefined {
+  const parts: SqlFragment[] = [];
 
   if (ast.limit !== undefined) {
     parts.push(sql`LIMIT ${ast.limit}`);

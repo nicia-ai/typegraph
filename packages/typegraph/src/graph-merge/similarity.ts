@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Pluggable, symmetric candidate-pair similarity scoring (design §8, T6).
  *
@@ -32,7 +33,6 @@
  * coefficient is symmetric by construction; the `custom` branch documents the
  * requirement and the caller is responsible for honoring it.
  */
-
 import { canonicalValueKey } from "./canonical-props";
 import { SimilarityUnavailableError } from "./errors";
 import type { MergeKey } from "./node-key";
@@ -290,8 +290,8 @@ function cosineSimilarity(left: Float32Array, right: Float32Array): number {
   let leftMagnitude = 0;
   let rightMagnitude = 0;
   for (let index = 0; index < left.length; index += 1) {
-    const leftComponent = left[index]!;
-    const rightComponent = right[index]!;
+    const leftComponent = requireDefined(left[index]);
+    const rightComponent = requireDefined(right[index]);
     dot += leftComponent * rightComponent;
     leftMagnitude += leftComponent * leftComponent;
     rightMagnitude += rightComponent * rightComponent;

@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { count, field, havingGt } from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
 /**
@@ -46,7 +47,7 @@ export function registerCrossBackendConsistencyTests(
 
         // Should only match "Apple Pie" - not "Pineapple" which contains Apple
         expect(results).toHaveLength(1);
-        expect(results[0]!.name).toBe("Apple Pie");
+        expect(requireDefined(results[0]).name).toBe("Apple Pie");
       });
 
       it("contains works consistently", async () => {
@@ -71,7 +72,7 @@ export function registerCrossBackendConsistencyTests(
           .execute();
 
         expect(results).toHaveLength(1);
-        expect(results[0]!.name).toBe("Red Apple");
+        expect(requireDefined(results[0]).name).toBe("Red Apple");
       });
 
       it("endsWith works consistently", async () => {
@@ -96,7 +97,7 @@ export function registerCrossBackendConsistencyTests(
           .execute();
 
         expect(results).toHaveLength(1);
-        expect(results[0]!.name).toBe("Fresh Apple");
+        expect(requireDefined(results[0]).name).toBe("Fresh Apple");
       });
     });
 
@@ -135,8 +136,8 @@ export function registerCrossBackendConsistencyTests(
 
         // Should include both 100 and 150
         expect(results).toHaveLength(2);
-        expect(results[0]!.price).toBe(100);
-        expect(results[1]!.price).toBe(150);
+        expect(requireDefined(results[0]).price).toBe(100);
+        expect(requireDefined(results[1]).price).toBe(150);
       });
 
       it("floating point comparisons work consistently", async () => {
@@ -163,7 +164,7 @@ export function registerCrossBackendConsistencyTests(
           .execute();
 
         expect(results).toHaveLength(1);
-        expect(results[0]!.name).toBe("P2");
+        expect(requireDefined(results[0]).name).toBe("P2");
       });
     });
 
@@ -188,7 +189,7 @@ export function registerCrossBackendConsistencyTests(
           .execute();
 
         expect(results).toHaveLength(1);
-        expect(results[0]!.title).toBe("Doc1");
+        expect(requireDefined(results[0]).title).toBe("Doc1");
       });
     });
 
@@ -280,7 +281,7 @@ export function registerCrossBackendConsistencyTests(
           })
           .execute();
 
-        expect(results[0]!.totalProducts).toBe(3);
+        expect(requireDefined(results[0]).totalProducts).toBe(3);
       });
 
       it("group by with having works consistently", async () => {
@@ -316,8 +317,8 @@ export function registerCrossBackendConsistencyTests(
 
         // Only category A has more than 1 product
         expect(results).toHaveLength(1);
-        expect(results[0]!.category).toBe("A");
-        expect(results[0]!.productCount).toBe(2);
+        expect(requireDefined(results[0]).category).toBe("A");
+        expect(requireDefined(results[0]).productCount).toBe(2);
       });
     });
   });

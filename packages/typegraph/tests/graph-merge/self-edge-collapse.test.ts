@@ -11,7 +11,6 @@
  * `edge-repoint.test.ts`; this suite proves the same contract through
  * `merge()` and the committed store on both backends.
  */
-
 import type { GraphBackend, Node, Store } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -37,7 +36,8 @@ import type {
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix } from "./test-utils";
+import { requireDefined } from "../../src/utils/presence";
+import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -94,12 +94,16 @@ function selfEdgeMergeOptions(): MergeOptions<SocialGraph> {
 async function livePersons(
   store: Store<SocialGraph>,
 ): Promise<readonly Readonly<{ id: string; name: unknown }>[]> {
-  const rows = await enumerateAllNodes(store.backend, store.graphId, "Person");
+  const rows = await enumerateAllNodes(
+    getStoreBackend(store),
+    store.graphId,
+    "Person",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => {
       const props = rowPropsToObject(row.props);
-      return { id: row.id, name: props.name };
+      return { id: row.id, name: props["name"] };
     })
     .sort((left, right) =>
       left.id < right.id ? -1
@@ -112,7 +116,11 @@ async function livePersons(
 async function liveKnows(
   store: Store<SocialGraph>,
 ): Promise<readonly Readonly<{ id: string; from: string; to: string }>[]> {
-  const rows = await enumerateAllEdges(store.backend, store.graphId, "knows");
+  const rows = await enumerateAllEdges(
+    getStoreBackend(store),
+    store.graphId,
+    "knows",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => ({ id: row.id, from: row.from_id, to: row.to_id }))
@@ -216,7 +224,7 @@ describe.each(backendMatrix())(
 
       // The duplicates collapsed into the min-id canonical...
       expect(result.data.resolutions).toHaveLength(1);
-      const resolution = result.data.resolutions[0]!;
+      const resolution = requireDefined(result.data.resolutions[0]);
       expect(resolution.canonicalId).toBe("p-ana");
       expect([...resolution.memberIds].sort()).toEqual(["p-ana", "p-anna"]);
       expect(await livePersons(baseStore)).toEqual([

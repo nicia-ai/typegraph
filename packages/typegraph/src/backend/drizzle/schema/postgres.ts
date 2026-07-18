@@ -14,10 +14,10 @@
  * @example
  * ```typescript
  * // Default table names
- * import { tables } from "@nicia-ai/typegraph/postgres";
+ * import { tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  *
  * // Custom table names
- * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  * const tables = createPostgresTables({
  *   nodes: "myapp_nodes",
  *   edges: "myapp_edges",
@@ -164,7 +164,9 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedFrom: timestamp("recorded_from", {
+        withTimezone: true,
+      }).notNull(),
       recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
@@ -194,7 +196,9 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", { withTimezone: true }).notNull(),
+      recordedFrom: timestamp("recorded_from", {
+        withTimezone: true,
+      }).notNull(),
       recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),

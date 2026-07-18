@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Edge repoint to canonical + set-dedupe cascade (design §6.3 / §6.4 rule 5, T9).
  *
@@ -28,7 +29,6 @@
  * identical result. Clusters are computed once upstream (T8) and passed in as
  * {@link canonicalOf}; this module never re-clusters.
  */
-
 import { canonicalizeProps } from "./canonical-props";
 import type { ClusterResult } from "./clustering";
 import type { ProvenanceWeights, ResolutionContext } from "./conflict-policy";
@@ -217,7 +217,7 @@ function pickSurvivor(
       []
     : edges.filter((edge) => edge.staged.branchId === preferredBranchId);
   const candidates = preferred.length > 0 ? preferred : edges;
-  let survivor = candidates[0]!;
+  let survivor = requireDefined(candidates[0]);
   for (const candidate of candidates.slice(1)) {
     if (candidate.staged.id < survivor.staged.id) {
       survivor = candidate;
@@ -268,7 +268,7 @@ function unionEdgeProps(
     const survivorValue =
       property in survivor.staged.props ?
         (survivor.staged.props[property] as JsonValue)
-      : values[0]!.value;
+      : requireDefined(values[0]).value;
     const canonicalValue: JsonValue =
       values.find((value) => value.branchId === preferredBranchId)?.value ??
       survivorValue;
@@ -394,10 +394,10 @@ export function repointEdges<G extends GraphDef = GraphDef>(
   );
 
   for (const group of sortedGroups) {
-    const dedupeKeys = [...dedupeKeyByGroup.get(group)!];
+    const dedupeKeys = [...requireDefined(dedupeKeyByGroup.get(group))];
     const groupEdges: RepointedEdge[] = [];
     for (const key of dedupeKeys) {
-      for (const edge of liveByDedupeKey.get(key)!) {
+      for (const edge of requireDefined(liveByDedupeKey.get(key))) {
         groupEdges.push(edge);
       }
     }

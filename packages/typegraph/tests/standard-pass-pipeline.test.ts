@@ -4,7 +4,6 @@
  * Tests the multi-pass optimization pipeline including column pruning,
  * limit pushdown, traversal collapsing, and vector/temporal passes.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -23,6 +22,7 @@ import {
 } from "../src/query/compiler/standard-pass-pipeline";
 import { getDialect } from "../src/query/dialect";
 import type { DialectAdapter } from "../src/query/dialect/types";
+import { sql } from "../src/query/sql-fragment";
 
 // ============================================================
 // Helpers

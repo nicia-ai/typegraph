@@ -3,7 +3,6 @@
  *
  * Tests the full query pipeline: builder → AST → SQL → execution → results.
  */
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -25,6 +24,7 @@ import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import { createQueryBuilder } from "../src/query/builder";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestDatabase } from "./test-utils";
 
 // ============================================================
@@ -212,7 +212,7 @@ async function seedTestData(backend: GraphBackend): Promise<{
 // ============================================================
 
 describe("Query Execution (SQLite)", () => {
-  let db: BetterSQLite3Database;
+  let db: ReturnType<typeof createTestDatabase>;
   let backend: GraphBackend;
   let store: ReturnType<typeof createStore<typeof testGraph>>;
 
@@ -248,8 +248,8 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Alice");
-      expect(results[0]!.email).toBe("alice@example.com");
+      expect(requireDefined(results[0]).name).toBe("Alice");
+      expect(requireDefined(results[0]).email).toBe("alice@example.com");
     });
 
     it("queries with contains filter", async () => {
@@ -276,7 +276,7 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.name).toBe("Alice");
+      expect(requireDefined(results[0]).name).toBe("Alice");
     });
 
     it("queries with limit and offset", async () => {
@@ -289,8 +289,8 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(results).toHaveLength(2);
-      expect(results[0]!.name).toBe("Alice");
-      expect(results[1]!.name).toBe("Bob");
+      expect(requireDefined(results[0]).name).toBe("Alice");
+      expect(requireDefined(results[1]).name).toBe("Bob");
 
       const offsetResults = await store
         .query()
@@ -302,8 +302,8 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(offsetResults).toHaveLength(2);
-      expect(offsetResults[0]!.name).toBe("Bob");
-      expect(offsetResults[1]!.name).toBe("Charlie");
+      expect(requireDefined(offsetResults[0]).name).toBe("Bob");
+      expect(requireDefined(offsetResults[1]).name).toBe("Charlie");
     });
   });
 
@@ -319,8 +319,8 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.person.name).toBe("Alice");
-      expect(results[0]!.company.name).toBe("Acme Inc");
+      expect(requireDefined(results[0]).person.name).toBe("Alice");
+      expect(requireDefined(results[0]).company.name).toBe("Acme Inc");
     });
 
     it("traverses multiple hops", async () => {
@@ -340,9 +340,9 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.person.name).toBe("Alice");
-      expect(results[0]!.friend.name).toBe("Bob");
-      expect(results[0]!.company.name).toBe("Acme Inc");
+      expect(requireDefined(results[0]).person.name).toBe("Alice");
+      expect(requireDefined(results[0]).friend.name).toBe("Bob");
+      expect(requireDefined(results[0]).company.name).toBe("Acme Inc");
     });
 
     it("returns multiple results for one-to-many traversals", async () => {
@@ -371,7 +371,9 @@ describe("Query Execution (SQLite)", () => {
         .execute();
 
       expect(withoutInverseExpansion).toHaveLength(1);
-      expect(withoutInverseExpansion[0]!.peerName).toBe("Charlie");
+      expect(requireDefined(withoutInverseExpansion[0]).peerName).toBe(
+        "Charlie",
+      );
 
       const withInverseExpansion = await store
         .query()
@@ -461,7 +463,7 @@ describe("Query Execution (SQLite)", () => {
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
-          name: context.o.name,
+          name: context.o["name"],
         }))
         .execute();
 
@@ -628,8 +630,8 @@ describe("Query Execution (SQLite)", () => {
       // No cast: SelectableNode.id is branded NodeId<Person>, matching what
       // getById/getByIds require.
       const [alice, [aliceAgain]] = await Promise.all([
-        store.nodes.Person.getById(aliceId!),
-        store.nodes.Person.getByIds([aliceId!]),
+        store.nodes.Person.getById(requireDefined(aliceId)),
+        store.nodes.Person.getByIds([requireDefined(aliceId)]),
       ]);
       expect(alice?.name).toBe("Alice");
       expect(aliceAgain?.name).toBe("Alice");
@@ -652,7 +654,9 @@ describe("Query Execution (SQLite)", () => {
 
       const [worksAtId] = edgeIds;
       expect(worksAtId).toBeDefined();
-      const brandedWorksAtId = asEdgeId<typeof worksAt>(worksAtId!);
+      const brandedWorksAtId = asEdgeId<typeof worksAt>(
+        requireDefined(worksAtId),
+      );
 
       const edge = await store.edges.worksAt.getById(brandedWorksAtId);
       expect(edge?.role).toBe("Engineer");
@@ -680,8 +684,12 @@ describe("Query Execution (SQLite)", () => {
       expect(row).toBeDefined();
 
       const [person, company] = await Promise.all([
-        store.nodes.Person.getById(asNodeId<typeof Person>(row!.fromId)),
-        store.nodes.Company.getById(asNodeId<typeof Company>(row!.toId)),
+        store.nodes.Person.getById(
+          asNodeId<typeof Person>(requireDefined(row).fromId),
+        ),
+        store.nodes.Company.getById(
+          asNodeId<typeof Company>(requireDefined(row).toId),
+        ),
       ]);
       expect(person?.name).toBe("Alice");
       expect(company?.name).toBe("Acme Inc");
@@ -737,22 +745,22 @@ describe("Query Execution (SQLite)", () => {
       expect(rows).toHaveLength(1);
       // Statically typed E["kind"] says "manages"; the actual row is the
       // managedBy edge matched via inverse expansion.
-      expect(rows[0]!.kind).toBe("managedBy");
-      expect(rows[0]!.id).toBe(managedByEdge.id);
+      expect(requireDefined(rows[0]).kind).toBe("managedBy");
+      expect(requireDefined(rows[0]).id).toBe(managedByEdge.id);
       // `note` is typed string | undefined per manages's schema, but the
       // real row is managedBy's { department } - there's no `note` key at
       // all, so this silently reads as undefined rather than erroring.
-      expect(rows[0]!.note).toBeUndefined();
+      expect(requireDefined(rows[0]).note).toBeUndefined();
 
       // Blindly trusting the requested alias's kind silently loses data...
       const wrongKindLookup = await orgStore.edges.manages.getById(
-        asEdgeId<typeof manages>(rows[0]!.id),
+        asEdgeId<typeof manages>(requireDefined(rows[0]).id),
       );
       expect(wrongKindLookup).toBeUndefined();
 
       // ...the row only resolves under its real kind, with its real schema.
       const rightKindLookup = await orgStore.edges.managedBy.getById(
-        asEdgeId<typeof managedBy>(rows[0]!.id),
+        asEdgeId<typeof managedBy>(requireDefined(rows[0]).id),
       );
       expect(rightKindLookup?.id).toBe(managedByEdge.id);
       expect(rightKindLookup?.department).toBe("Engineering");
@@ -760,7 +768,7 @@ describe("Query Execution (SQLite)", () => {
   });
 
   describe("Query Compilation", () => {
-    it("compiles to Drizzle SQL object", () => {
+    it("compiles to a TypeGraph SQL fragment", () => {
       const query = store
         .query()
         .from("Person", "p")
@@ -769,9 +777,8 @@ describe("Query Execution (SQLite)", () => {
 
       const compiled = query.compile();
 
-      // compile() returns a Drizzle SQL object
       expect(compiled).toBeDefined();
-      expect(compiled.queryChunks).toBeDefined();
+      expect(compiled.chunks).toBeDefined();
     });
 
     it("generates AST for inspection", () => {
@@ -788,8 +795,8 @@ describe("Query Execution (SQLite)", () => {
       expect(ast.start.alias).toBe("p");
       expect(ast.start.kinds).toContain("Person");
       expect(ast.traversals).toHaveLength(1);
-      expect(ast.traversals[0]!.edgeKinds).toEqual(["worksAt"]);
-      expect(ast.traversals[0]!.nodeAlias).toBe("c");
+      expect(requireDefined(ast.traversals[0]).edgeKinds).toEqual(["worksAt"]);
+      expect(requireDefined(ast.traversals[0]).nodeAlias).toBe("c");
       expect(ast.predicates).toHaveLength(1);
     });
   });
@@ -971,7 +978,7 @@ describe("Query Execution (SQLite)", () => {
         .select((context) => ({
           id: context.o.id,
           kind: context.o.kind,
-          name: context.o.name,
+          name: context.o["name"],
         }))
         .execute();
 
@@ -1041,7 +1048,7 @@ describe("Query Execution (SQLite)", () => {
 
       // With minHops(0), should include Charlie himself at depth 0
       expect(results).toHaveLength(1);
-      expect(results[0]!.friend).toBe("Charlie");
+      expect(requireDefined(results[0]).friend).toBe("Charlie");
     });
 
     it("returns results with depth information", async () => {
@@ -1241,8 +1248,8 @@ describe("Query Execution (SQLite)", () => {
       const results = await prepared.execute({ id: "alice" });
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.id).toBe("alice");
-      expect(results[0]!.whole.name).toBe("Alice");
+      expect(requireDefined(results[0]).id).toBe("alice");
+      expect(requireDefined(results[0]).whole.name).toBe("Alice");
     });
 
     it("supports prepared fallback when executeRaw is unavailable", async () => {

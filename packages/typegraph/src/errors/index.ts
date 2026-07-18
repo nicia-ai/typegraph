@@ -1164,7 +1164,7 @@ export function isRecordedCaptureGuardError(
   code?: RecordedCaptureGuardCode,
 ): error is RecordedCaptureGuardError {
   if (!(error instanceof ConfigurationError)) return false;
-  const actual = error.details.code;
+  const actual = error.details["code"];
   if (!isRecordedCaptureGuardCode(actual)) return false;
   return code === undefined || actual === code;
 }
@@ -1232,15 +1232,15 @@ export class StoreNotInitializedError extends TypeGraphError {
     },
   ) {
     super(
-      `${storageLabelFromLogicalName(options?.details?.logicalName)} for ` +
+      `${storageLabelFromLogicalName(options?.details?.["logicalName"])} for ` +
         `graph "${graphId}" ${STORE_NOT_INITIALIZED_REASON_PHRASE[reason]}. ` +
-        storeNotInitializedAction(reason, options?.details?.logicalName),
+        storeNotInitializedAction(reason, options?.details?.["logicalName"]),
       "STORE_NOT_INITIALIZED",
       {
         details: { ...options?.details, graphId, reason },
         category: "user",
         suggestion:
-          isStaleVectorSlot(reason, options?.details?.logicalName) ?
+          isStaleVectorSlot(reason, options?.details?.["logicalName"]) ?
             "The field's declared shape (e.g. its dimension) changed after " +
             "its storage was provisioned. Run store.reembedVectorField(" +
             "kind, fieldPath) to recreate the storage at the new shape and " +

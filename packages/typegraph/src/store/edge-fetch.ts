@@ -13,6 +13,7 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../backend/types";
+import { requireDefined } from "../utils/presence";
 import { getRowsByIds } from "./row-fetch";
 
 /**
@@ -29,7 +30,7 @@ export async function getEdgeRowsByIds(
     batch:
       backend.getEdges === undefined ?
         undefined
-      : (batchIds) => backend.getEdges!(graphId, batchIds),
+      : (batchIds) => requireDefined(backend.getEdges)(graphId, batchIds),
     one: (id) => backend.getEdge(graphId, id),
   });
 }

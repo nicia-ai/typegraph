@@ -1,8 +1,9 @@
 /**
  * Index Utilities
  *
- * Type-safe index definitions + helpers for generating DDL and integrating
- * with Drizzle schema definitions.
+ * Type-safe index definitions + helpers for generating portable DDL. Drizzle
+ * schema-builder helpers live in the explicit `adapters/drizzle/indexes`
+ * entrypoint so this module remains safe for strict non-Drizzle consumers.
  *
  * The recommended way to attach indexes to a graph is to pass them through
  * `defineGraph({ ..., indexes: [...] })`. They flow into
@@ -30,7 +31,7 @@
  *
  * @example Direct Drizzle schema integration (lower-level)
  * ```ts
- * import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+ * import { createPostgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
  * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
  *
  * const personEmail = defineNodeIndex(Person, { fields: ["email"] });
@@ -47,12 +48,6 @@ export {
   generateNodeIndexDDL,
 } from "./ddl";
 export { defineEdgeIndex, defineNodeIndex } from "./define-index";
-export {
-  buildPostgresEdgeIndexBuilders,
-  buildPostgresNodeIndexBuilders,
-  buildSqliteEdgeIndexBuilders,
-  buildSqliteNodeIndexBuilders,
-} from "./drizzle";
 export { toDeclaredIndex, toDeclaredIndexes } from "./profiler";
 export {
   generateSystemIndexDDL,

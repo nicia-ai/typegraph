@@ -33,6 +33,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { validateOptionalCanonicalIsoDate } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { requireDefined } from "../../utils/presence";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
   checkCardinalityConstraint,
@@ -1048,7 +1049,7 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
 
   if (candidateRows.length === 0) return undefined;
 
-  if (matchOn.length === 0) return rowToEdge(candidateRows[0]!);
+  if (matchOn.length === 0) return rowToEdge(requireDefined(candidateRows[0]));
 
   const { liveRow } = findMatchingEdge(candidateRows, matchOn, props);
   return liveRow === undefined ? undefined : rowToEdge(liveRow);
@@ -1423,7 +1424,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
       }
       for (const { index, sourceIndex } of probe.duplicateOf) {
-        found[index] = { edge: found[sourceIndex]!.edge, action: "found" };
+        found[index] = {
+          edge: requireDefined(found[sourceIndex]).edge,
+          action: "found",
+        };
       }
       return found;
     }
@@ -1445,7 +1449,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       );
       for (const [batchIndex, entry] of toCreate.entries()) {
         results[entry.index] = {
-          edge: createdEdges[batchIndex]!,
+          edge: requireDefined(createdEdges[batchIndex]),
           action: "created",
         };
       }
@@ -1493,7 +1497,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 
     // Step 6: Resolve within-batch duplicates
     for (const { index, sourceIndex } of duplicateOf) {
-      const sourceResult = results[sourceIndex]!;
+      const sourceResult = requireDefined(results[sourceIndex]);
       results[index] = { edge: sourceResult.edge, action: "found" };
     }
 

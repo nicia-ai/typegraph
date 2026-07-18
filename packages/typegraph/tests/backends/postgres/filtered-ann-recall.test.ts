@@ -31,9 +31,10 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import { embedding } from "../../../src/core/embedding";
 import { defineGraph, defineNode } from "../../../src/index";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const GRAPH_ID = "filtered_ann_recall";
@@ -59,7 +60,7 @@ function requirePostgres(ctx: { skip: () => void }): Pool {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -157,7 +158,7 @@ describe("Postgres filtered ANN recall — iterative-scan recovers a full page",
 
       // Assert the physical HNSW index exists — otherwise the search below
       // would silently be an exact seq scan and the test would be vacuous.
-      const table = backend.vectorStrategy!.tableName(
+      const table = requireDefined(backend.vectorStrategy).tableName(
         GRAPH_ID,
         "Doc",
         "embedding",
@@ -202,7 +203,7 @@ describe("Postgres filtered ANN recall — iterative-scan recovers a full page",
       // 200th — far outside the default ef_search (40) frontier — so nothing
       // live survives the filter and the page under-fills, mirroring libSQL's
       // `expect(approximate.rows.length).toBeLessThan(2)`.
-      const bounded = await backend.vectorSearch!({
+      const bounded = await requireDefined(backend.vectorSearch)({
         graphId: GRAPH_ID,
         nodeKind: "Doc",
         fieldPath: "embedding",

@@ -29,6 +29,7 @@ import {
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { isMissingTableError } from "../../utils/sql-errors";
+import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
 import {
   type ContributionMaterializationIdentity,
@@ -38,7 +39,6 @@ import {
   type TransactionBackend,
 } from "../types";
 import { runtimeStrategyContributions } from "./ddl";
-import { formatPostgresTimestamp, nowIso } from "./row-mappers";
 
 /**
  * Bridges the dialect-specific timestamp column representation to the
@@ -212,8 +212,7 @@ function contributionSignatureInput(
 // reasons — derive the union so the two cannot drift apart and the
 // assert can pass the state straight through as the error reason.
 type ContributionMaterializationState =
-  | "initialized"
-  | StoreNotInitializedReason;
+  "initialized" | StoreNotInitializedReason;
 
 function evaluateContributionState(
   row: ContributionMaterializationRow | undefined,
@@ -274,21 +273,21 @@ export function gateFulltextMethods(
   } = {};
 
   if (source.upsertFulltext) {
-    const raw = source.upsertFulltext.bind(source);
+    const raw = source.upsertFulltext;
     gated.upsertFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
   if (source.deleteFulltext) {
-    const raw = source.deleteFulltext.bind(source);
+    const raw = source.deleteFulltext;
     gated.deleteFulltext = async (params) => {
       await assert(params.graphId);
       await raw(params);
     };
   }
   if (source.upsertFulltextBatch) {
-    const raw = source.upsertFulltextBatch.bind(source);
+    const raw = source.upsertFulltextBatch;
     gated.upsertFulltextBatch = async (params) => {
       // A genuine no-op call asserts nothing — the "empty input is
       // harmless" contract.
@@ -298,7 +297,7 @@ export function gateFulltextMethods(
     };
   }
   if (source.deleteFulltextBatch) {
-    const raw = source.deleteFulltextBatch.bind(source);
+    const raw = source.deleteFulltextBatch;
     gated.deleteFulltextBatch = async (params) => {
       if (params.nodeIds.length === 0) return;
       await assert(params.graphId);
@@ -306,7 +305,7 @@ export function gateFulltextMethods(
     };
   }
   if (source.fulltextSearch) {
-    const raw = source.fulltextSearch.bind(source);
+    const raw = source.fulltextSearch;
     gated.fulltextSearch = async (params) => {
       await assert(params.graphId);
       return raw(params);
@@ -314,7 +313,7 @@ export function gateFulltextMethods(
   }
   // Unconditional: the hard-delete cascade deletes from the fulltext
   // table even for graphs that declare no `searchable()` fields.
-  const rawHardDelete = source.hardDeleteNode.bind(source);
+  const rawHardDelete = source.hardDeleteNode;
   gated.hardDeleteNode = async (params) => {
     await assert(params.graphId);
     await rawHardDelete(params);
@@ -625,9 +624,7 @@ export function createContributionMaterializer(
    * is its own verdict so boot can create it while hot-path asserts translate
    * it to `StoreNotInitializedError`. All other database faults propagate.
    */
-  async function readMarkerRows(
-    graphId: string,
-  ): Promise<
+  async function readMarkerRows(graphId: string): Promise<
     | Readonly<{
         kind: "rows";
         rows: ReadonlyMap<string, ContributionMaterializationRow>;
@@ -803,10 +800,7 @@ export function createContributionMaterializer(
   function groupVectorContributions(
     slots: readonly VectorSlot[],
   ): ReadonlyMap<string, readonly StrategyTableContribution[]> {
-    const grouped = new Map<
-      string,
-      readonly StrategyTableContribution[]
-    >();
+    const grouped = new Map<string, readonly StrategyTableContribution[]>();
     if (deps.vectorStrategy === undefined) return grouped;
     for (const slot of slots) {
       grouped.set(slot.graphId, [
@@ -826,7 +820,9 @@ export function createContributionMaterializer(
     }
   }
 
-  async function assertVectorSlots(slots: readonly VectorSlot[]): Promise<void> {
+  async function assertVectorSlots(
+    slots: readonly VectorSlot[],
+  ): Promise<void> {
     for (const [graphId, contributions] of groupVectorContributions(slots)) {
       await assertContributions(graphId, contributions);
     }

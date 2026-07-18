@@ -15,7 +15,6 @@
  * non-deterministic META (version / timestamps), so an idempotent re-commit (which
  * bumps `version`) still compares equal when the logical graph is unchanged.
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -35,6 +34,7 @@ import type {
   MergeOptions,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import {
   normalizeGraph,
   normalizeReport,
@@ -333,7 +333,7 @@ describe.each(backendMatrix())("new-vs-base invariants [$name]", (entry) => {
       await normalizeGraph(targetNatural),
     );
 
-    const ambiguity = natural.data.baseAmbiguities[0]!;
+    const ambiguity = requireDefined(natural.data.baseAmbiguities[0]);
     expect(
       ambiguity.baseIds
         .map((identity) => `${identity.kind}:${identity.id}`)

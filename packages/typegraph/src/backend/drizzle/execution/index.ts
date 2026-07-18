@@ -1,5 +1,6 @@
 export {
   type AnyPgDatabase,
+  type AnyPgTransaction,
   createPostgresExecutionAdapter,
   type PostgresExecutionAdapter,
 } from "./postgres-execution";

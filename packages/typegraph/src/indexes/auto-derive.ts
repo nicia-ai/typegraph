@@ -149,8 +149,9 @@ function readEmbeddingIndex(
 function readEmbeddingDimensions(schema: z.ZodType): number | undefined {
   for (const candidate of unwrapChain(schema)) {
     if (isEmbeddingSchema(candidate)) {
-      return (candidate as unknown as Record<string, number>)
-        ._embeddingDimensions;
+      return (candidate as unknown as Record<string, number>)[
+        "_embeddingDimensions"
+      ];
     }
   }
   return undefined;

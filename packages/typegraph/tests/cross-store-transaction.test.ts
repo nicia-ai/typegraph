@@ -23,8 +23,8 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
-  createStore,
-  createStoreWithSchema,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
   searchable,
@@ -33,6 +33,7 @@ import {
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
+import { requireDefined } from "../src/utils/presence";
 
 // The caller's own relational table (Drizzle-owned, NOT a TypeGraph
 // table) — the "Connector" row a graph node will point at.
@@ -77,7 +78,7 @@ function createSqlite(): {
 } {
   const sqlite = new Database(":memory:");
   // Base TypeGraph tables only — the FTS5 virtual table is filtered out
-  // (the post-`drizzle-kit push` state). createStoreWithSchema is the
+  // (the post-`drizzle-kit push` state). createAdapterStoreWithSchema is the
   // single writer that materializes it; the not-booted test relies on
   // it being absent to prove the gate emits no DDL.
   const baseDdl = generateSqliteDDL(defaultTables).filter(
@@ -107,19 +108,21 @@ describe("#134 cross-store atomicity (SQLite)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    // No createStoreWithSchema: a non-fulltext adopted-tx flow needs no
+    // No createAdapterStoreWithSchema: a non-fulltext adopted-tx flow needs no
     // boot — proving "a transaction that never touches fulltext requires
     // no fulltext initialization".
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     // The caller owns BEGIN / COMMIT on its own connection.
     sqlite.exec("BEGIN");
     const txStore = store.withTransaction(db);
-    const connectorId = db
-      .insert(connectors)
-      .values({ name: "github" })
-      .returning({ id: connectors.id })
-      .all()[0]!.id;
+    const connectorId = requireDefined(
+      db
+        .insert(connectors)
+        .values({ name: "github" })
+        .returning({ id: connectors.id })
+        .all()[0],
+    ).id;
     const source = await txStore.nodes.ArtifactSource.create({
       connectorId,
       label: "primary",
@@ -139,7 +142,7 @@ describe("#134 cross-store atomicity (SQLite)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     sqlite.exec("BEGIN");
     let caught: unknown;
@@ -173,15 +176,17 @@ describe("#134 cross-store atomicity (SQLite)", () => {
     });
     // Canonical boot path: materializes the FTS5 table and warms the
     // durable marker so the adopted-tx assert is a cache hit (no DDL).
-    const [store] = await createStoreWithSchema(FtGraph, bootBackend);
+    const [store] = await createAdapterStoreWithSchema(FtGraph, bootBackend);
 
     sqlite.exec("BEGIN");
     const txStore = store.withTransaction(db);
-    const connectorId = db
-      .insert(connectors)
-      .values({ name: "drive" })
-      .returning({ id: connectors.id })
-      .all()[0]!.id;
+    const connectorId = requireDefined(
+      db
+        .insert(connectors)
+        .values({ name: "drive" })
+        .returning({ id: connectors.id })
+        .all()[0],
+    ).id;
     const document = await txStore.nodes.Doc.create({
       connectorId,
       title: "quarterly revenue report",
@@ -205,8 +210,8 @@ describe("#134 cross-store atomicity (SQLite)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    // Bare createStore against an unmaterialized FTS5 table.
-    const store = createStore(FtGraph, backend);
+    // Bare createAdapterStore against an unmaterialized FTS5 table.
+    const store = createAdapterStore(FtGraph, backend);
 
     sqlite.exec("BEGIN");
     let thrown: unknown;
@@ -237,7 +242,7 @@ describe("#134 cross-store atomicity (SQLite)", () => {
       executionProfile: { isSync: true, transactionMode: "none" },
       tables: defaultTables,
     });
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     expect(() => store.withTransaction(db)).toThrow(ConfigurationError);
     expect(() => store.withTransaction(db)).toThrow(
@@ -265,15 +270,17 @@ describe("#140 graph-owned cross-store via tx.sql (SQLite)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     const source = await store.transaction(async (tx) => {
       const sqlTx = tx.sql as typeof db;
-      const connectorId = sqlTx
-        .insert(connectors)
-        .values({ name: "github" })
-        .returning({ id: connectors.id })
-        .all()[0]!.id;
+      const connectorId = requireDefined(
+        sqlTx
+          .insert(connectors)
+          .values({ name: "github" })
+          .returning({ id: connectors.id })
+          .all()[0],
+      ).id;
       return tx.nodes.ArtifactSource.create({ connectorId, label: "primary" });
     });
 
@@ -290,7 +297,7 @@ describe("#140 graph-owned cross-store via tx.sql (SQLite)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(PlainGraph, backend);
+    const store = createAdapterStore(PlainGraph, backend);
 
     await expect(
       store.transaction(async (tx) => {

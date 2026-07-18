@@ -16,9 +16,10 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { embedding } from "../../../src/core/embedding";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let sharedPool: Pool | undefined;
@@ -33,7 +34,7 @@ function requirePostgres(ctx: { skip: () => void }): { pool: Pool } {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -108,7 +109,7 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
 
     // The physical pgvector HNSW index is now visible on the strategy's
     // per-(graphId, kind, field) table.
-    const table = backend.vectorStrategy!.tableName(
+    const table = requireDefined(backend.vectorStrategy).tableName(
       "vector_pg_auto",
       "Document",
       "embedding",
@@ -175,12 +176,12 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
 
     // Each graph has its own per-field table, each with its own HNSW index —
     // distinct physical objects, no cross-graph sharing.
-    const tableA = backendA.vectorStrategy!.tableName(
+    const tableA = requireDefined(backendA.vectorStrategy).tableName(
       "vec_pg_xgraph_a",
       "Document",
       "embedding",
     );
-    const tableB = backendB.vectorStrategy!.tableName(
+    const tableB = requireDefined(backendB.vectorStrategy).tableName(
       "vec_pg_xgraph_b",
       "Document",
       "embedding",
@@ -236,7 +237,7 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
     });
     const backend = createPostgresBackend(drizzle(pool));
     const [store] = await createStoreWithSchema(graph, backend);
-    const tunedTable = backend.vectorStrategy!.tableName(
+    const tunedTable = requireDefined(backend.vectorStrategy).tableName(
       "vector_pg_tuned",
       "TunedDoc",
       "embedding",
@@ -256,7 +257,7 @@ describe("Postgres store.materializeIndexes — vector dispatch", () => {
         [tunedTable],
       );
       expect(rows.rows.length).toBe(1);
-      return rows.rows[0]!.indexdef;
+      return requireDefined(rows.rows[0]).indexdef;
     };
 
     // The declared tuning must reach the emitted DDL, not pgvector defaults

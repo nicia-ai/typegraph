@@ -19,6 +19,7 @@ import {
   sum,
 } from "../../src";
 import { buildKindRegistry } from "../../src/registry";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 import { sortDirectionArb, unicodeStringArb } from "./arbitraries";
 
@@ -354,7 +355,7 @@ describe("Large Dataset Execution", () => {
             })
             .execute();
 
-          expect(countResult[0]!.total).toBe(nodeData.length);
+          expect(requireDefined(countResult[0]).total).toBe(nodeData.length);
 
           // Sum should be correct
           const expectedSum = nodeData.reduce((accum, n) => accum + n.value, 0);
@@ -366,7 +367,7 @@ describe("Large Dataset Execution", () => {
             })
             .execute();
 
-          expect(sumResult[0]!.total).toBe(expectedSum);
+          expect(requireDefined(sumResult[0]).total).toBe(expectedSum);
         },
       ),
       { numRuns: 5 },

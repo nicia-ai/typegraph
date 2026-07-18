@@ -1,3 +1,4 @@
+import { requireDefined } from "../../utils/presence";
 /**
  * Query Compiler Module
  *
@@ -47,8 +48,6 @@ import { type ReadInstantMode, withPinnedReadInstant } from "./temporal";
 export { getDialect } from "../dialect";
 export { type DialectAdapter, type SqlDialect } from "../dialect/types";
 
-import { type SQL, sql } from "drizzle-orm";
-
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import {
   type AggregateExpr,
@@ -67,6 +66,7 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import { sql, type SqlFragment } from "../sql-fragment";
 import {
   annIndexScanTypes,
   asCompiledSelectSql,
@@ -202,7 +202,7 @@ export type CompileQueryOptions = Readonly<{
  * @param ast - The query AST to compile
  * @param graphId - The graph ID for filtering
  * @param options - Compilation options (dialect, schema)
- * @returns Drizzle SQL object ready for execution
+ * @returns TypeGraph `SqlFragment` ready for backend execution
  *
  * @example
  * ```typescript
@@ -242,7 +242,7 @@ export function compileQuery(
   // Collects the ANN slot index types the emitter compiles engine-form
   // branches for; a non-empty set brands the finished statement so the
   // backend applies the pgvector iterative-scan GUCs around execution.
-  // (Sub-compiled correlated queries brand their own SQL objects, which
+  // (Sub-compiled correlated queries brand their own `SqlFragment` objects, which
   // are embedded by text — an ANN branch inside a subquery therefore
   // does not surface the brand; the inline vector predicate compiles at
   // the top level, so this is theoretical today.)
@@ -270,7 +270,7 @@ export function compileQuery(
     : { fulltextLanguages: options_.fulltextLanguages }),
   };
 
-  function finish(compiled: SQL): CompiledSelectSql {
+  function finish(compiled: SqlFragment): CompiledSelectSql {
     if (annIndexTypes.size > 0) {
       markAnnIndexScan(compiled, [...annIndexTypes]);
     }
@@ -297,7 +297,7 @@ function tryLowerSingleHopRecursiveTraversal(
     return undefined;
   }
 
-  const traversal = ast.traversals[0]!;
+  const traversal = requireDefined(ast.traversals[0]);
   const variableLength = traversal.variableLength;
   if (!variableLength) {
     return undefined;
@@ -327,7 +327,7 @@ function tryLowerSingleHopRecursiveTraversal(
  * @param op - The set operation AST
  * @param graphId - The graph ID for filtering
  * @param options - Compilation options (dialect, schema)
- * @returns Drizzle SQL object
+ * @returns TypeGraph `SqlFragment`
  */
 export function compileSetOperation(
   op: SetOperation,
@@ -341,7 +341,7 @@ export function compileSetOperation(
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
   // Operand statements carry their own ANN brand, but the set-operation
-  // wrapper is a fresh SQL object and the backend only inspects the
+  // wrapper is a fresh `SqlFragment` object and the backend only inspects the
   // object it executes — so operand brands are merged onto the final
   // statement here, or a union with an approximate operand would skip
   // the pgvector GUC wrapper.
@@ -503,12 +503,12 @@ function resolveCountAggregateFastPath(
     return undefined;
   }
 
-  const traversal = ast.traversals[0]!;
+  const traversal = requireDefined(ast.traversals[0]);
   if ((traversal.inverseEdgeKinds?.length ?? 0) > 0) {
     return undefined;
   }
 
-  const groupField = ast.groupBy.fields[0]!;
+  const groupField = requireDefined(ast.groupBy.fields[0]);
   if (groupField.alias !== ast.start.alias || !isIdFieldRef(groupField)) {
     return undefined;
   }
@@ -579,7 +579,7 @@ function compileCountAggregateFastPath(
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
-): SQL | undefined {
+): SqlFragment | undefined {
   const plan = resolveCountAggregateFastPath(ast);
   if (!plan) {
     return undefined;
@@ -699,7 +699,7 @@ function compileCountAggregateFastPath(
         ]
     : [];
 
-  const aggregateColumns: SQL[] = [];
+  const aggregateColumns: SqlFragment[] = [];
   if (requiresNodeCount) {
     aggregateColumns.push(sql`COUNT(n.id) AS ${sql.raw(nodeCountColumn)}`);
   }
@@ -889,7 +889,7 @@ function buildStandardStartAndTraversalCtes(
     temporalFilterPass: TemporalFilterPass;
     traversalLimit: number | undefined;
   }>,
-): SQL[] {
+): SqlFragment[] {
   const {
     ast,
     carryForwardPreviousColumns,
@@ -900,7 +900,7 @@ function buildStandardStartAndTraversalCtes(
     temporalFilterPass,
     traversalLimit,
   } = input;
-  const ctes: SQL[] = [
+  const ctes: SqlFragment[] = [
     buildStandardStartCte({
       ast,
       ctx,
@@ -1065,7 +1065,7 @@ function buildLateMaterializedOuterFromClause(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
   const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
     const physical = sql.raw(lateMaterializedPhysicalAlias(alias));
@@ -1085,7 +1085,7 @@ function compileLateMaterializedQuery(
   temporalFilterPass: TemporalFilterPass,
   collapsedTraversalCteAlias: string | undefined,
   shouldCollapseSelectiveTraversalRowset: boolean,
-): SQL | undefined {
+): SqlFragment | undefined {
   const plan = resolveLateMaterializationPlan(ast);
   if (plan === undefined) {
     return undefined;
@@ -1142,7 +1142,7 @@ type StandardQueryStrategyHandler = (
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-) => SQL;
+) => SqlFragment;
 
 const STANDARD_QUERY_STRATEGY_HANDLERS: Record<
   DialectStandardQueryStrategy,
@@ -1155,7 +1155,7 @@ function compileStandardQuery(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const strategy = ctx.dialect.capabilities.standardQueryStrategy;
   const handler = STANDARD_QUERY_STRATEGY_HANDLERS[strategy];
   return handler(ast, graphId, ctx);
@@ -1172,7 +1172,7 @@ type SelectStandardOrderByInput = Readonly<{
 
 function selectStandardOrderBy(
   input: SelectStandardOrderByInput,
-): SQL | undefined {
+): SqlFragment | undefined {
   const {
     ast,
     collapsedTraversalCteAlias,
@@ -1234,7 +1234,7 @@ function compileStandardQueryWithCteStrategy(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
-): SQL {
+): SqlFragment {
   const { dialect } = ctx;
   const {
     collapsedTraversalCteAlias,

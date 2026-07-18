@@ -35,9 +35,10 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 /**
@@ -105,7 +106,7 @@ let probe: ConcurrencyProbe | undefined;
 let postgresAvailable = false;
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   try {
     pool = new Pool({ connectionString: TEST_DATABASE_URL });
     probe = probePoolConcurrency(pool);
@@ -126,7 +127,7 @@ function embeddingValue(seed: number): readonly number[] {
   return [seed, seed + 1, seed + 2];
 }
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   "transaction-scoped Postgres backend serializes statements on its pinned connection",
   () => {
     beforeEach(async () => {
@@ -140,9 +141,9 @@ describe.runIf(process.env.POSTGRES_URL)(
     });
 
     it("never overlaps the write pipeline's embedding and fulltext sync", async () => {
-      const backend = createPostgresBackend(db!);
+      const backend = createPostgresBackend(requireDefined(db));
       const [store] = await createStoreWithSchema(Graph, backend);
-      probe!.reset();
+      requireDefined(probe).reset();
 
       // A single create: no user concurrency at all. The pipeline's own
       // `Promise.all([syncEmbeddings, syncFulltext])` is the overlap source.
@@ -151,13 +152,13 @@ describe.runIf(process.env.POSTGRES_URL)(
         vector: embeddingValue(1),
       });
 
-      expect(probe!.maxPerClient()).toBe(1);
+      expect(requireDefined(probe).maxPerClient()).toBe(1);
     });
 
     it("never overlaps writes a caller issues with Promise.all inside store.transaction", async () => {
-      const backend = createPostgresBackend(db!);
+      const backend = createPostgresBackend(requireDefined(db));
       const [store] = await createStoreWithSchema(Graph, backend);
-      probe!.reset();
+      requireDefined(probe).reset();
 
       await store.transaction(async (tx) => {
         await Promise.all([
@@ -167,18 +168,18 @@ describe.runIf(process.env.POSTGRES_URL)(
         ]);
       });
 
-      expect(probe!.maxPerClient()).toBe(1);
+      expect(requireDefined(probe).maxPerClient()).toBe(1);
       expect(await store.nodes.Doc.count()).toBe(3);
     });
 
     it("survives a failing statement inside Promise.all and rolls the transaction back", async () => {
-      const backend = createPostgresBackend(db!);
+      const backend = createPostgresBackend(requireDefined(db));
       const [store] = await createStoreWithSchema(Graph, backend);
       await store.nodes.Doc.create(
         { title: "already here", vector: embeddingValue(1) },
         { id: "taken" },
       );
-      probe!.reset();
+      requireDefined(probe).reset();
 
       // The second create collides on the primary key, so the failure comes
       // from Postgres itself — after its sibling has already been queued.
@@ -197,8 +198,11 @@ describe.runIf(process.env.POSTGRES_URL)(
         }),
       ).rejects.toThrow();
 
-      expect(probe!.maxPerClient()).toBe(1);
-      const attached = createStore(Graph, createPostgresBackend(db!));
+      expect(requireDefined(probe).maxPerClient()).toBe(1);
+      const attached = createStore(
+        Graph,
+        createPostgresBackend(requireDefined(db)),
+      );
       expect(await attached.nodes.Doc.count()).toBe(1);
     });
   },

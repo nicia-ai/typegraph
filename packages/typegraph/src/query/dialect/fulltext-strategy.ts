@@ -9,9 +9,6 @@
  * (pg_trgm, ParadeDB/pg_search, pgroonga) to swap the entire fulltext
  * pipeline without forking TypeGraph.
  */
-import { type SQL, sql } from "drizzle-orm";
-
-import { quotedTableName } from "../../backend/drizzle/operations/shared";
 import {
   FULLTEXT_CONTRIBUTION_NAME,
   type StrategyTableContribution,
@@ -25,6 +22,7 @@ import {
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
 } from "../../backend/types";
+import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
  * Every `FulltextQueryMode` both shipped strategies accept.
@@ -58,23 +56,23 @@ export function buildFulltextCapabilities(
  * it emits every SQL statement the compiler and backend need — DDL,
  * reads, and writes. No out-of-band conventions across layers.
  */
-export interface FulltextStrategy {
+export type FulltextStrategy = Readonly<{
   /** Human-readable identifier used in error messages and telemetry. */
-  readonly name: string;
+  name: string;
 
   /**
    * Parse modes this strategy can translate. Callers validate against
    * this list before emitting SQL; a mode outside the set means the
    * strategy rejects the query at compile time.
    */
-  readonly supportedModes: readonly FulltextQueryMode[];
+  supportedModes: readonly FulltextQueryMode[];
 
   /**
    * Whether the strategy can emit a per-row highlighted snippet. When
    * false, `snippetExpression` returns a literal `NULL` so callers can
    * leave the `snippet` column in place without a branch.
    */
-  readonly supportsSnippets: boolean;
+  supportsSnippets: boolean;
 
   /**
    * Whether the strategy supports prefix queries (`foo*`). Used to
@@ -82,7 +80,7 @@ export interface FulltextStrategy {
    * may support prefix queries via dedicated syntax without advertising
    * "raw" mode (and vice-versa).
    */
-  readonly supportsPrefix: boolean;
+  supportsPrefix: boolean;
 
   /**
    * Whether a per-query `language` override is honored. Postgres' tsvector
@@ -91,14 +89,14 @@ export interface FulltextStrategy {
    * Callers may surface a warning when the user passes `language` to a
    * strategy that doesn't honor it.
    */
-  readonly supportsLanguageOverride: boolean;
+  supportsLanguageOverride: boolean;
 
   /**
    * Languages / tokenizer names understood by the strategy. Advisory — a
    * runtime backend like Postgres may accept other installed regconfigs.
    * Used to populate `BackendCapabilities.fulltext.languages`.
    */
-  readonly languages: readonly string[];
+  languages: readonly string[];
 
   /**
    * Emits the WHERE-side MATCH expression.
@@ -107,36 +105,39 @@ export interface FulltextStrategy {
    * tsvector: `"typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery('english', 'cats')`
    * fts5:     `"typegraph_node_fulltext" MATCH '"cats"'`
    */
-  matchCondition(
+  matchCondition: (
+    this: void,
     tableName: string,
     query: string,
     mode: FulltextQueryMode,
     language?: string,
-  ): SQL;
+  ) => SqlFragment;
 
   /**
    * Emits the relevance expression. Higher values = more relevant. The
    * compiler orders by this expression DESC, and both builder and
    * backend-direct paths use the same form so their top-k results agree.
    */
-  rankExpression(
+  rankExpression: (
+    this: void,
     tableName: string,
     query: string,
     mode: FulltextQueryMode,
     language?: string,
-  ): SQL;
+  ) => SqlFragment;
 
   /**
    * Emits a per-row highlighted snippet expression, or `NULL` when
    * `supportsSnippets` is false. Snippet markup is `<mark>…</mark>` in
    * both shipped strategies so consumers can apply one stylesheet.
    */
-  snippetExpression(
+  snippetExpression: (
+    this: void,
     tableName: string,
     query: string,
     mode: FulltextQueryMode,
     language?: string,
-  ): SQL;
+  ) => SqlFragment;
 
   /**
    * The tables this strategy owns, as Drizzle-free, already
@@ -152,18 +153,22 @@ export interface FulltextStrategy {
    * of a contribution rather than the strategy's whole storage
    * surface. (Public API change — see #129.)
    */
-  ownedTables(primaryTableName: string): readonly StrategyTableContribution[];
+  ownedTables: (
+    this: void,
+    primaryTableName: string,
+  ) => readonly StrategyTableContribution[];
 
   /**
    * Emits the statements that upsert a single fulltext row. Returns one
    * or more statements — some backends (SQLite FTS5) cannot emulate
    * upsert in a single statement and need DELETE + INSERT.
    */
-  buildUpsert(
+  buildUpsert: (
+    this: void,
     tableName: string,
     params: UpsertFulltextParams,
     timestamp: string,
-  ): readonly SQL[];
+  ) => readonly SqlFragment[];
 
   /**
    * Emits the statements that upsert many fulltext rows at once. Input
@@ -171,11 +176,12 @@ export interface FulltextStrategy {
    * strategy if the underlying SQL statement cannot tolerate duplicate
    * conflict keys. Returns `[]` when `params.rows` is empty.
    */
-  buildBatchUpsert(
+  buildBatchUpsert: (
+    this: void,
     tableName: string,
     params: UpsertFulltextBatchParams,
     timestamp: string,
-  ): readonly SQL[];
+  ) => readonly SqlFragment[];
 
   /**
    * Emits the statements that delete a single fulltext row. Normally a
@@ -183,17 +189,22 @@ export interface FulltextStrategy {
    * indexes (delete-triggered external stores, ParadeDB-style secondary
    * structures) may need more.
    */
-  buildDelete(tableName: string, params: DeleteFulltextParams): readonly SQL[];
+  buildDelete: (
+    this: void,
+    tableName: string,
+    params: DeleteFulltextParams,
+  ) => readonly SqlFragment[];
 
   /**
    * Emits the statements that delete many fulltext rows at once. Returns
    * `[]` when `params.nodeIds` is empty.
    */
-  buildBatchDelete(
+  buildBatchDelete: (
+    this: void,
     tableName: string,
     params: DeleteFulltextBatchParams,
-  ): readonly SQL[];
-}
+  ) => readonly SqlFragment[];
+}>;
 
 // ============================================================
 // Internal helpers
@@ -203,8 +214,8 @@ function quoteIdentifier(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
-function tsvectorColumn(tableName: string): SQL {
-  return sql`${quotedTableName(tableName)}."tsv"`;
+function tsvectorColumn(tableName: string): SqlFragment {
+  return sql`${sql.identifier(tableName)}."tsv"`;
 }
 
 /**
@@ -223,8 +234,8 @@ function dedupeFulltextBatchRows(
 function buildPkScopedDelete(
   tableName: string,
   params: DeleteFulltextParams,
-): SQL {
-  const table = quotedTableName(tableName);
+): SqlFragment {
+  const table = sql.identifier(tableName);
   return sql`
     DELETE FROM ${table}
     WHERE "graph_id" = ${params.graphId}
@@ -236,10 +247,10 @@ function buildPkScopedDelete(
 function buildPkScopedBatchDelete(
   tableName: string,
   params: DeleteFulltextBatchParams,
-): SQL | undefined {
+): SqlFragment | undefined {
   if (params.nodeIds.length === 0) return undefined;
   const unique = [...new Set(params.nodeIds)];
-  const table = quotedTableName(tableName);
+  const table = sql.identifier(tableName);
   return sql`
     DELETE FROM ${table}
     WHERE "graph_id" = ${params.graphId}
@@ -259,11 +270,11 @@ function postgresTsquery(
   mode: FulltextQueryMode,
   query: string,
   language: string | undefined,
-): SQL {
+): SqlFragment {
   // The `language` column is already `regconfig`, so the non-override
   // path references the column directly. The per-query override path
   // still arrives as a bound text parameter and needs the cast.
-  const langExpr: SQL =
+  const langExpr: SqlFragment =
     language === undefined ? sql`"language"` : sql`${language}::regconfig`;
   switch (mode) {
     case "websearch": {
@@ -318,7 +329,7 @@ export const tsvectorStrategy: FulltextStrategy = {
   },
 
   snippetExpression(_tableName, query, mode, language) {
-    const langExpr: SQL =
+    const langExpr: SqlFragment =
       language === undefined ? sql`"language"` : sql`${language}::regconfig`;
     const q = postgresTsquery(mode, query, language);
     return sql`ts_headline(${langExpr}, "content", ${q}, 'StartSel=<mark>,StopSel=</mark>,MaxFragments=1,MinWords=5,MaxWords=30,ShortWord=3')`;
@@ -366,7 +377,7 @@ export const tsvectorStrategy: FulltextStrategy = {
   },
 
   buildUpsert(tableName, params, timestamp) {
-    const table = quotedTableName(tableName);
+    const table = sql.identifier(tableName);
     // `tsv` is a GENERATED STORED column — Postgres computes it from
     // `content` + `language`, so it must not appear in the column list
     // or the ON CONFLICT update set.
@@ -391,7 +402,7 @@ export const tsvectorStrategy: FulltextStrategy = {
     const rows = dedupeFulltextBatchRows(params.rows);
     if (rows.length === 0) return [];
 
-    const table = quotedTableName(tableName);
+    const table = sql.identifier(tableName);
     const valueTuples = rows.map(
       (row) => sql`
         (
@@ -538,17 +549,17 @@ export const fts5Strategy: FulltextStrategy = {
 
   matchCondition(tableName, query, mode, _language) {
     const matchExpression = translateToFts5Query(query, mode);
-    return sql`${quotedTableName(tableName)} MATCH ${matchExpression}`;
+    return sql`${sql.identifier(tableName)} MATCH ${matchExpression}`;
   },
 
   rankExpression(tableName, _query, _mode, _language) {
     // FTS5 bm25() returns a negative score where lower = more relevant.
     // Negate so callers see higher = better (uniform with tsvector).
-    return sql`-bm25(${quotedTableName(tableName)})`;
+    return sql`-bm25(${sql.identifier(tableName)})`;
   },
 
   snippetExpression(tableName, _query, _mode, _language) {
-    return sql`snippet(${quotedTableName(tableName)}, -1, '<mark>', '</mark>', '…', 20)`;
+    return sql`snippet(${sql.identifier(tableName)}, -1, '<mark>', '</mark>', '…', 20)`;
   },
 
   ownedTables(primaryTableName) {
@@ -579,7 +590,7 @@ export const fts5Strategy: FulltextStrategy = {
   },
 
   buildUpsert(tableName, params, timestamp) {
-    const table = quotedTableName(tableName);
+    const table = sql.identifier(tableName);
     // FTS5 virtual tables don't support ON CONFLICT — emulate with
     // DELETE + INSERT, atomic under the caller's outer transaction.
     return [
@@ -600,7 +611,7 @@ export const fts5Strategy: FulltextStrategy = {
     const rows = dedupeFulltextBatchRows(params.rows);
     if (rows.length === 0) return [];
 
-    const table = quotedTableName(tableName);
+    const table = sql.identifier(tableName);
     const nodeIds = rows.map((row) => row.nodeId);
 
     const deleteStmt = sql`

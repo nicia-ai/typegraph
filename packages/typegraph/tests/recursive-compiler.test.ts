@@ -3,7 +3,6 @@
  *
  * Tests variable-length path traversal query generation.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { UnsupportedPredicateError } from "../src/errors";
@@ -23,6 +22,8 @@ import {
 } from "../src/query/compiler/recursive";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
+import { sql } from "../src/query/sql-fragment";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString } from "./sql-test-utils";
 
 // ============================================================
@@ -687,7 +688,11 @@ describe("compileVariableLengthQuery", () => {
         ],
       });
       // Override valueType to array
-      (ast.orderBy![0]!.field as { valueType: string }).valueType = "array";
+      (
+        requireDefined(requireDefined(ast.orderBy)[0]).field as {
+          valueType: string;
+        }
+      ).valueType = "array";
 
       expect(() => getSqlString(ast)).toThrow(UnsupportedPredicateError);
       expect(() => getSqlString(ast)).toThrow("arrays or objects");
@@ -703,7 +708,11 @@ describe("compileVariableLengthQuery", () => {
         ],
       });
       // Override valueType to object
-      (ast.orderBy![0]!.field as { valueType: string }).valueType = "object";
+      (
+        requireDefined(requireDefined(ast.orderBy)[0]).field as {
+          valueType: string;
+        }
+      ).valueType = "object";
 
       expect(() => getSqlString(ast)).toThrow(UnsupportedPredicateError);
     });

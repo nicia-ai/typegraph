@@ -1,6 +1,5 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import { sqlValueList } from "../../../query/compiler/predicate-utils";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
@@ -138,7 +137,10 @@ export function buildGetEdges(
   return sql`
     SELECT * FROM ${edges}
     WHERE ${edges.graphId} = ${graphId}
-      AND ${edges.id} IN (${sqlValueList(ids)})
+      AND ${edges.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
   `;
 }
 
@@ -225,7 +227,10 @@ export function buildDeleteEdgesBatch(
     UPDATE ${edges}
     SET ${quotedColumn(edges.deletedAt)} = ${timestamp}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} IN (${sqlValueList(params.ids)})
+      AND ${edges.id} IN (${sql.join(
+        params.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
       AND ${edges.deletedAt} IS NULL
   `;
 }
@@ -244,7 +249,10 @@ export function buildHardDeleteEdgesBatch(
   return sql`
     DELETE FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.id} IN (${sqlValueList(params.ids)})
+      AND ${edges.id} IN (${sql.join(
+        params.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
   `;
 }
 

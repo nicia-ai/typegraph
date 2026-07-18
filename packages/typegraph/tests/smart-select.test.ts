@@ -4,8 +4,6 @@
  * Smart select tracks which fields the select callback reads and compiles
  * a selective projection query that avoids fetching the full props blob.
  */
-
-import { type SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -24,7 +22,10 @@ import {
   FieldAccessTracker,
 } from "../src/query/execution/field-tracker";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
+import { type SqlFragment } from "../src/query/sql-fragment";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
+import { requireDefined } from "../src/utils/presence";
+import { toSqlWithParams } from "./sql-test-utils";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -99,10 +100,10 @@ const schemaIntrospector = createSchemaIntrospector(
 );
 
 // ============================================================
-// SQL Helpers
+// SQL helpers
 // ============================================================
 
-function sqlToStrings(sqlObject: SQL | string): {
+function sqlToStrings(sqlObject: SqlFragment | string): {
   sql: string;
   params: unknown[];
 } {
@@ -110,40 +111,15 @@ function sqlToStrings(sqlObject: SQL | string): {
   // backend captures as already-serialized SQL text.
   if (typeof sqlObject === "string") return { sql: sqlObject, params: [] };
 
-  const params: unknown[] = [];
-
-  function flatten(object: unknown): string {
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "value" in object &&
-      Array.isArray(object.value)
-    ) {
-      return (object as { value: string[] }).value.join("");
-    }
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "queryChunks" in object &&
-      Array.isArray((object as { queryChunks: unknown[] }).queryChunks)
-    ) {
-      return (object as { queryChunks: unknown[] }).queryChunks
-        .map((chunk) => flatten(chunk))
-        .join("");
-    }
-    params.push(object);
-    return "?";
-  }
-
-  return { sql: flatten(sqlObject), params };
+  return toSqlWithParams(sqlObject);
 }
 
 function createRecordingBackend(): Readonly<{
   backend: GraphBackend;
-  getLastQuery: () => SQL | string | undefined;
+  getLastQuery: () => SqlFragment | string | undefined;
 }> {
   const backend = createTestBackend();
-  let lastQuery: SQL | string | undefined;
+  let lastQuery: SqlFragment | string | undefined;
 
   const recordingBackend: GraphBackend = {
     ...backend,
@@ -156,7 +132,7 @@ function createRecordingBackend(): Readonly<{
     // statement the query actually ran.
     executeRaw: async <T>(sqlText: string, params: readonly unknown[]) => {
       lastQuery = sqlText;
-      return backend.executeRaw!<T>(sqlText, params);
+      return requireDefined(backend.executeRaw)<T>(sqlText, params);
     },
   };
 
@@ -321,7 +297,7 @@ describe("buildSelectiveFields", () => {
 
 describe("Smart Select Integration", () => {
   let store: Store<typeof testGraph>;
-  let getLastQuery: () => SQL | string | undefined;
+  let getLastQuery: () => SqlFragment | string | undefined;
   let aliceId: string;
 
   beforeEach(async () => {
@@ -358,7 +334,7 @@ describe("Smart Select Integration", () => {
     const last = getLastQuery();
     expect(last).toBeDefined();
 
-    const { sql } = sqlToStrings(last!);
+    const { sql } = sqlToStrings(requireDefined(last));
     expect(sql).toContain('AS "p_email"');
     expect(sql).toContain('AS "p_name"');
     expect(sql).not.toContain('AS "p_props"');
@@ -389,7 +365,7 @@ describe("Smart Select Integration", () => {
       },
     ]);
 
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).not.toContain('AS "p_props"');
   });
 
@@ -440,7 +416,7 @@ describe("Smart Select Integration", () => {
       { person: "Bob", company: "none" },
     ]);
 
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).not.toContain('AS "p_props"');
   });
 
@@ -482,7 +458,7 @@ describe("Smart Select Integration", () => {
       },
     ]);
 
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).toContain("FROM cte_o");
     expect(sql).not.toContain("FROM cte_p INNER JOIN cte_c");
     expect(sql).not.toContain('AS "p_props"');
@@ -506,7 +482,7 @@ describe("Smart Select Integration", () => {
     expect(page1.data).toEqual([{ name: "Bob" }]);
     expect(page1.nextCursor).toBeDefined();
 
-    const { sql: sql1 } = sqlToStrings(getLastQuery()!);
+    const { sql: sql1 } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql1).toContain('AS "p_name"');
     expect(sql1).toContain('AS "p_age"');
     expect(sql1).not.toContain('AS "p_props"');
@@ -516,12 +492,12 @@ describe("Smart Select Integration", () => {
       .from("Person", "p")
       .orderBy("p", "age", "asc")
       .select((ctx) => ({ name: ctx.p.name }))
-      .paginate({ first: 1, after: page1.nextCursor! });
+      .paginate({ first: 1, after: requireDefined(page1.nextCursor) });
 
     expect(page2.data).toEqual([{ name: "Alice" }]);
     expect(page2.prevCursor).toBeDefined();
 
-    const { sql: sql2 } = sqlToStrings(getLastQuery()!);
+    const { sql: sql2 } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql2).not.toContain('AS "p_props"');
   });
 
@@ -539,7 +515,7 @@ describe("Smart Select Integration", () => {
     }
 
     expect(results).toEqual([{ name: "Alice" }, { name: "Bob" }]);
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).not.toContain('AS "p_props"');
   });
 
@@ -556,7 +532,7 @@ describe("Smart Select Integration", () => {
     expect(results[0]?.person.meta.createdAt).toBeDefined();
 
     // Full fetch projection includes the props blob.
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).toContain('AS "p_props"');
   });
 
@@ -572,12 +548,12 @@ describe("Smart Select Integration", () => {
       .paginate({ first: 10 });
 
     expect(page.data).toHaveLength(2);
-    expect(page.data[0]!.name).toBe("Alice");
-    expect(page.data[0]!.id).toBe(aliceId);
-    expect(page.data[1]!.id).toBeDefined();
-    expect(typeof page.data[1]!.id).toBe("string");
+    expect(requireDefined(page.data[0]).name).toBe("Alice");
+    expect(requireDefined(page.data[0]).id).toBe(aliceId);
+    expect(requireDefined(page.data[1]).id).toBeDefined();
+    expect(typeof requireDefined(page.data[1]).id).toBe("string");
 
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).toContain('AS "p_id"');
     expect(sql).not.toContain('AS "p_props"');
   });
@@ -594,11 +570,13 @@ describe("Smart Select Integration", () => {
       .paginate({ first: 10 });
 
     expect(page.data).toHaveLength(2);
-    expect(page.data[0]!.id).toBeDefined();
-    expect(page.data[1]!.id).toBeDefined();
-    expect(page.data[0]!.id).not.toBe(page.data[1]!.id);
+    expect(requireDefined(page.data[0]).id).toBeDefined();
+    expect(requireDefined(page.data[1]).id).toBeDefined();
+    expect(requireDefined(page.data[0]).id).not.toBe(
+      requireDefined(page.data[1]).id,
+    );
 
-    const { sql } = sqlToStrings(getLastQuery()!);
+    const { sql } = sqlToStrings(requireDefined(getLastQuery()));
     expect(sql).not.toContain('AS "p_props"');
   });
 
@@ -614,10 +592,12 @@ describe("Smart Select Integration", () => {
       .execute();
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.id).toBeDefined();
-    expect(results[1]!.id).toBeDefined();
+    expect(requireDefined(results[0]).id).toBeDefined();
+    expect(requireDefined(results[1]).id).toBeDefined();
     // Verify ordering is by actual id column, not props->'id'
-    expect(results[0]!.id < results[1]!.id).toBe(true);
+    expect(requireDefined(results[0]).id < requireDefined(results[1]).id).toBe(
+      true,
+    );
   });
 
   it("supports string comparison operators on id field", async () => {
@@ -629,7 +609,7 @@ describe("Smart Select Integration", () => {
       .execute();
 
     expect(allResults).toHaveLength(2);
-    const firstId = allResults[0]!.id;
+    const firstId = requireDefined(allResults[0]).id;
 
     const gtResults = await store
       .query()
@@ -639,7 +619,7 @@ describe("Smart Select Integration", () => {
       .execute();
 
     expect(gtResults).toHaveLength(1);
-    expect(gtResults[0]!.id > firstId).toBe(true);
+    expect(requireDefined(gtResults[0]).id > firstId).toBe(true);
 
     const lteResults = await store
       .query()
@@ -649,7 +629,7 @@ describe("Smart Select Integration", () => {
       .execute();
 
     expect(lteResults).toHaveLength(1);
-    expect(lteResults[0]!.id).toBe(firstId);
+    expect(requireDefined(lteResults[0]).id).toBe(firstId);
   });
 
   it("supports cursor pagination with orderBy id", async () => {
@@ -671,11 +651,13 @@ describe("Smart Select Integration", () => {
       .from("Person", "p")
       .orderBy("p", "id", "asc")
       .select((ctx) => ({ id: ctx.p.id, name: ctx.p.name }))
-      .paginate({ first: 2, after: page1.nextCursor! });
+      .paginate({ first: 2, after: requireDefined(page1.nextCursor) });
 
     expect(page2.data).toHaveLength(1);
     expect(page2.hasNextPage).toBe(false);
     // Page 2 id must be greater than all page 1 ids
-    expect(page2.data[0]!.id > page1.data[1]!.id).toBe(true);
+    expect(
+      requireDefined(page2.data[0]).id > requireDefined(page1.data[1]).id,
+    ).toBe(true);
   });
 });

@@ -11,7 +11,8 @@ import { KindNotFoundError } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { ConfigurationError, ValidationError } from "../src/errors";
-import type { createStore } from "../src/store";
+import type { Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createInitializedStore } from "./test-utils";
 
 const Document = defineNode("Document", {
@@ -40,7 +41,7 @@ const TestGraph = defineGraph({
 describe("store.search.rebuildFulltext", () => {
   let backend: GraphBackend;
   let db: BetterSQLite3Database;
-  let store: ReturnType<typeof createStore<typeof TestGraph>>;
+  let store: Store<typeof TestGraph>;
 
   beforeEach(async () => {
     const result = createLocalSqliteBackend();
@@ -64,7 +65,7 @@ describe("store.search.rebuildFulltext", () => {
 
     // Simulate drift by clearing fulltext rows for every node.
     for (const nodeId of [d1.id, d2.id]) {
-      await backend.deleteFulltext!({
+      await requireDefined(backend.deleteFulltext)({
         graphId: store.graphId,
         nodeKind: "Document",
         nodeId,
@@ -111,7 +112,7 @@ describe("store.search.rebuildFulltext", () => {
     });
 
     // Force a stale fulltext row to exist so we can verify it gets cleared.
-    await backend.upsertFulltext!({
+    await requireDefined(backend.upsertFulltext)({
       graphId: store.graphId,
       nodeKind: "Document",
       nodeId: node.id,
@@ -151,7 +152,7 @@ describe("store.search.rebuildFulltext", () => {
 
     // Re-upsert a stale row that would normally have been cleaned up
     // by the delete hook. Rebuild should discover and remove it.
-    await backend.upsertFulltext!({
+    await requireDefined(backend.upsertFulltext)({
       graphId: store.graphId,
       nodeKind: "Document",
       nodeId: document.id,

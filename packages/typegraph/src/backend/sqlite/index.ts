@@ -6,13 +6,13 @@
  * JavaScript runtime (Node.js, Cloudflare Workers, D1, Durable Objects).
  *
  * For a batteries-included local backend using `better-sqlite3`, import
- * from `@nicia-ai/typegraph/sqlite/local` instead.
+ * from `@nicia-ai/typegraph/adapters/drizzle/sqlite/local` instead.
  *
  * @example Drizzle backend with manual setup
  * ```typescript
  * import { drizzle } from "drizzle-orm/better-sqlite3";
  * import Database from "better-sqlite3";
- * import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+ * import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
  *
  * const sqlite = new Database("app.db");
  * sqlite.exec(generateSqliteMigrationSQL());
@@ -22,6 +22,7 @@
  */
 
 // Drizzle SQLite backend
+export type { AnySqliteDatabase } from "../drizzle/execution";
 export {
   createSqliteBackend,
   createSqliteTables,

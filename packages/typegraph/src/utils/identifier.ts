@@ -17,6 +17,7 @@
  */
 import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
 import { fnv1aBase36 } from "./hash";
+import { requireDefined } from "./presence";
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -31,7 +32,11 @@ export function truncateToBytes(value: string, maxBytes: number): string {
   // Walk backwards from the limit to find a clean character boundary.
   // UTF-8 continuation bytes have the form 10xxxxxx (0x80..0xBF).
   let end = maxBytes;
-  while (end > 0 && encoded[end]! >= 0x80 && encoded[end]! < 0xc0) {
+  while (
+    end > 0 &&
+    requireDefined(encoded[end]) >= 0x80 &&
+    requireDefined(encoded[end]) < 0xc0
+  ) {
     end--;
   }
 

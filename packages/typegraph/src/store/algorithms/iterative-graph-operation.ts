@@ -1,8 +1,7 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   type GraphBackend,
   INTERNAL_TEMPORARY_WRITES,
+  type InternalTransactionOptions,
   type TransactionBackend,
 } from "../../backend/types";
 import {
@@ -20,6 +19,7 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { jsonPointer } from "../../query/json-pointer";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledTemporaryStatementSql,
@@ -55,7 +55,7 @@ export type IterativeGraphOperation = Readonly<{
    * expansion carries it as a `weight` column; `undefined` for unweighted
    * operations.
    */
-  weightExpression: SQL | undefined;
+  weightExpression: SqlFragment | undefined;
 }>;
 
 export type NodeIdentityKey = string & {
@@ -83,14 +83,16 @@ export type IterativeGraphRunContext = Readonly<{
   workingTable: WorkingTableIdentifier;
   graphId: string;
   runId: string;
-  executeTemporary: (query: SQL) => Promise<void>;
+  executeTemporary: (query: SqlFragment) => Promise<void>;
 }>;
 
 export type IterativeGraphState = Readonly<{
   workingTableSize: number;
 }>;
 
-export function frontierIndexIdentifier(context: IterativeGraphRunContext) {
+export function frontierIndexIdentifier(
+  context: IterativeGraphRunContext,
+): SqlFragment {
   return sql.identifier(
     `typegraph_iterative_${context.runId.replaceAll("-", "_")}_frontier`,
   );
@@ -118,7 +120,7 @@ export type IterativeGraphPlan<
 > = Readonly<{
   algorithm: string;
   maxIterations: number;
-  createWorkingTable: (context: IterativeGraphRunContext) => SQL;
+  createWorkingTable: (context: IterativeGraphRunContext) => SqlFragment;
   initialize: (context: IterativeGraphRunContext) => Promise<State>;
   runRound: (
     context: IterativeGraphRunContext,
@@ -266,84 +268,83 @@ export async function runIterativeGraphOperation<
     );
   }
 
-  return ctx.backend.transaction(
-    async (backend) => {
-      const temporaryBackend = requireTemporaryStatements(backend);
-      const runId = generateId();
-      const workingTable = sql.identifier(
-        `typegraph_iterative_${runId.replaceAll("-", "_")}`,
-      );
-      const context: IterativeGraphRunContext = {
-        operation: createOperation(ctx, options, temporaryBackend),
-        backend: temporaryBackend,
-        workingTable,
-        graphId: ctx.graphId,
-        runId,
-        executeTemporary: async (query) => {
-          await temporaryBackend.executeTemporaryStatement(
-            asCompiledTemporaryStatementSql(query),
-          );
-        },
-      };
+  const transactionOptions = {
+    isolationLevel: "repeatable_read",
+    accessMode: "read_only",
+    temporaryWrites: INTERNAL_TEMPORARY_WRITES,
+  } satisfies InternalTransactionOptions;
 
-      // Opt-in only: without an explicit workingMemory the rounds inherit
-      // the engine's configured setting. When requested, the override is
-      // transaction-scoped — `set_config(..., is_local => true)` reverts
-      // when this transaction ends, so the session/server setting is never
-      // touched. SQLite returns no statement here.
-      if (context.operation.workingMemory !== undefined) {
-        const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
-          context.operation.workingMemory,
+  return ctx.backend.transaction(async (backend) => {
+    const temporaryBackend = requireTemporaryStatements(backend);
+    const runId = generateId();
+    const workingTable = sql.identifier(
+      `typegraph_iterative_${runId.replaceAll("-", "_")}`,
+    );
+    const context: IterativeGraphRunContext = {
+      operation: createOperation(ctx, options, temporaryBackend),
+      backend: temporaryBackend,
+      workingTable,
+      graphId: ctx.graphId,
+      runId,
+      executeTemporary: async (query) => {
+        await temporaryBackend.executeTemporaryStatement(
+          asCompiledTemporaryStatementSql(query),
         );
-        if (workingMemoryStatement !== undefined) {
-          await context.executeTemporary(workingMemoryStatement);
-        }
+      },
+    };
+
+    // Opt-in only: without an explicit workingMemory the rounds inherit
+    // the engine's configured setting. When requested, the override is
+    // transaction-scoped — `set_config(..., is_local => true)` reverts
+    // when this transaction ends, so the session/server setting is never
+    // touched. SQLite returns no statement here.
+    if (context.operation.workingMemory !== undefined) {
+      const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+        context.operation.workingMemory,
+      );
+      if (workingMemoryStatement !== undefined) {
+        await context.executeTemporary(workingMemoryStatement);
       }
-      await context.executeTemporary(plan.createWorkingTable(context));
-      let operationFailure: CapturedFailure | undefined;
-      try {
-        let state = await plan.initialize(context);
-        let analyzedRowCount = await refreshWorkingTableStatistics(
-          context,
-          state.workingTableSize,
-        );
-        for (
-          let iteration = 1;
-          iteration <= plan.maxIterations && !plan.hasConverged(state);
-          iteration++
-        ) {
-          state = await plan.runRound(context, state, iteration);
-          // Statistics only pay off in a subsequent round: skip the refresh
-          // when the operation just converged or the iteration budget is
-          // spent — no further round will read the working table.
-          if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
-            analyzedRowCount = await refreshWorkingTableStatistics(
-              context,
-              state.workingTableSize,
-              analyzedRowCount,
-            );
-          }
-        }
-        if (!plan.hasConverged(state)) {
-          throw new GraphAlgorithmConvergenceError(
-            plan.algorithm,
-            plan.maxIterations,
+    }
+    await context.executeTemporary(plan.createWorkingTable(context));
+    let operationFailure: CapturedFailure | undefined;
+    try {
+      let state = await plan.initialize(context);
+      let analyzedRowCount = await refreshWorkingTableStatistics(
+        context,
+        state.workingTableSize,
+      );
+      for (
+        let iteration = 1;
+        iteration <= plan.maxIterations && !plan.hasConverged(state);
+        iteration++
+      ) {
+        state = await plan.runRound(context, state, iteration);
+        // Statistics only pay off in a subsequent round: skip the refresh
+        // when the operation just converged or the iteration budget is
+        // spent — no further round will read the working table.
+        if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
+          analyzedRowCount = await refreshWorkingTableStatistics(
+            context,
+            state.workingTableSize,
+            analyzedRowCount,
           );
         }
-        return await plan.extractResult(context, state);
-      } catch (error) {
-        operationFailure = { error };
-        throw error;
-      } finally {
-        await cleanupWorkingTables(context, plan.cleanup, operationFailure);
       }
-    },
-    {
-      isolationLevel: "repeatable_read",
-      accessMode: "read_only",
-      temporaryWrites: INTERNAL_TEMPORARY_WRITES,
-    },
-  );
+      if (!plan.hasConverged(state)) {
+        throw new GraphAlgorithmConvergenceError(
+          plan.algorithm,
+          plan.maxIterations,
+        );
+      }
+      return await plan.extractResult(context, state);
+    } catch (error) {
+      operationFailure = { error };
+      throw error;
+    } finally {
+      await cleanupWorkingTables(context, plan.cleanup, operationFailure);
+    }
+  }, transactionOptions);
 }
 
 export function shouldRefreshWorkingTableStatistics(
@@ -543,8 +544,8 @@ function fieldsForDirection(
 
 function compileDirectionUnion(
   direction: TraversalDirection,
-  compileDirection: (fields: DirectionFields) => SQL,
-): SQL {
+  compileDirection: (fields: DirectionFields) => SqlFragment,
+): SqlFragment {
   return sql.join(
     fieldsForDirection(direction).map((fields) => compileDirection(fields)),
     sql` UNION ALL `,
@@ -581,10 +582,10 @@ function compileExpansionQuery(
 export function compileWorkingTableExpansion(
   operation: IterativeGraphOperation,
   workingTable: WorkingTableIdentifier,
-  sourceFilter: SQL,
+  sourceFilter: SqlFragment,
   direction: TraversalDirection,
   edgeKinds: readonly string[],
-): SQL {
+): SqlFragment {
   return compileDirectionUnion(direction, (fields) =>
     compileDirectionalExpansion(
       operation,
@@ -609,11 +610,11 @@ export function compileWorkingTableExpansion(
 export function compileWorkingTableEdgeExpansion(
   operation: IterativeGraphOperation,
   workingTable: WorkingTableIdentifier,
-  sourceFilter: SQL,
+  sourceFilter: SqlFragment,
   direction: TraversalDirection,
   edgeKinds: readonly string[],
-  sourceProjection?: SQL,
-): SQL {
+  sourceProjection?: SqlFragment,
+): SqlFragment {
   return compileDirectionUnion(direction, (fields) =>
     compileDirectionalEdgeExpansion(
       operation,
@@ -631,8 +632,8 @@ export function compileWorkingTableEdgeExpansion(
 
 function compileDirectionalExpansion(
   operation: IterativeGraphOperation,
-  workingRelation: SQL | WorkingTableIdentifier,
-  sourceFilter: SQL,
+  workingRelation: SqlFragment | WorkingTableIdentifier,
+  sourceFilter: SqlFragment,
   edgeKinds: readonly string[],
   joinField: "from_id" | "to_id",
   joinKindField: "from_kind" | "to_kind",
@@ -656,14 +657,14 @@ function compileDirectionalExpansion(
 
 function compileDirectionalEdgeExpansion(
   operation: IterativeGraphOperation,
-  workingRelation: SQL | WorkingTableIdentifier,
-  sourceFilter: SQL,
+  workingRelation: SqlFragment | WorkingTableIdentifier,
+  sourceFilter: SqlFragment,
   edgeKinds: readonly string[],
   joinField: "from_id" | "to_id",
   joinKindField: "from_kind" | "to_kind",
   targetField: "from_id" | "to_id",
   targetKindField: "from_kind" | "to_kind",
-  sourceProjection?: SQL,
+  sourceProjection?: SqlFragment,
 ): ReturnType<typeof sql> {
   const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), edgeKinds);
   const weightColumn =
@@ -788,7 +789,7 @@ function compileWeightExpression(
   dialect: DialectAdapter,
   weightProperty: string,
   defaultWeight: number | undefined,
-): SQL {
+): SqlFragment {
   const extracted = dialect.jsonExtractDouble(
     sql.raw("e.props"),
     jsonPointer([weightProperty]),

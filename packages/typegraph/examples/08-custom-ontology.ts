@@ -443,7 +443,7 @@ export async function main() {
     const publications = await store
       .query()
       .from("Publication", "pub", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.pub.title, kind: ctx.pub.kind }))
+      .select((ctx) => ({ title: ctx.pub["title"], kind: ctx.pub.kind }))
       .execute();
     for (const row of publications) {
       console.log(`  [${row.kind}] "${String(row.title)}"`);
@@ -459,7 +459,7 @@ export async function main() {
       .traverse("about", "a")
       .to("Topic", "t", { includeSubClasses: true })
       .whereNode("t", (topic) => topic.kind.eq(DeepLearning.kind))
-      .select((ctx) => ({ title: ctx.p.title, topic: ctx.t.name }))
+      .select((ctx) => ({ title: ctx.p.title, topic: ctx.t["name"] }))
       .execute();
     for (const row of dlPapers) {
       console.log(`  "${row.title}" is about ${String(row.topic)}`);
@@ -474,7 +474,7 @@ export async function main() {
       .traverse("about", "a")
       .to("Topic", "t", { includeSubClasses: true })
       .whereNode("t", (topic) => topic.kind.in([...aiOrNarrower]))
-      .select((ctx) => ({ title: ctx.pub.title, field: ctx.t.name }))
+      .select((ctx) => ({ title: ctx.pub["title"], field: ctx.t["name"] }))
       .execute();
     for (const row of aiPublications) {
       console.log(`  "${String(row.title)}" (via ${String(row.field)})`);
@@ -489,7 +489,7 @@ export async function main() {
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "none" })
       .to("Publication", "cited", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.cited.title }))
+      .select((ctx) => ({ title: ctx.cited["title"] }))
       .execute();
     console.log(`  Explicit cites edges: ${explicitCites.length}`);
     const impliedCites = await store
@@ -498,7 +498,7 @@ export async function main() {
       .whereNode("p", ({ title }) => title.eq(ATTENTION_PAPER_TITLE))
       .traverse("cites", "c", { expand: "implying" })
       .to("Publication", "cited", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.cited.title }))
+      .select((ctx) => ({ title: ctx.cited["title"] }))
       .execute();
     for (const row of impliedCites) {
       console.log(`  With expand "implying": cites "${String(row.title)}" (via buildsOn)`);
@@ -513,7 +513,7 @@ export async function main() {
       .whereNode("s", ({ title }) => title.eq(SEQ2SEQ_PAPER_TITLE))
       .traverse("citedBy", "cb", { expand: "all" })
       .to("Publication", "citing", { includeSubClasses: true })
-      .select((ctx) => ({ title: ctx.citing.title }))
+      .select((ctx) => ({ title: ctx.citing["title"] }))
       .execute();
     for (const row of citingPublications) {
       console.log(`  Cited by "${String(row.title)}"`);

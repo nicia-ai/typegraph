@@ -4,11 +4,11 @@
  * Implements dialect-specific SQL generation for PostgreSQL databases.
  * Uses PostgreSQL's native JSONB operators for JSON operations.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import { sql, type SqlFragment } from "../sql-fragment";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
+import { getSqlDialectProfile, inlineSqlStringLiteral } from "./profile";
 import { type DialectAdapter } from "./types";
 
 /**
@@ -25,14 +25,6 @@ import { type DialectAdapter } from "./types";
  * emitted SQL text (which callers rely on being identical across clauses)
  * is unchanged for the common case.
  */
-function escapePostgresLiteral(value: string): string {
-  if (value.includes("\\")) {
-    return `E'${value.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
-  }
-  // PostgreSQL uses '' to escape single quotes inside string literals
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
 /**
  * Converts a JSON pointer to PostgreSQL's text array path.
  *
@@ -40,7 +32,7 @@ function escapePostgresLiteral(value: string): string {
  * is generated when the same field is used in multiple clauses (SELECT, GROUP BY).
  * Pointers usually come from schema definitions, but some (e.g. a weighted
  * traversal's `weightProperty`) are runtime strings — safe either way
- * because {@link escapePostgresLiteral} escapes independently of server
+ * because the shared PostgreSQL literal renderer escapes independently of server
  * configuration.
  *
  * @example
@@ -48,7 +40,7 @@ function escapePostgresLiteral(value: string): string {
  * "/items/0" → ARRAY['items', '0']
  * "/a/b/c" → ARRAY['a', 'b', 'c']
  */
-function toPostgresPath(pointer: JsonPointer): SQL {
+function toPostgresPath(pointer: JsonPointer): SqlFragment {
   if (!pointer || pointer === "" || pointer === "/") {
     return sql.raw("ARRAY[]::text[]");
   }
@@ -61,7 +53,7 @@ function toPostgresPath(pointer: JsonPointer): SQL {
   // Use raw SQL for path segments to ensure identical SQL text
   // when the same field is used in multiple clauses (e.g., SELECT and GROUP BY)
   const escapedSegments = segments
-    .map((segment) => escapePostgresLiteral(segment))
+    .map((segment) => inlineSqlStringLiteral(segment, "postgres"))
     .join(", ");
   return sql.raw(`ARRAY[${escapedSegments}]`);
 }
@@ -273,16 +265,17 @@ export const postgresDialect: DialectAdapter = {
   // ============================================================
 
   bindValue(value) {
-    // PostgreSQL supports native booleans, no conversion needed
-    return value;
+    return getSqlDialectProfile("postgres").bindValue(value);
   },
 
   booleanLiteral(value) {
-    return sql.raw(this.booleanLiteralString(value));
+    return sql.raw(
+      getSqlDialectProfile("postgres").booleanLiteralString(value),
+    );
   },
 
   booleanLiteralString(value) {
-    return value ? "TRUE" : "FALSE";
+    return getSqlDialectProfile("postgres").booleanLiteralString(value);
   },
 
   quoteIdentifier(name) {

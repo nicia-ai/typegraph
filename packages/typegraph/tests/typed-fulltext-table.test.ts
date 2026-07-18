@@ -137,8 +137,8 @@ describe("typed Drizzle fulltext table (tsvectorStrategy)", () => {
     ).toBeDefined();
   });
 
-  it("is included in the @nicia-ai/typegraph/postgres named exports", async () => {
-    // `export *` from "@nicia-ai/typegraph/postgres" is only complete
+  it("is included in the Drizzle Postgres adapter exports", async () => {
+    // `export *` from "@nicia-ai/typegraph/adapters/drizzle/postgres" is only complete
     // if `fulltext` is named — drizzle-kit picks up named exports.
     const postgresPublic = await import("../src/backend/postgres");
     expect(postgresPublic.fulltext).toBeDefined();

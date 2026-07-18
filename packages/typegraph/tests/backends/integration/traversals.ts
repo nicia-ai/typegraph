@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { requireDefined } from "../../../src/utils/presence";
 import {
   seedPeopleCompaniesForMultiHopTraversals,
   seedPeopleCompaniesForOptionalTraversals,
@@ -80,9 +81,15 @@ export function registerTraversalIntegrationTests(
         .select((ctx) => ctx.p)
         .execute();
 
-      const alice = people.find((person) => person.name === "Alice")!;
-      const bob = people.find((person) => person.name === "Bob")!;
-      const charlie = people.find((person) => person.name === "Charlie")!;
+      const alice = requireDefined(
+        people.find((person) => person.name === "Alice"),
+      );
+      const bob = requireDefined(
+        people.find((person) => person.name === "Bob"),
+      );
+      const charlie = requireDefined(
+        people.find((person) => person.name === "Charlie"),
+      );
 
       // Alice knows Bob and Charlie
       await store.edges.knows.create(alice, bob, { since: "2020" });
@@ -124,8 +131,12 @@ export function registerTraversalIntegrationTests(
         .select((ctx) => ctx.p)
         .execute();
 
-      const alice = people.find((person) => person.name === "Alice")!;
-      const bob = people.find((person) => person.name === "Bob")!;
+      const alice = requireDefined(
+        people.find((person) => person.name === "Alice"),
+      );
+      const bob = requireDefined(
+        people.find((person) => person.name === "Bob"),
+      );
 
       await store.edges.knows.create(alice, bob, { since: "2023" });
 
@@ -189,7 +200,9 @@ export function registerTraversalIntegrationTests(
         .from("Person", "p")
         .select((ctx) => ctx.p)
         .execute();
-      const alice = people.find((person) => person.name === "Alice")!;
+      const alice = requireDefined(
+        people.find((person) => person.name === "Alice"),
+      );
 
       await store.edges.knows.create(alice, diana, { since: "2022" });
 

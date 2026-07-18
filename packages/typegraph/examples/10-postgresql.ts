@@ -24,7 +24,7 @@ import {
 import {
   createPostgresBackend,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { z } from "zod";
@@ -93,7 +93,7 @@ export async function main() {
 
   // Get connection URL from environment or use default
   const connectionString =
-    process.env.POSTGRES_URL ??
+    process.env["POSTGRES_URL"] ??
     "postgresql://typegraph:typegraph@localhost:5432/typegraph_example";
 
   console.log("Connecting to PostgreSQL...");

@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../../src/errors";
 import { type FieldRef, type OrderSpec } from "../../src/query/ast";
+import type {
+  AliasMap,
+  EdgeAliasMap,
+  SelectContext,
+} from "../../src/query/builder/types";
 import {
   buildColumnId,
   buildCursorFromRow,
@@ -19,6 +24,7 @@ import {
   parsePaginateOptions,
 } from "../../src/query/execution/pagination";
 import { jsonPointer } from "../../src/query/json-pointer";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Helpers
@@ -51,12 +57,13 @@ function validCursor(direction: "f" | "b" = "f"): string {
   });
 }
 
-/**
- * Mock context builder for testing paginated results.
- * Cast to any since we only need the row structure for cursor building.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Test mock
-const mockBuildContext = (row: Record<string, unknown>) => row as any;
+/** Mock context builder for testing paginated results. */
+function mockBuildContext<
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+>(row: Record<string, unknown>): SelectContext<Aliases, EdgeAliases> {
+  return row as SelectContext<Aliases, EdgeAliases>;
+}
 
 // ============================================================
 // Property Tests - Cursor Encoding/Decoding
@@ -378,7 +385,7 @@ describe("Order Direction Adjustment Properties", () => {
 
         for (const [index, spec] of specs.entries()) {
           const original = spec.direction;
-          const reversed = adjusted[index]!.direction;
+          const reversed = requireDefined(adjusted[index]).direction;
 
           expect(reversed).toBe(original === "asc" ? "desc" : "asc");
         }
@@ -406,7 +413,7 @@ describe("Order Direction Adjustment Properties", () => {
         const twice = adjustOrderByForDirection(once, "backward");
 
         for (const [index, spec] of specs.entries()) {
-          expect(twice[index]!.direction).toBe(spec.direction);
+          expect(requireDefined(twice[index]).direction).toBe(spec.direction);
         }
       }),
       { numRuns: 30 },
@@ -421,7 +428,7 @@ describe("Order Direction Adjustment Properties", () => {
 
     const adjusted = adjustOrderByForDirection([spec], "backward");
 
-    expect(adjusted[0]!.field).toEqual(spec.field);
+    expect(requireDefined(adjusted[0]).field).toEqual(spec.field);
   });
 });
 
@@ -541,9 +548,13 @@ describe("Cursor Predicate Properties", () => {
       if (predicate.expression.__type !== "or") return;
       expect(predicate.expression.predicates).toHaveLength(2);
       // First: name > 'Alice'
-      expect(predicate.expression.predicates[0]!.__type).toBe("comparison");
+      expect(requireDefined(predicate.expression.predicates[0]).__type).toBe(
+        "comparison",
+      );
       // Second: name = 'Alice' AND id > 100
-      expect(predicate.expression.predicates[1]!.__type).toBe("and");
+      expect(requireDefined(predicate.expression.predicates[1]).__type).toBe(
+        "and",
+      );
     });
 
     it("three columns creates three OR branches", () => {
@@ -602,7 +613,9 @@ describe("Cursor Predicate Properties", () => {
       const secondBranch = orExpr.predicates[1];
       expect(secondBranch?.__type).toBe("and");
       if (secondBranch?.__type !== "and") return;
-      expect(secondBranch.predicates[0]!.__type).toBe("null_check");
+      expect(requireDefined(secondBranch.predicates[0]).__type).toBe(
+        "null_check",
+      );
     });
 
     it("null in comparison produces isNotNull", () => {

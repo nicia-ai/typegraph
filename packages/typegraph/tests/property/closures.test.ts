@@ -6,6 +6,7 @@ import {
   invertClosure,
   isReachable,
 } from "../../src/ontology/closures";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Arbitrary Generators
@@ -59,7 +60,10 @@ const chainRelationsArb = fc
 
     const relations: (readonly [string, string])[] = [];
     for (let index = 0; index < unique.length - 1; index++) {
-      relations.push([unique[index]!, unique[index + 1]!] as const);
+      relations.push([
+        requireDefined(unique[index]),
+        requireDefined(unique[index + 1]),
+      ] as const);
     }
     return relations;
   });
@@ -99,8 +103,8 @@ function closuresEqual(
 
   for (const [index, element] of relationsA.entries()) {
     if (
-      element[0] !== relationsB[index]![0] ||
-      element[1] !== relationsB[index]![1]
+      element[0] !== requireDefined(relationsB[index])[0] ||
+      element[1] !== requireDefined(relationsB[index])[1]
     ) {
       return false;
     }
@@ -176,15 +180,17 @@ describe("Transitive Closure Properties", () => {
           const closure = computeTransitiveClosure(relations);
 
           // Extract the chain nodes in order
-          const nodes: string[] = [relations[0]![0]];
+          const nodes: string[] = [requireDefined(relations[0])[0]];
           for (const [, to] of relations) {
             nodes.push(to);
           }
 
           // First node should reach all subsequent nodes
-          const firstNode = nodes[0]!;
+          const firstNode = requireDefined(nodes[0]);
           for (let index = 1; index < nodes.length; index++) {
-            expect(isReachable(closure, firstNode, nodes[index]!)).toBe(true);
+            expect(
+              isReachable(closure, firstNode, requireDefined(nodes[index])),
+            ).toBe(true);
           }
         }),
         { numRuns: 50 },
@@ -615,8 +621,8 @@ describe("Edge Cases", () => {
             // Create a cycle: A→B→C→...→A
             const cycle: (readonly [string, string])[] = [];
             for (let index = 0; index < unique.length; index++) {
-              const from = unique[index]!;
-              const to = unique[(index + 1) % unique.length]!;
+              const from = requireDefined(unique[index]);
+              const to = requireDefined(unique[(index + 1) % unique.length]);
               cycle.push([from, to]);
             }
 

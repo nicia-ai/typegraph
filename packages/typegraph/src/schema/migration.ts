@@ -6,6 +6,7 @@
  */
 import { type IndexEntity } from "../core/types";
 import { type IndexDeclaration } from "../indexes/types";
+import { requireDefined } from "../utils/presence";
 import { canonicalEqual } from "./canonical";
 import {
   type JsonSchema,
@@ -302,8 +303,8 @@ function diffNodes(
   // Find modified nodes
   for (const name of beforeNames) {
     if (afterNames.has(name)) {
-      const nodeBefore = before[name]!;
-      const nodeAfter = after[name]!;
+      const nodeBefore = requireDefined(before[name]);
+      const nodeAfter = requireDefined(after[name]);
       const nodeChanges = diffNodeDef(name, nodeBefore, nodeAfter);
       changes.push(...nodeChanges);
     }
@@ -600,8 +601,8 @@ function diffEdges(
   // Find modified edges
   for (const name of beforeNames) {
     if (afterNames.has(name)) {
-      const edgeBefore = before[name]!;
-      const edgeAfter = after[name]!;
+      const edgeBefore = requireDefined(before[name]);
+      const edgeAfter = requireDefined(after[name]);
       const edgeChanges = diffEdgeDef(name, edgeBefore, edgeAfter);
       changes.push(...edgeChanges);
     }

@@ -91,8 +91,9 @@ same commit: either both persist or neither does, so the cursor can never advanc
 past a batch the graph did not durably record.
 
 Two constraints make this the *only* sanctioned transactional recipe on a store
-created with `{ history: true }` — which the Transaction Receipts and Bitemporal
-sections below both require:
+created with `createAdapterStore` or `createAdapterStoreWithSchema` and
+`{ history: true }` — which the Transaction Receipts and Bitemporal sections
+below both require:
 
 - **Write your own tables through the external handle you passed in**, never
   through `tx.sql`. Under history capture `tx.sql` is a present-but-throwing
@@ -162,8 +163,8 @@ connection. TypeGraph serializes the statements its collections issue; sequence
 your own raw statements yourself (don't `Promise.all` them with graph writes) so
 two queries never race on that connection.
 
-For a portable materializer that runs against several backends, branch on
-capability rather than message-matching: use
+For an adapter-backed materializer that runs against several backends, branch
+on capability rather than message-matching: use
 [`tx.sqlAvailability`](/recipes/#cross-store-transactions-drizzle--typegraph) to
 decide whether raw SQL is usable inside `store.transaction`, and
 [`isRecordedCaptureGuardError(error, code?)`](/errors/#recorded-capture-guard-codes)

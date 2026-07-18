@@ -20,7 +20,7 @@ import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, embedding } from "../../../src";
@@ -28,6 +28,7 @@ import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { createStore, createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string().optional() }),
@@ -77,11 +78,32 @@ describe("PGlite backend", () => {
       const fetched = await store.nodes.Person.getById(created.id);
 
       expect(fetched).toBeDefined();
-      expect(fetched!.name).toBe("Alice");
+      expect(requireDefined(fetched).name).toBe("Alice");
     });
   });
 
   describe("createLocalPgliteBackend()", () => {
+    it("closes the PGlite client when provisioning fails", async () => {
+      const provisioningError = new Error("migration failed");
+      const close = vi.fn(() => Promise.resolve());
+      const client = {
+        close,
+        exec: () => Promise.reject(provisioningError),
+      } as unknown as PGlite;
+      const createSpy = vi.spyOn(PGlite, "create").mockResolvedValue(client);
+
+      try {
+        await expect(
+          createLocalPgliteBackend({
+            vector: false,
+          }),
+        ).rejects.toBe(provisioningError);
+        expect(close).toHaveBeenCalledOnce();
+      } finally {
+        createSpy.mockRestore();
+      }
+    });
+
     it("advertises pgvector and runs a vector search end to end", async () => {
       const { backend } = await createLocalPgliteBackend();
       cleanups.push(() => backend.close());
@@ -103,8 +125,10 @@ describe("PGlite backend", () => {
       });
 
       expect(hits).toHaveLength(2);
-      expect(hits[0]!.node.title).toBe("near");
-      expect(hits[0]!.score).toBeGreaterThan(hits[1]!.score);
+      expect(requireDefined(hits[0]).node.title).toBe("near");
+      expect(requireDefined(hits[0]).score).toBeGreaterThan(
+        requireDefined(hits[1]).score,
+      );
     });
 
     it("runs ordinary CRUD and transactions", async () => {
@@ -151,7 +175,7 @@ describe("PGlite backend", () => {
         limit: 1,
         metric: "cosine",
       });
-      expect(hits[0]!.node.title).toBe("only");
+      expect(requireDefined(hits[0]).node.title).toBe("only");
     });
 
     it("persists data (and embeddings) to an on-disk dataDir across reopen", async () => {
@@ -187,7 +211,7 @@ describe("PGlite backend", () => {
       await second.backend.close();
 
       expect(fetched?.title).toBe("persisted");
-      expect(hits[0]!.node.title).toBe("persisted");
+      expect(requireDefined(hits[0]).node.title).toBe("persisted");
     });
   });
 });

@@ -33,6 +33,7 @@ import {
 } from "../store/operations/node-write-pipeline";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
+import { storeBackend } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { checkUniquenessConstraints } from "../store/uniqueness";
 import { validateOptionalCanonicalIsoDate } from "../utils/date";
@@ -89,7 +90,7 @@ export async function importGraph<G extends GraphDef>(
   const errors: ImportError[] = [];
   const graph = store.graph;
   const graphId = store.graphId;
-  const backend = store.backend;
+  const backend = storeBackend(store);
   const registry = store.registry;
 
   // Build lookup maps for schema validation

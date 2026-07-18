@@ -15,10 +15,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { migrateLegacyEmbeddings } from "../../../src/backend/migrate-vectors";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { type GraphBackend } from "../../../src/backend/types";
+import { requireDefined } from "../../../src/utils/presence";
 import { isMissingTableError } from "../../../src/utils/sql-errors";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const LEGACY_TABLE = "typegraph_node_embeddings";
@@ -35,7 +36,7 @@ function requirePostgres(ctx: { skip: () => void }): { pool: Pool } {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -137,7 +138,11 @@ async function countPerField(
   fieldPath: string,
   graphId: string,
 ): Promise<number> {
-  const table = backend.vectorStrategy!.tableName(graphId, nodeKind, fieldPath);
+  const table = requireDefined(backend.vectorStrategy).tableName(
+    graphId,
+    nodeKind,
+    fieldPath,
+  );
   try {
     const result = await pool.query<{ c: string }>(
       `SELECT COUNT(*) AS c FROM "${table}" WHERE "graph_id" = $1`,
@@ -205,7 +210,7 @@ describe("migrateLegacyEmbeddings (pgvector, end-to-end)", () => {
       await countPerField(backend, pool, "Document", "embedding", "g2"),
     ).toBe(1);
 
-    const hits = await backend.vectorSearch!({
+    const hits = await requireDefined(backend.vectorSearch)({
       graphId: "g1",
       nodeKind: "Document",
       fieldPath: "embedding",

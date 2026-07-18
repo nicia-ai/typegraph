@@ -4,12 +4,14 @@
   "testRunner": "vitest",
   "plugins": ["@stryker-mutator/vitest-runner"],
   "mutate": [
+    "src/backend/graph-backend-projection.ts",
     "src/provenance/**/*.ts",
     "src/interchange/import.ts",
     "src/store/operations/node-write-pipeline.ts",
     "src/store/operations/write-transaction.ts",
     "src/store/uniqueness.ts",
-    "src/store/recorded-capture/clock.ts"
+    "src/store/recorded-capture/clock.ts",
+    "src/store/history-store-backend.ts"
   ],
   "ignorePatterns": ["dist", "node_modules"],
   "reporters": ["html", "clear-text", "progress"],

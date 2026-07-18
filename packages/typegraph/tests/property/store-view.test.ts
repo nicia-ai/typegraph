@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../../src";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
 const Item = defineNode("Item", {
@@ -101,8 +102,8 @@ describe("StoreView property tests", () => {
         }
         for (const spec of scenario.edges) {
           await store.edges.link.create(
-            { kind: "Item", id: ids[spec.from % ids.length]! },
-            { kind: "Item", id: ids[spec.to % ids.length]! },
+            { kind: "Item", id: requireDefined(ids[spec.from % ids.length]) },
+            { kind: "Item", id: requireDefined(ids[spec.to % ids.length]) },
             {},
             withValidity(spec.validFrom, spec.validTo),
           );
@@ -137,7 +138,7 @@ describe("StoreView property tests", () => {
         expect([...viewQuery].toSorted()).toEqual([...manualQuery].toSorted());
 
         // Edge findFrom (from the first node)
-        const ref = { kind: "Item", id: ids[0]! } as const;
+        const ref = { kind: "Item", id: requireDefined(ids[0]) } as const;
         expect(sortedIds(await past.edges.link.findFrom(ref))).toEqual(
           sortedIds(await store.edges.link.findFrom(ref, manual)),
         );
@@ -161,15 +162,15 @@ describe("StoreView property tests", () => {
         }
         for (const spec of scenario.edges) {
           await store.edges.link.create(
-            { kind: "Item", id: ids[spec.from % ids.length]! },
-            { kind: "Item", id: ids[spec.to % ids.length]! },
+            { kind: "Item", id: requireDefined(ids[spec.from % ids.length]) },
+            { kind: "Item", id: requireDefined(ids[spec.to % ids.length]) },
             {},
             withValidity(spec.validFrom, spec.validTo),
           );
         }
 
         const current = store.view({ mode: "current" });
-        const ref = { kind: "Item", id: ids[0]! } as const;
+        const ref = { kind: "Item", id: requireDefined(ids[0]) } as const;
 
         expect(sortedIds(await current.nodes.Item.find())).toEqual(
           sortedIds(await store.nodes.Item.find()),

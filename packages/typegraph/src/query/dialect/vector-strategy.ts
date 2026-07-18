@@ -29,8 +29,6 @@
  * `vec_distance_cosine`): a strategy whose `capabilities.indexTypes` is
  * `["none"]` simply never emits an ANN index and `buildSearch` always scans.
  */
-import { type SQL, sql } from "drizzle-orm";
-
 import { type StrategyTableContribution } from "../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
@@ -41,6 +39,8 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../backend/types";
+import { requireDefined } from "../../utils/presence";
+import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
  * `logicalName` prefix of a strategy-owned vector slot. Each
@@ -110,9 +110,9 @@ export function buildVectorCapabilities(
  * index lifecycle — and advertises exactly the metrics and index types it
  * can honor. Adding the Nth backend is one of these objects; no core edits.
  */
-export interface VectorStrategy {
+export type VectorStrategy = Readonly<{
   /** Human-readable identifier used in error messages and telemetry. */
-  readonly name: string;
+  name: string;
 
   /**
    * The metrics, index types, and dimension ceiling this strategy honors —
@@ -120,7 +120,7 @@ export interface VectorStrategy {
    * engines is legitimate and explicit here (pgvector has `inner_product`;
    * libSQL/sqlite-vec do not), never a silent runtime failure.
    */
-  readonly capabilities: VectorCapabilities;
+  capabilities: VectorCapabilities;
 
   /**
    * Deterministic physical table (or virtual-table) name backing a field in
@@ -128,7 +128,12 @@ export interface VectorStrategy {
    * and the backend uses it to route upserts/deletes. Must be a stable,
    * collision-safe SQL identifier derived from `(graphId, nodeKind, fieldPath)`.
    */
-  tableName(graphId: string, nodeKind: string, fieldPath: string): string;
+  tableName: (
+    this: void,
+    graphId: string,
+    nodeKind: string,
+    fieldPath: string,
+  ) => string;
 
   /**
    * The per-field storage this strategy owns for `slot`, as Drizzle-free
@@ -139,18 +144,22 @@ export interface VectorStrategy {
    * FTS5 / tsvector virtual tables do — these are materialized per graph by
    * `materializeIndexes()`, not by global `bootstrapTables`.
    */
-  ownedTables(slot: VectorSlot): readonly StrategyTableContribution[];
+  ownedTables: (
+    this: void,
+    slot: VectorSlot,
+  ) => readonly StrategyTableContribution[];
 
   /**
    * Emits the statement(s) that upsert a single embedding into the slot's
    * storage. Multiple statements are allowed for engines that cannot upsert
    * a vector in one statement (e.g. a `vec0` virtual table → DELETE+INSERT).
    */
-  buildUpsert(
+  buildUpsert: (
+    this: void,
     slot: VectorSlot,
     params: UpsertEmbeddingParams,
     timestamp: string,
-  ): readonly SQL[];
+  ) => readonly SqlFragment[];
 
   /**
    * Emits the statement(s) that upsert MANY embeddings into the slot's
@@ -159,14 +168,19 @@ export interface VectorStrategy {
    * rows carry distinct `nodeId`s and fit the connection's bound-parameter
    * budget (it chunks before calling).
    */
-  buildUpsertBatch?(
+  buildUpsertBatch?: (
+    this: void,
     slot: VectorSlot,
     params: UpsertEmbeddingBatchParams,
     timestamp: string,
-  ): readonly SQL[];
+  ) => readonly SqlFragment[];
 
   /** Emits the statement(s) that delete a single embedding from the slot. */
-  buildDelete(slot: VectorSlot, params: DeleteEmbeddingParams): readonly SQL[];
+  buildDelete: (
+    this: void,
+    slot: VectorSlot,
+    params: DeleteEmbeddingParams,
+  ) => readonly SqlFragment[];
 
   /**
    * Raw DDL statement(s) that drop the slot's entire physical storage
@@ -176,7 +190,7 @@ export interface VectorStrategy {
    * `ownedTables(...).createDdl`) for `backend.executeDdl`; must be idempotent
    * (`IF EXISTS`).
    */
-  buildDropStorage(slot: VectorSlot): readonly string[];
+  buildDropStorage: (this: void, slot: VectorSlot) => readonly string[];
 
   /**
    * Emits the similarity-search query for the `backend.vectorSearch` path,
@@ -196,11 +210,12 @@ export interface VectorStrategy {
    * pre-pushdown behavior: tombstoned ids are dropped after top-k during
    * hydration, so results can shrink below `limit` under index drift.
    */
-  buildSearch(
+  buildSearch: (
+    this: void,
     slot: VectorSlot,
     params: VectorSearchParams,
-    candidates?: SQL,
-  ): SQL;
+    candidates?: SqlFragment,
+  ) => SqlFragment;
 
   /**
    * True when {@link buildSearch} returns EXACT rankings — a brute-force
@@ -224,25 +239,27 @@ export interface VectorStrategy {
    * `embeddingColumn` is the already-qualified column SQL; `queryEmbedding`
    * is formatted by the strategy into its engine's literal form.
    */
-  distanceExpression(
-    embeddingColumn: SQL,
+  distanceExpression: (
+    this: void,
+    embeddingColumn: SqlFragment,
     queryEmbedding: readonly number[],
     metric: VectorMetric,
-  ): SQL;
+  ) => SqlFragment;
 
   /**
    * Emits the ANN index creation statement for a slot, or `undefined` when
    * indexing is inline (vec0) or unsupported (brute-force-only strategies).
    * Invoked through `backend.createVectorIndex` during `materializeIndexes`.
    */
-  buildCreateIndex?(
+  buildCreateIndex?: (
+    this: void,
     slot: VectorSlot,
     options?: Readonly<{ concurrent?: boolean }>,
-  ): SQL | undefined;
+  ) => SqlFragment | undefined;
 
   /** Emits the ANN index drop statement, or `undefined` when not applicable. */
-  buildDropIndex?(slot: VectorSlot): SQL | undefined;
-}
+  buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
+}>;
 
 // ============================================================
 // Shared, dialect-neutral expression math
@@ -258,9 +275,9 @@ export interface VectorStrategy {
  * are returned as-is (lower distance already ranks better, ordered ASC).
  */
 export function vectorScoreExpression(
-  distanceExpression: SQL,
+  distanceExpression: SqlFragment,
   metric: VectorMetric,
-): SQL {
+): SqlFragment {
   switch (metric) {
     case "cosine": {
       return sql`(1 - (${distanceExpression}))`;
@@ -281,10 +298,10 @@ export function vectorScoreExpression(
  * translating the score threshold back into the metric's distance space.
  */
 export function vectorMinScoreCondition(
-  distanceExpression: SQL,
+  distanceExpression: SqlFragment,
   metric: VectorMetric,
   minScore: number,
-): SQL {
+): SqlFragment {
   // Validate against the RESOLVED metric — both the compiler's relevance CTE
   // and the backend search path funnel here, so an out-of-range floor (e.g. a
   // cosine minScore of 5 → `distance <= 1 - 5`, which matches nothing) is
@@ -385,7 +402,7 @@ export function shortHash(input: string): string {
   let h1 = 0xde_ad_be_ef;
   let h2 = 0x41_c6_ce_57;
   for (let index = 0; index < input.length; index++) {
-    const ch = input.codePointAt(index)!;
+    const ch = requireDefined(input.codePointAt(index));
     h1 = Math.imul(h1 ^ ch, 0x9e_37_79_b1);
     h2 = Math.imul(h2 ^ ch, 0x5f_35_64_95);
   }

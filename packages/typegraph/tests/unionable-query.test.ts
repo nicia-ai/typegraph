@@ -4,7 +4,6 @@
  * Tests the set operation query builder that supports UNION, UNION ALL,
  * INTERSECT, and EXCEPT operations.
  */
-import { type SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -15,34 +14,7 @@ import {
   param as parameter,
 } from "../src";
 import { buildKindRegistry } from "../src/registry";
-
-/**
- * Helper to extract SQL string from a Drizzle SQL object.
- */
-function sqlToString(sqlObject: SQL): string {
-  function flatten(object: unknown): string {
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "value" in object &&
-      Array.isArray(object.value)
-    ) {
-      return (object as { value: string[] }).value.join("");
-    }
-    if (
-      typeof object === "object" &&
-      object !== null &&
-      "queryChunks" in object &&
-      Array.isArray((object as { queryChunks: unknown[] }).queryChunks)
-    ) {
-      return (object as { queryChunks: unknown[] }).queryChunks
-        .map((c) => flatten(c))
-        .join("");
-    }
-    return "?";
-  }
-  return flatten(sqlObject);
-}
+import { toSqlString as sqlToString } from "./sql-test-utils";
 
 // Test schema definitions
 const User = defineNode("User", {

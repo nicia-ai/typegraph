@@ -15,6 +15,7 @@ import type {
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 
 // A real 2-kind graph so the merge generics resolve against actual TypeGraph
 // type machinery (not a stub) — this is the "generics resolve against a real
@@ -146,7 +147,8 @@ describe("normalizeMergeOptions defaults", () => {
   });
 
   it("threads a function onPropertyConflict and canonical selector through", () => {
-    const canonical = (cluster: ResolvedCluster) => cluster.members[0]!;
+    const canonical = (cluster: ResolvedCluster) =>
+      requireDefined(cluster.members[0]);
     const normalized = normalizeMergeOptions<G>({
       onPropertyConflict: (conflict) => conflict.resolution,
       canonical,
@@ -251,8 +253,8 @@ describe("normalizeMergeOptions validation", () => {
         },
       },
     });
-    expect(normalized.resolve.Patient?.threshold).toBe(0.85);
-    expect(normalized.resolve.Patient?.similarity.kind).toBe("fulltext");
+    expect(normalized.resolve["Patient"]?.threshold).toBe(0.85);
+    expect(normalized.resolve["Patient"]?.similarity.kind).toBe("fulltext");
   });
 });
 

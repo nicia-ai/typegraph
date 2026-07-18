@@ -30,8 +30,12 @@ function buildInsertUniqueSqlite(
 ): SQL {
   const { uniques } = tables;
 
-  const columns = sql.raw(`"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`);
-  const conflictColumns = sql.raw(`"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`);
+  const columns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
+  );
 
   return sql`
     INSERT INTO ${uniques} (${columns})
@@ -76,8 +80,12 @@ function buildInsertUniquePostgres(
 ): SQL {
   const { uniques } = tables;
 
-  const columns = sql.raw(`"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`);
-  const conflictColumns = sql.raw(`"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`);
+  const columns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
+  );
 
   const tableName = getTableName(uniques);
   const existingColumn = (column: { name: string }) =>
@@ -159,10 +167,19 @@ export function buildInsertUniqueBatch(
   // EXISTING row inside DO UPDATE: Postgres qualifies with the table name,
   // SQLite uses the bare quoted column.
   const tableName = getTableName(uniques);
-  const existingColumn = (column: Readonly<{ name: string }>) =>
-    dialect === "postgres" ?
-      sql.raw(`"${tableName}"."${column.name}"`)
-    : sql.raw(`"${column.name}"`);
+  const existingColumn = (column: Readonly<{ name: string }>) => {
+    switch (dialect) {
+      case "postgres": {
+        return sql.raw(`"${tableName}"."${column.name}"`);
+      }
+      case "sqlite": {
+        return sql.raw(`"${column.name}"`);
+      }
+      default: {
+        return dialect satisfies never;
+      }
+    }
+  };
   const excludedColumn = (column: Readonly<{ name: string }>) =>
     sql.raw(`excluded."${column.name}"`);
 

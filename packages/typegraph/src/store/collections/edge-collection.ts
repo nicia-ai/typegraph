@@ -16,6 +16,7 @@ import { type AnyEdgeType, type TemporalMode } from "../../core/types";
 import { UnsupportedPredicateError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
+import { requireDefined } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { type EdgeRow } from "../row-mappers";
 import {
@@ -576,12 +577,15 @@ export function createEdgeCollection<
           }
 
           const deletedAt =
-            pendingEntry === undefined ? original!.deleted_at : undefined;
+            pendingEntry === undefined ?
+              requireDefined(original).deleted_at
+            : undefined;
 
           let dirty: UpsertDirtyCheck | undefined;
           if (config.upsertDirtyCheck !== undefined) {
             const currentProps =
-              pendingEntry?.props ?? rowPropsToObject(original!.props);
+              pendingEntry?.props ??
+              rowPropsToObject(requireDefined(original).props);
             try {
               // The fetched edge carries the authoritative kind (an id may
               // resolve to a different edge kind than this collection).
@@ -604,7 +608,9 @@ export function createEdgeCollection<
 
           if (coalesce) {
             if (pendingEntry === undefined) {
-              results[itemIndex] = narrowEdge<E>(rowToEdge(original!));
+              results[itemIndex] = narrowEdge<E>(
+                rowToEdge(requireDefined(original)),
+              );
             } else {
               deferred.push({
                 index: itemIndex,
@@ -631,7 +637,9 @@ export function createEdgeCollection<
           const createInputs = toCreate.map((entry) => entry.input);
           const created = await executeEdgeCreateBatch(createInputs, target);
           for (const [index, entry] of toCreate.entries()) {
-            results[entry.index] = narrowEdge<E>(created[index]!);
+            results[entry.index] = narrowEdge<E>(
+              requireDefined(created[index]),
+            );
           }
         }
 
@@ -646,7 +654,7 @@ export function createEdgeCollection<
         // Items that coalesced against an in-batch write take that write's
         // result (now filled). Its sourceIndex is always a write slot.
         for (const { index, sourceIndex } of deferred) {
-          results[index] = results[sourceIndex]!;
+          results[index] = requireDefined(results[sourceIndex]);
         }
 
         return { results, mutations: toCreate.length + toUpdate.length };

@@ -17,8 +17,8 @@
  */
 import { afterEach, beforeEach, describe } from "vitest";
 
-import { createStoreWithSchema } from "../../src";
-import type { GraphBackend } from "../../src/backend/types";
+import { createAdapterStoreWithSchema } from "../../src";
+import type { AdapterBackend } from "../../src/backend/types";
 import type { IntegrationStore, IntegrationTestContext } from "./integration";
 import {
   integrationTestGraph,
@@ -53,8 +53,8 @@ import {
 /**
  * Result from a backend factory, including optional cleanup function.
  */
-type BackendFactoryResult = Readonly<{
-  backend: GraphBackend;
+type BackendFactoryResult<TNativeTransaction> = Readonly<{
+  backend: AdapterBackend<TNativeTransaction>;
   /** Optional cleanup function called after each test (e.g., to close connection pools) */
   cleanup?: () => void | Promise<void>;
 }>;
@@ -64,8 +64,9 @@ type BackendFactoryResult = Readonly<{
  * Returns the backend and an optional cleanup function for resource management.
  * May be async (e.g. for libsql which requires async DDL setup).
  */
-type BackendFactory = () =>
-  BackendFactoryResult | Promise<BackendFactoryResult>;
+type BackendFactory<TNativeTransaction> = () =>
+  | BackendFactoryResult<TNativeTransaction>
+  | Promise<BackendFactoryResult<TNativeTransaction>>;
 
 /**
  * Options for the integration test suite.
@@ -82,13 +83,14 @@ type IntegrationTestSuiteOptions = Readonly<{
  * @param createBackend - Factory function that returns a fresh backend
  * @param options - Optional test configuration
  */
-export function createIntegrationTestSuite(
+export function createIntegrationTestSuite<TNativeTransaction>(
   name: string,
-  createBackend: BackendFactory,
+  createBackend: BackendFactory<TNativeTransaction>,
   _options: IntegrationTestSuiteOptions = {},
 ): void {
   describe(`${name} Integration Tests`, () => {
     let store: IntegrationStore | undefined;
+    let adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
     let cleanup: (() => void | Promise<void>) | undefined;
 
     const context = {
@@ -100,14 +102,37 @@ export function createIntegrationTestSuite(
         }
         return store;
       },
+      createStore: async (graph, options) => {
+        if (adapterBackend === undefined) {
+          throw new Error("Integration backend is not initialized.");
+        }
+        const [createdStore] = await createAdapterStoreWithSchema(
+          graph,
+          adapterBackend,
+          options,
+        );
+        return createdStore;
+      },
+      createHistoryStore: async (graph, options) => {
+        if (adapterBackend === undefined) {
+          throw new Error("Integration backend is not initialized.");
+        }
+        const [createdStore] = await createAdapterStoreWithSchema(
+          graph,
+          adapterBackend,
+          { ...options, history: true },
+        );
+        return createdStore;
+      },
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {
       const result = await createBackend();
+      adapterBackend = result.backend;
       // #135: createStoreWithSchema is the canonical durable-marker
       // writer. The shared fulltext suite exercises fulltext ops, which
       // now (correctly) require materialization at boot.
-      [store] = await createStoreWithSchema(
+      [store] = await createAdapterStoreWithSchema(
         integrationTestGraph,
         result.backend,
       );

@@ -14,6 +14,7 @@ import {
   type DynamicSelectableNode,
 } from "../src/query/builder/dynamic";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Document = defineNode("Document", {
@@ -72,18 +73,15 @@ describe("fromDynamic", () => {
       .execute();
 
     expect(rows).toHaveLength(2);
-    const titles = rows.map((row) => row.title).toSorted();
+    const titles = rows.map((row) => row["title"]).toSorted();
     expect(titles).toEqual(["Attention is all you need", "GPT-3"]);
 
-    expectTypeOf(rows[0]!).toExtend<DynamicSelectableNode>();
-    expect(rows[0]).toMatchObject({
-      id: expect.any(String),
-      kind: "Paper",
-      meta: expect.objectContaining({
-        version: expect.any(Number),
-        createdAt: expect.any(String),
-      }),
-    });
+    expectTypeOf(requireDefined(rows[0])).toExtend<DynamicSelectableNode>();
+    const firstRow = requireDefined(rows[0]);
+    expect(typeof firstRow.id).toBe("string");
+    expect(firstRow.kind).toBe("Paper");
+    expect(typeof firstRow.meta.version).toBe("number");
+    expect(typeof firstRow.meta.createdAt).toBe("string");
   });
 
   it("throws KindNotFoundError on unknown kind", async () => {
@@ -128,13 +126,13 @@ describe("traverseDynamic + toDynamic", () => {
 
     expect(rows).toHaveLength(1);
     const [row] = rows;
-    expect(row?.paper.title).toBe("GPT-2");
-    expect(row?.author.name).toBe("Alec Radford");
+    expect(row?.paper["title"]).toBe("GPT-2");
+    expect(row?.author["name"]).toBe("Alec Radford");
     expect(row?.edge.kind).toBe("authoredBy");
 
-    expectTypeOf(row!.paper).toExtend<DynamicSelectableNode>();
-    expectTypeOf(row!.author).toExtend<DynamicSelectableNode>();
-    expectTypeOf(row!.edge).toExtend<DynamicSelectableEdge>();
+    expectTypeOf(requireDefined(row).paper).toExtend<DynamicSelectableNode>();
+    expectTypeOf(requireDefined(row).author).toExtend<DynamicSelectableNode>();
+    expectTypeOf(requireDefined(row).edge).toExtend<DynamicSelectableEdge>();
   });
 
   it("filters on runtime-edge properties via whereEdge", async () => {
@@ -163,7 +161,7 @@ describe("traverseDynamic + toDynamic", () => {
       .execute();
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.name).toBe("First");
+    expect(rows[0]?.["name"]).toBe("First");
   });
 
   it("throws KindNotFoundError on unknown edge or target kind", async () => {
@@ -225,7 +223,10 @@ describe("optionalTraverseDynamic", () => {
       .fromDynamic("Paper", "p")
       .optionalTraverseDynamic("authoredBy", "a")
       .toDynamic("Author", "u")
-      .select((ctx) => ({ paperTitle: ctx.p.title, authorName: ctx.u?.name }))
+      .select((ctx) => ({
+        paperTitle: ctx.p["title"],
+        authorName: ctx.u?.["name"],
+      }))
       .execute();
 
     expect(rows).toHaveLength(2);
@@ -340,7 +341,7 @@ describe("mixed typed + dynamic aliases", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]?.doc.title).toBe("the doc");
-    expect(rows[0]?.tag.label).toBe("research");
+    expect(rows[0]?.tag["label"]).toBe("research");
   });
 });
 
@@ -390,7 +391,7 @@ describe(".field() discriminator", () => {
       .execute();
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.title).toBe("alpha");
+    expect(rows[0]?.["title"]).toBe("alpha");
   });
 });
 

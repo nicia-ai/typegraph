@@ -21,16 +21,16 @@ import {
 import { z } from "zod";
 
 import {
-  type AdoptedTransaction,
-  createStore,
+  type AdapterHistoryStore,
+  type AdapterStore,
+  createAdapterStore,
   defineGraph,
   defineNode,
-  type HistoryStore,
-  type MeasurableHistoryTransactionContext,
+  type MeasurableAdapterHistoryTransactionContext,
+  type MeasurableAdapterTransactionContext,
   type MeasurableTransactionContext,
   type RecordedInstant,
   type ScopedMeasure,
-  type Store,
   type TransactionContext,
   type TransactionOutcome,
 } from "../src";
@@ -70,7 +70,7 @@ function createHistoryStore(db: BetterSQLite3Database) {
     executionProfile: { isSync: true },
     tables: defaultTables,
   });
-  return createStore(graph, backend, { history: true });
+  return createAdapterStore(graph, backend, { history: true });
 }
 
 function requireRecordedInstant(
@@ -115,7 +115,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend, { history: true });
+    const store = createAdapterStore(graph, backend, { history: true });
 
     // The caller owns BEGIN / COMMIT; TypeGraph flushes capture before COMMIT.
     sqlite.exec("BEGIN");
@@ -145,7 +145,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend, { history: true });
+    const store = createAdapterStore(graph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     // Smuggle the transaction context out of the callback. Capture flushed and
@@ -169,7 +169,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend, { history: true });
+    const store = createAdapterStore(graph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     let caught: unknown;
@@ -194,7 +194,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend, { history: true });
+    const store = createAdapterStore(graph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     let nodeId: string | undefined;
@@ -266,7 +266,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend);
+    const store = createAdapterStore(graph, backend);
 
     sqlite.exec("BEGIN");
     const { result, receipt } = await store.withRecordedTransaction(
@@ -292,7 +292,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(composedGraph, backend, { history: true });
+    const store = createAdapterStore(composedGraph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     const { result: projected, receipt } = await store.withRecordedTransaction(
@@ -328,7 +328,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(composedGraph, backend, { history: true });
+    const store = createAdapterStore(composedGraph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     const { result: projected, receipt } = await store.withRecordedTransaction(
@@ -355,7 +355,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(composedGraph, backend, { history: true });
+    const store = createAdapterStore(composedGraph, backend, { history: true });
 
     sqlite.exec("BEGIN");
     const { result, receipt } = await store.withRecordedTransaction(
@@ -410,7 +410,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend);
+    const store = createAdapterStore(graph, backend);
 
     sqlite.exec("BEGIN");
     const { result: escaped, receipt } = await store.withRecordedTransaction(
@@ -434,7 +434,7 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
       executionProfile: { isSync: true },
       tables: defaultTables,
     });
-    const store = createStore(graph, backend);
+    const store = createAdapterStore(graph, backend);
 
     await store.transaction((tx) => {
       // Plain transactions run no recorder, so there is nothing to scope.
@@ -449,16 +449,16 @@ describe("withRecordedTransaction (adopted-tx recorded capture)", () => {
 // Never invoked: the assertions are checked by `tsc`, and the bodies reference
 // `declare`d values that are erased at runtime.
 function measureTypeAssertions(
-  history: HistoryStore<typeof graph>,
-  plain: Store<typeof graph>,
-  externalTx: AdoptedTransaction,
+  history: AdapterHistoryStore<typeof graph, unknown>,
+  plain: AdapterStore<typeof graph, unknown>,
+  externalTx: unknown,
 ): void {
   // Receipt-enabled contexts expose `measure`; a plain context does not.
   expectTypeOf<MeasurableTransactionContext<typeof graph>>().toHaveProperty(
     "measure",
   );
   expectTypeOf<
-    MeasurableHistoryTransactionContext<typeof graph>
+    MeasurableAdapterHistoryTransactionContext<typeof graph, unknown>
   >().toHaveProperty("measure");
   expectTypeOf<TransactionContext<typeof graph>>().not.toHaveProperty(
     "measure",
@@ -467,9 +467,9 @@ function measureTypeAssertions(
   // Assignability chain: history-measurable ⊑ measurable ⊑ TransactionContext,
   // so a projector helper typed against any of the three accepts the context
   // `withRecordedTransaction` hands it.
-  expectTypeOf<MeasurableHistoryTransactionContext<typeof graph>>().toExtend<
-    MeasurableTransactionContext<typeof graph>
-  >();
+  expectTypeOf<
+    MeasurableAdapterHistoryTransactionContext<typeof graph, unknown>
+  >().toExtend<MeasurableTransactionContext<typeof graph>>();
   expectTypeOf<MeasurableTransactionContext<typeof graph>>().toExtend<
     TransactionContext<typeof graph>
   >();
@@ -479,7 +479,9 @@ function measureTypeAssertions(
   expectTypeOf(
     history.withRecordedTransaction(externalTx, async (tx) => {
       expectTypeOf(tx.measure).toEqualTypeOf<
-        ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>
+        ScopedMeasure<
+          MeasurableAdapterHistoryTransactionContext<typeof graph, unknown>
+        >
       >();
       return tx.nodes.Person.count();
     }),
@@ -488,7 +490,9 @@ function measureTypeAssertions(
   expectTypeOf(
     plain.withRecordedTransaction(externalTx, async (tx) => {
       expectTypeOf(tx.measure).toEqualTypeOf<
-        ScopedMeasure<MeasurableTransactionContext<typeof graph>>
+        ScopedMeasure<
+          MeasurableAdapterTransactionContext<typeof graph, unknown>
+        >
       >();
       return tx.nodes.Person.count();
     }),

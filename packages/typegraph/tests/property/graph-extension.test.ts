@@ -41,6 +41,7 @@ import {
   computeSchemaHash,
   serializeSchema,
 } from "../../src/schema/serializer";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Identifier arbitraries
@@ -87,10 +88,10 @@ const stringPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
       wantSearchable,
     }): PropertyAndExample => {
       const property: Record<string, unknown> = { type: "string" };
-      if (minLength !== undefined) property.minLength = minLength;
-      if (maxLength !== undefined) property.maxLength = maxLength;
-      if (optional) property.optional = true;
-      if (wantSearchable) property.searchable = { language: "english" };
+      if (minLength !== undefined) property["minLength"] = minLength;
+      if (maxLength !== undefined) property["maxLength"] = maxLength;
+      if (optional) property["optional"] = true;
+      if (wantSearchable) property["searchable"] = { language: "english" };
       const example = "x".repeat(Math.max(minLength ?? 0, 1));
       return {
         property: property as unknown as ExtensionPropertyType,
@@ -106,8 +107,8 @@ const numberPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
   })
   .map(({ int, optional }): PropertyAndExample => {
     const property: Record<string, unknown> = { type: "number" };
-    if (int) property.int = true;
-    if (optional) property.optional = true;
+    if (int) property["int"] = true;
+    if (optional) property["optional"] = true;
     return {
       property: property as unknown as ExtensionPropertyType,
       example: int ? 7 : 1.5,
@@ -118,7 +119,7 @@ const booleanPropertyArb: fc.Arbitrary<PropertyAndExample> = fc
   .record({ optional: fc.boolean() })
   .map(({ optional }): PropertyAndExample => {
     const property: Record<string, unknown> = { type: "boolean" };
-    if (optional) property.optional = true;
+    if (optional) property["optional"] = true;
     return {
       property: property as unknown as ExtensionPropertyType,
       example: true,
@@ -228,7 +229,7 @@ describe("graph extension property tests", () => {
         });
         const compiled = compileGraphExtension(document);
         expect(compiled.nodes).toHaveLength(1);
-        const node = compiled.nodes[0]!;
+        const node = requireDefined(compiled.nodes[0]);
         expect(node.type.kind).toBe(kindName);
 
         const result = node.type.schema.safeParse(example);
@@ -262,9 +263,13 @@ describe("graph extension property tests", () => {
           },
         });
         const compiled = compileGraphExtension(document);
-        const schema = compiled.nodes[0]!.type.schema.shape[propertyName];
+        const schema = requireDefined(compiled.nodes[0]).type.schema.shape[
+          propertyName
+        ];
         expect(schema).toBeDefined();
-        expect(getSearchableMetadata(schema! as z.ZodType)).toEqual({
+        expect(
+          getSearchableMetadata(requireDefined(schema) as z.ZodType),
+        ).toEqual({
           language,
         });
       }),
@@ -294,9 +299,13 @@ describe("graph extension property tests", () => {
           },
         });
         const compiled = compileGraphExtension(document);
-        const schema = compiled.nodes[0]!.type.schema.shape[propertyName];
+        const schema = requireDefined(compiled.nodes[0]).type.schema.shape[
+          propertyName
+        ];
         expect(schema).toBeDefined();
-        expect(getEmbeddingDimensions(schema! as z.ZodType)).toBe(dimensions);
+        expect(
+          getEmbeddingDimensions(requireDefined(schema) as z.ZodType),
+        ).toBe(dimensions);
       }),
       { numRuns: 30 },
     );

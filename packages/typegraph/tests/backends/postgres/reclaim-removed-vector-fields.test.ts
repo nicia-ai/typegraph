@@ -16,9 +16,10 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 const GRAPH_ID = "reclaim_vec_pg";
@@ -35,7 +36,7 @@ function requirePostgres(ctx: { skip: () => void }): { pool: Pool } {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -126,7 +127,7 @@ describe("Postgres reclaimRemovedVectorFieldTables", () => {
   it("drops the orphaned pgvector table when an embedding field is removed", async (ctx) => {
     const { pool } = requirePostgres(ctx);
     const backend = createPostgresBackend(drizzle(pool));
-    const table = backend.vectorStrategy!.tableName(
+    const table = requireDefined(backend.vectorStrategy).tableName(
       GRAPH_ID,
       "Document",
       "embedding",
@@ -151,7 +152,7 @@ describe("Postgres reclaimRemovedVectorFieldTables", () => {
   it("does NOT drop a removed-then-re-added field (active schema wins)", async (ctx) => {
     const { pool } = requirePostgres(ctx);
     const backend = createPostgresBackend(drizzle(pool));
-    const table = backend.vectorStrategy!.tableName(
+    const table = requireDefined(backend.vectorStrategy).tableName(
       GRAPH_ID,
       "Document",
       "embedding",

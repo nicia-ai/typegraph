@@ -86,7 +86,7 @@ const FIXED_ORDER: readonly BranchId[] = [A, B];
  * engine with isolated tables within this file. The deterministic new-vs-base
  * tests pin the same paths on both backends; a dev box runs the full set.
  */
-const RUNS = process.env.CI ? 8 : 16;
+const RUNS = process.env["CI"] ? 8 : 16;
 
 /**
  * A new patient a branch stages: keyed by `mrn` for forced unique matches, and

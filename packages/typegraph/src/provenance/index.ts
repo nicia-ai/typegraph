@@ -7,16 +7,11 @@ import {
   type NodeRow,
   rowPropsToObject,
   type TombstonedNodeRow,
+  type TransactionBackend,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
-import type {
-  DynamicNodeCollection,
-  HistorySafeTransactionBackend,
-  HistoryStore,
-  HistoryTransactionContext,
-} from "../store";
 import {
   applyNodeResurrect,
   applyNodeSoftDelete,
@@ -24,6 +19,15 @@ import {
 } from "../store/operations/node-write-pipeline";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
+import {
+  transactionBackend,
+  transactionNodeOperationHookRunner,
+} from "../store/runtime-port";
+import type { HistoryStore } from "../store/store";
+import {
+  type DynamicNodeCollection,
+  type TransactionContext,
+} from "../store/types";
 import { compareStrings } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { isPlainObject } from "../utils/object";
@@ -804,7 +808,7 @@ async function forEachAffectedFact<T extends NodeRow>(
 
 /**
  * The transaction-scoped hook lifecycle fact close/reopen runs through —
- * `HistoryTransactionContext["runNodeOperationHooks"]`. Using the
+ * transaction runtime's operation-hook runner. Using the
  * transaction's runner (not the store's) defers each fact's success hook
  * until the transition's COMMIT, so hooks never report a closed or reopened
  * fact that a failed commit then rolls back.
@@ -817,7 +821,7 @@ type RunNodeOperationHooks = <T>(
 ) => Promise<T>;
 
 async function synchronizeFactCurrency<G extends GraphDef>(
-  backend: HistorySafeTransactionBackend,
+  backend: TransactionBackend,
   store: HistoryStore<G>,
   runHooks: RunNodeOperationHooks,
   snapshot: SupportSnapshot,
@@ -853,7 +857,7 @@ function getFactRegistration<G extends GraphDef>(
 }
 
 async function closeFactCurrency<G extends GraphDef>(
-  backend: HistorySafeTransactionBackend,
+  backend: TransactionBackend,
   store: HistoryStore<G>,
   runHooks: RunNodeOperationHooks,
   row: LiveNodeRow,
@@ -882,7 +886,7 @@ async function closeFactCurrency<G extends GraphDef>(
 }
 
 async function reopenFactCurrency<G extends GraphDef>(
-  backend: HistorySafeTransactionBackend,
+  backend: TransactionBackend,
   store: HistoryStore<G>,
   runHooks: RunNodeOperationHooks,
   row: TombstonedNodeRow,
@@ -906,7 +910,7 @@ async function reopenFactCurrency<G extends GraphDef>(
 }
 
 function getTransactionNodeCollection<G extends GraphDef>(
-  tx: HistoryTransactionContext<G>,
+  tx: TransactionContext<G>,
   kind: string,
 ): DynamicNodeCollection {
   const collection = tx.getNodeCollection(kind);
@@ -918,7 +922,7 @@ function getTransactionNodeCollection<G extends GraphDef>(
 }
 
 async function setSourceRetractionState<G extends GraphDef>(
-  tx: HistoryTransactionContext<G>,
+  tx: TransactionContext<G>,
   config: NormalizedConfig,
   source: ProvenanceNodeRef,
   retracted: boolean,
@@ -948,16 +952,17 @@ async function runTransition<
   }
 
   return store.transaction(async (tx) => {
+    const backend = transactionBackend(tx);
     // Serialize the whole read-compute-write transition per graph BEFORE the
     // first read. `store.transaction` itself takes no lock (write operations
     // acquire it at their own boundaries), but a transition's support
     // snapshot must not race a concurrent transition or history write, so
     // the per-graph write lock is acquired explicitly up front. The token is
     // the evidence the currency-sync pipeline steps require.
-    const lock = await lockRecordedGraphWrite(tx.backend, store.graphId);
+    const lock = await lockRecordedGraphWrite(backend, store.graphId);
     const rows = await Promise.all(
       uniqueSources.map((source) =>
-        tx.backend.getNode(store.graphId, source.kind, source.id),
+        backend.getNode(store.graphId, source.kind, source.id),
       ),
     );
     const sourceRows = uniqueSources.map((source, index): SourceRow<G> => {
@@ -972,11 +977,7 @@ async function runTransition<
     // premise/derive edges) is identical before and after the transition — only
     // source availability changes — so the pre- and post-flip snapshots share
     // this read instead of scanning the whole graph twice per retraction.
-    const supportGraph = await loadSupportGraph(
-      tx.backend,
-      store.graphId,
-      config,
-    );
+    const supportGraph = await loadSupportGraph(backend, store.graphId, config);
     const availableBefore = availableSourceKeys(
       supportGraph.sourceRows,
       config.retractedField,
@@ -1001,9 +1002,9 @@ async function runTransition<
     const after = computeSupportSnapshot(supportGraph, availableAfter);
     const affected = after.affectedFactKeys(uniqueSources);
     await synchronizeFactCurrency(
-      tx.backend,
+      backend,
       store,
-      tx.runNodeOperationHooks,
+      transactionNodeOperationHookRunner(tx),
       after,
       affected,
       lock,
@@ -1035,18 +1036,7 @@ export function createRetractionCapability<
   FactKindsFromConfig<G, C>,
   JustificationKindFromConfig<G, C>
 > {
-  const historyEnabled = (store as Readonly<{ historyEnabled: boolean }>)
-    .historyEnabled;
-  if (!historyEnabled) {
-    throw new ConfigurationError(
-      "createRetractionCapability requires a store created with { history: true }.",
-      { graphId: store.graphId },
-      {
-        suggestion:
-          "Use createStoreWithSchema(graph, backend, { history: true }) so retraction mutations are captured and queryable with asOfRecorded().",
-      },
-    );
-  }
+  assertRetractionHistoryEnabled(store);
   const normalized = normalizeConfig(store.graph, config);
 
   // The four retract verbs differ only in one/many source shape and the target
@@ -1070,13 +1060,14 @@ export function createRetractionCapability<
 
     async holding() {
       return store.transaction(async (tx) => {
+        const backend = transactionBackend(tx);
         // Same explicit lock as runTransition: the support computation reads
         // several relations, and PostgreSQL's READ COMMITTED gives each
         // statement its own snapshot — without the lock a concurrent
         // transition could commit between those reads and tear the view.
-        await lockRecordedGraphWrite(tx.backend, store.graphId);
+        await lockRecordedGraphWrite(backend, store.graphId);
         const snapshot = await computeSupport(
-          tx.backend,
+          backend,
           store.graphId,
           normalized,
         );
@@ -1086,4 +1077,19 @@ export function createRetractionCapability<
       });
     },
   };
+}
+
+function assertRetractionHistoryEnabled(
+  store: Readonly<{ historyEnabled: boolean; graphId: string }>,
+): void {
+  if (!store.historyEnabled) {
+    throw new ConfigurationError(
+      "createRetractionCapability requires a store created with { history: true }.",
+      { graphId: store.graphId },
+      {
+        suggestion:
+          "Use createStoreWithSchema(graph, backend, { history: true }) so retraction mutations are captured and queryable with asOfRecorded().",
+      },
+    );
+  }
 }

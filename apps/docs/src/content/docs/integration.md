@@ -14,7 +14,7 @@ connection. TypeGraph tables coexist alongside your application tables.
 ```typescript
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Your existing Drizzle setup
@@ -82,9 +82,9 @@ migrations for all tables—both yours and TypeGraph's—in one place.
 import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 
 // Import TypeGraph tables (these are standard Drizzle table definitions)
-export * from "@nicia-ai/typegraph/sqlite";
+export * from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 // Or for PostgreSQL:
-// export * from "@nicia-ai/typegraph/postgres";
+// export * from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Your application tables
 export const users = sqliteTable("users", {
@@ -116,7 +116,7 @@ wrangler d1 migrations apply your-database
 ```typescript
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { createStore } from "@nicia-ai/typegraph";
 
 const sqlite = new Database("app.db");
@@ -133,7 +133,7 @@ To avoid conflicts or match your naming conventions, use the factory function:
 
 ```typescript
 // schema.ts
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 // Create tables with custom names
 export const typegraphTables = createSqliteTables({
@@ -177,7 +177,7 @@ automatically:
 
 ```typescript
 // schema.ts (PostgreSQL)
-import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+import { createPostgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 export const typegraphTables = createPostgresTables({
   // …same names as above…
@@ -203,7 +203,7 @@ the typed export and rely on the backend's runtime
 Then pass the same tables to the backend:
 
 ```typescript
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { typegraphTables } from "./schema";
 
 const backend = createSqliteBackend(db, { tables: typegraphTables });
@@ -215,7 +215,7 @@ The table factory functions also accept `indexes`, which drizzle-kit will includ
 
 ```ts
 // schema.ts
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 
 import { Person } from "./graph";
@@ -225,7 +225,7 @@ const personEmail = defineNodeIndex(Person, { fields: ["email"] });
 export const typegraphTables = createSqliteTables({}, { indexes: [personEmail] });
 ```
 
-For PostgreSQL, use `createPostgresTables` from `@nicia-ai/typegraph/postgres`.
+For PostgreSQL, use `createPostgresTables` from `@nicia-ai/typegraph/adapters/drizzle/postgres`.
 See [Indexes](/performance/indexes) for covering fields, partial indexes, and profiler integration.
 
 Beyond accelerating queries, a declared index powers `store.nodes.<Kind>.bulkFindByIndex(indexName, items)` — a
@@ -235,10 +235,10 @@ query to decide create-vs-merge per record (the key may be non-unique, so each r
 See the [batched index lookup reference](/performance/indexes#batched-index-lookup-bulkfindbyindex) and the runnable
 [`examples/17-bulk-find-by-index.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/17-bulk-find-by-index.ts).
 
-If you only need PostgreSQL adapter exports, import from `@nicia-ai/typegraph/postgres`:
+If you only need PostgreSQL adapter exports, import from `@nicia-ai/typegraph/adapters/drizzle/postgres`:
 
 ```typescript
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 ```
 
 ### PostgreSQL with pgvector
@@ -254,7 +254,7 @@ Then in your schema:
 
 ```typescript
 // schema.ts
-export * from "@nicia-ai/typegraph/postgres";
+export * from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 export const users = pgTable("users", { ... });
 ```
 
@@ -279,7 +279,7 @@ and graph data.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Application database (your existing setup)
 const appPool = new Pool({ connectionString: process.env.APP_DATABASE_URL });
@@ -312,7 +312,7 @@ const store = createStore(graph, backend);
 Use in-memory SQLite for temporary graphs, caching, or computation.
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 function createEphemeralStore(graph: GraphDef) {
   const { backend } = createLocalSqliteBackend();
@@ -616,16 +616,16 @@ see the dedicated [Testing](/testing) guide.
 
 Deploy TypeGraph at the edge using SQLite-compatible runtimes.
 
-> **Note:** Edge environments cannot use `@nicia-ai/typegraph/sqlite/local`
+> **Note:** Edge environments cannot use `@nicia-ai/typegraph/adapters/drizzle/sqlite/local`
 > because it depends on `better-sqlite3`, a native Node.js addon. Instead, use
-> `@nicia-ai/typegraph/sqlite` which is driver-agnostic.
+> `@nicia-ai/typegraph/adapters/drizzle/sqlite` which is driver-agnostic.
 
 **Cloudflare Durable Objects (SQLite) — transactional:**
 
 ```typescript
 import { drizzle } from "drizzle-orm/durable-sqlite";
-import { createStoreWithSchema } from "@nicia-ai/typegraph";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createAdapterStoreWithSchema } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export class GraphObject {
   constructor(private ctx: DurableObjectState) {}
@@ -633,13 +633,13 @@ export class GraphObject {
   async fetch(): Promise<Response> {
     const db = drizzle(this.ctx.storage);
     const backend = createSqliteBackend(db); // auto-detects "do-sqlite"
-    const [store] = await createStoreWithSchema(graph, backend);
+    const [store] = await createAdapterStoreWithSchema(graph, backend);
 
     // Atomic across TypeGraph + the caller's own relational tables:
     await store.transaction(async (tx) => {
       await tx.nodes.Document.update(documentId, props);
-      // tx.sql is the AdoptedTransaction union — cast to your db type.
-      const sqlTx = tx.sql as typeof db;
+      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+      const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
     });
 
@@ -659,7 +659,7 @@ so `store.transaction()` / `store.withTransaction()` are fully atomic
 ```typescript
 // worker.ts
 import { drizzle } from "drizzle-orm/d1";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -685,7 +685,7 @@ export default {
 ```typescript
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL!,
@@ -708,7 +708,7 @@ use bun:sqlite with drizzle-kit managed migrations:
 ```typescript
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 const sqlite = new Database("app.db");
 const db = drizzle(sqlite);
@@ -739,7 +739,7 @@ Route heavy graph queries to read replicas while writes go to primary.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Primary for writes
 const primaryPool = new Pool({
@@ -820,9 +820,9 @@ function createTenantQuery(store: Store, tenantId: string) {
         .query()
         .from("Document", "d")
         .whereNode("d", (d) =>
-          d.tenantId.eq(tenantId).and(
-            d.embedding.similarTo(queryEmbedding, 10)
-          )
+          d.tenantId
+            .eq(tenantId)
+            .and(d.embedding.similarTo(queryEmbedding, 10)),
         )
         .select((ctx) => ctx.d)
         .execute(),
@@ -918,11 +918,11 @@ class TenantConnectionManager {
 
 **Comparison:**
 
-| Approach | Isolation | Complexity | Scaling | Cost |
-|----------|-----------|------------|---------|------|
-| Shared tables | Low (row-level) | Low | Single DB | Lowest |
-| Schema per tenant | Medium | Medium | Single DB, separate schemas | Low |
-| Database per tenant | High | High | Independent DBs | Highest |
+| Approach            | Isolation       | Complexity | Scaling                     | Cost    |
+| ------------------- | --------------- | ---------- | --------------------------- | ------- |
+| Shared tables       | Low (row-level) | Low        | Single DB                   | Lowest  |
+| Schema per tenant   | Medium          | Medium     | Single DB, separate schemas | Low     |
+| Database per tenant | High            | High       | Independent DBs             | Highest |
 
 **When to use each:**
 

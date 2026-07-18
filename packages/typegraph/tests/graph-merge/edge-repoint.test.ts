@@ -18,6 +18,7 @@ import {
   mergeKey,
 } from "../../src/graph-merge/node-key";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 
 type AnyNodeId = NodeId<NodeType>;
 
@@ -88,9 +89,11 @@ function clusterOf(...ids: readonly string[]): ClusterResult {
 
 /** Min-id canonical selector — the merge-wide default — over composite keys. */
 function minIdCanonical(cluster: ClusterResult): MergeKey {
-  return [...cluster.members].sort((left, right) =>
-    compareMergeKeys(left, right),
-  )[0]!;
+  return requireDefined(
+    [...cluster.members].sort((left, right) =>
+      compareMergeKeys(left, right),
+    )[0],
+  );
 }
 
 /** Deterministically shuffles a copy of an array via a seeded LCG. */
@@ -100,8 +103,8 @@ function shuffled<T>(items: readonly T[], seed: number): T[] {
   for (let index = copy.length - 1; index > 0; index -= 1) {
     state = (state * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
     const swapWith = state % (index + 1);
-    const temporary = copy[index]!;
-    copy[index] = copy[swapWith]!;
+    const temporary = requireDefined(copy[index]);
+    copy[index] = requireDefined(copy[swapWith]);
     copy[swapWith] = temporary;
   }
   return copy;
@@ -174,7 +177,7 @@ describe("repointEdges", () => {
     );
 
     expect(result.edges).toHaveLength(1);
-    const edge = result.edges[0]!;
+    const edge = requireDefined(result.edges[0]);
     expect(edge.fromId).toBe("x");
     // Canonical of {a, b} is "a" (lexicographic min).
     expect(edge.toId).toBe("a");
@@ -215,16 +218,16 @@ describe("repointEdges", () => {
 
     // Still a single edge (same from'/type/to'), but props differ → conflict.
     expect(result.edges).toHaveLength(1);
-    const edge = result.edges[0]!;
+    const edge = requireDefined(result.edges[0]);
     expect(edge.id).toBe("edge-1");
 
     expect(result.conflicts).toHaveLength(1);
-    const conflict = result.conflicts[0]!;
+    const conflict = requireDefined(result.conflicts[0]);
     expect(`${conflict.entityId}`).toBe("edge-1");
     expect(conflict.property).toBe("weight");
     // "flag" keeps the survivor's (edge-1, branchA) value.
     expect(conflict.resolution).toBe(1);
-    expect(edge.props.weight).toBe(1);
+    expect(edge.props["weight"]).toBe(1);
     // Both contributing values are recorded, tagged by branch.
     expect(
       conflict.values
@@ -271,7 +274,7 @@ describe("repointEdges", () => {
     );
 
     expect(result.edges).toHaveLength(1);
-    expect(result.edges[0]?.props.weight).toBe(2);
+    expect(result.edges[0]?.props["weight"]).toBe(2);
     expect(result.conflicts).toHaveLength(1);
     expect(result.conflicts[0]?.resolution).toBe(2);
   });
@@ -360,7 +363,7 @@ describe("repointEdges", () => {
     );
 
     expect(result.edges).toHaveLength(1);
-    const edge = result.edges[0]!;
+    const edge = requireDefined(result.edges[0]);
     expect(edge.toId).toBe("a");
     expect(edge.id).toBe("edge-1");
     expect(edge.mergedIds.map((id) => id)).toEqual([
@@ -387,7 +390,7 @@ describe("repointEdges", () => {
 
     expect(result.dropped).toEqual([]);
     expect(result.edges).toHaveLength(1);
-    const edge = result.edges[0]!;
+    const edge = requireDefined(result.edges[0]);
     expect(edge.fromId).toBe("a");
     expect(edge.toId).toBe("a");
     expect(edge.id).toBe("edge-1");
@@ -413,7 +416,7 @@ describe("repointEdges", () => {
     expect(result.dropped).toEqual([]);
     expect(result.conflicts).toEqual([]);
     expect(result.edges).toHaveLength(1);
-    const edge = result.edges[0]!;
+    const edge = requireDefined(result.edges[0]);
     expect(edge.fromId).toBe("a");
     expect(edge.toId).toBe("a");
     expect(edge.id).toBe("edge-1");

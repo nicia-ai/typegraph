@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import {
   type EdgeRow,
   type HardDeleteNodeParams,
@@ -9,6 +7,7 @@ import {
 import { RECORDED_MAX } from "../../core/temporal";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
 import { isPresent } from "../../utils/presence";
@@ -65,7 +64,7 @@ export function entityKey(entity: TouchedEntity): string {
  */
 async function closeOpenReturning(
   target: TransactionBackend,
-  table: SQL,
+  table: SqlFragment,
   graphId: string,
   ids: readonly string[],
   recordedCommit: string,
@@ -202,7 +201,7 @@ export async function flushEdges(
 
 async function closeOpenByKind(
   target: TransactionBackend,
-  table: SQL,
+  table: SqlFragment,
   graphId: string,
   kind: string,
   recordedCommit: string,

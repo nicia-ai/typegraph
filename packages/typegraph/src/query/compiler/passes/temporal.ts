@@ -1,6 +1,5 @@
-import { type SQL } from "drizzle-orm";
-
 import type { QueryAst } from "../../ast";
+import { type SqlFragment } from "../../sql-fragment";
 import {
   compileTemporalFilter,
   currentReadInstantFor,
@@ -9,7 +8,7 @@ import {
 } from "../temporal";
 
 export type TemporalFilterPass = Readonly<{
-  forAlias: (tableAlias?: string) => SQL;
+  forAlias: (tableAlias?: string) => SqlFragment;
 }>;
 
 /**
@@ -27,7 +26,7 @@ export function createTemporalFilterPass(
 ): TemporalFilterPass {
   const currentTimestamp = currentReadInstantFor(readInstant);
   return {
-    forAlias(tableAlias?: string): SQL {
+    forAlias(tableAlias?: string): SqlFragment {
       return compileTemporalFilter({
         ...extractTemporalOptions(ast, tableAlias),
         currentTimestamp,

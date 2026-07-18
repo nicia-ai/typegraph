@@ -1,12 +1,13 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { type GraphBackend } from "../../backend/types";
 import { RECORDED_MAX } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
+import type { SqlDialect } from "../../query/dialect/types";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
+import { requireDefined } from "../../utils/presence";
 import { executeStatement } from "./guards";
 
 type ClockRow = Readonly<{ recorded_at: unknown }>;
@@ -34,6 +35,11 @@ const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
 
+const USES_RECORDED_GRAPH_ADVISORY_LOCK = {
+  postgres: true,
+  sqlite: false,
+} as const satisfies Record<SqlDialect, boolean>;
+
 /**
  * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
  * Keep lock namespaces tied to acquire order, not to feature names:
@@ -46,7 +52,7 @@ const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
  * Sharing one key across those two acquire-order positions creates a circular
  * wait under ordinary concurrent load.
  */
-function graphAdvisoryLockSql(namespace: string, graphId: string): SQL {
+function graphAdvisoryLockSql(namespace: string, graphId: string): SqlFragment {
   return sql`
     SELECT pg_advisory_xact_lock(
       hashtext(${namespace}),
@@ -55,11 +61,13 @@ function graphAdvisoryLockSql(namespace: string, graphId: string): SQL {
   `;
 }
 
-export function recordedClockAdvisoryLockSql(graphId: string): SQL {
+export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
   return graphAdvisoryLockSql(RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE, graphId);
 }
 
-export function recordedGraphWriteAdvisoryLockSql(graphId: string): SQL {
+export function recordedGraphWriteAdvisoryLockSql(
+  graphId: string,
+): SqlFragment {
   return graphAdvisoryLockSql(
     RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
     graphId,
@@ -110,7 +118,7 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * lock round trip per write. The capture layer registers its per-transaction
  * backend here; every lock path that receives that backend (the capture
  * delegate's own writes, `runInWriteTransaction`, provenance) then skips the
- * SQL once the graph's lock is held.
+ * `SqlFragment` once the graph's lock is held.
  *
  * Keyed weakly by the backend object: the delegate is created per
  * transaction, so memo lifetime equals lock lifetime. NOT savepoint-aware —
@@ -156,7 +164,9 @@ export async function lockRecordedGraphWrite(
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  if (target.dialect !== "postgres") return graphWriteLockEvidence();
+  if (!USES_RECORDED_GRAPH_ADVISORY_LOCK[target.dialect]) {
+    return graphWriteLockEvidence();
+  }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
     await acquireRecordedGraphWriteLock(target, graphId);
@@ -216,7 +226,9 @@ function clockTimestampMs(value: string): number {
   const offsetMatch = OFFSET_DATETIME_PATTERN.exec(value);
   if (offsetMatch) {
     const [, date, time, offset] = offsetMatch;
-    return Date.parse(`${date}T${time}${normalizeOffsetDesignator(offset!)}`);
+    return Date.parse(
+      `${date}T${time}${normalizeOffsetDesignator(requireDefined(offset))}`,
+    );
   }
   return Date.parse(value);
 }
@@ -374,30 +386,32 @@ async function lockRecordedClock(
   // Serialize the read/advance/write sequence per graph. Without this,
   // concurrent transactions can read the same previous clock value and
   // allocate the same recorded instant.
-  if (target.dialect === "postgres") {
-    await target.execute(
-      asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
-    );
-    return;
+  switch (target.dialect) {
+    case "postgres": {
+      await target.execute(
+        asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
+      );
+      return;
+    }
+    case "sqlite": {
+      // SQLite: the seed-UPSERT exists only to take the clock row's write lock
+      // before reading when the enclosing transaction did NOT already hold one.
+      // Bundled transactions open BEGIN IMMEDIATE, so the lock is already held.
+      if (ownsWriteLock) return;
+      await executeStatement(
+        target,
+        sql`
+          INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
+          VALUES (${graphId}, ${RECORDED_MIN})
+          ON CONFLICT (graph_id) DO UPDATE SET recorded_at = recorded_at
+        `,
+      );
+      return;
+    }
+    default: {
+      target.dialect satisfies never;
+    }
   }
-
-  // SQLite family: the seed-UPSERT exists only to take the clock row's write
-  // lock before reading when the enclosing transaction did NOT already hold one
-  // — an adopted external transaction (withRecordedTransaction) may have begun
-  // in deferred mode, where two concurrent commits could otherwise both read
-  // the same previous value. The bundled transaction paths open BEGIN IMMEDIATE
-  // (ownsWriteLock), so the lock is already held and the seed is a redundant
-  // write; skip it there. The seeded floor is overwritten by writeRecordedClock
-  // in the same transaction when it does run.
-  if (ownsWriteLock) return;
-  await executeStatement(
-    target,
-    sql`
-      INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-      VALUES (${graphId}, ${RECORDED_MIN})
-      ON CONFLICT (graph_id) DO UPDATE SET recorded_at = recorded_at
-    `,
-  );
 }
 
 export async function allocateRecordedCommit(

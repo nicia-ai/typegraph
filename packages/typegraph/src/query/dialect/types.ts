@@ -5,10 +5,9 @@
  * Implementing a new dialect (MySQL, SQL Server, etc.) requires
  * implementing this interface.
  */
-import { type SQL, type SQLWrapper } from "drizzle-orm";
-
 import { type VectorMetric } from "../../backend/types";
 import { type JsonPointer } from "../json-pointer";
+import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
 
 /**
@@ -90,8 +89,9 @@ export type DialectCapabilities = Readonly<{
 /**
  * Adapter interface for SQL dialect differences.
  *
- * Each method generates dialect-specific SQL for a common operation.
- * All methods return Drizzle SQL objects that can be composed together.
+ * Each method generates a dialect-specific `SqlFragment` for a common operation.
+ * All methods return database-independent `SqlFragment` values that can be composed
+ * together and rendered by a backend adapter.
  */
 export interface DialectAdapter {
   /**
@@ -110,14 +110,17 @@ export interface DialectAdapter {
    * force `COLLATE "C"` so database locale cannot change deterministic graph
    * labels or query tie-breaks.
    */
-  binaryText(expression: SQL): SQL;
+  readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
 
   /**
    * Builds the dialect's planner-statistics refresh for a temporary table.
    * Returns undefined when the engine plans temporary tables well enough
    * without an explicit refresh.
    */
-  analyzeTemporaryTable(table: SQLWrapper): SQL | undefined;
+  readonly analyzeTemporaryTable: (
+    this: void,
+    table: SqlFragment,
+  ) => SqlFragment | undefined;
 
   /**
    * Builds the dialect's transaction-scoped working-memory override for
@@ -128,7 +131,10 @@ export interface DialectAdapter {
    * per-operation memory budget to raise (SQLite). Callers must run the
    * statement inside a transaction and validate the value's shape first.
    */
-  setTransactionWorkingMemory(workingMemory: string): SQL | undefined;
+  readonly setTransactionWorkingMemory: (
+    this: void,
+    workingMemory: string,
+  ) => SqlFragment | undefined;
 
   // ============================================================
   // JSON Path Operations
@@ -141,7 +147,7 @@ export interface DialectAdapter {
    * SQLite: "$.name" or "$[0].value"
    * PostgreSQL: ARRAY['name'] or ARRAY['0', 'value']
    */
-  compilePath(pointer: JsonPointer): SQL;
+  readonly compilePath: (this: void, pointer: JsonPointer) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path (returns JSON type).
@@ -150,7 +156,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: column #> ARRAY['path']
    */
-  jsonExtract(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtract: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path as text.
@@ -159,7 +169,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: column #>> ARRAY['path']
    */
-  jsonExtractText(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtractText: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path and casts to numeric.
@@ -168,7 +182,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: (column #>> ARRAY['path'])::numeric
    */
-  jsonExtractNumber(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtractNumber: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path as an IEEE 754 double.
@@ -182,7 +200,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: (column #>> ARRAY['path'])::double precision
    */
-  jsonExtractDouble(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtractDouble: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path and casts to boolean.
@@ -191,7 +213,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: (column #>> ARRAY['path'])::boolean
    */
-  jsonExtractBoolean(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtractBoolean: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Extracts a JSON value at a path and casts to timestamp.
@@ -200,7 +226,11 @@ export interface DialectAdapter {
    * SQLite: json_extract(column, '$.path')
    * PostgreSQL: (column #>> ARRAY['path'])::timestamptz
    */
-  jsonExtractDate(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonExtractDate: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   // ============================================================
   // JSON Array Operations
@@ -213,7 +243,7 @@ export interface DialectAdapter {
    * SQLite: json_array_length(column)
    * PostgreSQL: jsonb_array_length(column)
    */
-  jsonArrayLength(column: SQL): SQL;
+  readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
 
   /**
    * Checks if a JSON array contains a specific value.
@@ -222,7 +252,11 @@ export interface DialectAdapter {
    * SQLite: EXISTS (SELECT 1 FROM json_each(column) WHERE value = ?)
    * PostgreSQL: column @> '[value]'::jsonb
    */
-  jsonArrayContains(column: SQL, value: unknown): SQL;
+  readonly jsonArrayContains: (
+    this: void,
+    column: SqlFragment,
+    value: unknown,
+  ) => SqlFragment;
 
   /**
    * Checks if a JSON array contains all specified values.
@@ -231,7 +265,11 @@ export interface DialectAdapter {
    * SQLite: Multiple EXISTS subqueries ANDed
    * PostgreSQL: column @> '[values]'::jsonb
    */
-  jsonArrayContainsAll(column: SQL, values: readonly unknown[]): SQL;
+  readonly jsonArrayContainsAll: (
+    this: void,
+    column: SqlFragment,
+    values: readonly unknown[],
+  ) => SqlFragment;
 
   /**
    * Checks if a JSON array contains any of the specified values.
@@ -240,7 +278,11 @@ export interface DialectAdapter {
    * SQLite: Multiple EXISTS subqueries ORed
    * PostgreSQL: Multiple @> checks ORed
    */
-  jsonArrayContainsAny(column: SQL, values: readonly unknown[]): SQL;
+  readonly jsonArrayContainsAny: (
+    this: void,
+    column: SqlFragment,
+    values: readonly unknown[],
+  ) => SqlFragment;
 
   // ============================================================
   // JSON Object Operations
@@ -253,7 +295,11 @@ export interface DialectAdapter {
    * SQLite: json_type(column, '$.path') IS NOT NULL
    * PostgreSQL: column #> ARRAY['path'] IS NOT NULL
    */
-  jsonHasPath(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonHasPath: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Checks if a JSON value at a path is absent or the JSON `null` literal —
@@ -267,14 +313,22 @@ export interface DialectAdapter {
    * SQLite: COALESCE(json_type(column, '$.path') = 'null', 1)
    * PostgreSQL: COALESCE(jsonb_typeof(column #> path) = 'null', TRUE)
    */
-  jsonPathIsNull(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonPathIsNull: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Checks if a JSON value at a path is present and not the JSON `null`
    * literal. Exact negation of {@link jsonPathIsNull}: type-based, and
    * never SQL NULL — a missing path yields FALSE.
    */
-  jsonPathIsNotNull(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonPathIsNotNull: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   /**
    * Checks if the JSON value at a path exists and is a JSON number.
@@ -286,7 +340,11 @@ export interface DialectAdapter {
    * SQLite: json_type(column, '$.path') IN ('integer', 'real')
    * PostgreSQL: jsonb_typeof(column #> path) = 'number'
    */
-  jsonPathIsNumber(column: SQL, pointer: JsonPointer): SQL;
+  readonly jsonPathIsNumber: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+  ) => SqlFragment;
 
   // ============================================================
   // Comparison Operations
@@ -304,7 +362,11 @@ export interface DialectAdapter {
    * SQLite: left IS right
    * PostgreSQL: left IS NOT DISTINCT FROM right
    */
-  nullSafeEquals(left: SQL, right: SQL): SQL;
+  readonly nullSafeEquals: (
+    this: void,
+    left: SqlFragment,
+    right: SqlFragment,
+  ) => SqlFragment;
 
   /**
    * Tests scalar membership in a literal list. Dialects may choose a packed
@@ -314,7 +376,12 @@ export interface DialectAdapter {
    * SQLite: left IN (SELECT value FROM json_each(?))
    * PostgreSQL: left IN ($1, $2, ...)
    */
-  inList(left: SQL, values: readonly unknown[], negated: boolean): SQL;
+  readonly inList: (
+    this: void,
+    left: SqlFragment,
+    values: readonly unknown[],
+    negated: boolean,
+  ) => SqlFragment;
 
   // ============================================================
   // String Operations
@@ -327,7 +394,11 @@ export interface DialectAdapter {
    * SQLite: LOWER(column) LIKE LOWER(pattern)
    * PostgreSQL: column ILIKE pattern
    */
-  ilike(column: SQL, pattern: SQL | string): SQL;
+  readonly ilike: (
+    this: void,
+    column: SqlFragment,
+    pattern: SqlFragment | string,
+  ) => SqlFragment;
 
   // ============================================================
   // Set Operations
@@ -335,7 +406,7 @@ export interface DialectAdapter {
 
   /**
    * Wraps a single operand of a compound SELECT (UNION/INTERSECT/EXCEPT) so it
-   * is a valid compound member for this dialect. The inner SQL is a complete
+   * is a valid compound member for this dialect. The inner `SqlFragment` is a complete
    * leaf SELECT (which may carry its own WITH clause) or an already-combined
    * nested compound.
    *
@@ -344,7 +415,10 @@ export interface DialectAdapter {
    *                                 // but a WITH may live in a FROM-subquery
    * PostgreSQL: (inner)
    */
-  wrapSetOperationOperand(inner: SQL): SQL;
+  readonly wrapSetOperationOperand: (
+    this: void,
+    inner: SqlFragment,
+  ) => SqlFragment;
 
   // ============================================================
   // Recursive CTE Path Operations
@@ -357,7 +431,7 @@ export interface DialectAdapter {
    * SQLite: '|' || id || '|'
    * PostgreSQL: ARRAY[id]
    */
-  initializePath(nodeId: SQL): SQL;
+  readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
 
   /**
    * Extends a path with a new node ID.
@@ -366,7 +440,11 @@ export interface DialectAdapter {
    * SQLite: path || id || '|'
    * PostgreSQL: path || id
    */
-  extendPath(currentPath: SQL, nodeId: SQL): SQL;
+  readonly extendPath: (
+    this: void,
+    currentPath: SqlFragment,
+    nodeId: SqlFragment,
+  ) => SqlFragment;
 
   /**
    * Checks if a node ID is NOT already in the path (for cycle prevention).
@@ -376,7 +454,11 @@ export interface DialectAdapter {
    * SQLite: INSTR(path, '|' || id || '|') = 0
    * PostgreSQL: id != ALL(path)
    */
-  cycleCheck(nodeId: SQL, path: SQL): SQL;
+  readonly cycleCheck: (
+    this: void,
+    nodeId: SqlFragment,
+    path: SqlFragment,
+  ) => SqlFragment;
 
   // ============================================================
   // Value Binding & Literals
@@ -390,7 +472,7 @@ export interface DialectAdapter {
    * SQLite: true → 1, false → 0
    * PostgreSQL: true → true (unchanged)
    */
-  bindValue(value: unknown): unknown;
+  readonly bindValue: (this: void, value: unknown) => unknown;
 
   /**
    * Returns a boolean literal for use in static SQL contexts (DDL, etc).
@@ -399,7 +481,7 @@ export interface DialectAdapter {
    * SQLite: sql.raw("1") or sql.raw("0")
    * PostgreSQL: sql.raw("TRUE") or sql.raw("FALSE")
    */
-  booleanLiteral(value: boolean): SQL;
+  readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
 
   /**
    * Returns a boolean literal as a raw string for DDL generation.
@@ -408,7 +490,7 @@ export interface DialectAdapter {
    * SQLite: "1" or "0"
    * PostgreSQL: "TRUE" or "FALSE"
    */
-  booleanLiteralString(value: boolean): string;
+  readonly booleanLiteralString: (this: void, value: boolean) => string;
 
   /**
    * Quotes an identifier (table name, column name, alias) with proper escaping.
@@ -417,7 +499,7 @@ export interface DialectAdapter {
    * SQLite: "name" → "\"name\"", "foo\"bar" → "\"foo\"\"bar\""
    * PostgreSQL: "name" → "\"name\"", "foo\"bar" → "\"foo\"\"bar\""
    */
-  quoteIdentifier(name: string): string;
+  readonly quoteIdentifier: (this: void, name: string) => string;
 
   // ============================================================
   // Vector Operations

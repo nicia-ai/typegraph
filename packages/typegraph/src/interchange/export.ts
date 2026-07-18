@@ -9,8 +9,10 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { storeBackend } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { nowIso } from "../utils/date";
+import { requireDefined } from "../utils/presence";
 import {
   type ExportOptionsInput,
   type ExportStreamOptionsInput,
@@ -86,7 +88,7 @@ export async function* exportGraphStream<G extends GraphDef>(
 ): AsyncIterable<GraphInterchangeChunk> {
   const resolved = ExportStreamOptionsSchema.parse(options ?? {});
   const graphId = store.graphId;
-  const backend = store.backend;
+  const backend = storeBackend(store);
   const nodeKinds = resolved.nodeKinds ?? getNodeKinds(store.graph);
   const edgeKinds = resolved.edgeKinds ?? getEdgeKinds(store.graph);
   const schemaVersion = await backend.getActiveSchema(graphId);
@@ -175,7 +177,7 @@ async function* exportNodeChunks(
     });
     yield { type: "nodes", nodes };
     if (rows.length < options.batchSize) return;
-    after = rows.at(-1)!.id;
+    after = requireDefined(rows.at(-1)).id;
   }
 }
 
@@ -239,6 +241,6 @@ async function* exportEdgeChunks(
     });
     yield { type: "edges", edges };
     if (rows.length < options.batchSize) return;
-    after = rows.at(-1)!.id;
+    after = requireDefined(rows.at(-1)).id;
   }
 }

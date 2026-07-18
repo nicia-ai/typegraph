@@ -12,12 +12,14 @@
  * createAdapterTestSuite("Memory", () => createMemoryAdapter());
  * ```
  */
-import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { type GraphBackend, rowPropsToObject } from "../../src/backend/types";
+import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import type { SerializedSchema } from "../../src/schema/types";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Types
@@ -121,8 +123,8 @@ export function createAdapterTestSuite(
         expect(inserted.updated_at).toBeDefined();
 
         const props = rowPropsToObject(inserted.props);
-        expect(props.name).toBe("Alice");
-        expect(props.email).toBe("alice@example.com");
+        expect(props["name"]).toBe("Alice");
+        expect(props["email"]).toBe("alice@example.com");
 
         // Retrieve
         const fetched = await backend.getNode(
@@ -131,8 +133,8 @@ export function createAdapterTestSuite(
           "person-1",
         );
         expect(fetched).toBeDefined();
-        expect(fetched!.id).toBe("person-1");
-        expect(fetched!.kind).toBe("Person");
+        expect(requireDefined(fetched).id).toBe("person-1");
+        expect(requireDefined(fetched).kind).toBe("Person");
       });
 
       it("supports insertNodeNoReturn when available", async () => {
@@ -151,7 +153,7 @@ export function createAdapterTestSuite(
           "person-no-return",
         );
         expect(fetched).toBeDefined();
-        expect(fetched!.id).toBe("person-no-return");
+        expect(requireDefined(fetched).id).toBe("person-no-return");
       });
 
       it("supports insertNodesBatch when available", async () => {
@@ -260,8 +262,8 @@ export function createAdapterTestSuite(
           "Person",
           "person-temporal",
         );
-        expect(fetched!.valid_from).toBe(validFrom);
-        expect(fetched!.valid_to).toBe(validTo);
+        expect(requireDefined(fetched).valid_from).toBe(validFrom);
+        expect(requireDefined(fetched).valid_to).toBe(validTo);
       });
 
       it("updates a node without incrementing version", async () => {
@@ -282,7 +284,7 @@ export function createAdapterTestSuite(
 
         expect(updated.version).toBe(1);
         const props = rowPropsToObject(updated.props);
-        expect(props.name).toBe("Alice Updated");
+        expect(props["name"]).toBe("Alice Updated");
       });
 
       it("updates a node with version increment", async () => {
@@ -303,8 +305,8 @@ export function createAdapterTestSuite(
 
         expect(updated.version).toBe(2);
         const props = rowPropsToObject(updated.props);
-        expect(props.name).toBe("Alice Updated");
-        expect(props.age).toBe(30);
+        expect(props["name"]).toBe("Alice Updated");
+        expect(props["age"]).toBe(30);
       });
 
       it("updates a node with validTo", async () => {
@@ -348,7 +350,7 @@ export function createAdapterTestSuite(
           "person-1",
         );
         expect(fetched).toBeDefined();
-        expect(fetched!.deleted_at).toBeDefined();
+        expect(requireDefined(fetched).deleted_at).toBeDefined();
       });
 
       it("returns undefined for non-existent node", async () => {
@@ -388,8 +390,12 @@ export function createAdapterTestSuite(
 
         expect(person).toBeDefined();
         expect(company).toBeDefined();
-        expect(rowPropsToObject(person!.props).name).toBe("Alice");
-        expect(rowPropsToObject(company!.props).name).toBe("Acme");
+        expect(rowPropsToObject(requireDefined(person).props)["name"]).toBe(
+          "Alice",
+        );
+        expect(rowPropsToObject(requireDefined(company).props)["name"]).toBe(
+          "Acme",
+        );
       });
 
       it("handles nodes in different graphs", async () => {
@@ -410,8 +416,12 @@ export function createAdapterTestSuite(
         const fromA = await backend.getNode("graph_a", "Person", "person-1");
         const fromB = await backend.getNode("graph_b", "Person", "person-1");
 
-        expect(rowPropsToObject(fromA!.props).name).toBe("Alice");
-        expect(rowPropsToObject(fromB!.props).name).toBe("Bob");
+        expect(rowPropsToObject(requireDefined(fromA).props)["name"]).toBe(
+          "Alice",
+        );
+        expect(rowPropsToObject(requireDefined(fromB).props)["name"]).toBe(
+          "Bob",
+        );
       });
     });
 
@@ -441,13 +451,13 @@ export function createAdapterTestSuite(
         expect(inserted.deleted_at).toBeUndefined();
 
         const props = rowPropsToObject(inserted.props);
-        expect(props.role).toBe("Engineer");
+        expect(props["role"]).toBe("Engineer");
 
         // Retrieve
         const fetched = await backend.getEdge("test_graph", "edge-1");
         expect(fetched).toBeDefined();
-        expect(fetched!.id).toBe("edge-1");
-        expect(fetched!.kind).toBe("worksAt");
+        expect(requireDefined(fetched).id).toBe("edge-1");
+        expect(requireDefined(fetched).kind).toBe("worksAt");
       });
 
       it("supports insertEdgeNoReturn when available", async () => {
@@ -466,7 +476,7 @@ export function createAdapterTestSuite(
 
         const fetched = await backend.getEdge("test_graph", "edge-no-return");
         expect(fetched).toBeDefined();
-        expect(fetched!.id).toBe("edge-no-return");
+        expect(requireDefined(fetched).id).toBe("edge-no-return");
       });
 
       it("supports insertEdgesBatch when available", async () => {
@@ -610,8 +620,8 @@ export function createAdapterTestSuite(
         });
 
         const props = rowPropsToObject(updated.props);
-        expect(props.role).toBe("Senior Engineer");
-        expect(props.startDate).toBe("2024-01-01");
+        expect(props["role"]).toBe("Senior Engineer");
+        expect(props["startDate"]).toBe("2024-01-01");
       });
 
       it("updates an edge with validTo", async () => {
@@ -656,7 +666,7 @@ export function createAdapterTestSuite(
 
         const fetched = await backend.getEdge("test_graph", "edge-1");
         expect(fetched).toBeDefined();
-        expect(fetched!.deleted_at).toBeDefined();
+        expect(requireDefined(fetched).deleted_at).toBeDefined();
       });
 
       it("returns undefined for non-existent edge", async () => {
@@ -690,8 +700,12 @@ export function createAdapterTestSuite(
         const fromA = await backend.getEdge("graph_a", "edge-1");
         const fromB = await backend.getEdge("graph_b", "edge-1");
 
-        expect(rowPropsToObject(fromA!.props).graph).toBe("a");
-        expect(rowPropsToObject(fromB!.props).graph).toBe("b");
+        expect(rowPropsToObject(requireDefined(fromA).props)["graph"]).toBe(
+          "a",
+        );
+        expect(rowPropsToObject(requireDefined(fromB).props)["graph"]).toBe(
+          "b",
+        );
       });
     });
 
@@ -771,8 +785,8 @@ export function createAdapterTestSuite(
         });
 
         expect(existing).toBeDefined();
-        expect(existing!.node_id).toBe("person-1");
-        expect(existing!.concrete_kind).toBe("Person");
+        expect(requireDefined(existing).node_id).toBe("person-1");
+        expect(requireDefined(existing).concrete_kind).toBe("Person");
 
         // Check non-existing
         const notFound = await backend.checkUnique({
@@ -840,7 +854,7 @@ export function createAdapterTestSuite(
           key: "alice@example.com",
         });
 
-        expect(result!.node_id).toBe("person-1");
+        expect(requireDefined(result).node_id).toBe("person-1");
       });
 
       it("rejects re-insert with different nodeId (uniqueness violation)", async () => {
@@ -873,7 +887,7 @@ export function createAdapterTestSuite(
           key: "alice@example.com",
         });
 
-        expect(result!.node_id).toBe("person-1");
+        expect(requireDefined(result).node_id).toBe("person-1");
       });
 
       it("handles unique constraints in different graphs", async () => {
@@ -909,8 +923,8 @@ export function createAdapterTestSuite(
           key: "alice@example.com",
         });
 
-        expect(fromA!.node_id).toBe("person-a");
-        expect(fromB!.node_id).toBe("person-b");
+        expect(requireDefined(fromA).node_id).toBe("person-a");
+        expect(requireDefined(fromB).node_id).toBe("person-b");
       });
     });
 
@@ -943,13 +957,15 @@ export function createAdapterTestSuite(
         expect(inserted.is_active).toBe(true);
         expect(inserted.created_at).toBeDefined();
 
-        const schemaDocument = JSON.parse(inserted.schema_doc);
-        expect(schemaDocument.nodes.Person).toBeDefined();
+        const schemaDocument = z
+          .object({ nodes: z.record(z.string(), z.unknown()) })
+          .parse(JSON.parse(inserted.schema_doc));
+        expect(schemaDocument.nodes["Person"]).toBeDefined();
 
         const active = await backend.getActiveSchema("test_graph");
         expect(active).toBeDefined();
-        expect(active!.version).toBe(1);
-        expect(active!.schema_hash).toBe("abc123");
+        expect(requireDefined(active).version).toBe(1);
+        expect(requireDefined(active).schema_hash).toBe("abc123");
       });
 
       it("returns undefined when no active schema exists", async () => {
@@ -976,11 +992,11 @@ export function createAdapterTestSuite(
 
         const v1 = await backend.getSchemaVersion("test_graph", 1);
         const v2 = await backend.getSchemaVersion("test_graph", 2);
-        expect(v1!.is_active).toBe(false);
-        expect(v2!.is_active).toBe(true);
+        expect(requireDefined(v1).is_active).toBe(false);
+        expect(requireDefined(v2).is_active).toBe(true);
 
         const active = await backend.getActiveSchema("test_graph");
-        expect(active!.version).toBe(2);
+        expect(requireDefined(active).version).toBe(2);
       });
 
       it("handles schemas in different graphs", async () => {
@@ -1003,8 +1019,8 @@ export function createAdapterTestSuite(
         const activeA = await backend.getActiveSchema("graph_a");
         const activeB = await backend.getActiveSchema("graph_b");
 
-        expect(activeA!.schema_hash).toBe("hash-a");
-        expect(activeB!.schema_hash).toBe("hash-b");
+        expect(requireDefined(activeA).schema_hash).toBe("hash-a");
+        expect(requireDefined(activeB).schema_hash).toBe("hash-b");
       });
     });
 
@@ -1201,7 +1217,7 @@ export function createAdapterTestSuite(
           );
 
           expect(rows).toHaveLength(1);
-          expect(rows[0]!.id).toBe("person-raw-1");
+          expect(requireDefined(rows[0]).id).toBe("person-raw-1");
         });
       });
     }

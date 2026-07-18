@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * Connected-components clustering over the candidate-edge graph (design §6.4
  * rule 2, T8).
@@ -28,7 +29,6 @@
  *   satisfies the bound. This is the frozen v1 behavior — no correlation
  *   clustering in P0.
  */
-
 import type { CandidateEdge } from "./candidate-gen";
 import { compareMergeKeys, type MergeKey } from "./node-key";
 import { compareCandidateEdges } from "./scoring";
@@ -104,7 +104,10 @@ function buildComponents(
   }
   // Order clusters by their (sorted) first member, which is the minimum id.
   clusters.sort((left, right) =>
-    compareMergeKeys(left.members[0]!, right.members[0]!),
+    compareMergeKeys(
+      requireDefined(left.members[0]),
+      requireDefined(right.members[0]),
+    ),
   );
   return clusters;
 }
@@ -125,8 +128,8 @@ function adjacencyOf(
   }
   for (const edge of edges) {
     if (memberSet.has(edge.a) && memberSet.has(edge.b)) {
-      adjacency.get(edge.a)!.add(edge.b);
-      adjacency.get(edge.b)!.add(edge.a);
+      requireDefined(adjacency.get(edge.a)).add(edge.b);
+      requireDefined(adjacency.get(edge.b)).add(edge.a);
     }
   }
   return adjacency;
@@ -154,10 +157,10 @@ function exceedsDiameter(
     const queue: AnyNodeId[] = [source];
     let head = 0;
     while (head < queue.length) {
-      const current = queue[head]!;
+      const current = requireDefined(queue[head]);
       head += 1;
-      const currentDistance = distance.get(current)!;
-      for (const neighbor of adjacency.get(current)!) {
+      const currentDistance = requireDefined(distance.get(current));
+      for (const neighbor of requireDefined(adjacency.get(current))) {
         if (!distance.has(neighbor)) {
           const neighborDistance = currentDistance + 1;
           if (neighborDistance > maxDiameter) {
@@ -327,7 +330,10 @@ export function enforceDiameter(
     }
   }
   guarded.sort((left, right) =>
-    compareMergeKeys(left.members[0]!, right.members[0]!),
+    compareMergeKeys(
+      requireDefined(left.members[0]),
+      requireDefined(right.members[0]),
+    ),
   );
   return guarded;
 }
@@ -433,7 +439,10 @@ export function enforceBaseGuard(
     );
   }
   result.sort((left, right) =>
-    compareMergeKeys(left.members[0]!, right.members[0]!),
+    compareMergeKeys(
+      requireDefined(left.members[0]),
+      requireDefined(right.members[0]),
+    ),
   );
   return { clusters: result, events };
 }

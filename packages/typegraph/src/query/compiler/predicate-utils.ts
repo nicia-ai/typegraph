@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import type { KindEntity } from "../../core/types";
 import { CompilerInvariantError } from "../../errors";
 import {
@@ -8,6 +6,7 @@ import {
   type QueryAst,
   type VectorSimilarityPredicate,
 } from "../ast";
+import { sql, type SqlFragment } from "../sql-fragment";
 import {
   compilePredicateExpression,
   type PredicateCompilerContext,
@@ -19,7 +18,7 @@ const EMPTY_PREDICATES: readonly NodePredicate[] = [];
  * Builds a comma-separated bound-parameter list for an `IN (...)` clause. Each
  * value is parameterized, never interpolated.
  */
-export function sqlValueList(values: readonly string[]): SQL {
+export function sqlValueList(values: readonly string[]): SqlFragment {
   return sql.join(
     values.map((value) => sql`${value}`),
     sql`, `,
@@ -70,13 +69,16 @@ export function getPredicatesForAlias(
 export function compilePredicateClauses(
   predicates: readonly NodePredicate[],
   predicateContext: PredicateCompilerContext,
-): SQL[] {
+): SqlFragment[] {
   return predicates.map((predicate) =>
     compilePredicateExpression(predicate.expression, predicateContext),
   );
 }
 
-export function compileKindFilter(column: SQL, kinds: readonly string[]): SQL {
+export function compileKindFilter(
+  column: SqlFragment,
+  kinds: readonly string[],
+): SqlFragment {
   if (kinds.length === 0) {
     return sql`1 = 0`;
   }

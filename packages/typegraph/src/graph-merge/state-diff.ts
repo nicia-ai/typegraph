@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * State-diff engine: compute the per-fork delta (new / modified / deleted nodes
  * and edges) of a working copy against the IMMUTABLE original base store.
@@ -24,7 +25,6 @@
  * Concurrency: P0 assumes quiesced (non-concurrent) forks per design §10.
  * Concurrent-write enumeration is a P1 concern.
  */
-
 import {
   canonicalizeProps,
   edgeStateSignature,
@@ -41,6 +41,7 @@ import type {
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds } from "./typegraph-internal";
+import { storeBackend } from "./typegraph-internal";
 
 /**
  * Local structural mirror of TypeGraph's internal `NodeRow`. 0.29.0 does NOT
@@ -208,7 +209,7 @@ export async function enumerateAllNodes(
     if (page.length < ENUMERATION_PAGE_SIZE) {
       break;
     }
-    after = page.at(-1)!.id;
+    after = requireDefined(page.at(-1)).id;
   }
   return collected;
 }
@@ -243,7 +244,7 @@ export async function enumerateAllEdges(
     if (page.length < ENUMERATION_PAGE_SIZE) {
       break;
     }
-    after = page.at(-1)!.id;
+    after = requireDefined(page.at(-1)).id;
   }
   return collected;
 }
@@ -432,12 +433,12 @@ export async function diffAgainstBase<G extends GraphDef>(
 
   for (const kind of nodeKinds) {
     const baseRows = await enumerateAllNodes(
-      baseStore.backend,
+      storeBackend(baseStore),
       baseStore.graphId,
       kind,
     );
     const forkRows = await enumerateAllNodes(
-      forkStore.backend,
+      storeBackend(forkStore),
       forkStore.graphId,
       kind,
     );
@@ -468,12 +469,12 @@ export async function diffAgainstBase<G extends GraphDef>(
 
   for (const kind of edgeKinds) {
     const baseRows = await enumerateAllEdges(
-      baseStore.backend,
+      storeBackend(baseStore),
       baseStore.graphId,
       kind,
     );
     const forkRows = await enumerateAllEdges(
-      forkStore.backend,
+      storeBackend(forkStore),
       forkStore.graphId,
       kind,
     );

@@ -33,6 +33,7 @@ import {
   enumerateAllNodes,
 } from "../../../src/graph-merge/state-diff";
 import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
+import { storeBackend } from "../../../src/store/runtime-port";
 
 /** Lexicographic comparator over two strings (ids, kinds, properties). */
 function compareStrings(left: string, right: string): number {
@@ -302,7 +303,11 @@ export async function normalizeGraph<G extends GraphDef>(
 
   const nodes: NormalizedNode[] = [];
   for (const kind of nodeKinds) {
-    const rows = await enumerateAllNodes(store.backend, store.graphId, kind);
+    const rows = await enumerateAllNodes(
+      storeBackend(store),
+      store.graphId,
+      kind,
+    );
     for (const row of rows) {
       if (row.deleted_at !== undefined) {
         continue;
@@ -314,7 +319,11 @@ export async function normalizeGraph<G extends GraphDef>(
 
   const edges: NormalizedEdge[] = [];
   for (const kind of edgeKinds) {
-    const rows = await enumerateAllEdges(store.backend, store.graphId, kind);
+    const rows = await enumerateAllEdges(
+      storeBackend(store),
+      store.graphId,
+      kind,
+    );
     for (const row of rows) {
       if (row.deleted_at !== undefined) {
         continue;

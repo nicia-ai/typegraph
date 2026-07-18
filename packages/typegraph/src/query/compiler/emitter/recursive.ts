@@ -1,16 +1,15 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { CompilerInvariantError } from "../../../errors";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import { type LogicalPlan } from "../plan";
 import { inspectRecursiveProjectPlan } from "./plan-inspector";
 
 export type RecursiveQueryEmitterInput = Readonly<{
-  depthFilter: SQL;
-  limitOffset?: SQL;
+  depthFilter: SqlFragment;
+  limitOffset?: SqlFragment;
   logicalPlan: LogicalPlan;
-  orderBy?: SQL;
-  projection: SQL;
-  recursiveCte: SQL;
+  orderBy?: SqlFragment;
+  projection: SqlFragment;
+  recursiveCte: SqlFragment;
 }>;
 
 function assertRecursiveEmitterClauseAlignment(
@@ -44,10 +43,12 @@ function assertRecursiveEmitterClauseAlignment(
   }
 }
 
-export function emitRecursiveQuerySql(input: RecursiveQueryEmitterInput): SQL {
+export function emitRecursiveQuerySql(
+  input: RecursiveQueryEmitterInput,
+): SqlFragment {
   assertRecursiveEmitterClauseAlignment(input.logicalPlan, input);
 
-  const parts: SQL[] = [
+  const parts: SqlFragment[] = [
     sql`WITH RECURSIVE`,
     input.recursiveCte,
     sql`SELECT ${input.projection}`,

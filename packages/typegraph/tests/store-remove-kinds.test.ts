@@ -15,7 +15,6 @@
  * the compile-time reference would resurrect the orphan on the next
  * deploy.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -30,9 +29,11 @@ import {
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { planRemovals } from "../src/graph-extension/remove";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { migrateSchema } from "../src/schema/manager";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 type CountRow = Readonly<{ count: unknown }>;
@@ -91,12 +92,15 @@ describe("Store.removeKinds — schema commit", () => {
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
-    const beforeVersion = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const beforeVersion = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
 
     const removed = await evolved.removeKinds(["Tag"]);
 
-    const afterVersion = (await backend.getActiveSchema(baseGraph.id))!.version;
+    const afterVersion = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     expect(afterVersion).toBe(beforeVersion + 1);
     expect(removed.registry.hasNodeType("Tag")).toBe(false);
     expect(
@@ -107,12 +111,15 @@ describe("Store.removeKinds — schema commit", () => {
   it("is idempotent: removing an absent kind is a no-op (no version bump)", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
-    const beforeVersion = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const beforeVersion = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
 
     const result = await store.removeKinds(["DoesNotExist"]);
 
-    const afterVersion = (await backend.getActiveSchema(baseGraph.id))!.version;
+    const afterVersion = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     expect(afterVersion).toBe(beforeVersion);
     expect(result.registry.hasNodeType("DoesNotExist")).toBe(false);
   });
@@ -275,12 +282,14 @@ describe("Store.removeKinds — schema commit", () => {
       }),
     );
     const first = await evolved.removeKinds(["Tag"]);
-    const versionAfterFirst = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const versionAfterFirst = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
 
     const second = await first.removeKinds(["Tag"]);
-    const versionAfterSecond = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const versionAfterSecond = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
 
     expect(versionAfterSecond).toBe(versionAfterFirst);
     expect(second.registry.hasNodeType("Tag")).toBe(false);
@@ -304,7 +313,9 @@ describe("Store.removeKinds — pending data-cleanup status", () => {
 
     await evolved.removeKinds(["Tag"]);
 
-    const pending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const pending = await requireDefined(backend.getPendingKindRemovals)(
+      baseGraph.id,
+    );
     const tagPending = pending.find((row) => row.kindName === "Tag");
     expect(tagPending).toBeDefined();
     expect(tagPending?.entity).toBe("node");
@@ -332,7 +343,9 @@ describe("Store.materializeRemovals", () => {
     expect(result.results[0]?.kind).toBe("Tag");
     expect(result.results[0]?.status).toBe("removed");
 
-    const stillPending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const stillPending = await requireDefined(backend.getPendingKindRemovals)(
+      baseGraph.id,
+    );
     expect(stillPending).toHaveLength(0);
   });
 
@@ -410,7 +423,9 @@ describe("Store.materializeRemovals", () => {
     await evolved.removeKinds(["Tag"], { eager: {} });
 
     // Pending removals is empty after eager cleanup.
-    const pending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const pending = await requireDefined(backend.getPendingKindRemovals)(
+      baseGraph.id,
+    );
     expect(pending).toHaveLength(0);
   });
 
@@ -449,15 +464,16 @@ describe("Store.materializeRemovals", () => {
     // committing it as the new active schema is structurally
     // equivalent to a successful Tag removal that crashed before the
     // queue insert.
-    const evolvedVersion = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const evolvedVersion = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     await migrateSchema(backend, baseGraph, evolvedVersion);
 
     // The queue is empty (the crash window). Tag rows are orphaned
     // because the schema doesn't reference Tag any more.
-    const pendingAfterCrash = await backend.getPendingKindRemovals!(
-      baseGraph.id,
-    );
+    const pendingAfterCrash = await requireDefined(
+      backend.getPendingKindRemovals,
+    )(baseGraph.id);
     expect(pendingAfterCrash).toHaveLength(0);
     expect(
       await backend.countNodesByKind({ graphId: baseGraph.id, kind: "Tag" }),
@@ -478,9 +494,9 @@ describe("Store.materializeRemovals", () => {
     ).toBe(0);
 
     // After cleanup, the queue is empty (rows are completed, not pending).
-    const pendingAfterRecover = await backend.getPendingKindRemovals!(
-      baseGraph.id,
-    );
+    const pendingAfterRecover = await requireDefined(
+      backend.getPendingKindRemovals,
+    )(baseGraph.id);
     expect(pendingAfterRecover).toHaveLength(0);
 
     // A second materializeRemovals() is a no-op — reconciliation
@@ -512,22 +528,23 @@ describe("Store.materializeRemovals", () => {
     await tags.create({ label: "alpha" });
 
     // v3 (simulated crash-window removal — schema dropped, queue empty).
-    const versionBeforeRemoveCrash = (await backend.getActiveSchema(
-      baseGraph.id,
-    ))!.version;
+    const versionBeforeRemoveCrash = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     await migrateSchema(backend, baseGraph, versionBeforeRemoveCrash);
 
-    const pendingAfterCrash = await backend.getPendingKindRemovals!(
-      baseGraph.id,
-    );
+    const pendingAfterCrash = await requireDefined(
+      backend.getPendingKindRemovals,
+    )(baseGraph.id);
     expect(
       pendingAfterCrash.filter((row) => row.kindName === "Tag"),
     ).toHaveLength(0);
 
     // v4 (evolve adds an unrelated kind so the active version is no
     // longer adjacent to the crash-window transition).
-    const versionBeforeReevolve = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const versionBeforeReevolve = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     const reevolveExtension = defineGraphExtension({
       nodes: { Note: { properties: { body: { type: "string" } } } },
     });
@@ -570,7 +587,9 @@ describe("Store.removeKinds — re-add and re-remove cycle", () => {
     const removed1 = await v1.removeKinds(["Tag"]);
     const cleanup1 = await removed1.materializeRemovals();
     expect(cleanup1.results[0]?.status).toBe("removed");
-    expect(await backend.getPendingKindRemovals!(baseGraph.id)).toHaveLength(0);
+    expect(
+      await requireDefined(backend.getPendingKindRemovals)(baseGraph.id),
+    ).toHaveLength(0);
 
     // Re-add the same kind, write data, then remove again. The
     // status table is keyed on (graph_id, kind_name, entity,
@@ -582,7 +601,9 @@ describe("Store.removeKinds — re-add and re-remove cycle", () => {
     await tags2.create({ label: "alpha2" });
     const removed2 = await v2.removeKinds(["Tag"]);
 
-    const stillPending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const stillPending = await requireDefined(backend.getPendingKindRemovals)(
+      baseGraph.id,
+    );
     expect(stillPending.find((row) => row.kindName === "Tag")).toBeDefined();
 
     const cleanup2 = await removed2.materializeRemovals();
@@ -609,7 +630,9 @@ describe("Store.removeKinds — re-add and re-remove cycle", () => {
 
     await evolved.removeKinds(["Tag"]);
 
-    const pending = await backend.getPendingKindRemovals!(baseGraph.id);
+    const pending = await requireDefined(backend.getPendingKindRemovals)(
+      baseGraph.id,
+    );
     const tagRows = pending.filter((row) => row.kindName === "Tag");
     // Without `entity` in the PK, the second upsert collapses onto
     // the first, dropping one of the two pending rows.

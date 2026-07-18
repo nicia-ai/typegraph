@@ -8,8 +8,6 @@
  * commits are atomic and fast, data work is bounded by row count and
  * deferrable / parallelizable.
  */
-import { sql } from "drizzle-orm";
-
 import { type RawBackend } from "../backend/branded";
 import {
   type GraphBackend,
@@ -24,9 +22,11 @@ import type {
   VectorSlot,
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
+import { sql } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import { nowIso } from "../utils/date";
+import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
 import {
   ensureFocusedStatusTable,
@@ -263,7 +263,7 @@ async function reconcilePendingRemovals(
   // a row exists in any state (pending or completed). The rows we want
   // to reconcile are the ones missing from this set entirely.
   const allRemovals = await (backend.getAllKindRemovals === undefined ?
-    backend.getPendingKindRemovals!(graphId)
+    requireDefined(backend.getPendingKindRemovals)(graphId)
   : backend.getAllKindRemovals(graphId));
   const recorded = new Set(
     allRemovals.map((row) =>
@@ -356,7 +356,7 @@ async function materializeOne(
   row: KindRemovalRow,
   ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
-  const recordKindRemoval = ctx.backend.recordKindRemoval!;
+  const recordKindRemoval = requireDefined(ctx.backend.recordKindRemoval);
   try {
     await closeRecordedAndDeleteLiveRows(ctx, row);
     await Promise.all(buildEmbeddingTableCleanup(ctx, row));
@@ -462,7 +462,9 @@ async function executeDeleteStatements(
   if (target.executeStatement !== undefined) {
     await Promise.all(
       statements.map((statement) =>
-        target.executeStatement!(asCompiledStatementSql(sql.raw(statement))),
+        requireDefined(target.executeStatement)(
+          asCompiledStatementSql(sql.raw(statement)),
+        ),
       ),
     );
     return;
@@ -475,7 +477,7 @@ async function executeDeleteStatements(
     );
   }
   await Promise.all(
-    statements.map((statement) => target.executeDdl!(statement)),
+    statements.map((statement) => requireDefined(target.executeDdl)(statement)),
   );
 }
 
@@ -506,7 +508,7 @@ function buildEmbeddingTableCleanup(
   const vectorStrategy = ctx.backend.vectorStrategy;
   if (vectorStrategy === undefined) return [];
 
-  const executeDdl = ctx.backend.executeDdl!;
+  const executeDdl = requireDefined(ctx.backend.executeDdl);
   const cleanup = (async () => {
     const slots = await resolveRemovedKindEmbeddingSlots(ctx.backend, row);
     await Promise.all(

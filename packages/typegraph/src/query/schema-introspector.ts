@@ -5,6 +5,7 @@ import {
   getSearchableMetadata,
   type SearchableMetadata,
 } from "../core/searchable";
+import { requireDefined } from "../utils/presence";
 import { type ValueType } from "./ast";
 
 const SUPPORTED_SCHEMA_TYPES = [
@@ -515,7 +516,7 @@ function intersectShapes(
 
   const entries = keys
     .map((key) => {
-      const infos = shapes.map((shape) => shape[key]!);
+      const infos = shapes.map((shape) => requireDefined(shape[key]));
       const merged = mergeFieldTypeInfos(infos);
       if (!merged) {
         return;

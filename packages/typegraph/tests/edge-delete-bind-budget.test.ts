@@ -175,7 +175,7 @@ describe("cascade edge delete honors the bind budget", () => {
         if (hardDeleteEdgesBatch === undefined) {
           throw new Error("backend must expose hardDeleteEdgesBatch");
         }
-        await hardDeleteEdgesBatch.call(backend, {
+        await hardDeleteEdgesBatch({
           graphId: GRAPH_ID,
           ids: [...edgeIds],
         });

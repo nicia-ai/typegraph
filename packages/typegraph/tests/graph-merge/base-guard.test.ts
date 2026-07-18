@@ -17,7 +17,6 @@
  *
  * Runs on BOTH backends (new-vs-base semantics parity).
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -32,6 +31,7 @@ import { mergeAgainstBase } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -166,7 +166,7 @@ describe.each(backendMatrix())("component base guard [$name]", (entry) => {
 
     // The ambiguity is reported, spanning both base ids.
     expect(result.data.baseAmbiguities).toHaveLength(1);
-    const ambiguity = result.data.baseAmbiguities[0]!;
+    const ambiguity = requireDefined(result.data.baseAmbiguities[0]);
     expect(ambiguity.baseIds.map((identity) => identity.id)).toEqual([
       "base-a",
       "base-b",
@@ -212,7 +212,9 @@ describe.each(backendMatrix())("component base guard [$name]", (entry) => {
     // Ambiguity still reported despite the diameter split.
     expect(result.data.baseAmbiguities).toHaveLength(1);
     expect(
-      result.data.baseAmbiguities[0]!.baseIds.map((identity) => identity.id),
+      requireDefined(result.data.baseAmbiguities[0]).baseIds.map(
+        (identity) => identity.id,
+      ),
     ).toEqual(["base-a", "base-b"]);
 
     // Both committed entities still survive, separate.

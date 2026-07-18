@@ -15,11 +15,9 @@ npm install @nicia-ai/typegraph zod drizzle-orm better-sqlite3
 
 ```ts
 import { z } from "zod";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
 
-import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const knows = defineEdge("knows");
@@ -30,17 +28,16 @@ const graph = defineGraph({
   edges: { knows: { type: knows, from: [Person], to: [Person] } },
 });
 
-const sqlite = new Database(":memory:");
-const db = drizzle(sqlite);
-sqlite.exec(generateSqliteMigrationSQL());
-
-const backend = createSqliteBackend(db);
-const store = createStore(graph, backend);
+const store = await createLocalSqliteStore(graph);
 
 const alice = await store.nodes.Person.create({ name: "Alice" });
 const bob = await store.nodes.Person.create({ name: "Bob" });
 await store.edges.knows.create(alice, bob);
+await store.close();
 ```
+
+Use the explicit `/adapters/drizzle/...` entrypoints when your application owns
+the database connection or needs adapter-native transaction handles.
 
 See the repo README for more.
 

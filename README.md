@@ -64,10 +64,8 @@ bun:sqlite), see the docs:
 
 ```typescript
 import { z } from "zod";
-import { createStore, defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
-
-const { backend } = createLocalSqliteBackend();
+import { defineEdge, defineGraph, defineNode } from "@nicia-ai/typegraph";
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), role: z.string().optional() }),
@@ -88,7 +86,7 @@ const graph = defineGraph({
   },
 });
 
-const store = createStore(graph, backend);
+const store = await createLocalSqliteStore(graph);
 
 const alice = await store.nodes.Person.create({ name: "Alice", role: "Engineer" });
 const website = await store.nodes.Project.create({ name: "Website", status: "active" });
@@ -108,6 +106,12 @@ console.log(results);
 
 For production schema management, see:
 [createStoreWithSchema](https://typegraph.dev/getting-started#store-creation-which-function-to-use).
+
+The managed SQLite entrypoint provisions the schema and returns the complete,
+schema-derived `Store` API without exposing Drizzle types. PostgreSQL consumers
+can use the equivalent `createLocalPgliteStore` from
+`@nicia-ai/typegraph/postgres/pglite`. Bring-your-own-connection integrations
+live under the explicit `/adapters/drizzle/...` entrypoints.
 
 ## Learn More
 

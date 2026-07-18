@@ -28,8 +28,9 @@
  *   - ONTOLOGY — a cluster mixes `Doctor` and `SpecialistDoctor` so
  *     `reconcileTypes: "ontology"` collapses to the most-specific type.
  */
-
 import fc from "fast-check";
+
+import { requireDefined } from "../../../src/utils/presence";
 
 /** A near-duplicate patient-name pair that clears the Dice-trigram 0.85 threshold. */
 type DuplicateNamePair = Readonly<{ left: string; right: string }>;
@@ -216,7 +217,9 @@ export const mergeLawScenarioArb: fc.Arbitrary<MergeLawScenario> = fc
   })
   .map((draw) => {
     const nameAt = (offset: number): string =>
-      DISTINCT_NAMES[(draw.nameOffset + offset) % DISTINCT_NAMES.length]!;
+      requireDefined(
+        DISTINCT_NAMES[(draw.nameOffset + offset) % DISTINCT_NAMES.length],
+      );
     return {
       inherited: {
         name: nameAt(0),

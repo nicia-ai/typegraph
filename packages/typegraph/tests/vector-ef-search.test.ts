@@ -21,6 +21,7 @@ import {
   MAX_HNSW_EF_SEARCH,
 } from "../src/query/dialect/vector/pgvector-strategy";
 import { createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Document = defineNode("Doc", {
@@ -126,8 +127,8 @@ describe("efSearch on sqlite-vec is a no-op", () => {
       without.map((hit) => hit.node.id),
     );
     // The nearest neighbor to the x-axis query is "alpha".
-    expect((withEf[0]!.node as unknown as { title: string }).title).toBe(
-      "alpha",
-    );
+    expect(
+      (requireDefined(withEf[0]).node as unknown as { title: string }).title,
+    ).toBe("alpha");
   });
 });

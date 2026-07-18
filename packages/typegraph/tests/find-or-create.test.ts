@@ -13,6 +13,7 @@ import {
   ValidationError,
 } from "../src/errors";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -240,12 +241,12 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     );
 
     expect(results).toHaveLength(3);
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.node.name).toBe("Alice");
-    expect(results[1]!.action).toBe("created");
-    expect(results[1]!.node.name).toBe("Bob");
-    expect(results[2]!.action).toBe("created");
-    expect(results[2]!.node.name).toBe("Acme");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).node.name).toBe("Alice");
+    expect(requireDefined(results[1]).action).toBe("created");
+    expect(requireDefined(results[1]).node.name).toBe("Bob");
+    expect(requireDefined(results[2]).action).toBe("created");
+    expect(requireDefined(results[2]).node.name).toBe("Acme");
   });
 
   it("finds all existing nodes", async () => {
@@ -264,8 +265,8 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("found");
-    expect(results[1]!.action).toBe("found");
+    expect(requireDefined(results[0]).action).toBe("found");
+    expect(requireDefined(results[1]).action).toBe("found");
   });
 
   it("handles mixed creates and finds with correct ordering", async () => {
@@ -290,17 +291,17 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     expect(results).toHaveLength(3);
 
     // Bob is new
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.node.name).toBe("Bob");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).node.name).toBe("Bob");
 
     // Alice is found
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.node.id).toBe(alice.id);
-    expect(results[1]!.node.role).toBe("eng");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).node.id).toBe(alice.id);
+    expect(requireDefined(results[1]).node.role).toBe("eng");
 
     // Acme is new
-    expect(results[2]!.action).toBe("created");
-    expect(results[2]!.node.name).toBe("Acme");
+    expect(requireDefined(results[2]).action).toBe("created");
+    expect(requireDefined(results[2]).node.name).toBe("Acme");
   });
 
   it("bulk with ifExists: update updates existing nodes", async () => {
@@ -322,10 +323,10 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("updated");
-    expect(results[0]!.node.role).toBe("manager"); // updated
-    expect(results[1]!.action).toBe("created");
-    expect(results[1]!.node.role).toBe("intern");
+    expect(requireDefined(results[0]).action).toBe("updated");
+    expect(requireDefined(results[0]).node.role).toBe("manager"); // updated
+    expect(requireDefined(results[1]).action).toBe("created");
+    expect(requireDefined(results[1]).node.role).toBe("intern");
   });
 
   it("bulk resurrects soft-deleted nodes", async () => {
@@ -344,10 +345,10 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
     );
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.action).toBe("resurrected");
-    expect(results[0]!.node.id).toBe(alice.id);
-    expect(results[0]!.node.role).toBe("resurrected");
-    expect(results[0]!.node.meta.deletedAt).toBeUndefined();
+    expect(requireDefined(results[0]).action).toBe("resurrected");
+    expect(requireDefined(results[0]).node.id).toBe(alice.id);
+    expect(requireDefined(results[0]).node.role).toBe("resurrected");
+    expect(requireDefined(results[0]).node.meta.deletedAt).toBeUndefined();
   });
 
   it("handles batch larger than bind parameter limit", async () => {
@@ -376,8 +377,10 @@ describe("store.nodes.*.bulkGetOrCreateByConstraint()", () => {
 
     expect(again).toHaveLength(BATCH_SIZE);
     for (let index = 0; index < BATCH_SIZE; index++) {
-      expect(again[index]!.action).toBe("found");
-      expect(again[index]!.node.id).toBe(results[index]!.node.id);
+      expect(requireDefined(again[index]).action).toBe("found");
+      expect(requireDefined(again[index]).node.id).toBe(
+        requireDefined(results[index]).node.id,
+      );
     }
   });
 
@@ -738,10 +741,10 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.edge.role).toBe("eng");
-    expect(results[1]!.action).toBe("created");
-    expect(results[1]!.edge.role).toBe("manager");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).edge.role).toBe("eng");
+    expect(requireDefined(results[1]).action).toBe("created");
+    expect(requireDefined(results[1]).edge.role).toBe("manager");
   });
 
   it("mixed creates and finds with correct ordering", async () => {
@@ -762,10 +765,10 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     ]);
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[0]!.edge.role).toBe("manager");
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.edge.id).toBe(existing.id);
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[0]).edge.role).toBe("manager");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).edge.id).toBe(existing.id);
   });
 
   it("within-batch duplicates (same endpoint + matchOn key)", async () => {
@@ -782,9 +785,11 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[1]!.action).toBe("found");
-    expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).edge.id).toBe(
+      requireDefined(results[0]).edge.id,
+    );
   });
 
   it("ifExists: update updates existing edges", async () => {
@@ -800,9 +805,9 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     );
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.action).toBe("updated");
-    expect(results[0]!.edge.role).toBe("manager");
-    expect(results[0]!.edge.since).toBe(2024);
+    expect(requireDefined(results[0]).action).toBe("updated");
+    expect(requireDefined(results[0]).edge.role).toBe("manager");
+    expect(requireDefined(results[0]).edge.since).toBe(2024);
   });
 
   it("resurrects soft-deleted edge", async () => {
@@ -821,10 +826,10 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     ]);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.action).toBe("resurrected");
-    expect(results[0]!.edge.id).toBe(first.id);
-    expect(results[0]!.edge.role).toBe("resurrected");
-    expect(results[0]!.edge.meta.deletedAt).toBeUndefined();
+    expect(requireDefined(results[0]).action).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.id).toBe(first.id);
+    expect(requireDefined(results[0]).edge.role).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
   });
 
   it("duplicate inputs with ifExists: update → first creates, second updates", async () => {
@@ -841,9 +846,11 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]!.action).toBe("created");
-    expect(results[1]!.action).toBe("found");
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("found");
     // Both reference the same edge
-    expect(results[1]!.edge.id).toBe(results[0]!.edge.id);
+    expect(requireDefined(results[1]).edge.id).toBe(
+      requireDefined(results[0]).edge.id,
+    );
   });
 });

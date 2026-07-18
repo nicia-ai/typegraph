@@ -15,7 +15,6 @@
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
-import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -32,11 +31,14 @@ import { z } from "zod";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { embedding } from "../../../src/core/embedding";
-import { asCompiledRowsSql, defineGraph, defineNode } from "../../../src/index";
+import { defineGraph, defineNode } from "../../../src/index";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let sharedPool: Pool | undefined;
@@ -51,7 +53,7 @@ function requirePostgres(ctx: { skip: () => void }): { pool: Pool } {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -188,13 +190,13 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
         limit: 3,
       } as const;
 
-      await tx.vectorSearch!({ ...params, efSearch: 256 });
+      await requireDefined(tx.vectorSearch)({ ...params, efSearch: 256 });
 
       // The override was restored within the same transaction: a later
       // search without efSearch must not inherit 256.
       expect(await readEfSearch()).toBe(baseline);
       expect(await readEfSearch()).not.toBe("256");
-      const hits = await tx.vectorSearch!(params);
+      const hits = await requireDefined(tx.vectorSearch)(params);
       expect(hits.length).toBeGreaterThan(0);
       expect(await readEfSearch()).toBe(baseline);
     });
@@ -243,8 +245,8 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
       issued.length = 0;
       await backend.transaction(async (tx) => {
         await Promise.all([
-          tx.vectorSearch!({ ...params, efSearch: 111 }),
-          tx.vectorSearch!({ ...params, efSearch: 222 }),
+          requireDefined(tx.vectorSearch)({ ...params, efSearch: 111 }),
+          requireDefined(tx.vectorSearch)({ ...params, efSearch: 222 }),
         ]);
       });
 
@@ -292,7 +294,9 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
     });
 
     expect(hits.length).toBeGreaterThan(0);
-    expect((hits[0]!.node as unknown as { title: string }).title).toBe("alpha");
+    expect(
+      (requireDefined(hits[0]).node as unknown as { title: string }).title,
+    ).toBe("alpha");
   });
 });
 
@@ -321,15 +325,17 @@ describe("Postgres efSearch — transaction-less backend", () => {
         efSearch: 256,
       } as const;
 
-      const first = await noTxBackend.vectorSearch!(params);
-      const second = await noTxBackend.vectorSearch!(params);
+      const first = await requireDefined(noTxBackend.vectorSearch)(params);
+      const second = await requireDefined(noTxBackend.vectorSearch)(params);
 
       // The query still runs (override silently dropped, not fatal).
       expect(Array.isArray(first)).toBe(true);
       expect(Array.isArray(second)).toBe(true);
       // Warned exactly once across both calls.
       expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(warnSpy.mock.calls[0]![0]).toMatch(/efSearch.*ignored/s);
+      expect(requireDefined(warnSpy.mock.calls[0])[0]).toMatch(
+        /efSearch.*ignored/s,
+      );
     } finally {
       warnSpy.mockRestore();
     }
@@ -387,7 +393,10 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
       limit: 3,
     } as const;
 
-    await backend.vectorSearch!({ ...params, indexType: "hnsw" });
+    await requireDefined(backend.vectorSearch)({
+      ...params,
+      indexType: "hnsw",
+    });
     const hnswSetCalls = statements.filter((statement) =>
       statement.query.includes("set_config"),
     );
@@ -401,7 +410,10 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
     ).toBe(true);
 
     statements.length = 0;
-    await backend.vectorSearch!({ ...params, indexType: "ivfflat" });
+    await requireDefined(backend.vectorSearch)({
+      ...params,
+      indexType: "ivfflat",
+    });
     const ivfflatSetCalls = statements.filter((statement) =>
       statement.query.includes("set_config"),
     );
@@ -424,7 +436,10 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
     ).toContain("AS MATERIALIZED");
 
     statements.length = 0;
-    await backend.vectorSearch!({ ...params, indexType: "none" });
+    await requireDefined(backend.vectorSearch)({
+      ...params,
+      indexType: "none",
+    });
     expect(
       statements.filter((statement) => statement.query.includes("set_config")),
       "brute-force slot must not touch GUCs",
@@ -450,7 +465,7 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
       };
 
       const baseline = await readIterativeScan();
-      await backend.vectorSearch!({
+      await requireDefined(backend.vectorSearch)({
         graphId: "iter_scan_leak",
         nodeKind: "Doc",
         fieldPath: "embedding",
@@ -488,7 +503,7 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
         return rows[0]?.v;
       };
       const baseline = await readIterativeScan();
-      await tx.vectorSearch!({
+      await requireDefined(tx.vectorSearch)({
         graphId: "iter_scan_tx",
         nodeKind: "Doc",
         fieldPath: "embedding",

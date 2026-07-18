@@ -20,13 +20,11 @@
  * net transition), so the recorded-nodes and recorded-edges relations get the
  * same structural coverage.
  */
-import { type SQL, sql } from "drizzle-orm";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
   asRecordedInstant,
   createStore,
   createStoreWithSchema,
@@ -42,7 +40,10 @@ import {
   createSqlSchema,
   type SqlSchema,
 } from "../../src/query/compiler/schema";
+import { sql, type SqlFragment } from "../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { toCanonicalIso } from "../../src/store/recorded-capture";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
 const Item = defineNode("Item", {
@@ -104,7 +105,7 @@ async function readRecordedClock(
 
 async function readIntervals(
   backend: GraphBackend,
-  table: SQL,
+  table: SqlFragment,
   ids: readonly string[],
 ): Promise<ReadonlyMap<string, readonly { from: string; to: string }[]>> {
   const rows = await backend.execute<IntervalRow>(
@@ -208,10 +209,15 @@ function assertIntervalInvariants(
       expect(from < to).toBe(true);
     }
     const openRows = rows.filter((row) => row.to === RECORDED_MAX);
-    expect(openRows.length).toBe(expectedOpenRows(finalState.get(id)!));
+    expect(openRows.length).toBe(
+      expectedOpenRows(requireDefined(finalState.get(id))),
+    );
     const sorted = rows.toSorted((a, b) => (a.from < b.from ? -1 : 1));
     for (let index = 1; index < sorted.length; index += 1) {
-      expect(sorted[index - 1]!.to <= sorted[index]!.from).toBe(true);
+      expect(
+        requireDefined(sorted[index - 1]).to <=
+          requireDefined(sorted[index]).from,
+      ).toBe(true);
     }
   }
 }
@@ -225,7 +231,9 @@ async function assertReconstruction(
 ): Promise<void> {
   for (const [index, checkpoint] of checkpoints.entries()) {
     if (index > 0) {
-      expect(checkpoints[index - 1]!.commit < checkpoint.commit).toBe(true);
+      expect(
+        requireDefined(checkpoints[index - 1]).commit < checkpoint.commit,
+      ).toBe(true);
     }
     const reconstructed = await reconstructAt(checkpoint.commit);
     for (const id of ids) {
@@ -277,13 +285,13 @@ describe("recorded-time property tests", () => {
 
         let labelCursor = 0;
         for (const transaction of transactions) {
-          const id = NODE_IDS[transaction.node]!;
+          const id = requireDefined(NODE_IDS[transaction.node]);
           const applied = await store.transaction(async (tx) => {
             let anyWrite = false;
             for (const op of transaction.ops) {
-              const state = model.get(id)!;
+              const state = requireDefined(model.get(id));
               if (!isLegal(op, state)) continue;
-              const value = labels[labelCursor % labels.length]!;
+              const value = requireDefined(labels[labelCursor % labels.length]);
               labelCursor += 1;
               switch (op) {
                 case "update": {
@@ -382,13 +390,13 @@ describe("recorded-time property tests", () => {
 
         let labelCursor = 0;
         for (const transaction of transactions) {
-          const id = NODE_IDS[transaction.node]!;
+          const id = requireDefined(NODE_IDS[transaction.node]);
           const applied = await historyStore.transaction(async (tx) => {
             let anyWrite = false;
             for (const op of transaction.ops) {
-              const state = model.get(id)!;
+              const state = requireDefined(model.get(id));
               if (!isLegal(op, state)) continue;
-              const value = labels[labelCursor % labels.length]!;
+              const value = requireDefined(labels[labelCursor % labels.length]);
               labelCursor += 1;
               switch (op) {
                 case "update": {
@@ -510,13 +518,13 @@ describe("recorded-time property tests", () => {
 
         let labelCursor = 0;
         for (const transaction of transactions) {
-          const id = EDGE_IDS[transaction.edge]!;
+          const id = requireDefined(EDGE_IDS[transaction.edge]);
           const applied = await store.transaction(async (tx) => {
             let anyWrite = false;
             for (const op of transaction.ops) {
-              const state = model.get(id)!;
+              const state = requireDefined(model.get(id));
               if (!isLegal(op, state)) continue;
-              const value = labels[labelCursor % labels.length]!;
+              const value = requireDefined(labels[labelCursor % labels.length]);
               labelCursor += 1;
               switch (op) {
                 case "update": {

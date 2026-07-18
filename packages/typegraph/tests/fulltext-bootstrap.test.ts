@@ -36,6 +36,7 @@ import {
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
+import { requireDefined } from "../src/utils/presence";
 
 /**
  * Builds an in-memory SQLite database that has every typegraph table
@@ -236,9 +237,9 @@ describe("#135 durable fulltext materialization (SQLite)", () => {
 
     expect(backend.ensureFulltextTable).toBeTypeOf("function");
 
-    await backend.ensureFulltextTable!(FtGraph.id);
-    await backend.ensureFulltextTable!(FtGraph.id);
-    await backend.ensureFulltextTable!(FtGraph.id);
+    await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
+    await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
+    await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
 
     // Exactly one durable marker row, no error recorded.
     const markers = sqlite
@@ -312,7 +313,7 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     });
 
     await expect(
-      driftBackend.ensureRuntimeContributions!(FtGraph.id),
+      requireDefined(driftBackend.ensureRuntimeContributions)(FtGraph.id),
     ).rejects.toThrow(/already materialized with a different signature/);
 
     // The recorded marker still reflects the original successful

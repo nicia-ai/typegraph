@@ -18,6 +18,7 @@ import {
 } from "../../core/types";
 import { ConfigurationError } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
+import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow } from "../row-mappers";
 import {
@@ -313,7 +314,7 @@ export function createNodeCollection<
           .from(kind, "_n")
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
-          .select((ctx: Record<string, unknown>) => ctx._n);
+          .select((ctx: Record<string, unknown>) => ctx["_n"]);
         if (filter.limit !== undefined) query = query.limit(filter.limit);
         if (filter.offset !== undefined) query = query.offset(filter.offset);
         const results = await query.execute();
@@ -372,7 +373,7 @@ export function createNodeCollection<
         const runDirtyCheck =
           config.upsertDirtyCheck &&
           (() =>
-            config.upsertDirtyCheck!(
+            requireDefined(config.upsertDirtyCheck)(
               kind,
               id,
               rowPropsToObject(existing.props),
@@ -494,12 +495,15 @@ export function createNodeCollection<
           // A prior in-batch write left the row live; only the prefetched row
           // (no prior write) can be soft-deleted and trigger a resurrection.
           const deletedAt =
-            pendingEntry === undefined ? original!.deleted_at : undefined;
+            pendingEntry === undefined ?
+              requireDefined(original).deleted_at
+            : undefined;
 
           let dirty: UpsertDirtyCheck | undefined;
           if (config.upsertDirtyCheck !== undefined) {
             const currentProps =
-              pendingEntry?.props ?? rowPropsToObject(original!.props);
+              pendingEntry?.props ??
+              rowPropsToObject(requireDefined(original).props);
             try {
               dirty = config.upsertDirtyCheck(
                 kind,
@@ -522,7 +526,9 @@ export function createNodeCollection<
 
           if (coalesce) {
             if (pendingEntry === undefined) {
-              results[itemIndex] = narrowNode<N>(rowToNode(original!));
+              results[itemIndex] = narrowNode<N>(
+                rowToNode(requireDefined(original)),
+              );
             } else {
               deferred.push({
                 index: itemIndex,
@@ -549,7 +555,9 @@ export function createNodeCollection<
           const createInputs = toCreate.map((entry) => entry.input);
           const created = await executeNodeCreateBatch(createInputs, target);
           for (const [index, entry] of toCreate.entries()) {
-            results[entry.index] = narrowNode<N>(created[index]!);
+            results[entry.index] = narrowNode<N>(
+              requireDefined(created[index]),
+            );
           }
         }
 
@@ -564,7 +572,7 @@ export function createNodeCollection<
         // Items that coalesced against an in-batch write take that write's
         // result (now filled). Its sourceIndex is always a write slot.
         for (const { index, sourceIndex } of deferred) {
-          results[index] = results[sourceIndex]!;
+          results[index] = requireDefined(results[sourceIndex]);
         }
 
         return { results, mutations: toCreate.length + toUpdate.length };

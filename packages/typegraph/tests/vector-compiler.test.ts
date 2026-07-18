@@ -1,4 +1,3 @@
-import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 
 import { ConfigurationError } from "../src/errors";
@@ -12,6 +11,8 @@ import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy"
 import { type VectorStrategy } from "../src/query/dialect/vector-strategy";
 import { jsonPointer } from "../src/query/json-pointer";
 import { fieldRef } from "../src/query/predicates";
+import { renderPostgres } from "../src/query/sql-fragment";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString } from "./sql-test-utils";
 
 // The compiler resolves the per-field table for `(Document, embedding)`
@@ -286,7 +287,7 @@ describe("vector compilation semantics", () => {
 describe("vector metric validation follows the active strategy, not the dialect", () => {
   // A custom Postgres-dialect override that drops `inner_product` — exactly the
   // case the dialect's built-in metric list (which includes `inner_product`)
-  // would otherwise mis-validate. Spreads the real strategy so every SQL-gen
+  // would otherwise mis-validate. Spreads the real strategy so every SQL-generating
   // method is present; only the advertised capabilities differ.
   const cosineL2OnlyStrategy: VectorStrategy = {
     ...pgvectorStrategy,
@@ -364,8 +365,10 @@ describe("vector predicate without an explicit metric uses the declared metric",
       indexType: "hnsw" as const,
     };
     const ddlText = (concurrent: boolean): string =>
-      new PgDialect().sqlToQuery(
-        pgvectorStrategy.buildCreateIndex!(slot, { concurrent })!,
+      renderPostgres(
+        requireDefined(
+          pgvectorStrategy.buildCreateIndex?.(slot, { concurrent }),
+        ),
       ).sql;
     expect(ddlText(true)).toContain("CREATE INDEX CONCURRENTLY");
     expect(ddlText(false)).not.toContain("CONCURRENTLY");

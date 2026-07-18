@@ -170,6 +170,28 @@ jobs:
       - name: Run example smoke test
         run: pnpm --filter @nicia-ai/typegraph exec tsx examples/01-basic-usage.ts
 
+  test-strict-local-consumers:
+    name: Test Strict Packed Consumers (TypeScript 5 and 6)
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test strict packed SQLite and PGlite consumers
+        run: pnpm test:strict-local-consumers
+
   test-coverage:
     name: Coverage shard ${{ matrix.shard }}
     runs-on: ubuntu-24.04
@@ -267,7 +289,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        typescript-version: ["5.9.3", "6.0.2"]
+        typescript-version: ["5.9.3", "6.0.3"]
     steps:
       - uses: actions/checkout@v6
 
@@ -285,6 +307,10 @@ jobs:
         run: pnpm --filter @nicia-ai/typegraph test:types
         env:
           TYPEGRAPH_TYPESCRIPT_VERSION: ${{ matrix.typescript-version }}
+
+      - name: Verify public API report
+        if: matrix.typescript-version == '5.9.3'
+        run: pnpm --filter @nicia-ai/typegraph test:api-report
 
   test-postgres:
     name: Test (PostgreSQL, shard ${{ matrix.shard }})
@@ -370,6 +396,7 @@ jobs:
       - test-sqlite-unit
       - test-sqlite-property
       - test-sqlite-smoke
+      - test-strict-local-consumers
       - test-coverage-merge
       - test-typescript-compat
       - test-postgres

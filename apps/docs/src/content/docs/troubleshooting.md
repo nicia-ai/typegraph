@@ -312,11 +312,11 @@ const pool = new Pool({
 
 ```typescript
 // PostgreSQL
-import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 await pool.query(generatePostgresMigrationSQL());
 
 // SQLite
-import { generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 sqlite.exec(generateSqliteMigrationSQL());
 ```
 

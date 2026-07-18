@@ -5,19 +5,15 @@
  * new recorded row is captured. This is the at-least-once replay invariant the
  * option exists to provide (issue #256).
  */
-import { sql } from "drizzle-orm";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  asCompiledRowsSql,
-  createStoreWithSchema,
-  defineGraph,
-  defineNode,
-} from "../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../src";
 import { type GraphBackend } from "../../src/backend/types";
 import { createSqlSchema } from "../../src/query/compiler/schema";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { toCanonicalIso } from "../../src/store/recorded-capture";
 import { createTestBackend } from "../test-utils";
 

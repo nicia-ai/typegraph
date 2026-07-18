@@ -1,18 +1,17 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { CompilerInvariantError } from "../../../errors";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import { type LogicalPlan } from "../plan";
 import { inspectStandardProjectPlan } from "./plan-inspector";
 
 export type StandardQueryEmitterInput = Readonly<{
-  ctes: readonly SQL[];
-  fromClause: SQL;
-  groupBy?: SQL;
-  having?: SQL;
-  limitOffset?: SQL;
+  ctes: readonly SqlFragment[];
+  fromClause: SqlFragment;
+  groupBy?: SqlFragment;
+  having?: SqlFragment;
+  limitOffset?: SqlFragment;
   logicalPlan: LogicalPlan;
-  orderBy?: SQL;
-  projection: SQL;
+  orderBy?: SqlFragment;
+  projection: SqlFragment;
 }>;
 
 function assertStandardEmitterClauseAlignment(
@@ -60,10 +59,12 @@ function assertStandardEmitterClauseAlignment(
   }
 }
 
-export function emitStandardQuerySql(input: StandardQueryEmitterInput): SQL {
+export function emitStandardQuerySql(
+  input: StandardQueryEmitterInput,
+): SqlFragment {
   assertStandardEmitterClauseAlignment(input.logicalPlan, input);
 
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
   if (input.ctes.length > 0) {
     parts.push(sql`WITH ${sql.join([...input.ctes], sql`, `)}`);
   }

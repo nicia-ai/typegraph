@@ -303,7 +303,7 @@ Each tenant gets their own PostgreSQL schema within the same database.
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 

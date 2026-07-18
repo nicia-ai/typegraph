@@ -1,3 +1,4 @@
+import { requireDefined } from "../utils/presence";
 /**
  * A deterministic disjoint-set forest (union-find), shared by every merge phase
  * that folds a set of items into equivalence classes — ontology equivalence
@@ -31,12 +32,12 @@ export class UnionFind<T> {
     this.add(value);
     let root = value;
     while (this.parent.get(root) !== root) {
-      root = this.parent.get(root)!;
+      root = requireDefined(this.parent.get(root));
     }
     // Path compression: point every node on the walk straight at the root.
     let cursor = value;
     while (cursor !== root) {
-      const next = this.parent.get(cursor)!;
+      const next = requireDefined(this.parent.get(cursor));
       this.parent.set(cursor, root);
       cursor = next;
     }

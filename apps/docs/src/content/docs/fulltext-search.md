@@ -195,7 +195,7 @@ SQL; `createStoreWithSchema` is what then records the durable
 materialization marker that fulltext operations check (see above):
 
 ```typescript
-import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Includes the fulltext table, tsvector column, GIN index, and pgvector
 const migrationSQL = generatePostgresMigrationSQL();
@@ -627,14 +627,18 @@ let you change today:
 
 ### Strategy skeleton
 
-The `FulltextStrategy` interface is exported from the package root.
+The `FulltextStrategy` contract and every type referenced by it are exported
+from the Drizzle-free backend-authoring entrypoint.
 Fields below are the minimum surface; see
 `src/query/dialect/fulltext-strategy.ts` in the TypeGraph source for
 `tsvectorStrategy` and `fts5Strategy` as full references.
 
 ```typescript
-import { sql, type SQL } from "drizzle-orm";
-import type { FulltextStrategy } from "@nicia-ai/typegraph";
+import {
+  sql,
+  type FulltextStrategy,
+  type SqlFragment,
+} from "@nicia-ai/typegraph/backend";
 
 /**
  * Example: a trigram-based strategy on top of pg_trgm. Illustrative —
@@ -739,7 +743,7 @@ export const pgTrgmStrategy: FulltextStrategy = {
 Wire it in at backend construction:
 
 ```typescript
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const backend = createPostgresBackend(db, { fulltext: pgTrgmStrategy });
 ```

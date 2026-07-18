@@ -27,6 +27,7 @@ import {
   field,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -101,7 +102,7 @@ describe("countEdges vs count(target) semantics", () => {
       .execute();
     expect(liveTargets).toHaveLength(1);
     // Eve is expired, so only the Alice→Bob relationship counts as live.
-    expect(liveTargets[0]!.liveFriendCount).toBe(1);
+    expect(requireDefined(liveTargets[0]).liveFriendCount).toBe(1);
 
     const edgeCount = await store
       .query()
@@ -117,7 +118,7 @@ describe("countEdges vs count(target) semantics", () => {
       .execute();
     expect(edgeCount).toHaveLength(1);
     // Both Alice→Bob and Alice→Eve edges are live regardless of Eve's state.
-    expect(edgeCount[0]!.totalKnows).toBe(2);
+    expect(requireDefined(edgeCount[0]).totalKnows).toBe(2);
   });
 
   it("mixes count(target) and countEdges in a single aggregate", async () => {
@@ -139,9 +140,9 @@ describe("countEdges vs count(target) semantics", () => {
       .execute();
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.liveFriends).toBe(1);
-    expect(rows[0]!.totalEdges).toBe(2);
-    expect(rows[0]!.distinctEdges).toBe(2);
+    expect(requireDefined(rows[0]).liveFriends).toBe(1);
+    expect(requireDefined(rows[0]).totalEdges).toBe(2);
+    expect(requireDefined(rows[0]).distinctEdges).toBe(2);
   });
 
   it("countEdges returns 0 for users with no outgoing edges", async () => {
@@ -161,7 +162,7 @@ describe("countEdges vs count(target) semantics", () => {
       .execute();
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.followCount).toBe(0);
+    expect(requireDefined(rows[0]).followCount).toBe(0);
   });
 
   it("countEdges respects a whereNode predicate on the target alias", async () => {
@@ -198,7 +199,7 @@ describe("countEdges vs count(target) semantics", () => {
       .execute();
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.matchingFollows).toBe(1);
+    expect(requireDefined(rows[0]).matchingFollows).toBe(1);
   });
 
   it("required traversal drops groups whose targets all fail a whereNode predicate", async () => {

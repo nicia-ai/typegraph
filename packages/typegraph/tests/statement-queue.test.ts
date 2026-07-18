@@ -15,12 +15,13 @@ import { describe, expect, it } from "vitest";
 import { createSerialExecutionAdapter } from "../src/backend/drizzle/execution/statement-queue";
 import {
   type CompiledSqlQuery,
+  type ExecutableSql,
   type SqlExecutionAdapter,
 } from "../src/backend/drizzle/execution/types";
 import { TransactionClosedError } from "../src/errors";
 
 /** Labels the probe adapter reads back off a `SQL` it was handed. */
-const STATEMENT_LABELS = new WeakMap<SQL, string>();
+const STATEMENT_LABELS = new WeakMap<object, string>();
 
 function statement(label: string): SQL {
   const query = sql.raw(label);
@@ -28,7 +29,7 @@ function statement(label: string): SQL {
   return query;
 }
 
-function labelOf(query: SQL): string {
+function labelOf(query: ExecutableSql): string {
   const label = STATEMENT_LABELS.get(query);
   if (label === undefined) throw new Error("unlabelled statement");
   return label;
@@ -86,10 +87,10 @@ function createProbeAdapter(): Readonly<{
   }
 
   const adapter: SqlExecutionAdapter = {
-    compile(query: SQL): CompiledSqlQuery {
+    compile(query: ExecutableSql): CompiledSqlQuery {
       return { sql: labelOf(query), params: [] };
     },
-    execute<TRow>(query: SQL): Promise<readonly TRow[]> {
+    execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
       return run(labelOf(query));
     },
     executeCompiled<TRow>(

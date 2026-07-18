@@ -129,10 +129,11 @@ describe("createVerifiedStore", () => {
     const runtimeBackend = freshBackend(sqlite);
     await expect(
       createVerifiedStore(graphV2Safe(), runtimeBackend),
-    ).rejects.toMatchObject({
-      name: "MigrationError",
-      message: expect.stringMatching(/safe auto-migration/),
-    });
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof MigrationError &&
+        error.message.includes("safe auto-migration"),
+    );
   });
 
   it("throws MigrationError when the database is behind by a breaking change", async () => {
@@ -142,10 +143,11 @@ describe("createVerifiedStore", () => {
     const runtimeBackend = freshBackend(sqlite);
     await expect(
       createVerifiedStore(graphV3Breaking(), runtimeBackend),
-    ).rejects.toMatchObject({
-      name: "MigrationError",
-      message: expect.stringMatching(/breaking change/),
-    });
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof MigrationError &&
+        error.message.includes("breaking change"),
+    );
   });
 
   it("throws StoreNotInitializedError when schema is current but contribution markers are absent", async () => {

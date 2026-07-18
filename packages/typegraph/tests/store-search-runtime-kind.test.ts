@@ -17,6 +17,7 @@ import { defineGraph, defineNode } from "../src";
 import { KindNotFoundError } from "../src";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -49,7 +50,7 @@ describe("store.search.fulltext on graph-extension kinds", () => {
         },
       }),
     );
-    const papers = evolved.getNodeCollection("Paper")!;
+    const papers = requireDefined(evolved.getNodeCollection("Paper"));
     await papers.create({
       title: "Attention is all you need",
       abstract: "Introduces the Transformer architecture",
@@ -65,7 +66,7 @@ describe("store.search.fulltext on graph-extension kinds", () => {
       limit: 10,
     });
     expect(results.length).toBeGreaterThan(0);
-    const top = results[0]!.node as unknown as { title: string };
+    const top = requireDefined(results[0]).node as unknown as { title: string };
     expect(top.title).toBe("Attention is all you need");
   });
 
@@ -123,7 +124,7 @@ describe("store.search.vector", () => {
         },
       }),
     );
-    const papers = evolved.getNodeCollection("Paper")!;
+    const papers = requireDefined(evolved.getNodeCollection("Paper"));
     await papers.create({
       title: "alpha",
       embedding: [1, 0, 0, 0],
@@ -183,7 +184,7 @@ describe("store.search.hybrid on graph-extension kinds", () => {
         },
       }),
     );
-    const papers = evolved.getNodeCollection("Paper")!;
+    const papers = requireDefined(evolved.getNodeCollection("Paper"));
     await papers.create({
       title: "Attention is all you need",
       embedding: [1, 0, 0, 0],
@@ -224,7 +225,7 @@ describe("store.search.rebuildFulltext on graph-extension kinds", () => {
         },
       }),
     );
-    const papers = evolved.getNodeCollection("Paper")!;
+    const papers = requireDefined(evolved.getNodeCollection("Paper"));
     await papers.create({ title: "Attention" });
 
     // No cast: the kind name parameter is `string`-bounded, registry-
@@ -248,7 +249,7 @@ describe("store.search.rebuildFulltext on graph-extension kinds", () => {
         },
       }),
     );
-    const papers = evolved.getNodeCollection("Paper")!;
+    const papers = requireDefined(evolved.getNodeCollection("Paper"));
     await papers.create({ title: "First paper" });
     await papers.create({ title: "Second paper" });
 

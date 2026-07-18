@@ -24,7 +24,7 @@
  *   npx tsx examples/23-provenance-retraction.ts
  */
 import {
-  createStoreWithSchema,
+  createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -170,7 +170,7 @@ async function printHolding(
 export async function main(): Promise<void> {
   const backend = createExampleBackend();
   try {
-    const [store] = await createStoreWithSchema(graph, backend, {
+    const [store] = await createAdapterStoreWithSchema(graph, backend, {
       history: true,
     });
 

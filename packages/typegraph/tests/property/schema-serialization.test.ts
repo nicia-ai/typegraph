@@ -36,6 +36,7 @@ import {
   serializeSchema,
 } from "../../src/schema/serializer";
 import { serializedSchemaZod } from "../../src/schema/types";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Arbitrary Generators
@@ -360,8 +361,8 @@ const graphDefArb = fc
               key: edge.kind,
               value: {
                 type: edge,
-                from: [nodeTypes[fromIndex]!],
-                to: [nodeTypes[toIndex]!],
+                from: [requireDefined(nodeTypes[fromIndex])],
+                to: [requireDefined(nodeTypes[toIndex])],
                 cardinality,
                 endpointExistence,
               },
@@ -383,8 +384,8 @@ const graphDefArb = fc
                 })
                 .filter(({ fromIndex, toIndex }) => fromIndex !== toIndex)
                 .map(({ fromIndex, toIndex }) => {
-                  const from = nodeTypes[fromIndex]!;
-                  const to = nodeTypes[toIndex]!;
+                  const from = requireDefined(nodeTypes[fromIndex]);
+                  const to = requireDefined(nodeTypes[toIndex]);
                   switch (relationType) {
                     case 0: {
                       return subClassOf(from, to);
@@ -493,7 +494,7 @@ describe("Schema Serialization Properties", () => {
           for (const name of expectedNodeNames) {
             const node = deserialized.getNode(name);
             expect(node).toBeDefined();
-            expect(node!.kind).toBe(name);
+            expect(requireDefined(node).kind).toBe(name);
           }
 
           // Check edge names
@@ -505,7 +506,7 @@ describe("Schema Serialization Properties", () => {
           for (const name of expectedEdgeNames) {
             const edge = deserialized.getEdge(name);
             expect(edge).toBeDefined();
-            expect(edge!.kind).toBe(name);
+            expect(requireDefined(edge).kind).toBe(name);
           }
 
           // Check defaults

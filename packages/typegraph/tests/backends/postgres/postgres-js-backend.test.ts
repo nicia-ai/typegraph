@@ -12,32 +12,31 @@
  * EXISTS` DDL and per-test TRUNCATE, and the harness runs files
  * serially.
  */
-import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  asCompiledRowsSql,
-  count,
-  defineEdge,
-  defineGraph,
-  defineNode,
-} from "../../../src";
+import { count, defineEdge, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import {
   INTERNAL_TEMPORARY_WRITES,
+  type InternalTransactionOptions,
   rowPropsToObject,
 } from "../../../src/backend/types";
-import { asCompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledTemporaryStatementSql,
+} from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let sharedSql: Sql | undefined;
@@ -143,7 +142,7 @@ beforeAll(async () => {
   // Gated on POSTGRES_URL (same pattern as postgres-backend.test.ts) so
   // `pnpm test:unit` doesn't race with other postgres files when a stray
   // Docker Postgres happens to be reachable.
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
   if (isPostgresAvailable) {
     await setupTestDatabase();
@@ -172,7 +171,7 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
     expect(sharedDb).toBeDefined();
   });
 
-  describe.runIf(process.env.POSTGRES_URL)("Adapter Test Suite", () => {
+  describe.runIf(process.env["POSTGRES_URL"])("Adapter Test Suite", () => {
     beforeEach(async () => {
       await clearTestData();
     });
@@ -187,7 +186,7 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
     );
   });
 
-  describe.runIf(process.env.POSTGRES_URL)("Integration Test Suite", () => {
+  describe.runIf(process.env["POSTGRES_URL"])("Integration Test Suite", () => {
     beforeEach(async () => {
       await clearTestData();
     });
@@ -254,7 +253,9 @@ describe("postgres-js driver — coercion sanity", () => {
       "person-1",
     );
     expect(fetched).toBeDefined();
-    expect(rowPropsToObject(fetched!.props)).toEqual(complexProps);
+    expect(rowPropsToObject(requireDefined(fetched).props)).toEqual(
+      complexProps,
+    );
   });
 
   it("returns aggregate counts as plain numbers (not BigInt)", async (ctx) => {
@@ -291,8 +292,8 @@ describe("postgres-js driver — coercion sanity", () => {
     // string; postgres-js coerces to native `BigInt` unless Drizzle's
     // transparent-parser override catches OID 20. Assert we get a plain
     // JS number at the store boundary — that's the contract.
-    expect(typeof result[0]!.total).toBe("number");
-    expect(result[0]!.total).toBe(5);
+    expect(typeof requireDefined(result[0]).total).toBe("number");
+    expect(requireDefined(result[0]).total).toBe(5);
   });
 
   it("honors serializable isolation on db.transaction", async (ctx) => {
@@ -313,7 +314,9 @@ describe("postgres-js driver — coercion sanity", () => {
 
     const fetched = await backend.getNode("postgres_js_test", "Person", "tx-1");
     expect(fetched).toBeDefined();
-    expect(rowPropsToObject(fetched!.props).name).toBe("Alice");
+    expect(rowPropsToObject(requireDefined(fetched).props)["name"]).toBe(
+      "Alice",
+    );
   });
 
   it("honors repeatable-read access for read-only transactions", async (ctx) => {
@@ -328,7 +331,7 @@ describe("postgres-js driver — coercion sanity", () => {
             read_only: string;
           }>
         >(
-          asCompiledRowsSql(drizzleSql`
+          asCompiledRowsSql(portableSql`
             SELECT
               current_setting('transaction_isolation') AS isolation_level,
               current_setting('transaction_read_only') AS read_only
@@ -346,38 +349,36 @@ describe("postgres-js driver — coercion sanity", () => {
     const { db } = requirePostgres(ctx);
     const backend = createPostgresBackend(db);
 
-    const settings = await backend.transaction(
-      async (tx) => {
-        await tx.executeTemporaryStatement!(
-          asCompiledTemporaryStatementSql(
-            drizzleSql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
-          ),
-        );
-        const rows = await tx.execute<
-          Readonly<{
-            isolation_level: string;
-            read_only: string;
-          }>
-        >(
-          asCompiledRowsSql(drizzleSql`
+    const transactionOptions = {
+      accessMode: "read_only",
+      isolationLevel: "repeatable_read",
+      temporaryWrites: INTERNAL_TEMPORARY_WRITES,
+    } satisfies InternalTransactionOptions;
+    const settings = await backend.transaction(async (tx) => {
+      await requireDefined(tx.executeTemporaryStatement)(
+        asCompiledTemporaryStatementSql(
+          portableSql`CREATE TEMP TABLE iterative_probe (value INTEGER)`,
+        ),
+      );
+      const rows = await tx.execute<
+        Readonly<{
+          isolation_level: string;
+          read_only: string;
+        }>
+      >(
+        asCompiledRowsSql(portableSql`
             SELECT
               current_setting('transaction_isolation') AS isolation_level,
               current_setting('transaction_read_only') AS read_only
           `),
-        );
-        await tx.executeTemporaryStatement!(
-          asCompiledTemporaryStatementSql(
-            drizzleSql`DROP TABLE iterative_probe`,
-          ),
-        );
-        return rows;
-      },
-      {
-        accessMode: "read_only",
-        isolationLevel: "repeatable_read",
-        temporaryWrites: INTERNAL_TEMPORARY_WRITES,
-      },
-    );
+      );
+      await requireDefined(tx.executeTemporaryStatement)(
+        asCompiledTemporaryStatementSql(
+          portableSql`DROP TABLE iterative_probe`,
+        ),
+      );
+      return rows;
+    }, transactionOptions);
 
     expect(settings).toEqual([
       { isolation_level: "repeatable read", read_only: "off" },

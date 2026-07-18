@@ -11,20 +11,22 @@
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
-import { type SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
 import { type VectorSlot } from "../../../src/query/dialect/vector-strategy";
+import {
+  renderPostgres,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
-const dialect = new PgDialect();
 const GRAPH = "g1";
 const TS = "2026-06-01T00:00:00.000Z";
 
@@ -41,17 +43,22 @@ function requirePool(ctx: { skip: () => void }): Pool {
 
 async function run(
   pool: Pool,
-  query: SQL,
+  query: SqlFragment,
 ): Promise<readonly Record<string, unknown>[]> {
-  const compiled = dialect.sqlToQuery(query);
-  const result = await pool.query(compiled.sql, compiled.params);
-  return result.rows as readonly Record<string, unknown>[];
+  const compiled = renderPostgres(query);
+  const result = await pool.query<Record<string, unknown>>(compiled.sql, [
+    ...compiled.params,
+  ]);
+  return result.rows;
 }
 
-async function execAll(pool: Pool, queries: readonly SQL[]): Promise<void> {
+async function execAll(
+  pool: Pool,
+  queries: readonly SqlFragment[],
+): Promise<void> {
   for (const query of queries) {
-    const compiled = dialect.sqlToQuery(query);
-    await pool.query(compiled.sql, compiled.params);
+    const compiled = renderPostgres(query);
+    await pool.query(compiled.sql, [...compiled.params]);
   }
 }
 
@@ -121,7 +128,7 @@ async function upsert(
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const pool = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -178,9 +185,9 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       pool,
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids).toEqual(["d1", "d3", "d2"]);
-    expect(Number(rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("upsert replaces an existing embedding for the same node", async (ctx) => {
@@ -194,7 +201,7 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
     expect(rows.length).toBe(1);
-    expect(Number(rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("minScore filters out dissimilar rows (cosine)", async (ctx) => {
@@ -210,7 +217,7 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
   });
 
   it("delete removes a node's embedding", async (ctx) => {
@@ -251,7 +258,7 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
         searchParams([1, 0, 0], { metric: "l2" }),
       ),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1", "d3", "d2"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1", "d3", "d2"]);
   });
 
   it("inner_product metric ranks by maximum inner product (pgvector-only)", async (ctx) => {
@@ -269,7 +276,7 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
         searchParams([1, 0, 0], { metric: "inner_product" }),
       ),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d2", "d1", "d3"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d2", "d1", "d3"]);
   });
 
   it("search is partition-correct: another graph's identical vector does not leak", async (ctx) => {
@@ -282,7 +289,7 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       pool,
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 10 })),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
   });
 
   it("buildCreateIndex (HNSW) produces DDL that executes and search still ranks", async (ctx) => {
@@ -291,14 +298,14 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
     await createStorage(pool, s);
     const indexDdl = pgvectorStrategy.buildCreateIndex?.(s);
     expect(indexDdl).toBeDefined();
-    await execAll(pool, [indexDdl!]);
+    await execAll(pool, [requireDefined(indexDdl)]);
     await upsert(pool, s, "d1", [1, 0, 0]);
     await upsert(pool, s, "d2", [0, 1, 0]);
     const rows = await run(
       pool,
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
   });
 
   it("buildCreateIndex (IVFFlat) produces DDL that executes", async (ctx) => {
@@ -307,13 +314,13 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
     await createStorage(pool, s);
     const indexDdl = pgvectorStrategy.buildCreateIndex?.(s);
     expect(indexDdl).toBeDefined();
-    await execAll(pool, [indexDdl!]);
+    await execAll(pool, [requireDefined(indexDdl)]);
     await upsert(pool, s, "d1", [1, 0, 0]);
     const rows = await run(
       pool,
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
   });
 
   it("buildDropStorage drops the per-field table", async (ctx) => {

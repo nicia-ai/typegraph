@@ -461,8 +461,8 @@ export function registerStoreViewIntegrationTests(
 
         // `then` resolves to undefined so `await past.nodes` (a mistake) is a
         // no-op rather than a thrown KindNotFoundError.
-        expect((past.nodes as Record<string, unknown>).then).toBeUndefined();
-        expect((past.edges as Record<string, unknown>).then).toBeUndefined();
+        expect((past.nodes as Record<string, unknown>)["then"]).toBeUndefined();
+        expect((past.edges as Record<string, unknown>)["then"]).toBeUndefined();
       });
 
       it("the `in` operator agrees with property access on a pinned collection", () => {

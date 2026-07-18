@@ -22,7 +22,7 @@ Define your indexes once and pass them into the Drizzle schema factories:
 
 ```ts
 import { defineEdge, defineNode } from "@nicia-ai/typegraph";
-import { createPostgresTables } from "@nicia-ai/typegraph/postgres";
+import { createPostgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { andWhere, defineEdgeIndex, defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
 
@@ -62,7 +62,7 @@ export const typegraphTables = createPostgresTables({}, {
 For SQLite, use `createSqliteTables`:
 
 ```ts
-import { createSqliteTables } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export const typegraphTables = createSqliteTables({}, {
   indexes: [personEmail, worksAtRoleOut],

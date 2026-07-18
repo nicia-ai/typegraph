@@ -1,10 +1,11 @@
-import { type SQL } from "drizzle-orm";
+import { typeGraphGlobalSymbol } from "../utils/global-symbol";
+import { type SqlFragment } from "./sql-fragment";
 
 declare const SqlIntentBrand: unique symbol;
 
 export type SqlIntent = "rows" | "statement" | "temporary-statement";
 
-export type IntentSql<I extends SqlIntent> = SQL &
+export type IntentSql<I extends SqlIntent> = SqlFragment &
   Readonly<{ [SqlIntentBrand]: I }>;
 
 export type CompiledRowsSql = IntentSql<"rows">;
@@ -12,15 +13,17 @@ export type CompiledSelectSql = CompiledRowsSql;
 export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
-export function asCompiledRowsSql(query: SQL): CompiledRowsSql {
+export function asCompiledRowsSql(query: SqlFragment): CompiledRowsSql {
   return query as CompiledRowsSql;
 }
 
-export function asCompiledSelectSql(query: SQL): CompiledSelectSql {
+export function asCompiledSelectSql(query: SqlFragment): CompiledSelectSql {
   return asCompiledRowsSql(query);
 }
 
-export function asCompiledStatementSql(query: SQL): CompiledStatementSql {
+export function asCompiledStatementSql(
+  query: SqlFragment,
+): CompiledStatementSql {
   return query as CompiledStatementSql;
 }
 
@@ -31,7 +34,7 @@ export function asCompiledStatementSql(query: SQL): CompiledStatementSql {
  * operations still need to manage ephemeral working tables.
  */
 export function asCompiledTemporaryStatementSql(
-  query: SQL,
+  query: SqlFragment,
 ): CompiledTemporaryStatementSql {
   return query as CompiledTemporaryStatementSql;
 }
@@ -46,14 +49,40 @@ export function asCompiledTemporaryStatementSql(
  * call is planned against the actual parameters; the re-parse cost is
  * ~1ms, the generic-plan cliff it avoids is 10-300ms.
  */
-const forceCustomPlanQueries = new WeakSet<SQL>();
+type SqlIntentRegistry = Readonly<{
+  annIndexScanQueries: WeakMap<SqlFragment, readonly string[]>;
+  forceCustomPlanQueries: WeakSet<SqlFragment>;
+}>;
 
-export function markForceCustomPlan(query: SQL): void {
-  forceCustomPlanQueries.add(query);
+const SQL_INTENT_REGISTRY: unique symbol = typeGraphGlobalSymbol(
+  "sql-intent-registry",
+);
+const globalWithSqlIntentRegistry = globalThis as typeof globalThis &
+  Readonly<{
+    [SQL_INTENT_REGISTRY]?: SqlIntentRegistry;
+  }>;
+const sqlIntentRegistry =
+  globalWithSqlIntentRegistry[SQL_INTENT_REGISTRY] ??
+  (() => {
+    const registry: SqlIntentRegistry = {
+      annIndexScanQueries: new WeakMap(),
+      forceCustomPlanQueries: new WeakSet(),
+    };
+    Object.defineProperty(globalWithSqlIntentRegistry, SQL_INTENT_REGISTRY, {
+      configurable: false,
+      enumerable: false,
+      value: registry,
+      writable: false,
+    });
+    return registry;
+  })();
+
+export function markForceCustomPlan(query: SqlFragment): void {
+  sqlIntentRegistry.forceCustomPlanQueries.add(query);
 }
 
-export function shouldForceCustomPlan(query: SQL): boolean {
-  return forceCustomPlanQueries.has(query);
+export function shouldForceCustomPlan(query: SqlFragment): boolean {
+  return sqlIntentRegistry.forceCustomPlanQueries.has(query);
 }
 
 /**
@@ -67,17 +96,35 @@ export function shouldForceCustomPlan(query: SQL): boolean {
  * backend knows which GUCs apply. Backends without GUC semantics
  * ignore the brand.
  */
-const annIndexScanQueries = new WeakMap<SQL, readonly string[]>();
-
 export function markAnnIndexScan(
-  query: SQL,
+  query: SqlFragment,
   indexTypes: readonly string[],
 ): void {
-  annIndexScanQueries.set(query, indexTypes);
+  sqlIntentRegistry.annIndexScanQueries.set(query, indexTypes);
 }
 
-export function annIndexScanTypes(query: SQL): readonly string[] | undefined {
-  return annIndexScanQueries.get(query);
+export function annIndexScanTypes(
+  query: SqlFragment,
+): readonly string[] | undefined {
+  return sqlIntentRegistry.annIndexScanQueries.get(query);
+}
+
+/** @internal Copies execution semantics when immutable fragments are composed. */
+export function copySqlIntents(
+  target: SqlFragment,
+  sources: readonly SqlFragment[],
+): void {
+  if (sources.some((source) => shouldForceCustomPlan(source))) {
+    markForceCustomPlan(target);
+  }
+
+  const indexTypes = new Set<string>();
+  for (const source of sources) {
+    for (const indexType of annIndexScanTypes(source) ?? []) {
+      indexTypes.add(indexType);
+    }
+  }
+  if (indexTypes.size > 0) markAnnIndexScan(target, [...indexTypes]);
 }
 
 /**
@@ -90,7 +137,7 @@ export function annIndexScanTypes(query: SQL): readonly string[] | undefined {
  * cached — callers fall back to `backend.execute`. Keeping this predicate
  * beside the brands means a future brand updates one place, not every caller.
  */
-export function isRawExecutable(query: SQL): boolean {
+export function isRawExecutable(query: SqlFragment): boolean {
   return (
     !shouldForceCustomPlan(query) && annIndexScanTypes(query) === undefined
   );

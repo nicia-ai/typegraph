@@ -1,3 +1,4 @@
+import { createGraphBackendProjection } from "../backend/graph-backend-projection";
 import {
   createBackendOverlay,
   type DeleteEdgesBatchParams,
@@ -5,13 +6,14 @@ import {
   type GraphBackend,
   type InsertEdgeParams,
   type InsertNodeParams,
+  type InternalTransactionOptions,
   type NodeRow,
   type TransactionBackend,
-  type TransactionOptions,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { groupBy } from "../utils/array";
+import { requireDefined } from "../utils/presence";
 import {
   edgeInsertDispatch,
   nodeInsertDispatch,
@@ -38,9 +40,7 @@ import {
   assertCapturableBackend,
   assertRecordedCaptureTransactionIsolation,
   assertRequestedRecordedIsolation,
-  createHistoryUnsafeSqlRef,
   rawWriteGuards,
-  recordedCaptureRequiresCallbackTransactionError,
   requireCaptureStatements,
   requireRecordedSchema,
   withRecordedRelationsPrecondition,
@@ -60,9 +60,9 @@ export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
-  createHistoryUnsafeSqlRef,
-  createRevisionTrackingUnsafeSqlRef,
   recordedCaptureRequiresCallbackTransactionError,
+  throwHistoryUnsafeSqlAccess,
+  throwRevisionTrackingUnsafeSqlAccess,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
@@ -103,13 +103,13 @@ type RecordedFlushObserver = (instants: RecordedFlushInstants) => void;
 
 const RECORDED_FLUSH_OBSERVER = Symbol("typegraph.recordedFlushObserver");
 
-type RecordedFlushObserverOptions = TransactionOptions &
+type RecordedFlushObserverOptions = InternalTransactionOptions &
   Readonly<{
     [RECORDED_FLUSH_OBSERVER]?: RecordedFlushObserver;
   }>;
 
 function readRecordedFlushObserver(
-  options: TransactionOptions | undefined,
+  options: InternalTransactionOptions | undefined,
 ): RecordedFlushObserver | undefined {
   return (options as RecordedFlushObserverOptions | undefined)?.[
     RECORDED_FLUSH_OBSERVER
@@ -117,8 +117,8 @@ function readRecordedFlushObserver(
 }
 
 function stripRecordedFlushObserver(
-  options: TransactionOptions | undefined,
-): TransactionOptions | undefined {
+  options: InternalTransactionOptions | undefined,
+): InternalTransactionOptions | undefined {
   if (options === undefined) return undefined;
   // Omit only the observer symbol; every other (current or future)
   // TransactionOptions field passes through to the wrapped backend untouched.
@@ -128,9 +128,9 @@ function stripRecordedFlushObserver(
 }
 
 export function withRecordedFlushObserver(
-  options: TransactionOptions | undefined,
+  options: InternalTransactionOptions | undefined,
   observer: RecordedFlushObserver,
-): TransactionOptions {
+): InternalTransactionOptions {
   return {
     ...stripRecordedFlushObserver(options),
     [RECORDED_FLUSH_OBSERVER]: observer,
@@ -490,7 +490,7 @@ function createRecordedTransactionBackend(
         async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
           session.assertOpen();
           await lockGraph(params.graphId);
-          await target.deleteEdgesBatch!(params);
+          await requireDefined(target.deleteEdgesBatch)(params);
           for (const id of params.ids) {
             session.touchEdge(params.graphId, id);
           }
@@ -505,7 +505,7 @@ function createRecordedTransactionBackend(
         ): Promise<void> {
           session.assertOpen();
           await lockGraph(params.graphId);
-          await target.hardDeleteEdgesBatch!(params);
+          await requireDefined(target.hardDeleteEdgesBatch)(params);
           for (const id of params.ids) {
             session.touchEdge(params.graphId, id);
           }
@@ -553,7 +553,7 @@ async function runCapturedAutocommit<T>(
   backend: GraphBackend,
   schema: SqlSchema | undefined,
   fn: (target: TransactionBackend) => Promise<T>,
-  options?: TransactionOptions,
+  options?: InternalTransactionOptions,
 ): Promise<T> {
   assertRequestedRecordedIsolation(backend, options);
   return backend.transaction(async (target) => {
@@ -575,7 +575,8 @@ export function createRecordedBackend(
     fn: (target: TransactionBackend) => Promise<T>,
   ): Promise<T> => runCapturedAutocommit(backend, schema, fn);
 
-  return createBackendOverlay(backend, {
+  const projectedBackend = createGraphBackendProjection(backend);
+  return createBackendOverlay(projectedBackend, {
     ...rawWriteGuards(backend, "backend"),
 
     async insertNode(params) {
@@ -682,7 +683,9 @@ export function createRecordedBackend(
       {}
     : {
         async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
-          await capture((target) => target.deleteEdgesBatch!(params));
+          await capture((target) =>
+            requireDefined(target.deleteEdgesBatch)(params),
+          );
         },
       }),
 
@@ -692,7 +695,9 @@ export function createRecordedBackend(
         async hardDeleteEdgesBatch(
           params: DeleteEdgesBatchParams,
         ): Promise<void> {
-          await capture((target) => target.hardDeleteEdgesBatch!(params));
+          await capture((target) =>
+            requireDefined(target.hardDeleteEdgesBatch)(params),
+          );
         },
       }),
 
@@ -704,21 +709,11 @@ export function createRecordedBackend(
         await assertRecordedCaptureTransactionIsolation(target, backendOptions);
         const readOnly = backendOptions?.accessMode === "read_only";
         const scope = createRecordedTransactionScope(target, schema, !readOnly);
-        const result = await fn(scope.backend, createHistoryUnsafeSqlRef());
+        const result = await fn(scope.backend);
         const instants = await scope.flush();
         observer?.(instants);
         return result;
       }, backendOptions);
     },
-
-    ...(backend.adoptTransaction === undefined ?
-      {}
-    : {
-        adoptTransaction(externalTx): TransactionBackend {
-          throw recordedCaptureRequiresCallbackTransactionError({
-            externalTxType: typeof externalTx,
-          });
-        },
-      }),
   });
 }

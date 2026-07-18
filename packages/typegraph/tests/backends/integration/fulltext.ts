@@ -90,7 +90,7 @@ export function registerFulltextIntegrationTests(
       });
 
       const resultIds = results.map((r) => r.node.id);
-      expect(resultIds).toContain(ids.climate);
+      expect(resultIds).toContain(ids["climate"]);
       // Every result is a genuine match — ordered by score DESC with
       // rank = 1-based position.
       expect(results[0]?.rank).toBe(1);
@@ -108,7 +108,7 @@ export function registerFulltextIntegrationTests(
         query: "climate temperatures",
         limit: 10,
       });
-      expect(results.map((r) => r.node.id)).toContain(ids.climate);
+      expect(results.map((r) => r.node.id)).toContain(ids["climate"]);
     });
 
     it("supports websearch-mode negation", async (ctx) => {
@@ -121,8 +121,8 @@ export function registerFulltextIntegrationTests(
         limit: 10,
       });
       const resultIds = results.map((r) => r.node.id);
-      expect(resultIds).toContain(ids.climate);
-      expect(resultIds).not.toContain(ids.draft);
+      expect(resultIds).toContain(ids["climate"]);
+      expect(resultIds).not.toContain(ids["draft"]);
     });
 
     it("returns highlighted snippets when includeSnippets is set", async (ctx) => {
@@ -250,8 +250,8 @@ export function registerFulltextIntegrationTests(
         .execute();
 
       const resultIds = results.map((r) => r.id);
-      expect(resultIds).toContain(ids.climate);
-      expect(resultIds).not.toContain(ids.draft);
+      expect(resultIds).toContain(ids["climate"]);
+      expect(resultIds).not.toContain(ids["draft"]);
     });
 
     it(".matches() applies top-k after metadata filters", async (ctx) => {
@@ -300,9 +300,9 @@ export function registerFulltextIntegrationTests(
       const resultIds = results.map((r) => r.id);
       // Both science articles with matching body content appear; the
       // lifestyle cuisine article does not.
-      expect(resultIds).toContain(ids.climate);
-      expect(resultIds).toContain(ids.energy);
-      expect(resultIds).not.toContain(ids.cuisine);
+      expect(resultIds).toContain(ids["climate"]);
+      expect(resultIds).toContain(ids["energy"]);
+      expect(resultIds).not.toContain(ids["cuisine"]);
     });
 
     it(".matches() rejects placement under OR / NOT", async (ctx) => {
@@ -360,7 +360,7 @@ export function registerFulltextIntegrationTests(
         query: "climate",
         limit: 10,
       });
-      expect(restored.map((hit) => hit.node.id)).toContain(ids.climate);
+      expect(restored.map((hit) => hit.node.id)).toContain(ids["climate"]);
     });
   });
 }

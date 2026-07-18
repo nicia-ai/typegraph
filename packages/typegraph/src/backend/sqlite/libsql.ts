@@ -8,7 +8,7 @@
  * @example In-memory database
  * ```typescript
  * import { createClient } from "@libsql/client";
- * import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+ * import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
  *
  * const client = createClient({ url: "file::memory:" });
  * const { backend } = await createLibsqlBackend(client);
@@ -18,7 +18,7 @@
  * @example Remote Turso database
  * ```typescript
  * import { createClient } from "@libsql/client";
- * import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+ * import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
  *
  * const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
  * const { backend } = await createLibsqlBackend(client);
@@ -30,12 +30,14 @@ import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
 import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";
 import { generateSqliteDDL } from "../drizzle/ddl";
+import { type AnySqliteDatabase } from "../drizzle/execution";
+export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
   createSqliteBackend,
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
-import type { GraphBackend } from "../types";
+import type { AdapterBackend } from "../types";
 
 // ============================================================
 // Types
@@ -59,7 +61,7 @@ export type LibsqlBackendResult = Readonly<{
   /**
    * The GraphBackend instance for use with createStore.
    */
-  backend: GraphBackend;
+  backend: AdapterBackend<AnySqliteDatabase>;
 
   /**
    * The underlying Drizzle database instance.
@@ -93,7 +95,7 @@ export type LibsqlBackendResult = Readonly<{
  * @example
  * ```typescript
  * import { createClient } from "@libsql/client";
- * import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+ * import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
  *
  * const client = createClient({ url: "file::memory:" });
  * const { backend } = await createLibsqlBackend(client);

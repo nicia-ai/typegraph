@@ -17,6 +17,7 @@ import {
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { Node } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -178,11 +179,11 @@ describe("store.batch()", () => {
     );
 
     expect(people).toHaveLength(1);
-    expect(people[0]!.name).toBe("Bob");
+    expect(requireDefined(people[0]).name).toBe("Bob");
 
     expect(skills).toHaveLength(2);
-    expect(skills[0]!.name).toBe("Rust");
-    expect(skills[1]!.name).toBe("TypeScript");
+    expect(requireDefined(skills[0]).name).toBe("Rust");
+    expect(requireDefined(skills[1]).name).toBe("TypeScript");
   });
 
   it("handles queries with traversals", async () => {
@@ -208,8 +209,8 @@ describe("store.batch()", () => {
     expect(skillNames).toEqual(["Rust", "TypeScript"]);
 
     expect(bobCompany).toHaveLength(1);
-    expect(bobCompany[0]!.company).toBe("Globex");
-    expect(bobCompany[0]!.role).toBe("Manager");
+    expect(requireDefined(bobCompany[0]).company).toBe("Globex");
+    expect(requireDefined(bobCompany[0]).role).toBe("Manager");
   });
 
   it("handles empty result sets", async () => {
@@ -288,10 +289,10 @@ describe("store.batch()", () => {
     );
 
     expect(youngPeople).toHaveLength(1);
-    expect(youngPeople[0]!.name).toBe("Bob");
+    expect(requireDefined(youngPeople[0]).name).toBe("Bob");
 
     expect(techCompanies).toHaveLength(1);
-    expect(techCompanies[0]!.name).toBe("Acme");
+    expect(requireDefined(techCompanies[0]).name).toBe("Acme");
   });
 
   it("handles offset in addition to limit", async () => {
@@ -310,7 +311,7 @@ describe("store.batch()", () => {
     );
 
     expect(page).toHaveLength(1);
-    expect(page[0]!.name).toBe("Bob"); // Second person alphabetically
+    expect(requireDefined(page[0]).name).toBe("Bob"); // Second person alphabetically
   });
 
   // ============================================================
@@ -325,7 +326,7 @@ describe("store.batch()", () => {
 
     expect(skills).toHaveLength(2);
     expect(companies).toHaveLength(1);
-    expect(companies[0]!.kind).toBe("worksAt");
+    expect(requireDefined(companies[0]).kind).toBe("worksAt");
   });
 
   it("batches edge batchFindTo lookups", async () => {
@@ -371,14 +372,14 @@ describe("store.batch()", () => {
     );
 
     expect(bobEdges).toHaveLength(1);
-    expect(bobEdges[0]!.role).toBe("Manager");
+    expect(requireDefined(bobEdges[0]).role).toBe("Manager");
     expect(allPeople).toHaveLength(2);
     expect(bobSkillEdges).toHaveLength(1);
   });
 
   it("batchFindFrom excludes soft-deleted edges", async () => {
     const aliceSkills = await store.edges.hasSkill.findFrom(alice);
-    await store.edges.hasSkill.delete(aliceSkills[0]!.id);
+    await store.edges.hasSkill.delete(requireDefined(aliceSkills[0]).id);
 
     const [remaining] = await store.batch(
       store.edges.hasSkill.batchFindFrom(alice),
@@ -399,7 +400,7 @@ describe("store.batch()", () => {
 
     // Alice works at Acme — 1 result
     expect(aliceAtAcme).toHaveLength(1);
-    expect(aliceAtAcme[0]!.role).toBe("Engineer");
+    expect(requireDefined(aliceAtAcme[0]).role).toBe("Engineer");
 
     // Bob does not work at Acme — 0 results
     expect(bobAtAcme).toHaveLength(0);
@@ -418,13 +419,13 @@ describe("store.batch()", () => {
     );
 
     expect(matchingRole).toHaveLength(1);
-    expect(matchingRole[0]!.role).toBe("Engineer");
+    expect(requireDefined(matchingRole[0]).role).toBe("Engineer");
     expect(wrongRole).toHaveLength(0);
   });
 
   it("batchFindByEndpoints excludes soft-deleted edges", async () => {
     const aliceEdges = await store.edges.worksAt.findFrom(alice);
-    await store.edges.worksAt.delete(aliceEdges[0]!.id);
+    await store.edges.worksAt.delete(requireDefined(aliceEdges[0]).id);
 
     const [result] = await store.batch(
       store.edges.worksAt.batchFindByEndpoints(alice, acme),

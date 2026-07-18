@@ -23,6 +23,7 @@ import {
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
 import { compactUndefined } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
 import {
@@ -497,7 +498,7 @@ function dedupBy<T>(
       seen.set(key, item);
     }
   }
-  return order.map((key) => seen.get(key)!);
+  return order.map((key) => requireDefined(seen.get(key)));
 }
 
 function indexCompositeKey(entry: ExtensionIndex): string {

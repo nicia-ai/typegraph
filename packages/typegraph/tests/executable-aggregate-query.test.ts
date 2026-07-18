@@ -18,6 +18,7 @@ import {
   sum,
 } from "../src";
 import { buildKindRegistry } from "../src/registry";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString } from "./sql-test-utils";
 
 // Test schema definitions
@@ -75,7 +76,7 @@ describe("ExecutableAggregateQuery.toAst", () => {
     expect(ast.start.alias).toBe("p");
     expect(ast.start.kinds).toEqual(["Product"]);
     expect(ast.groupBy).toBeDefined();
-    expect(ast.groupBy!.fields).toHaveLength(1);
+    expect(requireDefined(ast.groupBy).fields).toHaveLength(1);
   });
 
   it("includes predicates in AST", () => {

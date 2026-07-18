@@ -1,19 +1,18 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { CompilerInvariantError } from "../../../errors";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import { type LogicalPlan } from "../plan";
 import { inspectSetOperationPlan } from "./plan-inspector";
 
 export type SetOperationQueryEmitterInput = Readonly<{
-  baseQuery: SQL;
-  ctes?: readonly SQL[];
+  baseQuery: SqlFragment;
+  ctes?: readonly SqlFragment[];
   logicalPlan: LogicalPlan;
-  suffixClauses?: readonly SQL[];
+  suffixClauses?: readonly SqlFragment[];
 }>;
 
 function assertSetOperationEmitterClauseAlignment(
   logicalPlan: LogicalPlan,
-  suffixClauses: readonly SQL[] | undefined,
+  suffixClauses: readonly SqlFragment[] | undefined,
 ): void {
   const shape = inspectSetOperationPlan(logicalPlan);
   const hasSuffixClauses =
@@ -54,13 +53,13 @@ function assertSetOperationEmitterClauseAlignment(
 
 export function emitSetOperationQuerySql(
   input: SetOperationQueryEmitterInput,
-): SQL {
+): SqlFragment {
   assertSetOperationEmitterClauseAlignment(
     input.logicalPlan,
     input.suffixClauses,
   );
 
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
   if (input.ctes !== undefined && input.ctes.length > 0) {
     parts.push(sql`WITH ${sql.join([...input.ctes], sql`, `)}`);
   }

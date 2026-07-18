@@ -25,6 +25,7 @@ import { ConfigurationError } from "../src/errors";
 import { defineEdgeIndex, defineNodeIndex } from "../src/indexes";
 import { generateIndexDDL } from "../src/indexes/ddl";
 import { serializeSchema } from "../src/schema/serializer";
+import { requireDefined } from "../src/utils/presence";
 
 const Document = defineNode("Doc", {
   schema: z.object({
@@ -171,7 +172,7 @@ describe("serialization", () => {
     // byte-identical.
     const btree = indexes.find((declaration) => !("method" in declaration));
     expect(btree).toBeDefined();
-    expect(Object.keys(btree!)).not.toContain("method");
+    expect(Object.keys(requireDefined(btree))).not.toContain("method");
   });
 });
 

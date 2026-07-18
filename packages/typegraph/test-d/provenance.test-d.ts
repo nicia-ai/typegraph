@@ -3,11 +3,11 @@ import { z } from "zod";
 
 import {
   createStore,
+  type AdapterHistoryStore,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
-  type HistoryStore,
   type Store,
 } from "..";
 import {
@@ -96,8 +96,11 @@ const terminalConfig = {
 } as const;
 
 declare const backend: GraphBackend;
-declare const historyStore: HistoryStore<typeof graph>;
-declare const terminalHistoryStore: HistoryStore<typeof terminalGraph>;
+declare const historyStore: AdapterHistoryStore<typeof graph, never>;
+declare const terminalHistoryStore: AdapterHistoryStore<
+  typeof terminalGraph,
+  never
+>;
 declare const sourceId: string;
 
 const liveStore: Store<typeof graph> = createStore(graph, backend);

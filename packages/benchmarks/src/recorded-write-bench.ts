@@ -30,12 +30,12 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import {
   createSqliteBackend,
   createSqliteTables,
   generateSqliteDDL,
-} from "@nicia-ai/typegraph/sqlite";
+} from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 import { median, nowMs } from "./utils";
 
@@ -244,7 +244,7 @@ async function main(): Promise<void> {
 
   if (!process.argv.includes("--postgres")) return;
 
-  const url = process.env.POSTGRES_URL;
+  const url = process.env["POSTGRES_URL"];
   if (url === undefined) {
     console.log(
       "\n(--postgres given but POSTGRES_URL unset — skipping Postgres lane)",

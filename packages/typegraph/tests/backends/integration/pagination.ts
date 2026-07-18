@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { requireDefined } from "../../../src/utils/presence";
 import { seedProductsForCursorPagination } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -35,7 +36,7 @@ export function registerPaginationIntegrationTests(
         .from("Product", "p")
         .orderBy("p", "price", "asc")
         .select((ctx) => ({ name: ctx.p.name, price: ctx.p.price }))
-        .paginate({ first: 3, after: page1.nextCursor! });
+        .paginate({ first: 3, after: requireDefined(page1.nextCursor) });
 
       expect(page2.data).toHaveLength(3);
       expect(page2.data[0]?.price).toBe(400);
@@ -60,7 +61,7 @@ export function registerPaginationIntegrationTests(
         .from("Product", "p")
         .orderBy("p", "price", "asc")
         .select((ctx) => ({ name: ctx.p.name, price: ctx.p.price }))
-        .paginate({ first: 5, after: page1.nextCursor! });
+        .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
 
       expect(page2.data[0]?.price).toBe(600);
       expect(page2.prevCursor).toBeDefined();
@@ -71,7 +72,7 @@ export function registerPaginationIntegrationTests(
         .from("Product", "p")
         .orderBy("p", "price", "asc")
         .select((ctx) => ({ name: ctx.p.name, price: ctx.p.price }))
-        .paginate({ last: 5, before: page2.prevCursor! });
+        .paginate({ last: 5, before: requireDefined(page2.prevCursor) });
 
       expect(previousPage.data).toHaveLength(5);
       expect(previousPage.data[0]?.price).toBe(100);
@@ -94,7 +95,7 @@ export function registerPaginationIntegrationTests(
         .from("Product", "p")
         .orderBy("p", "price", "asc")
         .select((ctx) => ({ name: ctx.p.name, price: ctx.p.price }))
-        .paginate({ first: 5, after: page1.nextCursor! });
+        .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
 
       expect(lastPage.data).toHaveLength(2);
       expect(lastPage.hasNextPage).toBe(false);

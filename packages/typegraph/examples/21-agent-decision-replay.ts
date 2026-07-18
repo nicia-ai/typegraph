@@ -28,6 +28,7 @@ import {
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
+import { requireDefined } from "../src/utils/presence";
 import { createExampleBackend, requireRecordedNow } from "./_helpers";
 
 // ============================================================
@@ -145,10 +146,10 @@ export async function main(): Promise<void> {
         await store.nodes.Paper.create({ title: `Follow-up paper ${index + 1}` }),
       );
     }
-    await store.edges.cites.create(citers[0]!, kaplan, {});
-    await store.edges.cites.create(citers[1]!, kaplan, {});
-    await store.edges.cites.create(citers[2]!, kaplan, {});
-    await store.edges.cites.create(citers[3]!, chinchilla, {});
+    await store.edges.cites.create(requireDefined(citers[0]), kaplan, {});
+    await store.edges.cites.create(requireDefined(citers[1]), kaplan, {});
+    await store.edges.cites.create(requireDefined(citers[2]), kaplan, {});
+    await store.edges.cites.create(requireDefined(citers[3]), chinchilla, {});
 
     // ----------------------------------------------------------
     // The agent decides — and we note WHEN it decided

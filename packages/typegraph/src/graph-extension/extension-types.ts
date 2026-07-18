@@ -47,7 +47,7 @@ export type ExtensionEmbeddingModifier = Readonly<{
  * list. `searchable` and `embedding` only apply to specific underlying
  * types — see the per-modifier docs.
  */
-type ExtensionPropertyModifiers = Readonly<{
+export type ExtensionPropertyModifiers = Readonly<{
   optional?: boolean;
   searchable?: ExtensionSearchableModifier;
   embedding?: ExtensionEmbeddingModifier;

@@ -93,7 +93,7 @@ describe("coordinateContext", () => {
       withRecordedCoordinate(validCoordinate(), RECORDED_AT),
     );
 
-    expect(context.recordedAsOf).toBe(RECORDED_AT);
-    expect(context.temporalMode).toBe("asOf");
+    expect(context["recordedAsOf"]).toBe(RECORDED_AT);
+    expect(context["temporalMode"]).toBe("asOf");
   });
 });

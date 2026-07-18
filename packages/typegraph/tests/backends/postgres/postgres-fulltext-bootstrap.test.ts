@@ -45,9 +45,10 @@ import {
   createPostgresBackend,
   tables as defaultTables,
 } from "../../../src/backend/postgres";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let pool: Pool | undefined;
@@ -72,7 +73,7 @@ const CONTRIB_MAT_TABLE = getTableName(
 );
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   try {
     pool = new Pool({ connectionString: TEST_DATABASE_URL });
     await pool.query("SELECT 1");
@@ -128,7 +129,7 @@ async function expectFulltextTableMissing(): Promise<void> {
   expect(exists.rows[0]?.exists).toBe(false);
 }
 
-describe.runIf(process.env.POSTGRES_URL)(
+describe.runIf(process.env["POSTGRES_URL"])(
   "PostgreSQL fulltext bootstrap gap",
   () => {
     const transientPools: Pool[] = [];
@@ -154,7 +155,7 @@ describe.runIf(process.env.POSTGRES_URL)(
       // Per-test pools (one per pooledBackend() call) — flush them
       // so repeated suite runs don't accumulate Postgres backends.
       while (transientPools.length > 0) {
-        const transientPool = transientPools.pop()!;
+        const transientPool = requireDefined(transientPools.pop());
         await transientPool.end();
       }
     });
@@ -165,7 +166,7 @@ describe.runIf(process.env.POSTGRES_URL)(
       const [store] = await createStoreWithSchema(FtGraph, pooledBackend());
 
       // The canonical boot path created the table.
-      const exists = await pool!.query<{ exists: boolean }>(
+      const exists = await requireDefined(pool).query<{ exists: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM pg_tables
            WHERE schemaname = 'public' AND tablename = $1
@@ -175,7 +176,7 @@ describe.runIf(process.env.POSTGRES_URL)(
       expect(exists.rows[0]?.exists).toBe(true);
 
       // The durable marker was recorded for this graph.
-      const markers = await pool!.query<{
+      const markers = await requireDefined(pool).query<{
         owner: string;
         materialized_at: string | null;
         last_error: string | null;
@@ -192,7 +193,7 @@ describe.runIf(process.env.POSTGRES_URL)(
 
       await store.nodes.Doc.create({ title: "renewable energy" });
 
-      const rows = await pool!.query<{ content: string }>(
+      const rows = await requireDefined(pool).query<{ content: string }>(
         `SELECT content FROM ${defaultTables.fulltextTableName} WHERE graph_id = $1`,
         [FtGraph.id],
       );
@@ -236,7 +237,7 @@ describe.runIf(process.env.POSTGRES_URL)(
       const store = createStore(FtGraph, pooledBackend());
       await store.nodes.Doc.create({ title: "attach path works" });
 
-      const rows = await pool!.query<{ content: string }>(
+      const rows = await requireDefined(pool).query<{ content: string }>(
         `SELECT content FROM ${defaultTables.fulltextTableName} WHERE graph_id = $1`,
         [FtGraph.id],
       );
@@ -251,12 +252,14 @@ describe.runIf(process.env.POSTGRES_URL)(
 
       expect(backend.ensureFulltextTable).toBeTypeOf("function");
 
-      await backend.ensureFulltextTable!(FtGraph.id);
-      await backend.ensureFulltextTable!(FtGraph.id);
-      await backend.ensureFulltextTable!(FtGraph.id);
+      await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
+      await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
+      await requireDefined(backend.ensureFulltextTable)(FtGraph.id);
 
       // Exactly one durable marker row, no error recorded.
-      const markers = await pool!.query<{ last_error: string | null }>(
+      const markers = await requireDefined(pool).query<{
+        last_error: string | null;
+      }>(
         `SELECT last_error FROM ${CONTRIB_MAT_TABLE}
           WHERE graph_id = $1`,
         [FtGraph.id],
@@ -266,7 +269,7 @@ describe.runIf(process.env.POSTGRES_URL)(
 
       // Sanity: the GIN index the strategy declares is also present
       // and idempotent (CREATE INDEX IF NOT EXISTS).
-      const indexes = await pool!.query<{ indexname: string }>(
+      const indexes = await requireDefined(pool).query<{ indexname: string }>(
         `SELECT indexname FROM pg_indexes WHERE tablename = $1`,
         [defaultTables.fulltextTableName],
       );
@@ -299,13 +302,15 @@ describe.runIf(process.env.POSTGRES_URL)(
       // exercises the full bootstrap flow back-to-back.
       const backend = pooledBackend();
 
-      await backend.bootstrapTables!();
-      await backend.bootstrapTables!();
-      await backend.bootstrapTables!();
+      await requireDefined(backend.bootstrapTables)();
+      await requireDefined(backend.bootstrapTables)();
+      await requireDefined(backend.bootstrapTables)();
 
       // Confirm the GENERATED column landed (would be missing if the
       // typed Drizzle table's CREATE had won the race).
-      const generated = await pool!.query<{ generation_expression: string }>(
+      const generated = await requireDefined(pool).query<{
+        generation_expression: string;
+      }>(
         `SELECT generation_expression
            FROM information_schema.columns
           WHERE table_name = $1 AND column_name = 'tsv'`,

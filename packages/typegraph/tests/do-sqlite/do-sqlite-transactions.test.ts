@@ -14,7 +14,7 @@
  * storage transaction is ambient on the object, so TypeGraph binds the
  * outer `db`.
  *
- * Boot uses `createStoreWithSchema` (the real path): `bootstrapTables`
+ * Boot uses `createAdapterStoreWithSchema` (the real adapter path): `bootstrapTables`
  * DDL and the durable contribution marker run OUTSIDE any storage
  * transaction (the #135 invariant); the schema-version commit runs
  * through the `do-sqlite` storage runner (data only, never DDL).
@@ -39,8 +39,8 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  createAdapterStoreWithSchema,
   createStore,
-  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -114,7 +114,7 @@ async function bootInsideDurableObject(storage: DurableObjectStorage) {
   // Real boot path: bootstrap DDL + durable marker run OUTSIDE any
   // storage transaction; the schema-version commit runs through the
   // do-sqlite storage runner (data only).
-  const [store] = await createStoreWithSchema(DocGraph, backend);
+  const [store] = await createAdapterStoreWithSchema(DocGraph, backend);
 
   // The caller's own relational table (created outside any business
   // transaction, like the TypeGraph base tables).
@@ -132,7 +132,7 @@ async function bootInsideDurableObject(storage: DurableObjectStorage) {
 async function bootHistoryInsideDurableObject(storage: DurableObjectStorage) {
   const db = drizzle(storage);
   const backend = createSqliteBackend(db, { tables: defaultTables });
-  const [store] = await createStoreWithSchema(HistoryGraph, backend, {
+  const [store] = await createAdapterStoreWithSchema(HistoryGraph, backend, {
     history: true,
   });
   return store;
@@ -446,11 +446,10 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
 
   it("graph-owned tx.sql: product write via tx.sql commits/rolls back with the TypeGraph mutation", async () => {
     await inObject("tx-sql", async ({ db, store }) => {
-      // tx.sql is the bound do-sqlite Drizzle handle.
+      // Adapter tx.sql is the precisely typed bound do-sqlite Drizzle handle.
       await store.transaction(async (tx) => {
         await tx.nodes.Doc.create({ title: "via-tx-sql" });
-        const sqlTx = tx.sql as typeof db;
-        await sqlTx
+        await tx.sql
           .insert(docVersions)
           .values({ documentSlug: "S", docVersion: 1, payload: "ok" });
       });
@@ -460,8 +459,7 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
       await expect(
         store.transaction(async (tx) => {
           await tx.nodes.Doc.create({ title: "doomed" });
-          const sqlTx = tx.sql as typeof db;
-          await sqlTx
+          await tx.sql
             .insert(docVersions)
             .values({ documentSlug: "S", docVersion: 2, payload: "z" });
           throw new Error("phase2-do-sqlite-rollback");

@@ -13,10 +13,9 @@
  *   npx tsx examples/19-incremental-merge.ts
  */
 import {
-  createStoreWithSchema,
+  createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
-  type GraphBackend,
   searchable,
   type Store,
 } from "@nicia-ai/typegraph";
@@ -88,8 +87,8 @@ async function listCompanies(store: KbStore): Promise<readonly string[]> {
 async function main(): Promise<void> {
   // Every backend this example opens — directly or through `branch()`'s factory —
   // is tracked here and closed in the finally below.
-  const openedBackends: GraphBackend[] = [];
-  function makeBackend(): Promise<GraphBackend> {
+  const openedBackends: ReturnType<typeof createExampleBackend>[] = [];
+  function makeBackend(): Promise<ReturnType<typeof createExampleBackend>> {
     const backend = createExampleBackend();
     openedBackends.push(backend);
     return Promise.resolve(backend);
@@ -100,7 +99,10 @@ async function main(): Promise<void> {
     // ingestion waves. This is the "base that has advanced" mergeIncremental
     // targets: Initech was renamed ON THE TARGET after the fork-point snapshot
     // below was frozen.
-    const [target] = await createStoreWithSchema(kbGraph, await makeBackend());
+    const [target] = await createAdapterStoreWithSchema(
+      kbGraph,
+      await makeBackend(),
+    );
     await target.nodes.Company.create(
       { name: "Acme Corp", domain: "acme.com" },
       { id: "acme" },
@@ -114,7 +116,7 @@ async function main(): Promise<void> {
     // as it looked AT FORK TIME — before the target's rename — so the provider's
     // edit to its inherited copy is a genuine inherited edit against the
     // fork-point that collides with the target's own committed rename.
-    const [forkPoint] = await createStoreWithSchema(
+    const [forkPoint] = await createAdapterStoreWithSchema(
       kbGraph,
       await makeBackend(),
     );

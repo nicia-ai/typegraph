@@ -1,7 +1,6 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { UnsupportedPredicateError } from "../../../errors";
 import { boundPgIdentifier } from "../../../utils/identifier";
+import { requireDefined } from "../../../utils/presence";
 import {
   type AggregateExpr,
   DEFAULT_RRF_K,
@@ -18,6 +17,7 @@ import {
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
+import { sql, type SqlFragment } from "../../sql-fragment";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -57,14 +57,14 @@ export type StandardEmitterPredicateIndex = PredicateIndex;
 function compileColumnReference(
   tableAlias: string | undefined,
   column: string,
-): SQL {
+): SqlFragment {
   if (tableAlias === undefined) {
     return sql.raw(column);
   }
   return sql`${sql.raw(tableAlias)}.${sql.raw(column)}`;
 }
 
-function qualifyColumn(owner: string, name: string): SQL {
+function qualifyColumn(owner: string, name: string): SqlFragment {
   return sql`${quoteIdentifier(owner)}.${quoteIdentifier(name)}`;
 }
 
@@ -92,7 +92,7 @@ function selectivePropsCteColumnName(field: SelectiveField): string {
   return boundPgIdentifier(encoded, `${alias}\0${fieldName}`);
 }
 
-function buildScopedNodeIdsSubquery(nodeAlias: string): SQL {
+function buildScopedNodeIdsSubquery(nodeAlias: string): SqlFragment {
   const cteAlias = `${ALIAS_CTE_PREFIX}${nodeAlias}`;
   return sql`
     (
@@ -113,7 +113,7 @@ type CompileSelectivePropsSelectColumnsInput = Readonly<{
 
 function compileSelectivePropsSelectColumns(
   input: CompileSelectivePropsSelectColumnsInput,
-): SQL[] {
+): SqlFragment[] {
   const { alias, dialect, selectiveFields, tableAlias } = input;
   const propsFields =
     selectiveFields?.filter(
@@ -133,9 +133,9 @@ function compileSelectivePropsSelectColumns(
 }
 
 function appendSelectivePropsColumns(
-  baseColumns: readonly SQL[],
+  baseColumns: readonly SqlFragment[],
   input: CompileSelectivePropsSelectColumnsInput,
-): SQL[] {
+): SqlFragment[] {
   return [...baseColumns, ...compileSelectivePropsSelectColumns(input)];
 }
 
@@ -147,7 +147,9 @@ type CompileNodeSelectColumnsInput = Readonly<{
   tableAlias: string | undefined;
 }>;
 
-function compileNodeSelectColumns(input: CompileNodeSelectColumnsInput): SQL[] {
+function compileNodeSelectColumns(
+  input: CompileNodeSelectColumnsInput,
+): SqlFragment[] {
   const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
     input;
   const baseColumns = NODE_COLUMNS.filter(
@@ -175,7 +177,9 @@ type CompileEdgeSelectColumnsInput = Readonly<{
   tableAlias: string | undefined;
 }>;
 
-function compileEdgeSelectColumns(input: CompileEdgeSelectColumnsInput): SQL[] {
+function compileEdgeSelectColumns(
+  input: CompileEdgeSelectColumnsInput,
+): SqlFragment[] {
   const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
     input;
   const baseColumns = EDGE_COLUMNS.filter((column) =>
@@ -206,7 +210,9 @@ type BuildStandardStartCteInput = Readonly<{
   limitOffset?: Readonly<{ limit: number; offset?: number | undefined }>;
 }>;
 
-export function buildStandardStartCte(input: BuildStandardStartCteInput): SQL {
+export function buildStandardStartCte(
+  input: BuildStandardStartCteInput,
+): SqlFragment {
   const { ast, ctx, graphId, predicateIndex, requiredColumnsByAlias } = input;
   const alias = ast.start.alias;
   const kinds = ast.start.kinds;
@@ -278,7 +284,7 @@ type BuildStandardTraversalCteInput = Readonly<{
 
 export function buildStandardTraversalCte(
   input: BuildStandardTraversalCteInput,
-): SQL {
+): SqlFragment {
   const {
     ast,
     carryForwardPreviousColumns,
@@ -291,7 +297,7 @@ export function buildStandardTraversalCte(
     traversalIndex,
     traversalLimit,
   } = input;
-  const traversal = ast.traversals[traversalIndex]!;
+  const traversal = requireDefined(ast.traversals[traversalIndex]);
   const traversalLimitValue =
     traversalIndex === ast.traversals.length - 1 ? traversalLimit : undefined;
 
@@ -377,14 +383,14 @@ export function buildStandardTraversalCte(
 
   function compileTraversalBranch(
     branch: Readonly<{
-      duplicateGuard?: SQL | undefined;
+      duplicateGuard?: SqlFragment | undefined;
       edgeKinds: readonly string[];
       joinField: "from_id" | "to_id";
       joinKindField: "from_kind" | "to_kind";
       targetField: "from_id" | "to_id";
       targetKindField: "from_kind" | "to_kind";
     }>,
-  ): SQL {
+  ): SqlFragment {
     const whereClauses = [
       ...baseWhereClauses,
       compileKindFilter(sql.raw("e.kind"), branch.edgeKinds),
@@ -499,7 +505,7 @@ export function buildStandardTraversalCte(
 function compileAggregateExprFromSource(
   expr: AggregateExpr,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const { field } = expr;
   const fn = expr.function;
 
@@ -536,7 +542,7 @@ function compileProjectedSource(
     source: FieldRef | AggregateExpr;
   },
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   if (isAggregateExpr(field.source)) {
     return compileAggregateExprFromSource(field.source, dialect);
   }
@@ -557,7 +563,7 @@ type BuildStandardProjectionInput = Readonly<{
 
 export function buildStandardProjection(
   input: BuildStandardProjectionInput,
-): SQL {
+): SqlFragment {
   const { ast, collapsedTraversalCteAlias, dialect } = input;
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileSelectiveProjection(
@@ -598,7 +604,7 @@ function compileSelectiveProjection(
   fields: readonly SelectiveField[],
   ast: QueryAst,
   collapsedTraversalCteAlias?: string,
-): SQL {
+): SqlFragment {
   const aliasToCte = buildAliasToCteMap(ast);
 
   const columns = fields.map((field) => {
@@ -624,7 +630,7 @@ function compileOrderFieldValue(
   field: FieldRef,
   dialect: DialectAdapter,
   cteAlias: string,
-): SQL {
+): SqlFragment {
   const selectiveField = findSelectivePropsFieldForFieldRef(
     ast.selectiveFields,
     field,
@@ -639,7 +645,7 @@ function compileOrderFieldValue(
 function buildRelevanceJoins(
   vectorPredicate: VectorSimilarityPredicate | undefined,
   fulltextPredicate: FulltextMatchPredicate | undefined,
-): SQL[] {
+): SqlFragment[] {
   const hybridTargetAlias = getHybridTargetAlias(
     vectorPredicate,
     fulltextPredicate,
@@ -652,7 +658,7 @@ function buildRelevanceJoins(
     ];
   }
 
-  const joins: SQL[] = [];
+  const joins: SqlFragment[] = [];
   if (vectorPredicate) {
     joins.push(
       buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, vectorPredicate.field.alias),
@@ -666,7 +672,7 @@ function buildRelevanceJoins(
   return joins;
 }
 
-function buildHybridCandidateJoin(nodeAlias: string): SQL {
+function buildHybridCandidateJoin(nodeAlias: string): SqlFragment {
   const candidateCte = sql.raw(HYBRID_CANDIDATES_CTE_ALIAS);
   const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
   const idColumn = sql.raw(`${nodeAlias}_id`);
@@ -678,7 +684,7 @@ function buildRelevanceJoin(
   cteAlias: string,
   nodeAlias: string,
   joinType = "INNER JOIN",
-): SQL {
+): SqlFragment {
   const cte = sql.raw(cteAlias);
   const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
   const idColumn = sql.raw(`${nodeAlias}_id`);
@@ -695,7 +701,7 @@ type BuildStandardFromClauseInput = Readonly<{
 
 export function buildStandardFromClause(
   input: BuildStandardFromClauseInput,
-): SQL {
+): SqlFragment {
   const {
     ast,
     collapsedTraversalCteAlias,
@@ -709,7 +715,7 @@ export function buildStandardFromClause(
   const startAlias = ast.start.alias;
   const fromClause = sql`FROM cte_${sql.raw(startAlias)}`;
 
-  const joins: SQL[] = [];
+  const joins: SqlFragment[] = [];
   for (const traversal of ast.traversals) {
     const cteAlias = `cte_${traversal.nodeAlias}`;
     const previousAlias = traversal.joinFromAlias;
@@ -740,7 +746,7 @@ type BuildStandardOrderByInput = Readonly<{
 
 export function buildStandardOrderBy(
   input: BuildStandardOrderByInput,
-): SQL | undefined {
+): SqlFragment | undefined {
   const { ast, collapsedTraversalCteAlias, dialect } = input;
   const fieldOrderBy = ast.orderBy ?? [];
   const aggregateOrderBy = ast.aggregateOrderBy ?? [];
@@ -754,7 +760,7 @@ export function buildStandardOrderBy(
   // common case for `.aggregate().orderBy(...)` has `fieldOrderBy` empty.
   const aliasToCte =
     fieldOrderBy.length > 0 ? buildAliasToCteMap(ast) : undefined;
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
   for (const orderSpec of fieldOrderBy) {
     const valueType = orderSpec.field.valueType;
     if (valueType === "array" || valueType === "object") {
@@ -860,7 +866,7 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
   dialect: DialectAdapter;
-  fromClause: SQL;
+  fromClause: SqlFragment;
   limit: number;
   offset?: number | undefined;
 }>;
@@ -876,7 +882,7 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
  */
 export function buildLateMaterializedTopKCte(
   input: BuildLateMaterializedTopKCteInput,
-): SQL {
+): SqlFragment {
   const { ast, collapsedTraversalCteAlias, dialect, fromClause } = input;
   const aliasToCte = buildAliasToCteMap(ast);
   const cteAliasFor = (alias: string): string =>
@@ -884,7 +890,7 @@ export function buildLateMaterializedTopKCte(
     aliasToCte.get(alias) ??
     `${ALIAS_CTE_PREFIX}${alias}`;
 
-  const columns: SQL[] = [];
+  const columns: SqlFragment[] = [];
   for (const alias of lateMaterializedNodeAliases(ast)) {
     const cteAlias = cteAliasFor(alias);
     columns.push(
@@ -916,7 +922,10 @@ export function buildLateMaterializedTopKCte(
     offset: input.offset,
   });
 
-  const parts: SQL[] = [sql`SELECT ${sql.join(columns, sql`, `)}`, fromClause];
+  const parts: SqlFragment[] = [
+    sql`SELECT ${sql.join(columns, sql`, `)}`,
+    fromClause,
+  ];
   if (innerOrderBy !== undefined) parts.push(innerOrderBy);
   if (limitOffset !== undefined) parts.push(limitOffset);
 
@@ -931,7 +940,7 @@ export function buildLateMaterializedTopKCte(
 export function buildLateMaterializedOuterProjection(
   ast: QueryAst,
   dialect: DialectAdapter,
-): SQL {
+): SqlFragment {
   const columns = (ast.selectiveFields ?? []).map((field) => {
     const physicalAlias = lateMaterializedPhysicalAlias(field.alias);
     if (field.isSystemField) {
@@ -956,11 +965,11 @@ export function buildLateMaterializedOuterProjection(
  */
 export function buildLateMaterializedOuterOrderBy(
   ast: QueryAst,
-): SQL | undefined {
+): SqlFragment | undefined {
   const orderBy = ast.orderBy ?? [];
   if (orderBy.length === 0) return undefined;
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
   for (const [index, orderSpec] of orderBy.entries()) {
     const column = sql`${topk}.${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`;
     const direction = sql.raw(orderSpec.direction.toUpperCase());
@@ -1003,7 +1012,7 @@ type BuildStandardGroupByInput = Readonly<{
 
 export function buildStandardGroupBy(
   input: BuildStandardGroupByInput,
-): SQL | undefined {
+): SqlFragment | undefined {
   const { ast, dialect } = input;
   if (!ast.groupBy || ast.groupBy.fields.length === 0) {
     return undefined;
@@ -1054,7 +1063,7 @@ type BuildStandardHavingInput = Readonly<{
 
 export function buildStandardHaving(
   input: BuildStandardHavingInput,
-): SQL | undefined {
+): SqlFragment | undefined {
   const { ast, ctx } = input;
   if (!ast.having) {
     return undefined;
@@ -1089,7 +1098,7 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
  */
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
-): SQL {
+): SqlFragment {
   const { ctx, graphId, nodeKinds, vectorPredicate } = input;
   const { field, metric, minScore, queryEmbedding } = vectorPredicate;
 
@@ -1224,7 +1233,7 @@ export function buildStandardEmbeddingsCte(
     const exactDistanceExpr = sql`(${distanceExpr} + 0.0)`;
     const scoreExpr = vectorScoreExpression(distanceExpr, branchMetric);
 
-    const conditions: SQL[] = [
+    const conditions: SqlFragment[] = [
       sql`${qualifyColumn(tableName, "graph_id")} = ${graphId}`,
     ];
     if (minScore !== undefined) {
@@ -1290,7 +1299,7 @@ export function buildStandardEmbeddingsCte(
  * score)` column contract, used when no kind in the alias declares the
  * embedding field. `WHERE 1 = 0` keeps the planner from scanning.
  */
-function emptyEmbeddingsBody(): SQL {
+function emptyEmbeddingsBody(): SqlFragment {
   return sql`
     SELECT
       CAST(NULL AS TEXT) AS node_id,
@@ -1314,7 +1323,7 @@ type BuildStandardFulltextCteInput = Readonly<{
 
 export function buildStandardFulltextCte(
   input: BuildStandardFulltextCteInput,
-): SQL {
+): SqlFragment {
   const { ctx, fulltextPredicate, graphId, nodeKinds } = input;
   const { dialect, schema } = ctx;
   const { query, mode, language, limit, minScore } = fulltextPredicate;
@@ -1356,7 +1365,7 @@ export function buildStandardFulltextCte(
     effectiveLanguage,
   );
 
-  const conditions: SQL[] = [
+  const conditions: SqlFragment[] = [
     sql`${qualifyColumn(tableName, "graph_id")} = ${graphId}`,
     compileKindFilter(qualifyColumn(tableName, "node_kind"), nodeKinds),
     matchCondition,
@@ -1416,7 +1425,7 @@ function sharedDeclaredLanguage(
   return [...languages][0];
 }
 
-export function buildStandardHybridCandidateCte(): SQL {
+export function buildStandardHybridCandidateCte(): SqlFragment {
   return sql`
     ${sql.raw(HYBRID_CANDIDATES_CTE_ALIAS)} AS (
       SELECT node_id, node_kind FROM ${sql.raw(EMBEDDINGS_CTE_ALIAS)}
@@ -1427,18 +1436,18 @@ export function buildStandardHybridCandidateCte(): SQL {
 }
 
 /**
- * Compiles user-supplied `orderBy` clauses into SQL fragments suitable
+ * Compiles user-supplied `orderBy` clauses into `SqlFragment` values suitable
  * for appending after a relevance-driven primary ORDER BY (vector,
  * fulltext, or hybrid RRF).
  */
 function compileUserOrderBy(
   ast: QueryAst,
   dialect: DialectAdapter,
-): readonly SQL[] {
+): readonly SqlFragment[] {
   if (!ast.orderBy || ast.orderBy.length === 0) return [];
 
   const aliasToCte = buildAliasToCteMap(ast);
-  const fragments: SQL[] = [];
+  const fragments: SqlFragment[] = [];
   for (const orderSpec of ast.orderBy) {
     const valueType = orderSpec.field.valueType;
     if (valueType === "array" || valueType === "object") {
@@ -1478,7 +1487,7 @@ type BuildStandardFulltextOrderByInput = Readonly<{
  */
 export function buildStandardFulltextOrderBy(
   input: BuildStandardFulltextOrderByInput,
-): SQL {
+): SqlFragment {
   const { ast, dialect } = input;
   const rankOrder = sql.raw(`${FULLTEXT_CTE_ALIAS}.rank DESC`);
   const userOrders = compileUserOrderBy(ast, dialect);
@@ -1508,7 +1517,7 @@ type BuildStandardHybridRrfOrderByInput = Readonly<{
 
 export function buildStandardHybridRrfOrderBy(
   input: BuildStandardHybridRrfOrderByInput,
-): SQL {
+): SqlFragment {
   const { ast, dialect, fusion } = input;
   const k = fusion?.k ?? DEFAULT_RRF_K;
   const vectorWeight = fusion?.weights?.vector ?? DEFAULT_RRF_WEIGHT;
@@ -1542,7 +1551,7 @@ type BuildStandardVectorOrderByInput = Readonly<{
 
 export function buildStandardVectorOrderBy(
   input: BuildStandardVectorOrderByInput,
-): SQL {
+): SqlFragment {
   const { ast, dialect } = input;
   const distanceOrder = sql.raw(`${EMBEDDINGS_CTE_ALIAS}.distance ASC`);
   const userOrders = compileUserOrderBy(ast, dialect);
@@ -1556,9 +1565,9 @@ type BuildLimitOffsetClauseInput = Readonly<{
 
 export function buildLimitOffsetClause(
   input: BuildLimitOffsetClauseInput,
-): SQL | undefined {
+): SqlFragment | undefined {
   const { limit, offset } = input;
-  const parts: SQL[] = [];
+  const parts: SqlFragment[] = [];
 
   if (limit !== undefined) {
     parts.push(sql`LIMIT ${limit}`);

@@ -17,8 +17,9 @@ cannot offer atomic transactions:
 
 Cloudflare **Durable Objects** SQLite is *not* in this list: a store backed
 by `drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`,
-reports `capabilities.transactions: true`, and is fully atomic (including
-`store.withTransaction` and `tx.sql`). See
+reports `capabilities.transactions: true`, and is fully atomic. An
+`AdapterStore` created from that backend also exposes the adapter-only
+`store.withTransaction` and `tx.sql` surfaces. See
 [Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite).
 
 These backends report `capabilities.transactions: false`. On such backends,
@@ -41,7 +42,7 @@ await store.transaction(async (tx) => {
 **If you require atomicity, branch on the capability:**
 
 ```typescript
-if (backend.capabilities.transactions) {
+if (store.capabilities.transactions) {
   await store.transaction(async (tx) => {
     /* atomic */
   });
@@ -142,7 +143,7 @@ TypeGraph does not manage database connections. You are responsible for:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 // You manage the connection
 const sqlite = new Database("app.db");
@@ -161,7 +162,7 @@ For production deployments, use connection pooling:
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -308,7 +309,9 @@ Temporal queries (`asOf`, `includeEnded`) work correctly but have some constrain
 ### Recorded / system time (`history: true`)
 
 Recorded-time capture (`createStore(graph, backend, { history: true })`) and
-`store.asOfRecorded(T)` add a second temporal axis with these constraints:
+`store.asOfRecorded(T)` add a second temporal axis with these constraints. Use
+`createAdapterStore(..., { history: true })` instead when the application must
+adopt a caller-owned transaction:
 
 - **Opt-in, no backfill.** Capture only sees changes committed after it is
   enabled; an entity that already exists is first recorded the next time it is
@@ -325,10 +328,10 @@ Recorded-time capture (`createStore(graph, backend, { history: true })`) and
   transactions and statement execution — the built-in SQLite / PostgreSQL
   backends qualify. A custom backend must implement `executeStatement` (optional
   on the `GraphBackend` interface, but required once `history: true` is set) or
-  enabling capture throws a `ConfigurationError` at write time. Raw `tx.sql` is
-  disabled under `history: true`; adopt external transactions with
-  `store.withRecordedTransaction(...)` instead of `store.withTransaction(...)`
-  (which is a compile error on a history store).
+  enabling capture throws a `ConfigurationError` at write time. On an
+  `AdapterHistoryStore`, raw `tx.sql` is disabled under `history: true`; adopt
+  external transactions with `store.withRecordedTransaction(...)` instead of
+  `store.withTransaction(...)` (which is a compile error on a history store).
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

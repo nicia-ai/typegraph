@@ -21,6 +21,7 @@ import type {
   ResolveConfig,
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, fakeEmbeddings } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -148,7 +149,12 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     );
     const rotated = generateCandidates(
       blockNodes(
-        [nodes[2]!, nodes[0]!, nodes[3]!, nodes[1]!],
+        [
+          requireDefined(nodes[2]),
+          requireDefined(nodes[0]),
+          requireDefined(nodes[3]),
+          requireDefined(nodes[1]),
+        ],
         blockByBirthDate,
       ),
       config,
@@ -206,7 +212,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     expect(isOk(clears)).toBe(true);
     const emittedScore =
       isOk(clears) && clears.data.edges.length === 1 ?
-        clears.data.edges[0]!.score
+        requireDefined(clears.data.edges[0]).score
       : undefined;
     expect(emittedScore).toBeDefined();
 
@@ -305,7 +311,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     expect(isOk(windowed)).toBe(true);
     if (isOk(windowed)) {
       expect(windowed.data.edges).toHaveLength(1);
-      const edge = windowed.data.edges[0]!;
+      const edge = requireDefined(windowed.data.edges[0]);
       expect(new Set([idOf(edge.a), idOf(edge.b)])).toEqual(
         new Set([ana.id, anna.id]),
       );
@@ -339,9 +345,11 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
       // No candidate edges: the kind merges by id only downstream.
       expect(result.data.edges).toEqual([]);
       expect(result.data.warnings).toHaveLength(1);
-      expect(result.data.warnings[0]!.kind).toBe("comparisonCeiling");
-      expect(result.data.warnings[0]!.comparisons).toBe(3);
-      expect(result.data.warnings[0]!.limit).toBe(2);
+      expect(requireDefined(result.data.warnings[0]).kind).toBe(
+        "comparisonCeiling",
+      );
+      expect(requireDefined(result.data.warnings[0]).comparisons).toBe(3);
+      expect(requireDefined(result.data.warnings[0]).limit).toBe(2);
     }
   });
 

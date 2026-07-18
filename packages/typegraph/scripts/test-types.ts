@@ -65,12 +65,12 @@ function getMode(argument: string | undefined): TestMode {
 }
 
 function getTypeScriptVersion(packageJson: TypegraphPackageJson): string {
-  const override = process.env.TYPEGRAPH_TYPESCRIPT_VERSION;
+  const override = process.env["TYPEGRAPH_TYPESCRIPT_VERSION"];
   if (override !== undefined && override.trim().length > 0) {
     return override.trim();
   }
 
-  const localSpecifier = packageJson.devDependencies?.typescript;
+  const localSpecifier = packageJson.devDependencies?.["typescript"];
   if (localSpecifier === undefined) {
     throw new Error(
       "Unable to resolve TypeScript version. Set TYPEGRAPH_TYPESCRIPT_VERSION or add devDependencies.typescript.",
@@ -191,7 +191,7 @@ async function runConsumerTypeSmokeTest(
   const tarballPath = path.join(temporaryDir, "typegraph.tgz");
   const fixtureDir = path.join(packageDir, "type-smoke");
 
-  const zodVersion = packageJson.devDependencies?.zod ?? "^4.0.0";
+  const zodVersion = packageJson.devDependencies?.["zod"] ?? "^4.0.0";
   const drizzleVersion =
     packageJson.devDependencies?.["drizzle-orm"] ?? ">=0.35.0";
 

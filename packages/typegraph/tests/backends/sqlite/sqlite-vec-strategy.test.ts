@@ -8,15 +8,16 @@
  * minScore filtering, and delete all execute and rank correctly.
  */
 import Database from "better-sqlite3";
-import { type SQL, sql } from "drizzle-orm";
-import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { sqliteVecStrategy } from "../../../src/query/dialect/vector/sqlite-vec-strategy";
 import { type VectorSlot } from "../../../src/query/dialect/vector-strategy";
-
-const dialect = new SQLiteSyncDialect();
+import {
+  renderSqlite,
+  sql,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
 
 function loadSqliteVec(db: Database.Database): boolean {
   try {
@@ -33,21 +34,21 @@ function loadSqliteVec(db: Database.Database): boolean {
 
 function run(
   db: Database.Database,
-  query: SQL,
+  query: SqlFragment,
 ): readonly Record<string, unknown>[] {
-  const compiled = dialect.sqlToQuery(query);
+  const compiled = renderSqlite(query);
   return db.prepare(compiled.sql).all(...compiled.params) as readonly Record<
     string,
     unknown
   >[];
 }
 
-function exec(db: Database.Database, query: SQL): void {
-  const compiled = dialect.sqlToQuery(query);
+function exec(db: Database.Database, query: SqlFragment): void {
+  const compiled = renderSqlite(query);
   db.prepare(compiled.sql).run(...compiled.params);
 }
 
-function execAll(db: Database.Database, queries: readonly SQL[]): void {
+function execAll(db: Database.Database, queries: readonly SqlFragment[]): void {
   for (const query of queries) exec(db, query);
 }
 
@@ -83,7 +84,7 @@ function searchParams(
 }
 
 /** Builds a `node_id IN (...)` candidate subquery from an id list. */
-function candidateIds(nodeIds: readonly string[]): SQL {
+function candidateIds(nodeIds: readonly string[]): SqlFragment {
   return sql.join(
     nodeIds.map((nodeId) => sql`SELECT ${nodeId}`),
     sql` UNION ALL `,
@@ -143,7 +144,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
   function pageIds(
     s: VectorSlot,
     overrides: Partial<VectorSearchParams>,
-    candidates?: SQL,
+    candidates?: SqlFragment,
   ): string[] {
     const rows = run(
       db,
@@ -153,7 +154,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
         candidates,
       ),
     );
-    return rows.map((row) => row.node_id as string);
+    return rows.map((row) => row["node_id"] as string);
   }
 
   it("creates a per-field vec0 virtual table named from (kind, field)", () => {
@@ -179,11 +180,11 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       db,
       sqliteVecStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids[0]).toBe("d1");
     expect(ids[1]).toBe("d3");
     expect(ids[2]).toBe("d2");
-    expect(Number(rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("upsert replaces an existing embedding for the same node", () => {
@@ -196,7 +197,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       sqliteVecStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
     expect(rows.length).toBe(1);
-    expect(Number(rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(Number(rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("minScore filters out dissimilar rows (brute force)", () => {
@@ -211,7 +212,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    expect(rows.map((r) => r.node_id as string)).toEqual(["d1"]);
+    expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
   });
 
   it("delete removes a node's embedding", () => {
@@ -248,7 +249,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       db,
       sqliteVecStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 2 })),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids).toHaveLength(2);
     expect(ids).toContain("d1");
     expect(ids).not.toContain("d2"); // orthogonal vector excluded from top-2
@@ -267,7 +268,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids).toContain("d1");
     expect(ids).not.toContain("d2");
   });
@@ -281,7 +282,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       db,
       sqliteVecStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 10 })),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids).toEqual(["d1"]);
     expect(ids).not.toContain("other");
   });
@@ -299,7 +300,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
         searchParams([1, 0, 0], { metric: "l2" }),
       ),
     );
-    const ids = rows.map((r) => r.node_id as string);
+    const ids = rows.map((r) => r["node_id"] as string);
     expect(ids[0]).toBe("d1");
     expect(ids[1]).toBe("d3");
     expect(ids[2]).toBe("d2");
@@ -322,8 +323,8 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
       db,
       sql`SELECT "node_id" AS node_id, ${distance} AS d FROM ${sql.raw(`"${table}"`)} WHERE "graph_id" = ${GRAPH} ORDER BY d ASC`,
     );
-    expect(rows[0]?.node_id).toBe("d1");
-    expect(Number(rows[0]?.d)).toBeCloseTo(0, 5);
+    expect(rows[0]?.["node_id"]).toBe("d1");
+    expect(Number(rows[0]?.["d"])).toBeCloseTo(0, 5);
   });
 
   it("buildCreateIndex / buildDropIndex are no-ops (vec0 indexes inline)", () => {
@@ -393,7 +394,7 @@ describe("sqliteVecStrategy (executed against better-sqlite3 + sqlite-vec)", () 
           candidateIds(["d198", "d199"]),
         ),
       );
-      expect(rows.map((row) => row.node_id)).toEqual(["d198", "d199"]);
+      expect(rows.map((row) => row["node_id"])).toEqual(["d198", "d199"]);
     });
   });
 

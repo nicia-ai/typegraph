@@ -11,12 +11,10 @@
  *   what carry a new library version's indexes onto an already-initialized
  *   database.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  asCompiledRowsSql,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -32,6 +30,9 @@ import { createSqliteTables, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { systemIndexName } from "../src/indexes/system";
+import { renderSqlInline, sql } from "../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -66,9 +67,9 @@ function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
     if (match === null) continue;
     extracted.push({
       unique: match[1] !== undefined,
-      name: match[2]!,
-      table: match[3]!,
-      columns: match[4]!,
+      name: requireDefined(match[2]),
+      table: requireDefined(match[3]),
+      columns: requireDefined(match[4]),
     });
   }
   return extracted;
@@ -192,7 +193,7 @@ describe("system-index name reservation", () => {
       expect(target?.status).toBe("failed");
       expect(target?.error?.message).toContain("collides with a TypeGraph");
       // No false-success row was recorded over the system index's name.
-      const row = await backend.getIndexMaterialization!(
+      const row = await requireDefined(backend.getIndexMaterialization)(
         "typegraph_nodes_id_idx",
       );
       expect(row?.entity === "node").toBe(false);
@@ -217,10 +218,20 @@ describe("materializeSystemIndexes", () => {
 
       // Simulate a database initialized by an older library version: the
       // index does not exist and no materialization was ever recorded.
-      db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
-      db.run(sql`DROP INDEX "typegraph_recorded_edges_from_idx"`);
       db.run(
-        sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx')`,
+        renderSqlInline(sql`DROP INDEX "typegraph_nodes_id_idx"`, "sqlite"),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DROP INDEX "typegraph_recorded_edges_from_idx"`,
+          "sqlite",
+        ),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx')`,
+          "sqlite",
+        ),
       );
       expect(await indexNames(backend)).not.toContain("typegraph_nodes_id_idx");
 
@@ -263,13 +274,17 @@ describe("materializeSystemIndexes", () => {
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       // Adopt once so a genuine success row exists for the index.
-      db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
+      db.run(
+        renderSqlInline(sql`DROP INDEX "typegraph_nodes_id_idx"`, "sqlite"),
+      );
       await store.materializeSystemIndexes();
 
       // Dump/restore or a manual drop can lose the index but keep the
       // row. Physical state is authoritative for system indexes: the
       // runner must rebuild, not settle on the stale success.
-      db.run(sql`DROP INDEX "typegraph_nodes_id_idx"`);
+      db.run(
+        renderSqlInline(sql`DROP INDEX "typegraph_nodes_id_idx"`, "sqlite"),
+      );
       const { results } = await store.materializeSystemIndexes();
       const target = results.find(
         (result) => result.indexName === "typegraph_nodes_id_idx",
@@ -287,7 +302,7 @@ describe("materializeSystemIndexes", () => {
       const [store] = await createStoreWithSchema(graph, backend);
       // A recorded success under a DIFFERENT signature — the shape an
       // in-place declaration change would leave behind.
-      await backend.recordIndexMaterialization!({
+      await requireDefined(backend.recordIndexMaterialization)({
         indexName: "typegraph_nodes_id_idx",
         graphId: "system-indexes",
         entity: "system",
@@ -323,7 +338,7 @@ describe("materializeSystemIndexes", () => {
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       // A graph-declared index materialized under a system index's name.
-      await backend.recordIndexMaterialization!({
+      await requireDefined(backend.recordIndexMaterialization)({
         indexName: "typegraph_nodes_id_idx",
         graphId: "someone-elses-graph",
         entity: "node",
@@ -343,7 +358,7 @@ describe("materializeSystemIndexes", () => {
       expect(target?.error?.message).toContain("Rename the graph-declared");
 
       // The foreign row is untouched — no drift write bricked it.
-      const row = await backend.getIndexMaterialization!(
+      const row = await requireDefined(backend.getIndexMaterialization)(
         "typegraph_nodes_id_idx",
       );
       expect(row?.signature).toBe("relational-signature");
@@ -359,8 +374,12 @@ describe("materializeSystemIndexes", () => {
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       // A legacy database that predates the recorded relations.
-      db.run(sql`DROP TABLE "typegraph_recorded_edges"`);
-      db.run(sql`DROP TABLE "typegraph_recorded_nodes"`);
+      db.run(
+        renderSqlInline(sql`DROP TABLE "typegraph_recorded_edges"`, "sqlite"),
+      );
+      db.run(
+        renderSqlInline(sql`DROP TABLE "typegraph_recorded_nodes"`, "sqlite"),
+      );
 
       const { results } = await store.materializeSystemIndexes();
       const recorded = results.filter(
@@ -392,13 +411,21 @@ describe("materializeSystemIndexes", () => {
     try {
       await createStoreWithSchema(graph, backend);
 
-      db.run(sql`DROP INDEX "typegraph_recorded_nodes_id_idx"`);
+      db.run(
+        renderSqlInline(
+          sql`DROP INDEX "typegraph_recorded_nodes_id_idx"`,
+          "sqlite",
+        ),
+      );
       // Clear the recorded materialization so the next boot cannot settle
       // on the (now stale) success row — this mirrors a database created
       // by a version that predates the index entirely, where no status
       // row exists.
       db.run(
-        sql`DELETE FROM "typegraph_index_materializations" WHERE index_name = 'typegraph_recorded_nodes_id_idx'`,
+        renderSqlInline(
+          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name = 'typegraph_recorded_nodes_id_idx'`,
+          "sqlite",
+        ),
       );
 
       await createStoreWithSchema(graph, backend);

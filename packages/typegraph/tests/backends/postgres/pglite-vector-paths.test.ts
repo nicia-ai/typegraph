@@ -19,22 +19,22 @@
  * One shared engine per file; `beforeEach` drops vector tables (dimension- and
  * reclaim-sensitive) and truncates base tables.
  */
-import { type SQL, sql } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  asCompiledRowsSql,
-  defineGraph,
-  defineNode,
-  embedding,
-} from "../../../src";
+import { defineGraph, defineNode, embedding } from "../../../src";
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
 import { type VectorSlot } from "../../../src/query/dialect/vector-strategy";
+import {
+  renderPostgres,
+  sql,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 import {
   setupSharedPgliteEngine,
   type SharedPgliteEngine,
@@ -45,25 +45,26 @@ import {
 // matches pg's `query(sql, params) -> { rows }` shape).
 // ============================================================
 
-const dialect = new PgDialect();
 const GRAPH = "g1";
 const TS = "2026-06-01T00:00:00.000Z";
 
 let engine: SharedPgliteEngine;
 
-async function run(query: SQL): Promise<readonly Record<string, unknown>[]> {
-  const compiled = dialect.sqlToQuery(query);
+async function run(
+  query: SqlFragment,
+): Promise<readonly Record<string, unknown>[]> {
+  const compiled = renderPostgres(query);
   const result = await engine.client.query<Record<string, unknown>>(
     compiled.sql,
-    compiled.params,
+    [...compiled.params],
   );
   return result.rows;
 }
 
-async function execAll(queries: readonly SQL[]): Promise<void> {
+async function execAll(queries: readonly SqlFragment[]): Promise<void> {
   for (const query of queries) {
-    const compiled = dialect.sqlToQuery(query);
-    await engine.client.query(compiled.sql, compiled.params);
+    const compiled = renderPostgres(query);
+    await engine.client.query(compiled.sql, [...compiled.params]);
   }
 }
 
@@ -161,8 +162,8 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     const rows = await run(
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1", "d3", "d2"]);
-    expect(Number(rows[0]?.score)).toBeCloseTo(1, 5);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1", "d3", "d2"]);
+    expect(Number(rows[0]?.["score"])).toBeCloseTo(1, 5);
   });
 
   it("ranks by l2 (euclidean) distance", async () => {
@@ -178,7 +179,7 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
         searchParams([1, 0, 0], { metric: "l2" }),
       ),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1", "d3", "d2"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1", "d3", "d2"]);
   });
 
   it("ranks by inner_product (pgvector-only metric)", async () => {
@@ -194,7 +195,7 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
         searchParams([1, 0, 0], { metric: "inner_product" }),
       ),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d2", "d1", "d3"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d2", "d1", "d3"]);
   });
 
   it("filters dissimilar rows with minScore and replaces on re-upsert", async () => {
@@ -210,7 +211,7 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
         searchParams([1, 0, 0], { minScore: 0.5 }),
       ),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
   });
 
   it("deletes a node's embedding", async () => {
@@ -243,7 +244,7 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     const rows = await run(
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0])),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
   });
 
   it("builds an HNSW index that executes and still ranks", async () => {
@@ -251,14 +252,14 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     await createStorage(s);
     const indexDdl = pgvectorStrategy.buildCreateIndex?.(s);
     expect(indexDdl).toBeDefined();
-    await execAll([indexDdl!]);
+    await execAll([requireDefined(indexDdl)]);
     await upsert(s, "d1", [1, 0, 0]);
     await upsert(s, "d2", [0, 1, 0]);
 
     const rows = await run(
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
   });
 
   it("builds an IVFFlat index that executes", async () => {
@@ -266,13 +267,13 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     await createStorage(s);
     const indexDdl = pgvectorStrategy.buildCreateIndex?.(s);
     expect(indexDdl).toBeDefined();
-    await execAll([indexDdl!]);
+    await execAll([requireDefined(indexDdl)]);
     await upsert(s, "d1", [1, 0, 0]);
 
     const rows = await run(
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
-    expect(rows.map((row) => row.node_id)).toEqual(["d1"]);
+    expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
   });
 });
 
@@ -317,7 +318,7 @@ describe("Store-level vector paths under PGlite", () => {
     });
 
     // Correct nearest neighbor returned via the efSearch path...
-    expect(hits[0]!.node.title).toBe("alpha");
+    expect(requireDefined(hits[0]).node.title).toBe("alpha");
     // ...and the SET LOCAL rolled off — single-connection PGlite makes any leak
     // immediately visible on the next read.
     expect(await readEfSearch()).toBe(baseline);
@@ -326,7 +327,7 @@ describe("Store-level vector paths under PGlite", () => {
 
   it("reclaims the orphaned vector table when an embedding field is removed", async () => {
     const backend = engine.makeBackend();
-    const table = backend.vectorStrategy!.tableName(
+    const table = requireDefined(backend.vectorStrategy).tableName(
       "reclaim_pglite",
       "Document",
       "embedding",

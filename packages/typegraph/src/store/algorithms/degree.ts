@@ -1,6 +1,5 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
@@ -28,7 +27,7 @@ export async function executeDegree(
   if (edgeKinds.length === 0) return 0;
 
   const schema = resolveReadSchema(ctx, options);
-  const whereClauses: SQL[] = [
+  const whereClauses: SqlFragment[] = [
     sql`graph_id = ${ctx.graphId}`,
     resolveTemporalFilter(ctx, options),
     compileDirectionFilter(ctx, direction, nodeId, schema.nodesTable),
@@ -76,8 +75,8 @@ export async function executeDegree(
 function nodeKindSubquery(
   ctx: AlgorithmContext,
   nodeId: string,
-  nodesTable: SQL,
-): SQL {
+  nodesTable: SqlFragment,
+): SqlFragment {
   return sql`(SELECT kind FROM ${nodesTable} WHERE graph_id = ${ctx.graphId} AND id = ${nodeId} LIMIT 1)`;
 }
 
@@ -92,8 +91,8 @@ function compileDirectionFilter(
   ctx: AlgorithmContext,
   direction: TraversalDirection,
   nodeId: string,
-  nodesTable: SQL,
-): SQL {
+  nodesTable: SqlFragment,
+): SqlFragment {
   const nodeKind = nodeKindSubquery(ctx, nodeId, nodesTable);
   const fromSide = sql`(from_kind = ${nodeKind} AND from_id = ${nodeId})`;
   const toSide = sql`(to_kind = ${nodeKind} AND to_id = ${nodeId})`;

@@ -4,7 +4,6 @@
  * Tests buildPredicateIndex, getPredicatesForAlias,
  * compileKindFilter, and getNodeKindsForAlias.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { CompilerInvariantError } from "../src/errors";
@@ -15,6 +14,7 @@ import {
   getNodeKindsForAlias,
   getPredicatesForAlias,
 } from "../src/query/compiler/predicate-utils";
+import { sql } from "../src/query/sql-fragment";
 import { toSqlString } from "./sql-test-utils";
 
 // ============================================================

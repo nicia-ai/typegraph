@@ -25,11 +25,10 @@
  *
  * Edge-safe: no `node:*` imports (loaded on Workers via neon-serverless).
  */
-import { type SQL } from "drizzle-orm";
-
 import { TransactionClosedError } from "../../../errors";
 import {
   type CompiledSqlQuery,
+  type ExecutableSql,
   type PreparedSqlStatement,
   type SqlExecutionAdapter,
 } from "./types";
@@ -115,11 +114,11 @@ export function createSerialExecutionAdapter(
   return {
     drainAndClose,
 
-    compile(query: SQL): CompiledSqlQuery {
+    compile(query: ExecutableSql): CompiledSqlQuery {
       return adapter.compile(query);
     },
 
-    execute<TRow>(query: SQL): Promise<readonly TRow[]> {
+    execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
       return enqueue(() => adapter.execute<TRow>(query));
     },
 
@@ -149,7 +148,9 @@ export function createSerialExecutionAdapter(
         prepare(sqlText: string): PreparedSqlStatement {
           const statement = prepare(sqlText);
           return {
-            execute<TRow>(params: readonly unknown[]): Promise<readonly TRow[]> {
+            execute<TRow>(
+              params: readonly unknown[],
+            ): Promise<readonly TRow[]> {
               return enqueue(() => statement.execute<TRow>(params));
             },
           };

@@ -15,6 +15,7 @@ import {
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { createRetractionCapability } from "../src/provenance";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 import {
   createCommitFailingBackend,
@@ -471,10 +472,10 @@ describe("provenance retraction contract", () => {
     const after = await store.recordedNow();
 
     await expect(
-      store.asOfRecorded(before!).nodes.Fact.getById(fact.id),
+      store.asOfRecorded(requireDefined(before)).nodes.Fact.getById(fact.id),
     ).resolves.toMatchObject({ id: "fact-a" });
     await expect(
-      store.asOfRecorded(after!).nodes.Fact.getById(fact.id),
+      store.asOfRecorded(requireDefined(after)).nodes.Fact.getById(fact.id),
     ).resolves.toBeUndefined();
   });
 
@@ -686,10 +687,9 @@ describe("provenance retraction contract", () => {
 
     expect(operations).toContain("update:node:Source:source-a");
     expect(operations).toContain("update:node:Fact:fact-a");
-    await expect(store.nodes.Fact.getById(fact.id)).resolves.toMatchObject({
-      id: "fact-a",
-      meta: expect.objectContaining({ version: 2 }),
-    });
+    const restoredFact = await store.nodes.Fact.getById(fact.id);
+    expect(restoredFact?.id).toBe("fact-a");
+    expect(restoredFact?.meta.version).toBe(2);
   });
 
   it("reports transition hooks only after the transaction commits", async () => {

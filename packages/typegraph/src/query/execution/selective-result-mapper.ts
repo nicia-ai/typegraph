@@ -344,7 +344,7 @@ function buildRequiredAliasValue(
     for (const field of plan.metaFields) {
       meta[field.metaKey] = nullToUndefined(row[field.outputName]);
     }
-    base.meta = createGuardedProxy(meta, `${plan.alias}.meta`);
+    base["meta"] = createGuardedProxy(meta, `${plan.alias}.meta`);
   }
 
   for (const field of plan.propsFields) {

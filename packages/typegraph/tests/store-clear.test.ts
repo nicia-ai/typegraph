@@ -1,13 +1,13 @@
 /**
  * Tests for store.clear() API.
  */
-import { type SQL } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { type CompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
 import { createTestBackend } from "./test-utils";
 
@@ -21,19 +21,16 @@ function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
     dialect: "postgres",
     async transaction(fn, options) {
       return base.transaction(
-        (tx, sqlHandle) =>
-          fn(
-            {
-              ...tx,
-              dialect: "postgres",
-              execute<T>(_query: SQL): Promise<readonly T[]> {
-                return Promise.resolve([
-                  { transaction_isolation: "serializable" } as T,
-                ]);
-              },
+        (tx) =>
+          fn({
+            ...tx,
+            dialect: "postgres",
+            execute<T>(_query: CompiledRowsSql): Promise<readonly T[]> {
+              return Promise.resolve([
+                { transaction_isolation: "serializable" } as T,
+              ]);
             },
-            sqlHandle,
-          ),
+          }),
         options,
       );
     },

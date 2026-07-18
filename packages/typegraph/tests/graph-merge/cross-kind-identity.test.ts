@@ -15,7 +15,6 @@
  *   3. with `reconcileTypes: "off"`, that same pair stays two distinct nodes — strict
  *      `(kind, id)` identity wins.
  */
-
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
@@ -35,6 +34,7 @@ import type {
   ReconcileTypesMode,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -116,10 +116,10 @@ describe.each(backendMatrix())("cross-kind identity merge [$name]", (entry) => {
     const [branchA, branchB] = branches;
 
     // Same id "shared", UNRELATED kinds, staged on different branches.
-    await branchA!.store.nodes.Patient.bulkCreate([
+    await requireDefined(branchA).store.nodes.Patient.bulkCreate([
       { id: "shared", props: { name: "Anna Rivera" } },
     ]);
-    await branchB!.store.nodes.Encounter.bulkCreate([
+    await requireDefined(branchB).store.nodes.Encounter.bulkCreate([
       { id: "shared", props: { reason: "annual checkup" } },
     ]);
 
@@ -156,10 +156,10 @@ describe.each(backendMatrix())("cross-kind identity merge [$name]", (entry) => {
     const [branchA, branchB] = branches;
 
     // Same id "doc-1", SUBTYPE-compatible kinds — the same entity at a refined type.
-    await branchA!.store.nodes.Doctor.bulkCreate([
+    await requireDefined(branchA).store.nodes.Doctor.bulkCreate([
       { id: "doc-1", props: { name: "Helen Park" } },
     ]);
-    await branchB!.store.nodes.SpecialistDoctor.bulkCreate([
+    await requireDefined(branchB).store.nodes.SpecialistDoctor.bulkCreate([
       { id: "doc-1", props: { name: "Helen Park" } },
     ]);
 
@@ -183,7 +183,7 @@ describe.each(backendMatrix())("cross-kind identity merge [$name]", (entry) => {
 
     // Reported as a type reconciliation (Doctor → SpecialistDoctor), keyed on the id.
     expect(result.data.typeReconciliations).toHaveLength(1);
-    const reconciliation = result.data.typeReconciliations[0]!;
+    const reconciliation = requireDefined(result.data.typeReconciliations[0]);
     expect(reconciliation.entityId).toBe("doc-1");
     expect(reconciliation.toType).toBe("SpecialistDoctor");
     expect([...reconciliation.fromTypes].sort()).toEqual([
@@ -197,10 +197,10 @@ describe.each(backendMatrix())("cross-kind identity merge [$name]", (entry) => {
     const { base, branches } = await forkedBranches();
     const [branchA, branchB] = branches;
 
-    await branchA!.store.nodes.Doctor.bulkCreate([
+    await requireDefined(branchA).store.nodes.Doctor.bulkCreate([
       { id: "doc-1", props: { name: "Helen Park" } },
     ]);
-    await branchB!.store.nodes.SpecialistDoctor.bulkCreate([
+    await requireDefined(branchB).store.nodes.SpecialistDoctor.bulkCreate([
       { id: "doc-1", props: { name: "Helen Park" } },
     ]);
 

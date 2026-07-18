@@ -157,7 +157,7 @@ async function enforceNodeDeleteBehavior(
           backend.hardDeleteEdgesBatch
         : backend.deleteEdgesBatch;
       if (batchDelete !== undefined) {
-        await batchDelete.call(backend, {
+        await batchDelete({
           graphId: ctx.graphId,
           ids: connectedEdges.map((edge) => edge.id),
         });

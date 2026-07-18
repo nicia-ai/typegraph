@@ -1,9 +1,8 @@
-import { sql } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
+import { renderPostgres, sql } from "../src/query/sql-fragment";
 import {
   shouldRefreshWorkingTableStatistics,
   WORKING_TABLE_ANALYZE_GROWTH_FACTOR,
@@ -54,7 +53,7 @@ describe("iterative graph working-table statistics", () => {
     if (postgresStatement === undefined) {
       throw new Error("PostgreSQL must emit a temporary-table ANALYZE");
     }
-    expect(new PgDialect().sqlToQuery(postgresStatement).sql).toBe(
+    expect(renderPostgres(postgresStatement).sql).toBe(
       'ANALYZE "typegraph_iterative_test"',
     );
     expect(sqliteDialect.analyzeTemporaryTable(workingTable)).toBeUndefined();
@@ -70,7 +69,7 @@ describe("iterative graph working-memory dialect seam", () => {
     if (postgresStatement === undefined) {
       throw new Error("PostgreSQL must emit a work_mem override");
     }
-    const compiled = new PgDialect().sqlToQuery(postgresStatement);
+    const compiled = renderPostgres(postgresStatement);
     // set_config(..., is_local => true) is the parameterizable form of
     // SET LOCAL: it reverts at transaction end and binds the value instead
     // of splicing it into the statement text.

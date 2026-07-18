@@ -28,12 +28,12 @@ import {
   createPostgresBackend,
   createPostgresTables,
   generatePostgresMigrationSQL,
-} from "@nicia-ai/typegraph/postgres";
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import {
   createSqliteBackend,
   createSqliteTables,
   generateSqliteDDL,
-} from "@nicia-ai/typegraph/sqlite";
+} from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 import { getPostgresUrl } from "./config";
 import { formatMs, median, percentile } from "./utils";

@@ -6,7 +6,15 @@
  * prebuilt binaries, so the end-to-end tests can run against the in-memory
  * backend without additional setup.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
@@ -24,9 +32,10 @@ import {
   searchable,
 } from "../src/core/searchable";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
-import type { createStore } from "../src/store";
+import type { Store } from "../src/store";
 import { getSearchableFields } from "../src/store/fulltext-sync";
 import { type FulltextSearchHit } from "../src/store/search";
+import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
   createTestBackend,
@@ -196,7 +205,7 @@ const SearchableGraph = defineGraph({
 
 describe("end-to-end fulltext search (SQLite FTS5)", () => {
   let backend: GraphBackend;
-  let store: ReturnType<typeof createStore<typeof SearchableGraph>>;
+  let store: Store<typeof SearchableGraph>;
 
   beforeEach(async () => {
     backend = createTestBackend();
@@ -268,7 +277,9 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
     });
 
     expect(results.length).toBeGreaterThan(0);
-    expect(documentProps(results[0]!).title).toBe("Climate change drivers");
+    expect(documentProps(requireDefined(results[0])).title).toBe(
+      "Climate change drivers",
+    );
     expect(results[0]?.score).toBeGreaterThan(0);
     expect(results[0]?.rank).toBe(1);
   });
@@ -289,7 +300,9 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
       limit: 10,
     });
     expect(phrase).toHaveLength(1);
-    expect(documentProps(phrase[0]!).title).toBe("Quick brown fox");
+    expect(documentProps(requireDefined(phrase[0])).title).toBe(
+      "Quick brown fox",
+    );
   });
 
   it("supports websearch syntax with negation", async () => {
@@ -308,7 +321,9 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
       limit: 10,
     });
     expect(negated).toHaveLength(1);
-    expect(documentProps(negated[0]!).title).toBe("Apple recipe");
+    expect(documentProps(requireDefined(negated[0])).title).toBe(
+      "Apple recipe",
+    );
   });
 
   it("re-indexes content on update", async () => {
@@ -339,7 +354,9 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
       limit: 10,
     });
     expect(results).toHaveLength(1);
-    expect(documentProps(results[0]!).title).toBe("Replaced title");
+    expect(documentProps(requireDefined(results[0])).title).toBe(
+      "Replaced title",
+    );
   });
 
   it("deletes the fulltext row when all searchable fields are emptied", async () => {
@@ -432,7 +449,9 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
       limit: 10,
     });
     expect(results).toHaveLength(1);
-    expect(documentProps(results[0]!).title).toBe("Climate report");
+    expect(documentProps(requireDefined(results[0])).title).toBe(
+      "Climate report",
+    );
   });
 
   it("rejects non-positive limit", async () => {
@@ -633,7 +652,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     });
 
     expect(results.length).toBeGreaterThan(0);
-    const topId = results[0]!.node.id;
+    const topId = requireDefined(results[0]).node.id;
     expect([solar.id, wind.id]).toContain(topId);
 
     const fused = results.find(
@@ -723,7 +742,7 @@ describe("hybrid search (vector + FTS, RRF fusion)", () => {
     // deterministic.
     const top = results[0];
     expect(top).toBeDefined();
-    expect([a.id, c.id]).toContain(top!.node.id);
+    expect([a.id, c.id]).toContain(requireDefined(top).node.id);
     // Both sub-scores are reported when the node was retrieved from both.
     const fullyFused = results.find(
       (r) => r.vector !== undefined && r.fulltext !== undefined,
@@ -845,7 +864,7 @@ describe("custom FulltextStrategy plumbing", () => {
 // ============================================================
 
 describe("warnIfConflictingLanguages", () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: MockInstance<typeof console.warn>;
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {
@@ -868,7 +887,11 @@ describe("warnIfConflictingLanguages", () => {
     // First call triggers the warning.
     getSearchableFields(Mixed.schema);
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    const payload = warnSpy.mock.calls[0]?.[0];
+    const payload: unknown = warnSpy.mock.calls[0]?.[0];
+    expect(typeof payload).toBe("string");
+    if (typeof payload !== "string") {
+      throw new TypeError("Expected console.warn to receive a string.");
+    }
     expect(payload).toContain("conflicting languages");
     expect(payload).toContain("title=english");
     expect(payload).toContain("titulo=spanish");

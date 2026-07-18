@@ -25,6 +25,7 @@ import {
   type HistoryStore,
 } from "../../src";
 import { createRetractionCapability } from "../../src/provenance";
+import { requireDefined } from "../../src/utils/presence";
 import { dumpObservableState } from "../state-snapshot";
 import { createTestBackend } from "../test-utils";
 
@@ -253,7 +254,7 @@ async function seedWorld(world: World): Promise<{
     );
     for (const sourceIndex of justification.sourcePremises) {
       await store.edges.premiseOf.create(
-        sources[sourceIndex]!,
+        requireDefined(sources[sourceIndex]),
         justificationNode,
         {},
         { id: `premise-s-${justificationIndex}-${sourceIndex}` },
@@ -261,7 +262,7 @@ async function seedWorld(world: World): Promise<{
     }
     for (const factIndex of justification.factPremises) {
       await store.edges.premiseOf.create(
-        facts[factIndex]!,
+        requireDefined(facts[factIndex]),
         justificationNode,
         {},
         { id: `premise-f-${justificationIndex}-${factIndex}` },
@@ -270,7 +271,7 @@ async function seedWorld(world: World): Promise<{
     for (const factIndex of justification.derivedFacts) {
       await store.edges.derives.create(
         justificationNode,
-        facts[factIndex]!,
+        requireDefined(facts[factIndex]),
         {},
         { id: `derives-${justificationIndex}-${factIndex}` },
       );
@@ -282,7 +283,7 @@ async function seedWorld(world: World): Promise<{
       { id: `note-${factIndex}` },
     );
     await store.edges.attachedTo.create(
-      facts[factIndex]!,
+      requireDefined(facts[factIndex]),
       note,
       {},
       {

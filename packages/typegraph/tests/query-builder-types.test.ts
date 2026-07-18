@@ -372,7 +372,7 @@ describe("Query Builder Type Safety", () => {
         .traverse("worksAt", "e")
         .whereEdge("e", (edge) => {
           // @ts-expect-error - worksAt edges don't have a "since" property
-          return edge.since.eq("2020");
+          return edge.since.eq("2020"); // eslint-disable-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- Deliberate negative compile-time assertion.
         });
 
       expect(true).toBe(true);

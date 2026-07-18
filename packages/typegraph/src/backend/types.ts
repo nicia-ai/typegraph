@@ -4,8 +4,6 @@
  * The backend abstracts database operations, allowing different
  * SQL implementations (SQLite, PostgreSQL) behind a common interface.
  */
-import { type SQL } from "drizzle-orm";
-
 import {
   type IndexEntity,
   type KindEntity,
@@ -17,16 +15,14 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../query/dialect/vector-strategy";
+import { type SqlFragment } from "../query/sql-fragment";
 import {
   type CompiledRowsSql,
   type CompiledStatementSql,
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
-import {
-  type AnyPgDatabase,
-  type AnySqliteDatabase,
-} from "./drizzle/execution";
+import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 
 // ============================================================
 // Vector Search Types
@@ -516,7 +512,7 @@ export type UpsertEmbeddingParams = Readonly<{
 /**
  * One row of a batched embedding upsert.
  */
-type UpsertEmbeddingBatchRow = Readonly<{
+export type UpsertEmbeddingBatchRow = Readonly<{
   nodeId: string;
   embedding: readonly number[];
 }>;
@@ -595,7 +591,7 @@ export type VectorSearchParams = Readonly<{
    * restricts to CURRENT nodes of the kind — non-tombstoned AND inside
    * their validity window — matching a `current` read.
    */
-  candidates?: SQL;
+  candidates?: SqlFragment;
   /**
    * Rows to skip AFTER ranking (pagination). The engine fetches
    * `limit + offset` ranked candidates and discards the first `offset`.
@@ -630,7 +626,7 @@ export type VectorSearchResult = Readonly<{
  * Parameters for a single-statement hybrid (vector + fulltext, RRF-fused)
  * search. The store facade resolves every default before calling — the
  * per-source candidate depths (`k`), the fusion constants, and the shared
- * `candidates` subquery — so the backend composes SQL without policy.
+ * `candidates` subquery — so the backend composes `SqlFragment` values without policy.
  */
 export type HybridSearchParams = Readonly<{
   graphId: string;
@@ -666,7 +662,7 @@ export type HybridSearchParams = Readonly<{
   /** Fused rows to skip (rank-relative pagination). */
   offset?: number;
   /** See {@link VectorSearchParams.candidates}; applies to both sources. */
-  candidates?: SQL;
+  candidates?: SqlFragment;
 }>;
 
 /**
@@ -828,7 +824,7 @@ export type FulltextSearchParams = Readonly<{
    * the kind — non-tombstoned AND inside their validity window —
    * matching a `current` read.
    */
-  candidates?: SQL;
+  candidates?: SqlFragment;
   /**
    * Rows to skip AFTER ranking (pagination). The engine fetches
    * `limit + offset` ranked candidates and discards the first `offset`.
@@ -1043,8 +1039,8 @@ export type RecordKindRemovalParams = Readonly<{
 // ============================================================
 
 /** @internal Capability token for connection-local temporary writes. */
-export const INTERNAL_TEMPORARY_WRITES = Symbol(
-  "typegraph.internalTemporaryWrites",
+export const INTERNAL_TEMPORARY_WRITES: unique symbol = typeGraphGlobalSymbol(
+  "internal-temporary-writes-v1",
 );
 
 /**
@@ -1059,29 +1055,18 @@ export type TransactionOptions = Readonly<{
    * multi-statement reads that need one snapshot and must not perform writes.
    */
   accessMode?: "read_only" | "read_write";
-  /**
-   * @internal Permit writes only to connection-local temporary state. The
-   * iterative-operation primitive uses this when an engine rejects temporary
-   * DDL in a read-only transaction.
-   */
-  temporaryWrites?: typeof INTERNAL_TEMPORARY_WRITES;
 }>;
 
-/**
- * A caller-owned, already-open Drizzle transaction handle that a
- * TypeGraph store can adopt so both layers commit/rollback together.
- *
- * The literal client the caller's transaction runs on — a `PgDatabase`
- * transaction (node-postgres / `neon-serverless` Pool) or a
- * `BaseSQLiteDatabase` connection. Async drivers obtain it from
- * `db.transaction(async (tx) => …)`; synchronous `better-sqlite3` (whose
- * driver rejects an `async` transaction callback) passes the connection
- * itself under an explicit `BEGIN`/`COMMIT`/`ROLLBACK`. Passing it to
- * {@link GraphBackend.adoptTransaction} threads that *literal* client
- * through TypeGraph's SQL, so graph writes and the caller's own
- * relational writes share one Postgres/SQLite transaction (#134).
- */
-export type AdoptedTransaction = AnyPgDatabase | AnySqliteDatabase;
+/** @internal Transaction options available only to TypeGraph-owned execution. */
+export type InternalTransactionOptions = TransactionOptions &
+  Readonly<{
+    /**
+     * Permit writes only to connection-local temporary state. The iterative
+     * operation primitive uses this when an engine rejects temporary DDL in a
+     * read-only transaction.
+     */
+    temporaryWrites?: typeof INTERNAL_TEMPORARY_WRITES;
+  }>;
 
 // ============================================================
 // Backend Interface
@@ -1093,6 +1078,10 @@ export type AdoptedTransaction = AnyPgDatabase | AnySqliteDatabase;
  * Implementations should provide:
  * - SQLite backend via better-sqlite3 or libsql
  * - PostgreSQL backend via pg or postgres
+ *
+ * Every function is receiver-free (`this: void`). Implementations must close
+ * over their state instead of reading `this`, which makes saved optional
+ * capabilities and other detached port calls safe by construction.
  */
 export type GraphBackend = Readonly<{
   /** The SQL dialect */
@@ -1121,88 +1110,132 @@ export type GraphBackend = Readonly<{
   vectorStrategy?: VectorStrategy | undefined;
 
   // === Node Operations ===
-  insertNode: (params: InsertNodeParams) => Promise<NodeRow>;
-  insertNodeNoReturn?: (params: InsertNodeParams) => Promise<void>;
-  insertNodesBatch?: (params: readonly InsertNodeParams[]) => Promise<void>;
+  insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+  insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
+  insertNodesBatch?: (
+    this: void,
+    params: readonly InsertNodeParams[],
+  ) => Promise<void>;
   insertNodesBatchReturning?: (
+    this: void,
     params: readonly InsertNodeParams[],
   ) => Promise<readonly NodeRow[]>;
-  updateNode: (params: UpdateNodeParams) => Promise<NodeRow>;
-  deleteNode: (params: DeleteNodeParams) => Promise<void>;
-  hardDeleteNode: (params: HardDeleteNodeParams) => Promise<void>;
+  updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+  deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
+  hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   getNode: (
+    this: void,
     graphId: string,
     kind: string,
     id: string,
   ) => Promise<NodeRow | undefined>;
   getNodes?: (
+    this: void,
     graphId: string,
     kind: string,
     ids: readonly string[],
   ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
-  insertEdge: (params: InsertEdgeParams) => Promise<EdgeRow>;
-  insertEdgeNoReturn?: (params: InsertEdgeParams) => Promise<void>;
-  insertEdgesBatch?: (params: readonly InsertEdgeParams[]) => Promise<void>;
+  insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+  insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
+  insertEdgesBatch?: (
+    this: void,
+    params: readonly InsertEdgeParams[],
+  ) => Promise<void>;
   insertEdgesBatchReturning?: (
+    this: void,
     params: readonly InsertEdgeParams[],
   ) => Promise<readonly EdgeRow[]>;
-  updateEdge: (params: UpdateEdgeParams) => Promise<EdgeRow>;
-  deleteEdge: (params: DeleteEdgeParams) => Promise<void>;
-  hardDeleteEdge: (params: HardDeleteEdgeParams) => Promise<void>;
+  updateEdge: (this: void, params: UpdateEdgeParams) => Promise<EdgeRow>;
+  deleteEdge: (this: void, params: DeleteEdgeParams) => Promise<void>;
+  hardDeleteEdge: (this: void, params: HardDeleteEdgeParams) => Promise<void>;
   /**
    * Batched {@link deleteEdge}: one soft-delete statement per bind-budget
    * chunk instead of one per edge. Optional — cascade deletes fall back to
    * the per-edge form when unset. Same per-row semantics (idempotent on
    * already-tombstoned rows).
    */
-  deleteEdgesBatch?: (params: DeleteEdgesBatchParams) => Promise<void>;
+  deleteEdgesBatch?: (
+    this: void,
+    params: DeleteEdgesBatchParams,
+  ) => Promise<void>;
   /** Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. */
-  hardDeleteEdgesBatch?: (params: DeleteEdgesBatchParams) => Promise<void>;
-  getEdge: (graphId: string, id: string) => Promise<EdgeRow | undefined>;
+  hardDeleteEdgesBatch?: (
+    this: void,
+    params: DeleteEdgesBatchParams,
+  ) => Promise<void>;
+  getEdge: (
+    this: void,
+    graphId: string,
+    id: string,
+  ) => Promise<EdgeRow | undefined>;
   getEdges?: (
+    this: void,
     graphId: string,
     ids: readonly string[],
   ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
-  countEdgesFrom: (params: CountEdgesFromParams) => Promise<number>;
-  edgeExistsBetween: (params: EdgeExistsBetweenParams) => Promise<boolean>;
+  countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+  edgeExistsBetween: (
+    this: void,
+    params: EdgeExistsBetweenParams,
+  ) => Promise<boolean>;
 
   // === Edge Query Operations ===
   findEdgesConnectedTo: (
+    this: void,
     params: FindEdgesConnectedToParams,
   ) => Promise<readonly EdgeRow[]>;
 
   // === Collection Query Operations ===
   findNodesByKind: (
+    this: void,
     params: FindNodesByKindParams,
   ) => Promise<readonly NodeRow[]>;
-  countNodesByKind: (params: CountNodesByKindParams) => Promise<number>;
+  countNodesByKind: (
+    this: void,
+    params: CountNodesByKindParams,
+  ) => Promise<number>;
   findEdgesByKind: (
+    this: void,
     params: FindEdgesByKindParams,
   ) => Promise<readonly EdgeRow[]>;
-  countEdgesByKind: (params: CountEdgesByKindParams) => Promise<number>;
+  countEdgesByKind: (
+    this: void,
+    params: CountEdgesByKindParams,
+  ) => Promise<number>;
 
   // === Unique Constraint Operations ===
-  insertUnique: (params: InsertUniqueParams) => Promise<void>;
+  insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
   /**
    * Batched variant of `insertUnique`: one multi-row statement per chunk
    * with the same per-entry conflict semantics (throws `UniquenessError`
    * for the first entry whose key a different live node holds). Optional —
    * callers fall back to per-entry `insertUnique` when unset.
    */
-  insertUniqueBatch?: (entries: readonly InsertUniqueParams[]) => Promise<void>;
-  deleteUnique: (params: DeleteUniqueParams) => Promise<void>;
-  checkUnique: (params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
+  insertUniqueBatch?: (
+    this: void,
+    entries: readonly InsertUniqueParams[],
+  ) => Promise<void>;
+  deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+  checkUnique: (
+    this: void,
+    params: CheckUniqueParams,
+  ) => Promise<UniqueRow | undefined>;
   checkUniqueBatch?: (
+    this: void,
     params: CheckUniqueBatchParams,
   ) => Promise<readonly UniqueRow[]>;
 
   // === Schema Operations ===
-  getActiveSchema: (graphId: string) => Promise<SchemaVersionRow | undefined>;
+  getActiveSchema: (
+    this: void,
+    graphId: string,
+  ) => Promise<SchemaVersionRow | undefined>;
   getSchemaVersion: (
+    this: void,
     graphId: string,
     version: number,
   ) => Promise<SchemaVersionRow | undefined>;
@@ -1227,6 +1260,7 @@ export type GraphBackend = Readonly<{
    * window the primitive exists to eliminate.
    */
   commitSchemaVersion: (
+    this: void,
     params: CommitSchemaVersionParams,
   ) => Promise<SchemaVersionRow>;
   /**
@@ -1238,16 +1272,28 @@ export type GraphBackend = Readonly<{
    *
    * Same transactional requirements as `commitSchemaVersion`.
    */
-  setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+  setActiveVersion: (
+    this: void,
+    params: SetActiveVersionParams,
+  ) => Promise<void>;
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
-  upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
+  upsertEmbedding?: (
+    this: void,
+    params: UpsertEmbeddingParams,
+  ) => Promise<void>;
   /**
    * Batched variant of `upsertEmbedding` for one vector slot. Optional —
    * callers fall back to per-row `upsertEmbedding` when unset.
    */
-  upsertEmbeddingBatch?: (params: UpsertEmbeddingBatchParams) => Promise<void>;
-  deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
+  upsertEmbeddingBatch?: (
+    this: void,
+    params: UpsertEmbeddingBatchParams,
+  ) => Promise<void>;
+  deleteEmbedding?: (
+    this: void,
+    params: DeleteEmbeddingParams,
+  ) => Promise<void>;
   /**
    * KNN search over one `(nodeKind, fieldPath)` slot. Top-k is computed
    * over CURRENT nodes only — non-tombstoned AND inside their validity
@@ -1262,10 +1308,17 @@ export type GraphBackend = Readonly<{
    * that headroom).
    */
   vectorSearch?: (
+    this: void,
     params: VectorSearchParams,
   ) => Promise<readonly VectorSearchResult[]>;
-  createVectorIndex?: (params: CreateVectorIndexParams) => Promise<void>;
-  dropVectorIndex?: (params: DropVectorIndexParams) => Promise<void>;
+  createVectorIndex?: (
+    this: void,
+    params: CreateVectorIndexParams,
+  ) => Promise<void>;
+  dropVectorIndex?: (
+    this: void,
+    params: DropVectorIndexParams,
+  ) => Promise<void>;
   /**
    * Single-statement hybrid search: both sources, RRF fusion, liveness
    * join, and node hydration composed into ONE statement — replacing the
@@ -1275,22 +1328,29 @@ export type GraphBackend = Readonly<{
    * as `vectorSearch` / `fulltextSearch`.
    */
   hybridSearch?: (
+    this: void,
     params: HybridSearchParams,
   ) => Promise<readonly HybridSearchRow[]>;
 
   // === Fulltext Operations (optional - depends on fulltext capabilities) ===
-  upsertFulltext?: (params: UpsertFulltextParams) => Promise<void>;
-  deleteFulltext?: (params: DeleteFulltextParams) => Promise<void>;
+  upsertFulltext?: (this: void, params: UpsertFulltextParams) => Promise<void>;
+  deleteFulltext?: (this: void, params: DeleteFulltextParams) => Promise<void>;
   /**
    * Batched variant of `upsertFulltext`. Optional — callers fall back to
    * per-row `upsertFulltext` when unset.
    */
-  upsertFulltextBatch?: (params: UpsertFulltextBatchParams) => Promise<void>;
+  upsertFulltextBatch?: (
+    this: void,
+    params: UpsertFulltextBatchParams,
+  ) => Promise<void>;
   /**
    * Batched variant of `deleteFulltext`. Optional — callers fall back to
    * per-row `deleteFulltext` when unset.
    */
-  deleteFulltextBatch?: (params: DeleteFulltextBatchParams) => Promise<void>;
+  deleteFulltextBatch?: (
+    this: void,
+    params: DeleteFulltextBatchParams,
+  ) => Promise<void>;
   /**
    * Ranked fulltext search over one node kind. Like `vectorSearch`, top-k
    * is computed over CURRENT nodes only — non-tombstoned AND inside their
@@ -1299,6 +1359,7 @@ export type GraphBackend = Readonly<{
    * honor the same contract.
    */
   fulltextSearch?: (
+    this: void,
     params: FulltextSearchParams,
   ) => Promise<readonly FulltextSearchResult[]>;
 
@@ -1318,7 +1379,7 @@ export type GraphBackend = Readonly<{
    * — concurrent `CREATE TABLE IF NOT EXISTS` for one specific table
    * is well-behaved on Postgres.
    */
-  ensureIndexMaterializationsTable?: () => Promise<void>;
+  ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
 
   /**
    * Idempotently ensure ONLY the `typegraph_revision_origins` table exists.
@@ -1329,13 +1390,14 @@ export type GraphBackend = Readonly<{
    * using `bootstrapTables` so existing deployments can adopt revision anchors
    * without replaying all base-table DDL during a merge read.
    */
-  ensureRevisionOriginsTable?: () => Promise<void>;
+  ensureRevisionOriginsTable?: (this: void) => Promise<void>;
 
   /**
    * Look up a recorded materialization for a declared index by its
    * physical SQL index name. Returns `undefined` if no row exists.
    */
   getIndexMaterialization?: (
+    this: void,
     indexName: string,
   ) => Promise<IndexMaterializationRow | undefined>;
   /**
@@ -1346,6 +1408,7 @@ export type GraphBackend = Readonly<{
    * `getIndexMaterialization` when unset.
    */
   getIndexMaterializations?: (
+    this: void,
     statusKeys: readonly string[],
   ) => Promise<readonly IndexMaterializationRow[]>;
   /**
@@ -1354,6 +1417,7 @@ export type GraphBackend = Readonly<{
    * timestamp survives across error windows.
    */
   recordIndexMaterialization?: (
+    this: void,
     params: RecordIndexMaterializationParams,
   ) => Promise<void>;
   /**
@@ -1365,10 +1429,12 @@ export type GraphBackend = Readonly<{
    * then builds without a claim, exactly as before.
    */
   claimIndexMaterialization?: (
+    this: void,
     params: ClaimIndexMaterializationParams,
   ) => Promise<boolean>;
   /** Releases a claim taken by `claimIndexMaterialization` (token-guarded). */
   releaseIndexMaterializationClaim?: (
+    this: void,
     params: ReleaseIndexMaterializationClaimParams,
   ) => Promise<void>;
 
@@ -1383,7 +1449,7 @@ export type GraphBackend = Readonly<{
    * replica startup, where the full `bootstrapTables` set risks a
    * Postgres SHARE-lock deadlock.
    */
-  ensureContributionMaterializationsTable?: () => Promise<void>;
+  ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
 
   /**
    * Look up the durable materialization marker for one strategy-owned
@@ -1391,6 +1457,7 @@ export type GraphBackend = Readonly<{
    * ("never initialized").
    */
   getContributionMaterialization?: (
+    this: void,
     identity: ContributionMaterializationIdentity,
   ) => Promise<ContributionMaterializationRow | undefined>;
 
@@ -1400,6 +1467,7 @@ export type GraphBackend = Readonly<{
    * later failed re-attempt doesn't erase the historical success.
    */
   recordContributionMaterialization?: (
+    this: void,
     params: RecordContributionMaterializationParams,
   ) => Promise<void>;
 
@@ -1415,7 +1483,10 @@ export type GraphBackend = Readonly<{
    * marker writes — initialization is the exclusive job of the async
    * boot path (`createStoreWithSchema` → `ensureRuntimeContributions`).
    */
-  assertRuntimeContributionsInitialized?: (graphId: string) => Promise<void>;
+  assertRuntimeContributionsInitialized?: (
+    this: void,
+    graphId: string,
+  ) => Promise<void>;
 
   // === Kind Removal Status ===
 
@@ -1427,7 +1498,7 @@ export type GraphBackend = Readonly<{
    * touches every base table and risks Postgres SHARE-lock deadlock
    * under concurrent replica startup.
    */
-  ensureKindRemovalsTable?: () => Promise<void>;
+  ensureKindRemovalsTable?: (this: void) => Promise<void>;
 
   /**
    * List graph-extension kind removals whose data-cleanup pass has not yet
@@ -1436,6 +1507,7 @@ export type GraphBackend = Readonly<{
    * one-at-a-time and don't depend on it.
    */
   getPendingKindRemovals?: (
+    this: void,
     graphId: string,
   ) => Promise<readonly KindRemovalRow[]>;
 
@@ -1448,7 +1520,10 @@ export type GraphBackend = Readonly<{
    * churning `last_attempted_at` on rows that long since succeeded.
    * Order is unspecified.
    */
-  getAllKindRemovals?: (graphId: string) => Promise<readonly KindRemovalRow[]>;
+  getAllKindRemovals?: (
+    this: void,
+    graphId: string,
+  ) => Promise<readonly KindRemovalRow[]>;
 
   /**
    * Upsert a kind-removal status row. `removedAt: undefined` records
@@ -1457,7 +1532,10 @@ export type GraphBackend = Readonly<{
    * mirrors `recordIndexMaterialization` so a later failure doesn't
    * clobber the historical successful timestamp from another replica.
    */
-  recordKindRemoval?: (params: RecordKindRemovalParams) => Promise<void>;
+  recordKindRemoval?: (
+    this: void,
+    params: RecordKindRemovalParams,
+  ) => Promise<void>;
 
   // === Reconciliation Watermark ===
 
@@ -1468,7 +1546,7 @@ export type GraphBackend = Readonly<{
    * tables — full `bootstrapTables` risks Postgres SHARE-lock
    * deadlock under concurrent replica startup.
    */
-  ensureReconciliationMarkersTable?: () => Promise<void>;
+  ensureReconciliationMarkersTable?: (this: void) => Promise<void>;
 
   // === Table Contributions (#129) ===
 
@@ -1485,7 +1563,7 @@ export type GraphBackend = Readonly<{
    * matching signature, otherwise runs the idempotent `createDdl` and
    * records the marker (success or failure) keyed by `graphId`.
    */
-  ensureRuntimeContributions?: (graphId: string) => Promise<void>;
+  ensureRuntimeContributions?: (this: void, graphId: string) => Promise<void>;
 
   /**
    * Privileged materializer for one embedding `(kind, field)` slot's
@@ -1505,6 +1583,7 @@ export type GraphBackend = Readonly<{
    * vector strategy.
    */
   ensureVectorSlotContribution?: (
+    this: void,
     slot: VectorSlot,
     options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
   ) => Promise<void>;
@@ -1515,6 +1594,7 @@ export type GraphBackend = Readonly<{
    * singular method remains available for re-embedding and compatibility.
    */
   ensureVectorSlotContributions?: (
+    this: void,
     slots: readonly VectorSlot[],
     options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
   ) => Promise<void>;
@@ -1529,13 +1609,14 @@ export type GraphBackend = Readonly<{
    * runtime attach. Performs ZERO DDL and ZERO writes. Present only on
    * backends wired with a vector strategy.
    */
-  assertVectorSlotInitialized?: (slot: VectorSlot) => Promise<void>;
+  assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
 
   /**
    * Batch form of `assertVectorSlotInitialized`, used by verified attach to
    * resolve every slot's durable markers with one graph-scoped query.
    */
   assertVectorSlotsInitialized?: (
+    this: void,
     slots: readonly VectorSlot[],
   ) => Promise<void>;
 
@@ -1547,7 +1628,10 @@ export type GraphBackend = Readonly<{
    * marker. Does NOT drop the table itself (the caller already did).
    * Present only on backends wired with a vector strategy.
    */
-  deleteVectorSlotContribution?: (slot: VectorSlot) => Promise<void>;
+  deleteVectorSlotContribution?: (
+    this: void,
+    slot: VectorSlot,
+  ) => Promise<void>;
 
   /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
@@ -1560,7 +1644,7 @@ export type GraphBackend = Readonly<{
    * pre-#129 fallback. #135 removed the remaining hot-path callers and
    * routed this through the durable-marker writer.
    */
-  ensureFulltextTable?: (graphId: string) => Promise<void>;
+  ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
 
   /**
    * Read the high-water mark schema version for which
@@ -1569,7 +1653,10 @@ export type GraphBackend = Readonly<{
    * recorded yet. Used to skip already-checked transitions in the
    * recovery walk.
    */
-  getReconciliationMarker?: (graphId: string) => Promise<number | undefined>;
+  getReconciliationMarker?: (
+    this: void,
+    graphId: string,
+  ) => Promise<number | undefined>;
 
   /**
    * Persist the reconciliation high-water mark for `graphId`. Called
@@ -1577,14 +1664,18 @@ export type GraphBackend = Readonly<{
    * calls walk only versions newer than this marker. Idempotent
    * upsert by `graphId`.
    */
-  setReconciliationMarker?: (graphId: string, version: number) => Promise<void>;
+  setReconciliationMarker?: (
+    this: void,
+    graphId: string,
+    version: number,
+  ) => Promise<void>;
 
   // === Graph Lifecycle ===
   /**
    * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
    * Intended for import-replacement workflows. No hooks, no per-row logic.
    */
-  clearGraph: (graphId: string) => Promise<void>;
+  clearGraph: (this: void, graphId: string) => Promise<void>;
 
   /**
    * Creates the base TypeGraph tables if they don't already exist.
@@ -1593,7 +1684,7 @@ export type GraphBackend = Readonly<{
    * is detected. Users who manage DDL themselves via `createStore()` never
    * hit this path.
    */
-  bootstrapTables?: () => Promise<void>;
+  bootstrapTables?: (this: void) => Promise<void>;
 
   /**
    * Refreshes the backend's query-planner statistics.
@@ -1613,7 +1704,7 @@ export type GraphBackend = Readonly<{
    * Safe to call at any time; costs a few tens of milliseconds on the
    * sizes this library is designed for.
    */
-  refreshStatistics: () => Promise<void>;
+  refreshStatistics: (this: void) => Promise<void>;
 
   /**
    * Runs an intentionally trusted, all-or-nothing initial import.
@@ -1629,11 +1720,12 @@ export type GraphBackend = Readonly<{
    * from {@link TransactionBackend}.
    */
   trustedImport?: <T>(
+    this: void,
     fn: (session: TrustedImportSession) => Promise<T>,
   ) => Promise<T>;
 
   // === Query Execution ===
-  execute: <T>(query: CompiledRowsSql) => Promise<readonly T[]>;
+  execute: <T>(this: void, query: CompiledRowsSql) => Promise<readonly T[]>;
 
   /**
    * Execute a non-row-returning SQL statement bound to this backend or
@@ -1641,7 +1733,7 @@ export type GraphBackend = Readonly<{
    * row-returning query path; features that need statement execution must
    * capability-check and fail loudly.
    */
-  executeStatement?: (query: CompiledStatementSql) => Promise<void>;
+  executeStatement?: (this: void, query: CompiledStatementSql) => Promise<void>;
 
   /**
    * Execute an internally compiled statement against connection-local
@@ -1650,18 +1742,21 @@ export type GraphBackend = Readonly<{
    * input through the public API.
    */
   executeTemporaryStatement?: (
+    this: void,
     query: CompiledTemporaryStatementSql,
   ) => Promise<void>;
 
   /** Execute pre-compiled SQL text with bound parameters. Available on sync SQLite and pg backends. */
   executeRaw?: <T>(
+    this: void,
     sqlText: string,
     params: readonly unknown[],
   ) => Promise<readonly T[]>;
 
-  /** Compile a Drizzle SQL object to { sql, params } without executing. */
+  /** Compile a TypeGraph `SqlFragment` to `{ sql, params }` without executing. */
   compileSql?: (
-    query: SQL,
+    this: void,
+    query: SqlFragment,
   ) => Readonly<{ sql: string; params: readonly unknown[] }>;
 
   /**
@@ -1675,64 +1770,44 @@ export type GraphBackend = Readonly<{
    * cannot run inside a transaction. Implementations must execute the
    * statement outside `transaction(...)`.
    */
-  executeDdl?: (ddl: string) => Promise<void>;
+  executeDdl?: (this: void, ddl: string) => Promise<void>;
 
   // === Transaction ===
-  /**
-   * `fn` receives the tx-scoped backend and the raw Drizzle handle
-   * **bound to that same transaction** (`AdoptedTransaction`). The
-   * store surfaces the second argument as `TransactionContext.sql` so
-   * callers can write their own relational tables inside the
-   * graph-owned transaction. Implementations MUST pass the *exact*
-   * handle the tx-scoped backend writes through (the Postgres/libsql
-   * tx handle; for better-sqlite3 / do-sqlite the bound connection),
-   * never a fresh one.
-   *
-   * The tx-scoped backend serializes the statements *it* issues onto the
-   * pinned connection, but the raw handle bypasses that queue. It is the
-   * caller's responsibility not to run raw statements concurrently with graph
-   * writes (or with each other) on the shared connection — a constraint
-   * inherent to a single-connection transaction, not something this method can
-   * enforce over a handle it does not mediate.
-   */
+  /** Runs TypeGraph operations inside a backend-owned transaction. */
   transaction: <T>(
-    fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+    this: void,
+    fn: (tx: TransactionBackend) => Promise<T>,
     options?: TransactionOptions,
   ) => Promise<T>;
 
-  /**
-   * Adopt a caller-owned, already-open transaction (#134).
-   *
-   * Returns a transaction-scoped backend bound to the *exact*
-   * `externalTx` client, reusing this backend's already-resolved
-   * schema/strategy config — no `createStoreWithSchema` / `evolve` /
-   * `migrateSchema`, and **no DDL inside the caller's business
-   * transaction**. The caller owns `BEGIN`/`COMMIT`/`ROLLBACK`; this
-   * method neither opens nor closes a transaction. Async drivers
-   * (node-postgres, `neon-serverless` Pool, libsql) wrap with
-   * `db.transaction(async …)`; synchronous `better-sqlite3` must instead
-   * issue explicit `BEGIN`/`COMMIT`/`ROLLBACK` (its driver rejects an
-   * `async` transaction callback).
-   *
-   * Optional and presence-detected like the other capability-scoped
-   * members: only the Drizzle Postgres/SQLite backends provide it.
-   * Implementations MUST throw (not silently degrade) when
-   * `capabilities.transactions` is `false` — a non-atomic fallback is
-   * safe for graph-only writes but dangerous for cross-store flows,
-   * where the caller's relational write *would* still commit.
-   *
-   * Fulltext stays safe by construction: the returned backend's
-   * fulltext methods assert the durable materialization marker (a
-   * cached SELECT, never DDL) at point of use and throw
-   * `StoreNotInitializedError` on a missing/stale/failed marker rather
-   * than migrating mid-transaction. Prefer booting the parent store via
-   * `createStoreWithSchema` so that assertion is a warm-cache no-op.
-   */
-  adoptTransaction?: (externalTx: AdoptedTransaction) => TransactionBackend;
-
   // === Lifecycle ===
-  close: () => Promise<void>;
+  close: (this: void) => Promise<void>;
 }>;
+
+/**
+ * Adapter-native transaction interoperability layered on top of the portable
+ * TypeGraph backend. Only adapter entrypoints expose this capability.
+ */
+export type AdapterBackend<TNativeTransaction> = GraphBackend &
+  Readonly<{
+    /**
+     * Runs TypeGraph operations and exposes the exact adapter-native handle
+     * bound to the same transaction.
+     */
+    transactionWithNative: <T>(
+      this: void,
+      fn: (
+        tx: TransactionBackend,
+        nativeTransaction: TNativeTransaction,
+      ) => Promise<T>,
+      options?: TransactionOptions,
+    ) => Promise<T>;
+    /** Adopts a caller-owned, already-open adapter transaction. */
+    adoptTransaction: (
+      this: void,
+      externalTransaction: TNativeTransaction,
+    ) => TransactionBackend;
+  }>;
 
 export type BackendIdentity = Pick<
   GraphBackend,
@@ -1868,6 +1943,8 @@ export type RawQueryExecutionBackend = Pick<
   "executeRaw" | "compileSql"
 >;
 
+export type SqlCompilationBackend = Pick<GraphBackend, "compileSql">;
+
 export type RawStatementExecutionBackend = Pick<
   GraphBackend,
   "executeStatement" | "executeTemporaryStatement" | "executeDdl"
@@ -1875,12 +1952,28 @@ export type RawStatementExecutionBackend = Pick<
 
 export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
 
-export type BackendTransactions = Pick<
-  GraphBackend,
-  "transaction" | "adoptTransaction"
+export type BackendTransactions = Pick<GraphBackend, "transaction">;
+
+export type AdapterBackendTransactions<TNativeTransaction> = Pick<
+  AdapterBackend<TNativeTransaction>,
+  "transactionWithNative" | "adoptTransaction"
 >;
 
 export type BackendLifecycle = Pick<GraphBackend, "close">;
+
+/**
+ * Read-oriented transaction projection exposed by portable transaction
+ * contexts. It preserves snapshot-aware graph reads and TypeGraph-compiled
+ * row queries while excluding graph writes, arbitrary raw SQL, DDL,
+ * transaction adoption, and lifecycle control.
+ */
+export type TransactionReadBackend = Readonly<
+  BackendIdentity &
+    GraphEntityReadBackend &
+    SchemaReadBackend &
+    QueryExecutionBackend &
+    SqlCompilationBackend
+>;
 
 /**
  * Transaction backend — a backend scoped to a transaction.
@@ -1909,6 +2002,64 @@ export type TransactionBackend = Readonly<
     RawStatementExecutionBackend
 >;
 
+/**
+ * Builds the actual runtime projection exposed as `TransactionContext.backend`.
+ * This is an explicit object rather than a type-only narrowing so portable
+ * callers cannot discover write or arbitrary-SQL methods on the underlying
+ * transaction backend at runtime.
+ *
+ * @internal
+ */
+export function createTransactionReadBackend(
+  backend: TransactionBackend,
+): TransactionReadBackend {
+  const getNodes = backend.getNodes;
+  const getEdges = backend.getEdges;
+  const compileSql = backend.compileSql;
+
+  return Object.freeze({
+    dialect: backend.dialect,
+    capabilities: backend.capabilities,
+    ...(backend.tableNames === undefined ?
+      {}
+    : { tableNames: backend.tableNames }),
+    ...(backend.fulltextStrategy === undefined ?
+      {}
+    : { fulltextStrategy: backend.fulltextStrategy }),
+    ...(backend.vectorStrategy === undefined ?
+      {}
+    : { vectorStrategy: backend.vectorStrategy }),
+    getNode: (graphId, kind, id) => backend.getNode(graphId, kind, id),
+    ...(getNodes === undefined ?
+      {}
+    : {
+        getNodes: (graphId: string, kind: string, ids: readonly string[]) =>
+          getNodes(graphId, kind, ids),
+      }),
+    getEdge: (graphId, id) => backend.getEdge(graphId, id),
+    ...(getEdges === undefined ?
+      {}
+    : {
+        getEdges: (graphId: string, ids: readonly string[]) =>
+          getEdges(graphId, ids),
+      }),
+    countEdgesFrom: (params) => backend.countEdgesFrom(params),
+    edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
+    findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
+    findNodesByKind: (params) => backend.findNodesByKind(params),
+    countNodesByKind: (params) => backend.countNodesByKind(params),
+    findEdgesByKind: (params) => backend.findEdgesByKind(params),
+    countEdgesByKind: (params) => backend.countEdgesByKind(params),
+    getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
+    getSchemaVersion: (graphId, version) =>
+      backend.getSchemaVersion(graphId, version),
+    execute: <T>(query: CompiledRowsSql) => backend.execute<T>(query),
+    ...(compileSql === undefined ?
+      {}
+    : { compileSql: (query: SqlFragment) => compileSql(query) }),
+  });
+}
+
 type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
   Readonly<Record<Exclude<keyof O, keyof T>, never>>;
 
@@ -1919,32 +2070,20 @@ type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
 /**
  * Overlays selected backend methods without copying the backend object.
  *
- * Backend wrappers use this instead of object spread so custom class/proxy
- * backends keep prototype methods, getters, private fields, and non-enumerable
- * members. Delegated target methods are bound to the original target, while
- * overlay methods keep the overlay object as their receiver.
+ * This is a decoration primitive: every non-overridden target property remains
+ * reachable. Never use it to narrow a capability surface; construct an
+ * explicit allowlist projection first, then decorate that projection.
+ *
+ * Backend wrappers use this instead of object spread so proxy backends keep
+ * getters and non-enumerable members. GraphBackend functions are receiver-free
+ * by contract, so delegated methods are returned unchanged.
  */
 export function createBackendOverlay<
-  T extends object,
+  T extends GraphBackend | TransactionBackend,
   const O extends Partial<T> = Partial<T>,
 >(target: T, overlay: ExactBackendOverlay<T, O>): T {
-  const boundTargetMethods = new Map<PropertyKey, unknown>();
-
   function hasOverlayProperty(property: PropertyKey): boolean {
     return Object.hasOwn(overlay, property);
-  }
-
-  function targetValue(targetObject: T, property: PropertyKey): unknown {
-    const value = Reflect.get(targetObject, property, targetObject);
-    if (typeof value !== "function") return value;
-
-    const cached = boundTargetMethods.get(property);
-    if (cached !== undefined) return cached;
-
-    const method = value as (this: T, ...args: unknown[]) => unknown;
-    const bound = method.bind(targetObject);
-    boundTargetMethods.set(property, bound);
-    return bound;
   }
 
   return new Proxy(target, {
@@ -1952,7 +2091,7 @@ export function createBackendOverlay<
       if (hasOverlayProperty(property)) {
         return Reflect.get(overlay, property, overlay);
       }
-      return targetValue(targetObject, property);
+      return Reflect.get(targetObject, property, targetObject);
     },
 
     has(targetObject, property) {
@@ -2006,19 +2145,78 @@ export function createBackendOverlay<
  * Wraps a GraphBackend with idempotent close that also runs a teardown
  * callback (e.g. closing the underlying database connection).
  */
+export function wrapWithManagedClose<TNativeTransaction>(
+  backend: AdapterBackend<TNativeTransaction>,
+  teardown: () => void | Promise<void>,
+): AdapterBackend<TNativeTransaction>;
+export function wrapWithManagedClose(
+  backend: GraphBackend,
+  teardown: () => void | Promise<void>,
+): GraphBackend;
 export function wrapWithManagedClose(
   backend: GraphBackend,
   teardown: () => void | Promise<void>,
 ): GraphBackend {
-  let isClosed = false;
-  return createBackendOverlay(backend, {
+  let backendClosed = false;
+  let teardownComplete = false;
+  let closeInFlight: Promise<void> | undefined;
+
+  async function closeManagedResources(): Promise<void> {
+    const errors: unknown[] = [];
+    if (!backendClosed) {
+      try {
+        await backend.close();
+        backendClosed = true;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (!teardownComplete) {
+      try {
+        await teardown();
+        teardownComplete = true;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "The backend and its managed resource both failed to close.",
+      );
+    }
+  }
+
+  const closeOverlay: Pick<GraphBackend, "close"> = {
     async close(): Promise<void> {
-      if (isClosed) return;
-      isClosed = true;
-      await backend.close();
-      await teardown();
+      if (backendClosed && teardownComplete) return;
+      closeInFlight ??= closeManagedResources().finally(() => {
+        closeInFlight = undefined;
+      });
+      await closeInFlight;
     },
-  });
+  };
+  return createBackendOverlay(backend, closeOverlay);
+}
+
+/**
+ * Closes an owned resource after provisioning fails without replacing the
+ * original domain error with a secondary cleanup failure.
+ */
+export async function closeAfterFailure(
+  resource: Readonly<{ close: () => void | Promise<void> }>,
+  provisioningError: unknown,
+): Promise<never> {
+  try {
+    await resource.close();
+  } catch {
+    // The provisioning failure remains the actionable error. Managed close is
+    // retryable when the resource is returned, but a failed factory has no
+    // handle it can safely expose for a second attempt.
+  }
+  throw provisioningError;
 }
 
 /**
@@ -2330,23 +2528,23 @@ export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
 /**
  * Default capabilities for SQLite.
  */
-export const SQLITE_CAPABILITIES: BackendCapabilities = {
+export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // SQLite supports transactions
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   returning: true, // SQLite has supported RETURNING since 3.35.0
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
-  graphAnalytics: { supported: true, mathFunctions: false },
-};
+  graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
+});
 
 /**
  * Default capabilities for PostgreSQL.
  */
-export const POSTGRES_CAPABILITIES: BackendCapabilities = {
+export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   transactions: true, // PostgreSQL supports transactions
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   returning: true, // PostgreSQL has supported RETURNING since 8.2
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
-  graphAnalytics: { supported: true, mathFunctions: true },
-};
+  graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
+});

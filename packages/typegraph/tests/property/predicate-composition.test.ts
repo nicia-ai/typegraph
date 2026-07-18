@@ -8,6 +8,7 @@ import {
   type Predicate,
   stringField,
 } from "../../src/query/predicates";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Helpers for Predicate Generation
@@ -264,8 +265,8 @@ describe("De Morgan's Law Structure", () => {
 
     expect(expression.__type).toBe("or");
     if (expression.__type !== "or") return;
-    expect(expression.predicates[0]!.__type).toBe("not");
-    expect(expression.predicates[1]!.__type).toBe("not");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("not");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("not");
   });
 
   it("NOT(A OR B) has correct structure", () => {
@@ -291,8 +292,8 @@ describe("De Morgan's Law Structure", () => {
 
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
-    expect(expression.predicates[0]!.__type).toBe("not");
-    expect(expression.predicates[1]!.__type).toBe("not");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("not");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("not");
   });
 });
 
@@ -313,7 +314,7 @@ describe("Associativity Structure", () => {
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
     expect(expression.predicates).toHaveLength(2);
-    expect(expression.predicates[0]!.__type).toBe("and");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("and");
     expect(expression.predicates[1]).toEqual(expr(r));
   });
 
@@ -330,7 +331,7 @@ describe("Associativity Structure", () => {
     if (expression.__type !== "and") return;
     expect(expression.predicates).toHaveLength(2);
     expect(expression.predicates[0]).toEqual(expr(p));
-    expect(expression.predicates[1]!.__type).toBe("and");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("and");
   });
 
   it("(A OR B) OR C creates left-nested structure", () => {
@@ -344,7 +345,7 @@ describe("Associativity Structure", () => {
     expect(expression.__type).toBe("or");
     if (expression.__type !== "or") return;
     expect(expression.predicates).toHaveLength(2);
-    expect(expression.predicates[0]!.__type).toBe("or");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("or");
     expect(expression.predicates[1]).toEqual(expr(r));
   });
 
@@ -360,7 +361,7 @@ describe("Associativity Structure", () => {
     if (expression.__type !== "or") return;
     expect(expression.predicates).toHaveLength(2);
     expect(expression.predicates[0]).toEqual(expr(p));
-    expect(expression.predicates[1]!.__type).toBe("or");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("or");
   });
 });
 
@@ -380,7 +381,7 @@ describe("Mixed Predicate Operations", () => {
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
     expect(expression.predicates[0]).toEqual(expr(p));
-    expect(expression.predicates[1]!.__type).toBe("or");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("or");
   });
 
   it("(A AND B) OR C has correct structure", () => {
@@ -393,7 +394,7 @@ describe("Mixed Predicate Operations", () => {
 
     expect(expression.__type).toBe("or");
     if (expression.__type !== "or") return;
-    expect(expression.predicates[0]!.__type).toBe("and");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("and");
     expect(expression.predicates[1]).toEqual(expr(r));
   });
 
@@ -407,7 +408,7 @@ describe("Mixed Predicate Operations", () => {
 
     expect(expression.__type).toBe("or");
     if (expression.__type !== "or") return;
-    expect(expression.predicates[0]!.__type).toBe("not");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("not");
     expect(expression.predicates[1]).toEqual(expr(r));
   });
 
@@ -422,7 +423,7 @@ describe("Mixed Predicate Operations", () => {
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
     expect(expression.predicates[0]).toEqual(expr(p));
-    expect(expression.predicates[1]!.__type).toBe("not");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("not");
   });
 });
 
@@ -540,8 +541,8 @@ describe("Different Field Type Predicates", () => {
     const expression = expr(result);
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
-    expect(expression.predicates[0]!.__type).toBe("null_check");
-    expect(expression.predicates[1]!.__type).toBe("null_check");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("null_check");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("null_check");
   });
 
   it("comparison predicates preserve their operators", () => {
@@ -555,8 +556,8 @@ describe("Different Field Type Predicates", () => {
 
     expect(expression.__type).toBe("and");
     if (expression.__type !== "and") return;
-    const left = expression.predicates[0]!;
-    const right = expression.predicates[1]!;
+    const left = requireDefined(expression.predicates[0]);
+    const right = requireDefined(expression.predicates[1]);
 
     expect(left.__type).toBe("comparison");
     expect(right.__type).toBe("comparison");
@@ -584,8 +585,8 @@ describe("Complex Expression Trees", () => {
 
     expect(expression.__type).toBe("or");
     if (expression.__type !== "or") return;
-    expect(expression.predicates[0]!.__type).toBe("and");
-    expect(expression.predicates[1]!.__type).toBe("and");
+    expect(requireDefined(expression.predicates[0]).__type).toBe("and");
+    expect(requireDefined(expression.predicates[1]).__type).toBe("and");
   });
 
   it("NOT distributes correctly in complex expressions", () => {

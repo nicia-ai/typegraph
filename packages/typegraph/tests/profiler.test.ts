@@ -32,6 +32,7 @@ import {
 } from "../src/profiler/recommendations";
 import { type DeclaredIndex } from "../src/profiler/types";
 import { createStore, type Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -211,9 +212,9 @@ describe("ProfileCollector", () => {
 
     const stats = patterns.get("node:Person:/email");
     expect(stats).toBeDefined();
-    expect(stats!.count).toBe(1);
-    expect(stats!.contexts.has("filter")).toBe(true);
-    expect(stats!.predicateTypes.has("eq")).toBe(true);
+    expect(requireDefined(stats).count).toBe(1);
+    expect(requireDefined(stats).contexts.has("filter")).toBe(true);
+    expect(requireDefined(stats).predicateTypes.has("eq")).toBe(true);
   });
 
   it("aggregates multiple accesses to same property", () => {
@@ -249,11 +250,11 @@ describe("ProfileCollector", () => {
     const patterns = collector.getPatterns();
     const stats = patterns.get("node:Person:/email");
 
-    expect(stats!.count).toBe(3);
-    expect(stats!.contexts.has("filter")).toBe(true);
-    expect(stats!.contexts.has("sort")).toBe(true);
-    expect(stats!.predicateTypes.has("eq")).toBe(true);
-    expect(stats!.predicateTypes.has("contains")).toBe(true);
+    expect(requireDefined(stats).count).toBe(3);
+    expect(requireDefined(stats).contexts.has("filter")).toBe(true);
+    expect(requireDefined(stats).contexts.has("sort")).toBe(true);
+    expect(requireDefined(stats).predicateTypes.has("eq")).toBe(true);
+    expect(requireDefined(stats).predicateTypes.has("contains")).toBe(true);
   });
 
   it("tracks query count", () => {
@@ -310,9 +311,9 @@ describe("Recommendations", () => {
     const recommendations = generateRecommendations(patterns, [], 1);
 
     expect(recommendations.length).toBe(1);
-    expect(recommendations[0]!.entityType).toBe("node");
-    expect(recommendations[0]!.kind).toBe("Person");
-    expect(recommendations[0]!.fields).toEqual([emailPointer]);
+    expect(requireDefined(recommendations[0]).entityType).toBe("node");
+    expect(requireDefined(recommendations[0]).kind).toBe("Person");
+    expect(requireDefined(recommendations[0]).fields).toEqual([emailPointer]);
   });
 
   it("excludes declared indexes from recommendations", () => {
@@ -480,7 +481,9 @@ describe("Recommendations", () => {
     const recommendations = generateRecommendations(patterns, [], 1);
 
     const byField = new Map(
-      recommendations.map((r) => [r.fields[0]!, r.priority] as const),
+      recommendations.map(
+        (r) => [requireDefined(r.fields[0]), r.priority] as const,
+      ),
     );
 
     expect(byField.get(emailPointer)).toBe("high");
@@ -516,7 +519,7 @@ describe("Recommendations", () => {
     const unindexed = getUnindexedFilters(patterns, []);
 
     expect(unindexed.length).toBe(1);
-    expect(unindexed[0]!.target).toEqual({
+    expect(requireDefined(unindexed[0]).target).toEqual({
       __type: "prop",
       pointer: emailPointer,
     });
@@ -599,8 +602,10 @@ describe("QueryProfiler", () => {
       const patterns = [...report.patterns.entries()];
       const emailPattern = patterns.find(([key]) => key.includes("email"));
       expect(emailPattern).toBeDefined();
-      expect(emailPattern![1].contexts.has("filter")).toBe(true);
-      expect(emailPattern![1].predicateTypes.has("eq")).toBe(true);
+      expect(requireDefined(emailPattern)[1].contexts.has("filter")).toBe(true);
+      expect(requireDefined(emailPattern)[1].predicateTypes.has("eq")).toBe(
+        true,
+      );
     });
 
     it("captures sort patterns", async () => {
@@ -618,7 +623,7 @@ describe("QueryProfiler", () => {
       const patterns = [...report.patterns.entries()];
       const namePattern = patterns.find(([key]) => key.includes("name"));
       expect(namePattern).toBeDefined();
-      expect(namePattern![1].contexts.has("sort")).toBe(true);
+      expect(requireDefined(namePattern)[1].contexts.has("sort")).toBe(true);
     });
 
     it("captures select patterns for system fields", async () => {
@@ -640,11 +645,11 @@ describe("QueryProfiler", () => {
       // System fields are captured in select context
       const idPattern = patterns.find(([key]) => key === "node:Person:$id");
       expect(idPattern).toBeDefined();
-      expect(idPattern![1].contexts.has("select")).toBe(true);
+      expect(requireDefined(idPattern)[1].contexts.has("select")).toBe(true);
 
       const kindPattern = patterns.find(([key]) => key === "node:Person:$kind");
       expect(kindPattern).toBeDefined();
-      expect(kindPattern![1].contexts.has("select")).toBe(true);
+      expect(requireDefined(kindPattern)[1].contexts.has("select")).toBe(true);
     });
 
     it("aggregates across multiple queries", async () => {
@@ -665,7 +670,7 @@ describe("QueryProfiler", () => {
 
       const patterns = [...report.patterns.entries()];
       const agePattern = patterns.find(([key]) => key.includes("age"));
-      expect(agePattern![1].count).toBe(5);
+      expect(requireDefined(agePattern)[1].count).toBe(5);
     });
 
     it("captures edge filter patterns with entityType edge", async () => {
@@ -689,8 +694,10 @@ describe("QueryProfiler", () => {
         ([key]) => key === "edge:worksAt:/role",
       );
       expect(rolePattern).toBeDefined();
-      expect(rolePattern![1].contexts.has("filter")).toBe(true);
-      expect(rolePattern![1].predicateTypes.has("eq")).toBe(true);
+      expect(requireDefined(rolePattern)[1].contexts.has("filter")).toBe(true);
+      expect(requireDefined(rolePattern)[1].predicateTypes.has("eq")).toBe(
+        true,
+      );
     });
 
     it("captures both node and edge patterns in same query", async () => {
@@ -770,7 +777,7 @@ describe("QueryProfiler", () => {
         r.fields.includes(emailPointer),
       );
       expect(emailRec).toBeDefined();
-      expect(emailRec!.kind).toBe("Person");
+      expect(requireDefined(emailRec).kind).toBe("Person");
     });
 
     it("excludes declared indexes from recommendations", async () => {
@@ -811,7 +818,7 @@ describe("QueryProfiler", () => {
       await profiledStore
         .query()
         .from("Organization", "o", { includeSubClasses: true })
-        .whereNode("o", (o) => o.industry!.eq("Tech"))
+        .whereNode("o", (o) => requireDefined(o["industry"]).eq("Tech"))
         .select((ctx) => ctx.o)
         .execute();
 
@@ -851,7 +858,7 @@ describe("QueryProfiler", () => {
           r.fields.includes(rolePointer),
       );
       expect(roleRec).toBeDefined();
-      expect(roleRec!.entityType).toBe("edge");
+      expect(requireDefined(roleRec).entityType).toBe("edge");
     });
 
     it("excludes declared edge indexes from recommendations", async () => {
@@ -976,9 +983,9 @@ describe("AST Extractor", () => {
         a.target.pointer === emailPointer,
     );
     expect(filterAccess).toBeDefined();
-    expect(filterAccess!.entityType).toBe("node");
-    expect(filterAccess!.kindNames).toEqual(["Person"]);
-    expect(filterAccess!.predicateType).toBe("eq");
+    expect(requireDefined(filterAccess).entityType).toBe("node");
+    expect(requireDefined(filterAccess).kindNames).toEqual(["Person"]);
+    expect(requireDefined(filterAccess).predicateType).toBe("eq");
   });
 
   it("extracts from string predicates", () => {
@@ -998,7 +1005,7 @@ describe("AST Extractor", () => {
         a.target.pointer === namePointer,
     );
     expect(filterAccess).toBeDefined();
-    expect(filterAccess!.predicateType).toBe("contains");
+    expect(requireDefined(filterAccess).predicateType).toBe("contains");
   });
 
   it("extracts from orderBy", () => {
@@ -1061,8 +1068,8 @@ describe("AST Extractor", () => {
         a.target.pointer === rolePointer,
     );
     expect(edgeFilterAccess).toBeDefined();
-    expect(edgeFilterAccess!.kindNames).toEqual(["worksAt"]);
-    expect(edgeFilterAccess!.predicateType).toBe("eq");
+    expect(requireDefined(edgeFilterAccess).kindNames).toEqual(["worksAt"]);
+    expect(requireDefined(edgeFilterAccess).predicateType).toBe("eq");
   });
 
   it("extracts from vector similarity predicates", () => {
@@ -1082,7 +1089,7 @@ describe("AST Extractor", () => {
         a.predicateType === "vector_similarity",
     );
     expect(vectorAccess).toBeDefined();
-    expect(vectorAccess!.kindNames).toEqual(["Document"]);
+    expect(requireDefined(vectorAccess).kindNames).toEqual(["Document"]);
   });
 
   it("extracts from EXISTS subquery predicates", () => {
@@ -1111,7 +1118,7 @@ describe("AST Extractor", () => {
         a.predicateType === "eq",
     );
     expect(industryAccess).toBeDefined();
-    expect(industryAccess!.kindNames).toEqual(["Company"]);
+    expect(requireDefined(industryAccess).kindNames).toEqual(["Company"]);
   });
 
   it("extracts from IN subquery predicates", () => {
@@ -1198,9 +1205,9 @@ describe("AST Extractor", () => {
     );
 
     expect(emailAccess).toBeDefined();
-    expect(emailAccess!.predicateType).toBe("eq");
+    expect(requireDefined(emailAccess).predicateType).toBe("eq");
     expect(ageAccess).toBeDefined();
-    expect(ageAccess!.predicateType).toBe("gt");
+    expect(requireDefined(ageAccess).predicateType).toBe("gt");
   });
 
   it("extracts from OR predicates", () => {
@@ -1231,7 +1238,7 @@ describe("AST Extractor", () => {
 
     expect(emailAccess).toBeDefined();
     expect(nameAccess).toBeDefined();
-    expect(nameAccess!.predicateType).toBe("contains");
+    expect(requireDefined(nameAccess).predicateType).toBe("contains");
   });
 
   it("extracts from NOT predicates", () => {
@@ -1251,7 +1258,7 @@ describe("AST Extractor", () => {
         a.target.pointer === emailPointer,
     );
     expect(emailAccess).toBeDefined();
-    expect(emailAccess!.predicateType).toBe("eq");
+    expect(requireDefined(emailAccess).predicateType).toBe("eq");
   });
 
   it("extracts from nested AND/OR/NOT predicates", () => {
@@ -1301,7 +1308,7 @@ describe("AST Extractor", () => {
       includeSubClasses: true,
     });
     const query = builder
-      .whereNode("o", (o) => o.name!.eq("Acme"))
+      .whereNode("o", (o) => requireDefined(o["name"]).eq("Acme"))
       .select((ctx) => ctx.o);
 
     const accesses = extractPropertyAccesses(query.toAst());
@@ -1314,6 +1321,9 @@ describe("AST Extractor", () => {
     );
 
     expect(filterAccess).toBeDefined();
-    expect(filterAccess!.kindNames).toEqual(["Organization", "Company"]);
+    expect(requireDefined(filterAccess).kindNames).toEqual([
+      "Organization",
+      "Company",
+    ]);
   });
 });

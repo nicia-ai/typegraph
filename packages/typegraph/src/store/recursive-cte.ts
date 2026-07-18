@@ -1,5 +1,3 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
 import { type RecursiveCyclePolicy } from "../query/ast";
@@ -14,6 +12,7 @@ import {
   currentReadInstant,
 } from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { type TraversalDirection } from "./algorithms/types";
 
 type BuildReachableCteOptions = Readonly<{
@@ -44,7 +43,9 @@ type BuildReachableCteOptions = Readonly<{
   recordedReadBinding?: RecordedReadBinding;
 }>;
 
-export function buildReachableCte(options: BuildReachableCteOptions): SQL {
+export function buildReachableCte(
+  options: BuildReachableCteOptions,
+): SqlFragment {
   const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),
@@ -87,14 +88,14 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
       options.dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
     : undefined;
 
-  const baseColumns: SQL[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
+  const baseColumns: SqlFragment[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
   if (initialPath !== undefined) {
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
   const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
 
-  const recursiveColumns: SQL[] = [
+  const recursiveColumns: SqlFragment[] = [
     sql`n.id`,
     sql`n.kind`,
     sql`r.depth + 1 AS depth`,
@@ -103,7 +104,7 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
     recursiveColumns.push(sql`${pathExtension} AS path`);
   }
 
-  const recursiveWhere: SQL[] = [
+  const recursiveWhere: SqlFragment[] = [
     sql`e.graph_id = ${options.graphId}`,
     edgeKindFilter,
     edgeTemporalFilter,
@@ -127,14 +128,16 @@ export function buildReachableCte(options: BuildReachableCteOptions): SQL {
 }
 
 type CompileRecursiveBranchOptions = Readonly<{
-  recursiveColumns: readonly SQL[];
-  whereClauses: readonly SQL[];
+  recursiveColumns: readonly SqlFragment[];
+  whereClauses: readonly SqlFragment[];
   direction: TraversalDirection;
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
 }>;
 
-function compileRecursiveBranch(options: CompileRecursiveBranchOptions): SQL {
+function compileRecursiveBranch(
+  options: CompileRecursiveBranchOptions,
+): SqlFragment {
   const selectClause = sql`SELECT ${sql.join([...options.recursiveColumns], sql`, `)}`;
 
   switch (options.direction) {
@@ -172,8 +175,8 @@ function compileRecursiveBranch(options: CompileRecursiveBranchOptions): SQL {
 }
 
 type DirectionalBranchOptions = Readonly<{
-  selectClause: SQL;
-  whereClauses: readonly SQL[];
+  selectClause: SqlFragment;
+  whereClauses: readonly SqlFragment[];
   joinField: "from_id" | "to_id";
   targetField: "from_id" | "to_id";
   targetKindField: "from_kind" | "to_kind";
@@ -181,7 +184,9 @@ type DirectionalBranchOptions = Readonly<{
   schema: SqlSchema;
 }>;
 
-function buildDirectionalBranch(options: DirectionalBranchOptions): SQL {
+function buildDirectionalBranch(
+  options: DirectionalBranchOptions,
+): SqlFragment {
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(options.targetField)} AND n.kind = e.${sql.raw(options.targetKindField)}`;
 
   if (options.forceWorktableOuterJoinOrder) {
@@ -196,13 +201,15 @@ function buildDirectionalBranch(options: DirectionalBranchOptions): SQL {
 }
 
 type BidirectionalBranchOptions = Readonly<{
-  selectClause: SQL;
-  whereClauses: readonly SQL[];
+  selectClause: SqlFragment;
+  whereClauses: readonly SqlFragment[];
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
 }>;
 
-function buildBidirectionalBranch(options: BidirectionalBranchOptions): SQL {
+function buildBidirectionalBranch(
+  options: BidirectionalBranchOptions,
+): SqlFragment {
   // PostgreSQL rejects multiple non-recursive terms, so both directions are
   // folded into a single UNION ALL branch via an OR on the join condition.
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;

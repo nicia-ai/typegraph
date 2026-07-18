@@ -25,12 +25,12 @@
  *   npx tsx examples/25-transactions.ts
  */
 import {
-  createStore,
+  createAdapterStore,
   defineEdge,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 
@@ -76,7 +76,7 @@ const graph = defineGraph({
 
 export async function main() {
   const backend = createExampleBackend();
-  const store = createStore(graph, backend);
+  const store = createAdapterStore(graph, backend);
 
   try {
     console.log("=== Transactions (store.transaction) ===\n");
@@ -246,7 +246,7 @@ export async function main() {
     // explicitly. (History-enabled stores use `store.withRecordedTransaction`.)
     const { backend: externalBackend, db } = createLocalSqliteBackend();
     try {
-      const externalStore = createStore(graph, externalBackend);
+      const externalStore = createAdapterStore(graph, externalBackend);
 
       db.run(sql`BEGIN`);
       const txStore = externalStore.withTransaction(db);

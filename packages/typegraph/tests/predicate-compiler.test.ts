@@ -1,9 +1,8 @@
 /**
  * Unit tests for predicate expression compilation.
  *
- * Tests the compilation of predicate AST nodes to SQL.
+ * Tests the compilation of predicate AST nodes to SqlFragment.
  */
-import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { UnsupportedPredicateError } from "../src/errors";
@@ -30,6 +29,8 @@ import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { type JsonPointer } from "../src/query/json-pointer";
+import { sql } from "../src/query/sql-fragment";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
 // ============================================================
@@ -1513,7 +1514,7 @@ describe("extractVectorSimilarityPredicates", () => {
     ];
     const result = extractVectorSimilarityPredicates(predicates);
     expect(result).toHaveLength(1);
-    expect(result[0]!.__type).toBe("vector_similarity");
+    expect(requireDefined(result[0]).__type).toBe("vector_similarity");
   });
 
   it("extracts from nested AND predicates", () => {

@@ -29,7 +29,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createPostgresBackend } from "../../../src/backend/postgres";
 
-describe("@nicia-ai/typegraph/postgres on @neondatabase/serverless", () => {
+describe("Drizzle Postgres adapter on @neondatabase/serverless", () => {
   it("wires drizzle-orm/neon-serverless through createPostgresBackend", () => {
     // Construct a Neon Pool. We never .connect() so no WebSocket
     // attempt happens; we just verify the constructor runs and the

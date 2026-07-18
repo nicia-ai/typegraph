@@ -17,7 +17,7 @@
  * connections that in-process backends cannot produce.
  */
 
-import type { GraphBackend, Store } from "@nicia-ai/typegraph";
+import type { GraphBackend, Store, StoreOptions } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
   defineGraph,
@@ -43,7 +43,7 @@ import type {
   MergeOptions,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
-import { backendMatrix, fakeEmbedder } from "./test-utils";
+import { backendMatrix, fakeEmbedder, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
   schema: z.object({
@@ -89,7 +89,11 @@ function revalidationMergeOptions(
 async function livePatientIds(
   store: Store<DriftGraph>,
 ): Promise<readonly string[]> {
-  const rows = await enumerateAllNodes(store.backend, store.graphId, "Patient");
+  const rows = await enumerateAllNodes(
+    getStoreBackend(store),
+    store.graphId,
+    "Patient",
+  );
   return rows
     .filter((row) => row.deleted_at === undefined)
     .map((row) => row.id)
@@ -127,9 +131,7 @@ describe.each(backendMatrix())(
     }
 
     /** Base with one anchor patient plus a branch that adds two more. */
-    async function seedScenario(
-      options?: Readonly<{ history?: boolean; revisionTracking?: boolean }>,
-    ): Promise<
+    async function seedScenario(options?: StoreOptions): Promise<
       Readonly<{
         baseStore: Store<DriftGraph>;
         branchA: GraphBranch<DriftGraph>;

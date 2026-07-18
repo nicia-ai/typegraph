@@ -12,6 +12,7 @@ import type { GraphBackend } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -100,7 +101,7 @@ describe("custom table names", () => {
       .execute();
 
     expect(aliceResult).toHaveLength(1);
-    expect(aliceResult[0]!.name).toBe("Alice");
+    expect(requireDefined(aliceResult[0]).name).toBe("Alice");
 
     void bob;
   });
@@ -131,9 +132,9 @@ describe("custom table names", () => {
       .execute();
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.person.name).toBe("Alice");
-    expect(results[0]!.friend.name).toBe("Bob");
-    expect(results[0]!.edge.since).toBe("2024");
+    expect(requireDefined(results[0]).person.name).toBe("Alice");
+    expect(requireDefined(results[0]).friend.name).toBe("Bob");
+    expect(requireDefined(results[0]).edge.since).toBe("2024");
   });
 
   it("explicit schema option takes precedence over backend.tableNames", () => {

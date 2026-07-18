@@ -10,13 +10,66 @@ import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
 } from "../src/backend/drizzle/execution/sqlite-execution";
+import { toDrizzleSql } from "../src/backend/drizzle/execution/types";
 import {
   D1_MAX_BIND_PARAMETERS,
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
 } from "../src/backend/types";
+import { sql as portableSql } from "../src/query/sql-fragment";
 import { createTestDatabase } from "./test-utils";
 
 describe("sqlite execution adapter", () => {
+  it("renders TypeGraph fragments without binding nested fragments as values", () => {
+    const db = createTestDatabase();
+    const adapter = createSqliteExecutionAdapter(db);
+    const condition = portableSql`${portableSql.identifier("display_name")} = ${"Alice"}`;
+    const query = portableSql`SELECT ${portableSql.identifier("id")} FROM ${portableSql.identifier("people")} WHERE ${condition}`;
+
+    expect(adapter.compile(query)).toEqual({
+      params: ["Alice"],
+      sql: 'SELECT "id" FROM "people" WHERE "display_name" = ?',
+    });
+  });
+
+  it("converts portable fragments to Drizzle SQL only at the driver boundary", () => {
+    const db = createTestDatabase();
+    const adapter = createSqliteExecutionAdapter(db);
+    const query = portableSql`SELECT ${portableSql.identifier('display"name')} FROM ${portableSql.identifier("people")} WHERE ${portableSql.identifier("id")} = ${42}`;
+
+    expect(adapter.compile(toDrizzleSql(query, "sqlite"))).toMatchObject({
+      params: [42],
+      sql: 'SELECT "display""name" FROM "people" WHERE "id" = ?',
+    });
+  });
+
+  it("normalizes direct parameters at the Drizzle boundary", () => {
+    const db = createTestDatabase();
+    const adapter = createSqliteExecutionAdapter(db);
+    const query = portableSql`SELECT ${true}, ${new Date(
+      "2025-01-02T03:04:05.000Z",
+    )}`;
+
+    expect(adapter.compile(toDrizzleSql(query, "sqlite"))).toMatchObject({
+      params: [1, "2025-01-02T03:04:05.000Z"],
+      sql: "SELECT ?, ?",
+    });
+  });
+
+  it("preserves exotic parameters and named placeholders at the Drizzle bridge", () => {
+    const db = createTestDatabase();
+    const adapter = createSqliteExecutionAdapter(db);
+    const binary = new Uint8Array([1, 2, 3]);
+    const array = ["a", "b"];
+    const query = portableSql`SELECT ${array}, ${binary}, ${undefined}, ${portableSql.placeholder(
+      "late",
+    )}`;
+
+    expect(adapter.compile(toDrizzleSql(query, "sqlite"))).toMatchObject({
+      params: [array, binary, undefined, expect.anything()],
+      sql: "SELECT ?, ?, ?, ?",
+    });
+  });
+
   it("enables compiled execution for sync sqlite clients", async () => {
     const db = createTestDatabase();
     const adapter = createSqliteExecutionAdapter(db);
@@ -226,7 +279,7 @@ describe("sqlite execution adapter", () => {
 
 /**
  * Builds a mock pg-style db whose `dialect.sqlToQuery()` echoes the
- * SQL fragment built from a single placeholder, so each test can issue
+ * `SqlFragment` built from a single placeholder, so each test can issue
  * distinct queries via `sql\`q1\``, `sql\`q2\``, etc. and the adapter
  * sees a different `compiled.sql` per query.
  */
@@ -267,6 +320,17 @@ function makeMockPgDb(): { db: AnyPgDatabase; query: MockPgQueryFunction } {
 }
 
 describe("postgres execution adapter", () => {
+  it("renders TypeGraph fragments with PostgreSQL placeholders", () => {
+    const { db } = makeMockPgDb();
+    const adapter = createPostgresExecutionAdapter(db);
+    const query = portableSql`SELECT ${portableSql.identifier("display_name")} FROM ${portableSql.identifier("people")} WHERE ${portableSql.identifier("id")} = ${42}`;
+
+    expect(adapter.compile(query)).toEqual({
+      params: [42],
+      sql: 'SELECT "display_name" FROM "people" WHERE "id" = $1',
+    });
+  });
+
   it("falls back to drizzle execution when raw client is unavailable", async () => {
     const execute = vi.fn(() =>
       Promise.resolve({

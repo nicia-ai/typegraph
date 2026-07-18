@@ -66,7 +66,7 @@ export const baseTypeScriptRules = {
       ignoreRestSiblings: true,
     },
   ],
-  "@typescript-eslint/no-non-null-assertion": "off",
+  "@typescript-eslint/no-non-null-assertion": "error",
   "@typescript-eslint/no-unnecessary-type-arguments": "off",
   "@typescript-eslint/no-unnecessary-type-parameters": "off",
   "@typescript-eslint/only-throw-error": "off",

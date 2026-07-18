@@ -1,7 +1,4 @@
-import { type SQL, sql } from "drizzle-orm";
-
 import {
-  type AdoptedTransaction,
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
@@ -11,6 +8,8 @@ import {
   type RecordedCaptureGuardCode,
 } from "../../errors";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
+import type { SqlDialect } from "../../query/dialect/types";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -19,6 +18,11 @@ import {
 export { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 
 type IsolationRow = Readonly<{ transaction_isolation: unknown }>;
+
+const RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK = {
+  postgres: true,
+  sqlite: false,
+} as const satisfies Record<SqlDialect, boolean>;
 
 /**
  * Resolves the recorded-relation schema for a capture target, failing loud when
@@ -69,7 +73,7 @@ export function requireCaptureStatements(
 
 export async function executeStatement(
   target: Pick<GraphBackend, "dialect" | "executeStatement">,
-  query: SQL,
+  query: SqlFragment,
 ): Promise<void> {
   requireCaptureStatements(target);
   await target.executeStatement(asCompiledStatementSql(query));
@@ -102,7 +106,7 @@ export function assertRequestedRecordedIsolation(
   backend: Pick<GraphBackend, "dialect">,
   options: TransactionOptions | undefined,
 ): void {
-  if (backend.dialect !== "postgres") return;
+  if (!RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK[backend.dialect]) return;
   if (options?.accessMode === "read_only") return;
   const isolationLevel = options?.isolationLevel;
   if (isSupportedRecordedIsolationLevel(isolationLevel)) return;
@@ -119,7 +123,7 @@ export async function assertRecordedCaptureTransactionIsolation(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   options?: TransactionOptions,
 ): Promise<void> {
-  if (target.dialect !== "postgres") return;
+  if (!RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK[target.dialect]) return;
   if (options?.accessMode === "read_only") return;
 
   const rows = await target.execute<IsolationRow>(
@@ -190,72 +194,12 @@ function revisionTrackingUnsafeRawWriteError(
   );
 }
 
-function failHistoryUnsafeSqlRef(): never {
+export function throwHistoryUnsafeSqlAccess(): never {
   throw historyUnsafeRawWriteError("tx.sql");
 }
 
-function failRevisionTrackingUnsafeSqlRef(): never {
+export function throwRevisionTrackingUnsafeSqlAccess(): never {
   throw revisionTrackingUnsafeRawWriteError("tx.sql");
-}
-
-/**
- * A stand-in for the raw transaction SQL handle that throws on any access —
- * including `then`, so `await tx.sql` fail-louds rather than silently resolving
- * to the proxy. The history-enabled store hands this to transaction callbacks
- * in place of the real handle so raw writes can't slip past recorded-time
- * capture.
- */
-export function createHistoryUnsafeSqlRef(): AdoptedTransaction {
-  return createUnsafeSqlRef(failHistoryUnsafeSqlRef);
-}
-
-/**
- * A fail-loud replacement for `tx.sql` on a revision-tracked live store. It
- * deliberately names revision tracking rather than history capture so callers
- * see the invariant their store actually enabled.
- */
-export function createRevisionTrackingUnsafeSqlRef(): AdoptedTransaction {
-  return createUnsafeSqlRef(failRevisionTrackingUnsafeSqlRef);
-}
-
-function createUnsafeSqlRef(fail: () => never): AdoptedTransaction {
-  return new Proxy(
-    function unsafeSqlRef(): never {
-      return fail();
-    },
-    {
-      get(): never {
-        return fail();
-      },
-      apply(): never {
-        return fail();
-      },
-      set(): never {
-        return fail();
-      },
-      defineProperty(): never {
-        return fail();
-      },
-      deleteProperty(): never {
-        return fail();
-      },
-      // Enumeration / inspection traps too, so spreading (`{...tx.sql}`),
-      // `Object.keys`, `in`, and prototype reads also fail loudly rather than
-      // silently yielding an empty object that reads as "no raw handle".
-      has(): never {
-        return fail();
-      },
-      ownKeys(): never {
-        return fail();
-      },
-      getOwnPropertyDescriptor(): never {
-        return fail();
-      },
-      getPrototypeOf(): never {
-        return fail();
-      },
-    },
-  ) as unknown as AdoptedTransaction;
 }
 
 /**

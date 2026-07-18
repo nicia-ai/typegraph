@@ -11,6 +11,7 @@
  */
 import type { KindEntity } from "../core/types";
 import { canonicalEqual } from "../schema/canonical";
+import { requireDefined } from "../utils/presence";
 import { type IncompatibleChange, IncompatibleChangeError } from "./errors";
 import {
   type ExtensionArrayProperty,
@@ -255,7 +256,7 @@ function classifyProperties(
   // (allowed-on-empty).
   for (const name of nextNames) {
     if (!existingNames.has(name)) {
-      const property = next[name]!;
+      const property = requireDefined(next[name]);
       if (property.optional === true) continue;
       recorders.recordRequireEmpty({
         kind,
@@ -268,7 +269,13 @@ function classifyProperties(
   // Modified properties — per-property classification.
   for (const name of existingNames) {
     if (!nextNames.has(name)) continue;
-    classifyProperty(kind, name, existing[name]!, next[name]!, recorders);
+    classifyProperty(
+      kind,
+      name,
+      requireDefined(existing[name]),
+      requireDefined(next[name]),
+      recorders,
+    );
   }
 }
 

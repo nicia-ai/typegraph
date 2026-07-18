@@ -36,6 +36,7 @@ import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres
 import { tables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
 
 const sqliteDialect = new SQLiteSyncDialect();
 function sqlToText(query: SQL): string {
@@ -241,7 +242,9 @@ describe("search candidates planning shapes", () => {
         "fulltextSearch",
       );
       await store.search.fulltext("PlanDoc", { query: "signal", limit: 5 });
-      expect(fulltextSpy.mock.calls[0]![0].candidates).toBeUndefined();
+      expect(
+        requireDefined(fulltextSpy.mock.calls[0])[0].candidates,
+      ).toBeUndefined();
 
       fulltextSpy.mockClear();
       await store.search.fulltext("PlanDoc", {
@@ -249,7 +252,9 @@ describe("search candidates planning shapes", () => {
         limit: 5,
         where: (document) => document.category.eq("a"),
       });
-      expect(fulltextSpy.mock.calls[0]![0].candidates).toBeDefined();
+      expect(
+        requireDefined(fulltextSpy.mock.calls[0])[0].candidates,
+      ).toBeDefined();
     } finally {
       await backend.close();
     }

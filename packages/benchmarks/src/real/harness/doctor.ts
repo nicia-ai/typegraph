@@ -40,9 +40,9 @@ export function isSnbEngineName(value: string): value is SnbEngineName {
  * repo's own CI already uses for Postgres tests (.github/workflows/ci.yml).
  */
 export const POSTGRES_IMAGE =
-  process.env.TYPEGRAPH_BENCH_POSTGRES_IMAGE ?? "pgvector/pgvector:pg18";
+  process.env["TYPEGRAPH_BENCH_POSTGRES_IMAGE"] ?? "pgvector/pgvector:pg18";
 export const NEO4J_IMAGE =
-  process.env.TYPEGRAPH_BENCH_NEO4J_IMAGE ?? "neo4j:2026.05.0";
+  process.env["TYPEGRAPH_BENCH_NEO4J_IMAGE"] ?? "neo4j:2026.05.0";
 
 type CheckStatus = "ok" | "failed" | "skipped";
 

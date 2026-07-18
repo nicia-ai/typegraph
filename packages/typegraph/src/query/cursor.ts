@@ -63,14 +63,14 @@ export function decodeCursor(cursor: string): CursorData {
     const json = atob(base64);
     const raw = JSON.parse(json) as Record<string, unknown>;
 
-    if (typeof raw.v !== "number" || raw.v > CURSOR_VERSION) {
+    if (typeof raw["v"] !== "number" || raw["v"] > CURSOR_VERSION) {
       throw new ValidationError(
-        `Unsupported cursor version: ${String(raw.v)}. Maximum supported: ${CURSOR_VERSION}`,
+        `Unsupported cursor version: ${String(raw["v"])}. Maximum supported: ${CURSOR_VERSION}`,
         {
           issues: [
             {
               path: "cursor",
-              message: `Cursor version ${String(raw.v)} is not supported`,
+              message: `Cursor version ${String(raw["v"])} is not supported`,
             },
           ],
         },
@@ -80,18 +80,21 @@ export function decodeCursor(cursor: string): CursorData {
       );
     }
 
-    if (raw.d !== "f" && raw.d !== "b") {
-      throw new ValidationError(`Invalid cursor direction: ${String(raw.d)}`, {
-        issues: [
-          {
-            path: "cursor",
-            message: `Direction must be "f" (forward) or "b" (backward)`,
-          },
-        ],
-      });
+    if (raw["d"] !== "f" && raw["d"] !== "b") {
+      throw new ValidationError(
+        `Invalid cursor direction: ${String(raw["d"])}`,
+        {
+          issues: [
+            {
+              path: "cursor",
+              message: `Direction must be "f" (forward) or "b" (backward)`,
+            },
+          ],
+        },
+      );
     }
 
-    if (!Array.isArray(raw.vals) || !Array.isArray(raw.cols)) {
+    if (!Array.isArray(raw["vals"]) || !Array.isArray(raw["cols"])) {
       throw new ValidationError("Invalid cursor structure", {
         issues: [
           {
@@ -102,22 +105,22 @@ export function decodeCursor(cursor: string): CursorData {
       });
     }
 
-    if (raw.vals.length !== raw.cols.length) {
+    if (raw["vals"].length !== raw["cols"].length) {
       throw new ValidationError("Cursor column count mismatch", {
         issues: [
           {
             path: "cursor",
-            message: `vals (${raw.vals.length}) and cols (${raw.cols.length}) must have same length`,
+            message: `vals (${raw["vals"].length}) and cols (${raw["cols"].length}) must have same length`,
           },
         ],
       });
     }
 
     return {
-      v: raw.v,
-      d: raw.d,
-      vals: raw.vals as readonly unknown[],
-      cols: raw.cols as readonly string[],
+      v: raw["v"],
+      d: raw["d"],
+      vals: raw["vals"] as readonly unknown[],
+      cols: raw["cols"] as readonly string[],
     };
   } catch (error) {
     if (error instanceof ValidationError) {

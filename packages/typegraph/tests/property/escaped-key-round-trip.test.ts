@@ -32,7 +32,9 @@ import { describe, expect, it } from "vitest";
 /** True when the running engine round-trips escaped object keys correctly. */
 function engineRoundTripsEscapedKeys(): boolean {
   JSON.parse(String.raw`{"a":1,"\\":2}`);
-  const keys = Object.keys(JSON.parse(String.raw`{"a":1,"\"":2}`));
+  const parsed: unknown = JSON.parse(String.raw`{"a":1,"\"":2}`);
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const keys = Object.keys(parsed);
   return keys.length === 2 && keys[1] === '"';
 }
 
@@ -43,7 +45,11 @@ describe("JSON.parse escaped-key round-trip (V8 regression guard)", () => {
     "round-trips distinct escaped keys of the same object shape",
     () => {
       JSON.parse(String.raw`{"a":1,"\\":2}`);
-      const keys = Object.keys(JSON.parse(String.raw`{"a":1,"\"":2}`));
+      const parsed: unknown = JSON.parse(String.raw`{"a":1,"\"":2}`);
+      if (typeof parsed !== "object" || parsed === null) {
+        throw new TypeError("Expected JSON.parse to return an object");
+      }
+      const keys = Object.keys(parsed);
       expect(keys).toEqual(["a", '"']);
     },
   );

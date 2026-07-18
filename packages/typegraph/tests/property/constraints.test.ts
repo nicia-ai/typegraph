@@ -13,6 +13,7 @@ import {
   createEmptyClosures,
   KindRegistry,
 } from "../../src/registry/kind-registry";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // Arbitrary Generators
@@ -327,7 +328,7 @@ describe("checkWherePredicate Properties", () => {
         fields: ["name"],
         scope: "kind",
         collation: "binary",
-        where: (p) => p.status!.isNull(),
+        where: (p) => requireDefined(p["status"]).isNull(),
       };
 
       // Note: the where predicate context is built from the props keys,
@@ -347,7 +348,7 @@ describe("checkWherePredicate Properties", () => {
               fields: ["name"],
               scope: "kind",
               collation: "binary",
-              where: (p) => p.status!.isNull(),
+              where: (p) => requireDefined(p["status"]).isNull(),
             };
 
             expect(checkWherePredicate(constraint, { status: value })).toBe(
@@ -371,7 +372,7 @@ describe("checkWherePredicate Properties", () => {
               fields: ["name"],
               scope: "kind",
               collation: "binary",
-              where: (p) => p.status!.isNotNull(),
+              where: (p) => requireDefined(p["status"]).isNotNull(),
             };
 
             expect(checkWherePredicate(constraint, { status: value })).toBe(
@@ -389,7 +390,7 @@ describe("checkWherePredicate Properties", () => {
         fields: ["name"],
         scope: "kind",
         collation: "binary",
-        where: (p) => p.status!.isNotNull(),
+        where: (p) => requireDefined(p["status"]).isNotNull(),
       };
 
       // eslint-disable-next-line unicorn/no-null -- testing null handling
@@ -411,7 +412,7 @@ describe("checkWherePredicate Properties", () => {
             fields: ["name"],
             scope: "kind",
             collation: "binary",
-            where: (p) => p.field!.isNull(),
+            where: (p) => requireDefined(p["field"]).isNull(),
           };
 
           const constraintNotNull: UniqueConstraint = {
@@ -419,7 +420,7 @@ describe("checkWherePredicate Properties", () => {
             fields: ["name"],
             scope: "kind",
             collation: "binary",
-            where: (p) => p.field!.isNotNull(),
+            where: (p) => requireDefined(p["field"]).isNotNull(),
           };
 
           const isNull = checkWherePredicate(constraintNull, props);
@@ -508,7 +509,7 @@ describe("checkCardinality Properties", () => {
             );
 
             expect(result).toBeDefined();
-            expect(result!.message).toContain("one");
+            expect(requireDefined(result).message).toContain("one");
           },
         ),
         { numRuns: 30 },
@@ -593,7 +594,7 @@ describe("checkCardinality Properties", () => {
             );
 
             expect(result).toBeDefined();
-            expect(result!.message).toContain("oneActive");
+            expect(requireDefined(result).message).toContain("oneActive");
           },
         ),
         { numRuns: 30 },
@@ -680,7 +681,7 @@ describe("checkUniqueEdge Properties", () => {
           );
 
           expect(result).toBeDefined();
-          expect(result!.message).toContain("unique");
+          expect(requireDefined(result).message).toContain("unique");
         },
       ),
       { numRuns: 50 },
@@ -822,7 +823,7 @@ describe("checkDisjointness Properties", () => {
       );
 
       expect(result).toBeDefined();
-      expect(result!.message).toContain("Organization");
+      expect(requireDefined(result).message).toContain("Organization");
     });
   });
 });

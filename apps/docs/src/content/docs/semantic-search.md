@@ -145,7 +145,7 @@ services:
 **TypeGraph migration enables vector support:**
 
 ```typescript
-import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 // Generates DDL including `CREATE EXTENSION IF NOT EXISTS vector;`.
 // It does NOT create a single embeddings table — each embedding field gets
@@ -202,7 +202,7 @@ replicas, and remote Turso databases:
 
 ```typescript
 import { createClient } from "@libsql/client";
-import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
 
 const client = createClient({ url: "libsql://my-db.turso.io", authToken: "..." });
 const { backend } = await createLibsqlBackend(client);

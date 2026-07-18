@@ -32,6 +32,7 @@ import {
 } from "../src";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -202,11 +203,11 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
 
     const v1 = await backend.getSchemaVersion("g", 1);
     const v2 = await backend.getSchemaVersion("g", 2);
-    expect(v1!.is_active).toBe(false);
-    expect(v2!.is_active).toBe(true);
+    expect(requireDefined(v1).is_active).toBe(false);
+    expect(requireDefined(v2).is_active).toBe(true);
 
     const active = await backend.getActiveSchema("g");
-    expect(active!.version).toBe(2);
+    expect(requireDefined(active).version).toBe(2);
   });
 
   it("throws StaleVersionError with correct actual when expected is stale", async () => {
@@ -295,9 +296,9 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
     expect(reactivated.is_active).toBe(true);
 
     const active = await orphanBackend.getActiveSchema("orphan_g");
-    expect(active!.version).toBe(2);
+    expect(requireDefined(active).version).toBe(2);
     const v1 = await orphanBackend.getSchemaVersion("orphan_g", 1);
-    expect(v1!.is_active).toBe(false);
+    expect(requireDefined(v1).is_active).toBe(false);
   });
 
   it("throws SchemaContentConflictError when target version exists with a different hash", async () => {
@@ -418,10 +419,10 @@ describe("setActiveVersion", () => {
     });
 
     const active = await backend.getActiveSchema("g");
-    expect(active!.version).toBe(1);
+    expect(requireDefined(active).version).toBe(1);
 
     const v2 = await backend.getSchemaVersion("g", 2);
-    expect(v2!.is_active).toBe(false);
+    expect(requireDefined(v2).is_active).toBe(false);
   });
 
   it("throws StaleVersionError when expected does not match", async () => {

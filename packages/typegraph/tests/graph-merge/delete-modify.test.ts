@@ -22,6 +22,7 @@ import type {
   GraphBranch,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -70,7 +71,7 @@ function projectResolution(
       (modification) => ({
         id: modification.node.id,
         branchId: modification.branchId,
-        name: modification.node.forkProps.name,
+        name: modification.node.forkProps["name"],
       }),
     ),
     nodeDeletions: resolution.nodeDeletions.map((deletion) => ({
@@ -194,7 +195,7 @@ describe.each(backendMatrix())("delete/modify resolution [$name]", (entry) => {
     expect(resolution.nodeDeletions).toHaveLength(0);
     expect(resolution.dropped).toHaveLength(0);
     expect(resolution.survivingModifications).toHaveLength(1);
-    const survivor = resolution.survivingModifications[0]!;
+    const survivor = requireDefined(resolution.survivingModifications[0]);
     expect(survivor.node.id).toBe(nodeId);
     expect(survivor.branchId).toBe(BRANCH_B);
     expect(survivor.node.forkProps).toMatchObject({ name: "Modified" });

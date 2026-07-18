@@ -12,7 +12,7 @@
  * - Boundary conditions
  * - Type-level safety (@ts-expect-error)
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -25,6 +25,7 @@ import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { ValidationError } from "../src/errors";
 import { createStore, type Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import {
   collectAllEdges,
   createTestBackend,
@@ -177,7 +178,7 @@ describe("store.subgraph()", () => {
       });
 
       expect(result.root).toBeDefined();
-      expect(result.root!.id).toBe(ids.runId);
+      expect(requireDefined(result.root).id).toBe(ids.runId);
       expect(result.nodes.size).toBe(1);
       expect(result.adjacency.size).toBe(0);
       expect(result.reverseAdjacency.size).toBe(0);
@@ -201,7 +202,7 @@ describe("store.subgraph()", () => {
 
       expect(result.nodes.size).toBe(1);
       expect(result.root).toBeDefined();
-      expect(result.root!.id).toBe(ids.runId);
+      expect(requireDefined(result.root).id).toBe(ids.runId);
     });
 
     it("returns empty result when maxDepth 0 and excludeRoot", async () => {
@@ -225,7 +226,7 @@ describe("store.subgraph()", () => {
 
       expect(result.nodes.size).toBe(1);
       expect(result.root).toBeDefined();
-      expect(result.root!.id).toBe(ids.agent1Id);
+      expect(requireDefined(result.root).id).toBe(ids.agent1Id);
       expect(result.adjacency.size).toBe(0);
     });
   });
@@ -296,7 +297,7 @@ describe("store.subgraph()", () => {
 
       // Only task1 itself — has_task edges go FROM Run, not from Task
       expect(result.nodes.size).toBe(1);
-      expect(result.root!.id).toBe(ids.task1Id);
+      expect(requireDefined(result.root).id).toBe(ids.task1Id);
     });
 
     it("follows both directions with direction: both", async () => {
@@ -483,7 +484,7 @@ describe("store.subgraph()", () => {
         (n) => n.kind === "Skill",
       );
       expect(skillNodes).toHaveLength(1);
-      expect(skillNodes[0]!.id).toBe(ids.skill1Id);
+      expect(requireDefined(skillNodes[0]).id).toBe(ids.skill1Id);
     });
   });
 
@@ -749,7 +750,7 @@ describe("store.subgraph()", () => {
 
       const allEdges = collectAllEdges(result.adjacency);
       expect(allEdges).toHaveLength(1);
-      const edge = allEdges[0]!;
+      const edge = requireDefined(allEdges[0]);
       expect(edge.kind).toBe("uses_skill");
       expect(edge).toHaveProperty("id");
       expect(edge).toHaveProperty("fromKind");
@@ -808,17 +809,13 @@ describe("store.subgraph()", () => {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
-          // @ts-expect-error - projected Task omits status
-          const status = node.status;
-          void status;
+          expectTypeOf(node).not.toHaveProperty("status");
         }
 
         if (node.kind === "Agent") {
           const createdAt: string = node.meta.createdAt;
           void createdAt;
-          // @ts-expect-error - projected Agent omits model
-          const model = node.model;
-          void model;
+          expectTypeOf(node).not.toHaveProperty("model");
         }
       }
     });
@@ -835,14 +832,12 @@ describe("store.subgraph()", () => {
       });
 
       const allEdges = collectAllEdges(result.adjacency);
-      const edge = allEdges[0]!;
+      const edge = requireDefined(allEdges[0]);
       const fromId: string = edge.fromId;
       const toId: string = edge.toId;
       void fromId;
       void toId;
-      // @ts-expect-error - projected edge omits meta unless requested
-      const meta = edge.meta;
-      void meta;
+      expectTypeOf(edge).not.toHaveProperty("meta");
     });
 
     it("narrows root type with kind discrimination", async () => {
@@ -885,9 +880,7 @@ describe("store.subgraph()", () => {
         if (edge.kind === "uses_skill") {
           const priority: number = edge.priority;
           void priority;
-          // @ts-expect-error - projected uses_skill omits meta
-          const meta = edge.meta;
-          void meta;
+          expectTypeOf(edge).not.toHaveProperty("meta");
         }
       }
 
@@ -1050,7 +1043,7 @@ describe("store.subgraph()", () => {
       const mbBackend = createTestBackend();
       const mbStore = createStore(mbGraph, mbBackend);
 
-      const collection = mbStore.nodes[multibyteKindName]!;
+      const collection = requireDefined(mbStore.nodes[multibyteKindName]);
       const root = await collection.create({ value: "root" });
       const child = await collection.create({ value: "child" });
       await mbStore.edges.mb_link.create(root, child);
@@ -1065,7 +1058,7 @@ describe("store.subgraph()", () => {
 
       expect(result.nodes.size).toBe(2);
       for (const node of result.nodes.values()) {
-        expect((node as Record<string, unknown>).value).toBeDefined();
+        expect((node as Record<string, unknown>)["value"]).toBeDefined();
       }
     });
 
@@ -1150,12 +1143,8 @@ describe("store.subgraph()", () => {
         if (node.kind === "Task") {
           const title: string = node.title;
           void title;
-          // @ts-expect-error - projected Task omits status even through reusable config
-          const status = node.status;
-          void status;
-          // @ts-expect-error - projected Task omits meta when not requested
-          const meta = node.meta;
-          void meta;
+          expectTypeOf(node).not.toHaveProperty("status");
+          expectTypeOf(node).not.toHaveProperty("meta");
         }
       }
 
@@ -1164,9 +1153,7 @@ describe("store.subgraph()", () => {
         if (edge.kind === "uses_skill") {
           const priority: number = edge.priority;
           void priority;
-          // @ts-expect-error - projected uses_skill omits meta when not requested
-          const meta = edge.meta;
-          void meta;
+          expectTypeOf(edge).not.toHaveProperty("meta");
         }
       }
     });

@@ -16,7 +16,7 @@ pre-configured. Each call returns a completely isolated database.
 
 ```typescript
 import { beforeEach, describe, expect, it } from "vitest";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 import { graph } from "../src/graph"; // your graph definition
 
@@ -49,7 +49,7 @@ If many test files use the same setup, extract a helper:
 
 ```typescript
 // tests/test-helpers.ts
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 import { graph } from "../src/graph";
 
@@ -259,7 +259,7 @@ be closed after each test.
 
 ```typescript
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 import { createStore } from "@nicia-ai/typegraph";
 import { graph } from "../src/graph";
 
@@ -297,7 +297,7 @@ writes), connect to a real database:
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 describe("PostgreSQL integration", () => {
   let pool: Pool;

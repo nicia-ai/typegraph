@@ -17,6 +17,7 @@ import {
   META_EDGE_SUB_CLASS_OF,
 } from "../ontology/constants";
 import { type OntologyRelation } from "../ontology/types";
+import { requireDefined } from "../utils/presence";
 
 /**
  * KindRegistry holds precomputed closures for ontological reasoning.
@@ -194,8 +195,8 @@ export class KindRegistry {
     const result: string[] = [];
     for (const pair of this.disjointPairs) {
       const parts = pair.split("|");
-      const firstKind = parts[0]!;
-      const secondKind = parts[1]!;
+      const firstKind = requireDefined(parts[0]);
+      const secondKind = requireDefined(parts[1]);
       if (firstKind === kind) result.push(secondKind);
       else if (secondKind === kind) result.push(firstKind);
     }
@@ -505,7 +506,7 @@ function computeEquivalenceSets(
       return x;
     }
     // Safe: has() check above guarantees key exists
-    const parentNode = parent.get(x)!;
+    const parentNode = requireDefined(parent.get(x));
     if (parentNode === x) return x;
     const root = find(parentNode);
     parent.set(x, root); // Path compression

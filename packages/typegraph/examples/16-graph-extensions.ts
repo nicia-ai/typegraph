@@ -49,10 +49,12 @@ import {
   IncompatibleChangeError,
   validateGraphExtension,
 } from "@nicia-ai/typegraph";
-import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 // Imported directly (not via ./_helpers) to show the public subpath.
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
+
+import { requireDefined } from "../src/utils/presence";
 
 // ============================================================
 // Step 1: Boot with a compile-time graph
@@ -255,9 +257,9 @@ export async function main() {
       .toDynamic("Author", "u")
       .whereNode("p", (p) => p.field("year").number().gte(2018))
       .select((ctx) => ({
-        paperTitle: ctx.p.title,
-        authorName: ctx.u.name,
-        order: ctx.a.order,
+        paperTitle: ctx.p["title"],
+        authorName: ctx.u["name"],
+        order: ctx.a["order"],
       }))
       .execute();
     console.log("\n[5] Dynamic multi-hop traversal Paper -> Author:");
@@ -282,9 +284,10 @@ export async function main() {
       nodes: {
         ...extension.nodes,
         Paper: {
-          ...extension.nodes!.Paper!,
+          ...requireDefined(requireDefined(extension.nodes)["Paper"]),
           properties: {
-            ...extension.nodes!.Paper!.properties,
+            ...requireDefined(requireDefined(extension.nodes)["Paper"])
+              .properties,
             year: { type: "string" },
           },
         },

@@ -18,6 +18,44 @@ const LOCALE_API_MESSAGE =
   "environments. Use compareStrings from src/utils/compare (or toSorted() " +
   "with no comparator) for deterministic code-unit ordering.";
 
+const GLOBAL_SYMBOL_MESSAGE =
+  "Register TypeGraph process-wide symbols through typeGraphGlobalSymbol so " +
+  "the closed symbol inventory and ESM/CJS identity contract stay audited.";
+
+const GLOBAL_SYMBOL_RESTRICTION = {
+  selector:
+    'CallExpression[callee.object.name="Symbol"][callee.property.name="for"]',
+  message: GLOBAL_SYMBOL_MESSAGE,
+};
+
+const RUNTIME_PORT_RESTRICTIONS = [
+  {
+    selector:
+      "ImportSpecifier[imported.name=/^(STORE_RUNTIME|StoreRuntime|TRANSACTION_RUNTIME|TransactionRuntime)$/]",
+    message:
+      "Use the internal storeBackend/transactionBackend accessor; runtime symbols stay inside src/store.",
+  },
+  {
+    selector:
+      "ExportSpecifier[local.name=/^(STORE_RUNTIME|StoreRuntime|TRANSACTION_RUNTIME|TransactionRuntime)$/]",
+    message:
+      "Runtime symbols and their structural contracts must not be re-exported outside src/store.",
+  },
+];
+
+const BACKEND_OVERLAY_RESTRICTIONS = [
+  {
+    selector: 'ImportSpecifier[imported.name="createBackendOverlay"]',
+    message:
+      "createBackendOverlay is decoration-only and restricted to audited modules; use an allowlist projection to narrow capabilities.",
+  },
+  {
+    selector: 'ExportSpecifier[local.name="createBackendOverlay"]',
+    message:
+      "createBackendOverlay must not be re-exported from a new surface; capability narrowing uses allowlist projections.",
+  },
+];
+
 // Determinism guardrail for the whole library source. NOTE: flat-config rule
 // entries REPLACE, not merge — any later block that sets no-restricted-syntax
 // for a subset of src must spread these selectors back in (see the query
@@ -117,7 +155,47 @@ export default [
   {
     files: ["src/**/*.ts"],
     rules: {
-      "no-restricted-syntax": ["error", ...DETERMINISM_RESTRICTIONS],
+      "no-restricted-syntax": [
+        "error",
+        ...DETERMINISM_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...BACKEND_OVERLAY_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // Runtime symbols are private implementation ports. Privileged subsystems
+  // use the storeBackend/transactionBackend accessors instead of importing the
+  // symbols or their structural contracts directly.
+  {
+    files: ["src/**/*.ts"],
+    ignores: ["src/store/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...DETERMINISM_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_OVERLAY_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // Backend, dialect, and strategy port functions explicitly reject
+  // receiver-dependent implementations with `this: void`. This is a valid
+  // TypeScript this parameter, not a void-valued data field.
+  {
+    files: [
+      "src/backend/types.ts",
+      "src/query/dialect/fulltext-strategy.ts",
+      "src/query/dialect/types.ts",
+      "src/query/dialect/vector-strategy.ts",
+    ],
+    rules: {
+      "@typescript-eslint/no-invalid-void-type": [
+        "error",
+        { allowAsThisParameter: true, allowInGenericTypeArguments: true },
+      ],
     },
   },
 
@@ -133,6 +211,9 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...DETERMINISM_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_OVERLAY_RESTRICTIONS,
         {
           selector:
             "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
@@ -142,6 +223,52 @@ export default [
           selector: "SwitchCase > Literal[value=/^(sqlite|postgres)$/]",
           message: DIALECT_SEAM_MESSAGE,
         },
+      ],
+    },
+  },
+
+  // This is the only module allowed to call Symbol.for directly. Every other
+  // source module must use its closed TypeGraph symbol-name inventory.
+  {
+    files: ["src/utils/global-symbol.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...DETERMINISM_RESTRICTIONS,
+        ...RUNTIME_PORT_RESTRICTIONS,
+        ...BACKEND_OVERLAY_RESTRICTIONS,
+      ],
+    },
+  },
+
+  // Audited same-surface decorators. These retain the global source and
+  // runtime-port restrictions while omitting only the overlay import ban.
+  {
+    files: [
+      "src/backend/drizzle/contribution-materializations.ts",
+      "src/backend/drizzle/postgres.ts",
+    ],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...DETERMINISM_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
+        ...RUNTIME_PORT_RESTRICTIONS,
+      ],
+    },
+  },
+  {
+    files: [
+      "src/store/operations/edge-operations.ts",
+      "src/store/operations/node-operations.ts",
+      "src/store/recorded-capture.ts",
+      "src/store/recorded-read-service.ts",
+    ],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...DETERMINISM_RESTRICTIONS,
+        GLOBAL_SYMBOL_RESTRICTION,
       ],
     },
   },

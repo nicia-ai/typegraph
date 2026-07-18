@@ -20,7 +20,7 @@ SQLite is ideal for development, testing, single-server deployments, and embedde
 For development and testing, use the convenience function that handles everything:
 
 ```typescript
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createStore } from "@nicia-ai/typegraph";
 
 // In-memory database (resets on restart)
@@ -62,7 +62,7 @@ For full control over the database connection:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 // Create and configure the database
@@ -98,7 +98,7 @@ extension and pass the strategy explicitly:
 ```typescript
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { sqliteVecStrategy } from "@nicia-ai/typegraph";
 
 const sqlite = new Database("app.db");
@@ -131,7 +131,7 @@ npm install @libsql/client
 
 ```typescript
 import { createClient } from "@libsql/client";
-import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
 import { createStore } from "@nicia-ai/typegraph";
 
 // Local file
@@ -251,7 +251,7 @@ documentation.
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 const pool = new Pool({
@@ -267,7 +267,7 @@ const [store] = await createStoreWithSchema(graph, backend);
 If you manage DDL externally, use `generatePostgresMigrationSQL()` with `createStore()`:
 
 ```typescript
-import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 await pool.query(generatePostgresMigrationSQL());
 const store = createStore(graph, backend);
@@ -286,7 +286,7 @@ npm install postgres drizzle-orm
 ```typescript
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 const sql = postgres(process.env.DATABASE_URL, {
@@ -316,7 +316,7 @@ npm install @neondatabase/serverless drizzle-orm
 ```typescript
 import { Pool } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-serverless";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
 const pool = new Pool({ connectionString: env.NEON_DATABASE_URL });
@@ -360,7 +360,7 @@ npm install @neondatabase/serverless drizzle-orm
 ```typescript
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStore } from "@nicia-ai/typegraph";
 
 const sql = neon(env.NEON_DATABASE_URL);
@@ -393,7 +393,7 @@ schema DDL, and returns a ready backend — the Postgres analog of
 `createLocalSqliteBackend`:
 
 ```typescript
-import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 import { createStore } from "@nicia-ai/typegraph";
 
 // In-memory by default, with pgvector enabled.
@@ -423,7 +423,7 @@ correctly:
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { drizzle } from "drizzle-orm/pglite";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const client = await PGlite.create({ extensions: { vector } });
 await client.exec(generatePostgresMigrationSQL());
@@ -444,7 +444,7 @@ wiring is required:
 ```typescript
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend, generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -651,24 +651,81 @@ individually.
 function generatePostgresDDL(tables?: PostgresTables): string[];
 ```
 
-## Drizzle Entrypoints
+## Managed Store Entrypoints
+
+For local applications that do not need direct database access, TypeGraph can
+own the connection, provision its schema, and return the complete typed Store:
+
+- `@nicia-ai/typegraph/sqlite/local` — Node-only SQLite through the
+  native better-sqlite3 addon
+- `@nicia-ai/typegraph/postgres/pglite` — in-process PostgreSQL through
+  PGlite's WebAssembly runtime
+
+```typescript
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalPgliteStore } from "@nicia-ai/typegraph/postgres/pglite";
+
+const sqliteStore = await createLocalSqliteStore(graph, { path: "./graph.db" });
+const postgresStore = await createLocalPgliteStore(graph, { vector: false });
+```
+
+These entrypoints expose no adapter-native database handle. The returned
+`Store` keeps the complete graph API, including graph-owned
+`store.transaction(...)`, but intentionally omits `withTransaction` and
+`withRecordedTransaction`, which require a caller-owned adapter handle. The
+Store owns its connection, so call `store.close()` during shutdown. Its
+declaration surface is safe for strict TypeScript consumers that do not install
+unused database drivers.
+
+PGlite vector support is enabled by default and loads the optional
+`@electric-sql/pglite-pgvector` package. Install that package when using vector
+fields, or pass `{ vector: false }` as above for a smaller non-vector setup.
+
+Both factories accept `store` and `schemaManagement` groups, so the managed
+path supports the same hooks, history/revision tracking, custom SQL schema,
+query defaults, and migration policy as `createStoreWithSchema`:
+
+```typescript
+import { createSqlSchema } from "@nicia-ai/typegraph";
+
+const store = await createLocalSqliteStore(graph, {
+  path: "./graph.db",
+  pragmas: { busyTimeoutMs: 10_000 },
+  store: {
+    history: true,
+    schema: createSqlSchema({
+      nodes: "app_nodes",
+      edges: "app_edges",
+      fulltext: "app_fulltext",
+      uniques: "app_uniques",
+    }),
+  },
+  schemaManagement: { systemIndexes: "skip" },
+});
+```
+
+When a custom SQL schema is supplied, the managed factory provisions those
+same physical table names; no separate Drizzle table configuration is needed.
+
+## Drizzle Adapter Entrypoints
 
 TypeGraph exposes Drizzle adapters through public entrypoints:
 
-- `@nicia-ai/typegraph/sqlite` — Generic SQLite adapter (any Drizzle SQLite driver)
-- `@nicia-ai/typegraph/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
-- `@nicia-ai/typegraph/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
-- `@nicia-ai/typegraph/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
-- `@nicia-ai/typegraph/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
+- `@nicia-ai/typegraph/adapters/drizzle/indexes` — Drizzle schema-builder helpers for TypeGraph index declarations
+- `@nicia-ai/typegraph/adapters/drizzle/sqlite` — Generic SQLite adapter (any Drizzle SQLite driver)
+- `@nicia-ai/typegraph/adapters/drizzle/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
+- `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
+- `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
+- `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
 
 Import from the entrypoint matching your database:
 
 ```typescript
-import { createSqliteBackend, tables } from "@nicia-ai/typegraph/sqlite";
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
-import { createLibsqlBackend } from "@nicia-ai/typegraph/sqlite/libsql";
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/postgres";
-import { createLocalPgliteBackend } from "@nicia-ai/typegraph/postgres/pglite";
+import { createSqliteBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
+import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 ```
 
 ## Cloudflare D1
@@ -681,7 +738,7 @@ database and manage schema versions across deployments:
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export default {
   async fetch(request: Request, env: Env) {
@@ -709,7 +766,8 @@ A store backed by `drizzle(ctx.storage)` inside a Durable Object is
 **auto-detected** as `transactionMode: "do-sqlite"` and reports
 `capabilities.transactions: true` — no `executionProfile` hint needed.
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
-so `store.transaction()` and `store.withTransaction()` are fully atomic.
+so adapter stores can provide fully atomic `store.transaction()` and
+`store.withTransaction()` operations.
 The runtime authorizer forbids temporary tables, so the same profile reports
 `capabilities.graphAnalytics.supported: false`. Traversal algorithms such as
 `shortestPath`, `reachable`, and `weightedShortestPath` automatically use their
@@ -723,8 +781,8 @@ parameter, so the list itself does not exhaust the Durable Object budget.
 
 ```typescript
 import { drizzle } from "drizzle-orm/durable-sqlite";
-import { createStoreWithSchema } from "@nicia-ai/typegraph";
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createAdapterStoreWithSchema } from "@nicia-ai/typegraph";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export class MyObject {
   constructor(private ctx: DurableObjectState) {}
@@ -735,13 +793,13 @@ export class MyObject {
     // Boots schema/DDL outside any storage transaction (no DDL in the
     // business transaction); the schema-version commit uses the
     // do-sqlite runner.
-    const [store] = await createStoreWithSchema(graph, backend);
+    const [store] = await createAdapterStoreWithSchema(graph, backend);
 
     // Atomic across TypeGraph + the product's own relational tables:
     await store.transaction(async (tx) => {
       await tx.nodes.Document.update(documentId, props);
-      // tx.sql is the AdoptedTransaction union — cast to your db type.
-      const sqlTx = tx.sql as typeof db;
+      if (tx.sql === undefined) throw new Error("Native transaction unavailable");
+      const sqlTx = tx.sql;
       await sqlTx.insert(documentVersions).values(versionRow);
     });
   }
@@ -761,8 +819,9 @@ Check what features a backend supports:
 
 ```typescript
 const backend = createSqliteBackend(db);
+const store = createStore(graph, backend);
 
-if (backend.capabilities.transactions) {
+if (store.capabilities.transactions) {
   await store.transaction(async (tx) => {
     /* ... */
   });
@@ -770,20 +829,21 @@ if (backend.capabilities.transactions) {
   // Handle non-transactional execution
 }
 
-if (backend.capabilities.vector?.supported) {
+if (store.capabilities.vector?.supported) {
   // Vector similarity queries available
 }
 ```
 
-`backend.capabilities` is the runtime source of truth. The shape is:
+`store.capabilities` is the portable runtime source of truth; adapter authors
+can inspect the same object as `backend.capabilities`. The shape is:
 
-| Field | Meaning |
-| --- | --- |
-| `transactions` | Atomic transactions available (see note below) |
-| `windowFunctions` | SQL window functions such as `ROW_NUMBER()` are available |
-| `graphAnalytics?.{supported,mathFunctions}` | Whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
-| `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions` | Vector strategy capabilities (present once a vector strategy is configured) |
-| `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities |
+| Field                                                                      | Meaning                                                                                             |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `transactions`                                                             | Atomic transactions available (see note below)                                                      |
+| `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
+| `graphAnalytics?.{supported,mathFunctions}`                                | Whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
+| `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
+| `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
 
 ### SQLite ↔ PostgreSQL parity
 
@@ -799,14 +859,14 @@ The remaining differences are **engine and runtime capability gaps** — they
 stem from what each database or hosted authorizer implements, not from
 TypeGraph choosing separate query semantics per backend:
 
-| Capability | SQLite | PostgreSQL | Behavior on the unsupported side |
-| --- | --- | --- | --- |
-| Whole-graph temporary-table analytics | ✓ standard connections / ✗ D1 and Durable Objects | ✓ connection-based drivers / ✗ `neon-http` | Throws `UnsupportedBackendCapabilityError`; traversal algorithms with an inline engine fall back automatically |
-| Vector metric `inner_product` | ✗ | ✓ | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
-| Vector index type `ivfflat` | ✗ | ✓ | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`) |
-| Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native` | ✗ (`pgvector` recovers, but is bounded) | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below |
-| Per-query fulltext `language` override | ✗ | ✓ | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query |
-| HNSW `efSearch` query tuning | ✗ | ✓ | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results |
+| Capability                                             | SQLite                                            | PostgreSQL                                 | Behavior on the unsupported side                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Whole-graph temporary-table analytics                  | ✓ standard connections / ✗ D1 and Durable Objects | ✓ connection-based drivers / ✗ `neon-http` | Throws `UnsupportedBackendCapabilityError`; traversal algorithms with an inline engine fall back automatically            |
+| Vector metric `inner_product`                          | ✗                                                 | ✓                                          | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
+| Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
+| Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
+| Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
+| HNSW `efSearch` query tuning                           | ✗                                                 | ✓                                          | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results                                |
 
 ### Filtered approximate search
 
@@ -825,11 +885,11 @@ if (filtered?.guaranteesFullPage !== true) {
 **Check `guaranteesFullPage`, not `mode`.** `mode` names the mechanism the strategy asks the engine for; only
 `guaranteesFullPage` tells you whether a short page is possible.
 
-| `mode` | Strategy | `guaranteesFullPage` | Meaning |
-| --- | --- | --- | --- |
-| `"filter-pushdown"` | `sqlite-vec` | `true` | The filter constrains the `vec0` KNN candidate set itself. `limit` matching rows come back whenever `limit` exist. |
-| `"iterative-scan"` | `pgvector` | `false` | The index is re-entered for more candidates (`hnsw.iterative_scan` / `ivfflat.iterative_scan`, applied automatically on pgvector ≥ 0.8). Much better recall than a post-filter, but **not a guarantee**: the scan stops at `hnsw.max_scan_tuples` / `ivfflat.max_probes`. And on **pgvector < 0.8** there is no iterative scan at all — the backend detects that, warns once, and the search stays `ef_search`-bounded. |
-| `"post-filter"` | `libsql-native` | `false` | DiskANN's `vector_top_k` is a table function with no filter pushdown and no way to re-enter the index. TypeGraph over-fetches `4 × (limit + offset)` neighbors and filters afterwards, so once more than that headroom is filtered out **the search silently returns fewer than `limit` rows while more matches exist**. |
+| `mode`              | Strategy        | `guaranteesFullPage` | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------- | --------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"filter-pushdown"` | `sqlite-vec`    | `true`               | The filter constrains the `vec0` KNN candidate set itself. `limit` matching rows come back whenever `limit` exist.                                                                                                                                                                                                                                                                                                      |
+| `"iterative-scan"`  | `pgvector`      | `false`              | The index is re-entered for more candidates (`hnsw.iterative_scan` / `ivfflat.iterative_scan`, applied automatically on pgvector ≥ 0.8). Much better recall than a post-filter, but **not a guarantee**: the scan stops at `hnsw.max_scan_tuples` / `ivfflat.max_probes`. And on **pgvector < 0.8** there is no iterative scan at all — the backend detects that, warns once, and the search stays `ef_search`-bounded. |
+| `"post-filter"`     | `libsql-native` | `false`              | DiskANN's `vector_top_k` is a table function with no filter pushdown and no way to re-enter the index. TypeGraph over-fetches `4 × (limit + offset)` neighbors and filters afterwards, so once more than that headroom is filtered out **the search silently returns fewer than `limit` rows while more matches exist**.                                                                                                |
 
 Heavy tombstone drift — routine in a temporal store — is what turns a bounded search from a theoretical caveat into
 a short page. When a full page matters, use an exact search (`approximate: false`), which scans and so applies the
@@ -966,9 +1026,7 @@ only `SELECT` / `INSERT` / `UPDATE` / `DELETE`:
 //    applies safe auto-migrations, commits the schema_versions row,
 //    and writes the durable contribution markers. The runtime gate
 //    checks all of those.
-const [
-  /* store */
-] = await createStoreWithSchema(graph, adminBackend);
+const [/* store */] = await createStoreWithSchema(graph, adminBackend);
 
 //    Optional prerequisite if you manage DDL externally with
 //    drizzle-kit. Generated SQL creates the tables but does NOT
@@ -976,7 +1034,7 @@ const [
 //    createStoreWithSchema afterwards (it skips bootstrap when tables
 //    already exist and commits the row + markers):
 //
-//    import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/postgres";
+//    import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 //    await adminPool.query(generatePostgresMigrationSQL());
 //    await createStoreWithSchema(graph, adminBackend);
 ```

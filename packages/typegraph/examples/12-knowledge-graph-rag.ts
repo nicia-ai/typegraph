@@ -20,6 +20,7 @@ import {
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
+import { requireDefined } from "../src/utils/presence";
 import { createExampleBackend, mockTextEmbedding } from "./_helpers";
 
 // ============================================================
@@ -193,17 +194,17 @@ export async function main() {
     const gpt4 = await ensureEntity("GPT-4", "concept");
 
     // Link chunks to entities (mentions)
-    await store.edges.mentions.create(document1Chunks[0]!, samAltman, {});
-    await store.edges.mentions.create(document1Chunks[0]!, openai, {});
-    await store.edges.mentions.create(document1Chunks[1]!, samAltman, {});
-    await store.edges.mentions.create(document1Chunks[1]!, openai, {});
-    await store.edges.mentions.create(document1Chunks[2]!, openai, {});
-    await store.edges.mentions.create(document1Chunks[2]!, gpt4, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[0]), samAltman, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[0]), openai, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[1]), samAltman, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[1]), openai, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[2]), openai, {});
+    await store.edges.mentions.create(requireDefined(document1Chunks[2]), gpt4, {});
 
-    await store.edges.mentions.create(document2Chunks[0]!, tesla, {});
-    await store.edges.mentions.create(document2Chunks[1]!, elonMusk, {});
-    await store.edges.mentions.create(document2Chunks[1]!, tesla, {});
-    await store.edges.mentions.create(document2Chunks[2]!, tesla, {});
+    await store.edges.mentions.create(requireDefined(document2Chunks[0]), tesla, {});
+    await store.edges.mentions.create(requireDefined(document2Chunks[1]), elonMusk, {});
+    await store.edges.mentions.create(requireDefined(document2Chunks[1]), tesla, {});
+    await store.edges.mentions.create(requireDefined(document2Chunks[2]), tesla, {});
 
     // Entity relationships
     await store.edges.relatesTo.create(samAltman, openai, {
@@ -268,7 +269,7 @@ export async function main() {
     console.log("\n--- Pattern 3: Context Window Expansion ---");
     console.log("Get chunk with surrounding context\n");
 
-    const middleChunk = document1Chunks[1]!;
+    const middleChunk = requireDefined(document1Chunks[1]);
 
     // Get previous chunk
     const before = await store
@@ -443,7 +444,7 @@ export async function main() {
     // Only nextChunk edges are stored; every prevChunk hop below is resolved
     // through the inverseOf ontology. Repeating the single-hop traversal walks
     // the whole chain back to the first chunk.
-    const lastChunk = document1Chunks[2]!;
+    const lastChunk = requireDefined(document1Chunks[2]);
     console.log(`  start: "${lastChunk.text}"`);
 
     let cursorId = lastChunk.id;

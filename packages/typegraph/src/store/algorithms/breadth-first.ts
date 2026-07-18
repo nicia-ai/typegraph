@@ -1,6 +1,6 @@
-import { sql } from "drizzle-orm";
-
+import { sql } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { requireDefined } from "../../utils/presence";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import {
   compareNodeIdentity,
@@ -562,7 +562,8 @@ async function findShortestPathInline(
     const sources = visibleNodes.filter((node) => node.id === sourceId);
     const targets = visibleNodes.filter((node) => node.id === targetId);
     if (sources.length === 0 || targets.length === 0) return;
-    if (sourceId === targetId) return { nodes: [sources[0]!], depth: 0 };
+    if (sourceId === targetId)
+      return { nodes: [requireDefined(sources[0])], depth: 0 };
 
     const forwardVisited = createVisitedMap(sources);
     const reverseVisited = createVisitedMap(targets);

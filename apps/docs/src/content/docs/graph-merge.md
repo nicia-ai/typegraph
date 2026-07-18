@@ -485,7 +485,7 @@ and in-process PGlite, and needs no schema changes.
 
 ```typescript
 // Each branch gets its own in-memory SQLite backend:
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 const makeBackend = async () => createLocalSqliteBackend().backend;
 const fork = unwrap(await branch(base, makeBackend, { id: asBranchId("worker-1") }));
 ```

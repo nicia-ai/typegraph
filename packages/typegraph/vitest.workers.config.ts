@@ -26,7 +26,7 @@ export default defineConfig({
   plugins: [cloudflareTest(workersOptions)],
   resolve: {
     alias: {
-      "@nicia-ai/typegraph/sqlite": resolve(
+      "@nicia-ai/typegraph/adapters/drizzle/sqlite": resolve(
         __dirname,
         "src/backend/sqlite/index.ts",
       ),

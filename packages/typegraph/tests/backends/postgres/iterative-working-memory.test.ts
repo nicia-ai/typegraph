@@ -30,7 +30,6 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
-  AdoptedTransaction,
   GraphBackend,
   TransactionBackend,
   TransactionOptions,
@@ -39,9 +38,10 @@ import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
 } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
 
 const TEST_DATABASE_URL =
-  process.env.POSTGRES_URL ??
+  process.env["POSTGRES_URL"] ??
   "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
 
 let pool: Pool | undefined;
@@ -56,7 +56,7 @@ function requirePostgres(ctx: { skip: () => void }): Pool {
 }
 
 beforeAll(async () => {
-  if (!process.env.POSTGRES_URL) return;
+  if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
@@ -113,10 +113,10 @@ function withTransactionCapture(backend: GraphBackend): {
   const captured: GraphBackend = {
     ...backend,
     transaction<T>(
-      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
-      return backend.transaction(async (tx, adoptedTransaction) => {
+      return backend.transaction(async (tx) => {
         const observedTransaction: TransactionBackend = {
           ...tx,
           execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
@@ -127,10 +127,10 @@ function withTransactionCapture(backend: GraphBackend): {
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
             statements.push(compileSql(query));
-            await tx.executeTemporaryStatement!(query);
+            await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
-        return fn(observedTransaction, adoptedTransaction);
+        return fn(observedTransaction);
       }, options);
     },
   };

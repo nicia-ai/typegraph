@@ -49,6 +49,11 @@ export function quotedTableName(tableName: string): SQL {
   return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
 }
 
+const CODE_POINT_ORDER_BUILDERS = {
+  postgres: (value: SQL) => sql`${value} COLLATE "C"`,
+  sqlite: (value: SQL) => value,
+} satisfies Record<SqlDialect, (value: SQL) => SQL>;
+
 /**
  * `column` rendered so that ORDER BY sorts it by code point on both engines.
  *
@@ -64,7 +69,7 @@ export function quotedTableName(tableName: string): SQL {
  * sorted anyway (no index supplies the order), so this costs nothing.
  */
 export function codePointOrderKey(column: SQL, dialect: SqlDialect): SQL {
-  return dialect === "postgres" ? sql`${column} COLLATE "C"` : column;
+  return CODE_POINT_ORDER_BUILDERS[dialect](column);
 }
 
 /**
@@ -91,9 +96,13 @@ export function liveNodeIdsSubquery(
 }
 
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {
-  return sql.raw(`"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`);
+  return sql.raw(
+    `"${nodes.graphId.name}", "${nodes.kind.name}", "${nodes.id.name}", "${nodes.props.name}", "${nodes.version.name}", "${nodes.validFrom.name}", "${nodes.validTo.name}", "${nodes.createdAt.name}", "${nodes.updatedAt.name}"`,
+  );
 }
 
 export function edgeColumnList(edges: Tables["edges"]): SQL {
-  return sql.raw(`"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`);
+  return sql.raw(
+    `"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`,
+  );
 }

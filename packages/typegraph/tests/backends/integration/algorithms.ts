@@ -11,7 +11,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { createStore, GraphAlgorithmConvergenceError } from "../../../src";
 import type {
-  AdoptedTransaction,
   GraphBackend,
   TransactionBackend,
   TransactionOptions,
@@ -20,6 +19,7 @@ import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
 } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { seedKnowsChain } from "./seed-helpers";
@@ -42,11 +42,11 @@ async function resolveAlgorithmFixture(
     byName.set(person.name, person.id);
   }
   return {
-    aliceId: byName.get("Alice")!,
-    bobId: byName.get("Bob")!,
-    charlieId: byName.get("Charlie")!,
-    dianaId: byName.get("Diana")!,
-    eveId: byName.get("Eve")!,
+    aliceId: requireDefined(byName.get("Alice")),
+    bobId: requireDefined(byName.get("Bob")),
+    charlieId: requireDefined(byName.get("Charlie")),
+    dianaId: requireDefined(byName.get("Diana")),
+    eveId: requireDefined(byName.get("Eve")),
   };
 }
 
@@ -111,10 +111,10 @@ function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
     ...backend,
     capabilities: { ...backend.capabilities, maxBindParameters },
     transaction<T>(
-      fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+      fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
-      return backend.transaction(async (tx, adoptedTransaction) => {
+      return backend.transaction(async (tx) => {
         const constrainedTransaction: TransactionBackend = {
           ...tx,
           capabilities: { ...tx.capabilities, maxBindParameters },
@@ -126,10 +126,10 @@ function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
             assertWithinBindLimit(backend, query, maxBindParameters);
-            await tx.executeTemporaryStatement!(query);
+            await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
-        return fn(constrainedTransaction, adoptedTransaction);
+        return fn(constrainedTransaction);
       }, options);
     },
   } satisfies GraphBackend;
@@ -140,7 +140,8 @@ function assertWithinBindLimit(
   query: CompiledRowsSql | CompiledTemporaryStatementSql,
   maxBindParameters: number,
 ): void {
-  const parameterCount = backend.compileSql!(query).params.length;
+  const parameterCount = requireDefined(backend.compileSql)(query).params
+    .length;
   if (parameterCount <= maxBindParameters) return;
   throw new Error(
     `Statement used ${parameterCount} bind parameters; limit is ${maxBindParameters}.`,
@@ -1273,8 +1274,8 @@ export function registerAlgorithmIntegrationTests(
           ),
         );
 
-        const source = people[0]!;
-        const target = people.at(-1)!;
+        const source = requireDefined(people[0]);
+        const target = requireDefined(people.at(-1));
         const reached = await store.algorithms.reachable(source, {
           edges: ["knows"],
           maxHops: 8,

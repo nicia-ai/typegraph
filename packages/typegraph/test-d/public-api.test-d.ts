@@ -4,13 +4,18 @@ import {
   expectNotAssignable,
   expectType,
 } from "tsd";
-import { sql } from "drizzle-orm";
 import { z } from "zod";
 
 import {
-  asCompiledStatementSql,
+  type AdapterBackend,
+  type BackendCapabilities,
   type BatchableQuery,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
+  createStoreWithSchema,
+  createVerifiedAdapterStore,
+  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -20,11 +25,16 @@ import {
   type EdgeId,
   type ExternalRecordedReadSource,
   type GraphBackend,
-  type HistorySafeBackend,
-  type HistorySafeTransactionBackend,
+  type GraphExtension,
+  type AdapterHistoryStore,
+  type AdapterHistoryTransactionContext,
+  type AdapterRecordedReadStore,
+  type AdapterStore,
   type HistoryStore,
-  type HistoryTransactionContext,
-  type MeasurableHistoryTransactionContext,
+  type HistoryStoreBackend,
+  type LiveStoreOptions,
+  type MeasurableAdapterHistoryTransactionContext,
+  type MeasurableTransactionContext,
   createQueryBuilder,
   getEdgeKinds,
   getNodeKinds,
@@ -35,13 +45,17 @@ import {
   type RecordedReadStore,
   type ResolvedSqlTableNames,
   type ScopedMeasure,
+  type SchemaValidationResult,
   createSqlSchema,
+  sql,
   type SqlSchema,
   type SqlTableNames,
   type Store,
   type StoreOptions,
+  type StoreRef,
   type TransactionOutcome,
   type TransactionReceipt,
+  type TransactionReadBackend,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -189,6 +203,127 @@ const graph = defineGraph({
 
 declare const store: Store<typeof graph>;
 declare const backend: GraphBackend;
+type NativeTransaction = Readonly<{
+  executeNative: (statement: string) => void;
+}>;
+type OtherNativeTransaction = Readonly<{
+  executeOther: (statement: string) => void;
+}>;
+declare const adapterBackend: AdapterBackend<NativeTransaction>;
+declare const nativeTransaction: NativeTransaction;
+expectNotAssignable<AdapterBackend<OtherNativeTransaction>>(adapterBackend);
+const portableStore = createStore(graph, backend);
+expectType<Store<typeof graph>>(portableStore);
+expectType<BackendCapabilities>(portableStore.capabilities);
+expectNotAssignable<AdapterStore<typeof graph, NativeTransaction>>(
+  portableStore,
+);
+expectError(createAdapterStore(graph, backend));
+const adapterStore = createAdapterStore(graph, adapterBackend);
+expectAssignable<AdapterStore<typeof graph, NativeTransaction>>(adapterStore);
+expectType<BackendCapabilities>(adapterStore.capabilities);
+expectAssignable<Store<typeof graph>>(adapterStore);
+expectNotAssignable<AdapterStore<typeof graph, OtherNativeTransaction>>(
+  adapterStore,
+);
+
+declare const widenedStoreOptions: StoreOptions;
+declare const widenedLiveStoreOptions: LiveStoreOptions;
+declare const historyFlag: boolean;
+
+const widenedPortableStore = createStore(graph, backend, widenedStoreOptions);
+expectType<
+  | Store<typeof graph>
+  | HistoryStore<typeof graph>
+  | RecordedReadStore<typeof graph>
+>(widenedPortableStore);
+
+const widenedAdapterStore = createAdapterStore(
+  graph,
+  adapterBackend,
+  widenedStoreOptions,
+);
+expectType<
+  | AdapterStore<typeof graph, NativeTransaction>
+  | AdapterHistoryStore<typeof graph, NativeTransaction>
+  | AdapterRecordedReadStore<typeof graph, NativeTransaction>
+>(widenedAdapterStore);
+expectError(widenedAdapterStore.withTransaction(nativeTransaction));
+
+expectType<
+  | AdapterStore<typeof graph, NativeTransaction>
+  | AdapterRecordedReadStore<typeof graph, NativeTransaction>
+>(createAdapterStore(graph, adapterBackend, widenedLiveStoreOptions));
+expectType<
+  | AdapterStore<typeof graph, NativeTransaction>
+  | AdapterHistoryStore<typeof graph, NativeTransaction>
+  | AdapterRecordedReadStore<typeof graph, NativeTransaction>
+>(createAdapterStore(graph, adapterBackend, { history: historyFlag }));
+
+expectType<
+  Promise<
+    [
+      (
+        | Store<typeof graph>
+        | HistoryStore<typeof graph>
+        | RecordedReadStore<typeof graph>
+      ),
+      SchemaValidationResult,
+    ]
+  >
+>(createStoreWithSchema(graph, backend, widenedStoreOptions));
+expectType<
+  Promise<
+    [
+      (
+        | AdapterStore<typeof graph, NativeTransaction>
+        | AdapterHistoryStore<typeof graph, NativeTransaction>
+        | AdapterRecordedReadStore<typeof graph, NativeTransaction>
+      ),
+      SchemaValidationResult,
+    ]
+  >
+>(createAdapterStoreWithSchema(graph, adapterBackend, widenedStoreOptions));
+expectType<
+  Promise<
+    [
+      (
+        | Store<typeof graph>
+        | HistoryStore<typeof graph>
+        | RecordedReadStore<typeof graph>
+      ),
+      SchemaValidationResult,
+    ]
+  >
+>(createVerifiedStore(graph, backend, widenedStoreOptions));
+expectType<
+  Promise<
+    [
+      (
+        | AdapterStore<typeof graph, NativeTransaction>
+        | AdapterHistoryStore<typeof graph, NativeTransaction>
+        | AdapterRecordedReadStore<typeof graph, NativeTransaction>
+      ),
+      SchemaValidationResult,
+    ]
+  >
+>(createVerifiedAdapterStore(graph, adapterBackend, widenedStoreOptions));
+declare const storeEvolutionExtension: GraphExtension;
+const portableRef: StoreRef<Store<typeof graph>> = { current: portableStore };
+const adapterRef: StoreRef<AdapterStore<typeof graph, NativeTransaction>> = {
+  current: adapterStore,
+};
+expectType<Promise<Store<typeof graph>>>(
+  portableStore.evolve(storeEvolutionExtension, { ref: portableRef }),
+);
+expectType<Promise<AdapterStore<typeof graph, NativeTransaction>>>(
+  adapterStore.evolve(storeEvolutionExtension, { ref: adapterRef }),
+);
+expectError(portableStore.evolve(storeEvolutionExtension, { ref: adapterRef }));
+expectNotAssignable<StoreRef<Store<typeof graph>>>(adapterRef);
+expectNotAssignable<StoreRef<AdapterStore<typeof graph, NativeTransaction>>>(
+  portableRef,
+);
 declare const registry: never;
 declare const worksAtId: EdgeId<typeof worksAt>;
 declare const worksAtEdge: Awaited<
@@ -240,13 +375,74 @@ const liveWithRecordedSource = createStore(graph, backend, {
   recordedRead: externalRecordedSource,
 });
 expectAssignable<RecordedReadStore<typeof graph>>(liveWithRecordedSource);
+expectNotAssignable<AdapterRecordedReadStore<typeof graph, never>>(
+  liveWithRecordedSource,
+);
 expectType<true>(liveWithRecordedSource.recordedReadBound);
+const recordedReadRef: StoreRef<RecordedReadStore<typeof graph>> = {
+  current: liveWithRecordedSource,
+};
+expectType<Promise<RecordedReadStore<typeof graph>>>(
+  liveWithRecordedSource.undeprecateKinds([], { ref: recordedReadRef }),
+);
+const adapterRecordedReadStore = createAdapterStore(graph, adapterBackend, {
+  recordedRead: externalRecordedSource,
+});
+expectAssignable<RecordedReadStore<typeof graph>>(adapterRecordedReadStore);
+const adapterRecordedReadRef: StoreRef<
+  AdapterRecordedReadStore<typeof graph, NativeTransaction>
+> = { current: adapterRecordedReadStore };
+expectType<Promise<AdapterRecordedReadStore<typeof graph, NativeTransaction>>>(
+  adapterRecordedReadStore.undeprecateKinds([], {
+    ref: adapterRecordedReadRef,
+  }),
+);
 
 const historyStore = createStore(graph, backend, { history: true });
 expectAssignable<HistoryStore<typeof graph>>(historyStore);
+expectAssignable<RecordedReadStore<typeof graph>>(historyStore);
+expectNotAssignable<AdapterHistoryStore<typeof graph, never>>(historyStore);
 expectType<true>(historyStore.historyEnabled);
 expectType<true>(historyStore.recordedReadBound);
-expectAssignable<HistorySafeBackend>(historyStore.backend);
+expectError(historyStore.backend);
+const historyRef: StoreRef<HistoryStore<typeof graph>> = {
+  current: historyStore,
+};
+const historyAsRecordedReadRef: StoreRef<RecordedReadStore<typeof graph>> = {
+  current: historyStore,
+};
+expectType<Promise<HistoryStore<typeof graph>>>(
+  historyStore.deprecateKinds([], { ref: historyAsRecordedReadRef }),
+);
+expectType<Promise<HistoryStore<typeof graph>>>(
+  historyStore.removeKinds([], { ref: historyRef }),
+);
+expectError(historyStore.deprecateKinds([], { ref: adapterRef }));
+
+const adapterHistoryStore = createAdapterStore(graph, adapterBackend, {
+  history: true,
+});
+expectAssignable<AdapterHistoryStore<typeof graph, NativeTransaction>>(
+  adapterHistoryStore,
+);
+expectAssignable<HistoryStore<typeof graph>>(adapterHistoryStore);
+expectType<HistoryStoreBackend>(adapterHistoryStore.backend);
+expectError(adapterHistoryStore.backend.executeStatement);
+expectError(adapterHistoryStore.backend.executeDdl);
+expectError(adapterHistoryStore.backend.executeRaw);
+expectError(adapterHistoryStore.backend.trustedImport);
+expectError(adapterHistoryStore.backend.clearGraph);
+expectError(adapterHistoryStore.backend.transaction);
+const adapterHistoryRef: StoreRef<
+  AdapterHistoryStore<typeof graph, NativeTransaction>
+> = { current: adapterHistoryStore };
+expectType<Promise<AdapterHistoryStore<typeof graph, NativeTransaction>>>(
+  adapterHistoryStore.deprecateKinds([], { ref: adapterHistoryRef }),
+);
+expectNotAssignable<StoreRef<HistoryStore<typeof graph>>>(adapterHistoryRef);
+expectError(
+  adapterStore.evolve(storeEvolutionExtension, { ref: adapterHistoryRef }),
+);
 
 const revisionStore = createStore(graph, backend, { revisionTracking: true });
 expectType<boolean>(revisionStore.revisionTrackingEnabled);
@@ -282,44 +478,36 @@ expectError(
   }),
 );
 
-// Captured-history stores hide write-shaped raw SQL surfaces from their typed
-// backend property. Callers can still read via TypeGraph APIs, but cannot
-// accidentally bypass capture with raw statements on a history-enabled store.
-expectError(
-  historyStore.backend.executeStatement?.(
-    asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
-  ),
-);
-expectError(historyStore.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
-
+// Portable transaction contexts expose only TypeGraph-owned operations and a
+// read-only backend projection.
 void historyStore.transaction(async (tx) => {
-  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
-  expectAssignable<HistorySafeTransactionBackend>(tx.backend);
-  expectError(tx.sql?.select());
-  expectError(
-    tx.backend.executeStatement?.(
-      asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
-    ),
-  );
-  expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
+  expectAssignable<TransactionReadBackend>(tx.backend);
+  expectError(tx.sql);
+  expectError(tx.backend.insertNode);
+  expectError(tx.backend.executeRaw);
+  expectError(tx.backend.executeStatement);
 });
 
 // withRecordedTransaction (adopted-commit path) returns a TransactionOutcome
 // carrying the receipt, and hands a measurable history context.
-const recordedOutcome = historyStore.withRecordedTransaction(
-  {} as never,
+const recordedOutcome = adapterHistoryStore.withRecordedTransaction(
+  {} as NativeTransaction,
   async (tx) => {
-    expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
-    expectAssignable<HistorySafeTransactionBackend>(tx.backend);
+    expectAssignable<
+      AdapterHistoryTransactionContext<typeof graph, NativeTransaction>
+    >(tx);
+    expectAssignable<TransactionReadBackend>(tx.backend);
     expectType<
-      ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>
+      ScopedMeasure<
+        MeasurableAdapterHistoryTransactionContext<
+          typeof graph,
+          NativeTransaction
+        >
+      >
     >(tx.measure);
     expectError(tx.sql?.select());
-    expectError(
-      tx.backend.executeStatement?.(
-        asCompiledStatementSql(sql`DELETE FROM typegraph_nodes`),
-      ),
-    );
+    expectError(tx.backend.executeRaw);
+    expectError(tx.backend.executeStatement);
     expectError(tx.backend.executeDdl?.("DROP TABLE typegraph_nodes"));
     return tx.nodes.Person.create({
       email: "alice@example.com",
@@ -333,17 +521,23 @@ expectType<
   >
 >(recordedOutcome);
 
-void store.transaction(async (tx) => {
-  expectType<typeof tx.sql>(tx.sql);
-  expectType<typeof tx.backend.executeStatement>(tx.backend.executeStatement);
-  expectType<typeof tx.backend.executeDdl>(tx.backend.executeDdl);
+void adapterStore.transaction(async (tx) => {
+  if (tx.sqlAvailability === "available") {
+    expectType<NativeTransaction>(tx.sql);
+  }
+  expectError(tx.backend.insertNode);
+  expectError(tx.backend.executeRaw);
+  expectError(tx.backend.executeStatement);
+  expectError(tx.backend.executeDdl);
 });
 
 // transactionWithReceipt mirrors transaction()'s callback signature, but
 // wraps the result in a TransactionOutcome carrying the write receipt
 // alongside it.
-const receiptOutcome = store.transactionWithReceipt(async (tx) => {
-  expectType<typeof tx.sql>(tx.sql);
+const receiptOutcome = adapterStore.transactionWithReceipt(async (tx) => {
+  if (tx.sqlAvailability === "available") {
+    expectType<NativeTransaction>(tx.sql);
+  }
   return tx.nodes.Person.create({ email: "alice@example.com", name: "Alice" });
 });
 expectType<
@@ -355,14 +549,14 @@ void receiptOutcome.then(({ receipt }) => {
   expectType<TransactionReceipt>(receipt);
 });
 
-// The history-store overload narrows `tx` to a measurable HistoryTransactionContext,
-// same as transaction() does above (plus the scoped `measure`).
+// The history-store overload narrows `tx` to a measurable adapter history
+// context, same as transaction() does above (plus the scoped `measure`).
 void historyStore.transactionWithReceipt(async (tx) => {
-  expectAssignable<HistoryTransactionContext<typeof graph>>(tx);
-  expectType<ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>>(
+  expectAssignable<TransactionReadBackend>(tx.backend);
+  expectType<ScopedMeasure<MeasurableTransactionContext<typeof graph>>>(
     tx.measure,
   );
-  expectError(tx.sql?.select());
+  expectError(tx.sql);
 });
 
 const nodeKinds = getNodeKinds(graph);
@@ -485,9 +679,7 @@ import {
   type NodeIndexDeclaration,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
-  type GraphExtension,
   type IncompatibleChange,
-  type StoreRef,
   validateGraphExtension,
   GraphExtensionError,
   GraphExtensionUnresolvedEndpointError,

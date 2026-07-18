@@ -13,6 +13,7 @@ import {
   UNBLOCKED_BUCKET_KEY,
 } from "../../src/graph-merge/blocking";
 import type { ResolveConfig } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -163,8 +164,7 @@ describe("blockNodes grouping by block()", () => {
 
       expect(buckets.has(UNBLOCKED_BUCKET_KEY)).toBe(true);
       expect(
-        buckets
-          .get(UNBLOCKED_BUCKET_KEY)!
+        requireDefined(buckets.get(UNBLOCKED_BUCKET_KEY))
           .map((node) => node.id)
           .sort(),
       ).toEqual([noKeyA.id, noKeyB.id].sort());
@@ -361,7 +361,7 @@ describe("blockNodes caseInsensitive collation (F6)", () => {
       const buckets = blockNodes([upper, lower], {}, constraints);
 
       expect(keyOrder(buckets)).toHaveLength(1);
-      const [, members] = [...buckets.entries()][0]!;
+      const [, members] = requireDefined([...buckets.entries()][0]);
       expect(members.map((node) => node.id).sort()).toEqual(
         [upper.id, lower.id].sort(),
       );
@@ -433,8 +433,7 @@ describe("blockNodes unique key matches enforcement (#1)", () => {
       const unique = uniqueBucketKeys(buckets);
       expect(unique).toHaveLength(1);
       expect(
-        buckets
-          .get(unique[0]!)!
+        requireDefined(buckets.get(requireDefined(unique[0])))
           .map((node) => node.id)
           .sort(),
       ).toEqual([numeric.id, stringy.id].sort());

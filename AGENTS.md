@@ -268,15 +268,15 @@ The `GraphBackend` interface abstracts database operations:
 
 ```typescript
 // SQLite (in-memory or file — requires better-sqlite3)
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/sqlite/local";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 const { backend, db } = createLocalSqliteBackend();
 
 // SQLite (bring your own Drizzle connection — no native deps)
-import { createSqliteBackend } from "@nicia-ai/typegraph/sqlite";
+import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 const backend = createSqliteBackend(drizzleDb);
 
 // PostgreSQL
-import { createPostgresBackend } from "@nicia-ai/typegraph/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 const backend = createPostgresBackend(pool);
 ```
 

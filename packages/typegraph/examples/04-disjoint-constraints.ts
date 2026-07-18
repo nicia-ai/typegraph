@@ -16,6 +16,7 @@ import {
 } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
+import { requireDefined } from "../src/utils/presence";
 import { createExampleBackend } from "./_helpers";
 
 // ============================================================
@@ -195,7 +196,7 @@ export async function main() {
     ];
 
     for (const [a, b] of pairs) {
-      const areDisjoint = registry.areDisjoint(a!, b!);
+      const areDisjoint = registry.areDisjoint(requireDefined(a), requireDefined(b));
       console.log(`  ${a} and ${b}: ${areDisjoint ? "DISJOINT" : "compatible"}`);
     }
 

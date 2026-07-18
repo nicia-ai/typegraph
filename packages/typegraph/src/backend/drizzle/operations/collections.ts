@@ -36,9 +36,7 @@ function buildTemporalConditions(
 
   if (mode === "current" || mode === "asOf") {
     if (params.asOf === undefined) {
-      throw new Error(
-        `asOf timestamp is required for temporal mode "${mode}"`,
-      );
+      throw new Error(`asOf timestamp is required for temporal mode "${mode}"`);
     }
     conditions.push(
       sql`(${table.validFrom} IS NULL OR ${table.validFrom} <= ${params.asOf})`,
@@ -79,9 +77,9 @@ export function buildFindNodesByKind(
   const whereClause = sql.join(conditions, sql` AND `);
 
   const orderByClause =
-    params.orderBy === "id"
-      ? sql`${nodes.id} ASC`
-      : sql`${nodes.createdAt} DESC, ${nodes.id} DESC`;
+    params.orderBy === "id" ?
+      sql`${nodes.id} ASC`
+    : sql`${nodes.createdAt} DESC, ${nodes.id} DESC`;
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`
@@ -177,9 +175,9 @@ export function buildFindEdgesByKind(
   const whereClause = sql.join(conditions, sql` AND `);
 
   const orderByClause =
-    params.orderBy === "id"
-      ? sql`${edges.id} ASC`
-      : sql`${edges.createdAt} DESC, ${edges.id} DESC`;
+    params.orderBy === "id" ?
+      sql`${edges.id} ASC`
+    : sql`${edges.createdAt} DESC, ${edges.id} DESC`;
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`

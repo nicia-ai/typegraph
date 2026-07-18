@@ -35,8 +35,13 @@ import {
   GraphExtensionValidationError,
   IncompatibleChangeError,
 } from "../src/graph-extension";
-import { createStore, createStoreWithSchema } from "../src/store/store";
+import {
+  createAdapterStoreWithSchema,
+  createStore,
+  createStoreWithSchema,
+} from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -295,10 +300,10 @@ describe("Store.evolve — round-trip parity matrix", () => {
     );
     const extensionTagCol = evolved.getNodeCollection("Tag");
     expect(extensionTagCol).toBeDefined();
-    const extensionTag = (await extensionTagCol!.create({
+    const extensionTag = (await requireDefined(extensionTagCol).create({
       label: "alpha",
     })) as unknown as ExtensionTag;
-    const extensionFetched = (await extensionTagCol!.getById(
+    const extensionFetched = (await requireDefined(extensionTagCol).getById(
       extensionTag.id,
     )) as unknown as ExtensionTag | undefined;
 
@@ -340,7 +345,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
         nodes: { Tag: { properties: { label: { type: "string" } } } },
       }),
     );
-    const runtimeTagCol = evolved.getNodeCollection("Tag")!;
+    const runtimeTagCol = requireDefined(evolved.getNodeCollection("Tag"));
     await runtimeTagCol.create({ label: "a" });
     await runtimeTagCol.create({ label: "b" });
 
@@ -358,17 +363,20 @@ describe("Store.evolve — round-trip parity matrix", () => {
 
     // update
     const compileUpdated = await compileStore.nodes.Tag.update(
-      compileFound[0]!.id,
+      requireDefined(compileFound[0]).id,
       { label: "z" },
     );
-    const runtimeUpdated = (await runtimeTagCol.update(runtimeFound[0]!.id, {
-      label: "z",
-    })) as unknown as ExtensionTag;
+    const runtimeUpdated = (await runtimeTagCol.update(
+      requireDefined(runtimeFound[0]).id,
+      {
+        label: "z",
+      },
+    )) as unknown as ExtensionTag;
     expect(runtimeUpdated.label).toBe(compileUpdated.label);
 
     // delete
-    await compileStore.nodes.Tag.delete(compileFound[1]!.id);
-    await runtimeTagCol.delete(runtimeFound[1]!.id);
+    await compileStore.nodes.Tag.delete(requireDefined(compileFound[1]).id);
+    await runtimeTagCol.delete(requireDefined(runtimeFound[1]).id);
     expect(await runtimeTagCol.count()).toBe(
       await compileStore.nodes.Tag.count(),
     );
@@ -391,7 +399,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
     );
 
     const alice = await evolved.nodes.Person.create({ name: "alice" });
-    const tagCol = evolved.getNodeCollection("Tag")!;
+    const tagCol = requireDefined(evolved.getNodeCollection("Tag"));
     const featured = (await tagCol.create({
       label: "featured",
     })) as unknown as ExtensionTag;
@@ -399,7 +407,7 @@ describe("Store.evolve — round-trip parity matrix", () => {
       label: "important",
     })) as unknown as ExtensionTag;
 
-    const appliesTo = evolved.getEdgeCollection("appliesTo")!;
+    const appliesTo = requireDefined(evolved.getEdgeCollection("appliesTo"));
     await appliesTo.create(
       { kind: "Tag", id: featured.id },
       { kind: "Person", id: alice.id },
@@ -417,8 +425,8 @@ describe("Store.evolve — round-trip parity matrix", () => {
       id: featured.id,
     });
     expect(fromFeatured).toHaveLength(1);
-    expect(fromFeatured[0]!.toKind).toBe("Person");
-    expect(fromFeatured[0]!.toId).toBe(alice.id);
+    expect(requireDefined(fromFeatured[0]).toKind).toBe("Person");
+    expect(requireDefined(fromFeatured[0]).toId).toBe(alice.id);
 
     // Reverse traversal: from a compile-time Person, find all
     // incoming appliesTo edges (originating from runtime Tags).
@@ -481,7 +489,7 @@ describe("Store.evolve — concurrency", () => {
     // advanced the active pointer before the loser's CAS check) or
     // SchemaContentConflictError (if the loser hits the version row
     // first and finds a different hash). Both are valid race losers.
-    const reason = rejected[0]!.reason as Error;
+    const reason = requireDefined(rejected[0]).reason as Error;
     const isExpected =
       reason instanceof StaleVersionError ||
       reason instanceof SchemaContentConflictError;
@@ -500,8 +508,9 @@ describe("Store.evolve — concurrency", () => {
     // B commits the extension first; A is now stale (its #graph
     // doesn't carry Tag, but the persisted schema does).
     const evolvedB = await storeB.evolve(tagExtension);
-    const versionAfterB = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const versionAfterB = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
 
     // A applies the same extension. Merging onto the caught-up
     // baseline is a structural no-op; the no-op short-circuit must
@@ -509,8 +518,9 @@ describe("Store.evolve — concurrency", () => {
     // `migrateSchema` and bump the version unnecessarily.
     const evolvedA = await storeA.evolve(tagExtension);
 
-    const versionAfterA = (await backend.getActiveSchema(baseGraph.id))!
-      .version;
+    const versionAfterA = requireDefined(
+      await backend.getActiveSchema(baseGraph.id),
+    ).version;
     expect(versionAfterA).toBe(versionAfterB);
 
     // The returned store reflects the caught-up state — introspect()
@@ -540,6 +550,37 @@ describe("StoreRef pattern (consumer-composed)", () => {
 
     expect(ref.current).toBe(evolved);
     expect(ref.current.registry.hasNodeType("Tag")).toBe(true);
+  });
+
+  it("preserves adapter capabilities when re-pointing an AdapterStore ref", async () => {
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(baseGraph, backend);
+    const ref: StoreRef<typeof store> = { current: store };
+
+    const extension = defineGraphExtension({
+      nodes: { Tag: { properties: { label: { type: "string" } } } },
+    });
+    const evolved = await ref.current.evolve(extension, { ref });
+
+    expect(ref.current).toBe(evolved);
+    expect(ref.current.registry.hasNodeType("Tag")).toBe(true);
+    expect(ref.current.withTransaction).toBeTypeOf("function");
+    expect(ref.current.backend).toBe(evolved.backend);
+  });
+
+  it("does not rewind an AdapterStore ref when evolution fails before replacement", async () => {
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(baseGraph, backend);
+    const [current] = await createAdapterStoreWithSchema(baseGraph, backend);
+    const ref: StoreRef<typeof store> = { current };
+
+    await expect(
+      store.deprecateKinds(["MissingKind"], { ref }),
+    ).rejects.toBeInstanceOf(KindNotFoundError);
+
+    expect(ref.current).toBe(current);
+    expect(ref.current).not.toBe(store);
+    expect(ref.current.withTransaction).toBeTypeOf("function");
   });
 
   it("evolve without ref returns the new store; consumer reassigns", async () => {

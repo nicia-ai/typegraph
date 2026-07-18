@@ -1,13 +1,21 @@
-import { type SQL } from "drizzle-orm";
-import { type PgDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { type SQL as DrizzleSql } from "drizzle-orm";
+import {
+  type PgDatabase,
+  type PgQueryResultHKT,
+  type PgTransaction,
+} from "drizzle-orm/pg-core";
+import { type ExtractTablesWithRelations } from "drizzle-orm/relations";
 
+import { isSqlFragment } from "../../../query/sql-fragment";
 import { shouldForceCustomPlan } from "../../../query/sql-intent";
 import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
+  type ExecutableSql,
   type PreparedSqlStatement,
   type SqlExecutionAdapter,
+  toDrizzleSql,
 } from "./types";
 
 /**
@@ -28,7 +36,10 @@ type PgQueryResult = Readonly<{
  * (postgres-js).
  */
 type PgQueryClient = Readonly<{
-  query: (sqlText: string, params: readonly unknown[]) => Promise<PgQueryResult>;
+  query: (
+    sqlText: string,
+    params: readonly unknown[],
+  ) => Promise<PgQueryResult>;
   /**
    * Executes WITHOUT a named server-side prepared statement, so the
    * server plans against the actual parameter values on every call.
@@ -89,7 +100,23 @@ type PgClientCarrier = Readonly<{
   }>;
 }>;
 
-export type AnyPgDatabase = PgDatabase<PgQueryResultHKT, Record<string, unknown>>;
+export type AnyPgDatabase = PgDatabase<
+  PgQueryResultHKT,
+  Record<string, unknown>
+>;
+
+/**
+ * A driver-agnostic Drizzle PostgreSQL transaction handle.
+ *
+ * Unlike {@link AnyPgDatabase}, this type cannot be satisfied by a root
+ * database. It is the native handle exposed to adapter-aware stores and
+ * accepted when adopting a caller-owned PostgreSQL transaction.
+ */
+export type AnyPgTransaction = PgTransaction<
+  PgQueryResultHKT,
+  Record<string, unknown>,
+  ExtractTablesWithRelations<Record<string, unknown>>
+>;
 
 export type PostgresExecutionAdapter = SqlExecutionAdapter;
 
@@ -109,7 +136,9 @@ function isPgNativeClient(candidate: unknown): candidate is NodePgClient {
   // are object instances with a `.query` method. We require non-callable
   // here so we don't accidentally swallow the postgres-js or neon-http
   // tagged-template clients (both callable, both also expose `.query`).
-  return typeof candidate === "object" && hasFunctionProperty(candidate, "query");
+  return (
+    typeof candidate === "object" && hasFunctionProperty(candidate, "query")
+  );
 }
 
 function isPgliteClient(candidate: unknown): candidate is NodePgClient {
@@ -252,9 +281,7 @@ function normalizeRow(row: unknown): unknown {
   return mutated ?? row;
 }
 
-function normalizeRows(
-  rows: readonly unknown[],
-): readonly unknown[] {
+function normalizeRows(rows: readonly unknown[]): readonly unknown[] {
   // Single-pass scan; only allocate a new array if any row contained a
   // Date that needed normalizing. Most rows on most queries don't.
   let mutated: unknown[] | undefined;
@@ -422,8 +449,8 @@ function resolvePgClient(
     return wrapNodePgClientUnnamed(client);
   }
   if (isPgNativeClient(client)) {
-    return prepareStatements
-      ? wrapNodePgClient(client, cacheMax)
+    return prepareStatements ?
+        wrapNodePgClient(client, cacheMax)
       : wrapNodePgClientUnnamed(client);
   }
   if (isPostgresJsClient(client)) {
@@ -450,7 +477,7 @@ function resolvePgClient(
  */
 async function executeDrizzleQuery<TRow>(
   db: AnyPgDatabase,
-  query: SQL,
+  query: DrizzleSql,
 ): Promise<readonly TRow[]> {
   const result = await db.execute(query);
   if (Array.isArray(result)) {
@@ -525,15 +552,18 @@ export function createPostgresExecutionAdapter(
     options.useTransactionClient ?? false,
   );
 
-  function compile(query: SQL): CompiledSqlQuery {
+  function compile(query: ExecutableSql): CompiledSqlQuery {
     return compileQueryWithDialect(db, query, "PostgreSQL");
   }
 
   if (pgClient === undefined) {
     return {
       compile,
-      async execute<TRow>(query: SQL): Promise<readonly TRow[]> {
-        return executeDrizzleQuery<TRow>(db, query);
+      async execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
+        return executeDrizzleQuery<TRow>(
+          db,
+          isSqlFragment(query) ? toDrizzleSql(query, "postgres") : query,
+        );
       },
     };
   }
@@ -552,7 +582,7 @@ export function createPostgresExecutionAdapter(
 
   return {
     compile,
-    async execute<TRow>(query: SQL): Promise<readonly TRow[]> {
+    async execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
       // Fast path: compile via Drizzle's dialect, then execute through
       // the wrapped client directly. Bypasses Drizzle's session
       // overhead (logging spans, plan-cache bookkeeping for typed
@@ -560,7 +590,7 @@ export function createPostgresExecutionAdapter(
       // the server-side prepared-statement path because the wrapped
       // client assigns each unique SQL a stable statement name.
       const compiled = compile(query);
-      if (shouldForceCustomPlan(query)) {
+      if (isSqlFragment(query) && shouldForceCustomPlan(query)) {
         const result = await pgQueryClient.queryUnnamed(
           compiled.sql,
           compiled.params,
