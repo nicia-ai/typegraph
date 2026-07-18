@@ -168,6 +168,7 @@ void store.algorithms.personalizedPageRank({
 void store.algorithms.labelPropagation({
   edges: ["knows"],
   nodeKinds: ["Person"],
+  onMaxIterations: "return",
 });
 
 // Degree accepts an options-less call and a specific edge-kind selection.

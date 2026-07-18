@@ -355,6 +355,7 @@ const memberships = await store.algorithms.labelPropagation({
   edges: ["knows", "worksAt"],
   nodeKinds: ["Person", "Company"], // optional; all kinds by default
   maxIterations: 1000, // default
+  onMaxIterations: "throw", // default; "return" accepts the fixed-round labeling
 });
 // [{ id, kind, labelId, labelKind }, ...]
 ```
@@ -367,12 +368,29 @@ before a label is staged, so results do not depend on bind limits or chunk
 order. Changed-node frontiers restrict each later round to nodes whose neighbor
 labels may have changed.
 
-This API follows CDLP's synchronous mode-label rule but intentionally has a
-stronger completion contract than the fixed-round Graphalytics benchmark: it
-returns only a converged labeling. Synchronous label propagation can oscillate
-(a single edge between two otherwise isolated nodes swaps labels forever), so
-exhausting `maxIterations` throws `GraphAlgorithmConvergenceError` rather than
-returning a parity-dependent partial labeling.
+Synchronous voting has no self-vote, so structures whose neighborhoods mirror
+each other never converge — they alternate between two labelings forever. This
+covers every tree-shaped component (an isolated edge pair, a path, a star, an
+org-chart hierarchy), every even-length cycle, and complete bipartite blocks;
+empirically most sparse random graphs contain at least one such component.
+One oscillating component anywhere in the selection prevents global
+convergence, and raising `maxIterations` cannot help. Dense neighborhoods
+built on odd cycles — triangles, cliques, and communities of them — converge.
+
+`onMaxIterations` selects the completion contract:
+
+- `"throw"` (default) returns only a converged labeling. A detected
+  period-two oscillation throws `GraphAlgorithmConvergenceError` immediately
+  rather than burning the remaining budget, and exhausting `maxIterations`
+  throws the same typed error. Partial labelings are never returned.
+- `"return"` yields the labeling after exactly `maxIterations` synchronous
+  rounds (or at convergence, whichever comes first) — the fixed-round
+  contract of the LDBC Graphalytics CDLP benchmark. Synchronous rounds are
+  deterministic and chunk-independent, so this labeling is exact and
+  identical on SQLite and PostgreSQL. Use it for tree-shaped or mixed data
+  where a converged labeling need not exist; a detected oscillation
+  fast-forwards to the parity-exact final labeling instead of running every
+  remaining round.
 
 Like WCC and PageRank, label propagation requires
 `backend.capabilities.graphAnalytics?.supported === true`, runs in one

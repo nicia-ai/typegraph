@@ -96,6 +96,22 @@ export function frontierIndexIdentifier(context: IterativeGraphRunContext) {
   );
 }
 
+type WorkingTableCountRow = Readonly<{ count: number | string }>;
+
+/** Counts this run's working-table rows; drivers may deliver bigint text. */
+export async function countWorkingTableRows(
+  context: IterativeGraphRunContext,
+): Promise<number> {
+  const rows = await context.backend.execute<WorkingTableCountRow>(
+    asCompiledRowsSql(sql`
+      SELECT COUNT(*) AS count
+      FROM ${context.workingTable}
+      WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
+    `),
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
 export type IterativeGraphPlan<
   State extends IterativeGraphState,
   Result,

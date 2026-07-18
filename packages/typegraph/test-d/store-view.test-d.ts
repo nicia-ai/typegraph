@@ -257,6 +257,12 @@ expectError(
   }),
 );
 expectError(
+  view.algorithms.labelPropagation({
+    edges: ["knows"],
+    onMaxIterations: "explode",
+  }),
+);
+expectError(
   view.algorithms.personalizedPageRank({
     edges: ["knows"],
     seeds: [{ id: "person-1", kind: "Person" }],

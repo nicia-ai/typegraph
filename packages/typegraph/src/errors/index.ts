@@ -921,15 +921,28 @@ export class ConfigurationError extends TypeGraphError {
  * budget before reaching its convergence predicate.
  */
 export class GraphAlgorithmConvergenceError extends TypeGraphError {
-  constructor(algorithm: string, maxIterations: number) {
+  constructor(
+    algorithm: string,
+    maxIterations: number,
+    options: Readonly<{ oscillating?: boolean }> = {},
+  ) {
+    const oscillating = options.oscillating === true;
     super(
-      `${algorithm} did not converge within ${maxIterations} iterations.`,
+      oscillating ?
+        `${algorithm} entered a periodic label oscillation and can never converge.`
+      : `${algorithm} did not converge within ${maxIterations} iterations.`,
       "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
       {
-        details: { algorithm, maxIterations },
+        details: {
+          algorithm,
+          maxIterations,
+          ...(oscillating ? { oscillating } : {}),
+        },
         category: "user",
         suggestion:
-          "Increase maxIterations or reduce the selected graph before retrying.",
+          oscillating ?
+            'Pass onMaxIterations: "return" to accept the fixed-round labeling, or exclude the oscillating component from the selection.'
+          : "Increase maxIterations or reduce the selected graph before retrying.",
       },
     );
     this.name = "GraphAlgorithmConvergenceError";

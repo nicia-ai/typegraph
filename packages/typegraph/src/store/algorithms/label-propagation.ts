@@ -1,12 +1,13 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
+import { GraphAlgorithmConvergenceError } from "../../errors";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
   normalizeNodeKinds,
   pickTemporalOptions,
@@ -14,8 +15,11 @@ import {
 } from "./context";
 import {
   compileWorkingTableEdgeExpansion,
+  countWorkingTableRows,
   frontierIndexIdentifier,
   type IterativeGraphRunContext,
+  type NodeIdentityKey,
+  nodeIdentityKey,
   runIterativeGraphOperation,
 } from "./iterative-graph-operation";
 import type {
@@ -26,15 +30,33 @@ import type {
 type IterationState = Readonly<{
   changedCount: number;
   workingTableSize: number;
+  /** Fixed-round completion reached (`onMaxIterations: "return"` only). */
+  completed: boolean;
+  /** A detected oscillation needs one parity round before completing. */
+  finishNextRound: boolean;
 }>;
-type CountRow = Readonly<{ count: number | string }>;
-type ChangedRow = Readonly<{ node_id: string }>;
+type ChangedRow = Readonly<{
+  node_id: string;
+  node_kind: string;
+  label_id: string;
+  label_kind: string;
+}>;
 type MembershipRow = Readonly<{
   node_id: string;
   node_kind: string;
   label_id: string;
   label_kind: string;
 }>;
+
+type CompletionMode = "return" | "throw";
+
+type RoundPolicy = Readonly<{
+  detector: OscillationDetector;
+  maxIterations: number;
+  onMaxIterations: CompletionMode;
+}>;
+
+type OscillationDetector = ReturnType<typeof createOscillationDetector>;
 
 const DEFAULT_LABEL_PROPAGATION_MAX_ITERATIONS = 1000;
 
@@ -53,6 +75,11 @@ export async function executeLabelPropagation<G extends GraphDef>(
     "labelPropagation",
   );
   const nodeKinds = normalizeNodeKinds(options.nodeKinds);
+  const policy: RoundPolicy = {
+    detector: createOscillationDetector(),
+    maxIterations,
+    onMaxIterations: options.onMaxIterations ?? "throw",
+  };
   const traversalOptions: InternalTraversalOptions = {
     edges: options.edges,
     direction: "both",
@@ -67,13 +94,58 @@ export async function executeLabelPropagation<G extends GraphDef>(
     maxIterations,
     createWorkingTable,
     initialize: (context) => initializeWorkingTables(context, nodeKinds),
-    runRound: runLabelPropagationRound,
+    runRound: (context, state, iteration) =>
+      runLabelPropagationRound(context, state, iteration, policy),
     hasConverged(state) {
-      return state.changedCount === 0;
+      return state.changedCount === 0 || state.completed;
     },
     extractResult: extractMemberships,
     cleanup: dropNeighborTable,
   });
+}
+
+/**
+ * Detects period-two oscillation from the per-round change feed. The round
+ * map is a delta over a lazily built shadow labeling (every node starts as
+ * its own label, and `applyNextLabels` reports every change), so a round
+ * whose changes exactly invert the previous round's proves the labeling two
+ * rounds back has recurred — and a deterministic synchronous rule then
+ * alternates between the two labelings forever. Longer cycles are not
+ * detected here and fall through to the `maxIterations` budget. Memory grows
+ * with the number of distinct nodes that ever changed label.
+ */
+function createOscillationDetector() {
+  const shadowLabels = new Map<NodeIdentityKey, NodeIdentityKey>();
+  let previousRound:
+    | ReadonlyMap<NodeIdentityKey, Readonly<{ before: NodeIdentityKey }>>
+    | undefined;
+  return {
+    /** Records one applied round; true when the round inverts the previous. */
+    observeRound(changedRows: readonly ChangedRow[]): boolean {
+      const round = new Map<
+        NodeIdentityKey,
+        Readonly<{ before: NodeIdentityKey; after: NodeIdentityKey }>
+      >();
+      for (const row of changedRows) {
+        const node = nodeIdentityKey({ id: row.node_id, kind: row.node_kind });
+        const after = nodeIdentityKey({
+          id: row.label_id,
+          kind: row.label_kind,
+        });
+        const before = shadowLabels.get(node) ?? node;
+        round.set(node, { before, after });
+        shadowLabels.set(node, after);
+      }
+      const priorRound = previousRound;
+      previousRound = round;
+      if (priorRound?.size !== round.size) return false;
+      if (round.size === 0) return false;
+      for (const [node, change] of round) {
+        if (priorRound.get(node)?.before !== change.after) return false;
+      }
+      return true;
+    },
+  };
 }
 
 function createWorkingTable(context: IterativeGraphRunContext): SQL {
@@ -94,6 +166,9 @@ function createWorkingTable(context: IterativeGraphRunContext): SQL {
   `;
 }
 
+// Single-letter discriminators before the run id keep the auxiliary relation
+// names aligned and clearly grouped per run; every name stays well inside
+// PostgreSQL's 63-byte identifier cap.
 function neighborTableIdentifier(context: IterativeGraphRunContext) {
   return sql.identifier(
     `typegraph_iterative_n_${context.runId.replaceAll("-", "_")}`,
@@ -106,21 +181,12 @@ function activeIndexIdentifier(context: IterativeGraphRunContext) {
   );
 }
 
-function reverseNeighborIndexIdentifier(context: IterativeGraphRunContext) {
-  return sql.identifier(
-    `typegraph_iterative_r_${context.runId.replaceAll("-", "_")}`,
-  );
-}
-
 async function initializeWorkingTables(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter =
-    nodeKinds === undefined ?
-      sql`TRUE`
-    : compileKindFilter(sql.raw("n.kind"), nodeKinds);
+  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
   await context.executeTemporary(sql`
     INSERT INTO ${workingTable}
       (graph_id, run_id, node_id, node_kind, label_id, label_kind,
@@ -150,11 +216,6 @@ async function initializeWorkingTables(
       PRIMARY KEY (target_kind, target_id, neighbor_kind, neighbor_id)
     )
   `);
-  await context.executeTemporary(sql`
-    CREATE INDEX ${reverseNeighborIndexIdentifier(context)}
-    ON ${neighborTable}
-      (neighbor_kind, neighbor_id, target_kind, target_id)
-  `);
   for (const edgeKinds of operation.edgeKindChunks) {
     await materializeChunkNeighbors(context, edgeKinds);
   }
@@ -164,21 +225,20 @@ async function initializeWorkingTables(
     await context.executeTemporary(analyzeNeighbors);
   }
 
-  const rows = await context.backend.execute<CountRow>(
-    asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS count
-      FROM ${workingTable}
-      WHERE graph_id = ${graphId} AND run_id = ${runId}
-    `),
-  );
-  const workingTableSize = Number(rows[0]?.count ?? 0);
-  return { changedCount: workingTableSize, workingTableSize };
+  const workingTableSize = await countWorkingTableRows(context);
+  return {
+    changedCount: workingTableSize,
+    workingTableSize,
+    completed: false,
+    finishNextRound: false,
+  };
 }
 
 async function runLabelPropagationRound(
   context: IterativeGraphRunContext,
   state: IterationState,
   iteration: number,
+  policy: RoundPolicy,
 ): Promise<IterationState> {
   // Every node owns a distinct initial label, so every non-isolated node votes
   // in round one. Later rounds activate only neighbors of the changed frontier.
@@ -187,10 +247,47 @@ async function runLabelPropagationRound(
   }
   await selectWinningLabels(context, iteration);
   const changedRows = await applyNextLabels(context, iteration);
-  return {
+  const next: IterationState = {
     changedCount: changedRows.length,
     workingTableSize: state.workingTableSize,
+    completed: false,
+    finishNextRound: false,
   };
+  if (next.changedCount === 0) return next;
+  if (state.finishNextRound) return { ...next, completed: true };
+  if (policy.detector.observeRound(changedRows)) {
+    return resolveOscillation(next, iteration, policy);
+  }
+  if (
+    policy.onMaxIterations === "return" &&
+    iteration === policy.maxIterations
+  ) {
+    return { ...next, completed: true };
+  }
+  return next;
+}
+
+/**
+ * The labeling two rounds back has recurred, so the synchronous rule now
+ * alternates between two labelings forever. The fixed-round result is fully
+ * determined by parity: an even remainder is this round's labeling, an odd
+ * remainder is the next round's.
+ */
+function resolveOscillation(
+  state: IterationState,
+  iteration: number,
+  policy: RoundPolicy,
+): IterationState {
+  if (policy.onMaxIterations === "throw") {
+    throw new GraphAlgorithmConvergenceError(
+      "labelPropagation",
+      policy.maxIterations,
+      { oscillating: true },
+    );
+  }
+  const remaining = policy.maxIterations - iteration;
+  if (remaining % 2 === 0) return { ...state, completed: true };
+  return { ...state, finishNextRound: true };
 }
 
 /** Marks exactly the nodes whose vote multiset may have changed this round. */
@@ -200,13 +297,17 @@ async function markActiveNeighbors(
 ): Promise<void> {
   const { workingTable, graphId, runId } = context;
   const neighborTable = neighborTableIdentifier(context);
+  // The neighbor relation is symmetric — materialization inserts both
+  // orientations of every visible edge — so probing the primary-key prefix by
+  // target and reading the neighbor columns enumerates the same adjacency as
+  // a dedicated reverse index would, without paying for one.
   await context.executeTemporary(sql`
     WITH candidates AS (
-      SELECT DISTINCT neighbors.target_id, neighbors.target_kind
+      SELECT DISTINCT neighbors.neighbor_id, neighbors.neighbor_kind
       FROM ${workingTable} changed
       JOIN ${neighborTable} neighbors
-        ON neighbors.neighbor_id = changed.node_id
-        AND neighbors.neighbor_kind = changed.node_kind
+        ON neighbors.target_id = changed.node_id
+        AND neighbors.target_kind = changed.node_kind
       WHERE changed.graph_id = ${graphId}
         AND changed.run_id = ${runId}
         AND changed.changed_round = ${iteration - 1}
@@ -216,9 +317,8 @@ async function markActiveNeighbors(
     FROM candidates
     WHERE target.graph_id = ${graphId}
       AND target.run_id = ${runId}
-      AND target.node_id = candidates.target_id
-      AND target.node_kind = candidates.target_kind
-      AND target.active_round <> ${iteration}
+      AND target.node_id = candidates.neighbor_id
+      AND target.node_kind = candidates.neighbor_kind
   `);
 }
 
@@ -333,6 +433,9 @@ function applyNextLabels(
   context: IterativeGraphRunContext,
   iteration: number,
 ): Promise<readonly ChangedRow[]> {
+  // Only rows selectWinningLabels staged this round can diverge, and it stages
+  // active rows exclusively, so the active index bounds this scan by the
+  // frontier instead of the whole working table.
   return context.backend.execute<ChangedRow>(
     asCompiledRowsSql(sql`
       UPDATE ${context.workingTable}
@@ -341,10 +444,11 @@ function applyNextLabels(
           changed_round = ${iteration}
       WHERE graph_id = ${context.graphId}
         AND run_id = ${context.runId}
+        AND active_round = ${iteration}
         AND (
           label_id <> next_label_id OR label_kind <> next_label_kind
         )
-      RETURNING node_id
+      RETURNING node_id, node_kind, label_id, label_kind
     `),
   );
 }

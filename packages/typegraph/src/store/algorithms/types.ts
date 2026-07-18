@@ -319,8 +319,18 @@ export type LabelPropagationOptions<G extends GraphDef> =
       edges: readonly EdgeKinds<G>[];
       /** Optional node kinds defining the induced subgraph to analyze. */
       nodeKinds?: readonly NodeKinds<G>[];
-      /** Maximum synchronous rounds before throwing. Defaults to `1000`. */
+      /** Maximum synchronous rounds. Defaults to `1000`. */
       maxIterations?: number;
+      /**
+       * Completion contract when `maxIterations` rounds elapse without
+       * convergence. `"throw"` (default) raises
+       * `GraphAlgorithmConvergenceError` — immediately once a periodic
+       * oscillation is detected, since no budget can converge it. `"return"`
+       * yields the exact labeling after `maxIterations` synchronous rounds,
+       * matching fixed-round Graphalytics CDLP; synchronous rounds are
+       * deterministic, so that labeling is identical on every backend.
+       */
+      onMaxIterations?: "throw" | "return";
     }>;
 
 export type InternalLabelPropagationOptions<G extends GraphDef> =

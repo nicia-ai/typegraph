@@ -1,12 +1,12 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
   normalizeNodeKinds,
   pickTemporalOptions,
@@ -14,6 +14,7 @@ import {
 } from "./context";
 import {
   compileWorkingTableEdgeExpansion,
+  countWorkingTableRows,
   frontierIndexIdentifier,
   type IterativeGraphRunContext,
   runIterativeGraphOperation,
@@ -27,7 +28,6 @@ type IterationState = Readonly<{
   changedCount: number;
   workingTableSize: number;
 }>;
-type CountRow = Readonly<{ count: number | string }>;
 type ChangedRow = Readonly<{ node_id: string }>;
 type MembershipRow = Readonly<{
   node_id: string;
@@ -98,10 +98,7 @@ async function initializeWorkingTable(
   nodeKinds: readonly string[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter =
-    nodeKinds === undefined ?
-      sql`TRUE`
-    : compileKindFilter(sql.raw("n.kind"), nodeKinds);
+  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
   await context.executeTemporary(sql`
     INSERT INTO ${workingTable}
       (graph_id, run_id, node_id, node_kind, label_id, label_kind,
@@ -118,14 +115,7 @@ async function initializeWorkingTable(
     ON ${workingTable} (graph_id, run_id, improved_round)
   `);
 
-  const rows = await context.backend.execute<CountRow>(
-    asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS count
-      FROM ${workingTable}
-      WHERE graph_id = ${graphId} AND run_id = ${runId}
-    `),
-  );
-  const workingTableSize = Number(rows[0]?.count ?? 0);
+  const workingTableSize = await countWorkingTableRows(context);
   return { changedCount: workingTableSize, workingTableSize };
 }
 

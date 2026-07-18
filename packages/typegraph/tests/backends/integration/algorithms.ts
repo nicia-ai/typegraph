@@ -1059,6 +1059,25 @@ export function registerAlgorithmIntegrationTests(
             maxIterations: 4,
           }),
         ).rejects.toBeInstanceOf(GraphAlgorithmConvergenceError);
+
+        // The fixed-round contract is parity-exact on both backends: a dyad
+        // holds its initial labels after even round counts and the swapped
+        // labels after odd round counts.
+        for (const [maxIterations, expectedLeft, expectedRight] of [
+          [4, left.id, right.id],
+          [5, right.id, left.id],
+        ] as const) {
+          const memberships = await store.algorithms.labelPropagation({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            maxIterations,
+            onMaxIterations: "return",
+          });
+          const labelOf = (id: string) =>
+            memberships.find((row) => row.id === id)?.labelId;
+          expect(labelOf(left.id)).toBe(expectedLeft);
+          expect(labelOf(right.id)).toBe(expectedRight);
+        }
       });
     });
 
