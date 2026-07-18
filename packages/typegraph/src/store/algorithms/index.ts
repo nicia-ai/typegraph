@@ -11,6 +11,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { assertNoRecordedCoordinate } from "../recorded-coordinate-guard";
 import { type AlgorithmContext } from "./context";
 import { executeDegree } from "./degree";
+import { executePageRank, executePersonalizedPageRank } from "./page-rank";
 import {
   executeCanReach,
   executeNeighbors,
@@ -23,11 +24,16 @@ import type {
   InternalBaseTraversalOptions,
   InternalDegreeOptions,
   InternalNeighborsOptions,
+  InternalPageRankOptions,
+  InternalPersonalizedPageRankOptions,
   InternalReachableOptions,
   InternalShortestPathOptions,
   InternalWeaklyConnectedComponentsOptions,
   InternalWeightedShortestPathOptions,
   NeighborsOptions,
+  PageRankOptions,
+  PageRankScore,
+  PersonalizedPageRankOptions,
   ReachableNode,
   ReachableOptions,
   ShortestPathOptions,
@@ -152,6 +158,19 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
   weaklyConnectedComponents: (
     options: WeaklyConnectedComponentsOptions<G>,
   ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
+
+  /**
+   * Computes global PageRank over the visible induced graph. Scores sum to
+   * approximately one and are returned from highest to lowest.
+   */
+  pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
+
+  /**
+   * Computes PageRank with teleport mass distributed across weighted seeds.
+   */
+  personalizedPageRank: (
+    options: PersonalizedPageRankOptions<G>,
+  ) => Promise<readonly PageRankScore[]>;
 }>;
 
 export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
@@ -185,6 +204,12 @@ export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
   weaklyConnectedComponents: (
     options: InternalWeaklyConnectedComponentsOptions<G>,
   ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
+  pageRank: (
+    options: InternalPageRankOptions<G>,
+  ) => Promise<readonly PageRankScore[]>;
+  personalizedPageRank: (
+    options: InternalPersonalizedPageRankOptions<G>,
+  ) => Promise<readonly PageRankScore[]>;
 }>;
 
 export type CreateGraphAlgorithmsParams = Readonly<{
@@ -284,6 +309,18 @@ export function createGraphAlgorithms<G extends GraphDef>(
       );
       return executeWeaklyConnectedComponents(ctx, options);
     },
+    pageRank(options) {
+      assertRecordedAsOfInternalOnly(options, "pageRank", allowRecordedAsOf);
+      return executePageRank(ctx, options);
+    },
+    personalizedPageRank(options) {
+      assertRecordedAsOfInternalOnly(
+        options,
+        "personalizedPageRank",
+        allowRecordedAsOf,
+      );
+      return executePersonalizedPageRank(ctx, options);
+    },
   };
 }
 
@@ -294,13 +331,19 @@ export type {
   InternalBaseTraversalOptions,
   InternalDegreeOptions,
   InternalNeighborsOptions,
+  InternalPageRankOptions,
+  InternalPersonalizedPageRankOptions,
   InternalReachableOptions,
   InternalShortestPathOptions,
   InternalTemporalAlgorithmOptions,
   InternalWeaklyConnectedComponentsOptions,
   InternalWeightedShortestPathOptions,
   NeighborsOptions,
+  PageRankOptions,
+  PageRankScore,
   PathNode,
+  PersonalizedPageRankOptions,
+  PersonalizedPageRankSeed,
   ReachableNode,
   ReachableOptions,
   ShortestPathOptions,

@@ -1083,6 +1083,14 @@ export function registerRecordedTimeIntegrationTests(
       expect(earlyComponents.every((membership) => membership.size === 3)).toBe(
         true,
       );
+      const earlyRanks = await early.algorithms.personalizedPageRank({
+        edges: ["knows"],
+        seeds: [{ id: a.id, kind: "Person" }],
+      });
+      expect(earlyRanks).toHaveLength(3);
+      expect(
+        earlyRanks.reduce((total, row) => total + row.score, 0),
+      ).toBeCloseTo(1, 10);
 
       const earlySubgraph = await early.subgraph(a.id, {
         edges: ["knows"],
@@ -1101,6 +1109,15 @@ export function registerRecordedTimeIntegrationTests(
       expect(
         await late.degree(a.id, { edges: ["knows"], direction: "out" }),
       ).toBe(2);
+      const lateRanks = await late.personalizedPageRank({
+        edges: ["knows"],
+        seeds: [{ id: a.id, kind: "Person" }],
+      });
+      expect(lateRanks).toHaveLength(3);
+      expect(lateRanks.find((row) => row.id === c.id)?.score).not.toBeCloseTo(
+        earlyRanks.find((row) => row.id === c.id)?.score ?? 0,
+        6,
+      );
 
       // History is immutable: the earlier instant still sees the two-hop path.
       const replayedPath = await store
@@ -1364,6 +1381,31 @@ export function registerRecordedTimeIntegrationTests(
             invokeRuntimeMethod(algorithms, "degree", [
               alice.id,
               algorithmOptions,
+            ]),
+          message: "recordedAsOf is only available through",
+        },
+        {
+          surface: "weaklyConnectedComponents",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "weaklyConnectedComponents", [
+              algorithmOptions,
+            ]),
+          message: "recordedAsOf is only available through",
+        },
+        {
+          surface: "pageRank",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "pageRank", [algorithmOptions]),
+          message: "recordedAsOf is only available through",
+        },
+        {
+          surface: "personalizedPageRank",
+          invoke: () =>
+            invokeRuntimeMethod(algorithms, "personalizedPageRank", [
+              {
+                ...algorithmOptions,
+                seeds: [{ id: alice.id, kind: "Person" }],
+              },
             ]),
           message: "recordedAsOf is only available through",
         },

@@ -42,11 +42,10 @@ TypeGraph works well for:
 TypeGraph is not designed for:
 
 - Distributed graph processing
-- Advanced graph analytics (PageRank, community detection, centrality
-  beyond degree) — it does ship connectivity algorithms
-  ([Graph Algorithms](https://typegraph.dev/graph-algorithms): shortest
-  path both weighted and unweighted, reachability, neighborhoods, degree,
-  exact WCC)
+- Broad graph-data-science suites—its focused
+  [Graph Algorithms](https://typegraph.dev/graph-algorithms) API includes
+  shortest path, reachability, neighborhoods, degree, exact WCC, and global
+  and personalized PageRank, but not community detection or centrality suites
 - Billion-scale graphs requiring dedicated graph-engine performance
 
 ## Installation

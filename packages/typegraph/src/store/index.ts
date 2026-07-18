@@ -62,6 +62,8 @@ export type {
   StoreViewDegreeOptions,
   StoreViewGraphAlgorithms,
   StoreViewNeighborsOptions,
+  StoreViewPageRankOptions,
+  StoreViewPersonalizedPageRankOptions,
   StoreViewReachableOptions,
   StoreViewShortestPathOptions,
   StoreViewSubgraphOptions,

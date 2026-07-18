@@ -55,7 +55,9 @@ database connection, and compiles queries to SQL.
 cases—knowledge bases, organizational structures, content relationships—the graph is part of your application,
 not a standalone system.
 
-**Tradeoff**: You don't get Neo4j's specialized graph algorithms (PageRank, community detection), but you avoid:
+**Tradeoff**: You don't get Neo4j's broad graph-data-science suite (community
+detection, betweenness centrality, and similar specialized analytics), but you
+avoid:
 
 - Additional deployment complexity
 - Network latency between app and graph
@@ -499,8 +501,8 @@ nearest neighbor search efficiently.
 ### What's Slower
 
 - **Deep recursive traversals**: Recursive CTEs are more expensive than simple JOINs
-- **Whole-graph algorithms**: WCC iterates over every visible node by default,
-  or over an explicit `nodeKinds` induced subgraph, and its selected edges
+- **Whole-graph algorithms**: WCC and PageRank iterate over every visible node
+  by default, or over an explicit `nodeKinds` induced subgraph, and their selected edges
 - **Large property filtering without indexes**: JSON extraction is slower than column access
 - **Cross-kind queries**: `includeSubClasses: true` increases the WHERE IN set
 
@@ -519,7 +521,7 @@ nearest neighbor search efficiently.
 Native graph databases (Neo4j, Amazon Neptune) excel at:
 
 - Very deep traversals (10+ hops)
-- Graph algorithms (shortest path, PageRank)
+- Broad graph-data-science suites beyond the focused built-in algorithms
 - Massive scale (billions of nodes)
 
 TypeGraph is designed for:

@@ -301,3 +301,51 @@ export type WeaklyConnectedComponentMembership = Readonly<{
   /** Number of visible nodes in this component. */
   size: number;
 }>;
+
+/** Options shared by global and personalized PageRank. */
+export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
+  IterativeMemoryOptions &
+  Readonly<{
+    /** Edge kinds defining the transition graph. */
+    edges: readonly EdgeKinds<G>[];
+    /** Optional node kinds defining the induced subgraph to rank. */
+    nodeKinds?: readonly NodeKinds<G>[];
+    /** Transition direction. Defaults to `"out"`. */
+    direction?: TraversalDirection;
+    /** Probability of following an edge. Defaults to `0.85`. */
+    dampingFactor?: number;
+    /** Maximum accepted per-node score change. Defaults to `1e-8`. */
+    tolerance?: number;
+    /** Maximum power-iteration rounds before throwing. Defaults to `1000`. */
+    maxIterations?: number;
+  }>;
+
+export type InternalPageRankOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<PageRankOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/** One weighted teleport target for personalized PageRank. */
+export type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
+  id: string;
+  kind: NodeKinds<G>;
+  /** Relative teleport weight. Defaults to `1`; must be finite and positive. */
+  weight?: number;
+}>;
+
+/** Personalized PageRank options with one or more weighted teleport seeds. */
+export type PersonalizedPageRankOptions<G extends GraphDef> =
+  PageRankOptions<G> &
+    Readonly<{
+      seeds: readonly PersonalizedPageRankSeed<G>[];
+    }>;
+
+export type InternalPersonalizedPageRankOptions<G extends GraphDef> =
+  InternalTemporalAlgorithmOptions &
+    Omit<PersonalizedPageRankOptions<G>, keyof TemporalAlgorithmOptions>;
+
+/** One visible node's normalized PageRank score. */
+export type PageRankScore = Readonly<{
+  id: string;
+  kind: string;
+  score: number;
+}>;

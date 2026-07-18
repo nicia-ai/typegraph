@@ -106,8 +106,9 @@ The same query code works with SQLite and PostgreSQL.
 
 TypeGraph deliberately excludes:
 
-- **Advanced graph analytics**: No PageRank, community detection, or
-  centrality measures beyond degree
+- **Broad graph analytics suites**: Focused PageRank and connectivity
+  primitives are built in; community detection and most centrality measures
+  are not
 - **Distributed storage**: Single-database deployment only
 
 These exclusions keep TypeGraph focused and maintainable.
@@ -169,7 +170,7 @@ Graph databases are powerful but come with operational overhead:
 | **Network** | Additional latency for every query | In-process, no network hop |
 | **Transactions** | Separate transaction scope from your SQL data | Same ACID transaction as your other data |
 | **Learning curve** | New query language (Cypher, Gremlin) | TypeScript you already know |
-| **Graph algorithms** | Built-in (PageRank, shortest path, community detection) | Connectivity algorithms (shortest path, reachability, neighborhoods, degree, WCC) |
+| **Graph algorithms** | Broad suites (PageRank, shortest path, community detection) | Focused algorithms (shortest path, reachability, neighborhoods, degree, WCC, PageRank/PPR) |
 | **Scale** | Optimized for billions of nodes | Best for thousands to millions |
 
 **Choose TypeGraph** when your graph is part of your application domain (knowledge bases, org
@@ -234,7 +235,7 @@ TypeGraph is not ideal for:
 - Large-scale graph analytics requiring distributed processing
 - Social networks with billions of edges
 - Real-time streaming graph data
-- Applications requiring advanced graph algorithms such as PageRank or
-  community detection (use Neo4j or a graph library; Tier 1 connectivity
-  algorithms — including weighted shortest path — ship on
+- Applications requiring a broad graph-data-science suite such as community
+  detection or betweenness centrality (use Neo4j or a graph library; focused
+  algorithms—including PageRank and weighted shortest path—ship on
   `store.algorithms.*`)

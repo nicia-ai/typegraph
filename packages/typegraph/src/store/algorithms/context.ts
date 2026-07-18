@@ -6,7 +6,10 @@ import {
   resolveReadCoordinate,
 } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import {
   type RecordedReadBinding,
@@ -204,4 +207,31 @@ export function assertEdgeKinds(edges: readonly string[]): void {
       { edges },
     );
   }
+}
+
+export function assertGraphAnalyticsSupported(
+  ctx: AlgorithmContext,
+  algorithm: string,
+  options: Readonly<{ requiresWindowFunctions?: boolean }> = {},
+): void {
+  const graphAnalytics =
+    ctx.backend.capabilities.graphAnalytics?.supported === true;
+  const windowFunctions = ctx.backend.capabilities.windowFunctions;
+  if (
+    graphAnalytics &&
+    (options.requiresWindowFunctions !== true || windowFunctions)
+  ) {
+    return;
+  }
+
+  throw new UnsupportedBackendCapabilityError(
+    algorithm,
+    "graphAnalytics",
+    {
+      dialect: ctx.backend.dialect,
+      supported: graphAnalytics,
+      ...(options.requiresWindowFunctions === true ? { windowFunctions } : {}),
+    },
+    "Use a built-in transactional SQLite/PostgreSQL backend, or declare graphAnalytics support on a compatible custom backend.",
+  );
 }
