@@ -97,7 +97,12 @@ async function startPgGraphContainer(): Promise<PgGraphContainer> {
   ]);
   const connectionString = `postgresql://${PGGRAPH_USER}:${PGGRAPH_PASSWORD}@127.0.0.1:${port}/${PGGRAPH_DB}`;
   const close = async (): Promise<void> => {
-    await spawnCapture("docker", ["rm", "-f", name]).catch(() => undefined);
+    // `-v` reclaims the anonymous data volume (see postgres-container.ts) —
+    // otherwise each pgGraph run leaks a large volume that overflows the host
+    // disk at SF10.
+    await spawnCapture("docker", ["rm", "-f", "-v", name]).catch(
+      () => undefined,
+    );
   };
   try {
     await waitForPgGraphReady(connectionString);
