@@ -138,6 +138,7 @@ import {
  * declared unsupported rather than run as an exploding query.
  */
 const NEO4J_UNSUPPORTED: SnbCapabilityGaps = {
+  IC14: "no weighted shortest path in plain Cypher (needs the GDS plugin)",
   GA_WCC: "no connected-components in plain Cypher (needs the GDS plugin)",
   GA_BFS: "no whole-component BFS in plain Cypher (needs the GDS plugin)",
   GA_SSSP: "no whole-component SSSP in plain Cypher (needs the GDS plugin)",
@@ -1181,6 +1182,7 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     IC8,
     IC9,
     GA_DEGREE,
+    IC14: unsupportedQuery("IC14"),
     GA_WCC: unsupportedQuery("GA_WCC"),
     GA_BFS: unsupportedQuery("GA_BFS"),
     GA_SSSP: unsupportedQuery("GA_SSSP"),

@@ -28,12 +28,20 @@ export const IS_QUERY_IDS: readonly IsQueryId[] = [
  *   reachable within `BFS3_HOPS` hops of a seed over `knows` (the seed
  *   excluded). Not the full IC1 (no name filter / profile projection) — just
  *   its traversal core, so every engine can express it natively.
+ * - `IC14` — the weighted-shortest-path core of LDBC IC14: the minimum-total-
+ *   weight route between two persons over `knows`, where each edge carries a
+ *   deterministic synthetic weight (see `synthesizeKnowsWeight`). Exercises
+ *   TypeGraph's `weightedShortestPath` (#288). Heavily gated: no competitor in
+ *   its available form does weighted shortest path (neo4j-community needs GDS;
+ *   pgGraph's `graph.shortest_path` is hop-only; ladybug's `WSHORTEST` is not
+ *   wired), so this is a TypeGraph SQLite-vs-PostgreSQL comparison.
  */
-export type TraversalQueryId = "IC13" | "BFS3";
+export type TraversalQueryId = "IC13" | "BFS3" | "IC14";
 
 export const TRAVERSAL_QUERY_IDS: readonly TraversalQueryId[] = [
   "IC13",
   "BFS3",
+  "IC14",
 ];
 
 /**
@@ -184,6 +192,51 @@ export function shortestPathDistanceResult(
   };
 }
 
+/** Edge property carrying each `knows` edge's synthetic IC14 weight. */
+export const KNOWS_WEIGHT_PROPERTY = "weight";
+
+/** Modulus bounding the synthetic weight to `[1, KNOWS_WEIGHT_MODULUS]`. */
+export const KNOWS_WEIGHT_MODULUS = 97;
+
+/**
+ * Deterministic synthetic weight for a `knows` edge, hashed from the two
+ * persons' ids. Symmetric (ids are canonically ordered) so the undirected
+ * `knows` graph carries one weight per pair, and range-bounded to
+ * `[1, KNOWS_WEIGHT_MODULUS]` so a longer cheaper route can beat a shorter
+ * costlier one — otherwise the weighted path would just mirror the hop-shortest
+ * path. FNV-1a keeps it a pure function of the ids, so both TypeGraph backends
+ * (which share this loader) materialize byte-identical weights and the IC14
+ * digest can't drift.
+ */
+export function synthesizeKnowsWeight(idA: string, idB: string): number {
+  const [lo, hi] = idA <= idB ? [idA, idB] : [idB, idA];
+  const key = `${lo} ${hi}`;
+  let hash = 2_166_136_261;
+  for (let index = 0; index < key.length; index++) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return ((hash >>> 0) % KNOWS_WEIGHT_MODULUS) + 1;
+}
+
+/** Sentinel total weight for an unreachable IC14 pair (real weights are >= 1). */
+export const IC14_UNREACHABLE = -1;
+
+/**
+ * Canonical IC14 result: the minimum total weight of the weighted-shortest
+ * path (or `IC14_UNREACHABLE`). Like IC13 the answer is a single scalar, so
+ * `rowCount` is 1 and the digest carries the signal. Edge weights are integers,
+ * so the summed total is an integer — no float-precision drift in the digest.
+ */
+export function weightedShortestPathResult(
+  totalWeight: number | undefined,
+): SnbQueryResult {
+  return {
+    rowCount: 1,
+    digest: canonicalDigest([{ weight: totalWeight ?? IC14_UNREACHABLE }]),
+  };
+}
+
 /**
  * Canonical BFS3 result: the distinct reachable person ids, de-duplicated and
  * sorted with the numeric-aware comparator so the digest can't drift on
@@ -314,6 +367,7 @@ export type SnbQueries = Readonly<{
   IS6: (message: MessageRef) => Promise<SnbQueryResult>;
   IS7: (message: MessageRef) => Promise<SnbQueryResult>;
   IC13: (pair: PersonPair) => Promise<SnbQueryResult>;
+  IC14: (pair: PersonPair) => Promise<SnbQueryResult>;
   BFS3: (personId: string) => Promise<SnbQueryResult>;
   IC2: (personId: string) => Promise<SnbQueryResult>;
   IC8: (personId: string) => Promise<SnbQueryResult>;

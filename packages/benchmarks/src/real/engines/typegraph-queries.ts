@@ -26,10 +26,12 @@ import {
   IC13_MAX_HOPS,
   IC9_MAX_DATE,
   IC_MESSAGE_LIMIT,
+  KNOWS_WEIGHT_PROPERTY,
   type MessageRef,
   type PersonPair,
   reachableSetResult,
   shortestPathDistanceResult,
+  weightedShortestPathResult,
   type SnbQueries,
   ssspResult,
 } from "./types";
@@ -478,6 +480,27 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     return shortestPathDistanceResult(path?.depth);
   }
 
+  // IC14 (traversal): the minimum-total-weight route between two persons over
+  // `knows`, where each edge carries the synthetic `weight` materialized at
+  // load. Exercises TypeGraph's weightedShortestPath (#288) — a cost-ordered
+  // Dijkstra on the D2 iterative substrate, so it takes the same 64MB
+  // work_mem as the other iterative algorithms. No competitor runs this
+  // (see the per-engine capability gaps), so it is a SQLite-vs-Postgres
+  // comparison of the weighted-path primitive.
+  async function IC14(pair: PersonPair) {
+    const path = await store.algorithms.weightedShortestPath(
+      pair.sourceId,
+      pair.targetId,
+      {
+        edges: ["knows"],
+        weightProperty: KNOWS_WEIGHT_PROPERTY,
+        direction: "out",
+        workingMemory: ALGORITHM_WORKING_MEMORY,
+      },
+    );
+    return weightedShortestPathResult(path?.totalWeight);
+  }
+
   // BFS3 (traversal): the distinct persons within BFS3_HOPS hops of a seed
   // over `knows`, via the native neighborhood algorithm (source excluded by
   // contract). Same undirected-via-bidirectional-edges reasoning as IC13.
@@ -760,6 +783,7 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     IS6,
     IS7,
     IC13,
+    IC14,
     BFS3,
     IC2,
     IC8,

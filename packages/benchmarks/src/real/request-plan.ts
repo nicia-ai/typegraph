@@ -37,6 +37,7 @@ export type SnbRequestPlan = Readonly<{
   IS6: readonly MessageRef[];
   IS7: readonly MessageRef[];
   IC13: readonly PersonPair[];
+  IC14: readonly PersonPair[];
   BFS3: readonly string[];
   IC2: readonly string[];
   IC8: readonly string[];
@@ -92,6 +93,7 @@ export function buildRequestPlan(
     IS6: messageRequests(),
     IS7: messageRequests(),
     IC13: pairRequests(),
+    IC14: pairRequests(),
     BFS3: personRequests(),
     IC2: personRequests(),
     IC8: personRequests(),

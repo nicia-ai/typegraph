@@ -82,6 +82,7 @@ import {
  * unsupported rather than run as an unbounded, exploding query.
  */
 const LADYBUG_UNSUPPORTED: SnbCapabilityGaps = {
+  IC14: "weighted shortest path (Kuzu WSHORTEST) not wired for this lane",
   GA_WCC: "no connected-components primitive",
   GA_BFS: "no whole-component BFS (variable-length paths cap at 30 hops)",
   GA_SSSP: "no whole-component SSSP (variable-length paths cap at 30 hops)",
@@ -988,6 +989,7 @@ async function createQueries(conn: Connection): Promise<SnbQueries> {
     IC8,
     IC9,
     GA_DEGREE,
+    IC14: unsupportedQuery("IC14"),
     GA_WCC: unsupportedQuery("GA_WCC"),
     GA_BFS: unsupportedQuery("GA_BFS"),
     GA_SSSP: unsupportedQuery("GA_SSSP"),

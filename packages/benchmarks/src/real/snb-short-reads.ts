@@ -192,6 +192,7 @@ async function runEngine(
       IS6: { requests: requestPlan.IS6, run: (r) => q.IS6(r as MessageRef) },
       IS7: { requests: requestPlan.IS7, run: (r) => q.IS7(r as MessageRef) },
       IC13: { requests: requestPlan.IC13, run: (r) => q.IC13(r as PersonPair) },
+      IC14: { requests: requestPlan.IC14, run: (r) => q.IC14(r as PersonPair) },
       BFS3: { requests: requestPlan.BFS3, run: (r) => q.BFS3(r as string) },
       IC2: { requests: requestPlan.IC2, run: (r) => q.IC2(r as string) },
       IC8: { requests: requestPlan.IC8, run: (r) => q.IC8(r as string) },

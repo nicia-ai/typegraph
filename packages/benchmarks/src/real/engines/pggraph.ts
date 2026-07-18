@@ -47,10 +47,12 @@ import {
   type PersonPair,
   reachableSetResult,
   shortestPathDistanceResult,
+  type SnbCapabilityGaps,
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
   ssspResult,
+  unsupportedQuery,
 } from "./types";
 
 const PERSON_TABLE = "public.person";
@@ -994,6 +996,7 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
     IS6,
     IS7,
     IC13,
+    IC14: unsupportedQuery("IC14"),
     BFS3,
     IC2,
     IC8,
@@ -1004,6 +1007,15 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
     GA_SSSP,
   };
 }
+
+/**
+ * pgGraph runs every lane query except IC14: `graph.shortest_path` is hop-only
+ * (a `max_depth` bound, no edge-weight/cost argument), so the weighted shortest
+ * path IC14 exercises has no native primitive here.
+ */
+const PGGRAPH_UNSUPPORTED: SnbCapabilityGaps = {
+  IC14: "graph.shortest_path is hop-only (no edge weights)",
+};
 
 export const createPgGraphEngine: SnbEngineFactory = async (
   options,
@@ -1068,6 +1080,7 @@ export const createPgGraphEngine: SnbEngineFactory = async (
         return pools;
       },
       queries: createPgGraphQueries(runQuery),
+      unsupported: PGGRAPH_UNSUPPORTED,
       async close() {
         queryClient?.release();
         await pool.end();
