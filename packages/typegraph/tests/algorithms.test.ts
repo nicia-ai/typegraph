@@ -204,6 +204,26 @@ function createCountingBackend(
   };
 }
 
+function personMembership(id: string, labelId: string) {
+  return { id, kind: "Person", labelId, labelKind: "Person" };
+}
+
+function expectAuxiliaryTableDroppedBeforeWorkingTable(
+  statements: readonly string[],
+): void {
+  const neighborDropIndex = statements.findIndex((statement) =>
+    statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_n_'),
+  );
+  const workingDropIndex = statements.findIndex(
+    (statement, index) =>
+      index > neighborDropIndex &&
+      statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_') &&
+      !statement.includes('"typegraph_iterative_n_'),
+  );
+  expect(neighborDropIndex).toBeGreaterThan(-1);
+  expect(workingDropIndex).toBeGreaterThan(neighborDropIndex);
+}
+
 // ============================================================
 // Test Setup
 // ============================================================
@@ -1348,6 +1368,382 @@ describe("store.algorithms", () => {
   });
 
   // --------------------------------------------------------------
+  // labelPropagation
+  // --------------------------------------------------------------
+
+  describe("labelPropagation", () => {
+    it("uses synchronous neighbor-mode labels and retains isolated nodes", async () => {
+      const labelStore = createStore(testGraph, createTestBackend());
+      const [alpha, beta, gamma, isolated] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
+        labelStore.nodes.Person.create({ name: "Beta" }, { id: "label-b" }),
+        labelStore.nodes.Person.create({ name: "Gamma" }, { id: "label-c" }),
+        labelStore.nodes.Person.create({ name: "Isolated" }, { id: "label-z" }),
+      ]);
+      await Promise.all([
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(beta, gamma, {}),
+        labelStore.edges.knows.create(gamma, alpha, {}),
+        // Neither parallel edges nor self-loops multiply neighbor votes.
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(alpha, alpha, {}),
+      ]);
+
+      await expect(
+        labelStore.algorithms.labelPropagation({ edges: ["knows"] }),
+      ).resolves.toEqual([
+        {
+          id: alpha.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: beta.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: gamma.id,
+          kind: "Person",
+          labelId: alpha.id,
+          labelKind: "Person",
+        },
+        {
+          id: isolated.id,
+          kind: "Person",
+          labelId: isolated.id,
+          labelKind: "Person",
+        },
+      ]);
+    });
+
+    it("materializes adjacency once with PostgreSQL-safe relation names", async () => {
+      const statements: string[] = [];
+      const labelStore = createStore(
+        testGraph,
+        createCountingBackend(createTestBackend(), statements),
+      );
+      const [alpha, beta, gamma] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
+        labelStore.nodes.Person.create({ name: "Beta" }, { id: "label-b" }),
+        labelStore.nodes.Person.create({ name: "Gamma" }, { id: "label-c" }),
+      ]);
+      await Promise.all([
+        labelStore.edges.knows.create(alpha, beta, {}),
+        labelStore.edges.knows.create(beta, gamma, {}),
+        labelStore.edges.knows.create(gamma, alpha, {}),
+      ]);
+
+      await labelStore.algorithms.labelPropagation({ edges: ["knows"] });
+
+      const adjacencyWrites = statements.filter(
+        (statement) =>
+          statement.includes('INSERT INTO "typegraph_iterative_n_') &&
+          statement.includes('"typegraph_edges"'),
+      );
+      expect(adjacencyWrites).toHaveLength(1);
+
+      const auxiliaryIdentifiers = new Set(
+        statements.flatMap((statement) =>
+          [
+            ...statement.matchAll(
+              /"(typegraph_iterative_[an]_[a-zA-Z0-9_]+)"/g,
+            ),
+          ].flatMap((match) => (match[1] === undefined ? [] : [match[1]])),
+        ),
+      );
+      expect(auxiliaryIdentifiers.size).toBe(2);
+      for (const identifier of auxiliaryIdentifiers) {
+        expect(identifier.length).toBeLessThanOrEqual(63);
+      }
+
+      expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    });
+
+    it("throws instead of returning an oscillating partial labeling", async () => {
+      const statements: string[] = [];
+      const labelStore = createStore(
+        testGraph,
+        createCountingBackend(createTestBackend(), statements),
+      );
+      const [left, right] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Left" }, { id: "left" }),
+        labelStore.nodes.Person.create({ name: "Right" }, { id: "right" }),
+      ]);
+      await labelStore.edges.knows.create(left, right, {});
+
+      const statementsBeforeRun = statements.length;
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 1000,
+        }),
+      ).rejects.toMatchObject({
+        code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+        details: {
+          algorithm: "labelPropagation",
+          maxIterations: 1000,
+          oscillating: true,
+        },
+      });
+
+      // Period-two detection proves non-convergence after two applied rounds,
+      // so the run must stop immediately instead of burning the full budget.
+      expect(statements.length - statementsBeforeRun).toBeLessThan(30);
+      expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    });
+
+    it("returns the exact fixed-round labeling under onMaxIterations return", async () => {
+      const statements: string[] = [];
+      const labelStore = createStore(
+        testGraph,
+        createCountingBackend(createTestBackend(), statements),
+      );
+      const [left, right] = await Promise.all([
+        labelStore.nodes.Person.create({ name: "Left" }, { id: "osc-a" }),
+        labelStore.nodes.Person.create({ name: "Right" }, { id: "osc-b" }),
+      ]);
+      await labelStore.edges.knows.create(left, right, {});
+
+      // A dyad alternates between the initial labeling (even rounds) and the
+      // swapped labeling (odd rounds); the fixed-round contract must land on
+      // the parity-exact state, including via oscillation fast-forward.
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 4,
+          onMaxIterations: "return",
+        }),
+      ).resolves.toEqual([
+        personMembership(left.id, left.id),
+        personMembership(right.id, right.id),
+      ]);
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 5,
+          onMaxIterations: "return",
+        }),
+      ).resolves.toEqual([
+        personMembership(right.id, left.id),
+        personMembership(left.id, right.id),
+      ]);
+
+      const statementsBeforeLargeBudget = statements.length;
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 1000,
+          onMaxIterations: "return",
+        }),
+      ).resolves.toEqual([
+        personMembership(left.id, left.id),
+        personMembership(right.id, right.id),
+      ]);
+      expect(statements.length - statementsBeforeLargeBudget).toBeLessThan(30);
+    });
+
+    it("propagates a moving frontier across a triangle chain", async () => {
+      // Three triangles sharing cut vertices: t00-t01-t02, t02-t03-t04,
+      // t04-t05-t06. The minimum label t00 sweeps down the chain over six
+      // changed rounds with a shrinking-then-churning frontier
+      // (7, 6, 3, 1, 1, 2 changed rows), converging on the seventh round —
+      // a regression net for the changed-frontier delta bookkeeping.
+      const labelStore = createStore(testGraph, createTestBackend());
+      const nodes = await Promise.all(
+        Array.from({ length: 7 }, (_, index) =>
+          labelStore.nodes.Person.create(
+            { name: `Chain ${index}` },
+            { id: `t0${index}` },
+          ),
+        ),
+      );
+      const edgePairs = [
+        [0, 1],
+        [1, 2],
+        [0, 2],
+        [2, 3],
+        [3, 4],
+        [2, 4],
+        [4, 5],
+        [5, 6],
+        [4, 6],
+      ] as const;
+      await Promise.all(
+        edgePairs.map(([from, to]) =>
+          labelStore.edges.knows.create(nodes[from]!, nodes[to]!, {}),
+        ),
+      );
+
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 6,
+        }),
+      ).rejects.toMatchObject({
+        code: "GRAPH_ALGORITHM_CONVERGENCE_ERROR",
+        details: { algorithm: "labelPropagation", maxIterations: 6 },
+      });
+
+      await expect(
+        labelStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 7,
+        }),
+      ).resolves.toEqual(
+        nodes.map((node) => ({
+          id: node.id,
+          kind: "Person",
+          labelId: "t00",
+          labelKind: "Person",
+        })),
+      );
+    });
+
+    it("supports an empty induced node-kind scope", async () => {
+      await expect(
+        store.algorithms.labelPropagation({
+          edges: ["knows"],
+          nodeKinds: [],
+        }),
+      ).resolves.toEqual([]);
+    });
+
+    it("rejects invalid options and unsupported backends", async () => {
+      await expect(
+        store.algorithms.labelPropagation({ edges: [] }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      for (const maxIterations of [0, -1, 1.5, Number.NaN]) {
+        await expect(
+          store.algorithms.labelPropagation({
+            edges: ["knows"],
+            maxIterations,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+      }
+
+      const unsupportedBackend: GraphBackend = {
+        ...backend,
+        capabilities: {
+          ...backend.capabilities,
+          graphAnalytics: { supported: false, mathFunctions: false },
+        },
+      };
+      const unsupportedStore = createStore(testGraph, unsupportedBackend);
+      await expect(
+        unsupportedStore.algorithms.labelPropagation({ edges: ["knows"] }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          operation: "labelPropagation",
+          capability: "graphAnalytics",
+          supported: false,
+        },
+      });
+    });
+
+    it("preserves a mid-run failure over cleanup of the auxiliary table", async () => {
+      const temporaryStatements: string[] = [];
+      const failingBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            let failNextExecute = false;
+            const failingTransaction: TransactionBackend = {
+              ...tx,
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                temporaryStatements.push(backend.compileSql!(query).sql);
+                await tx.executeTemporaryStatement!(query);
+                if (temporaryStatements.length === 1) failNextExecute = true;
+              },
+              execute<Result>(
+                query: CompiledRowsSql,
+              ): Promise<readonly Result[]> {
+                if (failNextExecute) {
+                  failNextExecute = false;
+                  return Promise.reject(new Error("forced round failure"));
+                }
+                return tx.execute<Result>(query);
+              },
+            };
+            return fn(failingTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const failingStore = createStore(testGraph, failingBackend);
+
+      await expect(
+        failingStore.algorithms.labelPropagation({ edges: ["knows"] }),
+      ).rejects.toThrow("forced round failure");
+
+      // The root failure survives both cleanup drops, in hook-then-table order.
+      expect(temporaryStatements.at(-2)).toContain(
+        'DROP TABLE IF EXISTS "typegraph_iterative_n_',
+      );
+      const finalStatement = temporaryStatements.at(-1) ?? "";
+      expect(finalStatement).toContain(
+        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      );
+      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
+    });
+
+    it("propagates an auxiliary-cleanup failure after a computed result", async () => {
+      const temporaryStatements: string[] = [];
+      const failingBackend: GraphBackend = {
+        ...backend,
+        transaction<T>(
+          fn: (tx: TransactionBackend, sql: AdoptedTransaction) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> {
+          return backend.transaction(async (tx, adoptedTransaction) => {
+            const failingTransaction: TransactionBackend = {
+              ...tx,
+              async executeTemporaryStatement(
+                query: CompiledTemporaryStatementSql,
+              ): Promise<void> {
+                const statement = backend.compileSql!(query).sql;
+                temporaryStatements.push(statement);
+                if (
+                  statement.includes(
+                    'DROP TABLE IF EXISTS "typegraph_iterative_n_',
+                  )
+                ) {
+                  throw new Error("forced cleanup failure");
+                }
+                await tx.executeTemporaryStatement!(query);
+              },
+            };
+            return fn(failingTransaction, adoptedTransaction);
+          }, options);
+        },
+      };
+      const failingStore = createStore(testGraph, failingBackend);
+
+      await expect(
+        failingStore.algorithms.labelPropagation({
+          edges: ["knows"],
+          maxIterations: 2,
+          onMaxIterations: "return",
+        }),
+      ).rejects.toThrow("forced cleanup failure");
+
+      // The hook failure wins, and the working-table drop is still attempted.
+      const finalStatement = temporaryStatements.at(-1) ?? "";
+      expect(finalStatement).toContain(
+        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      );
+      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
+    });
+  });
+
+  // --------------------------------------------------------------
   // PageRank / personalized PageRank
   // --------------------------------------------------------------
 
@@ -1633,7 +2029,7 @@ describe("store.algorithms", () => {
       });
     });
 
-    it("requires window functions for WCC but not for PageRank", async () => {
+    it("requires window functions for label algorithms but not PageRank", async () => {
       const noWindowFunctionsBackend: GraphBackend = {
         ...backend,
         capabilities: {
@@ -1656,6 +2052,20 @@ describe("store.algorithms", () => {
         details: {
           capability: "graphAnalytics",
           operation: "weaklyConnectedComponents",
+          supported: true,
+          windowFunctions: false,
+        },
+      });
+
+      await expect(
+        noWindowFunctionsStore.algorithms.labelPropagation({
+          edges: ["knows"],
+        }),
+      ).rejects.toMatchObject({
+        code: "UNSUPPORTED_BACKEND_CAPABILITY",
+        details: {
+          capability: "graphAnalytics",
+          operation: "labelPropagation",
           supported: true,
           windowFunctions: false,
         },
@@ -1788,6 +2198,12 @@ describe("store.algorithms", () => {
           }),
         ).rejects.toBeInstanceOf(ConfigurationError);
         await expect(
+          store.algorithms.labelPropagation({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
           store.algorithms.pageRank({ edges: ["knows"], workingMemory }),
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
@@ -1818,6 +2234,12 @@ describe("store.algorithms", () => {
           }),
         ).rejects.toBeInstanceOf(ConfigurationError);
         await expect(
+          store.algorithms.labelPropagation({
+            edges: ["knows"],
+            workingMemory,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
           store.algorithms.pageRank({ edges: ["knows"], workingMemory }),
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
@@ -1831,6 +2253,15 @@ describe("store.algorithms", () => {
         });
         expect(reached.some((node) => node.id === ids.dave)).toBe(true);
       }
+      // The fixture chain oscillates under synchronous voting, so exercise the
+      // accepted-value plumbing through the fixed-round completion contract.
+      const memberships = await store.algorithms.labelPropagation({
+        edges: ["knows"],
+        workingMemory: "32MB",
+        maxIterations: 4,
+        onMaxIterations: "return",
+      });
+      expect(memberships.length).toBeGreaterThan(0);
     });
 
     it("rejects maxHops over the explicit recursive limit", async () => {

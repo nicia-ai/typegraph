@@ -52,6 +52,7 @@ describe("RecordedStoreView typed surface", () => {
     expectTypeOf(recorded).toHaveProperty("weightedShortestPath");
     expectTypeOf(recorded).toHaveProperty("pageRank");
     expectTypeOf(recorded).toHaveProperty("personalizedPageRank");
+    expectTypeOf(recorded).toHaveProperty("labelPropagation");
     expectTypeOf(recorded).toHaveProperty("reachable");
     expectTypeOf(recorded).toHaveProperty("degree");
     expectTypeOf(recorded).toHaveProperty("nodes");

@@ -61,6 +61,7 @@ export type {
   StoreViewCoordinate,
   StoreViewDegreeOptions,
   StoreViewGraphAlgorithms,
+  StoreViewLabelPropagationOptions,
   StoreViewNeighborsOptions,
   StoreViewPageRankOptions,
   StoreViewPersonalizedPageRankOptions,

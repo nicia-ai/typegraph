@@ -32,6 +32,7 @@ import {
   type NodeTemporalReads,
   type NodeWrites,
   type InitialQueryBuilder,
+  type LabelPropagationMembership,
   type PageRankScore,
   type QueryOptions,
   type ReachableNode,
@@ -151,6 +152,12 @@ expectAssignable<Promise<readonly PageRankScore[]>>(
     nodeKinds: ["Person"],
   }),
 );
+expectAssignable<Promise<readonly LabelPropagationMembership[]>>(
+  view.algorithms.labelPropagation({
+    edges: ["knows"],
+    nodeKinds: ["Person"],
+  }),
+);
 expectAssignable<Promise<readonly PageRankScore[]>>(
   view.algorithms.personalizedPageRank({
     edges: ["knows"],
@@ -244,6 +251,18 @@ expectError(
   }),
 );
 expectError(
+  view.algorithms.labelPropagation({
+    edges: ["knows"],
+    temporalMode: "asOf",
+  }),
+);
+expectError(
+  view.algorithms.labelPropagation({
+    edges: ["knows"],
+    onMaxIterations: "explode",
+  }),
+);
+expectError(
   view.algorithms.personalizedPageRank({
     edges: ["knows"],
     seeds: [{ id: "person-1", kind: "Person" }],
@@ -321,6 +340,12 @@ expectError(
 );
 expectError(
   store.algorithms.pageRank({
+    edges: ["knows"],
+    ...LEAKED_RECORDED_OPTIONS,
+  }),
+);
+expectError(
+  store.algorithms.labelPropagation({
     edges: ["knows"],
     ...LEAKED_RECORDED_OPTIONS,
   }),
@@ -438,6 +463,7 @@ type RecordedSharedKeys =
   | "shortestPath"
   | "neighbors"
   | "degree"
+  | "labelPropagation"
   | "weaklyConnectedComponents"
   | "pageRank"
   | "personalizedPageRank"

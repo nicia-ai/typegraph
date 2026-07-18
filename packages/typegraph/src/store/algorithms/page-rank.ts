@@ -2,12 +2,12 @@ import { type SQL, sql } from "drizzle-orm";
 
 import type { GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
+  compileNodeKindSeedFilter,
   type InternalTraversalOptions,
   normalizeNodeKinds,
   pickTemporalOptions,
@@ -16,6 +16,7 @@ import {
 import {
   compareNodeIdentity,
   compileWorkingTableEdgeExpansion,
+  countWorkingTableRows,
   DEFAULT_MAX_BIND_PARAMETERS,
   type IterativeGraphRunContext,
   type NodeIdentityKey,
@@ -53,7 +54,6 @@ type NormalizedSeed = Readonly<{
   weight: number;
 }>;
 
-type CountRow = Readonly<{ count: number | string }>;
 type MetricRow = Readonly<{ value: number | string | null }>;
 type IdentityRow = Readonly<{ node_id: string; node_kind: string }>;
 type ScoreRow = Readonly<{
@@ -247,10 +247,7 @@ async function initializeWorkingTable(
   seeds: readonly NormalizedSeed[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter =
-    nodeKinds === undefined ?
-      sql`TRUE`
-    : compileKindFilter(sql.raw("n.kind"), nodeKinds);
+  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
   await context.executeTemporary(sql`
     INSERT INTO ${workingTable}
       (graph_id, run_id, node_id, node_kind, score, next_score,
@@ -262,14 +259,7 @@ async function initializeWorkingTable(
       AND ${operation.nodeTemporalFilter}
   `);
 
-  const countRows = await context.backend.execute<CountRow>(
-    asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS count
-      FROM ${workingTable}
-      WHERE graph_id = ${graphId} AND run_id = ${runId}
-    `),
-  );
-  const workingTableSize = Number(countRows[0]?.count ?? 0);
+  const workingTableSize = await countWorkingTableRows(context);
   if (workingTableSize === 0) {
     if (seeds !== undefined) {
       throw missingSeedError(seeds);

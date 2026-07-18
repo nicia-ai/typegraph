@@ -44,6 +44,8 @@ import {
   type BaseTraversalOptions,
   type DegreeOptions,
   type InternalGraphAlgorithms,
+  type LabelPropagationMembership,
+  type LabelPropagationOptions,
   type NeighborsOptions,
   type NodeIdentifier,
   type PageRankOptions,
@@ -165,6 +167,12 @@ export type StoreViewDegreeOptions<G extends GraphDef> = Omit<
 export type StoreViewWeaklyConnectedComponentsOptions<G extends GraphDef> =
   Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
 
+/** Label-propagation options pinned to the view's temporal coordinate. */
+export type StoreViewLabelPropagationOptions<G extends GraphDef> = Omit<
+  LabelPropagationOptions<G>,
+  keyof TemporalAlgorithmOptions
+>;
+
 /** PageRank options with the temporal axis removed (the view supplies it). */
 export type StoreViewPageRankOptions<G extends GraphDef> = Omit<
   PageRankOptions<G>,
@@ -206,6 +214,9 @@ export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
     node: NodeIdentifier,
     options?: StoreViewDegreeOptions<G>,
   ) => Promise<number>;
+  labelPropagation: (
+    options: StoreViewLabelPropagationOptions<G>,
+  ) => Promise<readonly LabelPropagationMembership[]>;
   weaklyConnectedComponents: (
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ) => Promise<readonly WeaklyConnectedComponentMembership[]>;
@@ -838,6 +849,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
       canReach: (from, to, options) => this.canReach(from, to, options),
       neighbors: (node, options) => this.neighbors(node, options),
       degree: (node, options) => this.degree(node, options),
+      labelPropagation: (options) => this.labelPropagation(options),
       weaklyConnectedComponents: (options) =>
         this.weaklyConnectedComponents(options),
       pageRank: (options) => this.pageRank(options),
@@ -926,6 +938,16 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
     options?: StoreViewDegreeOptions<G>,
   ): Promise<number> {
     return this.internalAlgorithms().degree(node, {
+      ...options,
+      ...withCoordinate(this.coordinate),
+    });
+  }
+
+  /** Deterministic label-propagation memberships at this view's coordinate. */
+  labelPropagation(
+    options: StoreViewLabelPropagationOptions<G>,
+  ): Promise<readonly LabelPropagationMembership[]> {
+    return this.internalAlgorithms().labelPropagation({
       ...options,
       ...withCoordinate(this.coordinate),
     });

@@ -106,9 +106,9 @@ The same query code works with SQLite and PostgreSQL.
 
 TypeGraph deliberately excludes:
 
-- **Broad graph analytics suites**: Focused PageRank and connectivity
-  primitives are built in; community detection and most centrality measures
-  are not
+- **Broad graph analytics suites**: Focused PageRank, connectivity, and
+  deterministic label-propagation primitives are built in; modularity
+  optimization and most centrality measures are not
 - **Distributed storage**: Single-database deployment only
 
 These exclusions keep TypeGraph focused and maintainable.
@@ -170,7 +170,7 @@ Graph databases are powerful but come with operational overhead:
 | **Network** | Additional latency for every query | In-process, no network hop |
 | **Transactions** | Separate transaction scope from your SQL data | Same ACID transaction as your other data |
 | **Learning curve** | New query language (Cypher, Gremlin) | TypeScript you already know |
-| **Graph algorithms** | Broad suites (PageRank, shortest path, community detection) | Focused algorithms (shortest path, reachability, neighborhoods, degree, WCC, PageRank/PPR) |
+| **Graph algorithms** | Broad suites (PageRank, shortest path, community detection) | Focused algorithms (shortest path, reachability, neighborhoods, degree, WCC, label propagation, PageRank/PPR) |
 | **Scale** | Optimized for billions of nodes | Best for thousands to millions |
 
 **Choose TypeGraph** when your graph is part of your application domain (knowledge bases, org

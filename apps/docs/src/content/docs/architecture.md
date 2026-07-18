@@ -501,7 +501,7 @@ nearest neighbor search efficiently.
 ### What's Slower
 
 - **Deep recursive traversals**: Recursive CTEs are more expensive than simple JOINs
-- **Whole-graph algorithms**: WCC and PageRank iterate over every visible node
+- **Whole-graph algorithms**: WCC, label propagation, and PageRank iterate over every visible node
   by default, or over an explicit `nodeKinds` induced subgraph, and their selected edges
 - **Large property filtering without indexes**: JSON extraction is slower than column access
 - **Cross-kind queries**: `includeSubClasses: true` increases the WHERE IN set

@@ -1,3 +1,5 @@
+import { type SQL, sql } from "drizzle-orm";
+
 import { type GraphBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
@@ -10,6 +12,7 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
+import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import {
   type RecordedReadBinding,
@@ -208,6 +211,17 @@ export function assertEdgeKinds(edges: readonly string[]): void {
       { edges },
     );
   }
+}
+
+/**
+ * Compiles the induced-subgraph node filter for a working-table seeding
+ * statement over the nodes-table alias `n`; `undefined` selects every kind.
+ */
+export function compileNodeKindSeedFilter(
+  nodeKinds: readonly string[] | undefined,
+): SQL {
+  if (nodeKinds === undefined) return sql`TRUE`;
+  return compileKindFilter(sql.raw("n.kind"), nodeKinds);
 }
 
 /**
