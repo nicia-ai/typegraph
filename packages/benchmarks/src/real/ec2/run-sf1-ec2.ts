@@ -73,7 +73,18 @@ const DEFAULT_INSTANCE_TYPE_BY_PROFILE: Readonly<
   sf1: "c7i.4xlarge",
   sf10: "r7i.4xlarge",
 };
-const DEFAULT_VOLUME_SIZE_GIB = 150;
+// SF1 fits comfortably in 150 GiB; SF10 does not — tg-sqlite's database alone is
+// ~90 GB (plus load-time WAL, the ~15 GB dataset, and OS/repo), and the
+// server engines' data layers add more, so 150 GiB overflows mid-run
+// ("database or disk is full"). Provision generously for SF10 — gp3 storage is
+// cheap for a run lasting hours.
+const DEFAULT_VOLUME_SIZE_GIB_BY_PROFILE: Readonly<
+  Record<"smoke" | "sf1" | "sf10", number>
+> = {
+  smoke: 150,
+  sf1: 150,
+  sf10: 500,
+};
 // gp3 decouples IOPS/throughput from volume size — an unprovisioned volume
 // silently gets the account's gp3 *baseline* (3,000 IOPS / 125 MB/s)
 // regardless of size. An EBS root-cause investigation (see
@@ -363,7 +374,8 @@ async function launch(argv: readonly string[]): Promise<void> {
     parseArgValue(argv, "instance-type") ??
     DEFAULT_INSTANCE_TYPE_BY_PROFILE[benchProfile];
   const volumeSizeGib = Number(
-    parseArgValue(argv, "volume-size-gib") ?? DEFAULT_VOLUME_SIZE_GIB,
+    parseArgValue(argv, "volume-size-gib") ??
+      DEFAULT_VOLUME_SIZE_GIB_BY_PROFILE[benchProfile],
   );
   const volumeIops = Number(
     parseArgValue(argv, "volume-iops") ?? DEFAULT_VOLUME_IOPS,
