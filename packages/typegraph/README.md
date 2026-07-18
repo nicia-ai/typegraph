@@ -42,6 +42,53 @@ const bob = await store.nodes.Person.create({ name: "Bob" });
 await store.edges.knows.create(alice, bob);
 ```
 
+### Strict local SQLite and PGlite consumers
+
+Applications that typecheck dependencies with `skipLibCheck: false` can keep
+unused Drizzle dialect declarations outside their TypeScript program by using
+the declaration-isolated subpaths:
+
+```ts
+import { defineGraph, defineNode } from "@nicia-ai/typegraph/core";
+import { createLocalPgliteStore } from "@nicia-ai/typegraph/postgres/pglite-store";
+import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local-store";
+import { z } from "zod";
+
+const Fact = defineNode("Fact", {
+  schema: z.object({ statement: z.string() }),
+});
+
+const graph = defineGraph({
+  id: "facts",
+  nodes: { Fact: { type: Fact } },
+  edges: {},
+});
+
+const sqliteStore = await createLocalSqliteStore(graph);
+const sqliteFact = await sqliteStore.nodes.Fact.create({ statement: "hello" });
+await sqliteStore.close();
+
+const pgliteStore = await createLocalPgliteStore(graph, { vector: false });
+const pgliteFact = await pgliteStore.nodes.Fact.create({ statement: "hello" });
+await pgliteStore.close();
+```
+
+Both convenience functions create the standard TypeGraph schema and return the
+existing runtime store through the same narrow, schema-derived CRUD interface.
+The facade intentionally omits query builders, custom backend/table
+configuration, transactions, history, and raw SQL. Import the existing root and
+backend entrypoints when those advanced surfaces are required.
+
+`sqlite/local-store` is Node.js-only because it opens `better-sqlite3`. Pass
+`{ path: "./graph.db" }` for file-backed storage; the default is an in-memory
+database with the standard local SQLite pragmas.
+
+`postgres/pglite-store` requires `@electric-sql/pglite`. It loads pgvector by
+default, which additionally requires `@electric-sql/pglite-pgvector`; pass
+`{ vector: false }` for graphs without embedding fields. Pass
+`{ dataDir: "./pgdata" }` for persistent storage. Production PostgreSQL remains
+available through the driver-agnostic `postgres` entrypoint.
+
 See the repo README for more.
 
 Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](https://github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples)

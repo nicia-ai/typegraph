@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: {
     index: "src/index.ts",
+    "core/index": "src/core/index.ts",
     "interchange/index": "src/interchange/index.ts",
     "profiler/index": "src/profiler/index.ts",
     "schema/index": "src/schema/index.ts",
@@ -12,9 +13,11 @@ export default defineConfig({
     "provenance/index": "src/provenance/index.ts",
     "backend/sqlite/index": "src/backend/sqlite/index.ts",
     "backend/sqlite/local": "src/backend/sqlite/local.ts",
+    "backend/sqlite/local-store": "src/backend/sqlite/local-store.ts",
     "backend/sqlite/libsql": "src/backend/sqlite/libsql.ts",
     "backend/postgres/index": "src/backend/postgres/index.ts",
     "backend/postgres/pglite": "src/backend/postgres/pglite.ts",
+    "backend/postgres/pglite-store": "src/backend/postgres/pglite-store.ts",
   },
   format: ["esm", "cjs"],
   dts: true,

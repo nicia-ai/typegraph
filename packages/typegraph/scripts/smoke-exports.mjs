@@ -26,6 +26,7 @@ const PACKAGE_NAME = "@nicia-ai/typegraph";
 // entry here.
 const PUBLIC_SUBPATHS = [
   { subpath: "", expectedExport: "createStore" },
+  { subpath: "/core", expectedExport: "defineGraph" },
   { subpath: "/interchange", expectedExport: "importGraph" },
   { subpath: "/profiler", expectedExport: "QueryProfiler" },
   { subpath: "/schema", expectedExport: "deserializeSchema" },
@@ -36,8 +37,16 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/sqlite", expectedExport: "createSqliteBackend" },
   { subpath: "/postgres", expectedExport: "createPostgresBackend" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteBackend" },
+  {
+    subpath: "/sqlite/local-store",
+    expectedExport: "createLocalSqliteStore",
+  },
   { subpath: "/sqlite/libsql", expectedExport: "createLibsqlBackend" },
   { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteBackend" },
+  {
+    subpath: "/postgres/pglite-store",
+    expectedExport: "createLocalPgliteStore",
+  },
 ];
 
 function findPackageManifest(startPath, packageName) {
