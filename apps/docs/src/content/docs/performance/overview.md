@@ -193,13 +193,16 @@ transactional round-trip.
 
 :::note[Operation hooks]
 Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
-throughput. Query hooks still fire normally. See [Schemas & Stores](/schemas-stores#hooks) for details.
+throughput. Query hooks still fire normally. See
+[Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::
 
 ## Connection Management
 
-TypeGraph does not manage database connections or pools — you bring your own and are responsible
-for lifecycle. See [Backend Setup](/backend-setup) for full setup guides.
+Managed local Store and backend factories own and close their SQLite or PGlite
+resources. Bring-your-own adapter integrations leave the supplied connection or
+pool under application control. See [Backend Setup](/backend-setup#connection-management)
+for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 

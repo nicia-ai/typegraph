@@ -651,6 +651,23 @@ individually.
 function generatePostgresDDL(tables?: PostgresTables): string[];
 ```
 
+## Drizzle-Free Entrypoints
+
+TypeGraph keeps its public core and backend contracts independent of Drizzle:
+
+- `@nicia-ai/typegraph/core` exports graph definition helpers and their
+  schema-derived types for packages that only define or share schemas.
+- `@nicia-ai/typegraph/backend` exports the complete backend, dialect,
+  SQL-fragment, fulltext, and vector strategy contracts for adapter authors.
+- `@nicia-ai/typegraph/sqlite/local` and
+  `@nicia-ai/typegraph/postgres/pglite` create managed Stores without exposing
+  adapter-native handles.
+
+Application code can continue importing the complete portable Store API from
+`@nicia-ai/typegraph`. Use the `/adapters/drizzle/...` entrypoints only when the
+application deliberately owns a Drizzle connection or needs native transaction
+interop.
+
 ## Managed Store Entrypoints
 
 For local applications that do not need direct database access, TypeGraph can
@@ -935,7 +952,19 @@ and PostgreSQL, so it is not a portability difference.
 
 ## Connection Management
 
-TypeGraph does not manage database connections. You are responsible for:
+Connection ownership follows the entrypoint:
+
+- **Managed Store factories** (`/sqlite/local` and `/postgres/pglite`) own the
+  connection and provisioned resources. `await store.close()` releases them.
+- **Owned local backend factories** (`createLocalSqliteBackend` and
+  `createLocalPgliteBackend`) also own their resources. A Store delegates
+  `close()` to its backend, so `await store.close()` releases them.
+- **Bring-your-own adapter factories** (`createSqliteBackend`,
+  `createPostgresBackend`, and `createLibsqlBackend`) leave connection ownership
+  with the caller. Their Store's `close()` does not close the supplied client or
+  pool.
+
+When you bring your own connection, you are responsible for:
 
 1. **Creating connections** with appropriate configuration
 2. **Connection pooling** for production use
@@ -954,7 +983,8 @@ process.on("exit", () => {
 });
 ```
 
-The `store.close()` method is a no-op—cleanup is your responsibility.
+Here `store.close()` leaves `sqlite` open because the application supplied the
+connection. Close the driver or pool through its own API.
 
 ## Database roles & least privilege
 

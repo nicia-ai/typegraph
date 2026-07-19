@@ -113,6 +113,11 @@ can use the equivalent `createLocalPgliteStore` from
 `@nicia-ai/typegraph/postgres/pglite`. Bring-your-own-connection integrations
 live under the explicit `/adapters/drizzle/...` entrypoints.
 
+Packages that only define or share graph schemas can import the DSL and its
+schema-derived types from `@nicia-ai/typegraph/core`. Custom backend and search
+strategy authors can use the complete Drizzle-free contract vocabulary from
+`@nicia-ai/typegraph/backend`.
+
 ## Learn More
 
 - Docs: [typegraph.dev](https://typegraph.dev)

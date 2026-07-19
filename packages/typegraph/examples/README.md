@@ -12,6 +12,13 @@ npx tsx examples/01-basic-usage.ts
 
 # Or run any example directly
 npx tsx examples/<example-name>.ts
+
+# Run every SQLite example from the repository root
+pnpm test:examples
+
+# Run the PostgreSQL example with a configured database
+POSTGRES_URL=postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test \
+  pnpm test:examples:postgres
 ```
 
 ## Examples Overview

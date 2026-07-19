@@ -46,8 +46,10 @@ tradeoffs were made.
                    └─────────────────┘
 ```
 
-TypeGraph is an **embedded library**, not a database. It runs in your application process, uses your existing
-database connection, and compiles queries to SQL.
+TypeGraph is an **embedded library**, not a database. It runs in your application
+process and compiles queries to SQL. A managed local Store can own its SQLite or
+PGlite connection; adapter integrations can instead use a connection your
+application already owns.
 
 ### Capability boundaries
 
@@ -572,6 +574,13 @@ adapters:
    precise Drizzle database and transaction types
 3. **Replaceable boundary**: The core depends on TypeGraph ports; adapters
    translate fragments and operations at the edge
+
+The package exports that boundary directly. Schema-only packages can import the
+graph DSL and its schema-derived types from the Drizzle-free
+`@nicia-ai/typegraph/core` entrypoint. Backend and search-strategy authors can
+import the full Drizzle-free port vocabulary, including `GraphBackend`,
+`AdapterBackend`, `DialectAdapter`, and `SqlFragment`, from
+`@nicia-ai/typegraph/backend`.
 
 ### Why Zod for Schemas?
 

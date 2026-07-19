@@ -39,6 +39,11 @@ await store.close();
 Use the explicit `/adapters/drizzle/...` entrypoints when your application owns
 the database connection or needs adapter-native transaction handles.
 
+Schema-only packages can import the graph DSL and schema-derived types from the
+Drizzle-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and
+search-strategy authors can import the complete Drizzle-free contract vocabulary
+from `@nicia-ai/typegraph/backend`.
+
 See the repo README for more.
 
 Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](https://github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples)
